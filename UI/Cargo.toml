@@ -1,0 +1,14 @@
+[package]
+name = "Floem-Epub"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}
+html_renderer = { package = "Html-Prototype", path = "../HtmlRenderer" }
+epub_svelte_lib = { package = "epub-svelte", path = "../Backend" }
+sync-common = { path = "../SyncCommon" }
+crossbeam = "0.8.4"
+[patch.crates-io]
+sync-common = { path = "../SyncCommon" }

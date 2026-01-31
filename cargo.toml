@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "epub-svelte",
+    "Html-Prototype",
+    "sync-server",
+    "Floem-Epub",
+    "data-analysis"
+]

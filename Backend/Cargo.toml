@@ -1,0 +1,44 @@
+[package]
+name = "epub-svelte"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "epub_svelte_lib"
+crate-type = ["rlib"]
+
+
+[dependencies]
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = {version = "0.37.0", features = ["bundled"] }
+include-sqlite-sql = "0.2.1"
+directories-next = "2"
+csv = "1.3.1"
+walkdir = "2.5.0"
+image = "0.24.9"
+fast_image_resize = {version = "5.2.0", features = ["image"] }
+uuid = { version = "1.0", features = ["v4"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1.0", features = ["full"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
+notify = "6.1"
+futures-util = "0.3"
+epub_provider = { path = "../HtmlRenderer/epub_provider" }
+crossbeam-channel = "0.5"
+sync-common = { path = "../SyncCommon" }
+urlencoding = "2"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+[dev-dependencies]
+axum = "0.7"
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "macros", "postgres"] }
+tempfile = "3"
