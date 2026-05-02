@@ -1,17 +1,21 @@
-use crate::db::{get_book_dir_by_hash, get_books_without_title, insert_book, insert_local_book_dir, update_book_title, upsert_dir, BookDir};
-use crate::epub::get_epub_id_and_title;
+use crate::home::get_app_data_thumbnails_dir;
+use crate::db::{derive_blob_state_from_local_tx, get_book_dir_by_hash, insert_book, insert_local_book_dir, update_book_metadata, upsert_blob_local_ref_tx, upsert_dir, BookDir};
+use crate::epub::get_epub_id_title_author;
+use crate::library::generate_thumbnail_to_app_data;
+use crate::library::generate_book_id_blake3;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel as std_channel;
-use std::sync::{Arc, OnceLock};
-use std::{fs, thread};
+use std::collections::HashSet;
 use std::hash::Hasher;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::time::{Duration, UNIX_EPOCH};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::channel as std_channel;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use std::time::{Duration, UNIX_EPOCH};
+use std::{fs, thread};
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,27 +27,13 @@ pub enum DownloadState {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum LibraryEvent {
-    BookAdded {
-        book_id: String,
-        path: String,
-    },
-    BookRemoved {
-        book_id: String,
-        path: String,
-    },
-    DirectoryAdded {
-        path: String,
-    },
-    DirectoryRemoved {
-        path: String,
-    },
-    ThumbnailGenerated {
-        book_id: String,
-    },
-    DownloadStatusChanged {
-        book_id: String,
-        state: DownloadState,
-    },
+    BookAdded { book_id: String, path: String },
+    BookRemoved { book_id: String, path: String },
+    DirectoryAdded { path: String },
+    DirectoryRemoved { path: String },
+    ThumbnailGenerated { book_id: String },
+    DownloadStatusChanged { book_id: String, state: DownloadState },
+    BookOpened { book_id: String },
     ScanComplete,
 }
 
@@ -51,6 +41,8 @@ pub struct LibraryScanner {
     state: Arc<ScannerState>,
     watcher_thread: Option<thread::JoinHandle<()>>,
     worker_thread: Option<thread::JoinHandle<()>>,
+    thumbnail_thread: Option<thread::JoinHandle<()>>,
+    hash_threads: Vec<thread::JoinHandle<()>>,
 }
 
 struct ScannerState {
@@ -60,17 +52,61 @@ struct ScannerState {
     park_thread: OnceLock<thread::Thread>,
     scan_requested: AtomicBool,
     should_finish: AtomicBool,
+    thumbnail_queue: crossbeam_channel::Sender<ThumbnailTask>,
+    hash_queue: crossbeam_channel::Sender<HashTask>,
+    hash_result_queue: crossbeam_channel::Sender<HashReady>,
+    hash_result_rx: crossbeam_channel::Receiver<HashReady>,
+    pending_hash_jobs: std::sync::Mutex<HashSet<u64>>,
+    thumbnail_inflight: AtomicUsize,
+}
+
+struct ThumbnailTask {
+    book_id: String,
+    epub_path: String,
+}
+
+struct HashTask {
+    parent_uuid: String,
+    file_name: String,
+    epub_path: String,
+    file_hash: u64,
+}
+
+struct HashReady {
+    parent_uuid: String,
+    file_name: String,
+    epub_path: String,
+    file_hash: u64,
+    book_hash: u64,
+    title: Option<String>,
+    author: Option<String>,
+}
+
+struct ThumbnailStateUpdate {
+    hash: String,
+    path: String,
+    exists: bool,
 }
 
 impl LibraryScanner {
     pub fn new(library_path: String, db: Pool<SqliteConnectionManager>, event_tx: Sender<LibraryEvent>) -> Self {
+        let (thumbnail_tx, thumbnail_rx) = crossbeam_channel::unbounded::<ThumbnailTask>();
+        let (hash_tx, hash_rx) = crossbeam_channel::unbounded::<HashTask>();
+        let (hash_result_tx, hash_result_rx) = crossbeam_channel::unbounded::<HashReady>();
+
         let state = Arc::new(ScannerState {
             library_path,
             db,
-            event_tx,
+            event_tx: event_tx.clone(),
             park_thread: OnceLock::new(),
             scan_requested: AtomicBool::new(true),
             should_finish: AtomicBool::new(false),
+            thumbnail_queue: thumbnail_tx,
+            hash_queue: hash_tx,
+            hash_result_queue: hash_result_tx,
+            hash_result_rx,
+            pending_hash_jobs: std::sync::Mutex::new(HashSet::new()),
+            thumbnail_inflight: AtomicUsize::new(0),
         });
 
         let worker_state = Arc::clone(&state);
@@ -79,24 +115,45 @@ impl LibraryScanner {
         let watcher_state = Arc::clone(&state);
         let watcher_thread = thread::spawn(move || Self::watcher_loop(watcher_state));
 
+        let hash_worker_count = thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 4);
+        let mut hash_threads = Vec::with_capacity(hash_worker_count);
+        for _ in 0..hash_worker_count {
+            let hash_state = Arc::clone(&state);
+            let hash_rx_clone = hash_rx.clone();
+            hash_threads.push(thread::spawn(move || Self::hash_worker_loop(hash_state, hash_rx_clone)));
+        }
+
+        let thumbnail_state = Arc::clone(&state);
+        let thumbnail_thread = thread::spawn(move || Self::thumbnail_worker_loop(thumbnail_state, thumbnail_rx, event_tx));
+
         Self {
             state,
             watcher_thread: Some(watcher_thread),
             worker_thread: Some(worker_thread),
+            thumbnail_thread: Some(thumbnail_thread),
+            hash_threads,
         }
     }
 
-    fn scan_library(library_path: &str, db: &Pool<SqliteConnectionManager>, event_tx: &Sender<LibraryEvent>) {
-        let mut conn = db.get().unwrap();
-        let transaction = conn.transaction().unwrap();
-        let now = Instant::now();
-        let walkdir = WalkDir::new(library_path)
-            .follow_links(false)
-            .min_depth(1)
-            .into_iter()
-            .filter_entry(|e| !e.file_name().as_bytes().starts_with(b"."))
-            .filter_map(Result::ok);
+    fn scan_library(library_path: &str, db: &Pool<SqliteConnectionManager>, _event_tx: &Sender<LibraryEvent>, state: &Arc<ScannerState>) {
+        let mut conn = match db.get() {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Scanner: Failed to get connection from pool: {}", e);
+                return;
+            }
+        };
 
+        // Use IMMEDIATE transaction to acquire write lock immediately
+        // This prevents race conditions where multiple transactions try to upgrade to exclusive
+        let transaction = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("Scanner: Failed to start transaction: {}", e);
+                return;
+            }
+        };
+        let walkdir = WalkDir::new(library_path).follow_links(false).min_depth(1).into_iter().filter_entry(|e| !e.file_name().as_bytes().starts_with(b".")).filter_map(Result::ok);
 
         let mut uuid_stack: Vec<String> = vec!["__root__".to_string()];
         for entry in walkdir {
@@ -109,7 +166,7 @@ impl LibraryScanner {
             if entry.file_type().is_dir() {
                 let uuid_path = entry.path().join(".biblos_uuid");
                 let uuid = match fs::read_to_string(&uuid_path) {
-                    Ok(uuid) => {uuid}
+                    Ok(uuid) => uuid,
                     Err(_) => {
                         let uuid = Uuid::new_v4().to_string();
                         fs::write(uuid_path, &uuid).unwrap();
@@ -118,59 +175,36 @@ impl LibraryScanner {
                 };
                 upsert_dir(&transaction, &uuid, parent_uuid, entry.file_name().to_str().unwrap());
                 uuid_stack.push(uuid);
-            }
-            else if entry.file_type().is_file() && entry.path().extension() == Some("epub".as_ref()) {
-                let (book_dir, hash) = get_book_dir(&transaction, &entry);
+            } else if entry.file_type().is_file() && entry.path().extension() == Some("epub".as_ref()) {
+                let (book_dir, file_hash) = get_book_dir(&transaction, &entry);
                 match book_dir {
                     None => {
-                        let book_hash = generate_file_hash(entry.path());
-                        insert_book(&transaction, book_hash);
-                        insert_local_book_dir(
-                            &transaction,
-                            parent_uuid,
-                            book_hash,
-                            entry.file_name().to_str().unwrap(),
-                            hash,
-                        );
+                        let task = HashTask {
+                            parent_uuid: parent_uuid.to_string(),
+                            file_name: entry.file_name().to_string_lossy().to_string(),
+                            epub_path: entry.path().to_string_lossy().to_string(),
+                            file_hash,
+                        };
+                        let mut pending = state.pending_hash_jobs.lock().unwrap();
+                        if pending.insert(file_hash) {
+                            let _ = state.hash_queue.send(task);
+                        }
                     }
                     Some(book_dir) => {
-                        let file_name = entry.file_name().to_str().unwrap();
-                        transaction
-                            .insert_book_dir(
-                                parent_uuid,
-                                &book_dir.book_id,
-                                file_name,
-                                &hash.to_string(),
-                                1,
-                            )
-                            .unwrap();
+                        insert_local_book_dir(&transaction, parent_uuid, book_dir.book_id, entry.file_name().to_str().unwrap(), file_hash);
                     }
                 }
             }
         }
-        let transaction_time = Instant::now();
-        if transaction.commit().is_err() {
-            todo!()
+        match transaction.commit() {
+            Ok(_) => (),
+            Err(e) => {
+                log::error!("Scanner: Failed to commit transaction: {}", e);
+                return;
+            }
         }
-        println!("Transaction time: {}", transaction_time.elapsed().as_millis());
-        println!("Scan time: {:?}", now.elapsed().as_millis());
-        let mut conn = db.get().unwrap();
-        let title_pass_transaction = conn.transaction().unwrap();
-        let new_books = get_books_without_title(&title_pass_transaction);
-        let library_path = PathBuf::from(library_path);
-        let now = Instant::now();
-        for book in new_books {
-            let (book_id, relative_book_path) = book;
-            let absolute_book_path = library_path.join(relative_book_path);
-            println!("Absolute path: {:#?}", absolute_book_path);
-            let (_, title) = get_epub_id_and_title(&absolute_book_path).unwrap();
-            update_book_title(&title_pass_transaction, book_id, &title);
-        }
-        title_pass_transaction.commit().unwrap();
-        println!("Title updating time: {:?}", now.elapsed().as_millis());
-
+        Self::drain_hash_results_on_scanner_thread(state);
     }
-
 }
 
 impl Drop for LibraryScanner {
@@ -180,15 +214,142 @@ impl Drop for LibraryScanner {
         if let Some(thread) = self.state.park_thread.get() {
             thread.unpark();
         }
+        // Close the thumbnail queue channel to signal the thumbnail thread to stop
+        drop(self.state.thumbnail_queue.clone());
+        drop(self.state.hash_queue.clone());
+        drop(self.state.hash_result_queue.clone());
         self.watcher_thread.take();
         self.worker_thread.take();
+        for thread in self.hash_threads.drain(..) {
+            let _ = thread.join();
+        }
+        self.thumbnail_thread.take();
     }
 }
 
 impl LibraryScanner {
+    fn hash_worker_loop(state: Arc<ScannerState>, hash_rx: crossbeam_channel::Receiver<HashTask>) {
+        let mut book_id_hash_buf = vec![0_u8; 1024 * 1024];
+        loop {
+            if state.should_finish.load(Ordering::Acquire) {
+                break;
+            }
+            let task = match hash_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(task) => task,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
+
+            let book_hash = generate_book_id_blake3(Path::new(&task.epub_path), &mut book_id_hash_buf);
+            let (title, author) = match get_epub_id_title_author(Path::new(&task.epub_path)) {
+                Some((_, title, author)) => (Some(title), Some(author)),
+                None => (None, None),
+            };
+
+            let ready = HashReady {
+                parent_uuid: task.parent_uuid,
+                file_name: task.file_name,
+                epub_path: task.epub_path,
+                file_hash: task.file_hash,
+                book_hash,
+                title,
+                author,
+            };
+
+            if state.hash_result_queue.send(ready).is_err() {
+                break;
+            }
+        }
+    }
+
+    fn drain_hash_results_on_scanner_thread(state: &Arc<ScannerState>) {
+        const MAX_BATCH: usize = 64;
+        loop {
+            if state.should_finish.load(Ordering::Acquire) {
+                break;
+            }
+
+            let pending_len = {
+                let pending = state.pending_hash_jobs.lock().unwrap();
+                pending.len()
+            };
+            if pending_len == 0 && state.hash_result_rx.is_empty() {
+                break;
+            }
+
+            let first = match state.hash_result_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(item) => item,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
+
+            let mut batch = vec![first];
+            while batch.len() < MAX_BATCH {
+                match state.hash_result_rx.try_recv() {
+                    Ok(item) => batch.push(item),
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            let mut conn = match state.db.get() {
+                Ok(c) => c,
+                Err(err) => {
+                    log::error!("Scanner inserter: failed to get DB connection: {}", err);
+                    let mut pending = state.pending_hash_jobs.lock().unwrap();
+                    for item in &batch {
+                        pending.remove(&item.file_hash);
+                    }
+                    continue;
+                }
+            };
+
+            let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    log::error!("Scanner inserter: failed to start transaction: {}", err);
+                    let mut pending = state.pending_hash_jobs.lock().unwrap();
+                    for item in &batch {
+                        pending.remove(&item.file_hash);
+                    }
+                    continue;
+                }
+            };
+
+            for item in &batch {
+                insert_book(&tx, item.book_hash);
+                insert_local_book_dir(&tx, &item.parent_uuid, item.book_hash.to_string(), &item.file_name, item.file_hash);
+                if let (Some(title), Some(author)) = (&item.title, &item.author) {
+                    update_book_metadata(&tx, item.book_hash, title, author);
+                }
+            }
+
+            if let Err(err) = tx.commit() {
+                log::error!("Scanner inserter: failed to commit transaction: {}", err);
+                let mut pending = state.pending_hash_jobs.lock().unwrap();
+                for item in &batch {
+                    pending.remove(&item.file_hash);
+                }
+                continue;
+            }
+
+            for item in &batch {
+                let _ = state.thumbnail_queue.send(ThumbnailTask { book_id: item.book_hash.to_string(), epub_path: item.epub_path.clone() });
+                state.thumbnail_inflight.fetch_add(1, Ordering::AcqRel);
+            }
+
+            let mut pending = state.pending_hash_jobs.lock().unwrap();
+            for item in &batch {
+                pending.remove(&item.file_hash);
+            }
+        }
+    }
+
     fn worker_loop(state: Arc<ScannerState>) {
         let current_thread = thread::current();
         let _ = state.park_thread.set(current_thread);
+        let mut last_scan_time: Option<Instant> = None;
+
         loop {
             if state.should_finish.load(Ordering::Acquire) {
                 break;
@@ -197,17 +358,106 @@ impl LibraryScanner {
                 thread::park();
                 continue;
             }
-            Self::scan_library(&state.library_path, &state.db, &state.event_tx);
+
+            // Add delay between scans to avoid rapid consecutive scans that could conflict
+            if let Some(last_time) = last_scan_time {
+                let elapsed = last_time.elapsed();
+                if elapsed < Duration::from_millis(500) {
+                    thread::sleep(Duration::from_millis(500) - elapsed);
+                }
+            }
+
+            Self::scan_library(&state.library_path, &state.db, &state.event_tx, &state);
+            last_scan_time = Some(Instant::now());
         }
+    }
+
+    fn thumbnail_worker_loop(state: Arc<ScannerState>, thumbnail_rx: crossbeam_channel::Receiver<ThumbnailTask>, event_tx: Sender<LibraryEvent>) {
+        const BATCH_CAP: usize = 50;
+        const FLUSH_INTERVAL: Duration = Duration::from_millis(1000);
+        let mut pending_updates: Vec<ThumbnailStateUpdate> = Vec::with_capacity(BATCH_CAP);
+
+        loop {
+            match thumbnail_rx.recv_timeout(FLUSH_INTERVAL) {
+                Ok(task) => {
+                    let thumb_path = get_app_data_thumbnails_dir()
+                        .join(format!("{}.jpg", task.book_id))
+                        .to_string_lossy()
+                        .to_string();
+                    let generated_ok = generate_thumbnail_to_app_data(&task.epub_path, &task.book_id).is_ok();
+                    let exists = Path::new(&thumb_path).exists();
+                    pending_updates.push(ThumbnailStateUpdate {
+                        hash: task.book_id.clone(),
+                        path: thumb_path,
+                        exists: generated_ok && exists,
+                    });
+
+                    if generated_ok {
+                        let _ = event_tx.send(LibraryEvent::ThumbnailGenerated { book_id: task.book_id });
+                    }
+
+                    if pending_updates.len() >= BATCH_CAP {
+                        Self::flush_thumbnail_state_updates(&state, &mut pending_updates);
+                    }
+
+                    let prev = state.thumbnail_inflight.fetch_sub(1, Ordering::AcqRel);
+                    if prev <= 1 {
+                        // Drained signal for current scan wave.
+                        Self::flush_thumbnail_state_updates(&state, &mut pending_updates);
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if !pending_updates.is_empty() {
+                        Self::flush_thumbnail_state_updates(&state, &mut pending_updates);
+                    }
+                    if state.should_finish.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if !pending_updates.is_empty() {
+            Self::flush_thumbnail_state_updates(&state, &mut pending_updates);
+        }
+    }
+
+    fn flush_thumbnail_state_updates(state: &Arc<ScannerState>, updates: &mut Vec<ThumbnailStateUpdate>) {
+        if updates.is_empty() {
+            return;
+        }
+        let mut conn = match state.db.get() {
+            Ok(c) => c,
+            Err(err) => {
+                log::error!("Thumbnail flush: failed to get DB connection: {}", err);
+                return;
+            }
+        };
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(tx) => tx,
+            Err(err) => {
+                log::error!("Thumbnail flush: failed to start transaction: {}", err);
+                return;
+            }
+        };
+
+        for update in updates.iter() {
+            upsert_blob_local_ref_tx(&tx, "thumbnail", &update.hash, &update.path, update.exists);
+            derive_blob_state_from_local_tx(&tx, "thumbnail", &update.hash);
+        }
+
+        if let Err(err) = tx.commit() {
+            log::error!("Thumbnail flush: failed to commit transaction: {}", err);
+            return;
+        }
+        updates.clear();
     }
 
     fn watcher_loop(state: Arc<ScannerState>) {
         let (event_tx, event_rx) = std_channel();
         let mut watcher = recommended_watcher(event_tx).expect("Failed to start filesystem watcher");
-        watcher
-            .watch(Path::new(&state.library_path), RecursiveMode::Recursive)
-            .expect("Failed to watch library path");
-        log::info!("Filesystem watcher started on {}", state.library_path);
+        watcher.watch(Path::new(&state.library_path), RecursiveMode::Recursive).expect("Failed to watch library path");
         let debounce = Duration::from_millis(500);
         let mut pending_scan = false;
         let mut last_event = None;
@@ -267,22 +517,19 @@ impl LibraryScanner {
     }
 
     fn is_epub_file(path: &Path) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("epub"))
-            .unwrap_or(false)
+        path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
     }
 }
 
 fn get_book_dir(transaction: &Transaction, entry: &DirEntry) -> (Option<BookDir>, u64) {
-    let mut hasher      = Xxh3::new();
-    let metadata        = entry.metadata().unwrap();
-    let modified_time   = metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let mut hasher = Xxh3::new();
+    let metadata = entry.metadata().unwrap();
+    let modified_time = metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
     hasher.write_u64(modified_time);
     hasher.write_u64(metadata.size());
     hasher.write_u64(metadata.ino());
     hasher.write_u64(metadata.dev());
-    let hash            = hasher.digest();
+    let hash = hasher.digest();
     (get_book_dir_by_hash(transaction, hash), hash)
 }
 
@@ -292,4 +539,3 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Transaction;
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
-use crate::library::generate_file_hash;

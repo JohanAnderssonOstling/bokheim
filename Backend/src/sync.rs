@@ -4,7 +4,6 @@ use crate::transfer::run_transfer_workers;
 use crate::transfer::TransferJob;
 use crossbeam_channel::Sender;
 use include_sqlite_sql::{impl_sql, include_sql};
-use rusqlite::Transaction;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest;
@@ -14,9 +13,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use sync_common::{EventPayload, PullEventsResponse, PushEventsRequest, PushEventsResponse};
-use tokio::runtime::Builder as TokioRuntimeBuilder;
+// TODO: sync protocol refactoring in progress — old Event types replaced by Change
+// use sync_common::{EventPayload, PullEventsResponse, PushEventsRequest, PushEventsResponse};
+use sync_common::{PullChangesResponse, PushChangesRequest, PushChangesResponse};
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 include_sql!("src/database/library.sql");
 
@@ -35,39 +36,31 @@ pub struct SyncManager {
     event_tx: Option<Sender<LibraryEvent>>,
 }
 
+#[derive(Debug, Serialize)]
+struct BlobsExistsRequest {
+    hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThumbnailsExistsRequest {
+    content_hashes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExistsResponse {
+    present: Vec<String>,
+}
+
 impl SyncManager {
-    pub fn new(
-        db_pool: DbPool,
-        client_id: String,
-        server_url: String,
-        library_id: String,
-        forced_user_id: Option<String>,
-        library_path: String,
-        event_tx: Option<Sender<LibraryEvent>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(db_pool: DbPool, client_id: String, server_url: String, library_id: String, forced_user_id: Option<String>, library_path: String, event_tx: Option<Sender<LibraryEvent>>) -> Result<Self, Box<dyn std::error::Error>> {
         let user_id = Self::get_or_create_user_id(&db_pool, forced_user_id)?;
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let http_client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
 
-        Ok(Self {
-            db_pool,
-            client_id,
-            server_url,
-            http_client,
-            user_id,
-            library_id,
-            library_path,
-            pending_downloads: Arc::new(Mutex::new(HashSet::new())),
-            event_tx,
-        })
+        Ok(Self { db_pool, client_id, server_url, http_client, user_id, library_id, library_path, pending_downloads: Arc::new(Mutex::new(HashSet::new())), event_tx })
     }
 
-    fn get_or_create_user_id(
-        db_pool: &DbPool,
-        forced_user_id: Option<String>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn get_or_create_user_id(db_pool: &DbPool, forced_user_id: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
         let file_user_id = Self::get_or_create_global_user_id(forced_user_id.clone())?;
         if let Some(id) = file_user_id {
             let conn = db_pool.get()?;
@@ -85,9 +78,7 @@ impl SyncManager {
         Ok(new_id)
     }
 
-    fn get_or_create_global_user_id(
-        forced_user_id: Option<String>,
-    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    fn get_or_create_global_user_id(forced_user_id: Option<String>) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let Ok(home) = std::env::var("HOME") else {
             return Ok(None);
         };
@@ -133,9 +124,7 @@ impl SyncManager {
         // Get last pull server_seq from metadata
         let last_pull_server_seq = {
             let conn = self.db_pool.get()?;
-            db::get_sync_metadata(&conn, "last_pull_server_seq")
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0)
+            db::get_sync_metadata(&conn, "last_pull_server_seq").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
         };
 
         // Push local events to server
@@ -150,180 +139,200 @@ impl SyncManager {
         Ok(())
     }
 
-    fn emit_event(&self, event: LibraryEvent) {
-        if let Some(tx) = &self.event_tx {
-            let _ = tx.send(event);
-        }
-    }
-
     async fn sync_assets(&self) -> Result<(), Box<dyn std::error::Error>> {
-        todo!()
-        /*
-        let db_pool = self.db.pool();
-        let conn = db_pool.get()?;
-        let mut book_paths = Vec::new();
-        /*conn.get_book_paths_with_downloaded(|row| {
-            let book_id: String = row.get(0)?;
-            let file_path: String = row.get(1)?;
-            let is_downloaded: i64 = row.get(2)?;
-            book_paths.push((book_id, file_path, is_downloaded != 0));
-            Ok(())
-        })?;*/
-
+        let conn = self.db_pool.get()?;
+        let assets = db::get_book_assets(&conn);
         let mut jobs = Vec::new();
+        let mut known_hashes = HashSet::new();
+        for asset in assets {
+            let local_path = self.resolve_book_path(&asset.file_path);
+            let thumb_path = self.thumbnail_path_for_content_hash(&asset.local_hash);
+            db::upsert_blob_local_ref(&conn, "book", &asset.local_hash, &local_path, Path::new(&local_path).exists());
+            db::derive_blob_state_from_local(&conn, "book", &asset.local_hash);
+            db::upsert_blob_local_ref(&conn, "thumbnail", &asset.local_hash, &thumb_path, Path::new(&thumb_path).exists());
+            db::derive_blob_state_from_local(&conn, "thumbnail", &asset.local_hash);
+            known_hashes.insert(asset.local_hash.clone());
+        }
+        let upload_blob_hashes = db::get_blob_hashes_by_state(&conn, "book", 1);
+        let upload_thumb_hashes = db::get_blob_hashes_by_state(&conn, "thumbnail", 1);
+        let mut pending_hashes = db::get_pending_download_hashes(&conn);
+        drop(conn);
 
-        for (book_id, file_path, is_downloaded) in book_paths {
-            let local_path = self.resolve_book_path(&file_path);
-            if Path::new(&local_path).exists() {
-                jobs.push(TransferJob::UploadBook {
-                    book_id: book_id.clone(),
-                    rel_path: file_path.clone(),
-                    local_path: local_path.clone(),
-                });
-                jobs.push(TransferJob::UploadThumbnail {
-                    book_id: book_id.clone(),
-                    rel_path: file_path.clone(),
-                    local_path: local_path.clone(),
-                });
-                if !is_downloaded {
-                    self.db.set_book_downloaded(&file_path, &book_id, true);
-                }
-            } else if is_downloaded {
-                self.db.set_book_downloaded(&file_path, &book_id, false);
+        let existing_blobs = self.check_existing_blobs(upload_blob_hashes.clone()).await?;
+        for hash in upload_blob_hashes {
+            if existing_blobs.contains(&hash) {
+                let conn = self.db_pool.get()?;
+                db::set_blob_state_checked(&conn, "book", &hash, 2);
+                continue;
             }
+            let conn = self.db_pool.get()?;
+            let Some(local_path) = db::get_blob_local_path(&conn, "book", &hash) else {
+                continue;
+            };
+            jobs.push(TransferJob::UploadBlob {
+                hash,
+                rel_path: String::new(),
+                local_path,
+                book_id: String::new(),
+            });
+        }
+        let existing_thumbs = self.check_existing_thumbnails(upload_thumb_hashes.clone()).await?;
+        for content_hash in upload_thumb_hashes {
+            if existing_thumbs.contains(&content_hash) {
+                let conn = self.db_pool.get()?;
+                db::set_blob_state_checked(&conn, "thumbnail", &content_hash, 2);
+                continue;
+            }
+            let conn = self.db_pool.get()?;
+            let Some(thumbnail_path) = db::get_blob_local_path(&conn, "thumbnail", &content_hash) else {
+                continue;
+            };
+            jobs.push(TransferJob::UploadThumbnail {
+                content_hash,
+                thumbnail_path,
+                book_id: String::new(),
+            });
         }
 
-        // Pending downloads
-        let pending: Vec<String> = {
+        let runtime_pending: Vec<String> = {
             let mut set = self.pending_downloads.lock().unwrap();
             set.drain().collect()
         };
-        for book_id in pending {
-            let mut file_path: Option<String> = None;
-            let _ = conn.get_book_file_path(&book_id, |row| {
-                file_path = Some(row.get(0)?);
-                Ok(())
-            });
-            let Some(file_path) = file_path else {
+        for hash in runtime_pending {
+            if !pending_hashes.iter().any(|x| x == &hash) {
+                pending_hashes.push(hash);
+            }
+        }
+
+        // State-driven requested downloads: local-missing + server-present.
+        let existing_pending = self.check_existing_blobs(pending_hashes.clone()).await?;
+        let mut still_pending = Vec::new();
+        for hash in pending_hashes {
+            let conn = self.db_pool.get()?;
+            if db::is_blob_local(&conn, "book", &hash) {
                 continue;
-            };
-            let local_path = self.resolve_book_path(&file_path);
-            jobs.push(TransferJob::DownloadBook {
-                book_id: book_id.clone(),
-                rel_path: file_path.clone(),
-                local_path: local_path.clone(),
-            });
-            jobs.push(TransferJob::DownloadThumbnail {
-                book_id: book_id.clone(),
-            });
+            }
+            if existing_pending.contains(&hash) {
+                db::set_blob_state_checked(&conn, "book", &hash, 3);
+                let target_path = if let Some(path) = db::get_blob_any_path(&conn, "book", &hash) {
+                    path
+                } else {
+                    // Seed blob_local_ref from canonical metadata paths in book_dir.
+                    let book_paths = db::get_book_paths_by_local_hash(&conn, &hash);
+                    if let Some(chosen) = book_paths.first() {
+                        let local = self.resolve_book_path(chosen);
+                        db::upsert_blob_local_ref(&conn, "book", &hash, &local, Path::new(&local).exists());
+                        local
+                    } else {
+                        still_pending.push(hash);
+                        continue;
+                    }
+                };
+                jobs.push(TransferJob::DownloadBlob {
+                    hash: hash.clone(),
+                    rel_path: String::new(),
+                    local_path: target_path,
+                    book_id: hash.clone(),
+                });
+            }
+            still_pending.push(hash);
         }
 
-        // Ensure thumbnails for known books
-        let mut unique_ids = Vec::new();
-        conn.get_book_ids(|row| {
-            unique_ids.push(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        for book_id in unique_ids {
-            jobs.push(TransferJob::DownloadThumbnail {
-                book_id: book_id.clone(),
-            });
+        // Eager thumbnails from known hashes: local-missing + server-present.
+        let known_hash_list: Vec<String> = known_hashes.into_iter().collect();
+        let existing_thumb_known = self.check_existing_thumbnails(known_hash_list.clone()).await?;
+        for hash in known_hash_list {
+            let conn = self.db_pool.get()?;
+            if db::is_blob_local(&conn, "thumbnail", &hash) {
+                continue;
+            }
+            if existing_thumb_known.contains(&hash) {
+                db::set_blob_state_checked(&conn, "thumbnail", &hash, 3);
+                jobs.push(TransferJob::DownloadThumbnail {
+                    content_hash: hash.clone(),
+                    book_id: hash,
+                });
+            }
         }
 
-        run_transfer_workers(
-            self.http_client.clone(),
-            self.server_url.clone(),
-            self.library_path.clone(),
-            db_pool.clone(),
-            self.event_tx.clone(),
-            jobs,
-            4,
-        )
-        .await?;
+        {
+            let conn = self.db_pool.get()?;
+            db::set_pending_download_hashes(&conn, &still_pending);
+        }
+
+        run_transfer_workers(self.http_client.clone(), self.server_url.clone(), self.library_path.clone(), self.db_pool.clone(), self.event_tx.clone(), jobs, 4).await?;
         Ok(())
-
-         */
     }
 
     pub fn request_download(&self, book_id: &str) {
-        let mut set = self.pending_downloads.lock().unwrap();
-        let should_spawn = set.insert(book_id.to_string());
-        drop(set);
-        if should_spawn {
-            if let Some(job) = self.build_download_job(book_id) {
-                self.spawn_manual_download(job);
-            }
+        if let Ok(conn) = self.db_pool.get() {
+            db::add_pending_download_hash(&conn, book_id);
+        } else {
+            let mut set = self.pending_downloads.lock().unwrap();
+            let _ = set.insert(book_id.to_string());
         }
     }
 
     fn resolve_book_path(&self, rel_path: &str) -> String {
         let trimmed = rel_path.trim_start_matches('/');
+        Path::new(&self.library_path).join(trimmed).to_string_lossy().into_owned()
+    }
+
+    fn thumbnail_path_for_content_hash(&self, content_hash: &str) -> String {
         Path::new(&self.library_path)
-            .join(trimmed)
+            .join(".biblos")
+            .join("thumbnails")
+            .join(format!("{content_hash}.png"))
             .to_string_lossy()
             .into_owned()
     }
 
-    fn build_download_job(&self, book_id: &str) -> Option<TransferJob> {
-        let conn = self.db_pool.get().ok()?;
-        let file_path = db::get_book_file_path(&conn, book_id)?;
-        let local_path = self.resolve_book_path(&file_path);
-        Some(TransferJob::DownloadBook {
-            book_id: book_id.to_string(),
-            rel_path: file_path,
-            local_path,
-        })
+    async fn check_existing_blobs(&self, hashes: Vec<String>) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+        if hashes.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let resp = self
+            .http_client
+            .post(&format!("{}/api/blobs/exists", self.server_url))
+            .json(&BlobsExistsRequest { hashes })
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: ExistsResponse = resp.json().await?;
+        Ok(body.present.into_iter().collect())
     }
 
-    fn spawn_manual_download(&self, job: TransferJob) {
-        let http_client = self.http_client.clone();
-        let server_url = self.server_url.clone();
-        let library_path = self.library_path.clone();
-        let db_pool = self.db_pool.clone();
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let runtime = TokioRuntimeBuilder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for download");
-            runtime.block_on(async move {
-                if let Err(err) = run_transfer_workers(
-                    http_client,
-                    server_url,
-                    library_path,
-                    db_pool,
-                    event_tx,
-                    vec![job],
-                    1,
-                )
-                .await
-                {
-                    log::error!("Manual download failed: {}", err);
-                }
-            });
-        });
+    async fn check_existing_thumbnails(&self, content_hashes: Vec<String>) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+        if content_hashes.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let resp = self
+            .http_client
+            .post(&format!("{}/api/thumbnails/exists", self.server_url))
+            .json(&ThumbnailsExistsRequest { content_hashes })
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: ExistsResponse = resp.json().await?;
+        Ok(body.present.into_iter().collect())
     }
 
     async fn push_local_events(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Get unpushed events for this client
-        let events = {
+        let changes = {
             let conn = self.db_pool.get()?;
             db::get_unpushed_events(&conn)
         };
 
-        if events.is_empty() {
+        if changes.is_empty() {
             return Ok(());
         }
 
-        // Track max local_seq for marking as pushed
-        let max_local_seq = events.iter().filter_map(|e| e.local_seq).max().unwrap_or(0);
-
-        // Send events to server
-        let request = PushEventsRequest {
+        let max_local_seq = changes.iter().filter_map(|e| e.local_seq).max().unwrap_or(0);
+        let request = PushChangesRequest {
             user_id: self.user_id.clone(),
             library_id: self.library_id.clone(),
             client_id: self.client_id.clone(),
-            events: events.clone(),
+            changes,
         };
 
         let response = self
@@ -333,26 +342,15 @@ impl SyncManager {
             .send()
             .await?
             .error_for_status()?;
+        let push_response: PushChangesResponse = response.json().await?;
 
-        let push_response: PushEventsResponse = response.json().await?;
-
-        // Mark events as pushed with the server_seq
         let conn = self.db_pool.get()?;
         db::mark_events_pushed(&conn, max_local_seq, push_response.last_server_seq);
-
-        // Apply authoritative events from server (server's decision on MPW conflicts)
-        for event in &push_response.authoritative_events {
-            db::apply_authoritative_event(&conn, event);
-        }
-
-        log::info!("Successfully pushed {} events", events.len());
+        db::set_sync_metadata(&conn, "first_sync_done", "1");
         Ok(())
     }
 
-    async fn pull_events_from_server(
-        &self,
-        since_server_seq: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn pull_events_from_server(&self, since_server_seq: u64) -> Result<(), Box<dyn std::error::Error>> {
         let response = self
             .http_client
             .get(&format!(
@@ -362,87 +360,32 @@ impl SyncManager {
             .send()
             .await?
             .error_for_status()?;
+        let pull_response: PullChangesResponse = response.json().await?;
+        {
+            let conn = self.db_pool.get()?;
+            db::set_sync_metadata(&conn, "first_sync_done", "1");
+        }
+        let changes = pull_response.changes;
 
-        let pull_response: PullEventsResponse = response.json().await?;
-        let events = pull_response.events;
-
-        if events.is_empty() {
+        if changes.is_empty() {
             return Ok(());
         }
 
         let mut conn = self.db_pool.get()?;
         let tx = conn.transaction()?;
-
-        // Apply events from server (server is authoritative)
-        for event in events.iter() {
-            db::apply_remote_event_in_tx(&tx, event)?;
-
-            // Emit UI events for relevant changes
-            match &event.payload {
-                EventPayload::DirAdded { dir_id, .. } => {
-                    if let Some(path) = Self::resolve_dir_path(&tx, dir_id) {
-                        self.emit_event(LibraryEvent::DirectoryAdded { path });
-                    }
-                }
-                EventPayload::BookDirAdded {
-                    book_id,
-                    dir_id,
-                    file_name,
-                    ..
-                } => {
-                    if let Some(dir_path) = Self::resolve_dir_path(&tx, dir_id) {
-                        let path = Self::join_dir_and_file(&dir_path, file_name);
-                        self.emit_event(LibraryEvent::BookAdded {
-                            book_id: book_id.to_string(),
-                            path,
-                        });
-                    }
-                }
-                EventPayload::BookDirRemoved {
-                    book_id,
-                    dir_id,
-                    file_name,
-                    ..
-                } => {
-                    if let Some(dir_path) = Self::resolve_dir_path(&tx, dir_id) {
-                        let path = Self::join_dir_and_file(&dir_path, file_name);
-                        self.emit_event(LibraryEvent::BookRemoved {
-                            book_id: book_id.to_string(),
-                            path,
-                        });
-                    }
-                }
-                _ => {}
-            }
+        for change in &changes {
+            db::apply_remote_change_in_tx(&tx, change)?;
         }
+        db::drain_pending_remote_changes_in_tx(&tx)?;
 
-        // Update last pull cursor to highest server_seq
-        if let Some(last_event) = events.last() {
-            if let Some(server_seq) = last_event.server_seq {
+        if let Some(last) = changes.last() {
+            if let Some(server_seq) = last.server_seq {
                 db::set_sync_metadata(&tx, "last_pull_server_seq", &server_seq.to_string());
             }
         }
 
         tx.commit()?;
-        log::info!("Successfully pulled {} events", events.len());
-
         Ok(())
     }
 
-    fn resolve_dir_path(tx: &Transaction, dir_id: &str) -> Option<String> {
-        let mut path = None;
-       // let _ = tx.find_path_by_dir_id(dir_id, |row| {
-          //  path = Some(row.get::<_, String>(0)?);
-         //   Ok(())
-       // });
-        path
-    }
-
-    fn join_dir_and_file(dir_path: &str, file_name: &str) -> String {
-        if dir_path == "/" {
-            format!("/{file_name}")
-        } else {
-            format!("{dir_path}/{file_name}")
-        }
-    }
 }

@@ -3,15 +3,15 @@ name = "Html-Prototype"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = ["epub_provider"]
-
 [dependencies]
 floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}
 floem_renderer = {version = "0.2.0"}
 rustc_data_structures = "0.1.2"
 scraper = "0.22"
 lightningcss = { version = "1.0.0-alpha.68", features = ["substitute_variables"] }
+parcel_selectors = "0.28.2"
 image = "0.25"
 sha2 = "0.10"
 epub_provider = { path = "epub_provider" }
+cosmic-text = "0.12.1"
+arboard = "3.6.1"

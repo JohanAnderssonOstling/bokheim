@@ -1,15 +1,21 @@
 use crate::epub_reader::create_epub_reader;
-use crate::home_page::{ HomePage};
+use crate::home_page::HomePage;
+use crate::library_page::LibraryState;
 use epub_svelte_lib::home::LibraryEntry;
 use epub_svelte_lib::library::Library;
 use epub_svelte_lib::scanner::{DownloadState, LibraryEvent};
-use floem::prelude::{container, create_rw_signal, dyn_view, Decorators, RwSignal, SignalGet, SignalUpdate};
-use floem::reactive::{create_effect, ReadSignal};
+use epub_svelte_lib::BookID;
+use floem::action::exec_after;
+use floem::prelude::{container, create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::create_effect;
+use floem::views::stack;
 use floem::View;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use epub_svelte_lib::BookID;
-use crate::library_page::LibraryState;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 
@@ -19,24 +25,12 @@ pub struct ReaderState {
     pub book_title: String,
 }
 
-
-impl LibraryState {
-    pub fn navigate_to_folder(&self, dir_id: &str) -> LibraryState {
-        Self {
-            library_id: self.library_id.clone(),
-            folder_id: dir_id.to_string(),
-        }
-    }
-}
-
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Page {
     Home,
-    Library (LibraryState),
-    Reader (ReaderState),
+    Library(LibraryState),
+    Reader(ReaderState),
 }
-
-
 
 #[derive(Clone)]
 pub struct NavStack {
@@ -71,10 +65,11 @@ pub struct Signals {
     pub nav_action: RwSignal<Option<NavAction>>,
     //pub active_page: RwSignal<Page>,
     //pub prev_page: RwSignal<Page>,
-
     pub library_handles: RwSignal<HashMap<LibraryID, Rc<Library>>>,
+    pub library_refresh_tick: RwSignal<u64>,
+    pub library_event_counter: Arc<AtomicU64>,
     pub active_library_id: RwSignal<Option<String>>,
-    
+    pub active_library_name: RwSignal<String>,
 }
 
 impl Signals {
@@ -84,53 +79,91 @@ impl Signals {
     pub fn navigate(&self, page: Page) {
         self.nav_action.set(Some(NavAction::Navigate(page)));
     }
-
 }
 
 pub fn page_navigation_view() -> impl View {
-
     let signals = Signals {
-        nav_stack: create_rw_signal(NavStack {
-            pages: vec![Page::Home],
-            index: 0,
-        }),
+        nav_stack: create_rw_signal(NavStack { pages: vec![Page::Home], index: 0 }),
         nav_action: create_rw_signal(None),
         library_handles: create_rw_signal(HashMap::new()),
+        library_refresh_tick: create_rw_signal(0),
+        library_event_counter: Arc::new(AtomicU64::new(0)),
         active_library_id: create_rw_signal(None),
+        active_library_name: create_rw_signal(String::new()),
     };
 
     create_effect(move |h| {
-        let Some(action) = signals.nav_action.get() else {return};
+        let Some(action) = signals.nav_action.get() else { return };
         signals.nav_stack.update(|nav| match action {
-            NavAction::Back =>  if nav.index > 0 {nav.index -= 1}
+            NavAction::Back => {
+                if nav.index > 0 {
+                    nav.index -= 1
+                }
+            }
             NavAction::Navigate(page) => {
                 nav.pages.truncate(nav.index + 1);
                 nav.pages.push(page);
                 nav.index = nav.pages.len() - 1;
             }
-
         });
         signals.nav_action.set(None)
-
     });
 
-    let mut page = HomePage {
-        active_library: None,
-        library_states: HashMap::new(),
+    // Bridge backend library events into a reactive UI tick without rebuilding views.
+    {
+        let signals_for_bridge = signals.clone();
+        let last_seen_counter = create_rw_signal(0_u64);
+        fn schedule_library_event_bridge(signals: Signals, last_seen_counter: RwSignal<u64>) {
+            exec_after(Duration::from_millis(200), move |_| {
+                let current = signals.library_event_counter.load(Ordering::Relaxed);
+                if current != last_seen_counter.get_untracked() {
+                    last_seen_counter.set(current);
+                    signals.library_refresh_tick.set(current);
+                }
+                schedule_library_event_bridge(signals.clone(), last_seen_counter);
+            });
+        }
+        schedule_library_event_bridge(signals_for_bridge, last_seen_counter);
+    }
+
+    // Home view is created once and shown/hidden — never reconstructed on navigation.
+    let home_content = {
+        let mut hp = HomePage { active_library: None, library_states: HashMap::new() };
+        hp.home_view(signals.clone())
     };
+    let nav_stack = signals.nav_stack;
+    let home_view = container(home_content).style(move |s| {
+        if matches!(nav_stack.get().current(), Page::Home) {
+            s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)
+        } else {
+            s.hide()
+        }
+    });
 
-    let content = dyn_view(move || match signals.nav_stack.get().current() {
-        Page::Home => container(page.clone().home_view(signals.clone()))
-            .style(|s| s.width_full().height_full().flex_grow(1.0)),
-        Page::Library(library_state) => container(page.clone().home_view(signals.clone()))
-            .style(|s| s.width_full().height_full().flex_grow(1.0)),
-        Page::Reader ( reader_state) => container(create_epub_reader(
-            reader_state,
-            signals.clone(),
-        ))
-        .style(|s| s.width_full().height_full().flex_grow(1.0)),
-    })
-    .style(|s| s.width_full().height_full().flex_grow(1.0));
+    // Overlay view handles Library and Reader; hidden on Home so home_view shows through.
+    let overlay_view = dyn_view({
+        let signals = signals.clone();
+        move || match signals.nav_stack.get().current().clone() {
+            Page::Home => Box::new(label(|| "")) as Box<dyn View>,
+            Page::Library(library_state) => {
+                Box::new(container(library_state.library_view(signals.clone())).style(|s| {
+                    s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)
+                })) as Box<dyn View>
+            }
+            Page::Reader(reader_state) => {
+                Box::new(container(create_epub_reader(&reader_state, signals.clone())).style(|s| {
+                    s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)
+                })) as Box<dyn View>
+            }
+        }
+    }).style(move |s| {
+        if matches!(nav_stack.get().current(), Page::Home) {
+            s.hide()
+        } else {
+            s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)
+        }
+    });
 
-    content
+    stack((home_view, overlay_view))
+        .style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0))
 }
