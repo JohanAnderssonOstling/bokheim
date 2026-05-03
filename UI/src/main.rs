@@ -13,6 +13,8 @@ mod library_tabs;
 mod page_navigation;
 mod style;
 mod toc;
+mod home_page_preview;
+mod shadcdn;
 
 fn app_view() -> impl View {
     /*let mut epub_renderer = EpubReader::new("/home/johan/Hem/Downloads/A Concise History of Switzerland.epub");

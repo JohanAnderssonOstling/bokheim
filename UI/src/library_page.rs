@@ -7,11 +7,11 @@ use crate::page_navigation::Signals;
 use floem::event::EventPropagation;
 use floem::keyboard::{Key, Modifiers, NamedKey};
 use floem::prelude::{create_rw_signal, h_stack, stack, v_stack, Decorators, RwSignal, SignalGet, SignalUpdate};
-use floem::reactive::create_effect;
 use floem::style::{AlignItems, Style};
 use floem::View;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LibraryTab {
     Home,
     Authors,
@@ -19,30 +19,65 @@ pub enum LibraryTab {
     Folders,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LibraryStateData {
+    pub library_id: String,
+    pub library_name: String,
+    pub active_tab: LibraryTab,
+    pub folder_stack: Vec<(String, String)>,
+}
+
+#[derive(Clone)]
 pub struct LibraryState {
     pub library_id: String,
+    pub library_name: String,
+    pub active_tab: RwSignal<LibraryTab>,
+    pub folder_stack: RwSignal<Vec<(String, String)>>,
 }
 
 impl LibraryState {
+    pub fn new(library_id: String, library_name: String) -> Self {
+        Self {
+            library_id,
+            library_name,
+            active_tab: create_rw_signal(LibraryTab::Folders),
+            folder_stack: create_rw_signal(vec![]),
+        }
+    }
+
+    pub fn from_data(data: LibraryStateData) -> Self {
+        Self {
+            library_id: data.library_id,
+            library_name: data.library_name,
+            active_tab: create_rw_signal(data.active_tab),
+            folder_stack: create_rw_signal(data.folder_stack),
+        }
+    }
+
+    pub fn snapshot(&self) -> LibraryStateData {
+        LibraryStateData {
+            library_id: self.library_id.clone(),
+            library_name: self.library_name.clone(),
+            active_tab: self.active_tab.get_untracked(),
+            folder_stack: self.folder_stack.get_untracked(),
+        }
+    }
+
     pub fn library_view(&self, signals: Signals) -> impl View {
-        let folder_stack: RwSignal<Vec<(String, String)>> = create_rw_signal(vec![]);
-        let active_tab: RwSignal<LibraryTab> = create_rw_signal(LibraryTab::Folders);
+        let active_tab = self.active_tab;
+        let folder_stack = self.folder_stack;
         let library_id = self.library_id.clone();
-        let library_id_for_home = library_id.clone();
-        let library_id_for_authors = library_id.clone();
-        let library_id_for_folders = library_id;
-        let signals_for_home = signals.clone();
-        let signals_for_authors = signals.clone();
-        let signals_for_folders = signals.clone();
+        let library_name = self.library_name.clone();
 
         let sidebar = create_library_sidebar(active_tab);
 
-        let home_tab = home_tab_view(library_id_for_home, signals_for_home).style(move |s| tab_visibility(s, active_tab, LibraryTab::Home));
-        let authors_tab = authors_tab_view(library_id_for_authors, signals_for_authors).style(move |s| tab_visibility(s, active_tab, LibraryTab::Authors));
+        let library_id_for_home = library_id.clone();
+        let library_id_for_authors = library_id.clone();
+        let library_id_for_folders = library_id;
+        let home_tab = home_tab_view(library_id_for_home, signals.clone()).style(move |s| tab_visibility(s, active_tab, LibraryTab::Home));
+        let authors_tab = authors_tab_view(library_id_for_authors, signals.clone()).style(move |s| tab_visibility(s, active_tab, LibraryTab::Authors));
         let search_tab = search_tab_view().style(move |s| tab_visibility(s, active_tab, LibraryTab::Search));
-        let folders_tab = folders_tab_view(library_id_for_folders, folder_stack, signals_for_folders).style(move |s| tab_visibility(s, active_tab, LibraryTab::Folders));
-
+        let folders_tab = folders_tab_view(library_id_for_folders, library_name, folder_stack, signals.clone()).style(move |s| tab_visibility(s, active_tab, LibraryTab::Folders));
         let content = stack((home_tab, authors_tab, search_tab, folders_tab)).style(|s| s.width_full().height_full().flex_grow(1.0));
 
         let library_root = h_stack((sidebar, content))
@@ -60,42 +95,14 @@ impl LibraryState {
                     });
                 },
             )
-            .on_key_down(
-                Key::Character("1".into()),
-                |mods: Modifiers| mods.control(),
-                move |_| {
-                    active_tab.set(LibraryTab::Home);
-                },
-            )
-            .on_key_down(
-                Key::Character("2".into()),
-                |mods: Modifiers| mods.control(),
-                move |_| {
-                    active_tab.set(LibraryTab::Authors);
-                },
-            )
-            .on_key_down(
-                Key::Character("3".into()),
-                |mods: Modifiers| mods.control(),
-                move |_| {
-                    active_tab.set(LibraryTab::Search);
-                },
-            )
-            .on_key_down(
-                Key::Character("4".into()),
-                |mods: Modifiers| mods.control(),
-                move |_| {
-                    active_tab.set(LibraryTab::Folders);
-                },
-            )
+            .on_key_down(Key::Character("1".into()), |mods: Modifiers| mods.control(), move |_| { active_tab.set(LibraryTab::Home); })
+            .on_key_down(Key::Character("2".into()), |mods: Modifiers| mods.control(), move |_| { active_tab.set(LibraryTab::Authors); })
+            .on_key_down(Key::Character("3".into()), |mods: Modifiers| mods.control(), move |_| { active_tab.set(LibraryTab::Search); })
+            .on_key_down(Key::Character("4".into()), |mods: Modifiers| mods.control(), move |_| { active_tab.set(LibraryTab::Folders); })
             .style(|s| s.width_full().height_full().flex_grow(1.0));
 
         let library_root_id = library_root.id();
         let library_root = library_root.on_click_stop(move |_| {
-            library_root_id.request_focus();
-        });
-        let library_root_id = library_root.id();
-        create_effect(move |_| {
             library_root_id.request_focus();
         });
 

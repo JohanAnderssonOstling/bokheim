@@ -13,20 +13,20 @@ use epub_svelte_lib::library::Library;
 use floem::event::EventPropagation;
 use floem::keyboard::{Key, Modifiers, NamedKey};
 use floem::peniko::Color;
-use floem::prelude::{button, create_rw_signal, dyn_view, label, stack_from_iter, Decorators, RwSignal, SignalGet, SignalUpdate};
+use floem::prelude::{button, create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::{IntoView, View};
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct HomePage {
-    pub active_library: Option<LibraryID>,
-    pub library_states: HashMap<LibraryID, LibraryState>,
-}
+pub struct HomePage {}
 
 impl HomePage {
-    pub fn home_view(&mut self, signals: Signals) -> impl View {
+    pub fn home_view(
+self                             : &Self,
+signals                          : Signals)
+-> impl View
+{
         let initial_entries = get_library_entries();
-        self.active_library = initial_entries.first().map(|library| library.library_id.clone());
         let library_entries_signal = create_rw_signal(initial_entries);
 
         if let Some(first) = library_entries_signal.get_untracked().first() {
@@ -75,7 +75,7 @@ impl HomePage {
                 Key::Named(NamedKey::ArrowDown),
                 move |_mods: Modifiers| show_switcher.get(),
                 move |_| {
-                    move_selection(selected_for_down, entries_for_down, 1);
+                    move_selection(selected_for_down, library_entries_signal, 1);
                 },
             )
             .on_key_down(
@@ -116,7 +116,11 @@ impl HomePage {
     }
 }
 
-fn create_content_view(signals: Signals, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> Box<dyn View> {
+fn create_content_view(
+signals                          : Signals,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> Box<dyn View>
+{
     let entries = library_entries_signal.get();
 
     let mut handles = signals.library_handles.get_untracked();
@@ -138,21 +142,40 @@ fn create_content_view(signals: Signals, library_entries_signal: RwSignal<Vec<Li
         signals.library_handles.set(handles);
     }
 
+    // Keep cached per-library UI state in sync with current library entries.
+    signals.library_states.update(|states| {
+        let mut next: HashMap<LibraryID, LibraryState> = HashMap::new();
+        for entry in &entries {
+            let state = states
+                .get(&entry.library_id)
+                .cloned()
+                .unwrap_or_else(|| LibraryState::new(entry.library_id.clone(), entry.library_name.clone()));
+            next.insert(entry.library_id.clone(), state);
+        }
+        *states = next;
+    });
+
     let active_signal = signals.active_library_id;
-    let views = stack_from_iter(entries.into_iter().map(|entry| {
-        let lid = entry.library_id.clone();
-        let library_view = LibraryState { library_id: lid.clone() }.library_view(signals.clone());
-        create_active_library_view(library_view, move || {
-            let active = active_signal.get();
-            active.as_deref() == Some(lid.as_str())
-        })
-    }))
+    let signals_for_view = signals;
+    let active_library_view = dyn_view(move || match active_signal.get() {
+        None => Box::new(label(|| "")) as Box<dyn View>,
+        Some(id) => match signals_for_view.library_state(&id) {
+            Some(state) => Box::new(state.library_view(signals_for_view.clone())) as Box<dyn View>,
+            None => Box::new(label(|| "Library not found".to_string())) as Box<dyn View>,
+        },
+    })
     .style(|s| s.width_full().height_full().flex_grow(1.0));
 
-    Box::new(views) as Box<dyn View>
+    Box::new(active_library_view) as Box<dyn View>
 }
 
-fn create_top_bar(signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> impl View {
+fn create_top_bar(
+signals                          : Signals,
+show_switcher                    : RwSignal<bool>,
+selected_switcher_index          : RwSignal<usize>,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> impl View
+{
     let switcher_button = button(label(move || signals.active_library_name.get())).on_click(move |_| {
         toggle_switcher(show_switcher, selected_switcher_index, signals.clone(), library_entries_signal);
         EventPropagation::Continue
@@ -161,7 +184,15 @@ fn create_top_bar(signals: Signals, show_switcher: RwSignal<bool>, selected_swit
     create_top_row(left_group)
 }
 
-fn create_switcher_item(index: usize, library_entry: LibraryEntry, signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> impl IntoView {
+fn create_switcher_item(
+index                            : usize,
+library_entry                    : LibraryEntry,
+signals                          : Signals,
+show_switcher                    : RwSignal<bool>,
+selected_switcher_index          : RwSignal<usize>,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> impl IntoView
+{
     let name = library_entry.library_name;
     let library_path = library_entry.library_path;
     let select_button = create_switcher_select_button(name, move || selected_switcher_index.get() == index).on_click(move |_| {
@@ -172,7 +203,13 @@ fn create_switcher_item(index: usize, library_entry: LibraryEntry, signals: Sign
     create_button_group((select_button, delete_button))
 }
 
-fn create_switcher_overlay(signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> impl View {
+fn create_switcher_overlay(
+signals                          : Signals,
+show_switcher                    : RwSignal<bool>,
+selected_switcher_index          : RwSignal<usize>,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> impl View
+{
     dyn_view(move || {
         let library_entries = library_entries_signal.get();
         let list = if library_entries.is_empty() {
@@ -200,7 +237,11 @@ fn create_switcher_overlay(signals: Signals, show_switcher: RwSignal<bool>, sele
     })
 }
 
-fn on_delete_library(library_path: String, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> impl FnMut(&floem::event::Event) -> EventPropagation {
+fn on_delete_library(
+library_path                     : String,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> impl FnMut(&floem::event::Event) -> EventPropagation
+{
     move |_| {
         remove_library(&library_path);
         library_entries_signal.set(get_library_entries());
@@ -208,7 +249,12 @@ fn on_delete_library(library_path: String, library_entries_signal: RwSignal<Vec<
     }
 }
 
-fn toggle_switcher(show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>, signals: Signals, library_entries_signal: RwSignal<Vec<LibraryEntry>>) {
+fn toggle_switcher(
+show_switcher                    : RwSignal<bool>,
+selected_switcher_index          : RwSignal<usize>,
+signals                          : Signals,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+{
     if show_switcher.get_untracked() {
         show_switcher.set(false);
     } else {
@@ -217,7 +263,11 @@ fn toggle_switcher(show_switcher: RwSignal<bool>, selected_switcher_index: RwSig
     }
 }
 
-fn move_selection(selected_switcher_index: RwSignal<usize>, library_entries_signal: RwSignal<Vec<LibraryEntry>>, delta: i32) {
+fn move_selection(
+selected_switcher_index          : RwSignal<usize>,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>,
+delta                            : i32)
+{
     let len = library_entries_signal.get_untracked().len();
     if len == 0 {
         return;
@@ -228,7 +278,12 @@ fn move_selection(selected_switcher_index: RwSignal<usize>, library_entries_sign
     });
 }
 
-fn switch_to_index(signals: Signals, library_entries_signal: RwSignal<Vec<LibraryEntry>>, index: usize, show_switcher: RwSignal<bool>) {
+fn switch_to_index(
+signals                          : Signals,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>,
+index                            : usize,
+show_switcher                    : RwSignal<bool>)
+{
     if let Some(entry) = library_entries_signal.get_untracked().get(index) {
         signals.active_library_id.set(Some(entry.library_id.clone()));
         signals.active_library_name.set(entry.library_name.clone());
@@ -236,21 +291,29 @@ fn switch_to_index(signals: Signals, library_entries_signal: RwSignal<Vec<Librar
     show_switcher.set(false);
 }
 
-fn active_library_index(signals: &Signals, library_entries_signal: RwSignal<Vec<LibraryEntry>>) -> Option<usize> {
+fn active_library_index(
+signals                          : &Signals,
+library_entries_signal           : RwSignal<Vec<LibraryEntry>>)
+-> Option<usize>
+{
     let active_id = signals.active_library_id.get_untracked();
     let entries = library_entries_signal.get_untracked();
     active_id.as_deref().and_then(|active| entries.iter().position(|e| e.library_id == active))
 }
 
-fn create_active_library_view(view: impl View + 'static, is_active: impl Fn() -> bool + 'static) -> impl View {
-    view.style(move |s| if is_active() { s.width_full().height_full().flex_grow(1.0) } else { s.hide() })
-}
-
-fn create_switcher_select_button(name: String, is_selected: impl Fn() -> bool + 'static) -> impl View {
+fn create_switcher_select_button(
+name                             : String,
+is_selected                      : impl Fn() -> bool + 'static)
+-> impl View
+{
     create_list_item_button(name).style(move |s| if is_selected() { s.background(Color::rgb8(219, 234, 254)) } else { s })
 }
 
-fn create_switcher_overlay_container(panel: impl IntoView + 'static, show_switcher: RwSignal<bool>) -> impl View {
+fn create_switcher_overlay_container(
+panel                            : impl IntoView + 'static,
+show_switcher                    : RwSignal<bool>)
+-> impl View
+{
     create_centered_stack((panel,)).style(move |s| {
         let s = s.absolute().inset(0).size_full().background(Color::rgba8(15, 23, 42, 140)).z_index(100);
         if show_switcher.get() {
