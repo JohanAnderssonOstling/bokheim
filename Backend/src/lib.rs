@@ -1,5 +1,6 @@
 extern crate core;
 
+pub mod auth;
 pub mod db;
 pub mod epub;
 pub mod home;

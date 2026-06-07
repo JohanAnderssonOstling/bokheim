@@ -3,6 +3,7 @@ use floem::{IntoView, View};
 
 use crate::page_navigation::page_navigation_view;
 
+mod auth_view;
 mod components;
 mod epub_reader;
 mod functions;
@@ -13,14 +14,16 @@ mod library_tabs;
 mod page_navigation;
 mod style;
 mod toc;
+#[cfg(feature = "ui-shadcn")]
 mod home_page_preview;
+#[cfg(feature = "ui-shadcn")]
 mod shadcdn;
 
 fn app_view() -> impl View {
     /*let mut epub_renderer = EpubReader::new("/home/johan/Hem/Downloads/A Concise History of Switzerland.epub");
     epub_renderer = epub_renderer.style(move |style| {style.width_full()});
     epub_renderer.into_view()*/
-    page_navigation_view().style(|s| s.width_full().height_full().min_width(0).min_height(0))
+    page_navigation_view().style(|s| s.size_pct(100.0, 100.0).width_full().height_full().min_width(0).min_height(0).flex_col())
 }
 
 fn main() {

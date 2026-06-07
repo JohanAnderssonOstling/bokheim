@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // TODO: sync protocol refactoring in progress — old Event types replaced by Change
 // use sync_common::{EventPayload, PullEventsResponse, PushEventsRequest, PushEventsResponse};
+use serde::{Deserialize, Serialize};
 use sync_common::{PullChangesResponse, PushChangesRequest, PushChangesResponse};
 use uuid::Uuid;
-use serde::{Deserialize, Serialize};
 
 include_sql!("src/database/library.sql");
 
@@ -34,6 +34,7 @@ pub struct SyncManager {
     library_path: String,
     pending_downloads: Arc<Mutex<HashSet<String>>>,
     event_tx: Option<Sender<LibraryEvent>>,
+    session: Arc<std::sync::RwLock<Option<crate::auth::Session>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +58,56 @@ impl SyncManager {
 
         let http_client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
 
-        Ok(Self { db_pool, client_id, server_url, http_client, user_id, library_id, library_path, pending_downloads: Arc::new(Mutex::new(HashSet::new())), event_tx })
+        let session = crate::auth::Session::load();
+        if let Some(s) = session.as_ref() {
+            if s.user_id != user_id {
+                log::warn!("Loaded session.user_id={} but local user_id={}; ignoring session.", s.user_id, user_id);
+            }
+        }
+        let session = session.filter(|s| s.user_id == user_id);
+
+        Ok(Self {
+            db_pool,
+            client_id,
+            server_url,
+            http_client,
+            user_id,
+            library_id,
+            library_path,
+            pending_downloads: Arc::new(Mutex::new(HashSet::new())),
+            event_tx,
+            session: Arc::new(std::sync::RwLock::new(session)),
+        })
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub fn is_signed_in(&self) -> bool {
+        self.session.read().map(|s| s.is_some()).unwrap_or(false)
+    }
+
+    pub fn current_session(&self) -> Option<crate::auth::Session> {
+        self.session.read().ok().and_then(|s| s.clone())
+    }
+
+    pub fn set_session(&self, session: crate::auth::Session) {
+        let _ = session.save();
+        if let Ok(mut guard) = self.session.write() {
+            *guard = Some(session);
+        }
+    }
+
+    pub fn clear_session(&self) {
+        crate::auth::Session::clear();
+        if let Ok(mut guard) = self.session.write() {
+            *guard = None;
+        }
+    }
+
+    fn token(&self) -> Option<String> {
+        self.session.read().ok().and_then(|g| g.as_ref().map(|s| s.token.clone()))
     }
 
     fn get_or_create_user_id(db_pool: &DbPool, forced_user_id: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
@@ -104,23 +154,16 @@ impl SyncManager {
         Ok(Some(new_id))
     }
 
-    pub async fn start_sync_loop(&self) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-
-        loop {
-            interval.tick().await;
-
-            if let Err(e) = self.sync_with_server().await {
-                log::error!("Sync failed: {}", e);
-            }
-        }
-    }
-
     pub async fn sync_once(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.sync_with_server().await
     }
 
     async fn sync_with_server(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.is_signed_in() {
+            // Local-only mode: nothing to push, nothing to pull.
+            return Ok(());
+        }
+
         // Get last pull server_seq from metadata
         let last_pull_server_seq = {
             let conn = self.db_pool.get()?;
@@ -169,12 +212,7 @@ impl SyncManager {
             let Some(local_path) = db::get_blob_local_path(&conn, "book", &hash) else {
                 continue;
             };
-            jobs.push(TransferJob::UploadBlob {
-                hash,
-                rel_path: String::new(),
-                local_path,
-                book_id: String::new(),
-            });
+            jobs.push(TransferJob::UploadBlob { hash, rel_path: String::new(), local_path, book_id: String::new() });
         }
         let existing_thumbs = self.check_existing_thumbnails(upload_thumb_hashes.clone()).await?;
         for content_hash in upload_thumb_hashes {
@@ -187,11 +225,7 @@ impl SyncManager {
             let Some(thumbnail_path) = db::get_blob_local_path(&conn, "thumbnail", &content_hash) else {
                 continue;
             };
-            jobs.push(TransferJob::UploadThumbnail {
-                content_hash,
-                thumbnail_path,
-                book_id: String::new(),
-            });
+            jobs.push(TransferJob::UploadThumbnail { content_hash, thumbnail_path, book_id: String::new() });
         }
 
         let runtime_pending: Vec<String> = {
@@ -228,12 +262,7 @@ impl SyncManager {
                         continue;
                     }
                 };
-                jobs.push(TransferJob::DownloadBlob {
-                    hash: hash.clone(),
-                    rel_path: String::new(),
-                    local_path: target_path,
-                    book_id: hash.clone(),
-                });
+                jobs.push(TransferJob::DownloadBlob { hash: hash.clone(), rel_path: String::new(), local_path: target_path, book_id: hash.clone() });
             }
             still_pending.push(hash);
         }
@@ -248,10 +277,7 @@ impl SyncManager {
             }
             if existing_thumb_known.contains(&hash) {
                 db::set_blob_state_checked(&conn, "thumbnail", &hash, 3);
-                jobs.push(TransferJob::DownloadThumbnail {
-                    content_hash: hash.clone(),
-                    book_id: hash,
-                });
+                jobs.push(TransferJob::DownloadThumbnail { content_hash: hash.clone(), book_id: hash });
             }
         }
 
@@ -260,13 +286,24 @@ impl SyncManager {
             db::set_pending_download_hashes(&conn, &still_pending);
         }
 
-        run_transfer_workers(self.http_client.clone(), self.server_url.clone(), self.library_path.clone(), self.db_pool.clone(), self.event_tx.clone(), jobs, 4).await?;
+        run_transfer_workers(self.http_client.clone(), self.server_url.clone(), self.library_path.clone(), self.db_pool.clone(), self.event_tx.clone(), jobs, 4, self.token()).await?;
         Ok(())
     }
 
     pub fn request_download(&self, book_id: &str) {
         if let Ok(conn) = self.db_pool.get() {
-            db::add_pending_download_hash(&conn, book_id);
+            // The asset-sync pass keys downloads by content hash, not book id.
+            // Resolve the book's file hash(es) so a book learned purely via sync
+            // (whose blob lives on the server) can actually be fetched. Fall back to
+            // treating the id as a hash for callers that already pass one.
+            let hashes = db::get_book_hashes(&conn, book_id);
+            if hashes.is_empty() {
+                db::add_pending_download_hash(&conn, book_id);
+            } else {
+                for hash in hashes {
+                    db::add_pending_download_hash(&conn, &hash);
+                }
+            }
         } else {
             let mut set = self.pending_downloads.lock().unwrap();
             let _ = set.insert(book_id.to_string());
@@ -279,25 +316,15 @@ impl SyncManager {
     }
 
     fn thumbnail_path_for_content_hash(&self, content_hash: &str) -> String {
-        Path::new(&self.library_path)
-            .join(".biblos")
-            .join("thumbnails")
-            .join(format!("{content_hash}.png"))
-            .to_string_lossy()
-            .into_owned()
+        Path::new(&self.library_path).join(".biblos").join("thumbnails").join(format!("{content_hash}.png")).to_string_lossy().into_owned()
     }
 
     async fn check_existing_blobs(&self, hashes: Vec<String>) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
         if hashes.is_empty() {
             return Ok(HashSet::new());
         }
-        let resp = self
-            .http_client
-            .post(&format!("{}/api/blobs/exists", self.server_url))
-            .json(&BlobsExistsRequest { hashes })
-            .send()
-            .await?
-            .error_for_status()?;
+        let token = self.token().ok_or("not signed in")?;
+        let resp = self.http_client.post(&format!("{}/api/blobs/exists", self.server_url)).bearer_auth(&token).json(&BlobsExistsRequest { hashes }).send().await?.error_for_status()?;
         let body: ExistsResponse = resp.json().await?;
         Ok(body.present.into_iter().collect())
     }
@@ -306,13 +333,8 @@ impl SyncManager {
         if content_hashes.is_empty() {
             return Ok(HashSet::new());
         }
-        let resp = self
-            .http_client
-            .post(&format!("{}/api/thumbnails/exists", self.server_url))
-            .json(&ThumbnailsExistsRequest { content_hashes })
-            .send()
-            .await?
-            .error_for_status()?;
+        let token = self.token().ok_or("not signed in")?;
+        let resp = self.http_client.post(&format!("{}/api/thumbnails/exists", self.server_url)).bearer_auth(&token).json(&ThumbnailsExistsRequest { content_hashes }).send().await?.error_for_status()?;
         let body: ExistsResponse = resp.json().await?;
         Ok(body.present.into_iter().collect())
     }
@@ -327,44 +349,45 @@ impl SyncManager {
             return Ok(());
         }
 
-        let max_local_seq = changes.iter().filter_map(|e| e.local_seq).max().unwrap_or(0);
-        let request = PushChangesRequest {
-            user_id: self.user_id.clone(),
-            library_id: self.library_id.clone(),
-            client_id: self.client_id.clone(),
-            changes,
-        };
+        let request = PushChangesRequest { user_id: self.user_id.clone(), library_id: self.library_id.clone(), client_id: self.client_id.clone(), changes };
 
-        let response = self
-            .http_client
-            .post(&format!("{}/api/sync/push", self.server_url))
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
+        let token = self.token().ok_or("not signed in")?;
+        let response = self.http_client.post(&format!("{}/api/sync/push", self.server_url)).bearer_auth(&token).json(&request).send().await?.error_for_status()?;
         let push_response: PushChangesResponse = response.json().await?;
 
-        let conn = self.db_pool.get()?;
-        db::mark_events_pushed(&conn, max_local_seq, push_response.last_server_seq);
-        db::set_sync_metadata(&conn, "first_sync_done", "1");
+        // A transient rejection (e.g. clock skew) means the change must be retried,
+        // not dropped — so the push cursor must not advance to or past the earliest
+        // one. Permanent rejections (malformed) are treated as done so they cannot
+        // wedge the cursor forever.
+        let mut transient_floor: Option<u64> = None;
+        for rejection in &push_response.rejected {
+            if rejection.reason.is_transient() {
+                log::warn!("Server deferred local sync event {}: {:?}", rejection.local_seq, rejection.reason);
+                transient_floor = Some(transient_floor.map_or(rejection.local_seq, |f| f.min(rejection.local_seq)));
+            } else {
+                log::error!("Server rejected local sync event {}: {:?}", rejection.local_seq, rejection.reason);
+            }
+        }
+
+        let permanent_rejected = push_response.rejected.iter().filter(|r| !r.reason.is_transient()).map(|r| r.local_seq);
+        let max_advance = push_response
+            .handled_local_seqs
+            .iter()
+            .copied()
+            .chain(permanent_rejected)
+            .filter(|seq| transient_floor.map_or(true, |floor| *seq < floor))
+            .max();
+        if let Some(up_to_local_seq) = max_advance {
+            let conn = self.db_pool.get()?;
+            db::mark_events_pushed(&conn, up_to_local_seq);
+        }
         Ok(())
     }
 
     async fn pull_events_from_server(&self, since_server_seq: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let response = self
-            .http_client
-            .get(&format!(
-                "{}/api/sync/pull?user_id={}&library_id={}&since_server_seq={}",
-                self.server_url, self.user_id, self.library_id, since_server_seq
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
+        let token = self.token().ok_or("not signed in")?;
+        let response = self.http_client.get(&format!("{}/api/sync/pull?user_id={}&library_id={}&client_id={}&since_server_seq={}", self.server_url, self.user_id, self.library_id, self.client_id, since_server_seq)).bearer_auth(&token).send().await?.error_for_status()?;
         let pull_response: PullChangesResponse = response.json().await?;
-        {
-            let conn = self.db_pool.get()?;
-            db::set_sync_metadata(&conn, "first_sync_done", "1");
-        }
         let changes = pull_response.changes;
 
         if changes.is_empty() {
@@ -376,7 +399,6 @@ impl SyncManager {
         for change in &changes {
             db::apply_remote_change_in_tx(&tx, change)?;
         }
-        db::drain_pending_remote_changes_in_tx(&tx)?;
 
         if let Some(last) = changes.last() {
             if let Some(server_seq) = last.server_seq {
@@ -387,5 +409,5 @@ impl SyncManager {
         tx.commit()?;
         Ok(())
     }
-
 }
+

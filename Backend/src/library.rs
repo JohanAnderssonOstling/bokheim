@@ -75,7 +75,7 @@ pub struct Library {
     scanner: LibraryScanner,
 }
 
-fn sync_server_url() -> String {
+pub fn sync_server_url() -> String {
     env::var("SYNC_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
 
@@ -179,10 +179,7 @@ impl Library {
 
     pub fn get_authors(&self) -> Vec<AuthorSummary> {
         let conn = self.db_pool.get().unwrap();
-        db::get_authors(&conn)
-            .into_iter()
-            .map(|(name, book_count)| AuthorSummary { name, book_count })
-            .collect()
+        db::get_authors(&conn).into_iter().map(|(name, book_count)| AuthorSummary { name, book_count }).collect()
     }
 
     pub fn get_author_folder_books(&self, author_name: &str) -> Vec<AuthorFolderBooks> {
@@ -193,10 +190,7 @@ impl Library {
                 book.cover = get_thumbnail(book.id);
             }
         }
-        groups
-            .into_iter()
-            .map(|(folder_id, folder_path, books)| AuthorFolderBooks { folder_id, folder_path, books })
-            .collect()
+        groups.into_iter().map(|(folder_id, folder_path, books)| AuthorFolderBooks { folder_id, folder_path, books }).collect()
     }
 
     fn resolve_book_path(&self, book_id: BookID) -> Option<PathBuf> {
@@ -252,6 +246,67 @@ impl Library {
 
     pub fn request_book_download(&self, book_id: &str) {
         self.sync_manager.request_download(book_id);
+    }
+
+    pub fn user_id(&self) -> &str {
+        self.sync_manager.user_id()
+    }
+
+    pub fn server_url(&self) -> String {
+        sync_server_url()
+    }
+
+    pub fn is_signed_in(&self) -> bool {
+        self.sync_manager.is_signed_in()
+    }
+
+    pub fn current_session(&self) -> Option<crate::auth::Session> {
+        self.sync_manager.current_session()
+    }
+
+    pub fn set_session(&self, session: crate::auth::Session) {
+        self.sync_manager.set_session(session);
+    }
+
+    pub fn clear_session(&self) {
+        self.sync_manager.clear_session();
+    }
+
+    pub fn login_blocking(&self, username: &str, password: &str) -> Result<crate::auth::Session, crate::auth::AuthError> {
+        let url = self.server_url();
+        let user_id = self.user_id().to_string();
+        let username = username.to_string();
+        let password = password.to_string();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(crate::auth::AuthError::Io)?;
+        let session = rt.block_on(async move {
+            crate::auth::login(&url, &username, &password, Some(&user_id)).await
+        })?;
+        self.sync_manager.set_session(session.clone());
+        Ok(session)
+    }
+
+    pub fn signup_blocking(&self, invite: &str, username: &str, password: &str) -> Result<crate::auth::Session, crate::auth::AuthError> {
+        let url = self.server_url();
+        let user_id = self.user_id().to_string();
+        let invite = invite.to_string();
+        let username = username.to_string();
+        let password = password.to_string();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(crate::auth::AuthError::Io)?;
+        let session = rt.block_on(async move {
+            crate::auth::signup(&url, &invite, &username, &password, Some(&user_id)).await
+        })?;
+        self.sync_manager.set_session(session.clone());
+        Ok(session)
+    }
+
+    pub fn logout_blocking(&self) {
+        if let Some(s) = self.sync_manager.current_session() {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+            if let Some(rt) = rt {
+                let _ = rt.block_on(async move { crate::auth::logout(&s).await });
+            }
+        }
+        self.sync_manager.clear_session();
     }
 
     pub fn delete_directory(&self, path: &str) {

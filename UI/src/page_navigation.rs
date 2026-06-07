@@ -1,16 +1,13 @@
 use crate::epub_reader::create_epub_reader;
-use crate::home_page::HomePage;
+use crate::home_page::home_view;
 use crate::library_page::LibraryState;
 use epub_svelte_lib::home::get_library_entries;
-use epub_svelte_lib::library::Library;
 use epub_svelte_lib::BookID;
 use floem::action::exec_after;
 use floem::prelude::{container, create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::reactive::create_effect;
 use floem::views::stack;
 use floem::View;
-use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,18 +43,16 @@ pub enum NavAction {
     Navigate(Page),
 }
 
-pub type LibraryID = String;
-
 #[derive(Clone)]
 pub struct Signals {
     pub nav_stack: RwSignal<NavStack>,
     pub nav_action: RwSignal<Option<NavAction>>,
-    pub library_handles: RwSignal<HashMap<LibraryID, Rc<Library>>>,
-    pub library_states: RwSignal<HashMap<LibraryID, LibraryState>>,
+    pub libraries: RwSignal<Vec<LibraryState>>,
     pub library_refresh_tick: RwSignal<u64>,
     pub library_event_counter: Arc<AtomicU64>,
     pub active_library_id: RwSignal<Option<String>>,
-    pub active_library_name: RwSignal<String>,
+    pub viewport_height: RwSignal<f64>,
+    pub session: RwSignal<Option<epub_svelte_lib::auth::Session>>,
 }
 
 impl Signals {
@@ -68,12 +63,15 @@ impl Signals {
         self.nav_action.set(Some(NavAction::Navigate(page)));
     }
 
-    /// Returns the cached `LibraryState` for the given id, if present.
-    /// States are eagerly populated in the root scope by `page_navigation_view`
-    /// (and re-populated when libraries are added/removed) so signals on them
-    /// outlive `dyn_view` rebuilds.
-    pub fn library_state(&self, library_id: &str) -> Option<LibraryState> {
-        self.library_states.with_untracked(|m| m.get(library_id).cloned())
+    pub fn library_by_id(&self, library_id: &str) -> Option<LibraryState> {
+        self.libraries.with_untracked(|v| v.iter().find(|s| s.meta.id == library_id).cloned())
+    }
+
+    pub fn active_library_name(&self) -> String {
+        let id = self.active_library_id.get();
+        id.as_deref()
+            .and_then(|active_id| self.libraries.with_untracked(|v| v.iter().find(|s| s.meta.id == active_id).map(|s| s.meta.name.clone())))
+            .unwrap_or_default()
     }
 }
 
@@ -81,22 +79,23 @@ pub fn page_navigation_view() -> impl View {
     let signals = Signals {
         nav_stack: create_rw_signal(NavStack { pages: vec![Page::Home], index: 0 }),
         nav_action: create_rw_signal(None),
-        library_handles: create_rw_signal(HashMap::new()),
-        library_states: create_rw_signal(HashMap::new()),
+        libraries: create_rw_signal(Vec::new()),
         library_refresh_tick: create_rw_signal(0),
         library_event_counter: Arc::new(AtomicU64::new(0)),
         active_library_id: create_rw_signal(None),
-        active_library_name: create_rw_signal(String::new()),
+        viewport_height: create_rw_signal(0.0),
+        session: create_rw_signal(epub_svelte_lib::auth::Session::load()),
     };
 
-    // Eagerly populate the per-library state cache in the root scope so the
-    // contained signals outlive any `dyn_view` rebuild.
+    // Eagerly populate the library cache in the root scope so signals on
+    // each `LibraryState` outlive any `dyn_view` rebuild. Backend handles
+    // are opened lazily on first access.
     {
-        let mut states = HashMap::new();
-        for entry in get_library_entries() {
-            states.insert(entry.library_id.clone(), LibraryState::new(entry.library_id, entry.library_name));
-        }
-        signals.library_states.set(states);
+        let initial: Vec<LibraryState> = get_library_entries()
+            .into_iter()
+            .map(|e| LibraryState::new(e.library_id, e.library_name, e.library_path))
+            .collect();
+        signals.libraries.set(initial);
     }
 
     create_effect(move |h| {
@@ -116,25 +115,19 @@ pub fn page_navigation_view() -> impl View {
         signals.nav_action.set(None)
     });
 
-    // Bridge backend library events into a reactive UI tick without rebuilding views.
-    {
-        let signals_for_bridge = signals.clone();
-        let last_seen_counter = create_rw_signal(0_u64);
-        fn schedule_library_event_bridge(signals: Signals, last_seen_counter: RwSignal<u64>) {
-            exec_after(Duration::from_millis(200), move |_| {
-                let current = signals.library_event_counter.load(Ordering::Relaxed);
-                if current != last_seen_counter.get_untracked() {
-                    last_seen_counter.set(current);
-                    signals.library_refresh_tick.set(current);
-                }
-                schedule_library_event_bridge(signals.clone(), last_seen_counter);
-            });
-        }
-        schedule_library_event_bridge(signals_for_bridge, last_seen_counter);
+    fn poll_library_events(signals: Signals) {
+        exec_after(Duration::from_millis(200), move |_| {
+            let current = signals.library_event_counter.load(Ordering::Relaxed);
+            if current != signals.library_refresh_tick.get_untracked() {
+                signals.library_refresh_tick.set(current);
+            }
+            poll_library_events(signals.clone());
+        });
     }
+    poll_library_events(signals.clone());
 
     // Home view is created once and shown/hidden — never reconstructed on navigation.
-    let home_content = HomePage {}.home_view(signals.clone());
+    let home_content = home_view(signals.clone());
     let nav_stack = signals.nav_stack;
     let home_view = container(home_content).style(move |s| {
         if matches!(nav_stack.get().current(), Page::Home) {
@@ -149,9 +142,15 @@ pub fn page_navigation_view() -> impl View {
         let signals = signals.clone();
         move || match signals.nav_stack.get().current().clone() {
             Page::Home => Box::new(label(|| "")) as Box<dyn View>,
-            Page::Reader(reader_state) => Box::new(
-                container(create_epub_reader(&reader_state, signals.clone())).style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)),
-            ) as Box<dyn View>,
+            Page::Reader(reader_state) => match signals.library_by_id(&reader_state.library_id) {
+                Some(state) => {
+                    let library = state.handle(signals.library_event_counter.clone());
+                    Box::new(
+                        container(create_epub_reader(&reader_state, library, signals.clone())).style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0)),
+                    ) as Box<dyn View>
+                }
+                None => Box::new(label(|| "Library not found".to_string())) as Box<dyn View>,
+            },
         }
     })
     .style(move |s| {
@@ -162,5 +161,12 @@ pub fn page_navigation_view() -> impl View {
         }
     });
 
-    stack((home_view, overlay_view)).style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0))
+    stack((home_view, overlay_view))
+        .on_resize(move |rect| {
+            let next = rect.height();
+            if (next - signals.viewport_height.get_untracked()).abs() > 0.5 {
+                signals.viewport_height.set(next);
+            }
+        })
+        .style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0))
 }
