@@ -6,11 +6,11 @@ use crate::components::stacks::{create_button_group, create_centered_stack, crea
 use crate::components::{add_library_button, create_danger_button, create_list_item_button};
 use crate::functions::add_library_on_click;
 use crate::page_navigation::Signals;
+use crate::style::palette;
 use epub_svelte_lib::home::{get_library_entries, remove_library, LibraryEntry};
 use epub_svelte_lib::library::Library;
 use floem::event::{Event, EventPropagation};
 use floem::keyboard::{Key, NamedKey};
-use floem::peniko::Color;
 use floem::prelude::{button, create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::{IntoView, View};
@@ -368,7 +368,7 @@ is_selected                      : impl Fn() -> bool + 'static)
 -> impl View
 {
     create_list_item_button(name).style(move |s| match is_selected() {
-        true => s.background(Color::rgb8(219, 234, 254)),
+        true => s.background(palette().active_highlight),
         false => s,
     })
 }
@@ -379,7 +379,7 @@ show_switcher                    : RwSignal<bool>)
 -> impl View
 {
     create_centered_stack((panel,)).style(move |s| {
-        let styled = s.absolute().inset(0).size_full().background(Color::rgba8(15, 23, 42, 140)).z_index(100);
+        let styled = s.absolute().inset(0).size_full().background(palette().overlay_scrim).z_index(100);
         match show_switcher.get() {
             true => styled,
             false => styled.hide(),

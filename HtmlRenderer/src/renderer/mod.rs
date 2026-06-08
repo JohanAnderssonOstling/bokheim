@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{env, fs};
 
 use floem::ViewId;
@@ -12,7 +12,7 @@ use floem::peniko::{Brush, Color};
 use floem::prelude::Decorators;
 use floem::reactive::{RwSignal, SignalUpdate, create_rw_signal};
 
-use crate::document::{BoxType, Document, ImageFragment, InlineKind, Line};
+use crate::document::{BoxType, Document, DocumentState, ImageFragment, InlineKind, Line};
 use crate::layout;
 use crate::resources::{ImagePipeline, ResourceProvider};
 use crate::text::glyph_cache::GlyphCache;
@@ -63,8 +63,6 @@ struct RenderState {
     col_index: f64,
     /// Set to true when rendering should stop (past visible area)
     should_stop: bool,
-    /// Accumulated time spent in draw_text calls (for profiling)
-    draw_text_time: Duration,
 }
 
 // =============================================================================
@@ -85,6 +83,20 @@ struct LineScreen {
     point: Point,
     /// Which column the line was rendered in
     col_index: i32,
+}
+
+/// Line positions and paging metadata for a rendered page.
+struct PagePositions {
+    /// First line considered for this page.
+    start_line: usize,
+    /// Last line that resolved to a visible screen position.
+    last_line: Option<usize>,
+    /// Screen positions of all lines (None if not visible).
+    positions: Vec<Option<LineScreen>>,
+    /// True when the pass reached the end of the document.
+    reached_end: bool,
+    /// Document Y offset to use for the next forward page.
+    next_start_offset_y: f64,
 }
 
 /// Text formatting state for markdown extraction
@@ -230,14 +242,6 @@ impl HighlightState {
 
 /// Signals for applying reader setting changes from external UI controls.
 struct ReaderSettingsSignals {
-    /// Pending column width request (px)
-    column_width_pending: RwSignal<Option<f64>>,
-    /// Pending root font size request (px)
-    font_size_pending: RwSignal<Option<f32>>,
-    /// Pending render scale request
-    scale_pending: RwSignal<Option<f64>>,
-    /// Pending line number visibility request
-    line_numbers_pending: RwSignal<Option<bool>>,
     /// Current base column width (px)
     current_column_width: RwSignal<f64>,
     /// Current root font size (px)
@@ -251,10 +255,6 @@ struct ReaderSettingsSignals {
 impl ReaderSettingsSignals {
     fn new(initial_column_width: f64, initial_font_size: f32, initial_scale: f64, initial_line_numbers: bool) -> Self {
         Self {
-            column_width_pending: create_rw_signal(None),
-            font_size_pending: create_rw_signal(None),
-            scale_pending: create_rw_signal(None),
-            line_numbers_pending: create_rw_signal(None),
             current_column_width: create_rw_signal(initial_column_width),
             current_font_size: create_rw_signal(initial_font_size),
             current_scale: create_rw_signal(initial_scale),
@@ -329,7 +329,7 @@ pub struct HTMLRenderer {
     // --- Core ---
     id: ViewId,
     /// The parsed and laid-out document
-    document: Document,
+    document: DocumentState,
     /// Cache of shaped text glyphs
     glyph_cache: GlyphCache,
     /// Async pipeline for loading and decoding images
@@ -430,10 +430,10 @@ impl HTMLRenderer {
 
     fn build_document_toc_entries_for(doc: &Document) -> Vec<crate::TocEntry> {
         fn convert_nodes(doc: &Document, nodes: &[crate::document::DocumentTocNode]) -> Vec<crate::TocEntry> {
-            nodes.iter().map(|node| crate::TocEntry { title: doc.strings.get(node.title).to_string(), link: doc.strings.get(node.href).to_string(), children: convert_nodes(doc, node.children.as_slice()) }).collect()
+            nodes.iter().map(|node| crate::TocEntry { title: doc.string(node.title).to_string(), link: doc.string(node.href).to_string(), children: convert_nodes(doc, node.children.as_slice()) }).collect()
         }
 
-        convert_nodes(doc, doc.document_toc_entries.as_slice())
+        convert_nodes(doc, doc.document_toc_entries())
     }
 
     pub fn set_render_column_width(&mut self, width: f64) {
@@ -485,14 +485,14 @@ impl HTMLRenderer {
         painter.encode_png()
     }
 
-    pub fn from_document(document: Document, glyph_cache: GlyphCache, provider: Arc<dyn ResourceProvider>, document_uris: Vec<String>, current_doc_index: usize, nav_signal: RwSignal<(usize, Option<u32>)>) -> Self {
+    pub fn from_document(document: DocumentState, glyph_cache: GlyphCache, provider: Arc<dyn ResourceProvider>, document_uris: Vec<String>, current_doc_index: usize, nav_signal: RwSignal<(usize, Option<u32>)>) -> Self {
         // initialize renderer state and caches
-        let root_font_size = document.root_font_size;
-        let doc_title = document.title.clone();
+        let root_font_size = document.root_font_size();
+        let doc_title = document.title().map(str::to_owned);
         let document_toc_entries = Self::build_document_toc_entries_for(&document);
         let mut glyph_cache = glyph_cache;
         let line_numbers = Self::build_line_number_cache(&mut glyph_cache);
-        let image_pipeline = ImagePipeline::new(Arc::new(document.images.clone()), provider.clone());
+        let image_pipeline = ImagePipeline::new(Arc::new(document.images().to_vec()), provider.clone());
 
         Self {
             id: ViewId::new(),
@@ -533,15 +533,7 @@ impl HTMLRenderer {
             origin: Point::ZERO,
         }
         .keyboard_navigable()
-        .style(move |style| {
-            style
-                .width_full()
-                .height_full()
-                .flex_grow(1.0)
-                .min_width(0)
-                .min_height(0)
-                .background(Brush::Solid(Color::WHITE))
-        })
+        .style(move |style| style.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0).background(Brush::Solid(Color::WHITE)))
     }
 
     fn build_line_number_cache(glyph_cache: &mut GlyphCache) -> LineNumberCache {
@@ -667,30 +659,6 @@ impl HTMLRenderer {
 
     pub fn current_line_numbers_signal(&self) -> RwSignal<bool> {
         self.settings.current_line_numbers
-    }
-
-    /// Signal used by external UI to request a column width update.
-    /// Set to Some(width_px). The renderer consumes it on the next paint.
-    pub fn column_width_request_signal(&self) -> RwSignal<Option<f64>> {
-        self.settings.column_width_pending
-    }
-
-    /// Signal used by external UI to request root font size changes.
-    /// Set to Some(size_px). The renderer consumes it on the next paint.
-    pub fn font_size_request_signal(&self) -> RwSignal<Option<f32>> {
-        self.settings.font_size_pending
-    }
-
-    /// Signal used by external UI to request zoom/scale changes.
-    /// Set to Some(scale). The renderer consumes it on the next paint.
-    pub fn scale_request_signal(&self) -> RwSignal<Option<f64>> {
-        self.settings.scale_pending
-    }
-
-    /// Signal used by external UI to request line number visibility.
-    /// Set to Some(true/false). The renderer consumes it on the next paint.
-    pub fn line_numbers_request_signal(&self) -> RwSignal<Option<bool>> {
-        self.settings.line_numbers_pending
     }
 
     pub fn nav_request_signal(&self) -> RwSignal<Option<String>> {

@@ -81,18 +81,14 @@ pub fn sync_server_url() -> String {
 
 impl Library {
     pub fn new(library_path: &str, library_id: &str) -> (Self, Receiver<LibraryEvent>) {
-        Self::with_options(library_path, library_id, None, None)
+        Self::with_options(library_path, library_id, None)
     }
 
-    pub fn new_with_user(library_path: &str, library_id: &str, user_id: &str) -> (Self, Receiver<LibraryEvent>) {
-        Self::with_options(library_path, library_id, Some(user_id.to_string()), None)
+    pub fn new_with_server(library_path: &str, library_id: &str, server_url: &str) -> (Self, Receiver<LibraryEvent>) {
+        Self::with_options(library_path, library_id, Some(server_url.to_string()))
     }
 
-    pub fn new_with_user_and_server(library_path: &str, library_id: &str, user_id: &str, server_url: &str) -> (Self, Receiver<LibraryEvent>) {
-        Self::with_options(library_path, library_id, Some(user_id.to_string()), Some(server_url.to_string()))
-    }
-
-    fn with_options(library_path: &str, library_id: &str, forced_user_id: Option<String>, forced_server_url: Option<String>) -> (Self, Receiver<LibraryEvent>) {
+    fn with_options(library_path: &str, library_id: &str, forced_server_url: Option<String>) -> (Self, Receiver<LibraryEvent>) {
         println!("Creating {library_path}");
         let _ = set_app_data_dir(Path::new(library_path).join(".biblos"));
         let res = fs::create_dir_all(format!("{library_path}/.biblos"));
@@ -132,7 +128,7 @@ impl Library {
         let library = Self {
             id: library_id.to_string(),
             db_pool: db_pool.clone(),
-            sync_manager: Arc::new(SyncManager::new(db_pool.clone(), client_id, forced_server_url.unwrap_or_else(sync_server_url), library_id.to_string(), forced_user_id, library_path.to_string(), Some(event_tx.clone())).unwrap()),
+            sync_manager: Arc::new(SyncManager::new(db_pool.clone(), client_id, forced_server_url.unwrap_or_else(sync_server_url), library_id.to_string(), library_path.to_string(), Some(event_tx.clone())).unwrap()),
             event_tx: event_tx.clone(),
             scanner,
         };
@@ -248,7 +244,7 @@ impl Library {
         self.sync_manager.request_download(book_id);
     }
 
-    pub fn user_id(&self) -> &str {
+    pub fn user_id(&self) -> Option<String> {
         self.sync_manager.user_id()
     }
 
@@ -264,8 +260,10 @@ impl Library {
         self.sync_manager.current_session()
     }
 
-    pub fn set_session(&self, session: crate::auth::Session) {
-        self.sync_manager.set_session(session);
+    /// Adopt a session obtained out-of-band (e.g. propagated from another live
+    /// library after login). Enforces the local account binding.
+    pub fn adopt_session(&self, session: crate::auth::Session) -> Result<(), String> {
+        self.sync_manager.adopt_session(session)
     }
 
     pub fn clear_session(&self) {
@@ -273,38 +271,20 @@ impl Library {
     }
 
     pub fn login_blocking(&self, username: &str, password: &str) -> Result<crate::auth::Session, crate::auth::AuthError> {
-        let url = self.server_url();
-        let user_id = self.user_id().to_string();
-        let username = username.to_string();
-        let password = password.to_string();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(crate::auth::AuthError::Io)?;
-        let session = rt.block_on(async move {
-            crate::auth::login(&url, &username, &password, Some(&user_id)).await
-        })?;
-        self.sync_manager.set_session(session.clone());
+        let session = crate::auth::login_blocking(&self.server_url(), username, password)?;
+        self.sync_manager.adopt_session(session.clone()).map_err(crate::auth::AuthError::Binding)?;
         Ok(session)
     }
 
     pub fn signup_blocking(&self, invite: &str, username: &str, password: &str) -> Result<crate::auth::Session, crate::auth::AuthError> {
-        let url = self.server_url();
-        let user_id = self.user_id().to_string();
-        let invite = invite.to_string();
-        let username = username.to_string();
-        let password = password.to_string();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(crate::auth::AuthError::Io)?;
-        let session = rt.block_on(async move {
-            crate::auth::signup(&url, &invite, &username, &password, Some(&user_id)).await
-        })?;
-        self.sync_manager.set_session(session.clone());
+        let session = crate::auth::signup_blocking(&self.server_url(), invite, username, password)?;
+        self.sync_manager.adopt_session(session.clone()).map_err(crate::auth::AuthError::Binding)?;
         Ok(session)
     }
 
     pub fn logout_blocking(&self) {
         if let Some(s) = self.sync_manager.current_session() {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
-            if let Some(rt) = rt {
-                let _ = rt.block_on(async move { crate::auth::logout(&s).await });
-            }
+            crate::auth::logout_blocking(&s);
         }
         self.sync_manager.clear_session();
     }

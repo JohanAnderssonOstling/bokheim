@@ -1,11 +1,12 @@
 use crate::epub_reader::create_epub_reader;
 use crate::home_page::home_view;
 use crate::library_page::LibraryState;
+use crate::style::{ThemeContext, ThemeMode, DEFAULT_THEME_MODE};
 use epub_svelte_lib::home::get_library_entries;
 use epub_svelte_lib::BookID;
 use floem::action::exec_after;
 use floem::prelude::{container, create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::reactive::create_effect;
+use floem::reactive::{create_effect, provide_context};
 use floem::views::stack;
 use floem::View;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,6 +54,7 @@ pub struct Signals {
     pub active_library_id: RwSignal<Option<String>>,
     pub viewport_height: RwSignal<f64>,
     pub session: RwSignal<Option<epub_svelte_lib::auth::Session>>,
+    pub theme_mode: RwSignal<ThemeMode>,
 }
 
 impl Signals {
@@ -85,7 +87,9 @@ pub fn page_navigation_view() -> impl View {
         active_library_id: create_rw_signal(None),
         viewport_height: create_rw_signal(0.0),
         session: create_rw_signal(epub_svelte_lib::auth::Session::load()),
+        theme_mode: create_rw_signal(DEFAULT_THEME_MODE),
     };
+    provide_context(ThemeContext { mode: signals.theme_mode });
 
     // Eagerly populate the library cache in the root scope so signals on
     // each `LibraryState` outlive any `dyn_view` rebuild. Backend handles

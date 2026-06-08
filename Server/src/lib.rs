@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod db;
 pub mod routes;
+pub mod state;
 
 use axum::Router;
 use sqlx::PgPool;

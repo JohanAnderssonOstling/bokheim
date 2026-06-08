@@ -19,7 +19,7 @@ impl HTMLRenderer {
         self.nav.document_uris.iter().position(|uri| uri == candidate).or_else(|| self.nav.document_uris.iter().position(|uri| uri.ends_with(candidate)))
     }
 
-    fn replace_document_state(&mut self, document: Document, glyph_cache: GlyphCache, sync_doc_title: bool) {
+    fn replace_document_state(&mut self, document: DocumentState, glyph_cache: GlyphCache, sync_doc_title: bool) {
         self.document = document;
         self.glyph_cache = glyph_cache;
         if sync_doc_title {
@@ -31,7 +31,7 @@ impl HTMLRenderer {
         self.image_pipeline = ImagePipeline::new(Arc::new(self.document.images().to_vec()), self.provider.clone());
     }
 
-    fn load_document_for_index(&self, doc_index: usize) -> (Document, GlyphCache) {
+    fn load_document_for_index(&self, doc_index: usize) -> (DocumentState, GlyphCache) {
         load::load_document(self.provider.clone(), &self.nav.document_uris[doc_index], self.root_font_size, self.layout.col_width)
     }
 
@@ -192,7 +192,7 @@ impl HTMLRenderer {
             return false;
         };
         let Some(glyph_idx) = self.document.anchor_glyph(id_idx) else {
-            if let Some(pos) = self.document.layout().anchor_positions.get(&id_idx).copied() {
+            if let Some(pos) = self.document.anchor_positions().get(&id_idx).copied() {
                 return self.restore_anchor_position(pos.y);
             }
             println!("jump_to_id: no glyph for id '{}'", id);
@@ -204,11 +204,11 @@ impl HTMLRenderer {
     }
 
     fn restore_anchor_position(&mut self, target_y: f64) -> bool {
-        if self.document.layout().lines.is_empty() {
+        if self.document.lines().is_empty() {
             return false;
         }
         let line_idx = self.find_start_line_at(target_y, 0.1);
-        let Some(line) = self.document.layout().lines.get(line_idx) else {
+        let Some(line) = self.document.line(line_idx) else {
             return false;
         };
         let line_y = line.point.y;
@@ -220,7 +220,7 @@ impl HTMLRenderer {
     }
     pub(super) fn find_start_line_at(&self, offset_y: f64, epsilon: f64) -> usize {
         // locate first visible line for a given scroll offset
-        let lines = &self.document.layout().lines;
+        let lines = self.document.lines();
         if lines.is_empty() {
             return 0;
         }
@@ -293,11 +293,11 @@ impl HTMLRenderer {
 
     pub(super) fn current_glyph_position(&self) -> Option<u32> {
         // glyph index that anchors current view
-        if self.document.layout().lines.is_empty() {
+        if self.document.lines().is_empty() {
             return None;
         }
         let line_idx = self.frame.current_page_start_line.unwrap_or_else(|| self.find_start_line());
-        self.document.layout().lines.get(line_idx).map(|line| line.glyphs.start)
+        self.document.line(line_idx).map(|line| line.glyphs.start)
     }
 
     pub(super) fn current_anchor_id(&self) -> Option<String> {
@@ -341,7 +341,7 @@ impl HTMLRenderer {
 
     fn best_anchor_from_positions(&self, current_y: f64, filter: Option<&HashSet<u16>>) -> Option<u16> {
         let mut best: Option<(u16, f64, u32)> = None;
-        for (id_idx, pos) in &self.document.layout().anchor_positions {
+        for (id_idx, pos) in self.document.anchor_positions() {
             if filter.is_some_and(|f| !f.contains(id_idx)) {
                 continue;
             }
@@ -361,7 +361,7 @@ impl HTMLRenderer {
         let Some(line_idx) = self.find_line_for_glyph(glyph_idx) else {
             return;
         };
-        let Some(line) = self.document.layout().lines.get(line_idx) else {
+        let Some(line) = self.document.line(line_idx) else {
             return;
         };
         self.jump_to_forward_offset(line.point.y, false);
@@ -426,7 +426,7 @@ impl HTMLRenderer {
 
     pub(super) fn find_end_line_at(&self, offset_y: f64, epsilon: f64) -> Option<usize> {
         // locate last line fully visible before a given offset
-        let lines = &self.document.layout().lines;
+        let lines = self.document.lines();
         if lines.is_empty() || lines[0].point.y + lines[0].height > offset_y + epsilon {
             return None;
         }
@@ -459,7 +459,7 @@ impl HTMLRenderer {
         let mut next_start_offset_y = self.viewport.start_offset_y;
         if let Some(end_idx) = self.frame.current_page_end_line {
             let next_idx = end_idx + 1;
-            if let Some(line) = self.document.layout().lines.get(next_idx) {
+            if let Some(line) = self.document.line(next_idx) {
                 next_start_offset_y = line.point.y;
             }
         } else if self.viewport.next_start_offset_y > self.viewport.start_offset_y {
@@ -469,7 +469,7 @@ impl HTMLRenderer {
     }
 
     pub(super) fn next_line(&mut self) {
-        let lines = &self.document.layout().lines;
+        let lines = self.document.lines();
         if lines.is_empty() {
             return;
         }
@@ -489,7 +489,7 @@ impl HTMLRenderer {
     }
 
     pub(super) fn prev_line(&mut self) {
-        let lines = &self.document.layout().lines;
+        let lines = self.document.lines();
         if lines.is_empty() {
             return;
         }
@@ -525,7 +525,7 @@ impl HTMLRenderer {
         self.viewport.direction = PaintDirection::Backward;
         self.viewport.back_anchor_end_line = self.frame.current_page_start_line.and_then(|idx| idx.checked_sub(1));
         if let Some(anchor_idx) = self.viewport.back_anchor_end_line {
-            if let Some(line) = self.document.layout().lines.get(anchor_idx) {
+            if let Some(line) = self.document.line(anchor_idx) {
                 self.viewport.end_offset_y = line.point.y + line.height;
             }
         } else {
@@ -628,9 +628,9 @@ impl HTMLRenderer {
             }
             DocAnchor::End => {
                 self.viewport.direction = PaintDirection::Backward;
-                if let Some(last) = self.document.layout().lines.last() {
+                if let Some(last) = self.document.lines().last() {
                     self.viewport.end_offset_y = last.point.y + last.height;
-                    self.viewport.back_anchor_end_line = Some(self.document.layout().lines.len().saturating_sub(1));
+                    self.viewport.back_anchor_end_line = Some(self.document.line_count().saturating_sub(1));
                 }
             }
             DocAnchor::Glyph(glyph_idx) => {

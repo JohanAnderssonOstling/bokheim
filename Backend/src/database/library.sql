@@ -75,6 +75,7 @@ SELECT path FROM dir_paths ORDER BY path;
 select  directory.id,        directory.name
 from    dir as directory
 where   directory.parent_id = :dir_id
+        and   directory.id != :dir_id
         and   directory.deleted_at is null;
 
 -- name: get_books_in_dir?
@@ -158,6 +159,11 @@ ON CONFLICT(id) DO UPDATE SET
 -- param: local_hash: &str
 SELECT book_id, dir_id, file_name  FROM book_dir
 WHERE local_hash = :local_hash;
+
+-- name: get_book_hashes?
+-- param: book_id: &str
+SELECT local_hash FROM book_dir
+WHERE book_id = :book_id AND deleted_at IS NULL;
 
 -- name: insert_book_dir!
 -- param: dir_id: &str
@@ -360,14 +366,14 @@ WHERE dir_id = :dir_id AND book_id = :book_id AND file_name = :file_name
 -- Event sourcing queries
 -- name: get_events_after_local_seq?
 -- param: local_seq: u64
-SELECT entity_id, event_type, payload, timestamp, local_seq, event_kind
+SELECT entity_id, event_type, payload, timestamp, local_seq
 FROM event_log
 WHERE local_seq > :local_seq
 ORDER BY local_seq ASC;
 
 -- name: get_unpushed_events?
 -- param: last_local_seq_sent: u64
-SELECT entity_id, event_type, payload, timestamp, local_seq, hlc_pt, hlc_l, event_kind
+SELECT entity_id, event_type, payload, timestamp, local_seq, hlc_pt, hlc_l
 FROM event_log
 WHERE local_seq > :last_local_seq_sent
 ORDER BY local_seq ASC;

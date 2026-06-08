@@ -1,3 +1,3 @@
 pub mod html;
 
-pub use html::{parse_html_document, DocumentFactory};
+pub use html::{DocumentFactory, parse_html_document};

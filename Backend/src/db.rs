@@ -3,41 +3,14 @@ use crate::BookID;
 use include_sqlite_sql::{impl_sql, include_sql};
 use rusqlite::{Connection, Transaction};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sync_common::{Change, ChangeOp, Hlc};
+use sync_common::{Change, Hlc, SyncOp};
 use uuid::Uuid;
 
 include_sql!("src/database/create_library.sql");
 include_sql!("src/database/library.sql");
 include_sql!("src/database/views.sql");
-
-struct RemoteChangeGuard<'a> {
-    conn: &'a Connection,
-    active: bool,
-}
-
-impl<'a> RemoteChangeGuard<'a> {
-    fn new(conn: &'a Connection) -> Self {
-        let active = match conn.set_sync_metadata("change_origin", "remote") {
-            Ok(_) => true,
-            Err(err) => {
-                log::warn!("Failed to mark sync context as remote – triggers will still run: {}", err);
-                false
-            }
-        };
-        Self { conn, active }
-    }
-}
-
-impl Drop for RemoteChangeGuard<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            let _ = self.conn.set_sync_metadata("change_origin", "local");
-        }
-    }
-}
 
 fn reset_development_schema(conn: &Connection) {
     let drop_stmt = r#"
@@ -52,15 +25,10 @@ fn reset_development_schema(conn: &Connection) {
     DROP TRIGGER IF EXISTS trig_book_deleted;
     DROP TRIGGER IF EXISTS trig_book_dir_added_insert;
     DROP TRIGGER IF EXISTS trig_book_dir_added_reactivate;
+    DROP TRIGGER IF EXISTS trig_book_dir_deleted;
     DROP TRIGGER IF EXISTS trig_book_read_pos;
     DROP TRIGGER IF EXISTS trig_book_last_read;
     DROP TRIGGER IF EXISTS trig_event_log_hlc;
-
-    DROP TABLE IF EXISTS book_dir;
-    DROP TABLE IF EXISTS book;
-    DROP TABLE IF EXISTS dir;
-    DROP TABLE IF EXISTS event_log;
-    DROP TABLE IF EXISTS sync_metadata;
 
     DROP VIEW IF EXISTS dir_paths;
 
@@ -81,17 +49,21 @@ pub fn init_db(conn: &Connection) -> String {
     conn.insert_root().unwrap();
     conn.create_book_dir_table().unwrap();
     conn.create_event_log_table().unwrap();
+    // Migration: older databases had an unused `event_kind NOT NULL` column on
+    // event_log. It is no longer populated by the triggers, so drop it if present.
+    let _ = conn.execute("ALTER TABLE event_log DROP COLUMN event_kind", ());
+    let _ = conn.execute("DROP TABLE IF EXISTS applied_remote_change", ());
+    let _ = conn.execute("DROP TABLE IF EXISTS local_sync_rejection", ());
+    let _ = conn.execute("DROP TABLE IF EXISTS local_sync_pending_dependency", ());
+    conn.create_sync_metadata_table().unwrap();
     conn.create_transfer_jobs_table().unwrap();
     conn.create_blob_state_table().unwrap();
     conn.create_blob_local_ref_table().unwrap();
     conn.create_views().unwrap();
     conn.execute_batch(include_str!("database/triggers.sql")).unwrap();
-    let _ = conn.execute("ALTER TABLE event_log ADD COLUMN event_kind INTEGER NOT NULL DEFAULT 0", ());
-    conn.create_sync_metadata_table().unwrap();
+    let _ = conn.execute("DROP TABLE IF EXISTS pending_remote_change", ());
+    let _ = conn.execute("DELETE FROM sync_metadata WHERE key = 'pending_remote_changes'", ());
     let _ = conn.set_sync_metadata("change_origin", "local");
-    if get_sync_metadata(conn, "first_sync_done").is_none() {
-        let _ = conn.set_sync_metadata("first_sync_done", "0");
-    }
     if get_sync_metadata(conn, "hlc_pt").is_none() {
         let _ = conn.set_sync_metadata("hlc_pt", "0");
     }
@@ -302,12 +274,7 @@ pub struct BookAsset {
 pub fn get_book_assets(conn: &Connection) -> Vec<BookAsset> {
     let mut assets = Vec::new();
     let _ = conn.get_book_assets(|row| {
-        assets.push(BookAsset {
-            book_id: row.get(0)?,
-            local_hash: row.get(1)?,
-            file_path: row.get(2)?,
-            is_downloaded: row.get::<_, i64>(3)? != 0,
-        });
+        assets.push(BookAsset { book_id: row.get(0)?, local_hash: row.get(1)?, file_path: row.get(2)?, is_downloaded: row.get::<_, i64>(3)? != 0 });
         Ok(())
     });
     assets
@@ -337,15 +304,7 @@ pub fn claim_due_transfer_job(conn: &Connection) -> Option<TransferJobRow> {
     let now = now_ts_secs();
     let mut job: Option<TransferJobRow> = None;
     let _ = conn.claim_due_transfer_job(now, |row| {
-        job = Some(TransferJobRow {
-            id: row.get(0)?,
-            kind: row.get(1)?,
-            key1: row.get(2)?,
-            rel_path: row.get(3)?,
-            local_path: row.get(4)?,
-            book_id: row.get(5)?,
-            attempts: row.get(6)?,
-        });
+        job = Some(TransferJobRow { id: row.get(0)?, kind: row.get(1)?, key1: row.get(2)?, rel_path: row.get(3)?, local_path: row.get(4)?, book_id: row.get(5)?, attempts: row.get(6)? });
         Ok(())
     });
     job
@@ -385,16 +344,7 @@ pub fn prune_unclaimed_transfer_jobs(conn: &Connection, desired: &[TransferJobKe
     let desired_set: HashSet<TransferJobKey> = desired.iter().cloned().collect();
     let mut rows: Vec<(i64, TransferJobKey)> = Vec::new();
     let _ = conn.get_unclaimed_transfer_jobs(|row| {
-        rows.push((
-            row.get(0)?,
-            TransferJobKey {
-                kind: row.get(1)?,
-                key1: row.get(2)?,
-                rel_path: row.get(3)?,
-                local_path: row.get(4)?,
-                book_id: row.get(5)?,
-            },
-        ));
+        rows.push((row.get(0)?, TransferJobKey { kind: row.get(1)?, key1: row.get(2)?, rel_path: row.get(3)?, local_path: row.get(4)?, book_id: row.get(5)? }));
         Ok(())
     });
 
@@ -475,6 +425,15 @@ pub fn get_book_paths_by_local_hash(conn: &Connection, local_hash: &str) -> Vec<
     paths
 }
 
+pub fn get_book_hashes(conn: &Connection, book_id: &str) -> Vec<String> {
+    let mut hashes = Vec::new();
+    let _ = conn.get_book_hashes(book_id, |row| {
+        hashes.push(row.get(0)?);
+        Ok(())
+    });
+    hashes
+}
+
 pub fn is_blob_local(conn: &Connection, kind: &str, hash: &str) -> bool {
     let mut exists = 0_i32;
     let _ = conn.get_blob_local_presence(kind, hash, |row| {
@@ -522,9 +481,7 @@ pub fn update_last_read(conn: &Connection, book_id: &str) {
     conn.update_last_read(book_id, last_read_time).unwrap();
 }
 pub fn get_unpushed_events(conn: &Connection) -> Vec<Change> {
-    let last_local_seq_sent = get_sync_metadata(conn, "last_pushed_local_seq")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let last_local_seq_sent = get_sync_metadata(conn, "last_pushed_local_seq").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let mut events = Vec::new();
     let _ = conn.get_unpushed_events(last_local_seq_sent, |row| {
         let entity_id: String = row.get(0)?;
@@ -535,30 +492,17 @@ pub fn get_unpushed_events(conn: &Connection) -> Vec<Change> {
         let hlc_pt: i64 = row.get(5)?;
         let hlc_l: i64 = row.get(6)?;
         let payload = serde_json::from_str(&payload_raw).unwrap_or_else(|_| serde_json::json!({}));
-        let op = if entity_type.ends_with("_deleted") {
-            ChangeOp::Delete
-        } else {
-            ChangeOp::Upsert
+        let changed_at = changed_at.max(0) as u64;
+        let Some(op) = SyncOp::from_event_parts(&entity_type, entity_id, &payload, changed_at) else {
+            return Ok(());
         };
 
-        events.push(Change {
-            entity_type,
-            entity_id,
-            op,
-            payload,
-            changed_at: changed_at.max(0) as u64,
-            hlc: Hlc {
-                pt: hlc_pt.max(0) as u64,
-                l: hlc_l.max(0) as u64,
-            },
-            local_seq: Some(local_seq.max(0) as u64),
-            server_seq: None,
-        });
+        events.push(Change { op, changed_at, hlc: Hlc { pt: hlc_pt.max(0) as u64, l: hlc_l.max(0) as u64 }, local_seq: Some(local_seq.max(0) as u64), server_seq: None });
         Ok(())
     });
     events
 }
-pub fn mark_events_pushed(conn: &Connection, up_to_local_seq: u64, _server_seq: u64) {
+pub fn mark_events_pushed(conn: &Connection, up_to_local_seq: u64) {
     set_sync_metadata(conn, "last_pushed_local_seq", &up_to_local_seq.to_string());
 }
 
@@ -601,121 +545,82 @@ pub fn apply_remote_change_in_tx(tx: &Transaction, change: &Change) -> Result<()
     }
 
     let _guard = TxOriginGuard::activate(tx)?;
-    match change.entity_type.as_str() {
-        "dir_added" => {
-            if let Some(path) = change.payload.get("path").and_then(|v| v.as_str()) {
-                let _ = ensure_dir_for_path(tx, path)?;
-            }
+    match &change.op {
+        SyncOp::DirAdded { dir_id, parent_id, name } => {
+            apply_remote_dir_upsert(tx, change, dir_id, parent_id, name)?;
         }
-        "dir_moved" => {
-            let old_path = change.payload.get("old_path").and_then(|v| v.as_str());
-            let new_path = change.payload.get("new_path").and_then(|v| v.as_str());
-            match (old_path, new_path) {
-                (Some(old_path), Some(new_path)) => {
-                    let Some(dir_id) = find_dir_id_by_path(tx, old_path)? else {
-                        stash_pending_remote_change(tx, change)?;
-                        return Ok(());
-                    };
-                    let (new_parent, new_name) = split_dir_path(new_path);
-                    let Some(new_name) = new_name else {
-                        stash_pending_remote_change(tx, change)?;
-                        return Ok(());
-                    };
-                    let Some(parent_id) = find_dir_id_by_path(tx, &new_parent)? else {
-                        stash_pending_remote_change(tx, change)?;
-                        return Ok(());
-                    };
-                    let _ = tx.upsert_dir(&dir_id, &parent_id, &new_name);
-                }
-                _ => {
-                    stash_pending_remote_change(tx, change)?;
-                    return Ok(());
-                }
-            }
+        SyncOp::DirMoved { dir_id, new_parent_id, new_name } => {
+            apply_remote_dir_upsert(tx, change, dir_id, new_parent_id, new_name)?;
         }
-        "dir_deleted" => {
-            if let Some(path) = change.payload.get("path").and_then(|v| v.as_str()) {
-                if let Some(dir_id) = find_dir_id_by_path(tx, path)? {
-                    let _ = tx.mark_dir_deleted(&dir_id);
-                }
-            }
+        SyncOp::DirDeleted { dir_id } => {
+            let _ = tx.mark_dir_deleted(dir_id);
         }
-        "book_added" => {
-            let title = change
-                .payload
-                .get("title")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&change.entity_id);
-            let added_at = change
-                .payload
-                .get("added_at")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(change.changed_at as i64);
-            let _ = tx.insert_book(&change.entity_id, title, added_at);
+        SyncOp::BookAdded { book_id, title, added_at } => {
+            let _ = tx.insert_book(book_id, title, *added_at);
         }
-        "book_deleted" => {
-            let book_id = change
-                .payload
-                .get("book_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&change.entity_id);
+        SyncOp::BookDeleted { book_id } => {
             let _ = tx.mark_book_deleted(book_id, change.changed_at as i64);
         }
-        "book_dir_added" | "book_dir_removed" | "book_dir_deleted" => {
-            let file_path = change
-                .payload
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .or_else(|| change.payload.get("path").and_then(|v| v.as_str()));
-            let dir_path = change.payload.get("dir_path").and_then(|v| v.as_str());
-            let book_id = change
-                .payload
-                .get("book_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&change.entity_id);
-
-            let (resolved_dir_path, file_name) = match (dir_path, file_path) {
-                (_, Some(fp)) => split_file_path(fp).unwrap_or_else(|| ("/".to_string(), fp.to_string())),
-                (Some(dp), None) => {
-                    let file_name = change
-                        .payload
-                        .get("file_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    (dp.to_string(), file_name)
-                }
-                (None, None) => ("/".to_string(), String::new()),
-            };
-
-            if !file_name.is_empty() {
-                let Some(dir_id) = find_dir_id_by_path(tx, &resolved_dir_path)? else {
-                    stash_pending_remote_change(tx, change)?;
-                    return Ok(());
-                };
-                let local_hash = remote_book_dir_hash(book_id, &dir_id, &file_name);
-                let _ = tx.first_book_insert(book_id, change.changed_at as i64);
-                if change.op == ChangeOp::Delete || change.entity_type != "book_dir_added" {
-                    let _ = tx.mark_book_dir_deleted(&dir_id, book_id, &file_name);
-                } else {
-                    let _ = tx.insert_book_dir(&dir_id, book_id, &file_name, &local_hash, 0);
-                }
-            }
+        SyncOp::BookDirAdded { book_id, dir_id, file_name, content_hash } => {
+            apply_remote_book_dir(tx, change, book_id, dir_id, file_name, content_hash, true)?;
         }
-        "reading_position_updated" => {
-            if let Some(cfi) = change.payload.get("cfi").and_then(|v| v.as_str()) {
-                tx.update_reading_position(&change.entity_id, cfi)?;
-            }
+        SyncOp::BookDirRemoved { book_id, dir_id, file_name } => {
+            apply_remote_book_dir(tx, change, book_id, dir_id, file_name, "", false)?;
         }
-        "book_opened" => {
-            if let Some(last_read) = change.payload.get("last_read").and_then(|v| v.as_i64()) {
-                tx.update_last_read(&change.entity_id, last_read)?;
-            }
+        SyncOp::ReadingPositionUpdated { book_id, cfi } => {
+            tx.update_reading_position(book_id, cfi)?;
         }
-        _ => {}
+        SyncOp::BookOpened { book_id, last_read } => {
+            tx.update_last_read(book_id, *last_read)?;
+        }
     }
     Ok(())
+}
+
+fn apply_remote_dir_upsert(tx: &Transaction, _change: &Change, dir_id: &str, parent_id: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if name.is_empty() || parent_id.is_empty() {
+        return Ok(());
+    }
+    if parent_id != "__root__" && !dir_exists(tx, parent_id)? {
+        log::error!("apply_remote_dir_upsert: parent dir {parent_id} missing for {dir_id}; skipping");
+        return Ok(());
+    }
+    let _ = tx.upsert_dir(dir_id, parent_id, name);
+    Ok(())
+}
+
+fn apply_remote_book_dir(tx: &Transaction, change: &Change, book_id: &str, dir_id: &str, file_name: &str, content_hash: &str, add: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if file_name.is_empty() {
+        return Ok(());
+    }
+    if !dir_exists(tx, dir_id)? {
+        log::error!("apply_remote_book_dir: dir {dir_id} missing for book {book_id}; skipping");
+        return Ok(());
+    }
+    // Prefer the originating device's real content hash so the blob can be fetched
+    // from the server. Fall back to a synthetic key for legacy events that predate
+    // content-hash propagation.
+    let local_hash = if content_hash.is_empty() {
+        remote_book_dir_hash(book_id, dir_id, file_name)
+    } else {
+        content_hash.to_string()
+    };
+    let _ = tx.first_book_insert(book_id, change.changed_at as i64);
+    if add {
+        let _ = tx.insert_book_dir(dir_id, book_id, file_name, &local_hash, 0);
+    } else {
+        let _ = tx.mark_book_dir_deleted(dir_id, book_id, file_name);
+    }
+    Ok(())
+}
+
+fn dir_exists(tx: &Transaction, dir_id: &str) -> Result<bool, rusqlite::Error> {
+    // Intentionally does not filter by `deleted_at IS NULL`. A soft-deleted
+    // dir is still a valid FK target for `book_dir`/`dir`, and remote events
+    // can legitimately reference a dir that the local client has soft-deleted
+    // concurrently. Skipping them would cause permanent divergence.
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM dir WHERE id = ?1", [dir_id], |row| row.get(0))?;
+    Ok(count > 0)
 }
 
 fn read_local_hlc(tx: &Transaction) -> Result<Hlc, rusqlite::Error> {
@@ -751,109 +656,6 @@ fn observe_remote_hlc(tx: &Transaction, remote_hlc: Hlc) -> Result<(), Box<dyn s
     Ok(())
 }
 
-pub fn drain_pending_remote_changes_in_tx(tx: &Transaction) -> Result<(), Box<dyn std::error::Error>> {
-    let pending = load_pending_remote_changes(tx)?;
-    if pending.is_empty() {
-        return Ok(());
-    }
-
-    tx.set_sync_metadata("pending_remote_changes", "[]")?;
-    for change in pending {
-        apply_remote_change_in_tx(tx, &change)?;
-    }
-    Ok(())
-}
-
-fn normalize_dir_path(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return String::new();
-    }
-    trimmed.trim_start_matches('/').trim_end_matches('/').to_string()
-}
-
-fn find_dir_id_by_path(tx: &Transaction, path: &str) -> Result<Option<String>, rusqlite::Error> {
-    let normalized = normalize_dir_path(path);
-    let mut stmt = tx.prepare("SELECT id FROM dir_paths WHERE path = ?1 LIMIT 1")?;
-    let mut rows = stmt.query([normalized])?;
-    if let Some(row) = rows.next()? {
-        Ok(Some(row.get(0)?))
-    } else {
-        Ok(None)
-    }
-}
-
-fn ensure_dir_for_path(tx: &Transaction, path: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let normalized = normalize_dir_path(path);
-    if normalized.is_empty() {
-        return Ok("__root__".to_string());
-    }
-
-    let mut current_id = "__root__".to_string();
-    for part in normalized.split('/').filter(|p| !p.is_empty()) {
-        let existing_id: Option<String> = tx
-            .query_row(
-                "SELECT id FROM dir WHERE parent_id = ?1 AND name = ?2 LIMIT 1",
-                rusqlite::params![current_id, part],
-                |row| row.get(0),
-            )
-            .ok();
-        let next_id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let _ = tx.upsert_dir(&next_id, &current_id, part);
-        current_id = next_id;
-    }
-    Ok(current_id)
-}
-
-fn split_file_path(path: &str) -> Option<(String, String)> {
-    let p = Path::new(path);
-    let file_name = p.file_name()?.to_string_lossy().to_string();
-    let parent = p.parent().map(|pp| pp.to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string());
-    let dir_path = if parent.is_empty() || parent == "." { "/".to_string() } else { parent };
-    Some((dir_path, file_name))
-}
-
-fn split_dir_path(path: &str) -> (String, Option<String>) {
-    let normalized = normalize_dir_path(path);
-    if normalized.is_empty() {
-        return ("/".to_string(), None);
-    }
-    if let Some((parent, name)) = normalized.rsplit_once('/') {
-        let p = if parent.is_empty() { "/".to_string() } else { format!("/{parent}") };
-        (p, Some(name.to_string()))
-    } else {
-        ("/".to_string(), Some(normalized))
-    }
-}
-
-fn load_pending_remote_changes(tx: &Transaction) -> Result<Vec<Change>, Box<dyn std::error::Error>> {
-    let mut raw: Option<String> = None;
-    let _ = tx.get_sync_metadata_value("pending_remote_changes", |row| {
-        raw = Some(row.get(0)?);
-        Ok(())
-    });
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-    let parsed: Vec<Change> = serde_json::from_str(&raw).unwrap_or_default();
-    Ok(parsed)
-}
-
-fn stash_pending_remote_change(tx: &Transaction, change: &Change) -> Result<(), Box<dyn std::error::Error>> {
-    let mut pending = load_pending_remote_changes(tx)?;
-    let already = pending.iter().any(|c| {
-        c.entity_type == change.entity_type
-            && c.entity_id == change.entity_id
-            && c.payload == change.payload
-            && c.changed_at == change.changed_at
-    });
-    if !already {
-        pending.push(change.clone());
-    }
-    let serialized = serde_json::to_string(&pending)?;
-    tx.set_sync_metadata("pending_remote_changes", &serialized)?;
-    Ok(())
-}
 fn remote_book_dir_hash(book_id: &str, dir_id: &str, file_name: &str) -> String {
     format!("remote:{dir_id}:{book_id}:{file_name}")
 }
@@ -984,17 +786,12 @@ fn get_or_create_author_id(transaction: &Transaction, author_name: &str) -> Opti
         return None;
     }
     let _ = transaction.execute("INSERT OR IGNORE INTO author(name) VALUES (?1)", [normalized]);
-    transaction
-        .query_row("SELECT id FROM author WHERE name = ?1 LIMIT 1", [normalized], |row| row.get(0))
-        .ok()
+    transaction.query_row("SELECT id FROM author WHERE name = ?1 LIMIT 1", [normalized], |row| row.get(0)).ok()
 }
 
 pub fn update_book_metadata(transaction: &Transaction, book_id: u64, title: &str, author: &str) {
     let author_id = get_or_create_author_id(transaction, author);
-    let query_result = transaction.execute(
-        "UPDATE book SET title = ?1, author_id = ?2 WHERE id = ?3",
-        rusqlite::params![title, author_id, book_id.to_string()],
-    );
+    let query_result = transaction.execute("UPDATE book SET title = ?1, author_id = ?2 WHERE id = ?3", rusqlite::params![title, author_id, book_id.to_string()]);
     match query_result {
         Ok(_) => log::debug!("Updated metadata for book {}: '{}' / '{}'", book_id, title, author),
         Err(err) => {

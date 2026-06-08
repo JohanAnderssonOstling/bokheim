@@ -1,7 +1,6 @@
 use floem::action::exec_after;
 use floem::event::EventPropagation;
 use floem::keyboard::{Key, Modifiers, NamedKey};
-use floem::peniko::Color;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -13,13 +12,13 @@ use floem::views::ScrollExt;
 use html_renderer::HTMLRenderer;
 
 use crate::page_navigation::{ReaderState, Signals};
-use crate::style::{BORDER_COLOR, DISABLED_BORDER, DISABLED_TEXT, HOVER_BG, PANEL_BG, SUBTLE_TEXT};
+use crate::components::{create_resizable_hsplit, create_resizable_right_split};
+use crate::style::palette;
 use crate::toc::{toc_view, toc_view_flat, TocEntry};
+use epub_svelte_lib::library::Library;
 
-pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl View {
+pub fn create_epub_reader(reader_state: &ReaderState, library: Rc<Library>, signals: Signals) -> impl View {
     let book_title = reader_state.book_title.clone();
-    let lib_handles = signals.library_handles.get_untracked();
-    let library = lib_handles.get(&reader_state.library_id).unwrap();
     let book_bytes = library.read_book_bytes(&reader_state.book_id.to_string()).expect("failed to read book bytes");
     let book_position = library.get_book_reading_position(&reader_state.book_id.to_string());
     library.mark_book_opened(&reader_state.book_id.to_string());
@@ -51,25 +50,18 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
     let match_info = renderer.match_info_signal();
     let search_nav = renderer.search_nav_signal();
     let search_query_signal = renderer.search_query_signal();
-    let column_width_request_signal = renderer.column_width_request_signal();
-    let font_size_request_signal = renderer.font_size_request_signal();
-    let scale_request_signal = renderer.scale_request_signal();
-    let line_numbers_request_signal = renderer.line_numbers_request_signal();
-    let current_column_width_signal = renderer.current_column_width_signal();
-    let current_font_size_signal = renderer.current_font_size_signal();
-    let current_scale_signal = renderer.current_scale_signal();
-    let current_line_numbers_signal = renderer.current_line_numbers_signal();
-    let settings_column_width = create_rw_signal(renderer.current_column_width());
-    let settings_font_size = create_rw_signal(renderer.current_font_size());
-    let settings_scale = create_rw_signal(renderer.current_scale());
-    let settings_line_numbers = create_rw_signal(renderer.current_line_numbers_enabled());
+    let settings_column_width = renderer.current_column_width_signal();
+    let settings_font_size = renderer.current_font_size_signal();
+    let settings_scale = renderer.current_scale_signal();
+    let settings_line_numbers = renderer.current_line_numbers_signal();
     let settings_menu_open = create_rw_signal(false);
+    let left_sidebar_width = create_rw_signal(280.0);
+    let right_sidebar_width = create_rw_signal(160.0);
     let last_position = create_rw_signal(None::<String>);
     let active_toc_entry = create_rw_signal(None::<(usize, Option<String>)>);
 
     let book_id = reader_state.book_id;
-    let library_id = reader_state.library_id.clone();
-    let signals_clone = signals.clone();
+    let library_for_effect = library.clone();
     create_effect(move |_| {
         let cfi = cfi_signal.get();
         let Some(cfi) = cfi else {
@@ -79,10 +71,8 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
             return;
         }
         last_position.set(Some(cfi.clone()));
-        if let Some(library) = signals_clone.library_handles.get_untracked().get(&library_id) {
-            library.update_reading_position(book_id, &cfi);
-            library.update_last_read(&book_id.to_string());
-        }
+        library_for_effect.update_reading_position(book_id, &cfi);
+        library_for_effect.update_last_read(&book_id.to_string());
     });
 
     {
@@ -138,11 +128,6 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
         search_query_signal.set(Some(q));
     });
 
-    create_effect(move |_| { settings_column_width.set(current_column_width_signal.get()); });
-    create_effect(move |_| { settings_font_size.set(current_font_size_signal.get()); });
-    create_effect(move |_| { settings_scale.set(current_scale_signal.get()); });
-    create_effect(move |_| { settings_line_numbers.set(current_line_numbers_signal.get()); });
-
     let search_input = text_input(search_query_buf);
     let input_id = search_input.id();
 
@@ -166,7 +151,7 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                     let (_, total) = match_info.get();
                     let no_matches = !search_query_buf.get().is_empty() && total == 0;
                     let base = s.width(240).padding_horiz(6).padding_vert(4).border(1).border_radius(4);
-                    if no_matches { base.background(Color::rgb8(255, 210, 210)) } else { base }
+                    if no_matches { base.background(palette().danger_bg) } else { base }
                 }),
             label(move || {
                 let (cur, total) = match_info.get();
@@ -187,7 +172,10 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                 })
                 .style(|s| s.margin_left(8).padding(4).border(1).border_radius(4)),
         ))
-        .style(|s| s.padding(8).border_top(1).border_color(BORDER_COLOR).align_items(AlignItems::Center).background(PANEL_BG))
+        .style(|s| {
+            let theme = palette();
+            s.padding(8).border_top(1).border_color(theme.border_color).align_items(AlignItems::Center).background(theme.surface_bg)
+        })
     };
 
     let body = v_stack((
@@ -228,7 +216,7 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                     settings_menu_open.update(|open| *open = !*open);
                     EventPropagation::Stop
                 })
-                .style(|s| s.width(34).height(34).border(1).border_radius(6).background(Color::WHITE)),
+                .style(|s| s.width(34).height(34).border(1).border_radius(6).background(palette().white_surface)),
         ))
         .style(|s| {
             s.width_pct(100.0)
@@ -237,7 +225,7 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                 .padding_left(16)
                 .padding_right(16)
                 .border_bottom(1)
-                .border_color(BORDER_COLOR)
+                .border_color(palette().border_color)
                 .align_items(AlignItems::Center)
                 .justify_content(JustifyContent::SpaceBetween)
         })
@@ -250,12 +238,10 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
             move || {
                 let next = (settings_column_width.get() - 40.0).clamp(200.0, 1200.0);
                 settings_column_width.set(next);
-                column_width_request_signal.set(Some(next));
             },
             move || {
                 let next = (settings_column_width.get() + 40.0).clamp(200.0, 1200.0);
                 settings_column_width.set(next);
-                column_width_request_signal.set(Some(next));
             },
         ),
         stepper_row(
@@ -264,12 +250,10 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
             move || {
                 let next = (settings_font_size.get() - 1.0).clamp(8.0, 64.0);
                 settings_font_size.set(next);
-                font_size_request_signal.set(Some(next));
             },
             move || {
                 let next = (settings_font_size.get() + 1.0).clamp(8.0, 64.0);
                 settings_font_size.set(next);
-                font_size_request_signal.set(Some(next));
             },
         ),
         stepper_row(
@@ -278,12 +262,10 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
             move || {
                 let next = (settings_scale.get() - 0.1).clamp(0.5, 3.0);
                 settings_scale.set(next);
-                scale_request_signal.set(Some(next));
             },
             move || {
                 let next = (settings_scale.get() + 0.1).clamp(0.5, 3.0);
                 settings_scale.set(next);
-                scale_request_signal.set(Some(next));
             },
         ),
         h_stack((
@@ -292,7 +274,6 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                 .on_click(move |_| {
                     let next = !settings_line_numbers.get();
                     settings_line_numbers.set(next);
-                    line_numbers_request_signal.set(Some(next));
                     EventPropagation::Stop
                 })
                 .style(|s| s.padding_horiz(10).height(28).border(1).border_radius(4)),
@@ -300,23 +281,26 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
         .style(|s| s.align_items(AlignItems::Center).gap(8.0)),
         v_stack((
             label(|| "Keyboard shortcuts").style(|s| s.margin_top(6).font_size(13)),
-            label(|| "Arrow Up / Down: Previous / Next line").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Mouse wheel: Previous / Next line").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Alt + Arrow Left / Right: Link history back / forward").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "L: Toggle line numbers").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Arrow Left / Right: Previous / Next page").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Ctrl + Arrow Left / Right: Previous / Next chapter").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Ctrl + F: Toggle search").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Enter / Shift+Enter (in search): Next / Previous match").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Esc: Close search").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Ctrl + C: Copy current selection").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Ctrl + +/-: Zoom in / out").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Ctrl + Alt + +/-: Column width +/-").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
-            label(|| "Alt + Arrow Up / Down: Font size +/-").style(|s| s.font_size(12).color(SUBTLE_TEXT)),
+            shortcut_label("Arrow Up / Down: Previous / Next line"),
+            shortcut_label("Mouse wheel: Previous / Next line"),
+            shortcut_label("Alt + Arrow Left / Right: Link history back / forward"),
+            shortcut_label("L: Toggle line numbers"),
+            shortcut_label("Arrow Left / Right: Previous / Next page"),
+            shortcut_label("Ctrl + Arrow Left / Right: Previous / Next chapter"),
+            shortcut_label("Ctrl + F: Toggle search"),
+            shortcut_label("Enter / Shift+Enter (in search): Next / Previous match"),
+            shortcut_label("Esc: Close search"),
+            shortcut_label("Ctrl + C: Copy current selection"),
+            shortcut_label("Ctrl + +/-: Zoom in / out"),
+            shortcut_label("Ctrl + Alt + +/-: Column width +/-"),
+            shortcut_label("Alt + Arrow Up / Down: Font size +/-"),
         ))
         .style(|s| s.gap(4.0)),
     ))
-    .style(move |s| if settings_menu_open.get() { s.padding(12).gap(10.0).border_bottom(1).border_color(BORDER_COLOR).background(PANEL_BG) } else { s.hide() });
+    .style(move |s| {
+        let theme = palette();
+        if settings_menu_open.get() { s.padding(12).gap(10.0).border_bottom(1).border_color(theme.border_color).background(theme.surface_bg) } else { s.hide() }
+    });
 
     let on_toc_click = {
         let nav_request = nav_request_signal;
@@ -338,9 +322,7 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                 ))) as Box<dyn View>
             }
         });
-        container(toc_content)
-            .scroll()
-            .style(|s| s.width(280).height_full().border_right(1).flex_shrink(0.0))
+        container(toc_content).scroll().style(|s| s.width_full().height_full().border_right(1).flex_shrink(0.0))
     };
 
     let right_header_panel = {
@@ -357,13 +339,13 @@ pub fn create_epub_reader(reader_state: &ReaderState, signals: Signals) -> impl 
                 ))) as Box<dyn View>
             }
         });
-        container(toc_content)
-            .scroll()
-            .style(|s| s.width(160).height_full().border_left(1).flex_shrink(0.0))
+        container(toc_content).scroll().style(|s| s.width_full().height_full().border_left(1).flex_shrink(0.0))
     };
 
-    let content = h_stack((left_toc_panel, body, right_header_panel))
-        .style(|s| s.flex_grow(1.0).width_full().min_width(0).height_full().flex_row());
+    let center_and_right = create_resizable_right_split(body, right_header_panel, right_sidebar_width, 120.0, 380.0)
+        .style(|s| s.width_full().height_full().flex_grow(1.0).min_width(0).min_height(0));
+    let content = create_resizable_hsplit(left_toc_panel, center_and_right, left_sidebar_width, 200.0, 560.0)
+        .style(|s| s.flex_grow(1.0).width_full().min_width(0).height_full());
 
     v_stack((top_bar, settings_dropdown, content))
 
@@ -431,8 +413,13 @@ fn history_nav_button(glyph: &'static str, can_nav: RwSignal<bool>, nav_signal: 
         })
         .style(move |s| {
             let base = s.width(30).height(30).border(1).border_radius(6);
-            if can_nav.get() { base } else { base.color(DISABLED_TEXT).border_color(DISABLED_BORDER).background(HOVER_BG) }
+            let theme = palette();
+            if can_nav.get() { base } else { base.color(theme.disabled_text).border_color(theme.disabled_border).background(theme.hover_bg) }
         })
+}
+
+fn shortcut_label(text: &'static str) -> impl View {
+    label(move || text).style(|s| s.font_size(12).color(palette().subtle_text))
 }
 
 fn stepper_row(

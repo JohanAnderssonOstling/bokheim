@@ -1,7 +1,8 @@
-use crate::style::{label_style, ACTIVE_HIGHLIGHT};
+use crate::style::{label_style, palette};
 use floem::event::EventPropagation;
 use floem::prelude::{container, create_rw_signal, dyn_view, h_stack, label, v_stack, Decorators, RwSignal, SignalGet, SignalUpdate};
 use floem::style::AlignContent;
+use floem::text::Weight;
 use floem::views::stack_from_iter;
 use floem::View;
 use std::collections::HashMap;
@@ -69,7 +70,7 @@ pub fn toc_view_flat(entries: Vec<TocEntry>, on_toc_click: Rc<dyn Fn(String)>, a
                 .min_width(0)
                 .text_ellipsis();
             if is_active() {
-                s.background(ACTIVE_HIGHLIGHT)
+                s.background(palette().active_highlight)
             } else {
                 s
             }
@@ -113,16 +114,17 @@ pub fn hierarchical_toc_entry(entry: TocEntry, on_toc_click: Rc<dyn Fn(String)>,
                 }
             });
 
-            label_style(label_view, 16).style(move |s| {
+            label_style(label_view, 17).style(move |s| {
                 let s = s
                     .padding(10)
                     .padding_left(toc_indent_px(level))
+                    .font_weight(Weight::SEMIBOLD)
                     .flex_grow(1.0)
                     .max_width_full()
                     .min_width(0)
                     .text_ellipsis();
                 if is_active {
-                    s.background(ACTIVE_HIGHLIGHT)
+                    s.background(palette().active_highlight)
                 } else {
                     s
                 }
@@ -148,6 +150,19 @@ pub fn toc_view_with_collapse_state(
 ) -> impl View {
     stack_from_iter(entries.into_iter().map(|entry| {
         hierarchical_toc_entry_with_state(entry, on_toc_click.clone(), active_entry, level, collapse_state.clone())
+    }))
+    .style(|s| s.flex_col().min_width(0))
+}
+
+pub fn toc_view_with_collapse_state_active_link(
+    entries: Vec<TocEntry>,
+    on_toc_click: Rc<dyn Fn(String)>,
+    active_link: RwSignal<Option<String>>,
+    level: i32,
+    collapse_state: CollapseState,
+) -> impl View {
+    stack_from_iter(entries.into_iter().map(|entry| {
+        hierarchical_toc_entry_with_state_active_link(entry, on_toc_click.clone(), active_link, level, collapse_state.clone())
     }))
     .style(|s| s.flex_col().min_width(0))
 }
@@ -202,9 +217,9 @@ fn hierarchical_toc_entry_with_state(
                     EventPropagation::Stop
                 }
             });
-            label_style(label_view, 16).style(move |s| {
-                let s = s.padding(10).padding_left(toc_indent_px(level)).flex_grow(1.0).max_width_full().min_width(0).text_ellipsis();
-                if is_active { s.background(ACTIVE_HIGHLIGHT) } else { s }
+            label_style(label_view, 17).style(move |s| {
+                let s = s.padding(10).padding_left(toc_indent_px(level)).font_weight(Weight::SEMIBOLD).flex_grow(1.0).max_width_full().min_width(0).text_ellipsis();
+                if is_active { s.background(palette().active_highlight) } else { s }
             })
         })
     };
@@ -219,6 +234,77 @@ fn hierarchical_toc_entry_with_state(
                 entry.children.clone(),
                 on_toc_click.clone(),
                 active_entry,
+                level + 1,
+                collapse_state.clone(),
+            ))
+        }
+    });
+
+    v_stack((header, children)).style(|s| s.width_full().min_width(0))
+}
+
+fn hierarchical_toc_entry_with_state_active_link(
+    entry: TocEntry,
+    on_toc_click: Rc<dyn Fn(String)>,
+    active_link: RwSignal<Option<String>>,
+    level: i32,
+    collapse_state: CollapseState,
+) -> impl View {
+    let entry_link = entry.link.clone();
+    let initial_collapsed = collapse_state
+        .get_untracked()
+        .get(&entry_link)
+        .copied()
+        .unwrap_or(true);
+    let collapsed = create_rw_signal(initial_collapsed);
+
+    let arrow_button = if !entry.children.is_empty() {
+        label(move || if collapsed.get() { "▶" } else { "▼" }.to_string())
+            .on_click(move |_| {
+                let next = !collapsed.get_untracked();
+                collapsed.set(next);
+                collapse_state.update(|state| {
+                    state.insert(entry_link.clone(), next);
+                });
+                EventPropagation::Stop
+            })
+            .style(|s| s.width(20).height(40).padding(0).align_content(AlignContent::Center).justify_center().items_center())
+    } else {
+        label(move || "").style(|s| s.width(0).height(0).padding(0))
+    };
+    let arrow_button = label_style(arrow_button, 12);
+
+    let title_widget = {
+        let entry = entry.clone();
+        let on_toc_click = on_toc_click.clone();
+        dyn_view(move || {
+            let is_active = active_link.get().as_deref() == Some(entry.link.as_str());
+            let title = entry.title.clone();
+            let link = entry.link.clone();
+            let label_view = label(move || title.clone()).on_click({
+                let on_toc_click = on_toc_click.clone();
+                move |_| {
+                    on_toc_click(link.clone());
+                    EventPropagation::Stop
+                }
+            });
+            label_style(label_view, 17).style(move |s| {
+                let s = s.padding(10).padding_left(toc_indent_px(level)).font_weight(Weight::SEMIBOLD).flex_grow(1.0).max_width_full().min_width(0).text_ellipsis();
+                if is_active { s.background(palette().active_highlight) } else { s }
+            })
+        })
+    };
+
+    let header = h_stack((arrow_button, title_widget)).style(|s| s.width_full().min_width(0));
+
+    let children = dyn_view(move || {
+        if collapsed.get() {
+            container(label(|| "").style(|s| s.width(0).height(0)))
+        } else {
+            container(toc_view_with_collapse_state_active_link(
+                entry.children.clone(),
+                on_toc_click.clone(),
+                active_link,
                 level + 1,
                 collapse_state.clone(),
             ))

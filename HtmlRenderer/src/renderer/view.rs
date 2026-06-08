@@ -24,6 +24,8 @@ impl View for HTMLRenderer {
 
     fn paint(&mut self, cx: &mut PaintCx) {
         let had_updates = self.image_pipeline.poll();
+        self.apply_reader_settings_from_signals();
+
         if let Some(href) = self.nav.nav_request_signal.get_untracked() {
             self.nav.nav_request_signal.set(None);
             if !href.is_empty() {
@@ -49,22 +51,6 @@ impl View for HTMLRenderer {
             } else {
                 self.prev_match();
             }
-        }
-        if let Some(width) = self.settings.column_width_pending.get_untracked() {
-            self.settings.column_width_pending.set(None);
-            self.set_col_width(width);
-        }
-        if let Some(font_size) = self.settings.font_size_pending.get_untracked() {
-            self.settings.font_size_pending.set(None);
-            self.set_root_font_size(font_size);
-        }
-        if let Some(scale) = self.settings.scale_pending.get_untracked() {
-            self.settings.scale_pending.set(None);
-            self.set_scale(scale);
-        }
-        if let Some(enabled) = self.settings.line_numbers_pending.get_untracked() {
-            self.settings.line_numbers_pending.set(None);
-            self.set_show_line_numbers(enabled);
         }
 
         self.configure_layout_for_viewport(self.id.get_size().unwrap());
@@ -280,6 +266,28 @@ impl View for HTMLRenderer {
 }
 
 impl HTMLRenderer {
+    fn apply_reader_settings_from_signals(&mut self) {
+        let column_width = self.settings.current_column_width.get_untracked();
+        if (column_width - self.layout.base_col_width).abs() >= 0.1 {
+            self.set_col_width(column_width);
+        }
+
+        let font_size = self.settings.current_font_size.get_untracked();
+        if (font_size - self.root_font_size).abs() >= f32::EPSILON {
+            self.set_root_font_size(font_size);
+        }
+
+        let scale = self.settings.current_scale.get_untracked();
+        if (scale - self.layout.scale).abs() >= f64::EPSILON {
+            self.set_scale(scale);
+        }
+
+        let show_line_numbers = self.settings.current_line_numbers.get_untracked();
+        if show_line_numbers != self.show_line_numbers {
+            self.set_show_line_numbers(show_line_numbers);
+        }
+    }
+
     fn to_layout(&self, pos: Point) -> Point {
         let scale = self.layout.scale;
         let dx = self.origin.x * (scale - 1.0);
@@ -292,20 +300,20 @@ impl HTMLRenderer {
             Some(idx) => idx,
             None => return false,
         };
-        if self.document.link_glyph_hrefs.get(&glyph_idx).is_none() {
+        if self.document.link_href_for_glyph(glyph_idx).is_none() {
             return false;
         }
         let line_idx = match self.find_line_for_glyph(glyph_idx) {
             Some(idx) => idx,
             None => return false,
         };
-        let line = &self.document.lines[line_idx];
+        let line = &self.document.lines()[line_idx];
         let screen = match self.frame.last_line_positions[line_idx] {
             Some(screen) => screen,
             None => return false,
         };
         let glyph_start = screen.point.x + self.glyph_x_in_line(line, glyph_idx);
-        let glyph_index = self.document.glyphs[glyph_idx as usize];
+        let glyph_index = self.document.glyph_at(glyph_idx as usize).unwrap_or_default();
         let glyph_width = self.glyph_cache.get(glyph_index).size().width;
         pos.x >= glyph_start && pos.x <= glyph_start + glyph_width
     }

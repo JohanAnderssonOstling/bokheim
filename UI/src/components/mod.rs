@@ -15,7 +15,11 @@ pub mod labels;
 #[cfg_attr(feature = "ui-shadcn", path = "shadcn/stacks.rs")]
 #[cfg_attr(not(feature = "ui-shadcn"), path = "own/stacks.rs")]
 pub mod stacks;
+pub mod page_views;
+pub mod library_views;
 
 pub use buttons::*;
 pub use labels::*;
 pub use stacks::*;
+pub use page_views::*;
+pub use library_views::*;

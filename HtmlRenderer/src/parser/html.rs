@@ -1,4 +1,4 @@
-use crate::document::{Document, DocumentMode, DocumentTocEntry, DomAttribute, DomElement, DomNode, DomText, ImageResource, ImageSource};
+use crate::document::{Document, DocumentMode, DocumentState, DocumentTocEntry, DomAttribute, DomElement, ImageResource, ImageSource, NodeRef};
 use crate::resources::ResourceProvider;
 use scraper::{ElementRef, Html, Node};
 use std::mem;
@@ -41,11 +41,11 @@ impl DocumentFactory {
     /// Parse HTML and build DOM tree (Phase 1)
     /// Returns a Document with populated dom_nodes and dom_root
     pub fn parse_to_dom(&mut self, html: &str) -> Document {
-        self.document.mode = DocumentMode::Html;
+        self.document.set_mode(DocumentMode::Html);
         let doc = parse_html_document(html);
         if let Some(root) = self.select_document_root(&doc) {
             let root_idx = self.build_dom_element(root, None);
-            self.document.dom_root = Some(root_idx);
+            self.document.set_dom_root(root_idx);
         }
         self.document.rebuild_document_toc_entries();
         mem::take(&mut self.document)
@@ -53,7 +53,7 @@ impl DocumentFactory {
 
     /// Complete new pipeline: Parse HTML → Build DOM → Resolve Styles → Build Boxes
     /// This uses the CSS display property instead of hardcoded tag names
-    pub fn parse_with_new_pipeline(&mut self, html: &str, css: Option<&str>) -> Document {
+    pub fn parse_with_new_pipeline(&mut self, html: &str, css: Option<&str>) -> DocumentState {
         match css {
             Some(css) => self.parse_with_new_pipeline_css_chunks(html, &[css]),
             None => self.parse_with_new_pipeline_css_chunks(html, &[]),
@@ -63,7 +63,7 @@ impl DocumentFactory {
     /// Complete new pipeline with independently parsed author CSS chunks.
     /// Each chunk is parsed separately so invalid author CSS cannot prevent the
     /// default stylesheet from producing a renderable box tree.
-    pub fn parse_with_new_pipeline_css_chunks<'css>(&mut self, html: &str, css_chunks: &[&'css str]) -> Document {
+    pub fn parse_with_new_pipeline_css_chunks<'css>(&mut self, html: &str, css_chunks: &[&'css str]) -> DocumentState {
         let parsed_html = parse_html_document(html);
         self.build_pipeline_from_parsed(&parsed_html, css_chunks)
     }
@@ -71,15 +71,15 @@ impl DocumentFactory {
     /// Run the full pipeline (DOM → styles → boxes) from an already-parsed HTML
     /// document. Lets a caller that also needs the title or embedded CSS parse
     /// the HTML only once and share the result across all three.
-    pub fn build_pipeline_from_parsed<'css>(&mut self, parsed_html: &Html, css_chunks: &[&'css str]) -> Document {
+    pub fn build_pipeline_from_parsed<'css>(&mut self, parsed_html: &Html, css_chunks: &[&'css str]) -> DocumentState {
         use crate::layout::build_box_tree;
         use crate::style::resolver::resolve_styles_for_dom;
         use lightningcss::stylesheet::{ParserOptions, StyleSheet};
-        self.document.mode = DocumentMode::Html;
+        self.document.set_mode(DocumentMode::Html);
         // Phase 1: Build DOM tree from the parsed HTML
         if let Some(root) = self.select_document_root(parsed_html) {
             let root_idx = self.build_dom_element(root, None);
-            self.document.dom_root = Some(root_idx);
+            self.document.set_dom_root(root_idx);
         }
 
         // Phase 2: Resolve styles for DOM elements
@@ -99,26 +99,24 @@ impl DocumentFactory {
         resolve_styles_for_dom(&mut self.document, &stylesheets);
 
         // Phase 3: Build box tree from styled DOM
-        build_box_tree(&mut self.document);
+        let box_tree = build_box_tree(&self.document);
         self.document.rebuild_document_toc_entries();
 
         // Return the fully processed document
-        mem::take(&mut self.document)
+        DocumentState::new(mem::take(&mut self.document), box_tree)
     }
 
     /// Build a DOM element and its children recursively
     fn build_dom_element(&mut self, elem: ElementRef, parent: Option<u32>) -> u32 {
-        let node_idx = self.document.dom_nodes.len() as u32;
-
         // Intern element info
         let tag_name = elem.value().name();
-        let tag = self.document.strings.intern(tag_name);
-        let namespace = if elem.value().name.ns.is_empty() { None } else { Some(self.document.strings.intern(elem.value().name.ns.as_ref())) };
-        let id = elem.value().attr("id").map(|s| self.document.strings.intern(s));
+        let tag = self.document.intern_string(tag_name);
+        let namespace = if elem.value().name.ns.is_empty() { None } else { Some(self.document.intern_string(elem.value().name.ns.as_ref())) };
+        let id = elem.value().attr("id").map(|s| self.document.intern_string(s));
         let classes = self.document.intern_classes(elem.value().attr("class"));
-        let href = elem.value().attr("href").map(|s| self.document.strings.intern(s));
+        let href = elem.value().attr("href").map(|s| self.document.intern_string(s));
         let image_ref = elem.value().attr("src").or_else(|| elem.value().attr("href")).or_else(|| elem.value().attr("xlink:href"));
-        let src = image_ref.map(|s| self.document.strings.intern(s));
+        let src = image_ref.map(|s| self.document.intern_string(s));
         let width = elem.value().attr("width").and_then(|v| v.parse::<u32>().ok());
         let height = elem.value().attr("height").and_then(|v| v.parse::<u32>().ok());
         let image_idx = self.register_image_resource(tag_name, image_ref, width, height);
@@ -131,14 +129,14 @@ impl DocumentFactory {
                     Some(prefix) => format!("{}:{}", prefix.as_ref(), key.local.as_ref()),
                     None => key.local.as_ref().to_string(),
                 };
-                let namespace = if key.ns.is_empty() { None } else { Some(self.document.strings.intern(key.ns.as_ref())) };
+                let namespace = if key.ns.is_empty() { None } else { Some(self.document.intern_string(key.ns.as_ref())) };
 
-                DomAttribute { name: self.document.strings.intern(&raw_name), local_name: self.document.strings.intern(key.local.as_ref()), namespace, value: self.document.strings.intern(value.as_ref()) }
+                DomAttribute { name: self.document.intern_string(&raw_name), local_name: self.document.intern_string(key.local.as_ref()), namespace, value: self.document.intern_string(value.as_ref()) }
             })
             .collect();
 
         // Push element first to reserve node_idx before children are added
-        self.document.dom_nodes.push(DomNode::Element(DomElement { tag, id, classes, namespace, parent, children: Vec::new(), href, src, width, height, image_idx, attributes, style: None }));
+        let node_idx = self.document.push_dom_element(DomElement { tag, id, classes, namespace, parent, children: Vec::new(), href, src, width, height, image_idx, attributes, style: None });
 
         // Process children
         let mut children = Vec::new();
@@ -152,9 +150,8 @@ impl DocumentFactory {
                 }
                 Node::Text(text) => {
                     if !text.is_empty() {
-                        let text_idx = self.document.dom_nodes.len() as u32;
+                        let text_idx = self.document.push_dom_text(text.to_string(), Some(node_idx));
                         children.push(text_idx);
-                        self.document.dom_nodes.push(DomNode::Text(DomText { text: text.to_string(), parent: Some(node_idx) }));
                     }
                 }
                 _ => {}
@@ -162,9 +159,7 @@ impl DocumentFactory {
         }
 
         // Update element with its children
-        if let DomNode::Element(ref mut elem) = self.document.dom_nodes[node_idx as usize] {
-            elem.children = children;
-        }
+        self.document.set_dom_children(node_idx, children);
 
         self.register_heading_toc(node_idx);
 
@@ -172,25 +167,29 @@ impl DocumentFactory {
     }
 
     fn register_heading_toc(&mut self, node_idx: u32) {
-        let (tag, existing_id, children) = match self.document.dom_nodes.get(node_idx as usize) {
-            Some(DomNode::Element(elem)) => (elem.tag, elem.id, elem.children.clone()),
-            _ => return,
-        };
-        let Some(level) = heading_level(self.document.strings.get(tag)) else {
+        let Some(element) = self.document.element_ref(node_idx as usize) else {
             return;
         };
+        let Some(level) = heading_level(element.tag()) else { return };
+        let existing_id = element.id().map(str::to_owned);
+        let children: Vec<u32> = element.children().map(|idx| idx as u32).collect();
 
         let title = collapse_whitespace(&self.collect_text_content(&children));
         if title.is_empty() {
             return;
         }
 
-        let id_idx = existing_id.unwrap_or_else(|| self.assign_generated_id(node_idx));
-        let href = format!("#{}", self.document.strings.get(id_idx));
-        let title_idx = self.document.strings.intern(&title);
-        let href_idx = self.document.strings.intern(&href);
+        let href = match existing_id {
+            Some(id) => format!("#{id}"),
+            None => {
+                let id_idx = self.assign_generated_id(node_idx);
+                format!("#{}", self.document.string(id_idx))
+            }
+        };
+        let title_idx = self.document.intern_string(&title);
+        let href_idx = self.document.intern_string(&href);
 
-        self.document.toc_entries.push(DocumentTocEntry { level, title: title_idx, href: href_idx, node_idx });
+        self.document.push_toc_entry(DocumentTocEntry { level, title: title_idx, href: href_idx, node_idx });
     }
 
     fn collect_text_content(&self, children: &[u32]) -> String {
@@ -202,16 +201,16 @@ impl DocumentFactory {
     }
 
     fn collect_text_from_node(&self, node_idx: u32, out: &mut String) {
-        match self.document.dom_nodes.get(node_idx as usize) {
-            Some(DomNode::Text(text)) => {
+        match self.document.node_ref(node_idx as usize) {
+            Some(NodeRef::Text(text)) => {
                 if !out.is_empty() {
                     out.push(' ');
                 }
-                out.push_str(&text.text);
+                out.push_str(text.text());
             }
-            Some(DomNode::Element(elem)) => {
-                for &child in &elem.children {
-                    self.collect_text_from_node(child, out);
+            Some(NodeRef::Element(element)) => {
+                for child in element.children() {
+                    self.collect_text_from_node(child as u32, out);
                 }
             }
             None => {}
@@ -224,13 +223,10 @@ impl DocumentFactory {
         let mut suffix = 2u32;
 
         loop {
-            let candidate_idx = self.document.strings.intern(&candidate);
+            let candidate_idx = self.document.intern_string(&candidate);
             if !self.id_in_use(candidate_idx) {
-                let id_name = self.document.strings.intern("id");
-                if let Some(DomNode::Element(elem)) = self.document.dom_nodes.get_mut(node_idx as usize) {
-                    elem.id = Some(candidate_idx);
-                    elem.attributes.push(DomAttribute { name: id_name, local_name: id_name, namespace: None, value: candidate_idx });
-                }
+                let id_name = self.document.intern_string("id");
+                self.document.set_dom_id_attribute(node_idx, candidate_idx, id_name);
                 return candidate_idx;
             }
             candidate = format!("{}-{}", base, suffix);
@@ -239,7 +235,7 @@ impl DocumentFactory {
     }
 
     fn id_in_use(&self, id_idx: u16) -> bool {
-        self.document.dom_nodes.iter().any(|node| matches!(node, DomNode::Element(elem) if elem.id == Some(id_idx)))
+        self.document.dom_id_in_use(id_idx)
     }
 
     fn register_image_resource(&mut self, tag_name: &str, src: Option<&str>, width: Option<u32>, height: Option<u32>) -> Option<u32> {
@@ -257,8 +253,7 @@ impl DocumentFactory {
             _ => src.to_string(),
         };
 
-        let image_idx = self.document.images.len() as u32;
-        self.document.images.push(ImageResource { source: ImageSource::Uri(resolved), width: 0, height: 0, width_attr: width, height_attr: height });
+        let image_idx = self.document.push_image(ImageResource { source: ImageSource::Uri(resolved), width: 0, height: 0, width_attr: width, height_attr: height });
         Some(image_idx)
     }
 
@@ -351,7 +346,7 @@ fn collapse_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::DocumentFactory;
-    use crate::document::DomNode;
+    use crate::document::{Document, ElementRef, NodeRef};
 
     #[test]
     fn keeps_whitespace_only_text_nodes_in_inline_content() {
@@ -359,25 +354,14 @@ mod tests {
         let mut factory = DocumentFactory::new();
         let document = factory.parse_to_dom(html);
 
-        let html_idx = document.dom_root.expect("html root should exist");
-        let html = match &document.dom_nodes[html_idx as usize] {
-            DomNode::Element(e) => e,
-            DomNode::Text(_) => panic!("expected html element"),
-        };
-        let body_idx = html.children.iter().copied().find(|&c| matches!(&document.dom_nodes[c as usize], DomNode::Element(e) if document.strings.get(e.tag) == "body")).expect("body should be a child of html");
-        let body = match &document.dom_nodes[body_idx as usize] {
-            DomNode::Element(e) => e,
-            DomNode::Text(_) => panic!("expected body element"),
-        };
+        let body = find_body(&document);
+        let children: Vec<usize> = body.children().collect();
 
-        assert_eq!(body.children.len(), 3, "body should keep the space node");
+        assert_eq!(children.len(), 3, "body should keep the space node");
 
-        let middle_text = match &document.dom_nodes[body.children[1] as usize] {
-            DomNode::Text(text) => text,
-            DomNode::Element(_) => panic!("expected whitespace text node"),
-        };
+        let middle_text = document.text_ref(children[1]).expect("expected whitespace text node");
 
-        assert_eq!(middle_text.text, " ");
+        assert_eq!(middle_text.text(), " ");
     }
 
     #[test]
@@ -386,17 +370,17 @@ mod tests {
         let mut factory = DocumentFactory::new();
         let document = factory.parse_to_dom(html);
 
-        assert_eq!(document.toc_entries.len(), 2);
+        assert_eq!(document.toc_entries().len(), 2);
 
-        let first = &document.toc_entries[0];
+        let first = &document.toc_entries()[0];
         assert_eq!(first.level, 1);
-        assert_eq!(document.strings.get(first.title), "Intro");
-        assert!(document.strings.get(first.href).starts_with("#heading-"));
+        assert_eq!(document.string(first.title), "Intro");
+        assert!(document.string(first.href).starts_with("#heading-"));
 
-        let second = &document.toc_entries[1];
+        let second = &document.toc_entries()[1];
         assert_eq!(second.level, 2);
-        assert_eq!(document.strings.get(second.title), "Chapter A");
-        assert_eq!(document.strings.get(second.href), "#chapter-a");
+        assert_eq!(document.string(second.title), "Chapter A");
+        assert_eq!(document.string(second.href), "#chapter-a");
     }
 
     #[test]
@@ -405,35 +389,22 @@ mod tests {
         let mut factory = DocumentFactory::new();
         let document = factory.parse_to_dom(html);
 
-        let body_idx = document
-            .dom_root
-            .and_then(|root| match &document.dom_nodes[root as usize] {
-                DomNode::Element(html) => html
-                    .children
-                    .iter()
-                    .copied()
-                    .find(|&c| matches!(&document.dom_nodes[c as usize], DomNode::Element(e) if document.strings.get(e.tag) == "body")),
-                DomNode::Text(_) => None,
-            })
-            .expect("body should exist");
+        let body = find_body(&document);
+        let p = child_element_by_tag(&document, body, "p");
+        let children: Vec<usize> = p.children().collect();
 
-        let p_idx = match &document.dom_nodes[body_idx as usize] {
-            DomNode::Element(body) => body
-                .children
-                .iter()
-                .copied()
-                .find(|&c| matches!(&document.dom_nodes[c as usize], DomNode::Element(e) if document.strings.get(e.tag) == "p"))
-                .expect("p should exist"),
-            DomNode::Text(_) => panic!("expected body element"),
-        };
+        assert_eq!(children.len(), 2, "self-closed anchor should not wrap following text");
+        assert_eq!(document.element_ref(children[0]).expect("first child should be anchor").tag(), "a");
+        assert!(matches!(document.node_ref(children[1]), Some(NodeRef::Text(text)) if text.text() == "After"));
+    }
 
-        let p = match &document.dom_nodes[p_idx as usize] {
-            DomNode::Element(p) => p,
-            DomNode::Text(_) => panic!("expected p element"),
-        };
+    fn find_body(document: &Document) -> ElementRef<'_> {
+        let html_idx = document.dom_root().expect("html root should exist");
+        let html = document.element_ref(html_idx).expect("html should be element");
+        child_element_by_tag(document, html, "body")
+    }
 
-        assert_eq!(p.children.len(), 2, "self-closed anchor should not wrap following text");
-        assert!(matches!(&document.dom_nodes[p.children[0] as usize], DomNode::Element(e) if document.strings.get(e.tag) == "a"));
-        assert!(matches!(&document.dom_nodes[p.children[1] as usize], DomNode::Text(t) if t.text == "After"));
+    fn child_element_by_tag<'a>(document: &'a Document, parent: ElementRef<'a>, tag: &str) -> ElementRef<'a> {
+        parent.children().find_map(|child_idx| document.element_ref(child_idx).filter(|element| element.tag() == tag)).expect("child element should exist")
     }
 }

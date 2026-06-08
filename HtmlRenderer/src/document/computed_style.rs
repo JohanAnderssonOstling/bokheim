@@ -90,6 +90,62 @@ pub struct StyleIndices {
     pub bg_idx: u32,
 }
 
+/// Computed-style storage (Servo-inspired split styles). Produced by style
+/// resolution and consumed read-only by box construction, shaping, and layout.
+/// `StyleIndices` (stored on each DOM element) index into these vecs.
+#[derive(Default)]
+pub struct StyleStore {
+    pub font_styles: Vec<Font>,
+    pub text_styles: Vec<InheritedText>,
+    pub box_styles: Vec<BoxModel>,
+    pub border_styles: Vec<Border>,
+    pub bg_styles: Vec<Background>,
+}
+
+impl StyleStore {
+    /// Ensure default styles exist at index 0 for fallback.
+    pub fn ensure_defaults(&mut self) {
+        if self.font_styles.is_empty() {
+            self.font_styles.push(Font::default());
+        }
+        if self.text_styles.is_empty() {
+            self.text_styles.push(InheritedText::default());
+        }
+        if self.box_styles.is_empty() {
+            self.box_styles.push(BoxModel::default());
+        }
+        if self.border_styles.is_empty() {
+            self.border_styles.push(Border::default());
+        }
+        if self.bg_styles.is_empty() {
+            self.bg_styles.push(Background::default());
+        }
+    }
+
+    /// Append one computed style block, returning the indices that address it.
+    pub fn push(&mut self, font: Font, text: InheritedText, box_model: BoxModel, border: Border, background: Background) -> StyleIndices {
+        let indices =
+            StyleIndices { font_idx: self.font_styles.len() as u32, text_idx: self.text_styles.len() as u32, box_idx: self.box_styles.len() as u32, border_idx: self.border_styles.len() as u32, bg_idx: self.bg_styles.len() as u32 };
+        self.font_styles.push(font);
+        self.text_styles.push(text);
+        self.box_styles.push(box_model);
+        self.border_styles.push(border);
+        self.bg_styles.push(background);
+        indices
+    }
+
+    /// Resolve a flat `StyleView` from a set of indices.
+    pub fn view(&self, indices: StyleIndices) -> StyleView<'_> {
+        StyleView {
+            font: &self.font_styles[indices.font_idx as usize],
+            text: &self.text_styles[indices.text_idx as usize],
+            box_model: &self.box_styles[indices.box_idx as usize],
+            border: &self.border_styles[indices.border_idx as usize],
+            background: &self.bg_styles[indices.bg_idx as usize],
+        }
+    }
+}
+
 /// Style view - returned by get_style(), provides flat access to all fields
 #[derive(Clone, Copy, Debug)]
 pub struct StyleView<'a> {

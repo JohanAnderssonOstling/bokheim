@@ -6,8 +6,8 @@ impl LayoutEngine {
     pub fn layout_box(&mut self, box_idx: usize, available_width: f64, parent_content_height: Option<f64>, first_line_indent: f64) -> Size {
         // Extract all style values we need before any mutable operations
         let style = get_style(&self.document, box_idx);
-        let is_image_box = self.document.boxes[box_idx].dom_element.and_then(|dom_idx| self.document.dom_nodes.get(dom_idx as usize)).and_then(|node| node.as_element()).and_then(|elem| elem.image_idx).is_some();
-        let is_table_cell = matches!(self.document.boxes[box_idx].layout_mode, LayoutMode::TableCell(_));
+        let is_image_box = self.document.get_box_image_idx(box_idx).is_some();
+        let is_table_cell = self.document.is_table_cell_box(box_idx);
 
         let height_val = style.height();
         let width_val = if is_image_box || is_table_cell { PreferredSize::Auto } else { style.width() };
@@ -25,6 +25,10 @@ impl LayoutEngine {
         let horizontal_margin_padding = style.get_horizontal_margin_padding();
         let horizontal_padding = style.get_horizontal_padding();
         let vertical_padding = style.get_vertical_padding();
+        let border_left = style.border_left_width() as f64;
+        let border_top = style.border_top_width() as f64;
+        let horizontal_border = border_left + style.border_right_width() as f64;
+        let vertical_border = border_top + style.border_bottom_width() as f64;
         let border_collapse = style.border_collapse();
 
         let list_marker_width = list_marker_width(&self.document, &self.glyph_cache, box_idx);
@@ -35,17 +39,17 @@ impl LayoutEngine {
             PreferredSize::Percent(pct) => parent_content_height.map(|h| h * pct as f64),
         };
 
-        let available_for_auto = available_width - horizontal_margin_padding;
+        let available_for_auto = available_width - horizontal_margin_padding - horizontal_border;
         let initial_width = resolve_preffered_size(width_val, available_for_auto, available_width);
         let min_width = resolve_preffered_size(min_width_val, 0., available_width);
         let max_width = resolve_preffered_size(max_width_val, f64::INFINITY, available_width);
         let content_width = initial_width.clamp(min_width, max_width).max(0.0);
 
         // Calculate content position from box position (which parent already set)
-        let box_point = self.document.boxes[box_idx].point;
-        let content_pos = Point::new(box_point.x + padding_left, box_point.y + padding_top);
+        let box_point = self.document.get_box_point(box_idx);
+        let content_pos = Point::new(box_point.x + padding_left + border_left, box_point.y + padding_top + border_top);
 
-        let content_size = match &self.document.boxes[box_idx].layout_mode {
+        let content_size = match self.document.box_layout_mode(box_idx).expect("layout box should exist") {
             LayoutMode::Block(block) => match &block.children {
                 Children::Blocks(indices) => {
                     let indices = indices.clone();
@@ -95,24 +99,30 @@ impl LayoutEngine {
             }
         }
 
+        // A normal-flow block-level box with `width: auto` fills its containing
+        // block (CSS 2.1 §10.3.3) rather than shrinking to content. Replaced
+        // images keep their intrinsic/scaled width, and shrink-to-fit contexts
+        // (tables, inline boxes) keep the measured content width.
+        let fills_available_width = !is_image_box && (self.document.is_block_box(box_idx) || self.document.is_anonymous_box(box_idx));
         let used_content_width = match width_val {
+            PreferredSize::Auto if fills_available_width => content_width,
             PreferredSize::Auto => content_size.width,
             _ => content_width,
         };
 
-        let size = Size::new(used_content_width + horizontal_padding, content_height + vertical_padding);
-        self.document.boxes[box_idx].size = size;
+        let size = Size::new(used_content_width + horizontal_padding + horizontal_border, content_height + vertical_padding + vertical_border);
+        self.document.set_box_size(box_idx, size);
 
-        match &self.document.boxes[box_idx].layout_mode {
-            BoxType::Block(_) => self.emit_block_decorations(box_idx),
-            BoxType::Table(_) => {
+        if self.document.is_block_box(box_idx) {
+            self.emit_block_decorations(box_idx);
+        } else if self.document.is_table_box(box_idx) {
+            {
                 if matches!(border_collapse, BorderCollapseMode::Collapse) {
                     self.emit_block_background(box_idx);
                 } else {
                     self.emit_block_decorations(box_idx);
                 }
             }
-            _ => {}
         }
         size
     }
