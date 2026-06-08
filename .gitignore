@@ -1,0 +1,23 @@
+# Rust build output (root and per-crate)
+/target
+**/target/
+
+# IDE
+.idea/
+.vscode/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+
+# Books / large test assets
+*.epub
+/TestData/
+/Server/books/
+/Server/thumbnails/
+/data-analysis/

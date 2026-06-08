@@ -15,7 +15,9 @@ pub enum AuthError {
     Network(reqwest::Error),
     Io(std::io::Error),
     BadStatus(reqwest::StatusCode, String),
-    UserIdMismatch { local: String, server: String },
+    /// The authenticated account doesn't match the account this local library is
+    /// bound to (would mix two accounts' data).
+    Binding(String),
 }
 
 impl std::fmt::Display for AuthError {
@@ -24,11 +26,7 @@ impl std::fmt::Display for AuthError {
             AuthError::Network(e) => write!(f, "network error: {e}"),
             AuthError::Io(e) => write!(f, "io error: {e}"),
             AuthError::BadStatus(s, msg) => write!(f, "server returned {s}: {msg}"),
-            AuthError::UserIdMismatch { local, server } => write!(
-                f,
-                "local user_id={local} does not match server user_id={server}; \
-                 logging in here would mix two different accounts."
-            ),
+            AuthError::Binding(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -66,7 +64,14 @@ impl Session {
     pub fn save(&self) -> std::io::Result<()> {
         let path = session_path().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no HOME"))?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        fs::write(&path, bytes)
+        fs::write(&path, bytes)?;
+        // The file holds a live bearer token; keep it owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     pub fn clear() {
@@ -87,8 +92,6 @@ struct SignupRequest<'a> {
     username: &'a str,
     password: &'a str,
     invite: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    adopt_user_id: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,49 +101,29 @@ struct AuthResponse {
     username: String,
 }
 
-pub async fn login(server_url: &str, username: &str, password: &str, local_user_id: Option<&str>) -> Result<Session, AuthError> {
-    let client = reqwest::Client::builder().build()?;
-    let resp = client
-        .post(format!("{}/api/auth/login", server_url.trim_end_matches('/')))
-        .json(&LoginRequest { username, password })
-        .send()
-        .await?;
-    let resp = ensure_ok(resp).await?;
-    let body: AuthResponse = resp.json().await?;
-    if let Some(local) = local_user_id {
-        if !local.is_empty() && local != body.user_id {
-            return Err(AuthError::UserIdMismatch {
-                local: local.to_string(),
-                server: body.user_id,
-            });
-        }
+impl AuthResponse {
+    fn into_session(self, server_url: String) -> Session {
+        Session { server_url, user_id: self.user_id, username: self.username, token: self.token }
     }
-    let session = Session {
-        server_url: server_url.trim_end_matches('/').to_string(),
-        user_id: body.user_id,
-        username: body.username,
-        token: body.token,
-    };
-    Ok(session)
 }
 
-pub async fn signup(server_url: &str, invite: &str, username: &str, password: &str, adopt_user_id: Option<&str>) -> Result<Session, AuthError> {
+async fn post_auth(url: String, body: &impl Serialize) -> Result<AuthResponse, AuthError> {
     let client = reqwest::Client::builder().build()?;
-    let req = SignupRequest { username, password, invite, adopt_user_id };
-    let resp = client
-        .post(format!("{}/api/auth/signup", server_url.trim_end_matches('/')))
-        .json(&req)
-        .send()
-        .await?;
+    let resp = client.post(url).json(body).send().await?;
     let resp = ensure_ok(resp).await?;
-    let body: AuthResponse = resp.json().await?;
-    let session = Session {
-        server_url: server_url.trim_end_matches('/').to_string(),
-        user_id: body.user_id,
-        username: body.username,
-        token: body.token,
-    };
-    Ok(session)
+    Ok(resp.json().await?)
+}
+
+pub async fn login(server_url: &str, username: &str, password: &str) -> Result<Session, AuthError> {
+    let base = server_url.trim_end_matches('/');
+    let body = post_auth(format!("{base}/api/auth/login"), &LoginRequest { username, password }).await?;
+    Ok(body.into_session(base.to_string()))
+}
+
+pub async fn signup(server_url: &str, invite: &str, username: &str, password: &str) -> Result<Session, AuthError> {
+    let base = server_url.trim_end_matches('/');
+    let body = post_auth(format!("{base}/api/auth/signup"), &SignupRequest { username, password, invite }).await?;
+    Ok(body.into_session(base.to_string()))
 }
 
 pub async fn logout(session: &Session) -> Result<(), AuthError> {
@@ -153,42 +136,21 @@ pub async fn logout(session: &Session) -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Reads the locally-cached user_id (the UUID the Backend tracks for this device)
-/// without requiring a fully-constructed `Library`. Falls back to `None` if the
-/// file doesn't exist.
-pub fn local_user_id() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let mut p = PathBuf::from(home);
-    p.push(".biblos");
-    p.push("user_id");
-    let s = fs::read_to_string(p).ok()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+fn blocking_runtime() -> Result<tokio::runtime::Runtime, AuthError> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(AuthError::Io)
 }
 
 pub fn login_blocking(server_url: &str, username: &str, password: &str) -> Result<Session, AuthError> {
-    let local = local_user_id();
-    let server_url = server_url.to_string();
-    let username = username.to_string();
-    let password = password.to_string();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(AuthError::Io)?;
-    rt.block_on(async move { login(&server_url, &username, &password, local.as_deref()).await })
+    blocking_runtime()?.block_on(login(server_url, username, password))
 }
 
 pub fn signup_blocking(server_url: &str, invite: &str, username: &str, password: &str) -> Result<Session, AuthError> {
-    let local = local_user_id();
-    let server_url = server_url.to_string();
-    let invite = invite.to_string();
-    let username = username.to_string();
-    let password = password.to_string();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(AuthError::Io)?;
-    rt.block_on(async move { signup(&server_url, &invite, &username, &password, local.as_deref()).await })
+    blocking_runtime()?.block_on(signup(server_url, invite, username, password))
 }
 
 pub fn logout_blocking(session: &Session) {
-    let s = session.clone();
-    if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        let _ = rt.block_on(async move { logout(&s).await });
+    if let Ok(rt) = blocking_runtime() {
+        let _ = rt.block_on(logout(session));
     }
 }
 

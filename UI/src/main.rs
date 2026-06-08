@@ -1,6 +1,6 @@
-use floem::views::Decorators;
-use floem::{IntoView, View};
+use floem::View;
 
+use crate::components::page_views::app_root;
 use crate::page_navigation::page_navigation_view;
 
 mod auth_view;
@@ -23,7 +23,7 @@ fn app_view() -> impl View {
     /*let mut epub_renderer = EpubReader::new("/home/johan/Hem/Downloads/A Concise History of Switzerland.epub");
     epub_renderer = epub_renderer.style(move |style| {style.width_full()});
     epub_renderer.into_view()*/
-    page_navigation_view().style(|s| s.size_pct(100.0, 100.0).width_full().height_full().min_width(0).min_height(0).flex_col())
+    app_root(page_navigation_view())
 }
 
 fn main() {

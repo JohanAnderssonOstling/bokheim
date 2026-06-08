@@ -46,7 +46,7 @@ impl HTMLRenderer {
 
     pub(super) fn initial_render_state() -> RenderState {
         // canonical renderer state for a fresh pass
-        RenderState { y_offset: 0.0, col_index: 0.0, should_stop: false, draw_text_time: Duration::ZERO }
+        RenderState { y_offset: 0.0, col_index: 0.0, should_stop: false }
     }
 
     pub(super) fn draw_line_index(&self, cx: &mut impl Painter, line_idx: usize, line: &Line, line_point: Point) {
@@ -87,7 +87,7 @@ impl HTMLRenderer {
         let page_end = start_offset_y + self.layout.col_count * self.layout.size.height; // visible doc y end for this page
         let breaks = breaks.unwrap_or_else(|| self.build_offset_breaks(start_offset_y));
         let inline_metrics = self.inline_metrics();
-        for decoration in &self.document.decorations {
+        for decoration in self.document.decorations() {
             if decoration.rect.y1 <= page_start || decoration.rect.y0 >= page_end {
                 continue;
             }
@@ -96,9 +96,9 @@ impl HTMLRenderer {
             if decoration.is_inline {
                 if let Some(line_idx) = self.find_line_index_for_decoration(rect.y0, rect.y1) {
                     if let Some(screen) = line_positions.and_then(|p| p.get(line_idx).and_then(|v| *v)) {
-                        let line = &self.document.lines[line_idx];
+                        let line = &self.document.lines()[line_idx];
                         self.paint_inline_decoration_at(cx, &rect, line, screen.point, 0.0, &color);
-                    } else if let Some(line) = self.document.lines.get(line_idx) {
+                    } else if let Some(line) = self.document.line(line_idx) {
                         let render_state = Self::initial_render_state();
                         let (point, _) = self.resolve_point_at(line.point, line.height, render_state, start_offset_y);
                         if let Some(point) = point {
@@ -119,7 +119,7 @@ impl HTMLRenderer {
             while seg_start < rect.y1 {
                 let next_break = breaks.get(break_idx).map(|b| b.0).unwrap_or(rect.y1);
                 let seg_end = rect.y1.min(next_break);
-                self.paint_decoration_segment(cx, &rect, seg_start, seg_end, current_offset, &color, decoration.is_inline, inline_metrics, start_offset_y);
+                self.paint_decoration_segment(cx, &rect, seg_start, seg_end, current_offset, &color, start_offset_y);
                 seg_start = seg_end;
                 if break_idx < breaks.len() && breaks[break_idx].0 <= seg_start {
                     current_offset = breaks[break_idx].1;
@@ -135,7 +135,7 @@ impl HTMLRenderer {
         let mut render_state = Self::initial_render_state();
         let start_line = self.find_start_line_at(start_offset_y, 0.1);
         let mut prev_offset = render_state.y_offset;
-        for line in &self.document.lines[start_line..] {
+        for line in &self.document.lines()[start_line..] {
             let (_point, next_state) = self.resolve_point_at(line.point, line.height, render_state, start_offset_y);
             if next_state.y_offset != prev_offset {
                 breaks.push((line.point.y, next_state.y_offset));
@@ -157,7 +157,7 @@ impl HTMLRenderer {
             let Some(screen) = positions.get(line_idx).and_then(|v| *v) else {
                 continue;
             };
-            let doc_y = self.document.lines[line_idx].point.y;
+            let doc_y = self.document.line(line_idx).map(|line| line.point.y).unwrap_or(0.0);
             let offset = screen.point.y // cached screen y converted back to doc y
                 + (screen.col_index as f64) * self.layout.size.height
                 - doc_y
@@ -170,9 +170,7 @@ impl HTMLRenderer {
         breaks
     }
 
-    pub(super) fn paint_decoration_segment(
-        &self, cx: &mut impl Painter, rect: &floem::kurbo::Rect, seg_start: f64, seg_end: f64, y_offset: f64, color: &floem::peniko::Color, is_inline: bool, inline_metrics: InlineMetrics, start_offset_y: f64,
-    ) {
+    pub(super) fn paint_decoration_segment(&self, cx: &mut impl Painter, rect: &floem::kurbo::Rect, seg_start: f64, seg_end: f64, y_offset: f64, color: &floem::peniko::Color, start_offset_y: f64) {
         // split decoration across columns and draw
         if seg_end <= seg_start {
             return;
@@ -198,7 +196,6 @@ impl HTMLRenderer {
             return;
         }
 
-        let inline_offset = if is_inline { inline_metrics.offset } else { 0.0 };
         for col in first_col..=last_col {
             let col_top = (col as f64) * col_height;
             let col_bottom = col_top + col_height;
@@ -207,7 +204,7 @@ impl HTMLRenderer {
             if y1 <= y0 {
                 continue;
             }
-            let x = self.col_x(col as f64, rect.x0 + inline_offset);
+            let x = self.col_x(col as f64, rect.x0);
             let y = y0 - col_top;
             let height = y1 - y0;
             let split_rect = floem::kurbo::Rect::new(x, y, x + rect.width(), y + height);
@@ -225,7 +222,7 @@ impl HTMLRenderer {
 
     pub(super) fn find_line_index_for_decoration(&self, y0: f64, y1: f64) -> Option<usize> {
         // find first line overlapping a decoration rect
-        let lines = &self.document.lines;
+        let lines = self.document.lines();
         if lines.is_empty() {
             return None;
         }
@@ -260,7 +257,7 @@ impl HTMLRenderer {
         cx.fill_rect(split_rect, *color);
     }
 
-    pub(super) fn draw_line_at(&self, cx: &mut impl Painter, line_idx: usize, line: &Line, point: Point, mut render_state: RenderState) -> RenderState {
+    pub(super) fn draw_line_at(&self, cx: &mut impl Painter, line_idx: usize, line: &Line, point: Point, render_state: RenderState) -> RenderState {
         // render glyphs for one line at a screen point
         let point = Point::new(self.snap_to_device_px(point.x), self.snap_to_device_px(point.y));
         if self.show_line_numbers {
@@ -270,11 +267,11 @@ impl HTMLRenderer {
 
         let mut curr_x = point.x;
         let base_y = point.y + line.baseline;
-        let offsets = self.document.line_glyph_offsets.get(line_idx);
+        let offsets = self.document.line_glyph_offsets().get(line_idx);
         let mut offset_idx = 0usize;
         let mut current = offsets.and_then(|runs| runs.get(0));
         for index in line.glyphs.start..line.glyphs.end {
-            let glyph_index = self.document.glyphs[index as usize];
+            let glyph_index = self.document.glyph_at(index as usize).unwrap_or_default();
             let glyph = self.glyph_cache.get(glyph_index);
             let (ascent, _) = self.glyph_cache.glyph_metrics(glyph_index);
             while let Some(run) = current {
@@ -287,9 +284,7 @@ impl HTMLRenderer {
             let offset = current.and_then(|run| if index >= run.range.start { Some(run.offset as f64) } else { None }).unwrap_or(0.0);
             let draw_point = Point::new(self.snap_to_device_px(curr_x), self.snap_to_device_px(base_y - ascent - offset));
 
-            let start = Instant::now();
             cx.draw_text(glyph, draw_point);
-            render_state.draw_text_time += start.elapsed();
 
             curr_x += glyph.size().width + line.letter_spacing;
 
@@ -302,12 +297,12 @@ impl HTMLRenderer {
     }
 
     pub(super) fn draw_images_for_line(&self, cx: &mut impl Painter, line_idx: usize, point: Point) {
-        if line_idx >= self.document.image_fragments_by_line.len() {
+        if line_idx >= self.document.image_fragments_by_line().len() {
             return;
         }
         let placeholder = Color::rgba8(230, 230, 230, 255);
-        for &frag_idx in &self.document.image_fragments_by_line[line_idx] {
-            let frag = &self.document.image_fragments[frag_idx];
+        for &frag_idx in &self.document.image_fragments_by_line()[line_idx] {
+            let frag = &self.document.image_fragments()[frag_idx];
             let (width, height) = self.scaled_image_size(frag);
             let rect = Rect::new(point.x + frag.offset.x, point.y + frag.offset.y, point.x + frag.offset.x + width, point.y + frag.offset.y + height);
             if let Some(decoded) = self.image_pipeline.get_decoded(frag.image_idx) {
@@ -319,12 +314,12 @@ impl HTMLRenderer {
     }
 
     pub(super) fn effective_line_height(&self, line_idx: usize, fallback: f64) -> f64 {
-        if line_idx >= self.document.image_fragments_by_line.len() {
+        if line_idx >= self.document.image_fragments_by_line().len() {
             return fallback;
         }
         let mut max_height = 0.0;
-        for &frag_idx in &self.document.image_fragments_by_line[line_idx] {
-            let frag = &self.document.image_fragments[frag_idx];
+        for &frag_idx in &self.document.image_fragments_by_line()[line_idx] {
+            let frag = &self.document.image_fragments()[frag_idx];
             let (_, height) = self.scaled_image_size(frag);
             if height > max_height {
                 max_height = height;
@@ -384,7 +379,7 @@ impl HTMLRenderer {
             if i == start {
                 x0 = Some(x);
             }
-            let glyph_index = self.document.glyphs[i as usize];
+            let glyph_index = self.document.glyph_at(i as usize).unwrap_or_default();
             let w = self.glyph_cache.get(glyph_index).size().width;
             x += w + line.letter_spacing;
             if self.glyph_cache.get_char(glyph_index) == ' ' {
@@ -400,12 +395,12 @@ impl HTMLRenderer {
         self.fill_selection_rect(cx, x0, x1, screen_point.y, line.height);
     }
 
-    pub(super) fn build_forward_positions(&self, start_offset_y: f64) -> (usize, Option<usize>, Vec<Option<LineScreen>>, bool, f64) {
-        let lines = &self.document.lines;
+    pub(super) fn build_forward_positions(&self, start_offset_y: f64) -> PagePositions {
+        let lines = self.document.lines();
         let start_line = self.find_start_line_at(start_offset_y, 0.1);
         let mut positions: Vec<Option<LineScreen>> = vec![None; lines.len()];
         let mut render_state = Self::initial_render_state();
-        let mut last_painted_idx: Option<usize> = None;
+        let mut last_line: Option<usize> = None;
         let mut next_start_offset_y = start_offset_y;
         for (offset, line) in lines[start_line..].iter().enumerate() {
             let line_idx = start_line + offset;
@@ -414,7 +409,7 @@ impl HTMLRenderer {
             render_state = next_state;
             if let Some(point) = point {
                 positions[line_idx] = Some(LineScreen { point, col_index: render_state.col_index as i32 });
-                last_painted_idx = Some(line_idx);
+                last_line = Some(line_idx);
             }
             if render_state.should_stop {
                 next_start_offset_y = line.point.y;
@@ -422,11 +417,11 @@ impl HTMLRenderer {
             }
         }
         let reached_end = !render_state.should_stop;
-        (start_line, last_painted_idx, positions, reached_end, next_start_offset_y)
+        PagePositions { start_line, last_line, positions, reached_end, next_start_offset_y }
     }
 
     fn paint_lines_from_positions(&self, cx: &mut impl Painter, first_line: usize, end_line: usize, positions: &[Option<LineScreen>], mut render_state: RenderState) -> RenderState {
-        let lines = &self.document.lines;
+        let lines = self.document.lines();
         for line_idx in first_line..=end_line {
             if let (Some(screen), Some(line)) = (positions.get(line_idx).and_then(|v| *v), lines.get(line_idx)) {
                 self.paint_highlights_for_line(cx, line, screen.point);
@@ -437,74 +432,37 @@ impl HTMLRenderer {
         render_state
     }
 
-    pub(super) fn build_backward_positions(&self, end_line: usize) -> (usize, Vec<Option<LineScreen>>) {
-        // precompute line positions for backward paging
-        let lines = &self.document.lines;
-        let mut positions: Vec<Option<LineScreen>> = vec![None; lines.len()];
-        let mut col_index = self.layout.col_count as i32 - 1;
-        if col_index < 0 {
-            return (end_line, positions);
+    fn paint_positioned_page(&mut self, cx: &mut impl Painter, page: PagePositions, start_offset_y: f64, paint_end: Option<usize>, use_cached_inline_positions: bool) -> RenderState {
+        self.frame.last_line_positions = page.positions;
+        let breaks = paint_end.map(|end_line| self.build_offset_breaks_from_positions(page.start_line, end_line, &self.frame.last_line_positions, start_offset_y));
+
+        if use_cached_inline_positions {
+            self.paint_decorations(cx, start_offset_y, breaks, Some(&self.frame.last_line_positions));
+        } else {
+            self.paint_decorations(cx, start_offset_y, breaks, None);
         }
 
-        let end_line_height = self.effective_line_height(end_line, lines[end_line].height);
-        let mut next_top = self.layout.size.height - end_line_height;
-        if next_top < 0.0 {
-            next_top = 0.0;
-        }
-        let mut first_painted = end_line;
-        let mut x = self.col_x(col_index as f64, lines[end_line].point.x);
-        let point = Point::new(x, next_top);
-        positions[end_line] = Some(LineScreen { point, col_index });
+        self.frame.current_page_start_line = Some(page.start_line);
+        self.frame.current_page_end_line = paint_end;
 
-        let mut prev_top = next_top;
-        for line_idx in (0..end_line).rev() {
-            let line = &lines[line_idx];
-            let line_height = self.effective_line_height(line_idx, line.height);
-            let gap_to_next = (lines[line_idx + 1].point.y - (line.point.y + line.height)).max(0.0);
-            let mut bottom = prev_top - gap_to_next;
-            let mut top = bottom - line_height;
-            if top < 0.0 {
-                col_index -= 1;
-                if col_index < 0 {
-                    break;
-                }
-                bottom = self.layout.size.height;
-                top = bottom - line_height;
-            }
-            if top < 0.0 {
-                top = 0.0;
-            }
-            x = self.col_x(col_index as f64, line.point.x);
-            let point = Point::new(x, top);
-            positions[line_idx] = Some(LineScreen { point, col_index });
-            first_painted = line_idx;
-            prev_top = top;
+        let mut render_state = Self::initial_render_state();
+        if let Some(end_line) = paint_end {
+            render_state = self.paint_lines_from_positions(cx, page.start_line, end_line, &self.frame.last_line_positions, render_state);
         }
-
-        (first_painted, positions)
+        render_state
     }
 
     pub(super) fn paint_forward(&mut self, cx: &mut impl Painter) -> RenderState {
         // render forward from current offset
-        let (start_line, last_painted_idx, positions, reached_end, next_start_offset_y) = self.build_forward_positions(self.viewport.start_offset_y);
-        self.viewport.next_start_offset_y = next_start_offset_y;
-        self.frame.last_line_positions = positions;
-        let breaks = if let Some(end_line) = last_painted_idx { Some(self.build_offset_breaks_from_positions(start_line, end_line, &self.frame.last_line_positions, self.viewport.start_offset_y)) } else { None };
-        self.paint_decorations(cx, self.viewport.start_offset_y, breaks, None);
-        self.frame.current_page_start_line = Some(start_line);
-        let mut render_state = Self::initial_render_state();
-        if let Some(end_line) = last_painted_idx {
-            render_state = self.paint_lines_from_positions(cx, start_line, end_line, &self.frame.last_line_positions, render_state);
-        }
-
-        self.viewport.reached_end = reached_end;
-        self.frame.current_page_end_line = last_painted_idx;
-
-        render_state
+        let page = self.build_forward_positions(self.viewport.start_offset_y);
+        self.viewport.next_start_offset_y = page.next_start_offset_y;
+        self.viewport.reached_end = page.reached_end;
+        let paint_end = page.last_line;
+        self.paint_positioned_page(cx, page, self.viewport.start_offset_y, paint_end, false)
     }
 
     pub(super) fn prefetch_images_for_current_page(&mut self) {
-        if self.document.image_fragments.is_empty() || self.document.lines.is_empty() {
+        if self.document.image_fragments().is_empty() || self.document.lines().is_empty() {
             return;
         }
         let Some(start_line) = self.frame.current_page_start_line else {
@@ -513,21 +471,21 @@ impl HTMLRenderer {
         let Some(end_line) = self.frame.current_page_end_line else {
             return;
         };
-        if start_line >= self.document.lines.len() || end_line >= self.document.lines.len() {
+        if start_line >= self.document.line_count() || end_line >= self.document.line_count() {
             return;
         }
 
         let page_len = end_line.saturating_sub(start_line) + 1;
         let next_start = end_line + 1;
-        let next_end = if next_start >= self.document.lines.len() { end_line } else { (next_start + page_len - 1).min(self.document.lines.len() - 1) };
+        let next_end = if next_start >= self.document.line_count() { end_line } else { (next_start + page_len - 1).min(self.document.line_count() - 1) };
 
         let mut desired: HashSet<u32> = HashSet::new();
         for line_idx in start_line..=next_end {
-            if line_idx >= self.document.image_fragments_by_line.len() {
+            if line_idx >= self.document.image_fragments_by_line().len() {
                 continue;
             }
-            for &frag_idx in &self.document.image_fragments_by_line[line_idx] {
-                let frag = &self.document.image_fragments[frag_idx];
+            for &frag_idx in &self.document.image_fragments_by_line()[line_idx] {
+                let frag = &self.document.image_fragments()[frag_idx];
                 desired.insert(frag.image_idx);
             }
         }
@@ -545,7 +503,7 @@ impl HTMLRenderer {
         // render backward from end offset
         self.viewport.reached_end = false;
 
-        let lines = &self.document.lines;
+        let lines = self.document.lines();
         let end_line = if let Some(idx) = self.viewport.back_anchor_end_line {
             idx.min(lines.len().saturating_sub(1))
         } else if let Some(idx) = self.find_end_line_at(self.viewport.end_offset_y, 1e-6) {
@@ -571,49 +529,41 @@ impl HTMLRenderer {
 
         // Use the same forward position resolver as normal rendering so lines that share
         // the same document Y (e.g. table rows across columns) keep consistent screen Y.
-        let (mut first_painted, mut last_painted_idx, mut positions, _, _) = self.build_forward_positions(self.viewport.back_start_offset_y);
+        let mut page = self.build_forward_positions(self.viewport.back_start_offset_y);
 
         // If anchor line is not visible, find the smallest start offset that includes it.
         // This keeps the anchor as low as possible (near page bottom) instead of pinning top.
-        if positions.get(end_line).and_then(|p| *p).is_none() {
+        if page.positions.get(end_line).and_then(|p| *p).is_none() {
             let mut lo = self.viewport.back_start_offset_y;
             let mut hi = lines[end_line].point.y.max(lo);
-            let mut best: Option<(usize, Option<usize>, Vec<Option<LineScreen>>, f64)> = None;
+            let mut best: Option<(PagePositions, f64)> = None;
 
             for _ in 0..20 {
                 if (hi - lo) <= 0.01 {
                     break;
                 }
                 let mid = (lo + hi) * 0.5;
-                let (first, last, pos, _, _) = self.build_forward_positions(mid);
-                if pos.get(end_line).and_then(|p| *p).is_some() {
-                    best = Some((first, last, pos, mid));
+                let candidate = self.build_forward_positions(mid);
+                if candidate.positions.get(end_line).and_then(|p| *p).is_some() {
+                    best = Some((candidate, mid));
                     hi = mid;
                 } else {
                     lo = mid;
                 }
             }
 
-            if let Some((first, last, pos, start)) = best {
+            if let Some((best_page, start)) = best {
                 self.viewport.back_start_offset_y = start;
-                first_painted = first;
-                last_painted_idx = last;
-                positions = pos;
+                page = best_page;
             }
         }
-        self.frame.last_line_positions = positions;
-        let paint_end = last_painted_idx.unwrap_or(first_painted).min(end_line);
-        let breaks = self.build_offset_breaks_from_positions(first_painted, paint_end, &self.frame.last_line_positions, self.viewport.back_start_offset_y);
+        let first_painted = page.start_line;
+        let paint_end = page.last_line.unwrap_or(first_painted).min(end_line);
+        let first_painted_y = lines[first_painted].point.y;
+        let render_state = self.paint_positioned_page(cx, page, self.viewport.back_start_offset_y, Some(paint_end), true);
 
-        let mut render_state = Self::initial_render_state();
-
-        self.paint_decorations(cx, self.viewport.back_start_offset_y, Some(breaks), Some(&self.frame.last_line_positions));
-        render_state = self.paint_lines_from_positions(cx, first_painted, paint_end, &self.frame.last_line_positions, render_state);
-
-        self.viewport.start_offset_y = lines[first_painted].point.y;
+        self.viewport.start_offset_y = first_painted_y;
         self.viewport.next_start_offset_y = self.viewport.end_offset_y;
-        self.frame.current_page_start_line = Some(first_painted);
-        self.frame.current_page_end_line = Some(paint_end);
 
         if first_painted == 0 && self.viewport.start_offset_y <= 0.0 {
             self.viewport.direction = PaintDirection::Forward;

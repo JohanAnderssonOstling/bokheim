@@ -55,7 +55,9 @@ impl LayoutEngine {
         let mut started_flow = false;
 
         let parent_style = get_style(&self.document, parent_idx);
-        let parent_padding = parent_style.get_top_left_padding();
+        // Children start inside the parent's border and padding (the parent's box
+        // point is its border-box origin).
+        let parent_padding = parent_style.get_top_left_padding() + Vec2::new(parent_style.border_left_width() as f64, parent_style.border_top_width() as f64);
         let parent_ctx = ParentCollapseContext {
             top_open: parent_style.padding_top() == 0.0 && parent_style.border_top_width() == 0.0,
             bottom_open: parent_style.padding_bottom() == 0.0 && parent_style.border_bottom_width() == 0.0 && matches!(parent_style.height(), PreferredSize::Auto) && matches!(parent_style.min_height(), PreferredSize::Auto),
@@ -64,7 +66,7 @@ impl LayoutEngine {
 
         for &child_handle in children {
             let child_idx = child_handle as usize;
-            if matches!(&self.document.boxes[child_idx].layout_mode, BoxType::Inline(_)) {
+            if self.document.is_inline_box(child_idx) {
                 continue;
             }
 
@@ -84,9 +86,9 @@ impl LayoutEngine {
                 pending_margin = CollapsedMargin::default();
             }
 
-            let child_indent = calculate_child_indent(&self.document.boxes[child_idx].layout_mode, &mut indent_remaining);
+            let child_indent = self.document.box_layout_mode(child_idx).map(|mode| calculate_child_indent(mode, &mut indent_remaining)).unwrap_or(0.0);
             let child_pos = position + Vec2::new(item.margin_left, y_offset);
-            self.document.boxes[child_idx].point = child_pos;
+            self.document.set_box_point(child_idx, child_pos);
             let child_size = self.layout_box(child_idx, available_width, parent_content_height, child_indent);
 
             max_width = max_width.max(child_size.width + item.horizontal_margin);
@@ -112,7 +114,7 @@ impl LayoutEngine {
 
     fn block_flow_item(&self, box_idx: usize) -> BlockFlowItem {
         let style = get_style(&self.document, box_idx);
-        let layout_mode = &self.document.boxes[box_idx].layout_mode;
+        let layout_mode = self.document.box_layout_mode(box_idx).expect("layout box should exist");
         let is_anonymous = matches!(layout_mode, BoxType::Anonymous(_));
         let has_children = match layout_mode {
             BoxType::Block(block) => !matches!(block.children, Children::Empty),
@@ -141,12 +143,12 @@ impl LayoutEngine {
             return result;
         }
 
-        let indices = match &self.document.boxes[box_idx].layout_mode {
-            BoxType::Block(block) => match &block.children {
+        let indices = match self.document.box_layout_mode(box_idx) {
+            Some(BoxType::Block(block)) => match &block.children {
                 Children::Blocks(v) => v.clone(),
                 _ => return result,
             },
-            BoxType::Table(table) => table.rows.clone(),
+            Some(BoxType::Table(table)) => table.rows.clone(),
             _ => return result,
         };
 
@@ -158,7 +160,7 @@ impl LayoutEngine {
             let mt = cs.margin_top() as f64;
             let mb = cs.margin_bottom() as f64;
             let (is_inline, is_anon, is_self_collapsing) = {
-                let mode = &self.document.boxes[child_idx].layout_mode;
+                let mode = self.document.box_layout_mode(child_idx).expect("layout box should exist");
                 (matches!(mode, BoxType::Inline(_)), matches!(mode, BoxType::Anonymous(_)), matches!(mode, BoxType::Block(b) if matches!(b.children, Children::Empty)) && child_top_open && child_bottom_open)
             };
 
@@ -196,12 +198,12 @@ impl LayoutEngine {
             return result;
         }
 
-        let indices = match &self.document.boxes[box_idx].layout_mode {
-            BoxType::Block(block) => match &block.children {
+        let indices = match self.document.box_layout_mode(box_idx) {
+            Some(BoxType::Block(block)) => match &block.children {
                 Children::Blocks(v) => v.clone(),
                 _ => return result,
             },
-            BoxType::Table(table) => table.rows.clone(),
+            Some(BoxType::Table(table)) => table.rows.clone(),
             _ => return result,
         };
 
@@ -213,7 +215,7 @@ impl LayoutEngine {
             let mt = cs.margin_top() as f64;
             let mb = cs.margin_bottom() as f64;
             let (is_inline, is_anon, is_self_collapsing) = {
-                let mode = &self.document.boxes[child_idx].layout_mode;
+                let mode = self.document.box_layout_mode(child_idx).expect("layout box should exist");
                 (matches!(mode, BoxType::Inline(_)), matches!(mode, BoxType::Anonymous(_)), matches!(mode, BoxType::Block(b) if matches!(b.children, Children::Empty)) && child_top_open && child_bottom_open)
             };
 

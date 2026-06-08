@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["ui-own"]
+default = ["ui-own", "theme-greco-futuristic"]
 ui-own = []
 ui-shadcn = []
+theme-library-serif = []
+theme-greco-futuristic = []
 
 [dependencies]
 floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}

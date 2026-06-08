@@ -21,7 +21,8 @@ create table if not exists dir(
     id              TEXT primary key,
     parent_id       TEXT not null references dir(id) on delete cascade,
     name            TEXT not null,
-    deleted_at      INTEGER
+    deleted_at      INTEGER,
+    CHECK (id != '__root__' OR deleted_at IS NULL)
 );
 
 -- name: insert_root!
@@ -48,8 +49,7 @@ create table if not exists event_log(
     payload         TEXT not null,
     timestamp       INTEGER not null,
     hlc_pt          INTEGER not null default 0,
-    hlc_l           INTEGER not null default 0,
-    event_kind      INTEGER not null
+    hlc_l           INTEGER not null default 0
 );
 
 -- name: create_sync_metadata_table!

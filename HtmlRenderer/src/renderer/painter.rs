@@ -1,10 +1,10 @@
 use floem::context::PaintCx;
 use floem::kurbo::{Point, Rect};
 use floem::peniko::Image as PenikoImage;
-use floem_renderer::Renderer;
-use floem_renderer::tiny_skia;
 use floem::prelude::Color;
 use floem::text::TextLayout;
+use floem_renderer::Renderer;
+use floem_renderer::tiny_skia;
 
 pub(crate) trait Painter {
     fn fill_rect(&mut self, rect: Rect, color: Color);

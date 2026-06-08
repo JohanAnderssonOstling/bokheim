@@ -43,11 +43,7 @@ pub fn resolve_thumbnail(book_id: BookID) -> Option<PathBuf> {
 }
 
 fn get_app_data_dir() -> PathBuf {
-    APP_DATA_DIR
-        .get_or_init(|| {
-            panic!("app data dir not initialized; call home::set_app_data_dir(...) before using backend")
-        })
-        .clone()
+    APP_DATA_DIR.get_or_init(|| panic!("app data dir not initialized; call home::set_app_data_dir(...) before using backend")).clone()
 }
 
 fn ensure_dir(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -92,11 +88,7 @@ pub fn create_library(name: String, root: Option<PathBuf>) -> Result<LibraryEntr
 
     ensure_dir(&library_root)?;
 
-    let entry = LibraryEntry {
-        library_id,
-        library_name: if name.trim().is_empty() { "Library".to_string() } else { name },
-        library_path: library_root.to_string_lossy().to_string(),
-    };
+    let entry = LibraryEntry { library_id, library_name: if name.trim().is_empty() { "Library".to_string() } else { name }, library_path: library_root.to_string_lossy().to_string() };
 
     append_library_entry(&csv_path, &entry)?;
     Ok(entry)

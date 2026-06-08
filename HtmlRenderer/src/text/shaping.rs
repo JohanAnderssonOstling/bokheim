@@ -1,20 +1,20 @@
-use crate::document::{Document, InlineKind, TextTransform, WhiteSpace};
+use crate::document::{DocumentState, InlineKind, TextTransform, WhiteSpace};
 use crate::layout::get_style;
 use crate::text::glyph_cache::GlyphCache;
 
 /// Shape all text in the document using computed styles.
 /// This collapses whitespace based on white-space mode, then
-/// replaces char codes in doc.box_tree.glyphs with actual glyph indices.
+/// replaces char codes in the document glyph buffer with actual glyph indices.
 /// Must be called after style resolution.
-pub fn shape_document(doc: &mut Document, glyph_cache: &mut GlyphCache) {
-    if doc.box_tree().glyphs.is_empty() {
+pub fn shape_document(doc: &mut DocumentState, glyph_cache: &mut GlyphCache) {
+    if doc.glyphs().is_empty() {
         return;
     }
 
     // First: collapse whitespace based on white_space style
     collapse_whitespace(doc);
 
-    if doc.box_tree().glyphs.is_empty() {
+    if doc.glyphs().is_empty() {
         return;
     }
 
@@ -46,7 +46,7 @@ pub fn shape_document(doc: &mut Document, glyph_cache: &mut GlyphCache) {
         let family = box_family[box_idx].as_deref();
 
         for i in range {
-            let char_code = doc.box_tree().glyphs[i as usize];
+            let char_code = doc.glyph_at(i as usize).unwrap_or('?' as u16);
             let mut c = char::from_u32(char_code as u32).unwrap_or('?');
 
             // Apply font variant small caps
@@ -72,18 +72,18 @@ pub fn shape_document(doc: &mut Document, glyph_cache: &mut GlyphCache) {
             }
 
             let glyph_idx = glyph_cache.shape_with_font_properties(c, font_size, font_weight, font_style, color, font_family_idx, family);
-            doc.box_tree_mut().glyphs[i as usize] = glyph_idx;
+            doc.glyphs_mut()[i as usize] = glyph_idx;
             prev_char = Some(c);
             prev_box = Some(box_idx);
         }
     }
 }
 
-/// Collapse whitespace in doc.box_tree.glyphs based on each character's box white_space style.
+/// Collapse whitespace in the document glyph buffer based on each character's box white_space style.
 /// Updates inline text run ranges to match the new glyph indices.
-fn collapse_whitespace(doc: &mut Document) {
-    let mut new_glyphs: Vec<u16> = Vec::with_capacity(doc.box_tree().glyphs.len());
-    let mut remap: Vec<u32> = vec![u32::MAX; doc.box_tree().glyphs.len()]; // old index -> new index
+fn collapse_whitespace(doc: &mut DocumentState) {
+    let mut new_glyphs: Vec<u16> = Vec::with_capacity(doc.glyphs().len());
+    let mut remap: Vec<u32> = vec![u32::MAX; doc.glyphs().len()]; // old index -> new index
 
     let mut prev_was_space = false;
     let mut at_line_start = true;
@@ -97,7 +97,7 @@ fn collapse_whitespace(doc: &mut Document) {
 
         for i in range {
             let i = i as usize;
-            let char_code = doc.box_tree().glyphs[i];
+            let char_code = doc.glyph_at(i).unwrap_or('?' as u16);
             let c = char::from_u32(char_code as u32).unwrap_or('?');
 
             if c == '\n' {
@@ -144,7 +144,7 @@ fn collapse_whitespace(doc: &mut Document) {
     }
 
     // Update inline text runs with new glyph ranges
-    for run in &mut doc.box_tree_mut().inline_runs {
+    for run in doc.inline_runs_mut() {
         let InlineKind::Text { glyphs } = &mut run.kind else {
             continue;
         };
@@ -176,5 +176,5 @@ fn collapse_whitespace(doc: &mut Document) {
         }
     }
 
-    doc.box_tree_mut().glyphs = new_glyphs;
+    doc.glyphs_mut().clone_from_slice(&new_glyphs);
 }

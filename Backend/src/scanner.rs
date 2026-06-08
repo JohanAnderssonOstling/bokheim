@@ -1,8 +1,8 @@
-use crate::home::get_app_data_thumbnails_dir;
 use crate::db::{derive_blob_state_from_local_tx, get_book_dir_by_hash, insert_book, insert_local_book_dir, update_book_metadata, upsert_blob_local_ref_tx, upsert_dir, BookDir};
 use crate::epub::get_epub_id_title_author;
-use crate::library::generate_thumbnail_to_app_data;
+use crate::home::get_app_data_thumbnails_dir;
 use crate::library::generate_book_id_blake3;
+use crate::library::generate_thumbnail_to_app_data;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -126,13 +126,7 @@ impl LibraryScanner {
         let thumbnail_state = Arc::clone(&state);
         let thumbnail_thread = thread::spawn(move || Self::thumbnail_worker_loop(thumbnail_state, thumbnail_rx, event_tx));
 
-        Self {
-            state,
-            watcher_thread: Some(watcher_thread),
-            worker_thread: Some(worker_thread),
-            thumbnail_thread: Some(thumbnail_thread),
-            hash_threads,
-        }
+        Self { state, watcher_thread: Some(watcher_thread), worker_thread: Some(worker_thread), thumbnail_thread: Some(thumbnail_thread), hash_threads }
     }
 
     fn scan_library(library_path: &str, db: &Pool<SqliteConnectionManager>, _event_tx: &Sender<LibraryEvent>, state: &Arc<ScannerState>) {
@@ -179,12 +173,7 @@ impl LibraryScanner {
                 let (book_dir, file_hash) = get_book_dir(&transaction, &entry);
                 match book_dir {
                     None => {
-                        let task = HashTask {
-                            parent_uuid: parent_uuid.to_string(),
-                            file_name: entry.file_name().to_string_lossy().to_string(),
-                            epub_path: entry.path().to_string_lossy().to_string(),
-                            file_hash,
-                        };
+                        let task = HashTask { parent_uuid: parent_uuid.to_string(), file_name: entry.file_name().to_string_lossy().to_string(), epub_path: entry.path().to_string_lossy().to_string(), file_hash };
                         let mut pending = state.pending_hash_jobs.lock().unwrap();
                         if pending.insert(file_hash) {
                             let _ = state.hash_queue.send(task);
@@ -246,15 +235,7 @@ impl LibraryScanner {
                 None => (None, None),
             };
 
-            let ready = HashReady {
-                parent_uuid: task.parent_uuid,
-                file_name: task.file_name,
-                epub_path: task.epub_path,
-                file_hash: task.file_hash,
-                book_hash,
-                title,
-                author,
-            };
+            let ready = HashReady { parent_uuid: task.parent_uuid, file_name: task.file_name, epub_path: task.epub_path, file_hash: task.file_hash, book_hash, title, author };
 
             if state.hash_result_queue.send(ready).is_err() {
                 break;
@@ -380,17 +361,10 @@ impl LibraryScanner {
         loop {
             match thumbnail_rx.recv_timeout(FLUSH_INTERVAL) {
                 Ok(task) => {
-                    let thumb_path = get_app_data_thumbnails_dir()
-                        .join(format!("{}.jpg", task.book_id))
-                        .to_string_lossy()
-                        .to_string();
+                    let thumb_path = get_app_data_thumbnails_dir().join(format!("{}.jpg", task.book_id)).to_string_lossy().to_string();
                     let generated_ok = generate_thumbnail_to_app_data(&task.epub_path, &task.book_id).is_ok();
                     let exists = Path::new(&thumb_path).exists();
-                    pending_updates.push(ThumbnailStateUpdate {
-                        hash: task.book_id.clone(),
-                        path: thumb_path,
-                        exists: generated_ok && exists,
-                    });
+                    pending_updates.push(ThumbnailStateUpdate { hash: task.book_id.clone(), path: thumb_path, exists: generated_ok && exists });
 
                     if generated_ok {
                         let _ = event_tx.send(LibraryEvent::ThumbnailGenerated { book_id: task.book_id });

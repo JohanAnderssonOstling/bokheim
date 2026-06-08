@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use scraper::{Html, Selector};
 
-use crate::document::{AnchorPosition, BoxType, Document, InlineKind};
+use crate::document::{AnchorPosition, DocumentState, InlineKind};
 use crate::layout;
-use crate::parser::{parse_html_document, DocumentFactory};
-use crate::resources::{probe_dimensions, EpubProvider, FileSystemProvider, ResourceProvider};
+use crate::parser::{DocumentFactory, parse_html_document};
+use crate::resources::{EpubProvider, FileSystemProvider, ResourceProvider, probe_dimensions};
 use crate::text::glyph_cache::GlyphCache;
 use crate::text::shaping as text_shaping;
 
@@ -24,7 +24,7 @@ pub(super) fn load_css_with_provider(provider: &dyn ResourceProvider, base_uri: 
     chunks
 }
 
-pub(super) fn load_document_with_dom_pipeline(provider: Arc<dyn ResourceProvider>, uri: &str, root_font_size: f32, col_width: f64) -> (Document, GlyphCache) {
+pub(super) fn load_document_with_dom_pipeline(provider: Arc<dyn ResourceProvider>, uri: &str, root_font_size: f32, col_width: f64) -> (DocumentState, GlyphCache) {
     // 1. Load HTML
     let html = provider.read_string(uri).expect("Failed to load HTML");
     // 2. Parse the HTML once; title, embedded CSS, and the DOM all derive from it.
@@ -42,15 +42,15 @@ pub(super) fn load_document_with_dom_pipeline(provider: Arc<dyn ResourceProvider
     factory.set_base_uri(uri);
     // Root font size must be set before style resolution so rem/em-based
     // computed font sizes and subsequent glyph shaping use the requested value.
-    factory.document.root_font_size = root_font_size;
+    factory.document.set_root_font_size(root_font_size);
     let css_refs: Vec<&str> = css_chunks.iter().map(String::as_str).collect();
     let mut document = factory.build_pipeline_from_parsed(&parsed_html, &css_refs);
 
     // 6. Set document metadata
-    document.title = title;
-    document.root_font_size = root_font_size;
+    document.set_title(title);
+    document.set_root_font_size(root_font_size);
     // 7. Probe image dimensions (reusable)
-    for image in &mut document.images {
+    for image in document.images_mut() {
         if image.width == 0 || image.height == 0 {
             if let Some((w, h)) = probe_dimensions(provider.as_ref(), &image.source) {
                 image.width = w;
@@ -87,7 +87,7 @@ pub(super) fn load_document_with_dom_pipeline(provider: Arc<dyn ResourceProvider
     (document, glyph_cache)
 }
 
-pub(crate) fn load_document(provider: Arc<dyn ResourceProvider>, uri: &str, root_font_size: f32, col_width: f64) -> (Document, GlyphCache) {
+pub(crate) fn load_document(provider: Arc<dyn ResourceProvider>, uri: &str, root_font_size: f32, col_width: f64) -> (DocumentState, GlyphCache) {
     // Use the new DOM-based pipeline
     load_document_with_dom_pipeline(provider, uri, root_font_size, col_width)
 }
@@ -103,31 +103,31 @@ fn extract_title(doc: &Html) -> Option<String> {
     None
 }
 
-pub(super) fn build_anchor_positions(document: &mut Document) {
-    document.layout.anchor_positions.clear();
-    if document.box_tree.boxes.is_empty() {
+pub(super) fn build_anchor_positions(document: &mut DocumentState) {
+    document.anchor_positions_mut().clear();
+    if document.box_count() == 0 {
         return;
     }
-    for box_idx in 0..document.box_tree.boxes.len() {
+    for box_idx in 0..document.box_count() {
         let Some(id_idx) = document.get_box_id(box_idx) else { continue };
         let mut pos_y = None;
-        if let Some(glyph_idx) = document.anchor_glyphs.get(&id_idx).copied() {
+        if let Some(glyph_idx) = document.anchor_glyph(id_idx) {
             pos_y = line_y_for_glyph(document, glyph_idx);
         }
         if pos_y.is_none() {
             let mut current = Some(box_idx);
             while let Some(idx) = current {
-                let node = &document.box_tree.boxes[idx];
-                if node.size.height > 0.0 || node.point.y != 0.0 {
-                    pos_y = Some(node.point.y);
+                if let Some(y) = document.box_anchor_y_candidate(idx) {
+                    pos_y = Some(y);
                     break;
                 }
-                current = node.parent.map(|p| p as usize);
+                current = document.get_parent(idx);
             }
         }
         let Some(pos_y) = pos_y else { continue };
-        let order = document.anchor_glyphs.get(&id_idx).copied().unwrap_or(box_idx as u32);
-        match document.layout.anchor_positions.get_mut(&id_idx) {
+        let order = document.anchor_glyph(id_idx).unwrap_or(box_idx as u32);
+        let positions = document.anchor_positions_mut();
+        match positions.get_mut(&id_idx) {
             Some(existing) => {
                 if pos_y < existing.y || (pos_y == existing.y && order < existing.order) {
                     existing.y = pos_y;
@@ -135,14 +135,14 @@ pub(super) fn build_anchor_positions(document: &mut Document) {
                 }
             }
             None => {
-                document.layout.anchor_positions.insert(id_idx, AnchorPosition { y: pos_y, order });
+                positions.insert(id_idx, AnchorPosition { y: pos_y, order });
             }
         }
     }
 }
 
-fn line_y_for_glyph(document: &Document, glyph_idx: u32) -> Option<f64> {
-    for line in &document.layout.lines {
+fn line_y_for_glyph(document: &DocumentState, glyph_idx: u32) -> Option<f64> {
+    for line in document.lines() {
         if line.glyphs.start <= glyph_idx && glyph_idx < line.glyphs.end {
             return Some(line.point.y);
         }
@@ -150,10 +150,11 @@ fn line_y_for_glyph(document: &Document, glyph_idx: u32) -> Option<f64> {
     None
 }
 
-fn build_link_glyph_hrefs(document: &mut Document) {
-    document.link_glyph_hrefs.clear();
+fn build_link_glyph_hrefs(document: &mut DocumentState) {
+    document.clear_link_glyph_hrefs();
 
-    for run in &document.box_tree.inline_runs {
+    let mut links = Vec::new();
+    for run in document.inline_runs() {
         let InlineKind::Text { glyphs } = &run.kind else {
             continue;
         };
@@ -168,27 +169,31 @@ fn build_link_glyph_hrefs(document: &mut Document) {
                 href_idx = Some(href);
                 break;
             }
-            current = document.box_tree.boxes[box_idx].parent.map(|p| p as usize);
+            current = document.get_parent(box_idx);
         }
 
         let Some(href_idx) = href_idx else {
             continue;
         };
 
+        links.push((glyphs.clone(), href_idx));
+    }
+
+    for (glyphs, href_idx) in links {
         for glyph_idx in glyphs.clone() {
-            document.link_glyph_hrefs.insert(glyph_idx, href_idx);
+            document.insert_link_glyph_href(glyph_idx, href_idx);
         }
     }
 }
 
-fn build_anchor_glyphs(document: &mut Document) {
-    document.anchor_glyphs.clear();
-    if document.box_tree.boxes.is_empty() {
+fn build_anchor_glyphs(document: &mut DocumentState) {
+    document.clear_anchor_glyphs();
+    if document.box_count() == 0 {
         return;
     }
 
-    let mut min_glyphs: Vec<Option<u32>> = vec![None; document.box_tree.boxes.len()];
-    for run in &document.box_tree.inline_runs {
+    let mut min_glyphs: Vec<Option<u32>> = vec![None; document.box_count()];
+    for run in document.inline_runs() {
         let InlineKind::Text { glyphs } = &run.kind else {
             continue;
         };
@@ -201,21 +206,19 @@ fn build_anchor_glyphs(document: &mut Document) {
             if entry.map_or(true, |existing| glyphs.start < existing) {
                 *entry = Some(glyphs.start);
             }
-            current = document.box_tree.boxes[idx].parent.map(|p| p as usize);
+            current = document.get_parent(idx);
         }
     }
 
-    for box_idx in 0..document.box_tree.boxes.len() {
+    for box_idx in 0..document.box_count() {
         if document.get_box_id(box_idx).is_none() || min_glyphs[box_idx].is_some() {
             continue;
         }
-        let BoxType::Inline(range) = &document.box_tree.boxes[box_idx].layout_mode else {
-            continue;
-        };
+        let Some(range) = document.box_inline_run_range(box_idx) else { continue };
         let run_idx = range.start as usize;
         let anchor_block = block_ancestor_idx(document, box_idx);
         let mut found = None;
-        for run in document.box_tree.inline_runs[run_idx..].iter() {
+        for run in document.inline_runs().get(run_idx..).into_iter().flatten() {
             let InlineKind::Text { glyphs } = &run.kind else { continue };
             if glyphs.start < glyphs.end {
                 let run_block = block_ancestor_idx(document, run.box_idx as usize);
@@ -226,7 +229,7 @@ fn build_anchor_glyphs(document: &mut Document) {
             }
         }
         if found.is_none() {
-            for run in document.box_tree.inline_runs[..run_idx].iter().rev() {
+            for run in document.inline_runs().get(..run_idx).into_iter().flatten().rev() {
                 let InlineKind::Text { glyphs } = &run.kind else { continue };
                 if glyphs.start < glyphs.end {
                     let run_block = block_ancestor_idx(document, run.box_idx as usize);
@@ -242,22 +245,21 @@ fn build_anchor_glyphs(document: &mut Document) {
         }
     }
 
-    for idx in 0..document.box_tree.boxes.len() {
+    for idx in 0..document.box_count() {
         let Some(id_idx) = document.get_box_id(idx) else { continue };
         if let Some(glyph_idx) = min_glyphs[idx] {
-            document.anchor_glyphs.insert(id_idx, glyph_idx);
+            document.insert_anchor_glyph(id_idx, glyph_idx);
         }
     }
 }
 
-fn block_ancestor_idx(document: &Document, box_idx: usize) -> Option<usize> {
+fn block_ancestor_idx(document: &DocumentState, box_idx: usize) -> Option<usize> {
     let mut current = Some(box_idx);
     while let Some(idx) = current {
-        let node = &document.box_tree.boxes[idx];
-        if matches!(node.layout_mode, BoxType::Block(_) | BoxType::Table(_) | BoxType::TableCell(_)) {
+        if document.is_block_container_box(idx) {
             return Some(idx);
         }
-        current = node.parent.map(|p| p as usize);
+        current = document.get_parent(idx);
     }
     None
 }
@@ -310,11 +312,10 @@ mod tests {
         shape_document(&mut document, &mut glyph_cache);
         build_link_glyph_hrefs(&mut document);
 
-        let href_idx = document.strings.lookup("chapter2.xhtml#target").expect("href should be interned");
-        let span_idx = (0..document.box_tree.boxes.len()).find(|&i| document.get_tag(i) == "span").expect("span box should exist");
+        let href_idx = document.lookup_string("chapter2.xhtml#target").expect("href should be interned");
+        let span_idx = (0..document.box_count()).find(|&i| document.get_tag(i) == "span").expect("span box should exist");
         let glyphs = document
-            .box_tree
-            .inline_runs
+            .inline_runs()
             .iter()
             .find_map(|run| match &run.kind {
                 InlineKind::Text { glyphs } if run.box_idx as usize == span_idx => Some(glyphs.clone()),
@@ -324,7 +325,7 @@ mod tests {
 
         assert!(glyphs.start < glyphs.end, "span text should produce glyphs");
         for glyph_idx in glyphs {
-            assert_eq!(document.link_glyph_hrefs.get(&glyph_idx).copied(), Some(href_idx));
+            assert_eq!(document.link_href_for_glyph(glyph_idx), Some(href_idx));
         }
     }
 
@@ -356,12 +357,7 @@ mod tests {
             }
         }
 
-        let provider = TestProvider {
-            files: HashMap::from([
-                ("base.css?v=1".to_string(), "p { color: red; }".to_string()),
-                ("override.css".to_string(), "p { color: green; }".to_string()),
-            ]),
-        };
+        let provider = TestProvider { files: HashMap::from([("base.css?v=1".to_string(), "p { color: red; }".to_string()), ("override.css".to_string(), "p { color: green; }".to_string())]) };
         let html = r#"
             <html><head>
                 <link rel="preload StyleSheet" type="Text/CSS; charset=utf-8" href="base.css?v=1">

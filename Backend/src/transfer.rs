@@ -322,6 +322,6 @@ async fn download_thumbnail(client: &Client, server_url: &str, db_pool: &DbPool,
     Ok(())
 }
 
-fn thumbnail_path_from_content_hash(library_path: &str, content_hash: &str) -> String {
+pub(crate) fn thumbnail_path_from_content_hash(library_path: &str, content_hash: &str) -> String {
     Path::new(library_path).join(".biblos").join("thumbnails").join(format!("{content_hash}.png")).to_string_lossy().into_owned()
 }

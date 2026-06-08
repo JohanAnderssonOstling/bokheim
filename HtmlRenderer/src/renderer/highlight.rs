@@ -22,7 +22,7 @@ impl HTMLRenderer {
         // Collect (lowercased_char, glyph_index) for every glyph
         let glyph_chars: Vec<char> = self
             .document
-            .glyphs
+            .glyphs()
             .iter()
             .map(|&idx| {
                 let ch = self.glyph_cache.get_char(idx);
@@ -58,7 +58,7 @@ impl HTMLRenderer {
             self.id.request_paint();
             return;
         }
-        let line_y = self.document.lines[line_idx].point.y;
+        let line_y = self.document.lines()[line_idx].point.y;
         self.viewport.start_offset_y = (line_y - 40.0).max(0.0);
         self.viewport.direction = PaintDirection::Forward;
         self.id.request_paint();

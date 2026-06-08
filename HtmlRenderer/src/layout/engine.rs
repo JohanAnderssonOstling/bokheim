@@ -1,12 +1,11 @@
-use crate::document::{BorderStyle, BoxType, Children, DecorationFragment, Document, GlyphOffsetRun, InlineKind, Line, StyleView};
+use crate::document::{Document, DocumentState, GlyphOffsetRun, LayoutCache, Line, StyleView};
 use crate::text::glyph_cache::GlyphCache;
-use floem::kurbo::{Point, Rect};
+use floem::kurbo::Point;
 use std::mem;
-use std::ops::Range;
 
 /// Get computed style for a box using split style vecs
 /// Returns a StyleView with references into the document's style storage
-pub(crate) fn get_style<'a>(doc: &'a Document, box_idx: usize) -> StyleView<'a> {
+pub(crate) fn get_style<'a>(doc: &'a DocumentState, box_idx: usize) -> StyleView<'a> {
     let indices = doc.box_style_indices(box_idx).unwrap_or_else(|| {
         // Fallback for boxes without split styles (shouldn't happen after migration)
         // Use default indices (index 0 guaranteed to exist from ensure_default_styles)
@@ -16,157 +15,20 @@ pub(crate) fn get_style<'a>(doc: &'a Document, box_idx: usize) -> StyleView<'a> 
     doc.style_view(indices)
 }
 
-fn push_border_rects(doc: &mut Document, rect: Rect, border_width: f64, color: u32, is_inline: bool) {
-    let bw = border_width.min(rect.width().min(rect.height()));
-    let x0 = rect.x0;
-    let x1 = rect.x1;
-    let y0 = rect.y0;
-    let y1 = rect.y1;
-    let top = Rect::new(x0, y0, x1, y0 + bw);
-    let bottom = Rect::new(x0, y1 - bw, x1, y1);
-    let left = Rect::new(x0, y0, x0 + bw, y1);
-    let right = Rect::new(x1 - bw, y0, x1, y1);
-    for rect in [top, right, bottom, left] {
-        doc.layout_mut().decorations.push(DecorationFragment { rect, color, is_inline });
-    }
-}
-
-fn uniform_solid_border_width(style: &StyleView) -> f64 {
-    matches!(style.border_top_style(), BorderStyle::Solid).then_some(style.border_top_width() as f64).unwrap_or(0.0)
-}
-
-fn paint_block_borders(doc: &mut Document, rect: Rect, top: Option<(f64, u32)>, right: Option<(f64, u32)>, bottom: Option<(f64, u32)>, left: Option<(f64, u32)>) {
-    if let Some((w, c)) = top {
-        let h = w.min(rect.height());
-        if h > 0.0 {
-            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x1, rect.y0 + h), color: c, is_inline: false });
-        }
-    }
-    if let Some((w, c)) = right {
-        let bw = w.min(rect.width());
-        if bw > 0.0 {
-            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x1 - bw, rect.y0, rect.x1, rect.y1), color: c, is_inline: false });
-        }
-    }
-    if let Some((w, c)) = bottom {
-        let h = w.min(rect.height());
-        if h > 0.0 {
-            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y1 - h, rect.x1, rect.y1), color: c, is_inline: false });
-        }
-    }
-    if let Some((w, c)) = left {
-        let bw = w.min(rect.width());
-        if bw > 0.0 {
-            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x0 + bw, rect.y1), color: c, is_inline: false });
-        }
-    }
-}
-
-pub(crate) struct ListMarkerHelper<'a> {
-    doc: &'a Document,
-    cache: &'a GlyphCache,
-}
-
-impl<'a> ListMarkerHelper<'a> {
-    pub(crate) fn new(doc: &'a Document, cache: &'a GlyphCache) -> Self {
-        Self { doc, cache }
-    }
-
-    pub(crate) fn width_for_box(&self, box_idx: usize) -> f64 {
-        if self.has_table_ancestor(box_idx) {
-            return 0.0;
-        }
-        if !self.has_list_ancestor(box_idx) {
-            return 0.0;
-        }
-        let run_range = match self.doc.box_layout_mode(box_idx) {
-            Some(BoxType::Block(block)) => match &block.children {
-                Children::Runs(range) => Some(range.clone()),
-                _ => None,
-            },
-            Some(BoxType::TableCell(cell)) => match &cell.children {
-                Children::Runs(range) => Some(range.clone()),
-                _ => None,
-            },
-            Some(BoxType::Inline(range) | BoxType::Anonymous(range)) => Some(range.clone()),
-            Some(BoxType::Table(_) | BoxType::TableRow(_)) | None => None,
-        };
-        let Some(run_range) = run_range else {
-            return 0.0;
-        };
-        self.marker_width_from_runs(run_range)
-    }
-
-    fn marker_width_from_runs(&self, run_range: Range<u32>) -> f64 {
-        let first_run = match self.doc.inline_run(run_range.start as usize) {
-            Some(run) => run,
-            None => return 0.0,
-        };
-        let InlineKind::Text { glyphs } = &first_run.kind else {
-            return 0.0;
-        };
-        if glyphs.start >= glyphs.end {
-            return 0.0;
-        }
-        let marker_chars: Vec<_> = glyphs.clone().filter_map(|i| self.doc.glyph(i)).map(|glyph| self.cache.get_char(glyph)).collect();
-        if marker_chars.is_empty() {
-            return 0.0;
-        }
-        if !marker_chars.last().map(|c| *c == ' ').unwrap_or(false) {
-            return 0.0;
-        }
-        if marker_chars.iter().any(|c| c.is_alphabetic()) {
-            return 0.0;
-        }
-        for c in &marker_chars {
-            if !(c.is_ascii_digit() || *c == '-' || *c == '.' || *c == ' ') {
-                return 0.0;
-            }
-        }
-        glyphs.clone().filter_map(|i| self.doc.glyph(i)).map(|glyph| self.cache.get(glyph).size().width).sum()
-    }
-
-    fn has_list_ancestor(&self, box_idx: usize) -> bool {
-        let mut current = Some(box_idx);
-        while let Some(idx) = current {
-            if self.doc.get_tag(idx).eq_ignore_ascii_case("li") {
-                return true;
-            }
-            current = self.doc.get_parent(idx);
-        }
-        false
-    }
-
-    fn has_table_ancestor(&self, box_idx: usize) -> bool {
-        let mut current = Some(box_idx);
-        while let Some(idx) = current {
-            if self.doc.get_tag(idx).eq_ignore_ascii_case("table") || self.doc.get_tag(idx).eq_ignore_ascii_case("tr") || self.doc.get_tag(idx).eq_ignore_ascii_case("td") || self.doc.get_tag(idx).eq_ignore_ascii_case("th") {
-                return true;
-            }
-            current = self.doc.get_parent(idx);
-        }
-        false
-    }
-}
-
-pub(crate) fn list_marker_width(doc: &Document, cache: &GlyphCache, box_idx: usize) -> f64 {
-    ListMarkerHelper::new(doc, cache).width_for_box(box_idx)
-}
-
 pub struct LayoutEngine {
     pub viewport_width: f64,
     pub line_height: f64,
     pub force_justify: bool,
-    pub(crate) document: Document,
+    pub(crate) document: DocumentState,
     pub(crate) glyph_cache: GlyphCache,
 }
 
 impl LayoutEngine {
     pub fn new(viewport_width: f64, line_height: f64) -> Self {
-        Self { viewport_width, line_height, force_justify: false, document: Document::new(), glyph_cache: GlyphCache::new() }
+        Self { viewport_width, line_height, force_justify: false, document: DocumentState::new(Document::new(), Default::default()), glyph_cache: GlyphCache::new() }
     }
 
-    pub fn layout(&mut self, document: Document, glyph_cache: GlyphCache) -> (Document, GlyphCache) {
+    pub fn layout(&mut self, document: DocumentState, glyph_cache: GlyphCache) -> (DocumentState, GlyphCache) {
         self.document = document;
         self.glyph_cache = glyph_cache;
         self.clear_layout_output();
@@ -181,8 +43,16 @@ impl LayoutEngine {
         (mem::take(&mut self.document), mem::take(&mut self.glyph_cache))
     }
 
+    pub(crate) fn layout_cache(&self) -> &LayoutCache {
+        self.document.layout()
+    }
+
+    pub(crate) fn layout_cache_mut(&mut self) -> &mut LayoutCache {
+        self.document.layout_mut()
+    }
+
     fn clear_layout_output(&mut self) {
-        let layout = self.document.layout_mut();
+        let layout = self.layout_cache_mut();
         layout.lines.clear();
         layout.line_glyph_offsets.clear();
         layout.decorations.clear();
@@ -191,7 +61,7 @@ impl LayoutEngine {
     }
 
     fn sort_lines_and_remap_images(&mut self) {
-        let layout = self.document.layout_mut();
+        let layout = self.layout_cache_mut();
         let mut offsets_by_line: Vec<Vec<GlyphOffsetRun>> = layout.line_glyph_offsets.drain(..).collect();
         let mut line_pairs: Vec<(Line, Vec<GlyphOffsetRun>, usize)> = layout.lines.drain(..).enumerate().map(|(idx, line)| (line, offsets_by_line.get_mut(idx).map(mem::take).unwrap_or_default(), idx)).collect();
 
@@ -211,202 +81,12 @@ impl LayoutEngine {
     }
 
     fn rebuild_image_fragments_by_line(&mut self) {
-        let layout = self.document.layout_mut();
+        let layout = self.layout_cache_mut();
         layout.image_fragments_by_line = vec![Vec::new(); layout.lines.len()];
         for (idx, frag) in layout.image_fragments.iter().enumerate() {
             if let Some(line) = layout.image_fragments_by_line.get_mut(frag.line_idx) {
                 line.push(idx);
             }
-        }
-    }
-
-    pub(crate) fn emit_block_background(&mut self, box_idx: usize) {
-        let style = get_style(&self.document, box_idx);
-        let background_color = style.background_color();
-        if background_color & 0xFF == 0 {
-            return;
-        }
-
-        let margin_left = style.margin_left() as f64;
-        let margin_right = style.margin_right() as f64;
-        let margin_top = style.margin_top() as f64;
-        let margin_bottom = style.margin_bottom() as f64;
-
-        let size = self.document.get_box_size(box_idx);
-        let point = self.document.get_box_point(box_idx);
-        let width = (size.width - margin_left - margin_right).max(0.0);
-        let height = (size.height - margin_top - margin_bottom).max(0.0);
-        let rect = Rect::new(point.x, point.y, point.x + width, point.y + height);
-        self.document.layout_mut().decorations.push(DecorationFragment { rect, color: background_color, is_inline: false });
-    }
-
-    pub(crate) fn emit_block_decorations(&mut self, box_idx: usize) {
-        // Extract all style values before mutable operations
-        let style = get_style(&self.document, box_idx);
-        let border_width = uniform_solid_border_width(&style);
-        let top_border = matches!(style.border_top_style(), BorderStyle::Solid).then_some((style.border_top_width() as f64, style.border_top_color()));
-        let right_border = matches!(style.border_right_style(), BorderStyle::Solid).then_some((style.border_right_width() as f64, style.border_right_color()));
-        let bottom_border = matches!(style.border_bottom_style(), BorderStyle::Solid).then_some((style.border_bottom_width() as f64, style.border_bottom_color()));
-        let left_border = matches!(style.border_left_style(), BorderStyle::Solid).then_some((style.border_left_width() as f64, style.border_left_color()));
-        let has_any_border = top_border.is_some() || right_border.is_some() || bottom_border.is_some() || left_border.is_some();
-        let margin_left = style.margin_left() as f64;
-        let margin_right = style.margin_right() as f64;
-        let margin_top = style.margin_top() as f64;
-        let margin_bottom = style.margin_bottom() as f64;
-
-        let size = self.document.get_box_size(box_idx);
-        let point = self.document.get_box_point(box_idx);
-        let width = (size.width - margin_left - margin_right).max(0.0);
-        let height = (size.height - margin_top - margin_bottom).max(0.0);
-
-        let x0 = point.x;
-        let y0 = point.y;
-        let x1 = x0 + width;
-        let y1 = y0 + height;
-        let rect = Rect::new(x0, y0, x1, y1);
-
-        self.emit_block_background(box_idx);
-
-        if border_width > 0.0 || has_any_border {
-            paint_block_borders(&mut self.document, rect, top_border, right_border, bottom_border, left_border);
-        }
-    }
-
-    fn collect_inline_decorations(&mut self) {
-        if self.document.layout().lines.is_empty() || self.document.inline_runs_empty() {
-            return;
-        }
-
-        // Inline text runs in ascending, contiguous glyph order. A glyph's owning
-        // box is derived from these runs (one entry per run) instead of a
-        // per-glyph map.
-        let text_runs = self.document.text_runs();
-
-        let inline_ancestors = self.build_inline_ancestor_map();
-        let mut active = vec![false; self.document.box_count()];
-        let mut active_start = vec![0.0f64; self.document.box_count()];
-        let mut active_indices: Vec<u32> = Vec::new();
-        let mut marked = vec![false; self.document.box_count()];
-
-        for line in self.document.layout().lines.clone() {
-            for &b in &active_indices {
-                active[b as usize] = false;
-            }
-            active_indices.clear();
-
-            // Run containing this line's first glyph; advanced monotonically as
-            // we walk the line left to right.
-            let mut run_cursor = text_runs.partition_point(|(_, range)| range.end <= line.glyphs.start);
-
-            let mut x = line.point.x;
-            for i in line.glyphs.clone() {
-                while run_cursor < text_runs.len() && text_runs[run_cursor].1.end <= i {
-                    run_cursor += 1;
-                }
-                // Glyphs outside any text run contribute no inline ancestors,
-                // matching the old map's behavior for uncovered glyphs.
-                let boxes: &[u32] = match text_runs.get(run_cursor) {
-                    Some((box_idx, range)) if range.start <= i => &inline_ancestors[*box_idx],
-                    _ => &[],
-                };
-
-                for &b in boxes {
-                    let b_idx = b as usize;
-                    marked[b_idx] = true;
-                    if !active[b_idx] {
-                        active[b_idx] = true;
-                        active_start[b_idx] = x;
-                        active_indices.push(b);
-                    }
-                }
-
-                if !active_indices.is_empty() {
-                    let mut next_active: Vec<u32> = Vec::with_capacity(active_indices.len());
-                    for &b in &active_indices {
-                        let b_idx = b as usize;
-                        if marked[b_idx] {
-                            next_active.push(b);
-                        } else {
-                            self.emit_inline_segment(b_idx, &line, active_start[b_idx], x);
-                            active[b_idx] = false;
-                        }
-                    }
-                    active_indices = next_active;
-                }
-
-                for &b in boxes {
-                    marked[b as usize] = false;
-                }
-
-                let Some(glyph_index) = self.document.glyph(i) else {
-                    continue;
-                };
-                let layout = self.glyph_cache.get(glyph_index);
-                x += layout.size().width;
-            }
-
-            for &b in &active_indices {
-                let b_idx = b as usize;
-                self.emit_inline_segment(b_idx, &line, active_start[b_idx], x);
-                active[b_idx] = false;
-            }
-            active_indices.clear();
-        }
-    }
-
-    fn build_inline_ancestor_map(&self) -> Vec<Vec<u32>> {
-        let mut result = vec![Vec::new(); self.document.box_count()];
-        for i in 0..self.document.box_count() {
-            let mut current = Some(i);
-            let mut ancestors = Vec::new();
-            while let Some(idx) = current {
-                if self.document.is_inline_box(idx) {
-                    ancestors.push(idx as u32);
-                }
-                current = self.document.get_parent(idx);
-            }
-            result[i] = ancestors;
-        }
-        result
-    }
-
-    fn emit_inline_segment(&mut self, box_idx: usize, line: &Line, start_x: f64, end_x: f64) {
-        if start_x >= end_x {
-            return;
-        }
-        if !self.document.is_inline_box(box_idx) {
-            return;
-        }
-
-        // Extract all style values before mutable operations
-        let style = get_style(&self.document, box_idx);
-        let background_color = style.background_color();
-        let color_alpha = background_color & 0xFF;
-        let border_width = uniform_solid_border_width(&style);
-        let pad_left = style.padding_left() as f64;
-        let pad_right = style.padding_right() as f64;
-        let pad_top = style.padding_top() as f64;
-        let pad_bottom = style.padding_bottom() as f64;
-        let border_top_color = style.border_top_color();
-
-        if color_alpha == 0 && border_width <= 0.0 {
-            return;
-        }
-
-        let x0 = start_x - pad_left - border_width;
-        let x1 = end_x + pad_right + border_width;
-        let y0 = line.point.y - pad_top - border_width;
-        let y1 = line.point.y + line.height + pad_bottom + border_width;
-        if x1 <= x0 || y1 <= y0 {
-            return;
-        }
-
-        let rect = Rect::new(x0, y0, x1, y1);
-        if color_alpha != 0 {
-            self.document.layout_mut().decorations.push(DecorationFragment { rect, color: background_color, is_inline: true });
-        }
-        if border_width > 0.0 {
-            push_border_rects(&mut self.document, rect, border_width, border_top_color, true);
         }
     }
 }

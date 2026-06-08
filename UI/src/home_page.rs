@@ -1,19 +1,21 @@
 use crate::auth_view::{account_button, auth_modal};
-use crate::components::labels::{create_header_label, create_label_background, create_padded_label};
-use crate::components::page_views::{create_overlay_scrim, create_switcher_select_button};
-use crate::components::stacks::{create_button_group, create_full_stack, create_list, create_list_header, create_top_row};
-use crate::components::{add_library_button, create_button, create_danger_button};
+use crate::components::labels::{create_label_background, create_padded_label};
+use crate::components::page_views::{
+    create_overlay_scrim, create_switcher_select_button, dialog_action_button, full_page_container, full_page_stack, switcher_header,
+    switcher_item_row, switcher_list, switcher_overlay_content, switcher_panel, switcher_rows, switcher_title, top_bar, top_bar_group,
+};
+use crate::components::{add_library_button, create_danger_button, create_dialog_button};
 use crate::functions::add_library_on_click;
 use crate::library_page::LibraryState;
 use crate::page_navigation::Signals;
-use crate::style::{BORDER_COLOR, SUBTLE_TEXT, TITLE_FONT_FAMILY, WHITE_SURFACE};
+use crate::style::{theme_button_label, toggle_theme};
 use epub_svelte_lib::home::remove_library;
 use floem::action::inspect;
 use floem::event::EventPropagation;
 use floem::keyboard::{Key, Modifiers, NamedKey};
-use floem::prelude::{button, container, create_rw_signal, dyn_view, h_stack, label, v_stack, Decorators, RwSignal, ScrollExt, SignalGet, SignalUpdate, SignalWith};
+use floem::prelude::{create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::stack_from_iter;
-use floem::{IntoView, View};
+use floem::View;
 
 pub fn home_view(signals: Signals) -> impl View {
     if let Some(first) = signals.libraries.get_untracked().first() {
@@ -31,18 +33,16 @@ pub fn home_view(signals: Signals) -> impl View {
     let auth_overlay = auth_modal(signals.clone(), show_auth_modal);
 
     let signals_for_content = signals.clone();
-    let content_view = dyn_view(move || match signals_for_content.active_library_id.get() {
+    let content_view = full_page_container(dyn_view(move || match signals_for_content.active_library_id.get() {
         None => Box::new(create_padded_label("Add a library to get started".to_string())) as Box<dyn View>,
         Some(id) => match signals_for_content.library_by_id(&id) {
             Some(state) => Box::new(state.library_view(signals_for_content.clone())) as Box<dyn View>,
             None => Box::new(create_padded_label("Library not found".to_string())) as Box<dyn View>,
         },
-    })
-    .style(|s| s.width_full().height_full().flex_col().flex_grow(1.0).min_height(0).min_width(0));
+    }));
     let signals_for_l = signals.clone();
     let signals_for_enter = signals.clone();
-    let home_root = create_full_stack((top_bar, content_view, switcher_overlay, auth_overlay))
-        .style(|s| s.width_full().height_full().flex_col().flex_grow(1.0).min_height(0).min_width(0))
+    let home_root = full_page_stack((top_bar, content_view, switcher_overlay, auth_overlay))
         .on_key_down(
             Key::Character("l".into()),
             |mods: Modifiers| mods.control(),
@@ -101,27 +101,25 @@ fn create_top_bar(signals: Signals, show_switcher: RwSignal<bool>, selected_swit
     let signals_for_button = signals.clone();
     let signals_for_account = signals.clone();
     let active_name_signal = signals.clone();
-    let switcher_button = button(label(move || active_name_signal.active_library_name()))
-        .style(|s| s.height(36))
+    let switcher_button = dialog_action_button(label(move || active_name_signal.active_library_name()))
         .on_click(move |_| {
             toggle_switcher(show_switcher, selected_switcher_index, signals_for_button.clone());
             EventPropagation::Continue
         });
-    let inspect_button = create_button("Inspect".to_string()).style(|s| s.height(36)).on_click(move |_| {
+    let theme_button = dialog_action_button(label(theme_button_label)).on_click(move |_| {
+        toggle_theme();
+        EventPropagation::Continue
+    });
+    let inspect_button = create_dialog_button("Inspect").on_click(move |_| {
         inspect();
         EventPropagation::Continue
     });
-    let left_group = create_button_group((switcher_button, inspect_button)).style(|s| s.gap(8).padding_horiz(16).padding_vert(10));
+    let left_group = top_bar_group((switcher_button, theme_button, inspect_button));
     let account = account_button(signals_for_account, show_auth_modal);
-    let row = h_stack((
-        container(left_group).style(|s| s.flex_grow(1.0)),
-        container(account).style(|s| s.padding_horiz(16).padding_vert(10).justify_end()),
-    ))
-    .style(|s| s.width_full().items_center());
-    create_top_row(row).style(|s| s.width_full().flex_shrink(0.0).border_bottom(1).border_color(BORDER_COLOR).background(WHITE_SURFACE))
+    top_bar(left_group, account)
 }
 
-fn create_switcher_item(index: usize, library: LibraryState, signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>) -> impl IntoView {
+fn create_switcher_item(index: usize, library: LibraryState, signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>) -> impl View {
     let name = library.meta.name.clone();
     let library_id = library.meta.id.clone();
     let signals_for_select = signals.clone();
@@ -132,8 +130,7 @@ fn create_switcher_item(index: usize, library: LibraryState, signals: Signals, s
     let delete_button = create_danger_button("Delete")
         .style(|s| s.width(88).height(36).flex_shrink(0.0))
         .on_click(on_delete_library(library.meta.path.clone(), library_id, signals));
-    h_stack((select_button.style(|s| s.flex_grow(1.0).height(36).justify_start().padding_horiz(12)), delete_button))
-        .style(|s| s.width_full().gap(8).align_items(floem::style::AlignItems::Center))
+    switcher_item_row(select_button.style(|s| s.flex_grow(1.0).height(36).justify_start().padding_horiz(12)), delete_button)
 }
 
 fn create_switcher_overlay(signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>) -> impl View {
@@ -148,34 +145,13 @@ fn create_switcher_overlay(signals: Signals, show_switcher: RwSignal<bool>, sele
                 .into_iter()
                 .enumerate()
                 .map(move |(idx, library)| create_switcher_item(idx, library, signals_for_iter.clone(), show_switcher, selected_switcher_index));
-            Box::new(
-                stack_from_iter(rows)
-                    .style(|s| s.width_full().flex_col().gap(8))
-                    .scroll()
-                    .style(|s| s.width_full().max_height(420).min_height(40)),
-            ) as Box<dyn View>
+            Box::new(switcher_rows(stack_from_iter(rows))) as Box<dyn View>
         };
 
         let add_button = add_library_button().style(|s| s.height(36)).on_click(add_library_on_click(signals_for_dyn.clone()));
-        let header = create_list_header((
-            create_header_label("Switch library".to_string())
-                .style(|s| s.font_size(22).font_family(TITLE_FONT_FAMILY.to_string()).color(SUBTLE_TEXT)),
-            add_button,
-        ))
-        .style(|s| s.width_full().justify_between().align_items(floem::style::AlignItems::Center).padding_bottom(8));
-        let list = container(list).style(|s| s.width_full());
-        let panel = create_list((header, list))
-            .style(|s| {
-                s.width(620)
-                    .max_width_pct(92.0)
-                    .gap(10)
-                    .padding(12)
-                    .background(WHITE_SURFACE)
-                    .border(1)
-                    .border_color(BORDER_COLOR)
-                    .border_radius(12)
-            })
-            .on_click(|_| EventPropagation::Stop);
+        let header = switcher_header(switcher_title("Switch library"), add_button);
+        let list = switcher_list(list);
+        let panel = switcher_panel((header, list)).on_click(|_| EventPropagation::Stop);
 
         Box::new(create_switcher_overlay_container(panel, show_switcher).on_click(move |_| {
             show_switcher.set(false);
@@ -236,9 +212,6 @@ fn active_library_index(signals: &Signals) -> Option<usize> {
     signals.libraries.with_untracked(|v| active_id.as_deref().and_then(|active| v.iter().position(|s| s.meta.id == active)))
 }
 
-fn create_switcher_overlay_container(panel: impl IntoView + 'static, show_switcher: RwSignal<bool>) -> impl View {
-    create_overlay_scrim(
-        show_switcher,
-        container(panel).style(|s| s.size_full().flex_col().justify_center().items_center().padding(20)),
-    )
+fn create_switcher_overlay_container(panel: impl View + 'static, show_switcher: RwSignal<bool>) -> impl View {
+    create_overlay_scrim(show_switcher, switcher_overlay_content(panel))
 }

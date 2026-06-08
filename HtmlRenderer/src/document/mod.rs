@@ -5,7 +5,7 @@ pub use computed_style::*;
 pub use dom::*;
 use floem::kurbo::{Point, Rect, Size};
 use rustc_data_structures::fx::FxHashMap;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 
 const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 
@@ -126,26 +126,6 @@ impl Document {
         self.toc_entries.push(entry);
     }
 
-    pub(crate) fn box_tree(&self) -> &BoxTree {
-        &self.box_tree
-    }
-
-    pub(crate) fn box_tree_mut(&mut self) -> &mut BoxTree {
-        &mut self.box_tree
-    }
-
-    pub(crate) fn set_box_tree(&mut self, box_tree: BoxTree) {
-        self.box_tree = box_tree;
-    }
-
-    pub(crate) fn layout(&self) -> &LayoutResult {
-        &self.layout
-    }
-
-    pub(crate) fn layout_mut(&mut self) -> &mut LayoutResult {
-        &mut self.layout
-    }
-
     pub fn anchor_glyph(&self, id_idx: u16) -> Option<u32> {
         self.anchor_glyphs.get(&id_idx).copied()
     }
@@ -189,49 +169,6 @@ impl Document {
         }
     }
 
-    pub fn print_box_tree(&self) {
-        if !self.box_tree.boxes.is_empty() {
-            self.print_box_node(0, 0);
-        }
-    }
-
-    fn print_box_node(&self, idx: usize, depth: usize) {
-        let indent = "  ".repeat(depth);
-        let b = &self.box_tree.boxes[idx];
-        let tag = self.get_tag(idx);
-        let dom_id = b.dom_element.map(|i| i.to_string()).unwrap_or("-".into());
-        let display = b.style.map(|si| format!("{:?}", self.styles.box_styles[si.box_idx as usize].display)).unwrap_or("none".into());
-        let mode = match &b.layout_mode {
-            LayoutMode::Block(bb) => format!("Block({:?})", bb.children),
-            LayoutMode::Table(tb) => format!("Table(rows={})", tb.rows.len()),
-            LayoutMode::TableRow(tr) => format!("TableRow(cells={})", tr.cells.len()),
-            LayoutMode::TableCell(tc) => format!("TableCell({:?})", tc.children),
-            LayoutMode::Inline(r) => format!("Inline({}..{})", r.start, r.end),
-            LayoutMode::Anonymous(r) => format!("Anon({}..{})", r.start, r.end),
-        };
-        println!("{}[{}] <{}> dom={} display={} {}", indent, idx, tag, dom_id, display, mode);
-        match &b.layout_mode {
-            LayoutMode::Block(bb) => {
-                if let Children::Blocks(indices) = &bb.children {
-                    for &i in indices {
-                        self.print_box_node(i as usize, depth + 1);
-                    }
-                }
-            }
-            LayoutMode::Table(tb) => {
-                for &i in &tb.rows {
-                    self.print_box_node(i as usize, depth + 1);
-                }
-            }
-            LayoutMode::TableRow(tr) => {
-                for &i in &tr.cells {
-                    self.print_box_node(i as usize, depth + 1);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn print_dom_node(&self, idx: usize, depth: usize) {
         let indent = "  ".repeat(depth);
         match &self.dom_nodes[idx] {
@@ -247,152 +184,6 @@ impl Document {
                 println!("{}\"{}\"", indent, truncated);
             }
         }
-    }
-
-    /// DOM element backing a layout box, if any (None for anonymous boxes).
-    pub fn box_element(&self, box_idx: usize) -> Option<&DomElement> {
-        self.box_tree.boxes[box_idx].dom_element.and_then(|node_idx| self.dom_nodes[node_idx as usize].as_element())
-    }
-
-    pub fn get_tag(&self, box_idx: usize) -> &str {
-        self.box_element(box_idx).map(|e| self.strings.get(e.tag)).unwrap_or("")
-    }
-
-    pub fn get_id(&self, box_idx: usize) -> Option<&str> {
-        self.get_box_id(box_idx).map(|idx| self.strings.get(idx))
-    }
-
-    /// Interned id of a box's DOM element, if any.
-    pub fn get_box_id(&self, box_idx: usize) -> Option<u16> {
-        self.box_element(box_idx).and_then(|e| e.id)
-    }
-
-    /// Interned href of a box's DOM element, if any.
-    pub fn get_box_href(&self, box_idx: usize) -> Option<u16> {
-        self.box_element(box_idx).and_then(|e| e.href)
-    }
-
-    pub fn get_box_image_idx(&self, box_idx: usize) -> Option<u32> {
-        self.box_tree.boxes.get(box_idx)?.dom_element.and_then(|node_idx| self.element_ref(node_idx as usize)?.image_idx())
-    }
-
-    pub fn box_layout_mode(&self, box_idx: usize) -> Option<&LayoutMode> {
-        self.box_tree.boxes.get(box_idx).map(|layout_box| &layout_box.layout_mode)
-    }
-
-    pub fn box_style_indices(&self, box_idx: usize) -> Option<StyleIndices> {
-        self.box_tree.boxes.get(box_idx)?.style
-    }
-
-    pub fn root_box(&self) -> Option<usize> {
-        self.box_tree.root_box.map(|idx| idx as usize)
-    }
-
-    pub fn box_count(&self) -> usize {
-        self.box_tree.boxes.len()
-    }
-
-    pub fn is_table_cell_box(&self, box_idx: usize) -> bool {
-        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::TableCell(_)))
-    }
-
-    pub fn is_block_box(&self, box_idx: usize) -> bool {
-        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_)))
-    }
-
-    pub fn is_table_box(&self, box_idx: usize) -> bool {
-        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Table(_)))
-    }
-
-    pub fn is_block_container_box(&self, box_idx: usize) -> bool {
-        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_) | LayoutMode::Table(_) | LayoutMode::TableCell(_)))
-    }
-
-    pub fn is_inline_box(&self, box_idx: usize) -> bool {
-        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Inline(_)))
-    }
-
-    pub fn box_inline_run_range(&self, box_idx: usize) -> Option<Range<u32>> {
-        match self.box_layout_mode(box_idx)? {
-            LayoutMode::Inline(range) => Some(range.clone()),
-            _ => None,
-        }
-    }
-
-    pub fn box_anchor_y_candidate(&self, box_idx: usize) -> Option<f64> {
-        let layout_box = self.box_tree.boxes.get(box_idx)?;
-        (layout_box.size.height > 0.0 || layout_box.point.y != 0.0).then_some(layout_box.point.y)
-    }
-
-    pub fn get_box_point(&self, box_idx: usize) -> Point {
-        self.box_tree.boxes[box_idx].point
-    }
-
-    pub fn get_box_size(&self, box_idx: usize) -> Size {
-        self.box_tree.boxes[box_idx].size
-    }
-
-    pub fn set_box_point(&mut self, box_idx: usize, point: Point) {
-        if let Some(layout_box) = self.box_tree.boxes.get_mut(box_idx) {
-            layout_box.point = point;
-        }
-    }
-
-    pub fn set_box_size(&mut self, box_idx: usize, size: Size) {
-        if let Some(layout_box) = self.box_tree.boxes.get_mut(box_idx) {
-            layout_box.size = size;
-        }
-    }
-
-    pub fn inline_runs_empty(&self) -> bool {
-        self.box_tree.inline_runs.is_empty()
-    }
-
-    pub fn inline_runs(&self) -> &[InlineRun] {
-        self.box_tree.inline_runs.as_slice()
-    }
-
-    pub fn inline_run(&self, run_idx: usize) -> Option<&InlineRun> {
-        self.box_tree.inline_runs.get(run_idx)
-    }
-
-    pub fn glyph(&self, glyph_idx: u32) -> Option<u16> {
-        self.box_tree.glyphs.get(glyph_idx as usize).copied()
-    }
-
-    /// `(box index, glyph range)` for each non-empty inline text run, in glyph
-    /// order. Shaping, whitespace-collapse, and decoration collection derive a
-    /// glyph's owning box from these runs rather than a per-glyph map: the runs
-    /// already store the association at one entry per run.
-    pub fn text_runs(&self) -> Vec<(usize, Range<u32>)> {
-        self.box_tree
-            .inline_runs
-            .iter()
-            .filter_map(|run| match &run.kind {
-                InlineKind::Text { glyphs } if glyphs.start < glyphs.end => Some((run.box_idx as usize, glyphs.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Get classes for a box as iterator
-    pub fn get_classes(&self, box_idx: usize) -> impl Iterator<Item = &str> {
-        let range = self.box_element(box_idx).map(|e| e.classes.clone()).unwrap_or(0..0);
-        self.class_list[range.start as usize..range.end as usize].iter().map(|&idx| self.strings.get(idx))
-    }
-
-    pub fn has_class(&self, box_idx: usize, class: &str) -> bool {
-        self.get_classes(box_idx).any(|c| c == class)
-    }
-
-    /// Get parent box index
-    pub fn get_parent(&self, box_idx: usize) -> Option<usize> {
-        self.box_tree.boxes[box_idx].parent.map(|p| p as usize)
-    }
-
-    /// Iterate ancestors (parent, grandparent, etc.)
-    pub fn ancestors(&self, box_idx: usize) -> AncestorIter<'_> {
-        AncestorIter { doc: self, current: self.box_tree.boxes[box_idx].parent }
     }
 
     // ========== DOM NODE ACCESSORS ==========
@@ -570,20 +361,6 @@ impl Document {
             // Only count element nodes, not text nodes
             if self.dom_nodes.get(child_idx as usize)?.as_element().is_some() {
                 element_count += 1;
-            }
-        }
-        None
-    }
-
-    /// Returns (text_node_idx, char_offset) for the glyph.
-    pub fn get_dom_node_for_glyph(&self, glyph_idx: u32) -> Option<(u32, usize)> {
-        for run in &self.box_tree.inline_runs {
-            if let InlineKind::Text { glyphs } = &run.kind {
-                if glyphs.contains(&glyph_idx) {
-                    let node_idx = run.dom_text_node?;
-                    let char_offset = (glyph_idx - glyphs.start) as usize;
-                    return Some((node_idx, char_offset));
-                }
             }
         }
         None
@@ -833,16 +610,9 @@ pub struct Document {
     dom_root: Option<u32>,
     mode: DocumentMode,
 
-    // ========== BOX TREE (Phase 3: Box Construction) ==========
-    // The box tree plus the inline text content (glyphs, runs) it references.
-    box_tree: BoxTree,
-
     // ========== RESOURCES ==========
     images: Vec<ImageResource>,
     title: Option<String>,
-
-    // ========== LAYOUT RESULTS (Phase 4: Layout) ==========
-    layout: LayoutResult,
 
     // ========== INTERNING ==========
     strings: StringInterner,
@@ -864,13 +634,453 @@ pub struct Document {
 /// Output of the layout phase: line boxes, glyph offsets, and paint fragments.
 /// Produced by `LayoutEngine` and consumed read-only by the renderer.
 #[derive(Default)]
-pub struct LayoutResult {
+pub struct LayoutCache {
     pub lines: Vec<Line>,
     pub line_glyph_offsets: Vec<Vec<GlyphOffsetRun>>,
     pub decorations: Vec<DecorationFragment>,
     pub image_fragments: Vec<ImageFragment>,
     pub image_fragments_by_line: Vec<Vec<usize>>,
     pub anchor_positions: FxHashMap<u16, AnchorPosition>,
+}
+
+#[derive(Default)]
+pub struct DocumentState {
+    document: Document,
+    box_tree: BoxTree,
+    layout: LayoutCache,
+}
+
+impl Deref for DocumentState {
+    type Target = Document;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl DerefMut for DocumentState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
+    }
+}
+
+impl DocumentState {
+    pub fn new(document: Document, box_tree: BoxTree) -> Self {
+        Self { document, box_tree, layout: Default::default() }
+    }
+
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    pub fn document_mut(&mut self) -> &mut Document {
+        &mut self.document
+    }
+
+    pub fn box_tree(&self) -> &BoxTree {
+        &self.box_tree
+    }
+
+    pub fn box_tree_mut(&mut self) -> &mut BoxTree {
+        &mut self.box_tree
+    }
+
+    pub fn set_box_tree(&mut self, box_tree: BoxTree) {
+        self.box_tree = box_tree;
+    }
+
+    pub fn box_at(&self, box_idx: usize) -> Option<&LayoutBox> {
+        self.box_tree.box_at(box_idx)
+    }
+
+    pub fn box_at_mut(&mut self, box_idx: usize) -> Option<&mut LayoutBox> {
+        self.box_tree.box_at_mut(box_idx)
+    }
+
+    pub fn glyphs(&self) -> &[u16] {
+        self.box_tree.glyphs()
+    }
+
+    pub fn glyphs_mut(&mut self) -> &mut [u16] {
+        self.box_tree.glyphs_mut()
+    }
+
+    pub fn glyph_at(&self, glyph_idx: usize) -> Option<u16> {
+        self.box_tree.glyph_at(glyph_idx)
+    }
+
+    pub fn glyph_slice(&self, range: Range<u32>) -> &[u16] {
+        self.box_tree.glyph_slice(range)
+    }
+
+    /// Returns (text_node_idx, char_offset) for the glyph.
+    pub fn get_dom_node_for_glyph(&self, glyph_idx: u32) -> Option<(u32, usize)> {
+        for run in self.box_tree.inline_runs() {
+            if let InlineKind::Text { glyphs } = &run.kind {
+                if glyphs.contains(&glyph_idx) {
+                    let node_idx = run.dom_text_node?;
+                    let char_offset = (glyph_idx - glyphs.start) as usize;
+                    return Some((node_idx, char_offset));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn box_element(&self, box_idx: usize) -> Option<&DomElement> {
+        self.box_tree.box_at(box_idx)?.get_element(&self.document)
+    }
+
+    pub fn box_dom_element_idx(&self, box_idx: usize) -> Option<u32> {
+        self.box_tree.box_at(box_idx)?.dom_element()
+    }
+
+    pub fn get_tag(&self, box_idx: usize) -> &str {
+        self.box_element(box_idx).map(|e| self.document.strings.get(e.tag)).unwrap_or("")
+    }
+
+    pub fn get_id(&self, box_idx: usize) -> Option<&str> {
+        self.get_box_id(box_idx).map(|idx| self.document.strings.get(idx))
+    }
+
+    pub fn get_box_id(&self, box_idx: usize) -> Option<u16> {
+        self.box_element(box_idx).and_then(|e| e.id)
+    }
+
+    pub fn get_box_href(&self, box_idx: usize) -> Option<u16> {
+        self.box_element(box_idx).and_then(|e| e.href)
+    }
+
+    pub fn get_box_image_idx(&self, box_idx: usize) -> Option<u32> {
+        self.box_tree.box_at(box_idx)?.dom_element().and_then(|node_idx| self.document.element_ref(node_idx as usize)?.image_idx())
+    }
+
+    pub fn box_layout_mode(&self, box_idx: usize) -> Option<&LayoutMode> {
+        self.box_tree.box_at(box_idx).map(|layout_box| layout_box.layout_mode())
+    }
+
+    pub fn box_style_indices(&self, box_idx: usize) -> Option<StyleIndices> {
+        self.box_tree.box_at(box_idx)?.style()
+    }
+
+    pub fn root_box(&self) -> Option<usize> {
+        self.box_tree.root_box()
+    }
+
+    pub fn box_count(&self) -> usize {
+        self.box_tree.box_count()
+    }
+
+    pub fn is_table_cell_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::TableCell(_)))
+    }
+
+    pub fn is_block_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_)))
+    }
+
+    pub fn is_anonymous_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Anonymous(_)))
+    }
+
+    pub fn is_table_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Table(_)))
+    }
+
+    pub fn is_block_container_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_) | LayoutMode::Table(_) | LayoutMode::TableCell(_)))
+    }
+
+    pub fn is_inline_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Inline(_)))
+    }
+
+    pub fn box_inline_run_range(&self, box_idx: usize) -> Option<Range<u32>> {
+        match self.box_layout_mode(box_idx)? {
+            LayoutMode::Inline(range) => Some(range.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn box_anchor_y_candidate(&self, box_idx: usize) -> Option<f64> {
+        let layout_box = self.box_tree.box_at(box_idx)?;
+        (layout_box.size().height > 0.0 || layout_box.point().y != 0.0).then_some(layout_box.point().y)
+    }
+
+    pub fn get_box_point(&self, box_idx: usize) -> Point {
+        self.box_tree.get_box_point(box_idx)
+    }
+
+    pub fn get_box_size(&self, box_idx: usize) -> Size {
+        self.box_tree.get_box_size(box_idx)
+    }
+
+    pub fn set_box_point(&mut self, box_idx: usize, point: Point) {
+        self.box_tree.set_box_point(box_idx, point);
+    }
+
+    pub fn set_box_size(&mut self, box_idx: usize, size: Size) {
+        self.box_tree.set_box_size(box_idx, size);
+    }
+
+    pub fn inline_runs_empty(&self) -> bool {
+        self.box_tree.inline_runs_empty()
+    }
+
+    pub fn inline_runs(&self) -> &[InlineRun] {
+        self.box_tree.inline_runs()
+    }
+
+    pub fn inline_runs_mut(&mut self) -> &mut [InlineRun] {
+        self.box_tree.inline_runs_mut()
+    }
+
+    pub fn inline_run(&self, run_idx: usize) -> Option<&InlineRun> {
+        self.box_tree.inline_run(run_idx)
+    }
+
+    pub fn glyph(&self, glyph_idx: u32) -> Option<u16> {
+        self.box_tree.glyph_at(glyph_idx as usize)
+    }
+
+    pub fn text_runs(&self) -> Vec<(usize, Range<u32>)> {
+        self.box_tree
+            .inline_runs
+            .iter()
+            .filter_map(|run| match &run.kind {
+                InlineKind::Text { glyphs } if glyphs.start < glyphs.end => Some((run.box_idx as usize, glyphs.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn get_classes(&self, box_idx: usize) -> impl Iterator<Item = &str> {
+        let range = self.box_element(box_idx).map(|e| e.classes.clone()).unwrap_or(0..0);
+        self.document.class_list[range.start as usize..range.end as usize].iter().map(|&idx| self.document.strings.get(idx))
+    }
+
+    pub fn has_class(&self, box_idx: usize, class: &str) -> bool {
+        self.get_classes(box_idx).any(|c| c == class)
+    }
+
+    pub fn get_parent(&self, box_idx: usize) -> Option<usize> {
+        self.box_tree.box_at(box_idx)?.parent().map(|p| p as usize)
+    }
+
+    pub fn ancestors(&self, box_idx: usize) -> AncestorIter<'_> {
+        AncestorIter { doc: self, current: self.box_tree.box_at(box_idx).and_then(|b| b.parent()) }
+    }
+
+    pub fn print_box_tree(&self) {
+        self.box_tree.print_box_tree(&self.document);
+    }
+
+    pub fn lines(&self) -> &[Line] {
+        self.layout.lines.as_slice()
+    }
+
+    pub fn line(&self, idx: usize) -> Option<&Line> {
+        self.layout.lines.get(idx)
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.layout.lines.len()
+    }
+
+    pub fn line_glyph_offsets(&self) -> &[Vec<GlyphOffsetRun>] {
+        self.layout.line_glyph_offsets.as_slice()
+    }
+
+    pub fn decorations(&self) -> &[DecorationFragment] {
+        self.layout.decorations.as_slice()
+    }
+
+    pub fn decorations_mut(&mut self) -> &mut [DecorationFragment] {
+        self.layout.decorations.as_mut_slice()
+    }
+
+    pub fn image_fragments(&self) -> &[ImageFragment] {
+        self.layout.image_fragments.as_slice()
+    }
+
+    pub fn image_fragments_by_line(&self) -> &[Vec<usize>] {
+        self.layout.image_fragments_by_line.as_slice()
+    }
+
+    pub fn anchor_positions(&self) -> &FxHashMap<u16, AnchorPosition> {
+        &self.layout.anchor_positions
+    }
+
+    pub fn anchor_positions_mut(&mut self) -> &mut FxHashMap<u16, AnchorPosition> {
+        &mut self.layout.anchor_positions
+    }
+
+    pub fn layout(&self) -> &LayoutCache {
+        &self.layout
+    }
+
+    pub fn layout_mut(&mut self) -> &mut LayoutCache {
+        &mut self.layout
+    }
+
+    pub fn set_layout_cache(&mut self, layout: LayoutCache) {
+        self.layout = layout;
+    }
+
+    pub fn take_layout_cache(&mut self) -> LayoutCache {
+        std::mem::take(&mut self.layout)
+    }
+}
+
+impl BoxTree {
+    pub fn box_count(&self) -> usize {
+        self.boxes.len()
+    }
+
+    pub fn box_at(&self, box_idx: usize) -> Option<&LayoutBox> {
+        self.boxes.get(box_idx)
+    }
+
+    pub fn box_at_mut(&mut self, box_idx: usize) -> Option<&mut LayoutBox> {
+        self.boxes.get_mut(box_idx)
+    }
+
+    pub fn root_box(&self) -> Option<usize> {
+        self.root_box.map(|idx| idx as usize)
+    }
+
+    pub fn set_root_box(&mut self, root_box: Option<u32>) {
+        self.root_box = root_box;
+    }
+
+    pub fn glyphs(&self) -> &[u16] {
+        self.glyphs.as_slice()
+    }
+
+    pub fn glyphs_mut(&mut self) -> &mut [u16] {
+        self.glyphs.as_mut_slice()
+    }
+
+    pub fn glyph_at(&self, glyph_idx: usize) -> Option<u16> {
+        self.glyphs.get(glyph_idx).copied()
+    }
+
+    pub fn glyph_slice(&self, range: Range<u32>) -> &[u16] {
+        &self.glyphs[range.start as usize..range.end as usize]
+    }
+
+    pub fn inline_runs(&self) -> &[InlineRun] {
+        self.inline_runs.as_slice()
+    }
+
+    pub fn inline_runs_mut(&mut self) -> &mut [InlineRun] {
+        self.inline_runs.as_mut_slice()
+    }
+
+    pub fn inline_run(&self, run_idx: usize) -> Option<&InlineRun> {
+        self.inline_runs.get(run_idx)
+    }
+
+    pub fn inline_runs_empty(&self) -> bool {
+        self.inline_runs.is_empty()
+    }
+
+    pub fn set_box_point(&mut self, box_idx: usize, point: Point) {
+        if let Some(layout_box) = self.boxes.get_mut(box_idx) {
+            layout_box.set_point(point);
+        }
+    }
+
+    pub fn set_box_size(&mut self, box_idx: usize, size: Size) {
+        if let Some(layout_box) = self.boxes.get_mut(box_idx) {
+            layout_box.set_size(size);
+        }
+    }
+
+    pub fn get_box_point(&self, box_idx: usize) -> Point {
+        self.boxes[box_idx].point()
+    }
+
+    pub fn get_box_size(&self, box_idx: usize) -> Size {
+        self.boxes[box_idx].size()
+    }
+
+    pub fn get_box_style_indices(&self, box_idx: usize) -> Option<StyleIndices> {
+        self.boxes.get(box_idx)?.style()
+    }
+
+    pub fn get_box_dom_element(&self, box_idx: usize) -> Option<u32> {
+        self.boxes.get(box_idx)?.dom_element()
+    }
+
+    pub fn get_box_parent(&self, box_idx: usize) -> Option<usize> {
+        self.boxes.get(box_idx)?.parent().map(|p| p as usize)
+    }
+
+    pub fn get_box_layout_mode(&self, box_idx: usize) -> Option<&LayoutMode> {
+        self.boxes.get(box_idx).map(|layout_box| layout_box.layout_mode())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.boxes.is_empty()
+    }
+
+    pub fn print_box_tree(&self, doc: &Document) {
+        if !self.boxes.is_empty() {
+            self.print_box_node(doc, 0, 0);
+        }
+    }
+
+    fn print_box_node(&self, doc: &Document, idx: usize, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let b = &self.boxes[idx];
+        let tag = b.get_element(doc).map(|e| doc.strings.get(e.tag)).unwrap_or("");
+        let dom_id = b.dom_element().map(|i| i.to_string()).unwrap_or("-".into());
+        let display = b.style().map(|si| format!("{:?}", doc.styles.box_styles[si.box_idx as usize].display)).unwrap_or("none".into());
+        let mode = match &b.layout_mode {
+            LayoutMode::Block(bb) => format!("Block({:?})", bb.children),
+            LayoutMode::Table(tb) => format!("Table(rows={})", tb.rows.len()),
+            LayoutMode::TableRow(tr) => format!("TableRow(cells={})", tr.cells.len()),
+            LayoutMode::TableCell(tc) => format!("TableCell({:?})", tc.children),
+            LayoutMode::Inline(r) => format!("Inline({}..{})", r.start, r.end),
+            LayoutMode::Anonymous(r) => format!("Anon({}..{})", r.start, r.end),
+        };
+        println!("{}[{}] <{}> dom={} display={} {}", indent, idx, tag, dom_id, display, mode);
+        match &b.layout_mode {
+            LayoutMode::Block(bb) => {
+                if let Children::Blocks(indices) = &bb.children {
+                    for &i in indices {
+                        self.print_box_node(doc, i as usize, depth + 1);
+                    }
+                }
+            }
+            LayoutMode::Table(tb) => {
+                for &i in &tb.rows {
+                    self.print_box_node(doc, i as usize, depth + 1);
+                }
+            }
+            LayoutMode::TableRow(tr) => {
+                for &i in &tr.cells {
+                    self.print_box_node(doc, i as usize, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn push_box(&mut self, layout_box: LayoutBox) -> u32 {
+        let idx = self.boxes.len() as u32;
+        self.boxes.push(layout_box);
+        idx
+    }
+
+    pub fn push_inline_run(&mut self, run: InlineRun) {
+        self.inline_runs.push(run);
+    }
+
+    pub fn push_glyph(&mut self, glyph: u16) {
+        self.glyphs.push(glyph);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -902,10 +1112,8 @@ impl Default for Document {
             dom_nodes: Vec::new(),
             dom_root: None,
             mode: DocumentMode::Html,
-            box_tree: BoxTree::default(),
             images: Vec::new(),
             title: None,
-            layout: LayoutResult::default(),
             strings: StringInterner::new(),
             class_list: Vec::new(),
             link_glyph_hrefs: FxHashMap::default(),
@@ -957,7 +1165,7 @@ fn build_document_toc_tree(entries: &[DocumentTocEntry]) -> Vec<DocumentTocNode>
 // ============================================================================
 
 pub struct AncestorIter<'a> {
-    doc: &'a Document,
+    doc: &'a DocumentState,
     current: Option<u32>,
 }
 
@@ -966,7 +1174,7 @@ impl<'a> Iterator for AncestorIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.current?;
-        self.current = self.doc.box_tree.boxes[idx as usize].parent;
+        self.current = self.doc.box_tree.box_at(idx as usize).and_then(|b| b.parent());
         Some(idx as usize)
     }
 }
@@ -991,10 +1199,10 @@ impl<'a> Iterator for DomAncestorIter<'a> {
 /// `build_box_tree`, consumed read-only by shaping and layout.
 #[derive(Default)]
 pub struct BoxTree {
-    pub boxes: Vec<LayoutBox>,
-    pub root_box: Option<u32>,
-    pub glyphs: Vec<u16>,
-    pub inline_runs: Vec<InlineRun>,
+    boxes: Vec<LayoutBox>,
+    root_box: Option<u32>,
+    glyphs: Vec<u16>,
+    inline_runs: Vec<InlineRun>,
 }
 
 pub struct LayoutBox {
@@ -1037,6 +1245,54 @@ impl LayoutBox {
     /// Get DOM node (element or text)
     pub fn get_dom_node<'a>(&self, doc: &'a Document) -> Option<&'a DomNode> {
         self.dom_element.map(|idx| &doc.dom_nodes[idx as usize])
+    }
+
+    pub fn point(&self) -> Point {
+        self.point
+    }
+
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    pub fn set_point(&mut self, point: Point) {
+        self.point = point;
+    }
+
+    pub fn set_size(&mut self, size: Size) {
+        self.size = size;
+    }
+
+    pub fn layout_mode(&self) -> &LayoutMode {
+        &self.layout_mode
+    }
+
+    pub fn layout_mode_mut(&mut self) -> &mut LayoutMode {
+        &mut self.layout_mode
+    }
+
+    pub fn style(&self) -> Option<StyleIndices> {
+        self.style
+    }
+
+    pub fn set_style(&mut self, style: Option<StyleIndices>) {
+        self.style = style;
+    }
+
+    pub fn dom_element(&self) -> Option<u32> {
+        self.dom_element
+    }
+
+    pub fn set_dom_element(&mut self, dom_element: Option<u32>) {
+        self.dom_element = dom_element;
+    }
+
+    pub fn parent(&self) -> Option<u32> {
+        self.parent
+    }
+
+    pub fn set_parent(&mut self, parent: Option<u32>) {
+        self.parent = parent;
     }
 }
 

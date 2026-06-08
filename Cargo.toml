@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = [
+    "Backend",
+    "MobileApp/src-tauri",
+    "SyncCommon",
+    "UI",
+    "data-analysis"
+]
+exclude = ["Server"]

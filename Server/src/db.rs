@@ -1,14 +1,11 @@
 use serde_json::Value;
+use sqlx::postgres::PgArguments;
+use sqlx::query::Query;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::{singleton_event_types_sql_list, Change, Hlc, PushRejection, PushRejectionReason, SyncOp};
 
 const HLC_FUTURE_TOLERANCE_MS: u64 = 60 * 60 * 1000;
-
-pub async fn ensure_user(pool: &PgPool, user_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("insert into users (id) values ($1) on conflict do nothing").bind(user_id).execute(pool).await?;
-    Ok(())
-}
 
 pub async fn ensure_library(pool: &PgPool, user_id: &str, library_id: &str) -> Result<bool, sqlx::Error> {
     let existing = sqlx::query_scalar::<_, String>("select user_id from libraries where id = $1").bind(library_id).fetch_optional(pool).await?;
@@ -55,79 +52,101 @@ pub async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, l
             rejected.push(PushRejection { local_seq: local_seq as u64, reason: PushRejectionReason::HlcTooFarFuture });
             continue;
         }
-        let hlc_pt = change.hlc.pt as i64;
-        let hlc_l = change.hlc.l as i64;
-        let event_type = change.op.event_type();
-        let entity_id = change.op.entity_id();
-        let payload = change.op.payload();
+        let row = EventRow {
+            library_id,
+            user_id,
+            event_type: change.op.event_type(),
+            entity_id: change.op.entity_id(),
+            payload: change.op.payload().to_string(),
+            changed_at: change.changed_at as i64,
+            client_id,
+            local_seq,
+            hlc_pt: change.hlc.pt as i64,
+            hlc_l: change.hlc.l as i64,
+        };
 
         if change.op.is_singleton() {
-            let sql = format!(
-                "INSERT INTO library_events (
-                    library_id, user_id, event_type, entity_id,
-                    data, timestamp, client_id, client_seq, hlc_pt, hlc_l
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                ON CONFLICT (library_id, entity_id, event_type)
-                WHERE event_type IN {list}
-                DO UPDATE SET
-                    data = EXCLUDED.data,
-                    timestamp = EXCLUDED.timestamp,
-                    client_id = EXCLUDED.client_id,
-                    client_seq = EXCLUDED.client_seq,
-                    hlc_pt = EXCLUDED.hlc_pt,
-                    hlc_l = EXCLUDED.hlc_l,
-                    -- Re-draw a fresh server_seq so the LWW-winning update resurfaces
-                    -- in pulls. bigserial only assigns on INSERT; without this the row
-                    -- keeps its original server_seq and devices that already pulled it
-                    -- (cursor >= server_seq) would never see later updates.
-                    server_seq = DEFAULT
-                WHERE (EXCLUDED.hlc_pt, EXCLUDED.hlc_l, EXCLUDED.client_id)
-                    > (library_events.hlc_pt, library_events.hlc_l, library_events.client_id)",
-                list = singleton_event_types_sql_list(),
-            );
-            sqlx::query(&sql)
-            .bind(library_id)
-            .bind(user_id)
-            .bind(event_type)
-            .bind(entity_id)
-            .bind(payload.to_string())
-            .bind(change.changed_at as i64)
-            .bind(client_id)
-            .bind(local_seq)
-            .bind(hlc_pt)
-            .bind(hlc_l)
-            .execute(&mut **tx)
-            .await?;
+            insert_singleton(tx, &row).await?;
         } else {
-            let sql = format!(
-                "INSERT INTO library_events (
-                    library_id, user_id, event_type, entity_id,
-                    data, timestamp, client_id, client_seq, hlc_pt, hlc_l
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                ON CONFLICT (library_id, client_id, client_seq)
-                WHERE event_type NOT IN {list}
-                DO NOTHING",
-                list = singleton_event_types_sql_list(),
-            );
-            sqlx::query(&sql)
-            .bind(library_id)
-            .bind(user_id)
-            .bind(event_type)
-            .bind(entity_id)
-            .bind(payload.to_string())
-            .bind(change.changed_at as i64)
-            .bind(client_id)
-            .bind(local_seq)
-            .bind(hlc_pt)
-            .bind(hlc_l)
-            .execute(&mut **tx)
-            .await?;
+            insert_append(tx, &row).await?;
         }
 
         handled_local_seqs.push(local_seq as u64);
     }
 
     Ok(InsertChangesResult { handled_local_seqs, rejected })
+}
+
+/// One `library_events` row's worth of bound columns, shared by both insert paths.
+struct EventRow<'a> {
+    library_id: &'a str,
+    user_id: &'a str,
+    event_type: &'a str,
+    entity_id: &'a str,
+    payload: String,
+    changed_at: i64,
+    client_id: &'a str,
+    local_seq: i64,
+    hlc_pt: i64,
+    hlc_l: i64,
+}
+
+fn bind_event<'q>(q: Query<'q, Postgres, PgArguments>, row: &'q EventRow<'q>) -> Query<'q, Postgres, PgArguments> {
+    q.bind(row.library_id)
+        .bind(row.user_id)
+        .bind(row.event_type)
+        .bind(row.entity_id)
+        .bind(&row.payload)
+        .bind(row.changed_at)
+        .bind(row.client_id)
+        .bind(row.local_seq)
+        .bind(row.hlc_pt)
+        .bind(row.hlc_l)
+}
+
+/// Singleton (LWW) insert: one row per `(library, entity, event_type)`, updated
+/// only when the incoming `(hlc_pt, hlc_l, client_id)` is strictly greater. The
+/// winning update re-draws `server_seq` so it resurfaces to clients that already
+/// pulled the previous value.
+async fn insert_singleton(tx: &mut Transaction<'_, Postgres>, row: &EventRow<'_>) -> Result<(), sqlx::Error> {
+    let sql = format!(
+        "INSERT INTO library_events (
+            library_id, user_id, event_type, entity_id,
+            data, timestamp, client_id, client_seq, hlc_pt, hlc_l
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT (library_id, entity_id, event_type)
+        WHERE event_type IN {list}
+        DO UPDATE SET
+            data = EXCLUDED.data,
+            timestamp = EXCLUDED.timestamp,
+            client_id = EXCLUDED.client_id,
+            client_seq = EXCLUDED.client_seq,
+            hlc_pt = EXCLUDED.hlc_pt,
+            hlc_l = EXCLUDED.hlc_l,
+            server_seq = DEFAULT
+        WHERE (EXCLUDED.hlc_pt, EXCLUDED.hlc_l, EXCLUDED.client_id)
+            > (library_events.hlc_pt, library_events.hlc_l, library_events.client_id)",
+        list = singleton_event_types_sql_list(),
+    );
+    bind_event(sqlx::query(&sql), row).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// Append insert: deduplicated by `(library, client_id, client_seq)`. Re-sends
+/// of an already-stored event are no-ops.
+async fn insert_append(tx: &mut Transaction<'_, Postgres>, row: &EventRow<'_>) -> Result<(), sqlx::Error> {
+    let sql = format!(
+        "INSERT INTO library_events (
+            library_id, user_id, event_type, entity_id,
+            data, timestamp, client_id, client_seq, hlc_pt, hlc_l
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT (library_id, client_id, client_seq)
+        WHERE event_type NOT IN {list}
+        DO NOTHING",
+        list = singleton_event_types_sql_list(),
+    );
+    bind_event(sqlx::query(&sql), row).execute(&mut **tx).await?;
+    Ok(())
 }
 
 pub async fn fetch_changes(pool: &PgPool, library_id: &str, client_id: &str, since_server_seq: u64) -> Result<Vec<Change>, sqlx::Error> {

@@ -8,16 +8,11 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest;
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-// TODO: sync protocol refactoring in progress — old Event types replaced by Change
-// use sync_common::{EventPayload, PullEventsResponse, PushEventsRequest, PushEventsResponse};
 use serde::{Deserialize, Serialize};
 use sync_common::{PullChangesResponse, PushChangesRequest, PushChangesResponse};
-use uuid::Uuid;
 
 include_sql!("src/database/library.sql");
 
@@ -29,7 +24,6 @@ pub struct SyncManager {
     client_id: String,
     server_url: String,
     http_client: reqwest::Client,
-    user_id: String,
     library_id: String,
     library_path: String,
     pending_downloads: Arc<Mutex<HashSet<String>>>,
@@ -53,25 +47,41 @@ struct ExistsResponse {
 }
 
 impl SyncManager {
-    pub fn new(db_pool: DbPool, client_id: String, server_url: String, library_id: String, forced_user_id: Option<String>, library_path: String, event_tx: Option<Sender<LibraryEvent>>) -> Result<Self, Box<dyn std::error::Error>> {
-        let user_id = Self::get_or_create_user_id(&db_pool, forced_user_id)?;
-
+    pub fn new(db_pool: DbPool, client_id: String, server_url: String, library_id: String, library_path: String, event_tx: Option<Sender<LibraryEvent>>) -> Result<Self, Box<dyn std::error::Error>> {
         let http_client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
 
+        // Identity is server-issued and lives only in the session. Load any
+        // saved session, but only trust it if it matches the user this local
+        // library is bound to (guards against a stale session.json from a
+        // different account being paired with this DB).
         let session = crate::auth::Session::load();
-        if let Some(s) = session.as_ref() {
-            if s.user_id != user_id {
-                log::warn!("Loaded session.user_id={} but local user_id={}; ignoring session.", s.user_id, user_id);
+        let session = {
+            let conn = db_pool.get()?;
+            match db::get_sync_metadata(&conn, "bound_user_id") {
+                Some(bound) => session.filter(|s| {
+                    if s.user_id == bound {
+                        true
+                    } else {
+                        log::warn!("Ignoring session for user {} (library bound to {})", s.user_id, bound);
+                        false
+                    }
+                }),
+                // Never synced: opening while already logged in binds this
+                // library to that account.
+                None => {
+                    if let Some(s) = session.as_ref() {
+                        db::set_sync_metadata(&conn, "bound_user_id", &s.user_id);
+                    }
+                    session
+                }
             }
-        }
-        let session = session.filter(|s| s.user_id == user_id);
+        };
 
         Ok(Self {
             db_pool,
             client_id,
             server_url,
             http_client,
-            user_id,
             library_id,
             library_path,
             pending_downloads: Arc::new(Mutex::new(HashSet::new())),
@@ -80,8 +90,9 @@ impl SyncManager {
         })
     }
 
-    pub fn user_id(&self) -> &str {
-        &self.user_id
+    /// The server-issued user id for the active session, or None when signed out.
+    pub fn user_id(&self) -> Option<String> {
+        self.session.read().ok().and_then(|g| g.as_ref().map(|s| s.user_id.clone()))
     }
 
     pub fn is_signed_in(&self) -> bool {
@@ -92,11 +103,29 @@ impl SyncManager {
         self.session.read().ok().and_then(|s| s.clone())
     }
 
-    pub fn set_session(&self, session: crate::auth::Session) {
+    /// Binds this local library to the session's (server-issued) user and stores
+    /// it. Rejects a session whose user differs from the one this library was
+    /// previously bound to, so two accounts can't share one local library.
+    pub fn adopt_session(&self, session: crate::auth::Session) -> Result<(), String> {
+        {
+            let conn = self.db_pool.get().map_err(|e| e.to_string())?;
+            match db::get_sync_metadata(&conn, "bound_user_id") {
+                Some(bound) if bound != session.user_id => {
+                    return Err(format!(
+                        "This library is already linked to a different account ({bound}). \
+                         Logging in as {} here would mix two accounts.",
+                        session.user_id
+                    ));
+                }
+                Some(_) => {}
+                None => db::set_sync_metadata(&conn, "bound_user_id", &session.user_id),
+            }
+        }
         let _ = session.save();
         if let Ok(mut guard) = self.session.write() {
             *guard = Some(session);
         }
+        Ok(())
     }
 
     pub fn clear_session(&self) {
@@ -108,50 +137,6 @@ impl SyncManager {
 
     fn token(&self) -> Option<String> {
         self.session.read().ok().and_then(|g| g.as_ref().map(|s| s.token.clone()))
-    }
-
-    fn get_or_create_user_id(db_pool: &DbPool, forced_user_id: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
-        let file_user_id = Self::get_or_create_global_user_id(forced_user_id.clone())?;
-        if let Some(id) = file_user_id {
-            let conn = db_pool.get()?;
-            db::set_sync_metadata(&conn, "user_id", &id);
-            return Ok(id);
-        }
-
-        let conn = db_pool.get()?;
-        if let Some(id) = db::get_sync_metadata(&conn, "user_id") {
-            return Ok(id);
-        }
-
-        let new_id = forced_user_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        db::set_sync_metadata(&conn, "user_id", &new_id);
-        Ok(new_id)
-    }
-
-    fn get_or_create_global_user_id(forced_user_id: Option<String>) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let Ok(home) = std::env::var("HOME") else {
-            return Ok(None);
-        };
-        let mut path = PathBuf::from(home);
-        path.push(".biblos");
-        fs::create_dir_all(&path)?;
-        path.push("user_id");
-
-        if let Some(forced) = forced_user_id {
-            fs::write(&path, &forced)?;
-            return Ok(Some(forced));
-        }
-
-        if let Ok(existing) = fs::read_to_string(&path) {
-            let trimmed = existing.trim().to_string();
-            if !trimmed.is_empty() {
-                return Ok(Some(trimmed));
-            }
-        }
-
-        let new_id = Uuid::new_v4().to_string();
-        fs::write(&path, &new_id)?;
-        Ok(Some(new_id))
     }
 
     pub async fn sync_once(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -316,7 +301,7 @@ impl SyncManager {
     }
 
     fn thumbnail_path_for_content_hash(&self, content_hash: &str) -> String {
-        Path::new(&self.library_path).join(".biblos").join("thumbnails").join(format!("{content_hash}.png")).to_string_lossy().into_owned()
+        crate::transfer::thumbnail_path_from_content_hash(&self.library_path, content_hash)
     }
 
     async fn check_existing_blobs(&self, hashes: Vec<String>) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
@@ -349,9 +334,10 @@ impl SyncManager {
             return Ok(());
         }
 
-        let request = PushChangesRequest { user_id: self.user_id.clone(), library_id: self.library_id.clone(), client_id: self.client_id.clone(), changes };
+        let session = self.current_session().ok_or("not signed in")?;
+        let request = PushChangesRequest { user_id: session.user_id.clone(), library_id: self.library_id.clone(), client_id: self.client_id.clone(), changes };
 
-        let token = self.token().ok_or("not signed in")?;
+        let token = session.token;
         let response = self.http_client.post(&format!("{}/api/sync/push", self.server_url)).bearer_auth(&token).json(&request).send().await?.error_for_status()?;
         let push_response: PushChangesResponse = response.json().await?;
 
@@ -385,8 +371,8 @@ impl SyncManager {
     }
 
     async fn pull_events_from_server(&self, since_server_seq: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let token = self.token().ok_or("not signed in")?;
-        let response = self.http_client.get(&format!("{}/api/sync/pull?user_id={}&library_id={}&client_id={}&since_server_seq={}", self.server_url, self.user_id, self.library_id, self.client_id, since_server_seq)).bearer_auth(&token).send().await?.error_for_status()?;
+        let session = self.current_session().ok_or("not signed in")?;
+        let response = self.http_client.get(&format!("{}/api/sync/pull?user_id={}&library_id={}&client_id={}&since_server_seq={}", self.server_url, session.user_id, self.library_id, self.client_id, since_server_seq)).bearer_auth(&session.token).send().await?.error_for_status()?;
         let pull_response: PullChangesResponse = response.json().await?;
         let changes = pull_response.changes;
 
