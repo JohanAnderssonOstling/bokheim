@@ -9,6 +9,24 @@ use std::ops::Range;
 
 const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 
+#[derive(Clone, Copy)]
+pub struct ElementRef<'a> {
+    doc: &'a Document,
+    node_idx: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct TextRef<'a> {
+    doc: &'a Document,
+    node_idx: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum NodeRef<'a> {
+    Element(ElementRef<'a>),
+    Text(TextRef<'a>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentMode {
     Html,
@@ -20,6 +38,140 @@ impl Document {
         let mut doc = Self::default();
         doc.ensure_default_styles();
         doc
+    }
+
+    pub fn mode(&self) -> DocumentMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: DocumentMode) {
+        self.mode = mode;
+    }
+
+    pub fn root_font_size(&self) -> f32 {
+        self.root_font_size
+    }
+
+    pub fn set_root_font_size(&mut self, root_font_size: f32) {
+        self.root_font_size = root_font_size;
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub fn set_title(&mut self, title: Option<String>) {
+        self.title = title;
+    }
+
+    pub fn intern_string(&mut self, value: &str) -> u16 {
+        self.strings.intern(value)
+    }
+
+    pub fn string(&self, idx: u16) -> &str {
+        self.strings.get(idx)
+    }
+
+    pub fn lookup_string(&self, value: &str) -> Option<u16> {
+        self.strings.lookup(value)
+    }
+
+    pub fn style_view(&self, indices: StyleIndices) -> StyleView<'_> {
+        self.styles.view(indices)
+    }
+
+    pub fn push_style(&mut self, font: Font, text: InheritedText, box_model: BoxModel, border: Border, background: Background) -> StyleIndices {
+        self.styles.push(font, text, box_model, border, background)
+    }
+
+    pub fn box_model_style(&self, idx: u32) -> &BoxModel {
+        &self.styles.box_styles[idx as usize]
+    }
+
+    pub fn text_style(&self, idx: u32) -> &InheritedText {
+        &self.styles.text_styles[idx as usize]
+    }
+
+    pub fn font_style(&self, idx: u32) -> &Font {
+        &self.styles.font_styles[idx as usize]
+    }
+
+    pub fn images(&self) -> &[ImageResource] {
+        self.images.as_slice()
+    }
+
+    pub fn images_mut(&mut self) -> &mut [ImageResource] {
+        self.images.as_mut_slice()
+    }
+
+    pub fn image(&self, image_idx: u32) -> Option<&ImageResource> {
+        self.images.get(image_idx as usize)
+    }
+
+    pub fn push_image(&mut self, image: ImageResource) -> u32 {
+        let image_idx = self.images.len() as u32;
+        self.images.push(image);
+        image_idx
+    }
+
+    pub fn toc_entries(&self) -> &[DocumentTocEntry] {
+        self.toc_entries.as_slice()
+    }
+
+    pub fn document_toc_entries(&self) -> &[DocumentTocNode] {
+        self.document_toc_entries.as_slice()
+    }
+
+    pub fn push_toc_entry(&mut self, entry: DocumentTocEntry) {
+        self.toc_entries.push(entry);
+    }
+
+    pub(crate) fn box_tree(&self) -> &BoxTree {
+        &self.box_tree
+    }
+
+    pub(crate) fn box_tree_mut(&mut self) -> &mut BoxTree {
+        &mut self.box_tree
+    }
+
+    pub(crate) fn set_box_tree(&mut self, box_tree: BoxTree) {
+        self.box_tree = box_tree;
+    }
+
+    pub(crate) fn layout(&self) -> &LayoutResult {
+        &self.layout
+    }
+
+    pub(crate) fn layout_mut(&mut self) -> &mut LayoutResult {
+        &mut self.layout
+    }
+
+    pub fn anchor_glyph(&self, id_idx: u16) -> Option<u32> {
+        self.anchor_glyphs.get(&id_idx).copied()
+    }
+
+    pub fn anchor_glyphs(&self) -> &FxHashMap<u16, u32> {
+        &self.anchor_glyphs
+    }
+
+    pub fn clear_anchor_glyphs(&mut self) {
+        self.anchor_glyphs.clear();
+    }
+
+    pub fn insert_anchor_glyph(&mut self, id_idx: u16, glyph_idx: u32) {
+        self.anchor_glyphs.insert(id_idx, glyph_idx);
+    }
+
+    pub fn link_href_for_glyph(&self, glyph_idx: u32) -> Option<u16> {
+        self.link_glyph_hrefs.get(&glyph_idx).copied()
+    }
+
+    pub fn clear_link_glyph_hrefs(&mut self) {
+        self.link_glyph_hrefs.clear();
+    }
+
+    pub fn insert_link_glyph_href(&mut self, glyph_idx: u32, href_idx: u16) {
+        self.link_glyph_hrefs.insert(glyph_idx, href_idx);
     }
 
     pub fn rebuild_document_toc_entries(&mut self) {
@@ -120,8 +272,107 @@ impl Document {
         self.box_element(box_idx).and_then(|e| e.href)
     }
 
+    pub fn get_box_image_idx(&self, box_idx: usize) -> Option<u32> {
+        self.box_tree.boxes.get(box_idx)?.dom_element.and_then(|node_idx| self.element_ref(node_idx as usize)?.image_idx())
+    }
+
+    pub fn box_layout_mode(&self, box_idx: usize) -> Option<&LayoutMode> {
+        self.box_tree.boxes.get(box_idx).map(|layout_box| &layout_box.layout_mode)
+    }
+
+    pub fn box_style_indices(&self, box_idx: usize) -> Option<StyleIndices> {
+        self.box_tree.boxes.get(box_idx)?.style
+    }
+
+    pub fn root_box(&self) -> Option<usize> {
+        self.box_tree.root_box.map(|idx| idx as usize)
+    }
+
+    pub fn box_count(&self) -> usize {
+        self.box_tree.boxes.len()
+    }
+
+    pub fn is_table_cell_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::TableCell(_)))
+    }
+
+    pub fn is_block_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_)))
+    }
+
+    pub fn is_table_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Table(_)))
+    }
+
+    pub fn is_block_container_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Block(_) | LayoutMode::Table(_) | LayoutMode::TableCell(_)))
+    }
+
+    pub fn is_inline_box(&self, box_idx: usize) -> bool {
+        matches!(self.box_layout_mode(box_idx), Some(LayoutMode::Inline(_)))
+    }
+
+    pub fn box_inline_run_range(&self, box_idx: usize) -> Option<Range<u32>> {
+        match self.box_layout_mode(box_idx)? {
+            LayoutMode::Inline(range) => Some(range.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn box_anchor_y_candidate(&self, box_idx: usize) -> Option<f64> {
+        let layout_box = self.box_tree.boxes.get(box_idx)?;
+        (layout_box.size.height > 0.0 || layout_box.point.y != 0.0).then_some(layout_box.point.y)
+    }
+
     pub fn get_box_point(&self, box_idx: usize) -> Point {
         self.box_tree.boxes[box_idx].point
+    }
+
+    pub fn get_box_size(&self, box_idx: usize) -> Size {
+        self.box_tree.boxes[box_idx].size
+    }
+
+    pub fn set_box_point(&mut self, box_idx: usize, point: Point) {
+        if let Some(layout_box) = self.box_tree.boxes.get_mut(box_idx) {
+            layout_box.point = point;
+        }
+    }
+
+    pub fn set_box_size(&mut self, box_idx: usize, size: Size) {
+        if let Some(layout_box) = self.box_tree.boxes.get_mut(box_idx) {
+            layout_box.size = size;
+        }
+    }
+
+    pub fn inline_runs_empty(&self) -> bool {
+        self.box_tree.inline_runs.is_empty()
+    }
+
+    pub fn inline_runs(&self) -> &[InlineRun] {
+        self.box_tree.inline_runs.as_slice()
+    }
+
+    pub fn inline_run(&self, run_idx: usize) -> Option<&InlineRun> {
+        self.box_tree.inline_runs.get(run_idx)
+    }
+
+    pub fn glyph(&self, glyph_idx: u32) -> Option<u16> {
+        self.box_tree.glyphs.get(glyph_idx as usize).copied()
+    }
+
+    /// `(box index, glyph range)` for each non-empty inline text run, in glyph
+    /// order. Shaping, whitespace-collapse, and decoration collection derive a
+    /// glyph's owning box from these runs rather than a per-glyph map: the runs
+    /// already store the association at one entry per run.
+    pub fn text_runs(&self) -> Vec<(usize, Range<u32>)> {
+        self.box_tree
+            .inline_runs
+            .iter()
+            .filter_map(|run| match &run.kind {
+                InlineKind::Text { glyphs } if glyphs.start < glyphs.end => Some((run.box_idx as usize, glyphs.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Get classes for a box as iterator
@@ -146,52 +397,119 @@ impl Document {
 
     // ========== DOM NODE ACCESSORS ==========
 
+    pub fn element_ref(&self, node_idx: usize) -> Option<ElementRef<'_>> {
+        self.dom_nodes.get(node_idx)?.as_element()?;
+        Some(ElementRef { doc: self, node_idx })
+    }
+
+    pub fn text_ref(&self, node_idx: usize) -> Option<TextRef<'_>> {
+        self.dom_nodes.get(node_idx)?.as_text()?;
+        Some(TextRef { doc: self, node_idx })
+    }
+
+    pub fn node_ref(&self, node_idx: usize) -> Option<NodeRef<'_>> {
+        match self.dom_nodes.get(node_idx)? {
+            DomNode::Element(_) => Some(NodeRef::Element(ElementRef { doc: self, node_idx })),
+            DomNode::Text(_) => Some(NodeRef::Text(TextRef { doc: self, node_idx })),
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.dom_nodes.len()
+    }
+
+    pub fn dom_root(&self) -> Option<usize> {
+        self.dom_root.map(|idx| idx as usize)
+    }
+
+    pub(crate) fn set_dom_root(&mut self, node_idx: u32) {
+        self.dom_root = Some(node_idx);
+    }
+
+    pub(crate) fn push_dom_element(&mut self, element: DomElement) -> u32 {
+        let node_idx = self.dom_nodes.len() as u32;
+        self.dom_nodes.push(DomNode::Element(element));
+        node_idx
+    }
+
+    pub(crate) fn push_dom_text(&mut self, text: impl Into<String>, parent: Option<u32>) -> u32 {
+        let node_idx = self.dom_nodes.len() as u32;
+        self.dom_nodes.push(DomNode::Text(DomText { text: text.into(), parent }));
+        node_idx
+    }
+
+    pub(crate) fn set_dom_children(&mut self, node_idx: u32, children: Vec<u32>) -> bool {
+        let Some(DomNode::Element(element)) = self.dom_nodes.get_mut(node_idx as usize) else {
+            return false;
+        };
+        element.children = children;
+        true
+    }
+
+    pub(crate) fn set_dom_id_attribute(&mut self, node_idx: u32, id_idx: u16, id_name_idx: u16) -> bool {
+        let Some(DomNode::Element(element)) = self.dom_nodes.get_mut(node_idx as usize) else {
+            return false;
+        };
+        element.id = Some(id_idx);
+        element.attributes.push(DomAttribute { name: id_name_idx, local_name: id_name_idx, namespace: None, value: id_idx });
+        true
+    }
+
+    pub(crate) fn dom_id_in_use(&self, id_idx: u16) -> bool {
+        self.dom_nodes.iter().any(|node| matches!(node, DomNode::Element(element) if element.id == Some(id_idx)))
+    }
+
+    pub fn is_text_node(&self, node_idx: usize) -> bool {
+        matches!(self.node_ref(node_idx), Some(NodeRef::Text(_)))
+    }
+
+    pub fn is_element_node(&self, node_idx: usize) -> bool {
+        matches!(self.node_ref(node_idx), Some(NodeRef::Element(_)))
+    }
+
+    pub fn dom_style_indices(&self, node_idx: usize) -> Option<StyleIndices> {
+        self.dom_nodes.get(node_idx)?.as_element()?.style
+    }
+
+    pub fn set_dom_style_indices(&mut self, node_idx: usize, style: Option<StyleIndices>) -> bool {
+        let Some(DomNode::Element(element)) = self.dom_nodes.get_mut(node_idx) else {
+            return false;
+        };
+        element.style = style;
+        true
+    }
+
     /// Get tag name for a DOM element
     pub fn get_dom_tag(&self, node_idx: usize) -> Option<&str> {
-        match &self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => Some(self.strings.get(e.tag)),
-            DomNode::Text(_) => None,
-        }
+        self.element_ref(node_idx).map(|element| element.tag())
     }
 
     /// Get ID for a DOM element
     pub fn get_dom_id(&self, node_idx: usize) -> Option<&str> {
-        match &self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e.id.map(|idx| self.strings.get(idx)),
-            DomNode::Text(_) => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.id())
     }
 
     /// Get classes for a DOM element as iterator
     pub fn get_dom_classes(&self, node_idx: usize) -> Box<dyn Iterator<Item = &str> + '_> {
-        match &self.dom_nodes.get(node_idx) {
-            Some(DomNode::Element(e)) => {
-                let range = e.classes.clone();
-                Box::new(self.class_list[range.start as usize..range.end as usize].iter().map(|&idx| self.strings.get(idx)))
-            }
-            _ => Box::new(std::iter::empty()),
-        }
+        if let Some(element) = self.element_ref(node_idx) { Box::new(element.classes()) } else { Box::new(std::iter::empty()) }
     }
 
     /// Check if DOM element has a specific class
     pub fn dom_has_class(&self, node_idx: usize, class: &str) -> bool {
-        self.get_dom_classes(node_idx).any(|c| c == class)
+        self.element_ref(node_idx).is_some_and(|element| element.has_class(class))
     }
 
     /// Get parent DOM node index
     pub fn get_dom_parent(&self, node_idx: usize) -> Option<usize> {
-        self.dom_nodes.get(node_idx)?.parent().map(|p| p as usize)
+        self.node_ref(node_idx)?.parent()
     }
 
     pub fn get_dom_namespace(&self, node_idx: usize) -> Option<&str> {
-        match &self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e.namespace.map(|idx| self.strings.get(idx)),
-            DomNode::Text(_) => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.namespace())
     }
 
     pub fn is_html_element_in_html_document(&self, node_idx: usize) -> bool {
-        self.mode == DocumentMode::Html && self.get_dom_namespace(node_idx).is_some_and(|namespace| namespace == HTML_NAMESPACE)
+        self.element_ref(node_idx).is_some_and(|element| element.is_html_element_in_html_document())
     }
 
     /// Iterate DOM ancestors (parent, grandparent, etc.)
@@ -201,54 +519,31 @@ impl Document {
 
     /// Get href attribute for DOM element
     pub fn get_dom_href(&self, node_idx: usize) -> Option<&str> {
-        match &self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e.href.map(|idx| self.strings.get(idx)),
-            DomNode::Text(_) => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.href())
     }
 
     pub fn get_dom_attr(&self, node_idx: usize, attr: &str) -> Option<&str> {
-        match self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e.attributes.iter().find(|entry| entry.namespace.is_none() && self.strings.get(entry.name) == attr).map(|entry| self.strings.get(entry.value)),
-            _ => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.attr(attr))
     }
 
     pub fn has_dom_attr(&self, node_idx: usize, attr: &str) -> bool {
-        self.get_dom_attr(node_idx, attr).is_some()
+        self.element_ref(node_idx).is_some_and(|element| element.has_attr(attr))
     }
 
     pub fn get_dom_attr_expanded(&self, node_idx: usize, namespace: Option<&str>, local_name: &str) -> Option<&str> {
-        match self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e
-                .attributes
-                .iter()
-                .find(|entry| {
-                    self.strings.get(entry.local_name) == local_name
-                        && match (namespace, entry.namespace) {
-                            (None, None) => true,
-                            (Some(expected), Some(actual)) => self.strings.get(actual) == expected,
-                            _ => false,
-                        }
-                })
-                .map(|entry| self.strings.get(entry.value)),
-            _ => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.attr_expanded(namespace, local_name))
     }
 
     pub fn has_dom_attr_expanded(&self, node_idx: usize, namespace: Option<&str>, local_name: &str) -> bool {
-        self.get_dom_attr_expanded(node_idx, namespace, local_name).is_some()
+        self.element_ref(node_idx).is_some_and(|element| element.has_attr_expanded(namespace, local_name))
     }
 
     pub fn get_dom_attr_in_any_namespace(&self, node_idx: usize, local_name: &str) -> Option<&str> {
-        match self.dom_nodes.get(node_idx)? {
-            DomNode::Element(e) => e.attributes.iter().find(|entry| self.strings.get(entry.local_name) == local_name).map(|entry| self.strings.get(entry.value)),
-            _ => None,
-        }
+        self.element_ref(node_idx).and_then(|element| element.attr_in_any_namespace(local_name))
     }
 
     pub fn has_dom_attr_in_any_namespace(&self, node_idx: usize, local_name: &str) -> bool {
-        self.get_dom_attr_in_any_namespace(node_idx, local_name).is_some()
+        self.element_ref(node_idx).is_some_and(|element| element.has_attr_in_any_namespace(local_name))
     }
 
     // ========== CFI HELPER FUNCTIONS ==========
@@ -393,38 +688,177 @@ impl Document {
         start..end
     }
 }
+
+impl<'a> ElementRef<'a> {
+    fn element(self) -> &'a DomElement {
+        self.doc.dom_nodes[self.node_idx].as_element().expect("ElementRef must point to a DOM element")
+    }
+
+    pub fn node_idx(self) -> usize {
+        self.node_idx
+    }
+
+    pub fn tag(self) -> &'a str {
+        self.doc.strings.get(self.element().tag)
+    }
+
+    pub fn id(self) -> Option<&'a str> {
+        self.element().id.map(|idx| self.doc.strings.get(idx))
+    }
+
+    pub fn classes(self) -> impl Iterator<Item = &'a str> + 'a {
+        let range = self.element().classes.clone();
+        self.doc.class_list[range.start as usize..range.end as usize].iter().map(|&idx| self.doc.strings.get(idx))
+    }
+
+    pub fn has_class(self, class: &str) -> bool {
+        self.classes().any(|candidate| candidate == class)
+    }
+
+    pub fn parent(self) -> Option<usize> {
+        self.element().parent.map(|idx| idx as usize)
+    }
+
+    pub fn children(self) -> impl Iterator<Item = usize> + 'a {
+        self.element().children.iter().map(|&idx| idx as usize)
+    }
+
+    pub fn namespace(self) -> Option<&'a str> {
+        self.element().namespace.map(|idx| self.doc.strings.get(idx))
+    }
+
+    pub fn is_html_element_in_html_document(self) -> bool {
+        self.doc.mode == DocumentMode::Html && self.namespace().is_some_and(|namespace| namespace == HTML_NAMESPACE)
+    }
+
+    pub fn href(self) -> Option<&'a str> {
+        self.element().href.map(|idx| self.doc.strings.get(idx))
+    }
+
+    pub fn attr(self, attr: &str) -> Option<&'a str> {
+        self.element().attributes.iter().find(|entry| entry.namespace.is_none() && self.doc.strings.get(entry.name) == attr).map(|entry| self.doc.strings.get(entry.value))
+    }
+
+    pub fn has_attr(self, attr: &str) -> bool {
+        self.attr(attr).is_some()
+    }
+
+    pub fn attr_expanded(self, namespace: Option<&str>, local_name: &str) -> Option<&'a str> {
+        self.element()
+            .attributes
+            .iter()
+            .find(|entry| {
+                self.doc.strings.get(entry.local_name) == local_name
+                    && match (namespace, entry.namespace) {
+                        (None, None) => true,
+                        (Some(expected), Some(actual)) => self.doc.strings.get(actual) == expected,
+                        _ => false,
+                    }
+            })
+            .map(|entry| self.doc.strings.get(entry.value))
+    }
+
+    pub fn has_attr_expanded(self, namespace: Option<&str>, local_name: &str) -> bool {
+        self.attr_expanded(namespace, local_name).is_some()
+    }
+
+    pub fn attr_in_any_namespace(self, local_name: &str) -> Option<&'a str> {
+        self.element().attributes.iter().find(|entry| self.doc.strings.get(entry.local_name) == local_name).map(|entry| self.doc.strings.get(entry.value))
+    }
+
+    pub fn has_attr_in_any_namespace(self, local_name: &str) -> bool {
+        self.attr_in_any_namespace(local_name).is_some()
+    }
+
+    pub fn style(self) -> Option<StyleIndices> {
+        self.doc.dom_style_indices(self.node_idx)
+    }
+
+    pub fn image_idx(self) -> Option<u32> {
+        self.element().image_idx
+    }
+
+    pub fn previous_element_sibling(self) -> Option<ElementRef<'a>> {
+        let parent = self.parent().and_then(|parent_idx| self.doc.element_ref(parent_idx))?;
+        let mut previous = None;
+        for child_idx in parent.children() {
+            if child_idx == self.node_idx {
+                return previous;
+            }
+            if let Some(child) = self.doc.element_ref(child_idx) {
+                previous = Some(child);
+            }
+        }
+        None
+    }
+}
+
+impl<'a> NodeRef<'a> {
+    pub fn node_idx(self) -> usize {
+        match self {
+            NodeRef::Element(element) => element.node_idx(),
+            NodeRef::Text(text) => text.node_idx(),
+        }
+    }
+
+    pub fn parent(self) -> Option<usize> {
+        match self {
+            NodeRef::Element(element) => element.parent(),
+            NodeRef::Text(text) => text.parent(),
+        }
+    }
+}
+
+impl<'a> TextRef<'a> {
+    fn text_node(self) -> &'a DomText {
+        self.doc.dom_nodes[self.node_idx].as_text().expect("TextRef must point to a DOM text node")
+    }
+
+    pub fn node_idx(self) -> usize {
+        self.node_idx
+    }
+
+    pub fn text(self) -> &'a str {
+        &self.text_node().text
+    }
+
+    pub fn parent(self) -> Option<usize> {
+        self.text_node().parent.map(|idx| idx as usize)
+    }
+}
+
 pub struct Document {
     // ========== DOM TREE (Phase 1: Parsing) ==========
-    pub dom_nodes: Vec<DomNode>,
-    pub dom_root: Option<u32>,
-    pub mode: DocumentMode,
+    dom_nodes: Vec<DomNode>,
+    dom_root: Option<u32>,
+    mode: DocumentMode,
 
     // ========== BOX TREE (Phase 3: Box Construction) ==========
     // The box tree plus the inline text content (glyphs, runs) it references.
-    pub box_tree: BoxTree,
+    box_tree: BoxTree,
 
     // ========== RESOURCES ==========
-    pub images: Vec<ImageResource>,
-    pub title: Option<String>,
+    images: Vec<ImageResource>,
+    title: Option<String>,
 
     // ========== LAYOUT RESULTS (Phase 4: Layout) ==========
-    pub layout: LayoutResult,
+    layout: LayoutResult,
 
     // ========== INTERNING ==========
-    pub strings: StringInterner,
-    pub class_list: Vec<u16>, // interned class indices
+    strings: StringInterner,
+    class_list: Vec<u16>, // interned class indices
 
     // ========== LINKS & ANCHORS ==========
-    pub link_glyph_hrefs: FxHashMap<u32, u16>,
-    pub anchor_glyphs: FxHashMap<u16, u32>,
-    pub toc_entries: Vec<DocumentTocEntry>,
-    pub document_toc_entries: Vec<DocumentTocNode>,
+    link_glyph_hrefs: FxHashMap<u32, u16>,
+    anchor_glyphs: FxHashMap<u16, u32>,
+    toc_entries: Vec<DocumentTocEntry>,
+    document_toc_entries: Vec<DocumentTocNode>,
 
     // ========== STYLES (Phase 2: Style Resolution) ==========
-    pub root_font_size: f32,
+    root_font_size: f32,
 
     // Computed styles (Servo-inspired split design), indexed by StyleIndices.
-    pub styles: StyleStore,
+    styles: StyleStore,
 }
 
 /// Output of the layout phase: line boxes, glyph offsets, and paint fragments.
@@ -561,40 +995,6 @@ pub struct BoxTree {
     pub root_box: Option<u32>,
     pub glyphs: Vec<u16>,
     pub inline_runs: Vec<InlineRun>,
-    /// Maps each glyph index to the index of the box that owns it. Derived from
-    /// `inline_runs`; rebuilt by `rebuild_glyph_box_map` once the glyph buffer is
-    /// finalized (after whitespace collapse) and shared by shaping and layout
-    /// instead of being reconstructed at each site.
-    pub glyph_box: Vec<u32>,
-}
-
-impl BoxTree {
-    /// Rebuild `glyph_box` from the inline text runs. Glyphs not covered by any
-    /// text run keep box index 0. Must be called after the glyph buffer reaches
-    /// its final length (post whitespace-collapse).
-    pub fn rebuild_glyph_box_map(&mut self) {
-        let mut map = vec![0u32; self.glyphs.len()];
-        for run in &self.inline_runs {
-            if let InlineKind::Text { glyphs } = &run.kind {
-                for i in glyphs.clone() {
-                    if let Some(slot) = map.get_mut(i as usize) {
-                        *slot = run.box_idx;
-                    }
-                }
-            }
-        }
-        self.glyph_box = map;
-    }
-
-    /// Return the glyph→box map, rebuilding it first if it is stale (its length
-    /// no longer matches the glyph buffer). Lets layout run safely even if it is
-    /// invoked without a preceding shaping pass.
-    pub fn glyph_box_map(&mut self) -> &[u32] {
-        if self.glyph_box.len() != self.glyphs.len() {
-            self.rebuild_glyph_box_map();
-        }
-        &self.glyph_box
-    }
 }
 
 pub struct LayoutBox {

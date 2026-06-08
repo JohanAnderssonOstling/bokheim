@@ -7,13 +7,13 @@ use std::ops::Range;
 /// Get computed style for a box using split style vecs
 /// Returns a StyleView with references into the document's style storage
 pub(crate) fn get_style<'a>(doc: &'a Document, box_idx: usize) -> StyleView<'a> {
-    let indices = doc.box_tree.boxes[box_idx].style.unwrap_or_else(|| {
+    let indices = doc.box_style_indices(box_idx).unwrap_or_else(|| {
         // Fallback for boxes without split styles (shouldn't happen after migration)
         // Use default indices (index 0 guaranteed to exist from ensure_default_styles)
         crate::document::StyleIndices { font_idx: 0, text_idx: 0, box_idx: 0, border_idx: 0, bg_idx: 0 }
     });
 
-    doc.styles.view(indices)
+    doc.style_view(indices)
 }
 
 fn push_border_rects(doc: &mut Document, rect: Rect, border_width: f64, color: u32, is_inline: bool) {
@@ -27,7 +27,7 @@ fn push_border_rects(doc: &mut Document, rect: Rect, border_width: f64, color: u
     let left = Rect::new(x0, y0, x0 + bw, y1);
     let right = Rect::new(x1 - bw, y0, x1, y1);
     for rect in [top, right, bottom, left] {
-        doc.layout.decorations.push(DecorationFragment { rect, color, is_inline });
+        doc.layout_mut().decorations.push(DecorationFragment { rect, color, is_inline });
     }
 }
 
@@ -39,25 +39,25 @@ fn paint_block_borders(doc: &mut Document, rect: Rect, top: Option<(f64, u32)>, 
     if let Some((w, c)) = top {
         let h = w.min(rect.height());
         if h > 0.0 {
-            doc.layout.decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x1, rect.y0 + h), color: c, is_inline: false });
+            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x1, rect.y0 + h), color: c, is_inline: false });
         }
     }
     if let Some((w, c)) = right {
         let bw = w.min(rect.width());
         if bw > 0.0 {
-            doc.layout.decorations.push(DecorationFragment { rect: Rect::new(rect.x1 - bw, rect.y0, rect.x1, rect.y1), color: c, is_inline: false });
+            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x1 - bw, rect.y0, rect.x1, rect.y1), color: c, is_inline: false });
         }
     }
     if let Some((w, c)) = bottom {
         let h = w.min(rect.height());
         if h > 0.0 {
-            doc.layout.decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y1 - h, rect.x1, rect.y1), color: c, is_inline: false });
+            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y1 - h, rect.x1, rect.y1), color: c, is_inline: false });
         }
     }
     if let Some((w, c)) = left {
         let bw = w.min(rect.width());
         if bw > 0.0 {
-            doc.layout.decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x0 + bw, rect.y1), color: c, is_inline: false });
+            doc.layout_mut().decorations.push(DecorationFragment { rect: Rect::new(rect.x0, rect.y0, rect.x0 + bw, rect.y1), color: c, is_inline: false });
         }
     }
 }
@@ -79,17 +79,17 @@ impl<'a> ListMarkerHelper<'a> {
         if !self.has_list_ancestor(box_idx) {
             return 0.0;
         }
-        let run_range = match &self.doc.box_tree.boxes[box_idx].layout_mode {
-            BoxType::Block(block) => match &block.children {
+        let run_range = match self.doc.box_layout_mode(box_idx) {
+            Some(BoxType::Block(block)) => match &block.children {
                 Children::Runs(range) => Some(range.clone()),
                 _ => None,
             },
-            BoxType::TableCell(cell) => match &cell.children {
+            Some(BoxType::TableCell(cell)) => match &cell.children {
                 Children::Runs(range) => Some(range.clone()),
                 _ => None,
             },
-            BoxType::Inline(range) | BoxType::Anonymous(range) => Some(range.clone()),
-            BoxType::Table(_) | BoxType::TableRow(_) => None,
+            Some(BoxType::Inline(range) | BoxType::Anonymous(range)) => Some(range.clone()),
+            Some(BoxType::Table(_) | BoxType::TableRow(_)) | None => None,
         };
         let Some(run_range) = run_range else {
             return 0.0;
@@ -98,7 +98,7 @@ impl<'a> ListMarkerHelper<'a> {
     }
 
     fn marker_width_from_runs(&self, run_range: Range<u32>) -> f64 {
-        let first_run = match self.doc.box_tree.inline_runs.get(run_range.start as usize) {
+        let first_run = match self.doc.inline_run(run_range.start as usize) {
             Some(run) => run,
             None => return 0.0,
         };
@@ -108,7 +108,7 @@ impl<'a> ListMarkerHelper<'a> {
         if glyphs.start >= glyphs.end {
             return 0.0;
         }
-        let marker_chars: Vec<_> = glyphs.clone().map(|i| self.cache.get_char(self.doc.box_tree.glyphs[i as usize])).collect();
+        let marker_chars: Vec<_> = glyphs.clone().filter_map(|i| self.doc.glyph(i)).map(|glyph| self.cache.get_char(glyph)).collect();
         if marker_chars.is_empty() {
             return 0.0;
         }
@@ -123,7 +123,7 @@ impl<'a> ListMarkerHelper<'a> {
                 return 0.0;
             }
         }
-        glyphs.clone().map(|i| self.cache.get(self.doc.box_tree.glyphs[i as usize]).size().width).sum()
+        glyphs.clone().filter_map(|i| self.doc.glyph(i)).map(|glyph| self.cache.get(glyph).size().width).sum()
     }
 
     fn has_list_ancestor(&self, box_idx: usize) -> bool {
@@ -171,9 +171,9 @@ impl LayoutEngine {
         self.glyph_cache = glyph_cache;
         self.clear_layout_output();
 
-        if let Some(root_box) = self.document.box_tree.root_box {
-            self.document.box_tree.boxes[root_box as usize].point = Point::ZERO;
-            self.layout_box(root_box as usize, self.viewport_width, None, 0.0);
+        if let Some(root_box) = self.document.root_box() {
+            self.document.set_box_point(root_box, Point::ZERO);
+            self.layout_box(root_box, self.viewport_width, None, 0.0);
         }
         self.sort_lines_and_remap_images();
         self.collect_inline_decorations();
@@ -182,16 +182,18 @@ impl LayoutEngine {
     }
 
     fn clear_layout_output(&mut self) {
-        self.document.layout.lines.clear();
-        self.document.layout.line_glyph_offsets.clear();
-        self.document.layout.decorations.clear();
-        self.document.layout.image_fragments.clear();
-        self.document.layout.image_fragments_by_line.clear();
+        let layout = self.document.layout_mut();
+        layout.lines.clear();
+        layout.line_glyph_offsets.clear();
+        layout.decorations.clear();
+        layout.image_fragments.clear();
+        layout.image_fragments_by_line.clear();
     }
 
     fn sort_lines_and_remap_images(&mut self) {
-        let mut offsets_by_line: Vec<Vec<GlyphOffsetRun>> = self.document.layout.line_glyph_offsets.drain(..).collect();
-        let mut line_pairs: Vec<(Line, Vec<GlyphOffsetRun>, usize)> = self.document.layout.lines.drain(..).enumerate().map(|(idx, line)| (line, offsets_by_line.get_mut(idx).map(mem::take).unwrap_or_default(), idx)).collect();
+        let layout = self.document.layout_mut();
+        let mut offsets_by_line: Vec<Vec<GlyphOffsetRun>> = layout.line_glyph_offsets.drain(..).collect();
+        let mut line_pairs: Vec<(Line, Vec<GlyphOffsetRun>, usize)> = layout.lines.drain(..).enumerate().map(|(idx, line)| (line, offsets_by_line.get_mut(idx).map(mem::take).unwrap_or_default(), idx)).collect();
 
         line_pairs.sort_by(|(a, _, _), (b, _, _)| a.point.y.partial_cmp(&b.point.y).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.point.x.partial_cmp(&b.point.x).unwrap_or(std::cmp::Ordering::Equal)));
 
@@ -199,9 +201,9 @@ impl LayoutEngine {
         for (new_idx, (_, _, old_idx)) in line_pairs.iter().enumerate() {
             index_map[*old_idx] = new_idx;
         }
-        self.document.layout.lines = line_pairs.iter().map(|(line, _, _)| line.clone()).collect();
-        self.document.layout.line_glyph_offsets = line_pairs.into_iter().map(|(_, offsets, _)| offsets).collect();
-        for frag in &mut self.document.layout.image_fragments {
+        layout.lines = line_pairs.iter().map(|(line, _, _)| line.clone()).collect();
+        layout.line_glyph_offsets = line_pairs.into_iter().map(|(_, offsets, _)| offsets).collect();
+        for frag in &mut layout.image_fragments {
             if let Some(&new_idx) = index_map.get(frag.line_idx) {
                 frag.line_idx = new_idx;
             }
@@ -209,9 +211,10 @@ impl LayoutEngine {
     }
 
     fn rebuild_image_fragments_by_line(&mut self) {
-        self.document.layout.image_fragments_by_line = vec![Vec::new(); self.document.layout.lines.len()];
-        for (idx, frag) in self.document.layout.image_fragments.iter().enumerate() {
-            if let Some(line) = self.document.layout.image_fragments_by_line.get_mut(frag.line_idx) {
+        let layout = self.document.layout_mut();
+        layout.image_fragments_by_line = vec![Vec::new(); layout.lines.len()];
+        for (idx, frag) in layout.image_fragments.iter().enumerate() {
+            if let Some(line) = layout.image_fragments_by_line.get_mut(frag.line_idx) {
                 line.push(idx);
             }
         }
@@ -229,11 +232,12 @@ impl LayoutEngine {
         let margin_top = style.margin_top() as f64;
         let margin_bottom = style.margin_bottom() as f64;
 
-        let b = &self.document.box_tree.boxes[box_idx];
-        let width = (b.size.width - margin_left - margin_right).max(0.0);
-        let height = (b.size.height - margin_top - margin_bottom).max(0.0);
-        let rect = Rect::new(b.point.x, b.point.y, b.point.x + width, b.point.y + height);
-        self.document.layout.decorations.push(DecorationFragment { rect, color: background_color, is_inline: false });
+        let size = self.document.get_box_size(box_idx);
+        let point = self.document.get_box_point(box_idx);
+        let width = (size.width - margin_left - margin_right).max(0.0);
+        let height = (size.height - margin_top - margin_bottom).max(0.0);
+        let rect = Rect::new(point.x, point.y, point.x + width, point.y + height);
+        self.document.layout_mut().decorations.push(DecorationFragment { rect, color: background_color, is_inline: false });
     }
 
     pub(crate) fn emit_block_decorations(&mut self, box_idx: usize) {
@@ -250,12 +254,13 @@ impl LayoutEngine {
         let margin_top = style.margin_top() as f64;
         let margin_bottom = style.margin_bottom() as f64;
 
-        let b = &self.document.box_tree.boxes[box_idx];
-        let width = (b.size.width - margin_left - margin_right).max(0.0);
-        let height = (b.size.height - margin_top - margin_bottom).max(0.0);
+        let size = self.document.get_box_size(box_idx);
+        let point = self.document.get_box_point(box_idx);
+        let width = (size.width - margin_left - margin_right).max(0.0);
+        let height = (size.height - margin_top - margin_bottom).max(0.0);
 
-        let x0 = b.point.x;
-        let y0 = b.point.y;
+        let x0 = point.x;
+        let y0 = point.y;
         let x1 = x0 + width;
         let y1 = y0 + height;
         let rect = Rect::new(x0, y0, x1, y1);
@@ -268,29 +273,42 @@ impl LayoutEngine {
     }
 
     fn collect_inline_decorations(&mut self) {
-        if self.document.layout.lines.is_empty() || self.document.box_tree.inline_runs.is_empty() {
+        if self.document.layout().lines.is_empty() || self.document.inline_runs_empty() {
             return;
         }
 
-        // Ensure the shared glyph→box map is current (rebuilds only if stale).
-        self.document.box_tree.glyph_box_map();
+        // Inline text runs in ascending, contiguous glyph order. A glyph's owning
+        // box is derived from these runs (one entry per run) instead of a
+        // per-glyph map.
+        let text_runs = self.document.text_runs();
 
         let inline_ancestors = self.build_inline_ancestor_map();
-        let mut active = vec![false; self.document.box_tree.boxes.len()];
-        let mut active_start = vec![0.0f64; self.document.box_tree.boxes.len()];
+        let mut active = vec![false; self.document.box_count()];
+        let mut active_start = vec![0.0f64; self.document.box_count()];
         let mut active_indices: Vec<u32> = Vec::new();
-        let mut marked = vec![false; self.document.box_tree.boxes.len()];
+        let mut marked = vec![false; self.document.box_count()];
 
-        for line in self.document.layout.lines.clone() {
+        for line in self.document.layout().lines.clone() {
             for &b in &active_indices {
                 active[b as usize] = false;
             }
             active_indices.clear();
 
+            // Run containing this line's first glyph; advanced monotonically as
+            // we walk the line left to right.
+            let mut run_cursor = text_runs.partition_point(|(_, range)| range.end <= line.glyphs.start);
+
             let mut x = line.point.x;
             for i in line.glyphs.clone() {
-                let box_idx = self.document.box_tree.glyph_box[i as usize] as usize;
-                let boxes = &inline_ancestors[box_idx];
+                while run_cursor < text_runs.len() && text_runs[run_cursor].1.end <= i {
+                    run_cursor += 1;
+                }
+                // Glyphs outside any text run contribute no inline ancestors,
+                // matching the old map's behavior for uncovered glyphs.
+                let boxes: &[u32] = match text_runs.get(run_cursor) {
+                    Some((box_idx, range)) if range.start <= i => &inline_ancestors[*box_idx],
+                    _ => &[],
+                };
 
                 for &b in boxes {
                     let b_idx = b as usize;
@@ -320,7 +338,9 @@ impl LayoutEngine {
                     marked[b as usize] = false;
                 }
 
-                let glyph_index = self.document.box_tree.glyphs[i as usize];
+                let Some(glyph_index) = self.document.glyph(i) else {
+                    continue;
+                };
                 let layout = self.glyph_cache.get(glyph_index);
                 x += layout.size().width;
             }
@@ -335,15 +355,15 @@ impl LayoutEngine {
     }
 
     fn build_inline_ancestor_map(&self) -> Vec<Vec<u32>> {
-        let mut result = vec![Vec::new(); self.document.box_tree.boxes.len()];
-        for i in 0..self.document.box_tree.boxes.len() {
+        let mut result = vec![Vec::new(); self.document.box_count()];
+        for i in 0..self.document.box_count() {
             let mut current = Some(i);
             let mut ancestors = Vec::new();
             while let Some(idx) = current {
-                if matches!(&self.document.box_tree.boxes[idx].layout_mode, BoxType::Inline(_)) {
+                if self.document.is_inline_box(idx) {
                     ancestors.push(idx as u32);
                 }
-                current = self.document.box_tree.boxes[idx].parent.map(|p| p as usize);
+                current = self.document.get_parent(idx);
             }
             result[i] = ancestors;
         }
@@ -354,7 +374,7 @@ impl LayoutEngine {
         if start_x >= end_x {
             return;
         }
-        if !matches!(&self.document.box_tree.boxes[box_idx].layout_mode, BoxType::Inline(_)) {
+        if !self.document.is_inline_box(box_idx) {
             return;
         }
 
@@ -383,7 +403,7 @@ impl LayoutEngine {
 
         let rect = Rect::new(x0, y0, x1, y1);
         if color_alpha != 0 {
-            self.document.layout.decorations.push(DecorationFragment { rect, color: background_color, is_inline: true });
+            self.document.layout_mut().decorations.push(DecorationFragment { rect, color: background_color, is_inline: true });
         }
         if border_width > 0.0 {
             push_border_rects(&mut self.document, rect, border_width, border_top_color, true);
