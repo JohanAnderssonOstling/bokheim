@@ -61,7 +61,24 @@ deduplicated by content hash, while each user is charged once for every unique
 book hash referenced anywhere in that user's libraries. Metadata and thumbnails
 do not consume book quota. New accounts receive a 5 GiB quota lazily; a plan or
 administrative operation changes `user_storage_account.quota_bytes` for the
-specific user.
+specific user. Quota changes go through the audited server operation:
+
+```text
+POST /api/admin/users/{user_id}/storage-quota
+Authorization: Basic <bokheim-admin credentials>
+
+{
+  "change_id": "billing-event-or-admin-request-id",
+  "quota_bytes": 21474836480,
+  "reason": "upgraded to 20 GiB"
+}
+```
+
+`change_id` is an idempotency key: retrying the identical change is safe, while
+reusing it for different values returns `409 Conflict`. Every successful change
+records the actor, previous and new limits, reason, and timestamp. Downgrading
+below current usage is allowed; existing books remain available and new uploads
+are rejected until usage returns below the new limit.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed book, then atomically converts the
