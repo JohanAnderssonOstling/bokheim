@@ -8,6 +8,7 @@ mod windows;
 
 use gpui::actions;
 
+pub use epub_svelte_lib::preferences::PdfPageLayout;
 pub use model::{ReaderPreferences, ReaderWindowGeometry, ReaderWindowId, SaveReaderSettings};
 pub use windows::{close_readers_for_library, configure, handle_book_removed, open_reader_window};
 

@@ -61,6 +61,46 @@ pub enum AssetError {
     Storage(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageQuotaStatus {
+    pub quota_bytes: u64,
+    pub used_bytes: u64,
+    pub reserved_bytes: u64,
+}
+
+impl StorageQuotaStatus {
+    pub fn over_quota(&self) -> bool {
+        self.used_bytes.saturating_add(self.reserved_bytes) > self.quota_bytes
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetStorageQuota {
+    /// Caller-supplied identifier used to make retries safe.
+    pub change_id: String,
+    pub user_id: String,
+    pub actor: String,
+    pub quota_bytes: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageQuotaError {
+    #[error("invalid storage quota change: {0}")]
+    InvalidInput(String),
+    #[error("user does not exist")]
+    UserNotFound,
+    #[error("quota change id was already used for a different change")]
+    IdempotencyConflict,
+    #[error("storage quota service failed: {0}")]
+    Internal(String),
+}
+
+#[async_trait]
+pub trait StorageQuotaService: Send + Sync {
+    async fn set_quota(&self, change: SetStorageQuota) -> Result<StorageQuotaStatus, StorageQuotaError>;
+}
+
 #[async_trait]
 pub trait AssetStore: Send + Sync {
     async fn initialize(&self) -> Result<(), AssetError>;
@@ -410,13 +450,7 @@ mod tests {
         }
 
         async fn reserve_book_upload(&self, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<BookUploadAdmission, AssetError> {
-            Ok(BookUploadAdmission::Reserved(BookUploadReservation {
-                id: "reservation".to_string(),
-                user_id: user_id.to_string(),
-                library_id: library_id.clone(),
-                hash: hash.clone(),
-                expected_size_bytes: size_bytes,
-            }))
+            Ok(BookUploadAdmission::Reserved(BookUploadReservation { id: "reservation".to_string(), user_id: user_id.to_string(), library_id: library_id.clone(), hash: hash.clone(), expected_size_bytes: size_bytes }))
         }
 
         async fn finish_book_upload(&self, _reservation: &BookUploadReservation, _actual_size_bytes: u64) -> Result<(), AssetError> {

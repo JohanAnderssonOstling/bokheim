@@ -1,12 +1,14 @@
 //! PostgreSQL adapter for synchronization, authentication, migrations, and
 //! cross-process maintenance coordination.
 
-mod auth;
 mod assets;
+mod auth;
+mod quota;
 mod sync;
 mod sync_store;
 
 pub use auth::PostgresAuthService;
+pub use quota::PostgresStorageQuotaService;
 pub use sync::PostgresSyncRepository;
 
 use sqlx::PgPool;

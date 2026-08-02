@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen } from "./lib/app-events";
 
   import Reader from "./components/Reader.svelte";
   import BookGrid from "./components/library/BookGrid.svelte";
@@ -13,7 +13,7 @@
   import LibrarySwitcher from "./components/shell/LibrarySwitcher.svelte";
   import Store from "./components/store/Store.svelte";
   import { applyApplicationAppearance } from "./lib/application-appearance";
-  import { commands } from "./lib/bindings";
+  import { commands } from "./lib/commands";
   import { pickEpub, type PickedEpub } from "./lib/epub-picker";
   import { NAV_ITEMS, type Destination } from "./lib/navigation";
   import { observeNetworkStatus, UNKNOWN_NETWORK_STATUS } from "./lib/network-status";
@@ -43,6 +43,7 @@
     type TransferPreferences,
   } from "./lib/types";
   import { APP_NAME, APP_NAME_LOWER } from "./lib/application-name";
+  import { isWebDemo } from "./lib/platform";
 
   type FolderLevel = { id: string; name: string };
   type BookBytes = ArrayBuffer | Uint8Array | number[];
@@ -829,6 +830,12 @@
             </form>
           </section>
         {:else if activeDestination === "home"}
+          {#if isWebDemo}
+            <section class="web-demo-banner">
+              <div><strong>Browser demo</strong><span>Explore the interface, or open an EPUB from your device in the full reader.</span></div>
+              <button type="button" onclick={() => void openDeviceFile()}>Open an EPUB</button>
+            </section>
+          {/if}
           {#if homeLoading && homeLoadedFor !== activeLibraryId}
             <div class="inline-empty">Loading books…</div>
           {:else}
@@ -1081,6 +1088,13 @@
   .loader.small { width: 1rem; height: 1rem; border-width: .13rem; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .inline-empty { display: grid; place-items: center; min-height: 8rem; color: var(--color-subtle-text); font-size: .84rem; text-align: center; }
+
+  .web-demo-banner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.4rem; padding: .9rem 1rem; border: 1px solid color-mix(in srgb, var(--color-accent) 35%, var(--color-border-color)); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-accent) 8%, var(--color-white-surface)); }
+  .web-demo-banner div { display: grid; gap: .18rem; }
+  .web-demo-banner strong { font-size: .82rem; }
+  .web-demo-banner span { color: var(--color-subtle-text); font-size: .74rem; line-height: 1.4; }
+  .web-demo-banner button { flex: none; min-height: 2.45rem; padding: .5rem .8rem; border: 0; border-radius: var(--radius-sm); color: var(--color-white-surface); background: var(--color-accent); font-size: .74rem; font-weight: 750; cursor: pointer; }
+  @media (max-width: 31rem) { .web-demo-banner { align-items: stretch; flex-direction: column; } }
 
   .library-section { margin-top: 0; }
   .folder-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .45rem; margin-bottom: 1.25rem; }

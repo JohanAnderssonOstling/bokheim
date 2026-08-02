@@ -1,9 +1,10 @@
 use crate::bandwidth::{TransferGovernor, TransferLimits};
 use crate::ClientAddressSource;
-use server_core::{AssetService, AuthService, GarbageCollector, SyncService};
+use server_core::{AssetService, AuthService, GarbageCollector, StorageQuotaService, SyncService};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use sync_common::api::opds::CatalogRegistry;
 
 const AUTH_ATTEMPTS_PER_WINDOW: u8 = 8;
 const AUTH_ATTEMPT_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -55,22 +56,17 @@ pub(crate) struct AppState {
     pub(crate) auth: Arc<dyn AuthService>,
     pub(crate) sync: Arc<dyn SyncService>,
     pub(crate) assets: Arc<dyn AssetService>,
+    pub(crate) storage_quotas: Arc<dyn StorageQuotaService>,
     pub(crate) garbage_collector: Arc<GarbageCollector>,
     pub(crate) auth_rate_limiter: Arc<AuthRateLimiter>,
     pub(crate) transfer_governor: TransferGovernor,
     pub(crate) client_address_source: ClientAddressSource,
+    pub(crate) opds_catalogs: Arc<CatalogRegistry>,
 }
 
 impl AppState {
-    pub(super) fn new(
-        auth: Arc<dyn AuthService>,
-        sync: Arc<dyn SyncService>,
-        assets: Arc<dyn AssetService>,
-        garbage_collector: Arc<GarbageCollector>,
-        client_address_source: ClientAddressSource,
-        transfer_limits: TransferLimits,
-    ) -> Self {
-        Self { auth, sync, assets, garbage_collector, auth_rate_limiter: Arc::new(AuthRateLimiter::new()), transfer_governor: TransferGovernor::new(transfer_limits), client_address_source }
+    pub(super) fn new(auth: Arc<dyn AuthService>, sync: Arc<dyn SyncService>, assets: Arc<dyn AssetService>, storage_quotas: Arc<dyn StorageQuotaService>, garbage_collector: Arc<GarbageCollector>, client_address_source: ClientAddressSource, transfer_limits: TransferLimits, opds_catalogs: Arc<CatalogRegistry>) -> Self {
+        Self { auth, sync, assets, storage_quotas, garbage_collector, auth_rate_limiter: Arc::new(AuthRateLimiter::new()), transfer_governor: TransferGovernor::new(transfer_limits), client_address_source, opds_catalogs }
     }
 }
 

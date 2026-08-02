@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{Div, ElementId, FontWeight, MouseButton, ScrollHandle, SharedString, Stateful, div, px};
-use gpui_component::Disableable;
+use gpui_component::{Disableable, Selectable};
 use gpui_component::button::Button;
 use gpui_component::list::ListItem;
 use gpui_component::popover::Popover;
@@ -28,6 +28,12 @@ pub fn reader_control_button_state(id: impl Into<ElementId>, label: impl Into<Sh
     reader_control_button(id, label).disabled(!enabled)
 }
 
+pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
+    reader_control_button(id, label)
+        .selected(selected)
+        .px(px(10.0))
+}
+
 pub fn reader_square_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     reader_control_button(id, label).w(px(34.0)).px_0().text_size(gpui::rems(18.0 / 16.0))
 }
@@ -53,7 +59,16 @@ pub fn reader_document_message(text: impl Into<SharedString>) -> Div {
 }
 
 pub fn reader_pdf_scroll_surface(scroll_handle: &ScrollHandle) -> Stateful<Div> {
-    reader_document_surface().id("pdf-reader-scroll").overflow_x_scroll().overflow_y_scroll().track_scroll(scroll_handle).flex().items_start().justify_center().p(px(24.0))
+    reader_document_surface()
+        .id("pdf-reader-scroll")
+        .overflow_x_scroll()
+        .overflow_y_scroll()
+        .track_scroll(scroll_handle)
+        .flex()
+        .items_start()
+        .justify_center()
+        .gap(px(16.0))
+        .p(px(24.0))
 }
 
 pub fn reader_toc() -> Div {

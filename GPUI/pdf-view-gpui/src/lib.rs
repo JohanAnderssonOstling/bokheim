@@ -14,6 +14,22 @@ use std::sync::{Arc, Mutex};
 const DISPLAY_CACHE_BUDGET: usize = 128 * 1024 * 1024;
 const DEFAULT_RENDER_WIDTH: u16 = 1400;
 const DEFAULT_DISPLAY_WIDTH: f32 = 900.0;
+const SPREAD_DISPLAY_WIDTH: f32 = 500.0;
+const AUTO_SPREAD_MIN_WIDTH: f32 = 1064.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PdfPageLayout {
+    Single,
+    Spread,
+    #[default]
+    Automatic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedPageLayout {
+    Single,
+    Spread,
+}
 
 #[derive(Clone, Debug)]
 pub enum PdfViewEvent {
@@ -25,14 +41,16 @@ pub enum PdfViewEvent {
 pub struct PdfView {
     session: Option<Arc<Mutex<PdfDocumentSession>>>,
     info: Option<PdfDocumentInfo>,
-    page: Option<Arc<DisplayPage>>,
+    pages: Vec<(usize, Arc<DisplayPage>)>,
     display_cache: DisplayPageCache,
     current_page: usize,
     target_width: u16,
     display_scale: f32,
+    page_layout: PdfPageLayout,
+    resolved_page_layout: ResolvedPageLayout,
     load_generation: u64,
     render_generation: u64,
-    pending_render: Option<(u64, PageRenderKey)>,
+    pending_render: Option<(u64, Vec<PageRenderKey>)>,
     search_generation: u64,
     search_in_flight: bool,
     pending_search: Option<(u64, String)>,
@@ -41,10 +59,11 @@ pub struct PdfView {
     error: Option<String>,
     selection_anchor: Option<(f32, f32)>,
     selection_active: Option<(f32, f32)>,
+    selection_page: Option<usize>,
     selection: Option<PdfTextSelection>,
     search_hits: Vec<PdfSearchHit>,
     active_search_hit: Option<usize>,
-    pending_search_scroll: Option<NormalizedRect>,
+    pending_search_scroll: Option<(usize, NormalizedRect)>,
     interaction_style: ReaderInteractionStyle,
     scroll_handle: ScrollHandle,
     focus: FocusHandle,
@@ -66,11 +85,12 @@ struct DisplayPageCache {
 struct PdfPageElement {
     view: Entity<PdfView>,
     focus: FocusHandle,
+    page_index: usize,
     page: Arc<DisplayPage>,
     selection: Vec<NormalizedRect>,
     search_hits: Vec<(NormalizedRect, bool)>,
     interaction_style: ReaderInteractionStyle,
-    display_scale: f32,
+    display_width: f32,
 }
 
 struct PdfPagePrepaint {
@@ -87,11 +107,13 @@ impl PdfView {
         let mut view = Self {
             session: None,
             info: None,
-            page: None,
+            pages: Vec::new(),
             display_cache: DisplayPageCache::new(DISPLAY_CACHE_BUDGET),
             current_page: initial_page,
             target_width: DEFAULT_RENDER_WIDTH,
             display_scale: 1.0,
+            page_layout: PdfPageLayout::Automatic,
+            resolved_page_layout: ResolvedPageLayout::Single,
             load_generation: 1,
             render_generation: 0,
             pending_render: None,
@@ -103,6 +125,7 @@ impl PdfView {
             error: None,
             selection_anchor: None,
             selection_active: None,
+            selection_page: None,
             selection: None,
             search_hits: Vec::new(),
             active_search_hit: None,
@@ -127,25 +150,59 @@ impl PdfView {
         self.info.as_ref().map(PdfDocumentInfo::page_count).unwrap_or(0)
     }
 
-    pub fn next_page(&mut self, cx: &mut Context<Self>) {
-        let page_count = self.page_count();
-        if self.current_page + 1 >= page_count {
+    pub fn page_layout(&self) -> PdfPageLayout {
+        self.page_layout
+    }
+
+    pub fn set_page_layout(&mut self, page_layout: PdfPageLayout, cx: &mut Context<Self>) {
+        if self.page_layout == page_layout {
             return;
         }
-        self.current_page += 1;
+        self.page_layout = page_layout;
+        let resolved = match page_layout {
+            PdfPageLayout::Single => ResolvedPageLayout::Single,
+            PdfPageLayout::Spread => ResolvedPageLayout::Spread,
+            PdfPageLayout::Automatic => self.resolved_page_layout,
+        };
+        self.apply_resolved_page_layout(resolved, cx);
+    }
+
+    pub fn set_available_width(&mut self, available_width: f32, cx: &mut Context<Self>) {
+        let resolved = resolve_page_layout(self.page_layout, available_width);
+        self.apply_resolved_page_layout(resolved, cx);
+    }
+
+    pub fn can_previous_page(&self) -> bool {
+        previous_page_index(self.current_page, self.page_count(), self.resolved_page_layout).is_some()
+    }
+
+    pub fn can_next_page(&self) -> bool {
+        next_page_index(self.current_page, self.page_count(), self.resolved_page_layout).is_some()
+    }
+
+    pub fn visible_page_range(&self) -> Option<(usize, usize)> {
+        let indices = visible_page_indices(self.current_page, self.page_count(), self.resolved_page_layout);
+        Some((*indices.first()?, *indices.last()?))
+    }
+
+    pub fn next_page(&mut self, cx: &mut Context<Self>) {
+        let Some(next_page) = next_page_index(self.current_page, self.page_count(), self.resolved_page_layout) else {
+            return;
+        };
+        self.current_page = next_page;
         self.reset_page_scroll();
         self.clear_selection();
-        self.request_current_page(cx);
+        self.request_current_pages(cx);
     }
 
     pub fn previous_page(&mut self, cx: &mut Context<Self>) {
-        if self.current_page == 0 {
+        let Some(previous_page) = previous_page_index(self.current_page, self.page_count(), self.resolved_page_layout) else {
             return;
-        }
-        self.current_page -= 1;
+        };
+        self.current_page = previous_page;
         self.reset_page_scroll();
         self.clear_selection();
-        self.request_current_page(cx);
+        self.request_current_pages(cx);
     }
 
     pub fn set_page(&mut self, page_index: usize, cx: &mut Context<Self>) {
@@ -155,7 +212,7 @@ impl PdfView {
         self.current_page = page_index;
         self.reset_page_scroll();
         self.clear_selection();
-        self.request_current_page(cx);
+        self.request_current_pages(cx);
     }
 
     pub fn set_render_width(&mut self, target_width: u16, cx: &mut Context<Self>) {
@@ -164,7 +221,7 @@ impl PdfView {
             return;
         }
         self.target_width = target_width;
-        self.request_current_page(cx);
+        self.request_current_pages(cx);
     }
 
     pub fn display_scale(&self) -> f32 {
@@ -184,6 +241,17 @@ impl PdfView {
 
     pub fn change_display_scale(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.set_display_scale(self.display_scale + delta, cx);
+    }
+
+    fn apply_resolved_page_layout(&mut self, resolved: ResolvedPageLayout, cx: &mut Context<Self>) {
+        if self.resolved_page_layout == resolved {
+            return;
+        }
+        self.resolved_page_layout = resolved;
+        self.reset_page_scroll();
+        self.clear_selection();
+        self.request_current_pages(cx);
+        cx.notify();
     }
 
     pub fn set_interaction_style(&mut self, style: ReaderInteractionStyle, cx: &mut Context<Self>) {
@@ -230,13 +298,13 @@ impl PdfView {
                             this.search_hits = hits;
                             this.active_search_hit = (!this.search_hits.is_empty()).then_some(0);
                             if let Some(hit) = this.search_hits.first() {
-                                this.pending_search_scroll = Some(hit.bounds());
+                                this.pending_search_scroll = Some((hit.page_index(), hit.bounds()));
                                 if this.current_page != hit.page_index() {
                                     this.current_page = hit.page_index();
                                     this.reset_page_scroll();
                                 }
                                 this.clear_selection();
-                                this.request_current_page(cx);
+                                this.request_current_pages(cx);
                             }
                             cx.emit(PdfViewEvent::SearchChanged { current: usize::from(!this.search_hits.is_empty()), total: this.search_hits.len() });
                         }
@@ -262,13 +330,13 @@ impl PdfView {
         let next = if step < 0 { (current + self.search_hits.len() - 1) % self.search_hits.len() } else { (current + 1) % self.search_hits.len() };
         self.active_search_hit = Some(next);
         let hit = self.search_hits[next];
-        self.pending_search_scroll = Some(hit.bounds());
+        self.pending_search_scroll = Some((hit.page_index(), hit.bounds()));
         if self.current_page != hit.page_index() {
             self.current_page = hit.page_index();
             self.reset_page_scroll();
         }
         self.clear_selection();
-        self.request_current_page(cx);
+        self.request_current_pages(cx);
         cx.emit(PdfViewEvent::SearchChanged { current: next + 1, total: self.search_hits.len() });
     }
 
@@ -299,7 +367,7 @@ impl PdfView {
                         this.info = Some(session.info().clone());
                         this.session = Some(Arc::new(Mutex::new(session)));
                         this.current_page = this.current_page.min(this.page_count().saturating_sub(1));
-                        this.request_current_page(cx);
+                        this.request_current_pages(cx);
                         if let Some((search_generation, query)) = this.pending_search.take().filter(|(search_generation, _)| *search_generation == this.search_generation) {
                             this.start_search(search_generation, query, cx);
                         }
@@ -316,59 +384,97 @@ impl PdfView {
         .detach();
     }
 
-    fn request_current_page(&mut self, cx: &mut Context<Self>) {
+    fn request_current_pages(&mut self, cx: &mut Context<Self>) {
         self.render_generation = self.render_generation.wrapping_add(1);
         let generation = self.render_generation;
-        let key = PageRenderKey::new(self.current_page, self.target_width);
-        if let Some(page) = self.display_cache.get(key) {
-            self.page = Some(page);
+        let keys = self.visible_render_keys();
+        if keys.is_empty() {
+            self.pages.clear();
+            cx.notify();
+            return;
+        }
+        if let Some(pages) = self.cached_pages(&keys) {
+            self.pages = pages;
             self.pending_render = None;
             self.reveal_pending_search();
             self.emit_page_changed(cx);
             cx.notify();
             return;
         }
-        self.page = None;
+        self.pages.clear();
         self.error = None;
         if self.rendering {
-            self.pending_render = Some((generation, key));
+            self.pending_render = Some((generation, keys));
             cx.notify();
             return;
         }
-        self.start_render(generation, key, cx);
+        self.start_render(generation, keys, cx);
     }
 
-    fn start_render(&mut self, generation: u64, key: PageRenderKey, cx: &mut Context<Self>) {
+    fn visible_render_keys(&self) -> Vec<PageRenderKey> {
+        visible_page_indices(self.current_page, self.page_count(), self.resolved_page_layout)
+            .into_iter()
+            .map(|page_index| PageRenderKey::new(page_index, self.target_width))
+            .collect()
+    }
+
+    fn cached_pages(&mut self, keys: &[PageRenderKey]) -> Option<Vec<(usize, Arc<DisplayPage>)>> {
+        let mut pages = Vec::with_capacity(keys.len());
+        for key in keys {
+            pages.push((key.page_index(), self.display_cache.get(*key)?));
+        }
+        Some(pages)
+    }
+
+    fn start_render(&mut self, generation: u64, keys: Vec<PageRenderKey>, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
         self.rendering = true;
-        let work = cx.background_executor().spawn(async move { session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render_page(key.page_index(), Some(key.target_width())) });
+        let work = cx.background_executor().spawn(async move {
+            let session = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut rendered_pages = Vec::with_capacity(keys.len());
+            for key in keys {
+                let rendered = session.render_page(key.page_index(), Some(key.target_width()))?;
+                rendered_pages.push((key, rendered));
+            }
+            Ok::<_, pdf_reader_core::PdfError>(rendered_pages)
+        });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.rendering = false;
                 if this.render_generation == generation {
                     match result {
-                        Ok(rendered) => match DisplayPage::from_rendered(rendered) {
-                            Ok(page) => {
-                                let page = Arc::new(page);
-                                this.display_cache.insert(key, page.clone());
-                                this.page = Some(page);
+                        Ok(rendered_pages) => {
+                            let mut conversion_error = None;
+                            for (key, rendered) in rendered_pages {
+                                match DisplayPage::from_rendered(rendered) {
+                                    Ok(page) => {
+                                        this.display_cache.insert(key, Arc::new(page));
+                                    }
+                                    Err(error) => {
+                                        conversion_error = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(error) = conversion_error {
+                                this.error = Some(error);
+                            } else {
+                                let keys = this.visible_render_keys();
+                                this.pages = this.cached_pages(&keys).unwrap_or_default();
                                 this.reveal_pending_search();
                                 this.emit_page_changed(cx);
                             }
-                            Err(error) => {
-                                this.error = Some(error);
-                            }
-                        },
+                        }
                         Err(error) => {
                             this.error = Some(error.to_string());
                         }
                     }
                 }
-                if let Some((next_generation, next_key)) = this.pending_render.take().filter(|(next_generation, _)| *next_generation == this.render_generation) {
-                    this.start_render(next_generation, next_key, cx);
+                if let Some((next_generation, next_keys)) = this.pending_render.take().filter(|(next_generation, _)| *next_generation == this.render_generation) {
+                    this.start_render(next_generation, next_keys, cx);
                 }
                 cx.notify();
             });
@@ -384,6 +490,7 @@ impl PdfView {
     fn clear_selection(&mut self) {
         self.selection_anchor = None;
         self.selection_active = None;
+        self.selection_page = None;
         self.selection = None;
     }
 
@@ -392,16 +499,16 @@ impl PdfView {
     }
 
     fn reveal_pending_search(&mut self) {
-        let Some(hit) = self.pending_search_scroll.take() else {
+        let Some((page_index, hit)) = self.pending_search_scroll.take() else {
             return;
         };
-        let Some(page) = &self.page else {
-            self.pending_search_scroll = Some(hit);
+        let Some((_, page)) = self.pages.iter().find(|(visible_page, _)| *visible_page == page_index) else {
+            self.pending_search_scroll = Some((page_index, hit));
             return;
         };
         let image_size = page.image.size(0);
         let aspect = i32::from(image_size.height) as f32 / (i32::from(image_size.width) as f32).max(1.0);
-        let page_height = DEFAULT_DISPLAY_WIDTH * self.display_scale * aspect;
+        let page_height = self.page_display_width() * aspect;
         let viewport_height = f32::from(self.scroll_handle.bounds().size.height);
         let target = (24.0 + hit.top() * page_height - viewport_height * 0.3).max(0.0);
         let maximum = f32::from(self.scroll_handle.max_offset().y);
@@ -410,15 +517,20 @@ impl PdfView {
         self.scroll_handle.set_offset(point(current.x, px(-target)));
     }
 
-    fn begin_selection(&mut self, position: (f32, f32), cx: &mut Context<Self>) {
+    fn begin_selection(&mut self, page_index: usize, position: (f32, f32), cx: &mut Context<Self>) {
+        if self.current_page != page_index {
+            self.current_page = page_index;
+            self.emit_page_changed(cx);
+        }
+        self.selection_page = Some(page_index);
         self.selection_anchor = Some(position);
         self.selection_active = Some(position);
         self.update_selection();
         cx.notify();
     }
 
-    fn update_selection_to(&mut self, position: (f32, f32), cx: &mut Context<Self>) {
-        if self.selection_anchor.is_none() {
+    fn update_selection_to(&mut self, page_index: usize, position: (f32, f32), cx: &mut Context<Self>) {
+        if self.selection_anchor.is_none() || self.selection_page != Some(page_index) {
             return;
         }
         self.selection_active = Some(position);
@@ -427,7 +539,81 @@ impl PdfView {
     }
 
     fn update_selection(&mut self) {
-        self.selection = self.page.as_ref().and_then(|page| Some((page, self.selection_anchor?, self.selection_active?))).and_then(|(page, anchor, active)| page.text_layout.select(anchor, active));
+        self.selection = self
+            .pages
+            .iter()
+            .find(|(page_index, _)| Some(*page_index) == self.selection_page)
+            .and_then(|(_, page)| Some((page, self.selection_anchor?, self.selection_active?)))
+            .and_then(|(page, anchor, active)| page.text_layout.select(anchor, active));
+    }
+
+    fn page_display_width(&self) -> f32 {
+        let base_width = match self.resolved_page_layout {
+            ResolvedPageLayout::Single => DEFAULT_DISPLAY_WIDTH,
+            ResolvedPageLayout::Spread => SPREAD_DISPLAY_WIDTH,
+        };
+        base_width * self.display_scale
+    }
+}
+
+fn resolve_page_layout(page_layout: PdfPageLayout, available_width: f32) -> ResolvedPageLayout {
+    match page_layout {
+        PdfPageLayout::Single => ResolvedPageLayout::Single,
+        PdfPageLayout::Spread => ResolvedPageLayout::Spread,
+        PdfPageLayout::Automatic if available_width >= AUTO_SPREAD_MIN_WIDTH => ResolvedPageLayout::Spread,
+        PdfPageLayout::Automatic => ResolvedPageLayout::Single,
+    }
+}
+
+fn spread_start(page_index: usize) -> usize {
+    if page_index == 0 {
+        0
+    } else if page_index % 2 == 1 {
+        page_index
+    } else {
+        page_index - 1
+    }
+}
+
+fn visible_page_indices(current_page: usize, page_count: usize, layout: ResolvedPageLayout) -> Vec<usize> {
+    if page_count == 0 {
+        return Vec::new();
+    }
+    let current_page = current_page.min(page_count - 1);
+    match layout {
+        ResolvedPageLayout::Single => vec![current_page],
+        ResolvedPageLayout::Spread if current_page == 0 => vec![0],
+        ResolvedPageLayout::Spread => {
+            let first = spread_start(current_page);
+            (first..=(first + 1).min(page_count - 1)).collect()
+        }
+    }
+}
+
+fn next_page_index(current_page: usize, page_count: usize, layout: ResolvedPageLayout) -> Option<usize> {
+    if page_count == 0 {
+        return None;
+    }
+    match layout {
+        ResolvedPageLayout::Single => (current_page + 1 < page_count).then_some(current_page + 1),
+        ResolvedPageLayout::Spread if current_page == 0 => (page_count > 1).then_some(1),
+        ResolvedPageLayout::Spread => {
+            let next = spread_start(current_page) + 2;
+            (next < page_count).then_some(next)
+        }
+    }
+}
+
+fn previous_page_index(current_page: usize, page_count: usize, layout: ResolvedPageLayout) -> Option<usize> {
+    if page_count == 0 || current_page == 0 {
+        return None;
+    }
+    match layout {
+        ResolvedPageLayout::Single => Some(current_page - 1),
+        ResolvedPageLayout::Spread => {
+            let first = spread_start(current_page);
+            Some(if first <= 1 { 0 } else { first - 2 })
+        }
     }
 }
 
@@ -491,7 +677,7 @@ impl Element for PdfPageElement {
     type PrepaintState = PdfPagePrepaint;
 
     fn id(&self) -> Option<ElementId> {
-        Some("gpui-pdf-page".into())
+        Some(("gpui-pdf-page", self.page_index).into())
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -502,8 +688,8 @@ impl Element for PdfPageElement {
         let mut style = Style::default();
         let image_size = self.page.image.size(0);
         let aspect = i32::from(image_size.height) as f32 / (i32::from(image_size.width) as f32).max(1.0);
-        style.size.width = px(DEFAULT_DISPLAY_WIDTH * self.display_scale).into();
-        style.size.height = px(DEFAULT_DISPLAY_WIDTH * self.display_scale * aspect).into();
+        style.size.width = px(self.display_width).into();
+        style.size.height = px(self.display_width * aspect).into();
         style.flex_shrink = 0.0;
         (window.request_layout(style, [], cx), ())
     }
@@ -540,6 +726,7 @@ impl Element for PdfPageElement {
 
         let hitbox = prepaint.hitbox.clone();
         let page_bounds = prepaint.page_bounds;
+        let page_index = self.page_index;
         let mouse_down_target = self.view.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !hitbox.is_hovered(window) {
@@ -547,19 +734,20 @@ impl Element for PdfPageElement {
             }
             mouse_down_target.update(cx, |view, cx| {
                 view.focus.focus(window, cx);
-                view.begin_selection(normalized_point(event.position, page_bounds), cx);
+                view.begin_selection(page_index, normalized_point(event.position, page_bounds), cx);
                 cx.stop_propagation();
             });
         });
 
         let page_bounds = prepaint.page_bounds;
+        let page_index = self.page_index;
         let mouse_move_target = self.view.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
             if phase != DispatchPhase::Bubble || !event.dragging() {
                 return;
             }
             mouse_move_target.update(cx, |view, cx| {
-                view.update_selection_to(normalized_point(event.position, page_bounds), cx);
+                view.update_selection_to(page_index, normalized_point(event.position, page_bounds), cx);
                 cx.stop_propagation();
             });
         });
@@ -597,14 +785,41 @@ impl Element for PdfPageElement {
 
 impl Render for PdfView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(page) = self.page.clone() else {
+        if self.pages.is_empty() {
             let message = self.error.clone().unwrap_or_else(|| if self.loading { "Opening PDF…".to_owned() } else { "Rendering page…".to_owned() });
             return components::reader_document_message(message).into_any_element();
-        };
-        let selection = self.selection.as_ref().map(|selection| selection.rects().to_vec()).unwrap_or_default();
-        let search_hits = self.search_hits.iter().enumerate().filter(|(_, hit)| hit.page_index() == self.current_page).map(|(index, hit)| (hit.bounds(), self.active_search_hit == Some(index))).collect();
+        }
+        let display_width = self.page_display_width();
+        let pages = self
+            .pages
+            .iter()
+            .map(|(page_index, page)| {
+                let selection = if self.selection_page == Some(*page_index) {
+                    self.selection.as_ref().map(|selection| selection.rects().to_vec()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let search_hits = self
+                    .search_hits
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hit)| hit.page_index() == *page_index)
+                    .map(|(index, hit)| (hit.bounds(), self.active_search_hit == Some(index)))
+                    .collect();
+                PdfPageElement {
+                    view: cx.entity(),
+                    focus: self.focus.clone(),
+                    page_index: *page_index,
+                    page: page.clone(),
+                    selection,
+                    search_hits,
+                    interaction_style: self.interaction_style,
+                    display_width,
+                }
+            })
+            .collect::<Vec<_>>();
         components::reader_pdf_scroll_surface(&self.scroll_handle)
-            .child(PdfPageElement { view: cx.entity(), focus: self.focus.clone(), page, selection, search_hits, interaction_style: self.interaction_style, display_scale: self.display_scale })
+            .children(pages)
             .into_any_element()
     }
 }
@@ -620,6 +835,32 @@ fn normalized_point(position: Point<Pixels>, page: Bounds<Pixels>) -> (f32, f32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spread_keeps_the_cover_alone_and_pairs_following_pages() {
+        assert_eq!(visible_page_indices(0, 6, ResolvedPageLayout::Spread), vec![0]);
+        assert_eq!(visible_page_indices(1, 6, ResolvedPageLayout::Spread), vec![1, 2]);
+        assert_eq!(visible_page_indices(2, 6, ResolvedPageLayout::Spread), vec![1, 2]);
+        assert_eq!(visible_page_indices(5, 6, ResolvedPageLayout::Spread), vec![5]);
+    }
+
+    #[test]
+    fn spread_navigation_advances_by_visible_spreads() {
+        assert_eq!(next_page_index(0, 7, ResolvedPageLayout::Spread), Some(1));
+        assert_eq!(next_page_index(1, 7, ResolvedPageLayout::Spread), Some(3));
+        assert_eq!(next_page_index(2, 7, ResolvedPageLayout::Spread), Some(3));
+        assert_eq!(previous_page_index(3, 7, ResolvedPageLayout::Spread), Some(1));
+        assert_eq!(previous_page_index(2, 7, ResolvedPageLayout::Spread), Some(0));
+        assert_eq!(previous_page_index(1, 7, ResolvedPageLayout::Spread), Some(0));
+    }
+
+    #[test]
+    fn automatic_layout_uses_the_available_reader_width() {
+        assert_eq!(resolve_page_layout(PdfPageLayout::Automatic, AUTO_SPREAD_MIN_WIDTH - 1.0), ResolvedPageLayout::Single);
+        assert_eq!(resolve_page_layout(PdfPageLayout::Automatic, AUTO_SPREAD_MIN_WIDTH), ResolvedPageLayout::Spread);
+        assert_eq!(resolve_page_layout(PdfPageLayout::Single, AUTO_SPREAD_MIN_WIDTH * 2.0), ResolvedPageLayout::Single);
+        assert_eq!(resolve_page_layout(PdfPageLayout::Spread, 200.0), ResolvedPageLayout::Spread);
+    }
 
     #[test]
     fn display_cache_evicts_oldest_page_with_a_byte_budget() {

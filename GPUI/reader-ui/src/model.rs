@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bokheim_ui_runtime::BlockingWorker;
 use epub_svelte_lib::BookLocator;
 use epub_svelte_lib::library::Library;
+use epub_svelte_lib::preferences::PdfPageLayout;
 use gpui::{App, Entity, FocusHandle, Global, Subscription, Task};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
@@ -21,11 +22,20 @@ pub struct ReaderPreferences {
     pub scale: f64,
     pub line_numbers: bool,
     pub toc_width: f32,
+    #[serde(default)]
+    pub pdf_page_layout: PdfPageLayout,
 }
 
 impl Default for ReaderPreferences {
     fn default() -> Self {
-        Self { font_size: 20.0, column_width: 600.0, scale: 1.0, line_numbers: true, toc_width: 300.0 }
+        Self {
+            font_size: 20.0,
+            column_width: 600.0,
+            scale: 1.0,
+            line_numbers: true,
+            toc_width: 300.0,
+            pdf_page_layout: PdfPageLayout::Automatic,
+        }
     }
 }
 

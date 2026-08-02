@@ -290,6 +290,15 @@ pub enum ReaderFlow {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
+pub enum PdfPageLayout {
+    Single,
+    Spread,
+    #[default]
+    Automatic,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
 pub enum ReaderFontFamily {
     #[default]
     Publisher,
@@ -332,6 +341,8 @@ pub struct ReaderPreferences {
     max_column_count: ColumnCount,
     /// Supported by the native renderer. Foliate ignores this preference.
     line_numbers: bool,
+    /// Controls how many PDF pages the native reader presents together.
+    pdf_page_layout: PdfPageLayout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,6 +451,7 @@ impl Default for ReaderPreferences {
             hyphenation: true,
             max_column_count: ColumnCount(2),
             line_numbers: true,
+            pdf_page_layout: PdfPageLayout::Automatic,
         }
     }
 }
@@ -477,6 +489,9 @@ impl ReaderPreferences {
     }
     pub fn line_numbers(self) -> bool {
         self.line_numbers
+    }
+    pub fn pdf_page_layout(self) -> PdfPageLayout {
+        self.pdf_page_layout
     }
 
     pub fn set_font_size_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
@@ -517,6 +532,9 @@ impl ReaderPreferences {
     pub fn set_line_numbers(&mut self, value: bool) {
         self.line_numbers = value;
     }
+    pub fn set_pdf_page_layout(&mut self, value: PdfPageLayout) {
+        self.pdf_page_layout = value;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -537,6 +555,7 @@ pub enum ReaderPreferencePatch {
     Hyphenation(bool),
     MaxColumnCount(u8),
     LineNumbers(bool),
+    PdfPageLayout(PdfPageLayout),
 }
 
 impl ReaderPreferencePatch {
@@ -571,6 +590,10 @@ impl ReaderPreferencePatch {
                 preferences.set_line_numbers(value);
                 Ok(())
             }
+            Self::PdfPageLayout(value) => {
+                preferences.set_pdf_page_layout(value);
+                Ok(())
+            }
         }
     }
 }
@@ -596,6 +619,7 @@ pub enum ReaderPreferenceKey {
     Hyphenation,
     MaxColumnCount,
     LineNumbers,
+    PdfPageLayout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -607,7 +631,13 @@ pub struct ReaderCapabilities {
 impl ReaderCapabilities {
     pub fn for_engine(engine: ReaderEngine) -> Self {
         let supported_preferences = match engine {
-            ReaderEngine::Native => vec![ReaderPreferenceKey::FontSizePx, ReaderPreferenceKey::MaxLineWidthPx, ReaderPreferenceKey::Zoom, ReaderPreferenceKey::LineNumbers],
+            ReaderEngine::Native => vec![
+                ReaderPreferenceKey::FontSizePx,
+                ReaderPreferenceKey::MaxLineWidthPx,
+                ReaderPreferenceKey::Zoom,
+                ReaderPreferenceKey::LineNumbers,
+                ReaderPreferenceKey::PdfPageLayout,
+            ],
             ReaderEngine::Foliate => vec![
                 ReaderPreferenceKey::FontSizePx,
                 ReaderPreferenceKey::MaxLineWidthPx,
@@ -667,11 +697,18 @@ pub struct ReaderTextAlignmentOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PdfPageLayoutOption {
+    pub value: PdfPageLayout,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ReaderPreferenceOptions {
     pub themes: Vec<ReaderThemeOption>,
     pub flows: Vec<ReaderFlowOption>,
     pub font_families: Vec<ReaderFontFamilyOption>,
     pub text_alignments: Vec<ReaderTextAlignmentOption>,
+    pub pdf_page_layouts: Vec<PdfPageLayoutOption>,
 }
 
 impl Default for ReaderPreferenceOptions {
@@ -692,6 +729,11 @@ impl Default for ReaderPreferenceOptions {
                 ReaderTextAlignmentOption { value: ReaderTextAlignment::Publisher, label: "Publisher".to_string() },
                 ReaderTextAlignmentOption { value: ReaderTextAlignment::Start, label: "Left".to_string() },
                 ReaderTextAlignmentOption { value: ReaderTextAlignment::Justify, label: "Justified".to_string() },
+            ],
+            pdf_page_layouts: vec![
+                PdfPageLayoutOption { value: PdfPageLayout::Single, label: "Single page".to_string() },
+                PdfPageLayoutOption { value: PdfPageLayout::Spread, label: "Two-page spread".to_string() },
+                PdfPageLayoutOption { value: PdfPageLayout::Automatic, label: "Automatic".to_string() },
             ],
         }
     }
@@ -913,6 +955,7 @@ mod tests {
         assert_eq!(preferences.font_size_px(), 24.0);
         assert_eq!(preferences.max_line_width_px(), 600.0);
         assert_eq!(preferences.theme(), ReaderTheme::Sepia);
+        assert_eq!(preferences.pdf_page_layout(), PdfPageLayout::Automatic);
     }
 
     #[test]
@@ -982,8 +1025,10 @@ mod tests {
         let native = ReaderCapabilities::for_engine(ReaderEngine::Native);
         let foliate = ReaderCapabilities::for_engine(ReaderEngine::Foliate);
         assert!(native.supports(ReaderPreferenceKey::LineNumbers));
+        assert!(native.supports(ReaderPreferenceKey::PdfPageLayout));
         assert!(!native.supports(ReaderPreferenceKey::Theme));
         assert!(!foliate.supports(ReaderPreferenceKey::LineNumbers));
+        assert!(!foliate.supports(ReaderPreferenceKey::PdfPageLayout));
         assert!(foliate.supports(ReaderPreferenceKey::Theme));
     }
 
@@ -1003,5 +1048,17 @@ mod tests {
         assert_eq!(options.flows.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFlow::Paginated, ReaderFlow::Scrolled]);
         assert_eq!(options.font_families.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFontFamily::Publisher, ReaderFontFamily::Serif, ReaderFontFamily::SansSerif]);
         assert_eq!(options.text_alignments.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderTextAlignment::Publisher, ReaderTextAlignment::Start, ReaderTextAlignment::Justify]);
+        assert_eq!(options.pdf_page_layouts.iter().map(|option| option.value).collect::<Vec<_>>(), vec![PdfPageLayout::Single, PdfPageLayout::Spread, PdfPageLayout::Automatic]);
+    }
+
+    #[test]
+    fn pdf_page_layout_patch_is_persisted_by_the_shared_backend() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = crate::home::BackendContext::initialize(crate::home::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
+
+        let updated = context.apply_reader_preference_patch(ReaderPreferencePatch::PdfPageLayout(PdfPageLayout::Spread)).unwrap();
+
+        assert_eq!(updated.pdf_page_layout(), PdfPageLayout::Spread);
+        assert_eq!(context.load_reader_preferences().unwrap().pdf_page_layout(), PdfPageLayout::Spread);
     }
 }

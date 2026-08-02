@@ -73,9 +73,47 @@ pub mod libraries {
     }
 }
 
+pub mod opds {
+    use serde::{Deserialize, Serialize};
+
+    pub const CATALOG_REGISTRY_SCHEMA_VERSION: u32 = 1;
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CatalogAccess {
+        Open,
+        Membership,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum CatalogAuthentication {
+        None,
+        Basic { username_label: String, password_required: bool },
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct CatalogSource {
+        pub id: String,
+        pub title: String,
+        pub description: String,
+        pub languages: Vec<String>,
+        pub url: String,
+        pub access: CatalogAccess,
+        pub authentication: CatalogAuthentication,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct CatalogRegistry {
+        pub schema_version: u32,
+        pub revision: u64,
+        pub catalogs: Vec<CatalogSource>,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{assets, auth, libraries};
+    use super::{assets, auth, libraries, opds};
     use crate::{ContentHash, LibraryId};
     use serde_json::json;
 
@@ -121,5 +159,26 @@ mod tests {
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value, json!({ "library_id": "library-1", "library_name": "History" }));
         assert_eq!(serde_json::from_value::<libraries::LibrarySummary>(value).unwrap(), libraries::LibrarySummary { library_id: request.library_id, library_name: request.library_name });
+    }
+
+    #[test]
+    fn opds_registry_contract_is_versioned_and_data_driven() {
+        let registry = opds::CatalogRegistry {
+            schema_version: opds::CATALOG_REGISTRY_SCHEMA_VERSION,
+            revision: 7,
+            catalogs: vec![opds::CatalogSource {
+                id: "example".to_owned(),
+                title: "Example".to_owned(),
+                description: "Example books".to_owned(),
+                languages: vec!["English".to_owned()],
+                url: "https://example.com/opds".to_owned(),
+                access: opds::CatalogAccess::Open,
+                authentication: opds::CatalogAuthentication::None,
+            }],
+        };
+        let value = serde_json::to_value(&registry).unwrap();
+        assert_eq!(value["schema_version"], opds::CATALOG_REGISTRY_SCHEMA_VERSION);
+        assert_eq!(value["revision"], 7);
+        assert_eq!(serde_json::from_value::<opds::CatalogRegistry>(value).unwrap(), registry);
     }
 }

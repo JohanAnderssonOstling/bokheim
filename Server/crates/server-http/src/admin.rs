@@ -1,9 +1,10 @@
 use crate::extract::auth_error;
 use crate::state::AppState;
-use axum::extract::{Json, State};
+use axum::extract::{Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use server_core::SetStorageQuota;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize, Default)]
@@ -29,6 +30,21 @@ pub(super) struct GcReport {
     bytes_reclaimed: u64,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct SetStorageQuotaRequest {
+    change_id: String,
+    quota_bytes: u64,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct StorageQuotaResponse {
+    quota_bytes: u64,
+    used_bytes: u64,
+    reserved_bytes: u64,
+    over_quota: bool,
+}
+
 const GC_SAFETY_WINDOW: Duration = Duration::from_secs(3600);
 
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
@@ -45,6 +61,13 @@ pub(super) async fn post_admin_invite(State(state): State<AppState>, headers: He
     let request = body.map(|Json(body)| body).unwrap_or_default();
     let (invite, expires_at) = state.auth.create_invite(request.note.as_deref(), request.expires_in_days).await.map_err(auth_error)?;
     Ok(Json(CreateInviteResponse { invite, expires_at }))
+}
+
+pub(super) async fn post_admin_storage_quota(State(state): State<AppState>, Path(user_id): Path<String>, headers: HeaderMap, Json(request): Json<SetStorageQuotaRequest>) -> Result<Json<StorageQuotaResponse>, StatusCode> {
+    let (username, password) = basic_credentials(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    state.auth.verify_admin(&username, &password).await.map_err(auth_error)?;
+    let status = state.storage_quotas.set_quota(SetStorageQuota { change_id: request.change_id, user_id, actor: username, quota_bytes: request.quota_bytes, reason: request.reason }).await.map_err(crate::extract::storage_quota_error)?;
+    Ok(Json(StorageQuotaResponse { quota_bytes: status.quota_bytes, used_bytes: status.used_bytes, reserved_bytes: status.reserved_bytes, over_quota: status.over_quota() }))
 }
 
 pub(super) async fn post_admin_gc(State(state): State<AppState>) -> Result<Json<GcReport>, StatusCode> {
