@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use Html_Prototype::style::resolver::is_property_supported;
 use epub_provider::{EpubProvider, ResourceProvider};
+use html_style::property_name_is_supported;
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::rules::CssRule;
@@ -176,10 +176,10 @@ fn collect_unsupported_properties(sheet: &StyleSheet<'_, '_>, out: &mut HashMap<
             continue;
         };
         for property in &style_rule.declarations.declarations {
-            if is_property_supported(property) {
+            let name = property_name(property);
+            if property_name_is_supported(&name) {
                 continue;
             }
-            let name = property_name(property);
             let info = out.entry(name).or_insert_with(PropertyInfo::new);
             info.count += 1;
             info.books.insert(book_path.to_string());

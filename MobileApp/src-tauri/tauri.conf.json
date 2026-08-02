@@ -1,24 +1,25 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mobileapp",
+  "productName": "Bokheim",
   "version": "0.1.0",
-  "identifier": "com.johan.mobileapp",
+  "identifier": "se.bokheim.reader",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../build"
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "mobileapp",
+        "title": "Bokheim",
         "width": 800,
         "height": 600
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'",
+      "devCsp": "default-src 'self' customprotocol: asset: http:; connect-src ipc: http://ipc.localhost http: ws:; img-src 'self' asset: http://asset.localhost blob: data: http:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'"
     }
   },
   "bundle": {

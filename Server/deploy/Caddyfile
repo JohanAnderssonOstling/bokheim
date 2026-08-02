@@ -1,0 +1,12 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$BOKHEIM_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	reverse_proxy unix//run/bokheim/sync.sock
+}

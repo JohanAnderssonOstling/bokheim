@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "Backend",
+    "BookFormat",
+    "HtmlRenderer/crates/html-source",
+    "HtmlRenderer/epub_provider",
+    "MobileApp/src-tauri",
+    "SyncCommon",
+]
+
+[workspace.dependencies]
+pdfium-render = { version = "0.9.3", default-features = false }
+
+# The full development workspace includes the local GPUI fork used by the
+# desktop renderer. Android releases intentionally use this self-contained
+# workspace because the mobile application does not depend on GPUI.

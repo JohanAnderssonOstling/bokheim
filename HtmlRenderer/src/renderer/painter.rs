@@ -1,86 +1,65 @@
+use crate::text::glyph_cache::GlyphCache;
 use floem::context::PaintCx;
-use floem::kurbo::{Point, Rect};
-use floem::peniko::Image as PenikoImage;
-use floem::prelude::Color;
-use floem::text::TextLayout;
 use floem_renderer::Renderer;
-use floem_renderer::tiny_skia;
+pub(crate) use html_view_core::Painter;
+use kurbo::{Point, Rect};
+use peniko::{Color, Image};
 
-pub(crate) trait Painter {
-    fn fill_rect(&mut self, rect: Rect, color: Color);
-    fn draw_text(&mut self, layout: &TextLayout, point: Point);
-    fn draw_image(&mut self, image: &PenikoImage, hash: &[u8], rect: Rect);
+pub(crate) struct FloemPainter<'borrow, 'renderer, 'cache> {
+    cx: &'borrow mut PaintCx<'renderer>,
+    glyph_cache: &'cache GlyphCache,
 }
 
-impl Painter for PaintCx<'_> {
+impl<'borrow, 'renderer, 'cache> FloemPainter<'borrow, 'renderer, 'cache> {
+    pub(crate) fn new(cx: &'borrow mut PaintCx<'renderer>, glyph_cache: &'cache GlyphCache) -> Self {
+        Self { cx, glyph_cache }
+    }
+}
+
+impl Painter for FloemPainter<'_, '_, '_> {
     fn fill_rect(&mut self, rect: Rect, color: Color) {
         use std::ops::DerefMut;
-        self.deref_mut().fill(&rect, &color, 0.0);
+        self.cx.deref_mut().fill(&rect, &color, 0.0);
     }
 
-    fn draw_text(&mut self, layout: &TextLayout, point: Point) {
+    fn draw_glyph(&mut self, glyph: crate::document::GlyphId, origin: Point) {
         use std::ops::DerefMut;
-        self.deref_mut().draw_text(layout, point);
+        self.cx.deref_mut().draw_text(self.glyph_cache.get(glyph), origin);
     }
 
-    fn draw_image(&mut self, image: &PenikoImage, hash: &[u8], rect: Rect) {
+    fn draw_image(&mut self, image: &Image, hash: &[u8], rect: Rect) {
         use std::ops::DerefMut;
-        self.deref_mut().draw_img(floem_renderer::Img { img: image.clone(), hash }, rect);
+        self.cx.deref_mut().draw_img(floem_renderer::Img { img: image.clone(), hash }, rect);
     }
 }
 
-pub struct SoftwarePainter {
-    pixmap: tiny_skia::Pixmap,
-}
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-impl SoftwarePainter {
-    pub fn new(width: u32, height: u32) -> Self {
-        let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("failed to create pixmap");
-        pixmap.fill(tiny_skia::Color::WHITE);
-        Self { pixmap }
-    }
+    use html_view_core::RecordingPainter;
+    use kurbo::Size;
 
-    pub fn encode_png(&self) -> Result<Vec<u8>, String> {
-        self.pixmap.encode_png().map_err(|e| e.to_string())
-    }
-}
+    use super::super::HTMLRenderer;
 
-impl Painter for SoftwarePainter {
-    fn fill_rect(&mut self, rect: Rect, color: Color) {
-        let Some(skia_rect) = tiny_skia::Rect::from_xywh(rect.x0 as f32, rect.y0 as f32, rect.width() as f32, rect.height() as f32) else {
-            return;
-        };
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(tiny_skia::Color::from_rgba8(color.r, color.g, color.b, color.a));
-        paint.blend_mode = tiny_skia::BlendMode::SourceOver;
-        self.pixmap.fill_rect(skia_rect, &paint, tiny_skia::Transform::identity(), None);
-    }
+    #[test]
+    fn recording_painter_captures_visible_page_text() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let fixture = std::env::temp_dir().join(format!("html-renderer-recording-{nonce}"));
+        fs::create_dir_all(&fixture).unwrap();
+        fs::write(fixture.join("index.html"), "<html><body><p>Recorded text</p></body></html>").unwrap();
 
-    fn draw_text(&mut self, _layout: &TextLayout, _point: Point) {
-        // TODO: Software text rendering path needs adaptation to Floem main's text internals.
-    }
+        let mut renderer = HTMLRenderer::from_source_path(fixture.clone());
+        renderer.renderer.set_line_numbers_enabled(false);
+        let frame = renderer.renderer.prepare_frame(Size::new(800.0, 600.0));
+        let mut painter = RecordingPainter::default();
+        frame.paint(&mut painter);
 
-    fn draw_image(&mut self, image: &PenikoImage, _hash: &[u8], rect: Rect) {
-        if image.width == 0 || image.height == 0 {
-            return;
-        }
-        let src_data = image.data.data();
-        if src_data.len() != (image.width * image.height * 4) as usize {
-            return;
-        }
-        // Premultiply alpha for tiny-skia's premultiplied RGBA format
-        let premultiplied: Vec<u8> = src_data
-            .chunks_exact(4)
-            .flat_map(|px| {
-                let a = px[3] as u32;
-                [(px[0] as u32 * a / 255) as u8, (px[1] as u32 * a / 255) as u8, (px[2] as u32 * a / 255) as u8, px[3]]
-            })
-            .collect();
-        let Some(src) = tiny_skia::PixmapRef::from_bytes(&premultiplied, image.width, image.height) else {
-            return;
-        };
-        let sx = rect.width() as f32 / image.width as f32;
-        let sy = rect.height() as f32 / image.height as f32;
-        self.pixmap.draw_pixmap(rect.x0 as i32, rect.y0 as i32, src, &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::from_scale(sx, sy), None);
+        let view = renderer.document().render_view();
+        let visible: String = painter.glyphs.iter().map(|(glyph, _)| view.glyph_metric(*glyph).expect("recorded glyph is registered").ch()).collect();
+        assert!(visible.contains("Recorded text"), "recorded glyphs were {visible:?}");
+
+        fs::remove_dir_all(fixture).unwrap();
     }
 }

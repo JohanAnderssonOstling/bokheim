@@ -1,13 +1,11 @@
-use crate::components::library_views::{
-    author_card_button, author_cards_grid, author_cards_page, author_group_stack, author_group_title, back_with_title, library_scroll_content,
-    load_more_button, message_row, panel_card, surface,
+use crate::components::{
+    author_back_with_title, author_cards_grid, author_cards_page, author_group_stack, author_group_title, author_load_more_button, author_scroll_content, card_surface, inline_message, library_item_card, page_surface, secondary_button,
 };
-use crate::library_tabs::folders_tab::create_books_grid;
+use crate::library_tabs::create_books_grid;
 use crate::page_navigation::Signals;
 use floem::event::EventPropagation;
-use floem::prelude::{create_rw_signal, dyn_view, v_stack, Decorators, SignalGet, SignalUpdate};
+use floem::prelude::{create_rw_signal, dyn_view, v_stack, Decorators, SignalGet, SignalUpdate, View};
 use floem::reactive::create_effect;
-use floem::View;
 use std::cmp::Ordering;
 use std::rc::Rc;
 
@@ -27,7 +25,7 @@ pub fn authors_tab_view(library_id: String, signals: Signals) -> impl View {
     let selected_author = create_rw_signal(None::<String>);
     let author_summaries = create_rw_signal(Rc::new(Vec::<AuthorSummary>::new()));
     let author_groups = create_rw_signal(Rc::new(Vec::<AuthorFolderGroup>::new()));
-    let visible_authors_count = create_rw_signal(200_usize);
+    let visible_authors_count = create_rw_signal(400_usize);
     let library_loaded = create_rw_signal(false);
 
     {
@@ -38,17 +36,21 @@ pub fn authors_tab_view(library_id: String, signals: Signals) -> impl View {
         create_effect(move |_| {
             let _refresh_tick = signals_for_index.library_refresh_tick.get();
             let _ = signals_for_index.libraries.get();
-            let Some(state) = signals_for_index.library_by_id(&library_id_for_index) else {
+            if signals_for_index.library_by_id(&library_id_for_index).is_none() {
                 author_summaries_for_index.set(Rc::new(vec![]));
                 library_loaded_for_index.set(false);
                 return;
-            };
-            let library = state.handle(signals_for_index.library_event_counter.clone());
+            }
 
-            let mut summaries = library
-                .get_authors()
+            let mut summaries = signals_for_index
+                .app_core
+                .authors_in(&library_id_for_index)
+                .unwrap_or_else(|error| {
+                    eprintln!("failed to load authors: {error}");
+                    Vec::new()
+                })
                 .into_iter()
-                .map(|author| AuthorSummary { name: author.name, book_count: author.book_count })
+                .map(|author| AuthorSummary { name: author.name().as_str().to_owned(), book_count: author.book_count() })
                 .collect::<Vec<_>>();
             summaries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             author_summaries_for_index.set(Rc::new(summaries));
@@ -69,16 +71,20 @@ pub fn authors_tab_view(library_id: String, signals: Signals) -> impl View {
             };
 
             let _ = signals_for_groups.libraries.get();
-            let Some(state) = signals_for_groups.library_by_id(&library_id_for_groups) else {
+            if signals_for_groups.library_by_id(&library_id_for_groups).is_none() {
                 author_groups_for_groups.set(Rc::new(vec![]));
                 return;
-            };
-            let library = state.handle(signals_for_groups.library_event_counter.clone());
+            }
 
-            let mut groups = library
-                .get_author_folder_books(&author_name)
+            let mut groups = signals_for_groups
+                .app_core
+                .author_folder_books_in(&library_id_for_groups, &author_name)
+                .unwrap_or_else(|error| {
+                    eprintln!("failed to load books for author {author_name}: {error}");
+                    Vec::new()
+                })
                 .into_iter()
-                .map(|group| AuthorFolderGroup { folder_path: group.folder_path, books: group.books })
+                .map(|group| AuthorFolderGroup { folder_path: group.folder_path().as_str().to_owned(), books: group.books().to_vec() })
                 .collect::<Vec<_>>();
             groups.sort_by(|a, b| compare_folder_hierarchy(&a.folder_path, &b.folder_path));
             author_groups_for_groups.set(Rc::new(groups));
@@ -87,42 +93,35 @@ pub fn authors_tab_view(library_id: String, signals: Signals) -> impl View {
 
     dyn_view(move || {
         if !library_loaded.get() {
-            return Box::new(message_row("Library not loaded")) as Box<dyn View>;
+            return Box::new(inline_message("Library not loaded")) as Box<dyn View>;
         }
         if let Some(author_name) = selected_author.get() {
             let groups = author_groups.get();
             let total_books: usize = groups.iter().map(|group| group.books.len()).sum();
 
             let sections: Box<dyn View> = if groups.is_empty() {
-                Box::new(message_row("No books found for this author"))
+                Box::new(inline_message("No books found for this author"))
             } else {
                 let library_id_for_sections = library_id.clone();
                 let signals_for_sections = signals.clone();
                 let groups = groups.as_ref().clone();
                 Box::new(author_group_stack(groups.into_iter().map(move |group| {
-                        let mut books = group.books;
-                        books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-                        panel_card(v_stack((
-                            author_group_title(group.folder_path),
-                            create_books_grid(books, library_id_for_sections.clone(), signals_for_sections.clone()),
-                        )))
-                    })))
+                    let mut books = group.books;
+                    books.sort_by(|a, b| a.title().as_str().to_lowercase().cmp(&b.title().as_str().to_lowercase()));
+                    card_surface(v_stack((author_group_title(group.folder_path), create_books_grid(books, library_id_for_sections.clone(), signals_for_sections.clone()))))
+                })))
             };
 
-            return Box::new(
-                surface(v_stack((
-                    back_with_title(format!("{author_name} ({total_books})"), move |_| {
-                        selected_author.set(None);
-                        EventPropagation::Continue
-                    }),
-                    library_scroll_content(sections),
-                ))),
-            ) as Box<dyn View>;
+            let back_button = secondary_button("Back").on_click(move |_| {
+                selected_author.set(None);
+                EventPropagation::Continue
+            });
+            return Box::new(page_surface(v_stack((author_back_with_title(back_button, format!("{author_name} ({total_books})")), author_scroll_content(sections))))) as Box<dyn View>;
         }
 
         let authors = author_summaries.get();
         if authors.is_empty() {
-            return Box::new(message_row("No authors found")) as Box<dyn View>;
+            return Box::new(inline_message("No authors found")) as Box<dyn View>;
         }
 
         let visible_count = visible_authors_count.get().min(authors.len());
@@ -130,19 +129,17 @@ pub fn authors_tab_view(library_id: String, signals: Signals) -> impl View {
         let cards = author_cards_grid(visible_authors.into_iter().map(move |author| {
             let author_name = author.name.clone();
             let count = author.book_count;
-            author_card_button(author_name, count)
-            .on_click(move |_| {
+            library_item_card(author_name, format!("({count})")).on_click(move |_| {
                 selected_author.set(Some(author.name.clone()));
                 EventPropagation::Continue
             })
         }));
 
         let show_more = visible_count < authors.len();
-        let load_more = load_more_button(show_more)
-            .on_click(move |_| {
-                visible_authors_count.update(|count| *count += 200);
-                EventPropagation::Continue
-            });
+        let load_more = author_load_more_button(show_more).on_click(move |_| {
+            visible_authors_count.update(|count| *count += 200);
+            EventPropagation::Continue
+        });
 
         Box::new(author_cards_page(cards, load_more)) as Box<dyn View>
     })

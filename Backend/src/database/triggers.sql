@@ -6,6 +6,10 @@ DROP TRIGGER IF EXISTS trig_dir_moved;
 
 DROP TRIGGER IF EXISTS trig_dir_deleted;
 
+DROP TRIGGER IF EXISTS trig_dir_state_insert;
+
+DROP TRIGGER IF EXISTS trig_dir_state_update;
+
 DROP TRIGGER IF EXISTS trig_book_added;
 
 DROP TRIGGER IF EXISTS trig_book_added_reactivate;
@@ -22,78 +26,49 @@ DROP TRIGGER IF EXISTS trig_book_read_pos;
 
 DROP TRIGGER IF EXISTS trig_book_last_read;
 
+DROP TRIGGER IF EXISTS trig_book_metadata;
+
 DROP TRIGGER IF EXISTS trig_event_log_hlc;
 
+DROP TRIGGER IF EXISTS trig_event_log_id;
 
-CREATE TRIGGER trig_dir_added_insert
+CREATE TRIGGER trig_dir_state_insert
 AFTER INSERT ON dir
-WHEN NEW.deleted_at IS NULL
-  AND NEW.id != '__root__'
+WHEN NEW.id != '__root__'
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
     INSERT INTO event_log (entity_id, event_type, payload, timestamp)
     VALUES (
         NEW.id,
-        'dir_added',
+        'dir_state',
         json_object(
             'parent_id', NEW.parent_id,
-            'name', NEW.name
+            'name', NEW.name,
+            'deleted', NEW.deleted_at IS NOT NULL
         ),
         CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
     );
 END;
 
-CREATE TRIGGER trig_dir_added_reactivate
-AFTER UPDATE OF deleted_at ON dir
-WHEN NEW.deleted_at IS NULL
-  AND NEW.id != '__root__'
-  AND OLD.deleted_at IS NOT NULL
+CREATE TRIGGER trig_dir_state_update
+AFTER UPDATE OF parent_id, name, deleted_at ON dir
+WHEN NEW.id != '__root__'
+  AND (
+      OLD.parent_id IS NOT NEW.parent_id
+      OR OLD.name IS NOT NEW.name
+      OR OLD.deleted_at IS NOT NEW.deleted_at
+  )
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
     INSERT INTO event_log (entity_id, event_type, payload, timestamp)
     VALUES (
         NEW.id,
-        'dir_added',
+        'dir_state',
         json_object(
             'parent_id', NEW.parent_id,
-            'name', NEW.name
+            'name', NEW.name,
+            'deleted', NEW.deleted_at IS NOT NULL
         ),
-        CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
-    );
-END;
-
-CREATE TRIGGER trig_dir_moved
-AFTER UPDATE OF parent_id, name ON dir
-WHEN NEW.deleted_at IS NULL
-  AND OLD.deleted_at IS NULL
-  AND NEW.id != '__root__'
-  AND (OLD.parent_id IS NOT NEW.parent_id OR OLD.name IS NOT NEW.name)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-BEGIN
-    INSERT INTO event_log (entity_id, event_type, payload, timestamp)
-    VALUES (
-        NEW.id,
-        'dir_moved',
-        json_object(
-            'new_parent_id', NEW.parent_id,
-            'new_name', NEW.name
-        ),
-        CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
-    );
-END;
-
-CREATE TRIGGER trig_dir_deleted
-BEFORE UPDATE OF deleted_at ON dir
-WHEN NEW.deleted_at IS NOT NULL
-  AND OLD.deleted_at IS NULL
-  AND OLD.id != '__root__'
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-BEGIN
-    INSERT INTO event_log (entity_id, event_type, payload, timestamp)
-    VALUES (
-        OLD.id,
-        'dir_deleted',
-        json_object(),
         CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
     );
 END;
@@ -137,8 +112,28 @@ BEGIN
     );
 END;
 
+CREATE TRIGGER trig_book_metadata
+AFTER UPDATE OF title, author_id ON book
+WHEN (
+      OLD.title IS NOT NEW.title
+      OR OLD.author_id IS NOT NEW.author_id
+  )
+  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+BEGIN
+    INSERT INTO event_log (entity_id, event_type, payload, timestamp)
+    VALUES (
+        NEW.id,
+        'book_metadata_updated',
+        json_object(
+            'title', COALESCE(NEW.title, ''),
+            'author', COALESCE((SELECT name FROM author WHERE id = NEW.author_id), '')
+        ),
+        CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
+    );
+END;
+
 CREATE TRIGGER trig_book_deleted
-BEFORE UPDATE OF deleted_at ON book
+AFTER UPDATE OF deleted_at ON book
 WHEN NEW.deleted_at IS NOT NULL
   AND OLD.deleted_at IS NULL
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
@@ -166,19 +161,21 @@ BEGIN
         json_object(
             'dir_id', NEW.dir_id,
             'file_name', NEW.file_name,
-            'content_hash', NEW.local_hash
+            'content_hash', NEW.content_hash
         ),
         CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
     );
 END;
 
 CREATE TRIGGER trig_book_dir_added_reactivate
-AFTER UPDATE OF deleted_at, dir_id, file_name ON book_dir
+AFTER UPDATE OF deleted_at, dir_id, file_name, book_id, content_hash ON book_dir
 WHEN NEW.deleted_at IS NULL
   AND (
       OLD.deleted_at IS NOT NULL
       OR OLD.dir_id IS NOT NEW.dir_id
       OR OLD.file_name IS NOT NEW.file_name
+      OR OLD.book_id IS NOT NEW.book_id
+      OR OLD.content_hash IS NOT NEW.content_hash
   )
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
@@ -189,14 +186,16 @@ BEGIN
         json_object(
             'dir_id', NEW.dir_id,
             'file_name', NEW.file_name,
-            'content_hash', NEW.local_hash
+            'content_hash', NEW.content_hash
         ),
         CAST(strftime('%s','now') || substr(strftime('%f','now'), 4) AS INTEGER)
     );
 END;
 
+-- AFTER (not BEFORE) so trig_event_log_hlc's nested stamp of book_dir.hlc isn't
+-- writing a row that's mid-update; by AFTER time the deleted_at write is settled.
 CREATE TRIGGER trig_book_dir_deleted
-BEFORE UPDATE OF deleted_at ON book_dir
+AFTER UPDATE OF deleted_at ON book_dir
 WHEN NEW.deleted_at IS NOT NULL
   AND OLD.deleted_at IS NULL
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
@@ -254,6 +253,15 @@ END;
 CREATE TRIGGER trig_event_log_hlc
 AFTER INSERT ON event_log
 BEGIN
+    -- Upgraded databases have a constant empty-string default because SQLite
+    -- cannot add a column with a random expression. Generate the identity in
+    -- this same trigger so entity version stamping cannot race another trigger.
+    UPDATE event_log
+    SET event_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
+                   lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
+                   lower(hex(randomblob(6)))
+    WHERE local_seq = NEW.local_seq AND event_id = '';
+
     UPDATE event_log
     SET
         hlc_pt = (
@@ -283,13 +291,48 @@ BEGIN
         )
     WHERE local_seq = NEW.local_seq;
 
-    INSERT OR REPLACE INTO sync_metadata (key, value)
+    INSERT INTO sync_metadata (key, value)
     SELECT 'hlc_pt', CAST(hlc_pt AS TEXT)
     FROM event_log
-    WHERE local_seq = NEW.local_seq;
+    WHERE local_seq = NEW.local_seq
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 
-    INSERT OR REPLACE INTO sync_metadata (key, value)
+    INSERT INTO sync_metadata (key, value)
     SELECT 'hlc_l', CAST(hlc_l AS TEXT)
     FROM event_log
-    WHERE local_seq = NEW.local_seq;
+    WHERE local_seq = NEW.local_seq
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+
+    -- Stamp lifecycle state with the exact HLC and actor-local sequence carried
+    -- by its event. These writes do not touch event-producing columns.
+    UPDATE book
+    SET hlc_pt = (SELECT hlc_pt FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_l  = (SELECT hlc_l  FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_actor = COALESCE((SELECT value FROM sync_metadata WHERE key = 'client_id'), ''),
+        hlc_seq = NEW.local_seq,
+        hlc_event = (SELECT event_id FROM event_log WHERE local_seq = NEW.local_seq)
+    WHERE NEW.event_type IN ('book_added', 'book_deleted')
+      AND id = NEW.entity_id;
+
+    UPDATE dir
+    SET hlc_pt = (SELECT hlc_pt FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_l  = (SELECT hlc_l  FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_actor = COALESCE((SELECT value FROM sync_metadata WHERE key = 'client_id'), ''),
+        hlc_seq = NEW.local_seq,
+        hlc_event = (SELECT event_id FROM event_log WHERE local_seq = NEW.local_seq)
+    WHERE NEW.event_type = 'dir_state'
+      AND id = NEW.entity_id;
+
+    -- Stamp the placement's LWW version using the same rule. No-op for other
+    -- events; these columns do not re-fire the placement event triggers.
+    UPDATE book_dir
+    SET hlc_pt = (SELECT hlc_pt FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_l  = (SELECT hlc_l  FROM event_log WHERE local_seq = NEW.local_seq),
+        hlc_actor = COALESCE((SELECT value FROM sync_metadata WHERE key = 'client_id'), ''),
+        hlc_seq = NEW.local_seq,
+        hlc_event = (SELECT event_id FROM event_log WHERE local_seq = NEW.local_seq)
+    WHERE NEW.event_type IN ('book_dir_added', 'book_dir_removed')
+      AND book_id = NEW.entity_id
+      AND dir_id = json_extract(NEW.payload, '$.dir_id')
+      AND file_name = json_extract(NEW.payload, '$.file_name');
 END;

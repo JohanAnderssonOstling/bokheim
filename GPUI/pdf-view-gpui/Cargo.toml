@@ -1,0 +1,12 @@
+[package]
+name = "pdf-view-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bokheim-ui-components = { path = "../bokheim-ui-components" }
+gpui.workspace = true
+image = { version = "0.25", default-features = false }
+pdf-reader-core = { path = "../../PdfRenderer" }
+smallvec = "1"

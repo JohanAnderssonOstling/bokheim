@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bokheim — Offline Ebook Reader for Desktop and Mobile</title>
+<meta name="description" content="Bokheim is an offline-first ebook reader that keeps your books and reading progress synchronized across desktop and mobile devices.">
+<meta name="robots" content="index, follow">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Bokheim",
+  "description": "An offline-first ebook reader that synchronizes your library and reading progress across devices.",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Windows, macOS, Linux, Android, iOS"
+}
+</script>
+<link rel="icon" href="/icon/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/icon/bokheim.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon/bokheim-180.png">
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #2E3D31;
+    --cream: #F9F5EE;
+    --greige: #EDE6DC;
+    --sage: #BAC1B3;
+    --warm-grey: #E7E5E3;
+    --text: #1F2830;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--cream);
+    color: var(--text);
+    font-family: "Avenir Next", Avenir, "Century Gothic", sans-serif;
+    line-height: 1.5;
+  }
+
+  a { color: var(--ink); }
+
+  .page {
+    width: min(100% - 2rem, 75rem);
+    margin: 0 auto;
+    border-right: 1px solid var(--sage);
+    border-left: 1px solid var(--sage);
+  }
+
+  .hero {
+    display: flex;
+    min-height: 68vh;
+    align-items: center;
+    justify-content: center;
+    padding: 5rem 1.5rem;
+    text-align: center;
+  }
+
+  .hero-inner {
+    width: min(100%, 44rem);
+  }
+
+  .mark {
+    display: block;
+    width: clamp(4rem, 9vw, 5.5rem);
+    height: auto;
+    margin: 0 auto 1.25rem;
+  }
+
+  h1 {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: clamp(3.25rem, 7vw, 4.75rem);
+    font-style: italic;
+    font-weight: 400;
+    letter-spacing: -0.035em;
+    line-height: 1;
+  }
+
+  .summary {
+    max-width: 35rem;
+    margin: 1.25rem auto 0;
+    font-size: clamp(1.05rem, 2vw, 1.25rem);
+  }
+
+  .download-actions {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.65rem;
+    margin-top: 2rem;
+  }
+
+  #primary-download,
+  .download-menu summary {
+    display: inline-flex;
+    min-height: 3rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    padding: 0.7rem 1rem;
+    border: 1px solid var(--ink);
+    border-radius: 0.35rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  #primary-download {
+    background: var(--ink);
+    color: var(--cream);
+    text-decoration: none;
+  }
+
+  #primary-download:hover { background: var(--text); }
+
+  #primary-download svg {
+    width: 1.1rem;
+    height: 1.1rem;
+  }
+
+  .download-menu { position: relative; }
+
+  .download-menu summary {
+    background: var(--cream);
+    color: var(--ink);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+
+  .download-menu summary::-webkit-details-marker { display: none; }
+
+  .download-menu summary::after {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    content: "";
+    transform: translateY(-0.1rem) rotate(45deg);
+  }
+
+  .download-menu[open] summary::after {
+    transform: translateY(0.1rem) rotate(225deg);
+  }
+
+  .download-menu-list {
+    position: absolute;
+    z-index: 2;
+    top: calc(100% + 0.4rem);
+    right: 0;
+    width: max-content;
+    min-width: 12rem;
+    margin: 0;
+    padding: 0.35rem;
+    border: 1px solid var(--sage);
+    border-radius: 0.35rem;
+    background: var(--cream);
+    box-shadow: 0 0.4rem 1rem rgb(46 61 49 / 12%);
+    list-style: none;
+    text-align: left;
+  }
+
+  .download-menu-list a {
+    display: block;
+    padding: 0.5rem 0.65rem;
+    border-radius: 0.2rem;
+    font-size: 0.9rem;
+    text-decoration: none;
+  }
+
+  .download-menu-list a:hover { background: var(--greige); }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--sage);
+  }
+
+  .feature {
+    min-height: 10rem;
+    padding: 1.5rem;
+  }
+
+  .feature + .feature { border-left: 1px solid var(--sage); }
+
+  .feature h2 {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: 1.15rem;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+
+  .feature p {
+    margin: 0.55rem 0 0;
+    font-size: 0.95rem;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--ink);
+    outline-offset: 3px;
+  }
+
+  ::selection {
+    background: var(--sage);
+    color: var(--text);
+  }
+
+  @media (max-width: 42rem) {
+    .page { width: calc(100% - 1rem); }
+
+    .hero {
+      min-height: 62vh;
+      padding: 4rem 1rem;
+    }
+
+    .download-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    #primary-download,
+    .download-menu summary { width: 100%; }
+
+    .download-menu-list {
+      position: static;
+      width: 100%;
+      margin-top: 0.4rem;
+      box-shadow: none;
+    }
+
+    .features { grid-template-columns: 1fr; }
+
+    .feature { min-height: auto; }
+
+    .feature + .feature {
+      border-top: 1px solid var(--sage);
+      border-left: 0;
+    }
+  }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="hero">
+    <div class="hero-inner">
+      <img class="mark" src="/icon/bokheim.svg" width="512" height="512" alt="">
+      <h1>Bokheim</h1>
+      <p class="summary">An ebook reader that keeps your library available and synchronized across every device.</p>
+
+      <div class="download-actions">
+        <a id="primary-download" href="/downloads/">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/>
+          </svg>
+          <span id="download-label">Download Bokheim</span>
+        </a>
+
+        <details class="download-menu">
+          <summary>Other downloads</summary>
+          <ul class="download-menu-list">
+            <li><a href="/downloads/bokheim-windows.exe">Windows</a></li>
+            <li><a href="/downloads/bokheim-macos.dmg">macOS</a></li>
+            <li><a href="/downloads/bokheim-linux.AppImage">Linux</a></li>
+            <li><a href="/downloads/bokheim-android.apk">Android</a></li>
+            <li><a href="/downloads/ios/">iPhone and iPad</a></li>
+          </ul>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <section class="features" aria-label="Features">
+    <article class="feature">
+      <h2>Offline-first synchronization</h2>
+      <p>Read and make progress without a connection. Everything catches up when you are back online.</p>
+    </article>
+    <article class="feature">
+      <h2>Your library everywhere</h2>
+      <p>Keep the same books and reading position across your computer and phone.</p>
+    </article>
+    <article class="feature">
+      <h2>Made for reading</h2>
+      <p>A focused reader that keeps your books on your devices and within reach.</p>
+    </article>
+  </section>
+</main>
+
+<script>
+  const downloads = {
+    windows: ["Download for Windows", "/downloads/bokheim-windows.exe"],
+    macos: ["Download for macOS", "/downloads/bokheim-macos.dmg"],
+    linux: ["Download for Linux", "/downloads/bokheim-linux.AppImage"],
+    android: ["Download for Android", "/downloads/bokheim-android.apk"],
+    ios: ["Download for iPhone and iPad", "/downloads/ios/"],
+  };
+
+  function detectOS() {
+    const platform = navigator.userAgentData?.platform || navigator.platform || "";
+    const userAgent = navigator.userAgent || "";
+
+    if (/iPhone|iPad|iPod/i.test(userAgent) ||
+        (platform === "MacIntel" && navigator.maxTouchPoints > 1)) return "ios";
+    if (/Android/i.test(userAgent)) return "android";
+    if (/Win/i.test(platform)) return "windows";
+    if (/Mac/i.test(platform)) return "macos";
+    if (/Linux/i.test(platform)) return "linux";
+    return null;
+  }
+
+  const primaryDownload = document.querySelector("#primary-download");
+  const downloadLabel = document.querySelector("#download-label");
+  const download = downloads[detectOS()];
+
+  if (download) {
+    downloadLabel.textContent = download[0];
+    primaryDownload.href = download[1];
+  }
+</script>
+</body>
+</html>

@@ -50,7 +50,7 @@ The biggest missing areas are:
 | Text alignment | `left`, `right`, `center`, `justify`, `text-align-last` supported. | No advanced justification or hyphenation behavior. |
 | Text indent | `text-indent`, including `hanging` and `each-line`, is implemented. | No special page-break interaction. |
 | Text transform | `uppercase`, `lowercase`, `capitalize` supported. | None noted. |
-| Fonts | `font`, `font-size`, `font-weight`, `font-style`, `font-family`, `line-height`, `font-variant-caps: small-caps` supported. | Current code forces `Liberation Serif` except monospace, so authored font-family is not fully honored. |
+| Fonts | `font`, `font-size`, `font-weight`, `font-style`, `font-family`, `line-height`, `font-variant-caps: small-caps` supported. | Authored font families are passed to the active rendering backend. |
 | Spacing | `letter-spacing`, `word-spacing` supported. | `word-break`, `overflow-wrap`, `word-wrap` unsupported. |
 | Vertical align | Inline and table-cell `vertical-align` support for `baseline`, `sub`, `super`, `top`, `text-top`, `middle`, `bottom`, `text-bottom`, length, and percent values. | Likely incomplete versus browser behavior, but core cases exist. |
 | Text decoration | Underline, overline, and line-through are parsed and painted. | No richer decoration styles or colors. |
@@ -142,7 +142,7 @@ Implemented:
 
 Partial:
 
-- `font-family` is parsed, but runtime font selection is constrained by the forced serif override.
+- `font-family` is parsed and passed to the active rendering backend for font selection.
 
 Not implemented:
 

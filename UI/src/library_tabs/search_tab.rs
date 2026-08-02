@@ -1,6 +1,6 @@
-use crate::components::library_views::message_row;
+use crate::components::inline_message;
 use floem::View;
 
 pub fn search_tab_view() -> impl View {
-    message_row("Search")
+    inline_message("Search")
 }

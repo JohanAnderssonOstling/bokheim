@@ -1,12 +1,11 @@
-#![allow(non_snake_case)]
-
-mod document;
-mod layout;
-mod parser;
 mod renderer;
-mod resources;
-pub mod style;
-mod text;
+#[doc(hidden)]
+pub mod text;
+
+mod document {
+    pub(crate) use html_dom::MemoryUsageReport;
+    pub(crate) use html_layout::{FontStyle, GlyphId, GlyphMetric};
+}
 
 pub use epub_provider::TocEntry;
-pub use renderer::HTMLRenderer;
+pub use renderer::{HTMLRenderer, RendererCommand, RendererEvent, RendererHandle, RendererHost, RendererOperation};

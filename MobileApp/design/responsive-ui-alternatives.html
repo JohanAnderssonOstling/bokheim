@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bokheim responsive UI alternatives</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #282621;
+        background: #e9e5dc;
+        font-synthesis: none;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      button,
+      a {
+        font: inherit;
+      }
+
+      .page-header {
+        max-width: 1540px;
+        margin: 0 auto;
+        padding: 48px 28px 28px;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: #86633d;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 850px;
+        margin-bottom: 14px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(40px, 6vw, 76px);
+        font-weight: 500;
+        line-height: 0.98;
+        letter-spacing: -0.045em;
+      }
+
+      .intro {
+        max-width: 760px;
+        margin-bottom: 0;
+        color: #666158;
+        font-size: 16px;
+        line-height: 1.6;
+      }
+
+      .jump-links {
+        position: sticky;
+        z-index: 20;
+        top: 0;
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 12px max(28px, calc((100vw - 1484px) / 2));
+        border-block: 1px solid #d4cec1;
+        background: rgb(233 229 220 / 92%);
+        backdrop-filter: blur(16px);
+      }
+
+      .jump-links a {
+        flex: none;
+        padding: 9px 14px;
+        border: 1px solid #cfc7b8;
+        border-radius: 999px;
+        color: inherit;
+        background: #f5f1e9;
+        font-size: 13px;
+        font-weight: 750;
+        text-decoration: none;
+      }
+
+      main {
+        max-width: 1540px;
+        margin: 0 auto;
+        padding: 28px;
+      }
+
+      .concept {
+        margin-bottom: 34px;
+        padding: 26px;
+        border: 1px solid #d2ccbf;
+        border-radius: 28px;
+        background: #f5f1e9;
+        box-shadow: 0 18px 55px rgb(77 66 47 / 9%);
+      }
+
+      .concept.recommended {
+        border-color: #9d7449;
+        box-shadow: 0 18px 55px rgb(112 77 39 / 14%);
+      }
+
+      .concept-heading {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 24px;
+      }
+
+      .concept-heading h2 {
+        margin-bottom: 7px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(27px, 3vw, 40px);
+        font-weight: 500;
+        letter-spacing: -0.025em;
+      }
+
+      .concept-heading p {
+        max-width: 720px;
+        margin-bottom: 0;
+        color: #716b61;
+        line-height: 1.5;
+      }
+
+      .badge {
+        flex: none;
+        padding: 8px 12px;
+        border-radius: 999px;
+        color: #fffaf1;
+        background: #865a31;
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .device-grid {
+        display: grid;
+        grid-template-columns: 280px minmax(400px, 0.9fr) minmax(570px, 1.25fr);
+        gap: 22px;
+        align-items: end;
+        overflow-x: auto;
+        padding-bottom: 6px;
+      }
+
+      .device-column {
+        min-width: 0;
+      }
+
+      .device-label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin: 0 4px 9px;
+        color: #70695f;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .device-label small {
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+
+      .device {
+        position: relative;
+        overflow: hidden;
+        border: 7px solid #292826;
+        border-radius: 24px;
+        background: #fbf8f1;
+        box-shadow: 0 14px 32px rgb(39 35 28 / 18%);
+      }
+
+      .phone {
+        height: 560px;
+        border-radius: 34px;
+      }
+
+      .phone::before {
+        position: absolute;
+        z-index: 10;
+        top: 7px;
+        left: 50%;
+        width: 76px;
+        height: 18px;
+        border-radius: 999px;
+        background: #292826;
+        content: "";
+        transform: translateX(-50%);
+      }
+
+      .tablet,
+      .desktop {
+        height: 510px;
+      }
+
+      .desktop {
+        border-width: 6px;
+        border-radius: 16px;
+      }
+
+      .screen {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        min-width: 0;
+        min-height: 0;
+        background: #fbf8f1;
+      }
+
+      .region {
+        position: relative;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .region::after {
+        position: absolute;
+        top: 8px;
+        right: 9px;
+        color: #8d867c;
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        content: attr(data-region);
+        pointer-events: none;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 58px;
+        padding: 12px 15px;
+        border-bottom: 1px solid #ddd6ca;
+        background: #f5f0e7;
+      }
+
+      .phone .topbar {
+        padding-top: 28px;
+        min-height: 72px;
+      }
+
+      .brand-dot,
+      .nav-dot {
+        flex: none;
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: #9c754e;
+      }
+
+      .nav-dot {
+        width: 26px;
+        height: 26px;
+        background: #d5cbbb;
+      }
+
+      .line {
+        height: 9px;
+        border-radius: 999px;
+        background: #d9d1c5;
+      }
+
+      .line.dark {
+        background: #8f8679;
+      }
+
+      .line.short {
+        width: 42%;
+      }
+
+      .line.medium {
+        width: 68%;
+      }
+
+      .title-stack {
+        display: grid;
+        flex: 1;
+        gap: 6px;
+      }
+
+      .search-box {
+        height: 36px;
+        border: 1px solid #ddd5c8;
+        border-radius: 12px;
+        background: #fffdf8;
+      }
+
+      .canvas {
+        overflow: hidden;
+        padding: 18px;
+      }
+
+      .section-lines {
+        display: grid;
+        gap: 7px;
+        margin-bottom: 16px;
+      }
+
+      .cover-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .tablet .cover-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .desktop .cover-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .book-placeholder {
+        display: grid;
+        gap: 7px;
+      }
+
+      .cover {
+        aspect-ratio: 0.7;
+        border: 1px solid #d7cfc1;
+        border-radius: 9px;
+        background: linear-gradient(145deg, #ded5c7, #bfae99);
+      }
+
+      .cover.alt {
+        background: linear-gradient(145deg, #cdd3cf, #94a09b);
+      }
+
+      .cover.warm {
+        background: linear-gradient(145deg, #e2cdb8, #b9865e);
+      }
+
+      .bottom-nav {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 7px;
+        padding: 10px 13px 14px;
+        border-top: 1px solid #d9d2c6;
+        background: #f5f0e7;
+      }
+
+      .bottom-nav span {
+        height: 32px;
+        border-radius: 10px;
+        background: #d8d0c4;
+      }
+
+      .bottom-nav span:first-child {
+        background: #9c754e;
+      }
+
+      .rail,
+      .sidebar {
+        display: grid;
+        align-content: start;
+        gap: 12px;
+        padding: 18px 12px;
+        border-right: 1px solid #d7d0c4;
+        background: #eee8dd;
+      }
+
+      .rail {
+        justify-items: center;
+      }
+
+      .rail .nav-dot:first-of-type,
+      .sidebar .nav-row:first-of-type {
+        background: #a47b52;
+      }
+
+      .sidebar {
+        padding: 22px 15px;
+      }
+
+      .nav-row {
+        height: 34px;
+        border-radius: 9px;
+        background: #d8d0c4;
+      }
+
+      .side-panel,
+      .detail-pane {
+        padding: 18px;
+        border-left: 1px solid #d7d0c4;
+        background: #f3eee5;
+      }
+
+      .detail-block {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+
+      /* Alternative A */
+      .a-phone {
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+
+      .a-tablet {
+        grid-template-columns: 58px minmax(0, 1fr);
+      }
+
+      .a-tablet .app-main,
+      .a-desktop .app-main {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-width: 0;
+      }
+
+      .a-desktop {
+        grid-template-columns: 170px minmax(0, 1fr) 160px;
+      }
+
+      /* Alternative B */
+      .b-phone,
+      .b-tablet,
+      .b-desktop {
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .b-phone .canvas {
+        display: grid;
+        align-content: start;
+        gap: 18px;
+        padding-top: 26px;
+      }
+
+      .hero-placeholder {
+        min-height: 122px;
+        border-radius: 18px;
+        background: linear-gradient(140deg, #b88a5e, #dec9af);
+      }
+
+      .category-row {
+        display: flex;
+        gap: 8px;
+        overflow: hidden;
+      }
+
+      .category-row span {
+        flex: none;
+        width: 72px;
+        height: 28px;
+        border-radius: 999px;
+        background: #ddd5c8;
+      }
+
+      .b-tablet .canvas,
+      .b-desktop .canvas {
+        width: min(100%, 920px);
+        margin: 0 auto;
+      }
+
+      .b-desktop .cover-grid {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }
+
+      .top-links {
+        display: flex;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .top-links span {
+        width: 64px;
+        height: 28px;
+        border-radius: 9px;
+        background: #d5cdbf;
+      }
+
+      /* Alternative C */
+      .c-phone {
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .list-stack {
+        display: grid;
+        align-content: start;
+        gap: 9px;
+        padding: 14px;
+        overflow: hidden;
+      }
+
+      .list-row {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr) 20px;
+        align-items: center;
+        gap: 10px;
+        min-height: 62px;
+        padding: 8px;
+        border: 1px solid #ddd5c9;
+        border-radius: 12px;
+        background: #fffdf8;
+      }
+
+      .list-row .thumb {
+        height: 46px;
+        border-radius: 6px;
+        background: #c2b09b;
+      }
+
+      .list-row .row-copy {
+        display: grid;
+        gap: 7px;
+      }
+
+      .c-tablet {
+        grid-template-columns: minmax(220px, 0.42fr) minmax(0, 1fr);
+      }
+
+      .c-desktop {
+        grid-template-columns: 145px minmax(230px, 0.38fr) minmax(0, 1fr);
+      }
+
+      .preview {
+        display: grid;
+        align-content: start;
+        justify-items: center;
+        gap: 18px;
+        padding: 34px;
+        background: #f6f2ea;
+      }
+
+      .preview .cover {
+        width: min(48%, 190px);
+      }
+
+      .preview-copy {
+        display: grid;
+        width: min(85%, 440px);
+        gap: 9px;
+      }
+
+      .action-placeholder {
+        width: min(70%, 260px);
+        height: 40px;
+        border-radius: 12px;
+        background: #987049;
+      }
+
+      .comparison {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 28px;
+      }
+
+      .comparison article {
+        padding: 20px;
+        border: 1px solid #d2ccbf;
+        border-radius: 18px;
+        background: #f5f1e9;
+      }
+
+      .comparison h2 {
+        margin-bottom: 14px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 22px;
+        font-weight: 500;
+      }
+
+      .comparison dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 8px 12px;
+        margin: 0;
+        font-size: 13px;
+      }
+
+      .comparison dt {
+        color: #766f65;
+        font-weight: 750;
+      }
+
+      .comparison dd {
+        margin: 0;
+      }
+
+      @media (max-width: 980px) {
+        .page-header {
+          padding-top: 32px;
+        }
+
+        main,
+        .page-header {
+          padding-inline: 16px;
+        }
+
+        .concept {
+          padding: 18px;
+          border-radius: 20px;
+        }
+
+        .concept-heading {
+          display: grid;
+        }
+
+        .badge {
+          justify-self: start;
+        }
+
+        .device-grid {
+          grid-template-columns: 260px 430px 610px;
+        }
+
+        .comparison {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="page-header">
+      <p class="eyebrow">Static responsive sketches</p>
+      <h1>Three shells for the same Bokheim UI</h1>
+      <p class="intro">
+        These frames contain only structural placeholders. They compare how navigation, browsing space, and optional detail areas adapt from phone to tablet and wide web layouts.
+      </p>
+    </header>
+
+    <nav class="jump-links" aria-label="Sketch alternatives">
+      <a href="#adaptive">A · Adaptive navigation</a>
+      <a href="#canvas">B · Content canvas</a>
+      <a href="#master-detail">C · Master detail</a>
+      <a href="#comparison">Comparison</a>
+    </nav>
+
+    <main>
+      <section class="concept recommended" id="adaptive">
+        <header class="concept-heading">
+          <div>
+            <h2>A. Adaptive navigation shell</h2>
+            <p>One information architecture expressed as phone tabs, a tablet rail, and a desktop sidebar. This is the strongest starting point because the components and navigation model stay shared.</p>
+          </div>
+          <span class="badge">Recommended start</span>
+        </header>
+
+        <div class="device-grid">
+          <div class="device-column">
+            <div class="device-label"><span>Phone</span><small>bottom navigation</small></div>
+            <div class="device phone">
+              <div class="screen a-phone">
+                <header class="topbar region" data-region="Header">
+                  <span class="brand-dot"></span>
+                  <span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span>
+                  <span class="nav-dot"></span>
+                </header>
+                <section class="canvas region" data-region="Browse">
+                  <div class="search-box"></div>
+                  <div class="section-lines" style="margin-top: 18px"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <div class="cover-grid">
+                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i><i class="line short"></i></div>
+                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i><i class="line medium"></i></div>
+                    <div class="book-placeholder"><span class="cover"></span><i class="line"></i><i class="line short"></i></div>
+                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i><i class="line medium"></i></div>
+                  </div>
+                </section>
+                <nav class="bottom-nav region" data-region="Tabs"><span></span><span></span><span></span><span></span></nav>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Tablet</span><small>navigation rail</small></div>
+            <div class="device tablet">
+              <div class="screen a-tablet">
+                <nav class="rail region" data-region="Rail"><span class="brand-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span></nav>
+                <div class="app-main">
+                  <header class="topbar region" data-region="Header"><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="search-box" style="width: 42%"></span><span class="nav-dot"></span></header>
+                  <section class="canvas region" data-region="Browse grid">
+                    <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                    <div class="cover-grid">
+                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Wide web</span><small>sidebar + optional context</small></div>
+            <div class="device desktop">
+              <div class="screen a-desktop">
+                <nav class="sidebar region" data-region="Sidebar"><span class="brand-dot"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span></nav>
+                <div class="app-main">
+                  <header class="topbar region" data-region="Toolbar"><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="search-box" style="width: 46%"></span><span class="nav-dot"></span></header>
+                  <section class="canvas region" data-region="Browse grid">
+                    <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                    <div class="cover-grid">
+                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                    </div>
+                  </section>
+                </div>
+                <aside class="side-panel region" data-region="Context"><div class="detail-block"><i class="line dark"></i><i class="line"></i><i class="line medium"></i></div><div class="detail-block"><i class="line dark medium"></i><i class="line"></i><i class="line"></i></div></aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="concept" id="canvas">
+        <header class="concept-heading">
+          <div>
+            <h2>B. Content-first canvas</h2>
+            <p>Navigation stays in a compact top bar while recommendations and collections dominate the screen. It feels editorial and calm, but deep library navigation is less immediately visible.</p>
+          </div>
+        </header>
+
+        <div class="device-grid">
+          <div class="device-column">
+            <div class="device-label"><span>Phone</span><small>editorial feed</small></div>
+            <div class="device phone">
+              <div class="screen b-phone">
+                <header class="topbar region" data-region="Compact header"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i></span><span class="nav-dot"></span></header>
+                <section class="canvas region" data-region="Content canvas">
+                  <div class="hero-placeholder"></div>
+                  <div class="category-row"><span></span><span></span><span></span><span></span></div>
+                  <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <div class="cover-grid">
+                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
+                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Tablet</span><small>top navigation</small></div>
+            <div class="device tablet">
+              <div class="screen b-tablet">
+                <header class="topbar region" data-region="Top navigation"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i></span><span class="top-links"><span></span><span></span><span></span></span></header>
+                <section class="canvas region" data-region="Centered canvas">
+                  <div class="hero-placeholder" style="min-height: 138px"></div>
+                  <div class="category-row" style="margin: 14px 0"><span></span><span></span><span></span><span></span></div>
+                  <div class="cover-grid">
+                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
+                    <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Wide web</span><small>centered editorial surface</small></div>
+            <div class="device desktop">
+              <div class="screen b-desktop">
+                <header class="topbar region" data-region="Top navigation"><span class="brand-dot"></span><span class="title-stack" style="max-width: 160px"><i class="line dark medium"></i></span><span class="top-links"><span></span><span></span><span></span><span></span></span><span class="search-box" style="width: 210px"></span></header>
+                <section class="canvas region" data-region="Centered canvas">
+                  <div class="hero-placeholder" style="min-height: 142px"></div>
+                  <div class="section-lines" style="margin-top: 16px"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <div class="cover-grid">
+                    <div class="book-placeholder"><span class="cover warm"></span></div>
+                    <div class="book-placeholder"><span class="cover alt"></span></div>
+                    <div class="book-placeholder"><span class="cover"></span></div>
+                    <div class="book-placeholder"><span class="cover warm"></span></div>
+                    <div class="book-placeholder"><span class="cover alt"></span></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="concept" id="master-detail">
+        <header class="concept-heading">
+          <div>
+            <h2>C. Library master-detail</h2>
+            <p>Browsing is list-oriented and larger screens gain a persistent preview pane. This handles large, deeply organized libraries well, but feels denser and less cover-focused on phones.</p>
+          </div>
+        </header>
+
+        <div class="device-grid">
+          <div class="device-column">
+            <div class="device-label"><span>Phone</span><small>stacked list screens</small></div>
+            <div class="device phone">
+              <div class="screen c-phone">
+                <header class="topbar region" data-region="Header"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="nav-dot"></span></header>
+                <section class="list-stack region" data-region="Library list">
+                  <div class="search-box"></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                </section>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Tablet</span><small>list + preview</small></div>
+            <div class="device tablet">
+              <div class="screen c-tablet">
+                <section class="list-stack region" data-region="Browse list">
+                  <div class="search-box"></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                </section>
+                <section class="preview region" data-region="Book preview"><span class="cover warm"></span><div class="preview-copy"><i class="line dark"></i><i class="line medium"></i><i class="line"></i><i class="line short"></i></div><span class="action-placeholder"></span></section>
+              </div>
+            </div>
+          </div>
+
+          <div class="device-column">
+            <div class="device-label"><span>Wide web</span><small>three-pane workspace</small></div>
+            <div class="device desktop">
+              <div class="screen c-desktop">
+                <nav class="sidebar region" data-region="Navigation"><span class="brand-dot"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span></nav>
+                <section class="list-stack region" data-region="Browse list">
+                  <div class="search-box"></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                </section>
+                <section class="preview region" data-region="Book preview"><span class="cover alt"></span><div class="preview-copy"><i class="line dark"></i><i class="line medium"></i><i class="line"></i><i class="line"></i><i class="line short"></i></div><span class="action-placeholder"></span></section>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="comparison" id="comparison" aria-label="Alternative comparison">
+        <article>
+          <h2>A. Adaptive navigation</h2>
+          <dl><dt>Strength</dt><dd>Best cross-device continuity</dd><dt>Tablet</dt><dd>Excellent use of space</dd><dt>Complexity</dt><dd>Moderate</dd></dl>
+        </article>
+        <article>
+          <h2>B. Content canvas</h2>
+          <dl><dt>Strength</dt><dd>Calm and editorial</dd><dt>Tablet</dt><dd>Good, but less structured</dd><dt>Complexity</dt><dd>Lowest</dd></dl>
+        </article>
+        <article>
+          <h2>C. Master detail</h2>
+          <dl><dt>Strength</dt><dd>Powerful for large libraries</dd><dt>Tablet</dt><dd>Strong preview workflow</dd><dt>Complexity</dt><dd>Highest</dd></dl>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

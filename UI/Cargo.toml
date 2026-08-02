@@ -4,19 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["ui-own", "theme-greco-futuristic"]
+default = ["ui-own"]
 ui-own = []
-ui-shadcn = []
-theme-library-serif = []
-theme-greco-futuristic = []
 
 [dependencies]
 floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}
-html_renderer = { package = "Html-Prototype", path = "../HtmlRenderer" }
+html_renderer = { package = "html-renderer", path = "../HtmlRenderer" }
 epub_svelte_lib = { package = "epub-svelte", path = "../Backend" }
 sync-common = { path = "../SyncCommon" }
 crossbeam = "0.8.4"
-dirs = "5"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 [patch.crates-io]
 sync-common = { path = "../SyncCommon" }

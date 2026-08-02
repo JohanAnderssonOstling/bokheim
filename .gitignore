@@ -10,6 +10,19 @@
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+
+# Generated application state and profiling output
+**/.biblos/thumbnails/
+**/.bookrium/thumbnails/
+perf.data
+perf.data.old
+
+# Signing material must never enter source control
+*.jks
+*.keystore
+keystore.properties
 
 # Python
 __pycache__/

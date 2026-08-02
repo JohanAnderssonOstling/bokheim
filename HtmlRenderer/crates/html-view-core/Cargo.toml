@@ -1,0 +1,14 @@
+[package]
+name = "html-view-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+html-resources = { path = "../html-resources" }
+html-layout = { path = "../html-layout" }
+html-pipeline = { path = "../html-pipeline" }
+epub_provider = { path = "../../epub_provider" }
+kurbo.workspace = true
+peniko.workspace = true
+reader-style = { path = "../../../ReaderStyle" }

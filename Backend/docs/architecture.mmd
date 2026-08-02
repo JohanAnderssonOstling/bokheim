@@ -1,6 +1,6 @@
 flowchart LR
   A[App uses library::Library] --> B[Library::with_options]
-  B --> C[Create .biblos dirs + SQLite DB]
+  B --> C[Create .bokheim dirs + SQLite DB]
   C --> D[DBConn::new initializes schema]
   B --> E[LibraryScanner::new]
   B --> F[SyncManager::new]

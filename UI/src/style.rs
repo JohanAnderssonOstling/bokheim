@@ -1,28 +1,23 @@
+use epub_svelte_lib::preferences::{ApplicationTheme, UiFontFamily};
 use floem::peniko::Color;
-use floem::prelude::{Decorators, RwSignal, SignalGet, SignalUpdate};
+use floem::prelude::{RwSignal, SignalGet};
 use floem::reactive::use_context;
-use floem::style::CursorStyle;
-use floem::text::Weight;
-use floem::views::{label, Img, Label};
-
-#[cfg(all(feature = "theme-library-serif", feature = "theme-greco-futuristic"))]
-compile_error!("Enable only one theme feature: `theme-library-serif` or `theme-greco-futuristic`.");
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum ThemeMode {
-    GrecoFuturistic,
-    LibrarySerif,
-}
+use serde::Deserialize;
+use std::sync::LazyLock;
 
 #[derive(Clone, Copy)]
 pub struct ThemeContext {
-    pub mode: RwSignal<ThemeMode>,
+    pub theme: RwSignal<ApplicationTheme>,
 }
 
 #[derive(Clone, Copy)]
+pub struct TypographyContext {
+    pub interface_font: RwSignal<UiFontFamily>,
+    pub heading_font: RwSignal<UiFontFamily>,
+}
+
+#[derive(Clone)]
 pub struct ThemePalette {
-    pub ui_font_family: &'static str,
-    pub title_font_family: &'static str,
     pub app_bg: Color,
     pub surface_bg: Color,
     pub card_bg: Color,
@@ -44,137 +39,104 @@ pub struct ThemePalette {
     pub overlay_scrim: Color,
 }
 
-const LIBRARY_SERIF_THEME: ThemePalette = ThemePalette {
-    ui_font_family: "IBM Plex Sans",
-    title_font_family: "Source Serif 4",
-    app_bg: Color::rgb8(244, 241, 234),
-    surface_bg: Color::rgb8(236, 231, 220),
-    card_bg: Color::rgb8(250, 247, 239),
-    ink_text: Color::rgb8(31, 27, 22),
-    subtle_text: Color::rgb8(107, 98, 87),
-    accent: Color::rgb8(138, 106, 47),
-    border_color: Color::rgb8(207, 197, 180),
-    hover_bg: Color::rgb8(241, 236, 226),
-    active_highlight: Color::rgb8(235, 225, 203),
-    disabled_text: Color::rgb8(157, 146, 132),
-    disabled_border: Color::rgb8(212, 204, 190),
-    white_surface: Color::rgb8(255, 253, 248),
-    box_shadow: Color::rgba8(44, 35, 24, 70),
-    danger_text: Color::rgb8(150, 34, 34),
-    danger_bg: Color::rgb8(252, 232, 225),
-    split_handle_bg: Color::rgb8(207, 197, 180),
-    split_handle_hover: Color::rgb8(176, 161, 136),
-    split_handle_active: Color::rgb8(138, 106, 47),
-    overlay_scrim: Color::rgba8(30, 24, 16, 120),
-};
+#[derive(Deserialize)]
+struct ThemeDefinition {
+    app_bg: String,
+    surface_bg: String,
+    card_bg: String,
+    ink_text: String,
+    subtle_text: String,
+    accent: String,
+    border_color: String,
+    hover_bg: String,
+    active_highlight: String,
+    disabled_text: String,
+    disabled_border: String,
+    white_surface: String,
+    box_shadow: String,
+    danger_text: String,
+    danger_bg: String,
+    split_handle_bg: String,
+    split_handle_hover: String,
+    split_handle_active: String,
+    overlay_scrim: String,
+}
 
-const GRECO_FUTURISTIC_THEME: ThemePalette = ThemePalette {
-    ui_font_family: "IBM Plex Sans",
-    title_font_family: "Source Serif 4",
-    app_bg: Color::rgb8(250, 251, 252),
-    surface_bg: Color::rgb8(243, 245, 247),
-    card_bg: Color::rgb8(255, 255, 255),
-    ink_text: Color::rgb8(26, 29, 36),
-    subtle_text: Color::rgb8(112, 125, 142),
-    accent: Color::rgb8(201, 169, 106),
-    border_color: Color::rgb8(221, 228, 236),
-    hover_bg: Color::rgb8(246, 249, 252),
-    active_highlight: Color::rgb8(240, 246, 252),
-    disabled_text: Color::rgb8(167, 177, 190),
-    disabled_border: Color::rgb8(224, 231, 238),
-    white_surface: Color::rgb8(255, 255, 255),
-    box_shadow: Color::rgba8(80, 100, 130, 35),
-    danger_text: Color::rgb8(190, 35, 35),
-    danger_bg: Color::rgb8(255, 232, 232),
-    split_handle_bg: Color::rgb8(224, 231, 238),
-    split_handle_hover: Color::rgb8(174, 185, 200),
-    split_handle_active: Color::rgb8(201, 169, 106),
-    overlay_scrim: Color::rgba8(30, 24, 16, 120),
-};
+#[derive(Deserialize)]
+struct ThemeDefinitions {
+    library_serif: ThemeDefinition,
+    greco_futuristic: ThemeDefinition,
+}
 
-pub const DEFAULT_THEME_MODE: ThemeMode = {
-    #[cfg(feature = "theme-library-serif")]
-    {
-        ThemeMode::LibrarySerif
-    }
-    #[cfg(not(feature = "theme-library-serif"))]
-    {
-        ThemeMode::GrecoFuturistic
-    }
-};
+#[derive(Deserialize)]
+struct DesignContract {
+    themes: ThemeDefinitions,
+}
 
-pub fn palette_for(mode: ThemeMode) -> ThemePalette {
-    match mode {
-        ThemeMode::GrecoFuturistic => GRECO_FUTURISTIC_THEME,
-        ThemeMode::LibrarySerif => LIBRARY_SERIF_THEME,
+impl ThemeDefinition {
+    fn into_palette(self) -> ThemePalette {
+        ThemePalette {
+            app_bg: parse_color(&self.app_bg),
+            surface_bg: parse_color(&self.surface_bg),
+            card_bg: parse_color(&self.card_bg),
+            ink_text: parse_color(&self.ink_text),
+            subtle_text: parse_color(&self.subtle_text),
+            accent: parse_color(&self.accent),
+            border_color: parse_color(&self.border_color),
+            hover_bg: parse_color(&self.hover_bg),
+            active_highlight: parse_color(&self.active_highlight),
+            disabled_text: parse_color(&self.disabled_text),
+            disabled_border: parse_color(&self.disabled_border),
+            white_surface: parse_color(&self.white_surface),
+            box_shadow: parse_color(&self.box_shadow),
+            danger_text: parse_color(&self.danger_text),
+            danger_bg: parse_color(&self.danger_bg),
+            split_handle_bg: parse_color(&self.split_handle_bg),
+            split_handle_hover: parse_color(&self.split_handle_hover),
+            split_handle_active: parse_color(&self.split_handle_active),
+            overlay_scrim: parse_color(&self.overlay_scrim),
+        }
     }
 }
 
-pub fn active_theme_mode() -> ThemeMode {
-    use_context::<ThemeContext>().map(|theme| theme.mode.get()).unwrap_or(DEFAULT_THEME_MODE)
+fn parse_color(value: &str) -> Color {
+    let hexadecimal = value.strip_prefix('#').expect("shared color must start with #");
+    let byte = |offset| u8::from_str_radix(&hexadecimal[offset..offset + 2], 16).expect("shared color must contain hexadecimal bytes");
+    match hexadecimal.len() {
+        6 => Color::rgb8(byte(0), byte(2), byte(4)),
+        8 => Color::rgba8(byte(0), byte(2), byte(4), byte(6)),
+        _ => panic!("shared color must use #RRGGBB or #RRGGBBAA"),
+    }
+}
+
+static THEMES: LazyLock<(ThemePalette, ThemePalette)> = LazyLock::new(|| {
+    let contract: DesignContract = serde_json::from_str(include_str!("../../FrontendContract/design_tokens.json")).expect("shared design themes must be valid");
+    (contract.themes.greco_futuristic.into_palette(), contract.themes.library_serif.into_palette())
+});
+
+pub fn palette_for(theme: ApplicationTheme) -> ThemePalette {
+    match theme {
+        ApplicationTheme::GrecoFuturistic => THEMES.0.clone(),
+        ApplicationTheme::LibrarySerif => THEMES.1.clone(),
+    }
+}
+
+pub fn active_application_theme() -> ApplicationTheme {
+    use_context::<ThemeContext>().map(|context| context.theme.get()).unwrap_or_default()
 }
 
 pub fn palette() -> ThemePalette {
-    palette_for(active_theme_mode())
+    palette_for(active_application_theme())
+}
+
+pub fn interface_font_family() -> String {
+    use_context::<TypographyContext>().map(|typography| typography.interface_font.get().font_name().to_string()).unwrap_or_else(|| UiFontFamily::SansSerif.font_name().to_string())
+}
+
+pub fn heading_font_family() -> String {
+    use_context::<TypographyContext>().map(|typography| typography.heading_font.get().font_name().to_string()).unwrap_or_else(|| UiFontFamily::Serif.font_name().to_string())
 }
 
 pub fn theme_button_label() -> String {
-    match active_theme_mode() {
-        ThemeMode::GrecoFuturistic => "Theme: Greco".to_string(),
-        ThemeMode::LibrarySerif => "Theme: Serif".to_string(),
-    }
-}
-
-pub fn toggle_theme() {
-    if let Some(theme) = use_context::<ThemeContext>() {
-        theme.mode.update(|mode| {
-            *mode = match *mode {
-                ThemeMode::GrecoFuturistic => ThemeMode::LibrarySerif,
-                ThemeMode::LibrarySerif => ThemeMode::GrecoFuturistic,
-            };
-        });
-    }
-}
-
-pub fn create_label(text: String, font_size: i32) -> Label {
-    label(move || text.clone()).style(move |s| {
-        let theme = palette();
-        s.hover(|s| s.background(theme.hover_bg))
-            .text_ellipsis()
-            .font_size(font_size)
-            .font_family(theme.ui_font_family.to_string())
-            .font_weight(Weight::LIGHT)
-            .color(theme.ink_text)
-    })
-}
-
-pub fn label_style(label: Label, font_size: i32) -> Label {
-    label.style(move |s| {
-        let theme = palette();
-        s.hover(|s| s.background(theme.hover_bg)).text_ellipsis().font_size(font_size).font_family(theme.ui_font_family.to_string()).color(theme.ink_text)
-    })
-}
-
-pub fn create_book_title_label(title: String) -> Label {
-    label(move || title.clone()).style(|s| {
-        let theme = palette();
-        s.width(196).height(46).font_size(17).font_family(theme.title_font_family.to_string()).font_weight(Weight::SEMIBOLD).color(theme.ink_text).text_ellipsis().margin_top(10)
-    })
-}
-
-pub fn style_book_cover(img: Img) -> Img {
-    img.style(move |s| {
-        let theme = palette();
-        s.width(200)
-            .height(320)
-            .border_radius(6)
-            .border(1)
-            .border_color(theme.border_color)
-            .box_shadow_blur(14)
-            .box_shadow_color(theme.box_shadow)
-            .box_shadow_spread(0)
-            .box_shadow_h_offset(2)
-            .box_shadow_v_offset(8)
-            .cursor(CursorStyle::Pointer)
-    })
+    format!("Theme: {}", active_application_theme().label())
 }

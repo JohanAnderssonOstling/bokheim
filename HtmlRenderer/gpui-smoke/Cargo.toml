@@ -1,0 +1,10 @@
+[package]
+name = "html-gpui-smoke"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+html-view-core = { path = "../crates/html-view-core" }
+html-view-gpui = { path = "../crates/html-view-gpui" }
