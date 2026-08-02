@@ -3,6 +3,7 @@
 //! This crate deliberately contains no renderer knowledge. Owning stage crates
 //! translate their public output contracts into the corresponding WPT form.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A declarative helper used by the CSS parsing Web Platform Tests.
@@ -49,13 +50,67 @@ pub struct CssParsingExtraction {
     pub unsupported_calls: Vec<UnsupportedCssParsingCall>,
 }
 
+/// Return relative script resources referenced by a WPT HTML file. Shared
+/// browser harness paths and absolute/network resources are intentionally
+/// excluded; owning tests may load the returned files as static preludes.
+pub fn relative_script_references(source: &str) -> Vec<String> {
+    let lower = source.to_ascii_lowercase();
+    let mut references = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = lower[cursor..].find("<script") {
+        let tag_start = cursor + offset;
+        let Some(tag_length) = lower[tag_start..].find('>') else { break };
+        let tag_end = tag_start + tag_length;
+        let tag_lower = &lower[tag_start..tag_end];
+        let Some(src_offset) = tag_lower.find("src") else {
+            cursor = tag_end + 1;
+            continue;
+        };
+        let mut value_start = tag_start + src_offset + 3;
+        skip_ascii_whitespace(source.as_bytes(), &mut value_start);
+        if source.as_bytes().get(value_start) != Some(&b'=') {
+            cursor = tag_end + 1;
+            continue;
+        }
+        value_start += 1;
+        skip_ascii_whitespace(source.as_bytes(), &mut value_start);
+        let Some(quote @ (b'\'' | b'"')) = source.as_bytes().get(value_start).copied() else {
+            cursor = tag_end + 1;
+            continue;
+        };
+        value_start += 1;
+        let Some(value_length) = source.as_bytes()[value_start..tag_end].iter().position(|byte| *byte == quote) else {
+            cursor = tag_end + 1;
+            continue;
+        };
+        let reference = &source[value_start..value_start + value_length];
+        if !reference.is_empty() && !reference.starts_with('/') && !reference.starts_with("//") && !reference.contains("://") {
+            references.push(reference.to_owned());
+        }
+        cursor = tag_end + 1;
+    }
+    references
+}
+
 /// Extract literal declarative CSS parsing tests from an original WPT HTML
 /// file without running its JavaScript.
 pub fn extract_css_parsing_tests(source: &str) -> CssParsingExtraction {
+    extract_css_parsing_tests_with_prelude(source, "")
+}
+
+/// Extract tests from an unchanged WPT HTML file while making definitions
+/// from its relative, local script resources available to the static adapter.
+/// The prelude is context only: calls in it are not emitted and HTML line
+/// numbers remain relative to `source`.
+pub fn extract_css_parsing_tests_with_prelude(source: &str, prelude: &str) -> CssParsingExtraction {
+    let combined = if prelude.is_empty() { source.to_owned() } else { format!("{prelude}\n{source}") };
+    let source_start = if prelude.is_empty() { 0 } else { prelude.len() + 1 };
+    let source = combined.as_str();
     let bytes = source.as_bytes();
     let static_loops = collect_static_loop_bindings(source);
+    let static_functions = collect_static_functions(source);
     let mut extraction = CssParsingExtraction::default();
-    let mut cursor = 0;
+    let mut cursor = source_start;
     let mut line = 1;
 
     while cursor < bytes.len() {
@@ -99,7 +154,7 @@ pub fn extract_css_parsing_tests(source: &str) -> CssParsingExtraction {
                     }
                     open += 1;
                 }
-                if (!helper.starts_with("test_") && helper != "assert_valid") || bytes.get(open) != Some(&b'(') {
+                if (!helper.starts_with("test_") && helper != "assert_valid" && !static_functions.contains_key(helper)) || bytes.get(open) != Some(&b'(') {
                     cursor = open;
                     continue;
                 }
@@ -113,6 +168,26 @@ pub fn extract_css_parsing_tests(source: &str) -> CssParsingExtraction {
                                 Err(reason) => extraction.unsupported_calls.push(UnsupportedCssParsingCall { helper: helper.to_owned(), line: call_line, reason }),
                             }
                             continue;
+                        }
+                        if let Some(expansion) = expand_custom_css_helper(helper, &raw_arguments, call_line) {
+                            match expansion {
+                                Ok(tests) => extraction.tests.extend(tests),
+                                Err(reason) => extraction.unsupported_calls.push(UnsupportedCssParsingCall { helper: helper.to_owned(), line: call_line, reason }),
+                            }
+                            continue;
+                        }
+                        if let Some(function) = static_functions.get(helper) {
+                            match expand_static_function(source, function, &raw_arguments, start, call_line, &static_loops) {
+                                Ok(tests) if !tests.is_empty() => {
+                                    extraction.tests.extend(tests);
+                                    continue;
+                                }
+                                Ok(_) => {}
+                                Err(reason) => {
+                                    extraction.unsupported_calls.push(UnsupportedCssParsingCall { helper: helper.to_owned(), line: call_line, reason });
+                                    continue;
+                                }
+                            }
                         }
                         let kind = css_test_kind(helper);
                         let required_arguments = kind.map(required_argument_count).unwrap_or(raw_arguments.len());
@@ -145,7 +220,14 @@ pub fn extract_css_parsing_tests(source: &str) -> CssParsingExtraction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StaticLoopBinding {
     name: String,
-    values: Vec<String>,
+    values: Vec<Vec<String>>,
+    body_start: usize,
+    body_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StaticFunction {
+    parameters: Vec<String>,
     body_start: usize,
     body_end: usize,
 }
@@ -154,6 +236,7 @@ struct StaticLoopBinding {
 /// used by CSS parsing WPTs. This is data expansion, not JavaScript execution.
 fn collect_static_loop_bindings(source: &str) -> Vec<StaticLoopBinding> {
     let bytes = source.as_bytes();
+    let arrays = collect_static_string_arrays(source);
     let mut bindings = Vec::new();
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -165,17 +248,43 @@ fn collect_static_loop_bindings(source: &str) -> Vec<StaticLoopBinding> {
             continue;
         }
 
-        let Some(binding) = parse_static_loop_binding(source, cursor) else {
+        let Some(binding) = parse_static_loop_binding(source, cursor, &arrays) else {
             cursor += 3;
             continue;
         };
         cursor += 3;
-        bindings.push(binding);
+        if !static_loop_binding_is_mutated(source, &binding) {
+            bindings.push(binding);
+        }
     }
     bindings
 }
 
-fn parse_static_loop_binding(source: &str, start: usize) -> Option<StaticLoopBinding> {
+fn static_loop_binding_is_mutated(source: &str, binding: &StaticLoopBinding) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = binding.body_start + 1;
+    while cursor < binding.body_end {
+        if !is_js_identifier_start(bytes[cursor]) {
+            advance_js_token(bytes, &mut cursor);
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < binding.body_end && is_js_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        if source.get(start..cursor) != Some(binding.name.as_str()) {
+            continue;
+        }
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes.get(cursor) == Some(&b'=') && bytes.get(cursor + 1) != Some(&b'=') && bytes.get(cursor + 1) != Some(&b'>') {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_static_loop_binding(source: &str, start: usize, arrays: &BTreeMap<String, Vec<Vec<String>>>) -> Option<StaticLoopBinding> {
     let bytes = source.as_bytes();
     let mut cursor = start + 3;
     skip_ascii_whitespace(bytes, &mut cursor);
@@ -203,11 +312,19 @@ fn parse_static_loop_binding(source: &str, start: usize) -> Option<StaticLoopBin
     }
     cursor += 2;
     skip_ascii_whitespace(bytes, &mut cursor);
-    let array_start = cursor;
-    expect_byte(bytes, &mut cursor, b'[')?;
-    let array_end = find_matching_delimiter(source, array_start, b'[', b']')?;
-    let values = split_js_values(source.get(array_start + 1..array_end)?)?.into_iter().map(parse_js_string_literal).collect::<Option<Vec<_>>>()?;
-    cursor = array_end + 1;
+    let values = if bytes.get(cursor) == Some(&b'[') {
+        let array_start = cursor;
+        let array_end = find_matching_delimiter(source, array_start, b'[', b']')?;
+        let values = parse_static_string_array(source.get(array_start + 1..array_end)?, arrays)?;
+        cursor = array_end + 1;
+        values
+    } else {
+        let array_name_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| is_js_identifier_continue(*byte)) {
+            cursor += 1;
+        }
+        arrays.get(source.get(array_name_start..cursor)?)?.clone()
+    };
     skip_ascii_whitespace(bytes, &mut cursor);
     expect_byte(bytes, &mut cursor, b')')?;
     skip_ascii_whitespace(bytes, &mut cursor);
@@ -217,16 +334,131 @@ fn parse_static_loop_binding(source: &str, start: usize) -> Option<StaticLoopBin
     Some(StaticLoopBinding { name, values, body_start, body_end })
 }
 
+fn collect_static_string_arrays(source: &str) -> BTreeMap<String, Vec<Vec<String>>> {
+    let bytes = source.as_bytes();
+    let mut arrays = BTreeMap::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if !is_js_identifier_start(bytes[cursor]) {
+            advance_js_token(bytes, &mut cursor);
+            continue;
+        }
+        let name_start = cursor;
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(|byte| is_js_identifier_continue(*byte)) {
+            cursor += 1;
+        }
+        let Some(name) = source.get(name_start..cursor).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes.get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes.get(cursor) != Some(&b'[') {
+            continue;
+        }
+        let array_start = cursor;
+        let Some(array_end) = find_matching_delimiter(source, array_start, b'[', b']') else {
+            continue;
+        };
+        if let Some(values) = source.get(array_start + 1..array_end).and_then(|body| parse_static_string_array(body, &arrays)) {
+            arrays.insert(name.to_owned(), values);
+        }
+        cursor = array_end + 1;
+    }
+    arrays
+}
+
+fn parse_static_string_array(source: &str, arrays: &BTreeMap<String, Vec<Vec<String>>>) -> Option<Vec<Vec<String>>> {
+    let mut values = Vec::new();
+    for item in split_js_values(source)? {
+        let uncommented = item.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        let item = uncommented.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if let Some(name) = item.strip_prefix("...") {
+            values.extend(arrays.get(name.trim())?.iter().cloned());
+        } else if let Some(body) = item.trim().strip_prefix('[').and_then(|item| item.strip_suffix(']')) {
+            let tuple = split_js_values(body)?.into_iter().map(parse_js_string_literal).collect::<Option<Vec<_>>>()?;
+            values.push(tuple);
+        } else {
+            values.push(vec![parse_js_string_literal(item)?]);
+        }
+    }
+    Some(values)
+}
+
+fn collect_static_functions(source: &str) -> BTreeMap<String, StaticFunction> {
+    let bytes = source.as_bytes();
+    let mut functions = BTreeMap::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes.get(cursor..cursor + 8) != Some(b"function")
+            || cursor.checked_sub(1).and_then(|index| bytes.get(index)).is_some_and(|byte| is_js_identifier_continue(*byte))
+            || bytes.get(cursor + 8).is_some_and(|byte| is_js_identifier_continue(*byte))
+        {
+            advance_js_token(bytes, &mut cursor);
+            continue;
+        }
+        cursor += 8;
+        skip_ascii_whitespace(bytes, &mut cursor);
+        let name_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| is_js_identifier_continue(*byte)) {
+            cursor += 1;
+        }
+        let Some(name) = source.get(name_start..cursor).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes.get(cursor) != Some(&b'(') {
+            continue;
+        }
+        let parameters_start = cursor;
+        let Some(parameters_end) = find_matching_delimiter(source, parameters_start, b'(', b')') else {
+            continue;
+        };
+        let Some(parameters) = source.get(parameters_start + 1..parameters_end).and_then(split_js_values) else {
+            continue;
+        };
+        let parameters = parameters.into_iter().map(str::trim).map(str::to_owned).collect::<Vec<_>>();
+        cursor = parameters_end + 1;
+        skip_ascii_whitespace(bytes, &mut cursor);
+        let body_start = cursor;
+        if bytes.get(body_start) != Some(&b'{') {
+            continue;
+        }
+        let Some(body_end) = find_matching_delimiter(source, body_start, b'{', b'}') else {
+            continue;
+        };
+        functions.insert(name.to_owned(), StaticFunction { parameters, body_start, body_end });
+        cursor = body_end + 1;
+    }
+    functions
+}
+
 fn expand_static_arguments(raw_arguments: &[&str], call_offset: usize, loops: &[StaticLoopBinding], required_arguments: usize) -> Option<Vec<Vec<String>>> {
+    expand_static_arguments_with_environment(raw_arguments, call_offset, loops, required_arguments, &BTreeMap::new())
+}
+
+fn expand_static_arguments_with_environment(raw_arguments: &[&str], call_offset: usize, loops: &[StaticLoopBinding], required_arguments: usize, base_environment: &BTreeMap<String, String>) -> Option<Vec<Vec<String>>> {
     let raw_arguments = &raw_arguments[..raw_arguments.len().min(required_arguments)];
     let enclosing = loops.iter().filter(|binding| binding.body_start < call_offset && call_offset < binding.body_end).collect::<Vec<_>>();
-    let mut environments = vec![Vec::<(&str, &str)>::new()];
+    let mut environments = vec![base_environment.clone()];
     for binding in enclosing {
         let mut expanded = Vec::new();
         for environment in &environments {
-            for value in &binding.values {
+            for tuple in &binding.values {
                 let mut next = environment.clone();
-                next.push((&binding.name, value));
+                if let Some(value) = tuple.first() {
+                    next.insert(binding.name.clone(), value.clone());
+                }
+                for (index, value) in tuple.iter().enumerate() {
+                    next.insert(format!("{}[{index}]", binding.name), value.clone());
+                }
                 expanded.push(next);
             }
         }
@@ -236,13 +468,18 @@ fn expand_static_arguments(raw_arguments: &[&str], call_offset: usize, loops: &[
     environments.into_iter().map(|environment| raw_arguments.iter().map(|argument| evaluate_static_string(argument, &environment)).collect()).collect()
 }
 
-fn evaluate_static_string(argument: &str, environment: &[(&str, &str)]) -> Option<String> {
+fn evaluate_static_string(argument: &str, environment: &BTreeMap<String, String>) -> Option<String> {
     if let Some(value) = parse_js_string_literal(argument) {
         return Some(value);
     }
     let argument = argument.trim();
-    if let Some((_, value)) = environment.iter().find(|(name, _)| *name == argument) {
-        return Some((*value).to_owned());
+    if let Some(value) = environment.get(argument) {
+        return Some(value.clone());
+    }
+    if let Some(spread) = argument.strip_prefix("...")
+        && let Some(value) = environment.get(&format!("{}[0]", spread.trim()))
+    {
+        return Some(value.clone());
     }
     if !(argument.starts_with('`') && argument.ends_with('`')) {
         return None;
@@ -253,6 +490,57 @@ fn evaluate_static_string(argument: &str, environment: &[(&str, &str)]) -> Optio
         expanded = expanded.replace(&format!("${{{name}}}"), value);
     }
     (!expanded.contains("${")).then_some(expanded)
+}
+
+fn expand_static_function(source: &str, function: &StaticFunction, call_arguments: &[&str], call_offset: usize, call_line: usize, loops: &[StaticLoopBinding]) -> Result<Vec<CssParsingTest>, String> {
+    let actual_sets = expand_static_arguments(call_arguments, call_offset, loops, function.parameters.len()).ok_or_else(|| "wrapper arguments are not a static literal expansion".to_owned())?;
+    let bytes = source.as_bytes();
+    let mut output = Vec::new();
+
+    for actuals in actual_sets {
+        let environment = function.parameters.iter().cloned().zip(actuals).collect::<BTreeMap<_, _>>();
+        let mut cursor = function.body_start + 1;
+        while cursor < function.body_end {
+            match bytes[cursor] {
+                b'\'' | b'"' | b'`' => {
+                    let quote = bytes[cursor];
+                    let mut ignored_line = 0;
+                    skip_js_string(bytes, &mut cursor, &mut ignored_line, quote);
+                }
+                byte if is_js_identifier_start(byte) => {
+                    let helper_start = cursor;
+                    cursor += 1;
+                    while cursor < function.body_end && is_js_identifier_continue(bytes[cursor]) {
+                        cursor += 1;
+                    }
+                    let helper = &source[helper_start..cursor];
+                    let Some(kind) = css_test_kind(helper) else {
+                        continue;
+                    };
+                    let mut open = cursor;
+                    skip_ascii_whitespace(bytes, &mut open);
+                    if bytes.get(open) != Some(&b'(') {
+                        continue;
+                    }
+                    let mut ignored_line = 0;
+                    let (arguments, end) = collect_js_call_arguments(source, open, &mut ignored_line)?;
+                    cursor = end;
+                    let required = required_argument_count(kind);
+                    let expanded = expand_static_arguments_with_environment(&arguments, helper_start, loops, required, &environment).ok_or_else(|| format!("{helper} inside wrapper is not a static literal expansion"))?;
+                    output.extend(expanded.into_iter().map(|arguments| CssParsingTest { kind, arguments, line: call_line }));
+                }
+                _ => cursor += 1,
+            }
+        }
+    }
+
+    let mut deduplicated = Vec::new();
+    for test in output {
+        if !deduplicated.contains(&test) {
+            deduplicated.push(test);
+        }
+    }
+    Ok(deduplicated)
 }
 
 fn expand_is_where_assertion(raw_arguments: &[&str], line: usize) -> Result<Vec<CssParsingTest>, String> {
@@ -280,6 +568,111 @@ fn expand_is_where_assertion(raw_arguments: &[&str], line: usize) -> Result<Vec<
             CssParsingTest { kind, arguments, line }
         })
         .collect())
+}
+
+fn expand_custom_css_helper(helper: &str, arguments: &[&str], line: usize) -> Option<Result<Vec<CssParsingTest>, String>> {
+    let declaration_tests = |kind, property: &str, value_indices: &[usize]| -> Result<Vec<CssParsingTest>, String> {
+        value_indices
+            .iter()
+            .map(|index| {
+                let value = literal_argument(arguments, *index, helper)?;
+                Ok(CssParsingTest { kind, arguments: vec![property.to_owned(), value], line })
+            })
+            .collect()
+    };
+    let rule_test = |kind, rule: String| Ok(vec![CssParsingTest { kind, arguments: vec![rule], line }]);
+
+    if !matches!(
+        helper,
+        "test_pseudo_computed_value"
+            | "test_relative"
+            | "test_relative_size"
+            | "test_font_size"
+            | "test_system_font"
+            | "test_auto_duration"
+            | "test_currentcolor_alpha"
+            | "test_keyframes_name_valid"
+            | "test_keyframes_name_invalid"
+            | "test_valid_keyframe_selector"
+            | "test_invalid_keyframe_selector"
+            | "test_display_computed"
+            | "test_display_affected"
+            | "test_valid"
+            | "test_invalid"
+    ) {
+        return None;
+    }
+
+    Some((|| -> Result<Vec<CssParsingTest>, String> {
+        match helper {
+            // computed-testcommon.js helper with an extra pseudo-element argument.
+            "test_pseudo_computed_value" => {
+                let property = literal_argument(arguments, 1, helper)?;
+                declaration_tests(CssParsingTestKind::ComputedValue, &property, &[2])
+            }
+            // Local font WPT helpers still assign each selected value through the
+            // corresponding CSS declaration before making their relational check.
+            "test_relative" => declaration_tests(CssParsingTestKind::ComputedValue, "font-weight", &[0, 1]),
+            "test_relative_size" => declaration_tests(CssParsingTestKind::ComputedValue, "font-size", &[0, 1]),
+            "test_font_size" => declaration_tests(CssParsingTestKind::ComputedValue, "font-size", &[1]),
+            "test_system_font" => declaration_tests(CssParsingTestKind::ComputedValue, "font", &[0]),
+            "test_auto_duration" => {
+                let mut tests = declaration_tests(CssParsingTestKind::ComputedValue, "animation-duration", &[0])?;
+                tests.extend(declaration_tests(CssParsingTestKind::ComputedValue, "animation-timeline", &[1])?);
+                Ok(tests)
+            }
+            "test_currentcolor_alpha" => {
+                let mut tests = declaration_tests(CssParsingTestKind::ComputedValue, "background-color", &[0])?;
+                tests.extend(declaration_tests(CssParsingTestKind::ComputedValue, "color", &[2])?);
+                Ok(tests)
+            }
+            "test_keyframes_name_valid" | "test_keyframes_name_invalid" => {
+                let name = literal_argument(arguments, 0, helper)?;
+                let kind = if helper.ends_with("_valid") { CssParsingTestKind::ValidRule } else { CssParsingTestKind::InvalidRule };
+                rule_test(kind, format!("@keyframes {name} {{}}"))
+            }
+            "test_valid_keyframe_selector" | "test_invalid_keyframe_selector" => {
+                let selector = literal_argument(arguments, 0, helper)?;
+                let kind = if helper.starts_with("test_valid") { CssParsingTestKind::ValidRule } else { CssParsingTestKind::InvalidRule };
+                rule_test(kind, format!("@keyframes --wpt {{ {selector} {{}} }}"))
+            }
+            "test_display_computed" => {
+                let object = arguments.first().ok_or_else(|| "test_display_computed requires a property object".to_owned())?;
+                let value = object_literal_string_field(object, "display").ok_or_else(|| "test_display_computed display field is not a string literal".to_owned())?;
+                Ok(vec![CssParsingTest { kind: CssParsingTestKind::ComputedValue, arguments: vec!["display".to_owned(), value], line }])
+            }
+            "test_display_affected" => {
+                let property = literal_argument(arguments, 0, helper)?;
+                let value = literal_argument(arguments, 1, helper)?;
+                Ok(vec![CssParsingTest { kind: CssParsingTestKind::ComputedValue, arguments: vec![property, value], line }])
+            }
+            // This helper exists only in starting-style-parsing.html and inserts
+            // the supplied at-rule prefix followed by an empty block.
+            "test_valid" | "test_invalid" => {
+                let prefix = literal_argument(arguments, 0, helper)?;
+                let kind = if helper == "test_valid" { CssParsingTestKind::ValidRule } else { CssParsingTestKind::InvalidRule };
+                rule_test(kind, format!("{prefix}{{}}"))
+            }
+            _ => unreachable!("custom helper guard and expansion match stay synchronized"),
+        }
+    })())
+}
+
+fn literal_argument(arguments: &[&str], index: usize, helper: &str) -> Result<String, String> {
+    arguments.get(index).and_then(|argument| parse_js_string_literal(argument)).ok_or_else(|| format!("{helper} argument {} is not a string literal", index + 1))
+}
+
+fn object_literal_string_field(object: &str, requested: &str) -> Option<String> {
+    let object = object.trim();
+    let body = object.strip_prefix('{')?.strip_suffix('}')?;
+    for field in split_js_values(body)? {
+        let (name, value) = field.split_once(':')?;
+        let name = parse_js_string_literal(name.trim()).unwrap_or_else(|| name.trim().to_owned());
+        if name == requested {
+            return parse_js_string_literal(value.trim());
+        }
+    }
+    None
 }
 
 fn skip_js_function_body(source: &str, cursor: &mut usize, line: &mut usize) {
@@ -331,13 +724,40 @@ fn split_js_values(source: &str) -> Option<Vec<&str>> {
     let mut start = 0;
     let mut values = Vec::new();
     let mut ignored_line = 0;
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
     while cursor < bytes.len() {
         match bytes[cursor] {
             b'\'' | b'"' | b'`' => {
                 let quote = bytes[cursor];
                 skip_js_string(bytes, &mut cursor, &mut ignored_line, quote);
             }
-            b',' => {
+            b'(' => {
+                parentheses += 1;
+                cursor += 1;
+            }
+            b')' => {
+                parentheses = parentheses.saturating_sub(1);
+                cursor += 1;
+            }
+            b'[' => {
+                brackets += 1;
+                cursor += 1;
+            }
+            b']' => {
+                brackets = brackets.saturating_sub(1);
+                cursor += 1;
+            }
+            b'{' => {
+                braces += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                braces = braces.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if parentheses == 0 && brackets == 0 && braces == 0 => {
                 values.push(source[start..cursor].trim());
                 cursor += 1;
                 start = cursor;
@@ -719,7 +1139,7 @@ fn parse_error(case_index: usize, message: &str) -> TreeConstructionParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssParsingTestKind, ScriptingMode, extract_css_parsing_tests, parse_tree_construction_file};
+    use super::{CssParsingTestKind, ScriptingMode, extract_css_parsing_tests, extract_css_parsing_tests_with_prelude, parse_tree_construction_file, relative_script_references};
 
     #[test]
     fn extracts_literal_css_helpers_and_reports_dynamic_calls() {
@@ -762,20 +1182,66 @@ mod tests {
     #[test]
     fn expands_static_keyword_matrices_and_ignores_optional_serialization_arrays() {
         let source = r#"
-            for (const first of ['none', 'auto']) {
-                for (const second of ['trim-start', 'space-first']) {
+            const first_values = ['none', 'auto'];
+            const second_values = ['trim-start', 'space-first'];
+            const combined = [...first_values, 'normal'];
+            for (const first of first_values) {
+                for (const second of second_values) {
                     test_invalid_value("text-spacing", `${first} ${second}`);
                 }
+            }
+            for (const value of combined) {
+                test_valid_value("text-spacing", value);
             }
             test_valid_selector('*#id', ['*#id', '#id']);
         "#;
         let extraction = extract_css_parsing_tests(source);
 
         assert_eq!(extraction.unsupported_calls, []);
-        assert_eq!(extraction.tests.len(), 5);
+        assert_eq!(extraction.tests.len(), 8);
         assert_eq!(extraction.tests[0].arguments, ["text-spacing", "none trim-start"]);
         assert_eq!(extraction.tests[3].arguments, ["text-spacing", "auto space-first"]);
-        assert_eq!(extraction.tests[4].arguments, ["*#id"]);
+        assert_eq!(extraction.tests[4].arguments, ["text-spacing", "none"]);
+        assert_eq!(extraction.tests[6].arguments, ["text-spacing", "normal"]);
+        assert_eq!(extraction.tests[7].arguments, ["*#id"]);
+    }
+
+    #[test]
+    fn loads_relative_script_data_as_context_without_emitting_its_calls() {
+        let html = r#"
+            <script src="values.js"></script>
+            <script src="/resources/testharness.js"></script>
+            <script>
+              for (const value of values) {
+                test_valid_value("width", value);
+              }
+            </script>
+        "#;
+        let prelude = r#"const values = ["1px", "2px"]; test_invalid_value("width", "bad");"#;
+        assert_eq!(relative_script_references(html), ["values.js"]);
+
+        let extraction = extract_css_parsing_tests_with_prelude(html, prelude);
+        assert_eq!(extraction.unsupported_calls, []);
+        assert_eq!(extraction.tests.len(), 2);
+        assert_eq!(extraction.tests[0].arguments, ["width", "1px"]);
+        assert_eq!(extraction.tests[1].arguments, ["width", "2px"]);
+    }
+
+    #[test]
+    fn expands_simple_declarative_wrapper_functions() {
+        let source = r#"
+            function pair(property, value) {
+                test_valid_value(property, value);
+                test_valid_value(property, `${value} extra`);
+            }
+            pair("content", "open-quote");
+        "#;
+        let extraction = extract_css_parsing_tests(source);
+
+        assert_eq!(extraction.unsupported_calls, []);
+        assert_eq!(extraction.tests.len(), 2);
+        assert_eq!(extraction.tests[0].arguments, ["content", "open-quote"]);
+        assert_eq!(extraction.tests[1].arguments, ["content", "open-quote extra"]);
     }
 
     #[test]
