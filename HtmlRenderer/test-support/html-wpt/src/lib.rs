@@ -169,7 +169,7 @@ pub fn extract_css_parsing_tests_with_prelude(source: &str, prelude: &str) -> Cs
                             }
                             continue;
                         }
-                        if let Some(expansion) = expand_custom_css_helper(helper, &raw_arguments, call_line) {
+                        if let Some(expansion) = expand_custom_css_helper(source, helper, &raw_arguments, call_line) {
                             match expansion {
                                 Ok(tests) => extraction.tests.extend(tests),
                                 Err(reason) => extraction.unsupported_calls.push(UnsupportedCssParsingCall { helper: helper.to_owned(), line: call_line, reason }),
@@ -476,6 +476,13 @@ fn evaluate_static_string(argument: &str, environment: &BTreeMap<String, String>
     if let Some(value) = environment.get(argument) {
         return Some(value.clone());
     }
+    if let Some(terms) = split_static_string_concatenation(argument) {
+        let mut value = String::new();
+        for term in terms {
+            value.push_str(&evaluate_static_string(term, environment)?);
+        }
+        return Some(value);
+    }
     if let Some(spread) = argument.strip_prefix("...")
         && let Some(value) = environment.get(&format!("{}[0]", spread.trim()))
     {
@@ -490,6 +497,67 @@ fn evaluate_static_string(argument: &str, environment: &BTreeMap<String, String>
         expanded = expanded.replace(&format!("${{{name}}}"), value);
     }
     (!expanded.contains("${")).then_some(expanded)
+}
+
+fn split_static_string_concatenation(source: &str) -> Option<Vec<&str>> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut start = 0usize;
+    let mut terms = Vec::new();
+    let mut parentheses = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut ignored_line = 0usize;
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            quote @ (b'\'' | b'"' | b'`') => skip_js_string(bytes, &mut cursor, &mut ignored_line, quote),
+            b'(' => {
+                parentheses += 1;
+                cursor += 1;
+            }
+            b')' => {
+                parentheses = parentheses.saturating_sub(1);
+                cursor += 1;
+            }
+            b'[' => {
+                brackets += 1;
+                cursor += 1;
+            }
+            b']' => {
+                brackets = brackets.saturating_sub(1);
+                cursor += 1;
+            }
+            b'{' => {
+                braces += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                braces = braces.saturating_sub(1);
+                cursor += 1;
+            }
+            b'+' if parentheses == 0 && brackets == 0 && braces == 0 => {
+                let term = source[start..cursor].trim();
+                if term.is_empty() {
+                    return None;
+                }
+                terms.push(term);
+                cursor += 1;
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    if terms.is_empty() {
+        return None;
+    }
+    let final_term = source[start..].trim();
+    if final_term.is_empty() {
+        return None;
+    }
+    terms.push(final_term);
+    Some(terms)
 }
 
 fn expand_static_function(source: &str, function: &StaticFunction, call_arguments: &[&str], call_offset: usize, call_line: usize, loops: &[StaticLoopBinding]) -> Result<Vec<CssParsingTest>, String> {
@@ -570,7 +638,7 @@ fn expand_is_where_assertion(raw_arguments: &[&str], line: usize) -> Result<Vec<
         .collect())
 }
 
-fn expand_custom_css_helper(helper: &str, arguments: &[&str], line: usize) -> Option<Result<Vec<CssParsingTest>, String>> {
+fn expand_custom_css_helper(source: &str, helper: &str, arguments: &[&str], line: usize) -> Option<Result<Vec<CssParsingTest>, String>> {
     let declaration_tests = |kind, property: &str, value_indices: &[usize]| -> Result<Vec<CssParsingTest>, String> {
         value_indices
             .iter()
@@ -597,6 +665,7 @@ fn expand_custom_css_helper(helper: &str, arguments: &[&str], line: usize) -> Op
             | "test_invalid_keyframe_selector"
             | "test_display_computed"
             | "test_display_affected"
+            | "test_various"
             | "test_valid"
             | "test_invalid"
     ) {
@@ -646,6 +715,10 @@ fn expand_custom_css_helper(helper: &str, arguments: &[&str], line: usize) -> Op
                 let value = literal_argument(arguments, 1, helper)?;
                 Ok(vec![CssParsingTest { kind: CssParsingTestKind::ComputedValue, arguments: vec![property, value], line }])
             }
+            // font-valid.html and font-computed.html deliberately generate all
+            // permutations recursively. Reproduce that finite data generator
+            // so the upstream files remain unchanged and no JS engine is needed.
+            "test_various" => expand_font_various(source, arguments, line),
             // This helper exists only in starting-style-parsing.html and inserts
             // the supplied at-rule prefix followed by an empty block.
             "test_valid" | "test_invalid" => {
@@ -656,6 +729,79 @@ fn expand_custom_css_helper(helper: &str, arguments: &[&str], line: usize) -> Op
             _ => unreachable!("custom helper guard and expansion match stay synchronized"),
         }
     })())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FontPrefixPart {
+    Normal,
+    Style,
+    Variant,
+    Weight,
+    Stretch,
+}
+
+#[derive(Default)]
+struct FontGeneratorCounters {
+    style: usize,
+    weight: usize,
+    stretch: usize,
+    size: usize,
+    line_height: usize,
+    family: usize,
+}
+
+fn expand_font_various(source: &str, arguments: &[&str], line: usize) -> Result<Vec<CssParsingTest>, String> {
+    if arguments.len() != 1 || arguments[0].trim() != "[]" {
+        return Err("test_various is only supported for the literal empty-prefix entry point".to_owned());
+    }
+    let kind = if source.contains("test_valid_value('font', parts.join(' ')") {
+        CssParsingTestKind::ValidValue
+    } else if source.contains("test_computed_value('font', parts.join(' ')") {
+        CssParsingTestKind::ComputedValue
+    } else {
+        return Err("test_various is not the known finite font shorthand generator".to_owned());
+    };
+    let computed = kind == CssParsingTestKind::ComputedValue;
+    let mut tests = Vec::new();
+    let mut counters = FontGeneratorCounters::default();
+    generate_font_permutations(&mut Vec::new(), computed, kind, line, &mut counters, &mut tests);
+    Ok(tests)
+}
+
+fn generate_font_permutations(prefix: &mut Vec<FontPrefixPart>, computed: bool, kind: CssParsingTestKind, line: usize, counters: &mut FontGeneratorCounters, tests: &mut Vec<CssParsingTest>) {
+    fn alternating<'a>(values: &'a [&str], counter: &mut usize) -> &'a str {
+        let value = values[*counter % values.len()];
+        *counter += 1;
+        value
+    }
+    let mut parts = Vec::new();
+    for entry in prefix.iter().copied() {
+        let value = match entry {
+            FontPrefixPart::Normal => "normal",
+            FontPrefixPart::Style => alternating(if computed { &["italic"] } else { &["italic", "oblique"] }, &mut counters.style),
+            FontPrefixPart::Variant => "small-caps",
+            FontPrefixPart::Weight => alternating(&["bold", "bolder", "lighter", "100", "900"], &mut counters.weight),
+            FontPrefixPart::Stretch => alternating(&["ultra-condensed", "extra-condensed", "condensed", "semi-condensed", "semi-expanded", "expanded", "extra-expanded", "ultra-expanded"], &mut counters.stretch),
+        };
+        parts.push(value.to_owned());
+    }
+    let size = alternating(&["xx-small", "medium", "xx-large", "larger", "smaller", "10px", "20%", "calc(30% - 40px)"], &mut counters.size);
+    let line_height = alternating(&["", "normal", "1.2", "calc(120% + 1.2em)"], &mut counters.line_height);
+    parts.push(if line_height.is_empty() { size.to_owned() } else { format!("{size}/{line_height}") });
+    let families = if computed { &["serif", "sans-serif", "cursive", "fantasy", "monospace", "Menu", "Non-Generic Example Family Name"][..] } else { &["serif", "sans-serif", "cursive", "fantasy", "monospace", "Menu", "FB Armada"][..] };
+    parts.push(alternating(families, &mut counters.family).to_owned());
+    tests.push(CssParsingTest { kind, arguments: vec!["font".to_owned(), parts.join(" ")], line });
+
+    if prefix.len() == 4 {
+        return;
+    }
+    for alternative in [FontPrefixPart::Normal, FontPrefixPart::Style, FontPrefixPart::Variant, FontPrefixPart::Weight, FontPrefixPart::Stretch] {
+        if alternative == FontPrefixPart::Normal || !prefix.contains(&alternative) {
+            prefix.push(alternative);
+            generate_font_permutations(prefix, computed, kind, line, counters, tests);
+            prefix.pop();
+        }
+    }
 }
 
 fn literal_argument(arguments: &[&str], index: usize, helper: &str) -> Result<String, String> {
@@ -800,6 +946,8 @@ fn css_test_kind(helper: &str) -> Option<CssParsingTestKind> {
         "test_shorthand_value" => CssParsingTestKind::ShorthandValue,
         "test_valid_selector" => CssParsingTestKind::ValidSelector,
         "test_invalid_selector" => CssParsingTestKind::InvalidSelector,
+        "assert_selector_serializes_to" => CssParsingTestKind::ValidSelector,
+        "assert_invalid_selector" => CssParsingTestKind::InvalidSelector,
         "test_valid_forgiving_selector" => CssParsingTestKind::ValidForgivingSelector,
         "test_valid_rule" => CssParsingTestKind::ValidRule,
         "test_invalid_rule" => CssParsingTestKind::InvalidRule,
@@ -1242,6 +1390,43 @@ mod tests {
         assert_eq!(extraction.tests.len(), 2);
         assert_eq!(extraction.tests[0].arguments, ["content", "open-quote"]);
         assert_eq!(extraction.tests[1].arguments, ["content", "open-quote extra"]);
+    }
+
+    #[test]
+    fn expands_static_string_concatenation_in_selector_wrappers() {
+        let source = r#"
+            function run(source) {
+                assert_selector_serializes_to(source + '(n)', source + '(n)');
+                assert_invalid_selector(source + '(n-b1)');
+            }
+            run(':nth-child');
+        "#;
+        let extraction = extract_css_parsing_tests(source);
+
+        assert_eq!(extraction.unsupported_calls, []);
+        assert_eq!(extraction.tests.len(), 2);
+        assert_eq!(extraction.tests[0].kind, CssParsingTestKind::ValidSelector);
+        assert_eq!(extraction.tests[0].arguments, [":nth-child(n)"]);
+        assert_eq!(extraction.tests[1].kind, CssParsingTestKind::InvalidSelector);
+        assert_eq!(extraction.tests[1].arguments, [":nth-child(n-b1)"]);
+    }
+
+    #[test]
+    fn expands_the_finite_font_shorthand_permutation_generator() {
+        let source = r#"
+            function test_specific(prefix) {
+                test_valid_value('font', parts.join(' '), canonical.join(' '));
+            }
+            function test_various(prefix) {}
+            test_various([]);
+        "#;
+        let extraction = extract_css_parsing_tests(source);
+
+        assert_eq!(extraction.unsupported_calls, []);
+        assert_eq!(extraction.tests.len(), 309);
+        assert_eq!(extraction.tests[0].arguments, ["font", "xx-small serif"]);
+        assert_eq!(extraction.tests[1].arguments, ["font", "normal medium/normal sans-serif"]);
+        assert!(extraction.tests.iter().all(|test| test.kind == CssParsingTestKind::ValidValue));
     }
 
     #[test]
