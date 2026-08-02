@@ -1,6 +1,6 @@
 use html_style::{PropertyValueSyntax, property_value_syntax, selector_syntax_is_valid, stylesheet_syntax_is_valid};
 use html_wpt_test_support::{CssParsingTestKind, extract_css_parsing_tests};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -36,8 +36,11 @@ fn runs_vendored_declarative_css_parsing_tests_directly() {
         unsupported_details.extend(extraction.unsupported_calls.iter().map(|call| format!("{relative}|line={}|helper={}|reason={}", call.line, call.helper, call.reason)));
         extracted += extraction.tests.len();
 
-        for (ordinal, test) in extraction.tests.iter().enumerate() {
+        let mut source_line_ordinals = BTreeMap::new();
+        for test in &extraction.tests {
+            let ordinal = source_line_ordinals.entry((test.line, format!("{:?}", test.kind))).or_insert(0usize);
             let run_key = format!("{relative}|line={}|ordinal={ordinal}|kind={:?}", test.line, test.kind);
+            *ordinal += 1;
             if ignored.remove(&run_key) {
                 continue;
             }
