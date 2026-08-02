@@ -1,0 +1,137 @@
+name: Android APK release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Signed ARM64 APK
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 29.0.14206865
+      CARGO_BUILD_JOBS: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: MobileApp/package-lock.json
+
+      - name: Install Android SDK tooling
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Rust Android target
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add aarch64-linux-android
+
+      - name: Select the self-contained mobile workspace
+        shell: bash
+        run: cp .github/mobile-release-Cargo.toml Cargo.toml
+
+      - name: Install frontend dependencies
+        working-directory: MobileApp
+        run: npm ci
+
+      - name: Check tagged version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./MobileApp/src-tauri/tauri.conf.json').version")
+          test "v${VERSION}" = "$GITHUB_REF_NAME"
+
+      - name: Check frontend and generated bindings
+        working-directory: MobileApp
+        run: |
+          npm run check
+          npm run check:bindings
+
+      - name: Test shared mobile backend
+        run: cargo test -p epub-svelte --lib --no-default-features --features mobile
+
+      - name: Configure Android signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bokheim-release.jks"
+          chmod 600 "$RUNNER_TEMP/bokheim-release.jks"
+          {
+            printf 'storeFile=%s\n' "$RUNNER_TEMP/bokheim-release.jks"
+            printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PASSWORD"
+          } > MobileApp/src-tauri/gen/android/keystore.properties
+
+      - name: Build signed release APK
+        working-directory: MobileApp
+        run: npm run tauri -- android build --apk --target aarch64
+
+      - name: Verify and name release files
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./MobileApp/src-tauri/tauri.conf.json').version")
+          APK=$(find MobileApp/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' ! -name '*unsigned*' -print -quit)
+          test -n "$APK"
+          mkdir -p release
+          cp "$APK" "release/bokheim-v${VERSION}-arm64.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "release/bokheim-v${VERSION}-arm64.apk"
+          cd release
+          sha256sum "bokheim-v${VERSION}-arm64.apk" > "bokheim-v${VERSION}-arm64.apk.sha256"
+
+      - name: Retain workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bokheim-android-arm64
+          path: release/*
+          if-no-files-found: error
+
+      - name: Create draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --draft \
+            --generate-notes \
+            --verify-tag \
+            --title "Bokheim ${GITHUB_REF_NAME#v}"

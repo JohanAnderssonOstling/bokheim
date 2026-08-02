@@ -7,8 +7,8 @@
 - In Vello, `draw_text` groups glyphs by `(font_id, font_size, color, metadata)` and then calls a lower-level glyph API (`draw_glyph_run`) that uses `scene.draw_glyphs` with `glyph_id`, `x`, `y`.
 
 Relevant sources:
-- `/home/johan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/floem_renderer-0.2.0/src/lib.rs`
-- `/home/johan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/floem_vello_renderer-0.2.0/src/lib.rs`
+- `$CARGO_HOME/registry/src/.../floem_renderer-0.2.0/src/lib.rs`
+- `$CARGO_HOME/registry/src/.../floem_vello_renderer-0.2.0/src/lib.rs`
 
 ## What `TextLayout` contains
 
@@ -17,8 +17,8 @@ Relevant sources:
 - `layout_runs()` returns `LayoutRun` objects containing `&[LayoutGlyph]`.
 
 Relevant sources:
-- `/home/johan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/floem_renderer-0.2.0/src/text/layout.rs`
-- `/home/johan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cosmic-text-0.12.1/src/layout.rs`
+- `$CARGO_HOME/registry/src/.../floem_renderer-0.2.0/src/text/layout.rs`
+- `$CARGO_HOME/registry/src/.../cosmic-text-0.12.1/src/layout.rs`
 
 ## Minimal glyph representation for rendering
 
@@ -84,7 +84,7 @@ In Vello:
 - For each line, translate by `line.line_y` before drawing glyphs
 
 Sources:
-- `/home/johan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/floem_vello_renderer-0.2.0/src/lib.rs`
+- `$CARGO_HOME/registry/src/.../floem_vello_renderer-0.2.0/src/lib.rs`
 
 ## Memory sizing notes
 

@@ -3,6 +3,8 @@ use std::io::{self, Cursor, Read, Seek};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+pub use html_source::{ResourceProvider, TocEntry};
+
 mod definitions;
 pub use definitions::{CreatorRole, IdentifierScheme, parse_creator_role, parse_identifier_scheme};
 
@@ -31,13 +33,6 @@ pub struct EpubMetadata {
     pub date: String,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct TocEntry {
-    pub title: String,
-    pub link: String,
-    pub children: Vec<TocEntry>,
-}
-
 #[derive(Clone, Debug)]
 struct ManifestItem {
     id: String,
@@ -52,25 +47,6 @@ struct ParsedManifest {
     spine: Vec<String>,
     nav_href: Option<String>,
     ncx_href: Option<String>,
-}
-
-pub trait ResourceProvider: Send + Sync {
-    fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>>;
-
-    fn read_string(&self, uri: &str) -> io::Result<String> {
-        let bytes = self.read_bytes(uri)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    fn exists(&self, uri: &str) -> bool;
-
-    fn resolve(&self, base: &str, href: &str) -> String;
-
-    fn list_html_candidates(&self, root: &str) -> io::Result<Vec<String>>;
-
-    fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
-        Ok(None)
-    }
 }
 
 pub struct EpubProvider {
@@ -1049,7 +1025,6 @@ mod tests {
     fn test_recursive_metadata_extraction() {
         // Set the directory to scan - change this to your test directory
         let test_dir = std::env::var("EPUB_TEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let test_dir = "/home/johan/syncthing/Böcker/";
 
         //println!("\nScanning directory: {}", test_dir);
         //println!("{}", "=".repeat(80));

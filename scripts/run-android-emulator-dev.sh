@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname -- "$SCRIPT_DIR")"
 APP_DIR="$ROOT/MobileApp"
 AVD_NAME="${AVD_NAME:-Pixel_8a_x86_64}"
 EMULATOR_SERIAL="${EMULATOR_SERIAL:-emulator-5554}"

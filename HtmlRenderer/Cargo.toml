@@ -1,5 +1,5 @@
 [package]
-name = "Html-Prototype"
+name = "html-renderer"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,11 +7,19 @@ edition = "2024"
 floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}
 floem_renderer = {version = "0.2.0"}
 rustc_data_structures = "0.1.2"
-scraper = "0.22"
-lightningcss = { version = "1.0.0-alpha.68", features = ["substitute_variables"] }
-parcel_selectors = "0.28.2"
-image = "0.25"
+scraper.workspace = true
+lightningcss.workspace = true
+parcel_selectors.workspace = true
+kurbo.workspace = true
+peniko.workspace = true
 sha2 = "0.10"
 epub_provider = { path = "epub_provider" }
-cosmic-text = "0.12.1"
 arboard = "3.6.1"
+html-parse = { path = "crates/html-parse" }
+html-dom = { path = "crates/html-dom" }
+html-style-model = { path = "crates/html-style-model" }
+html-style = { path = "crates/html-style" }
+html-layout = { path = "crates/html-layout" }
+html-pipeline = { path = "crates/html-pipeline" }
+html-resources = { path = "crates/html-resources" }
+html-view-core = { path = "crates/html-view-core" }

@@ -1,21 +1,21 @@
 use crate::auth_view::{account_button, auth_modal};
-use crate::components::labels::{create_label_background, create_padded_label};
-use crate::components::page_views::{
-    create_overlay_scrim, create_switcher_select_button, dialog_action_button, full_page_container, full_page_stack, switcher_header,
-    switcher_item_row, switcher_list, switcher_overlay_content, switcher_panel, switcher_rows, switcher_title, top_bar, top_bar_group,
+use crate::components::{
+    create_switcher_select_button, dynamic_button, full_page_stack, label_card, padded_text, page_surface, secondary_button, switcher_delete_button, switcher_header, switcher_item_row, switcher_overlay_root, switcher_panel, switcher_rows,
+    switcher_title, top_bar, top_bar_group,
 };
-use crate::components::{add_library_button, create_danger_button, create_dialog_button};
-use crate::functions::add_library_on_click;
 use crate::library_page::LibraryState;
 use crate::page_navigation::Signals;
-use crate::style::{theme_button_label, toggle_theme};
-use epub_svelte_lib::home::remove_library;
-use floem::action::inspect;
-use floem::event::EventPropagation;
+use crate::style::theme_button_label;
+use epub_svelte_lib::preferences::BrowsingPreferencePatch;
+use floem::action::{exec_after, inspect, open_file};
+use floem::event::{Event, EventPropagation};
+use floem::file::FileDialogOptions;
 use floem::keyboard::{Key, Modifiers, NamedKey};
-use floem::prelude::{create_rw_signal, dyn_view, label, Decorators, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::prelude::{create_rw_signal, dyn_view, Decorators, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::stack_from_iter;
 use floem::View;
+use std::collections::HashMap;
+use std::time::Duration;
 
 pub fn home_view(signals: Signals) -> impl View {
     if let Some(first) = signals.libraries.get_untracked().first() {
@@ -28,16 +28,91 @@ pub fn home_view(signals: Signals) -> impl View {
     let selected_switcher_index = create_rw_signal(active_library_index(&signals).unwrap_or(0));
     let show_auth_modal = create_rw_signal(false);
 
-    let top_bar = create_top_bar(signals.clone(), show_switcher, selected_switcher_index, show_auth_modal);
-    let switcher_overlay = create_switcher_overlay(signals.clone(), show_switcher, selected_switcher_index);
+    let top_bar = {
+        let signals_for_button = signals.clone();
+        let signals_for_account = signals.clone();
+        let active_name_signal = signals.clone();
+        let switcher_button = secondary_button(active_name_signal.active_library_name()).on_click(move |_| {
+            toggle_switcher(show_switcher, selected_switcher_index, signals_for_button.clone());
+            EventPropagation::Continue
+        });
+        let theme_signals = signals.clone();
+        let theme_button = secondary_button(theme_button_label()).on_click(move |_| {
+            let next = theme_signals.application_theme.get_untracked().next();
+            match theme_signals.app_core.update_browsing_preference(BrowsingPreferencePatch::Theme(next)) {
+                Ok(_) => theme_signals.application_theme.set(next),
+                Err(error) => eprintln!("failed to save browsing theme: {error}"),
+            }
+            EventPropagation::Continue
+        });
+        let interface_font_signals = signals.clone();
+        let interface_font_label = signals.clone();
+        let interface_font_button = dynamic_button(move || format!("Interface: {}", interface_font_label.interface_font.get().font_name())).on_click(move |_| {
+            let next = interface_font_signals.interface_font.get_untracked().next();
+            match interface_font_signals.app_core.update_browsing_preference(BrowsingPreferencePatch::InterfaceFont(next)) {
+                Ok(_) => interface_font_signals.interface_font.set(next),
+                Err(error) => eprintln!("failed to save interface font: {error}"),
+            }
+            EventPropagation::Continue
+        });
+        let heading_font_signals = signals.clone();
+        let heading_font_label = signals.clone();
+        let heading_font_button = dynamic_button(move || format!("Headings: {}", heading_font_label.heading_font.get().font_name())).on_click(move |_| {
+            let next = heading_font_signals.heading_font.get_untracked().next();
+            match heading_font_signals.app_core.update_browsing_preference(BrowsingPreferencePatch::HeadingFont(next)) {
+                Ok(_) => heading_font_signals.heading_font.set(next),
+                Err(error) => eprintln!("failed to save heading font: {error}"),
+            }
+            EventPropagation::Continue
+        });
+        let inspect_button = secondary_button("Inspect").on_click(move |_| {
+            inspect();
+            EventPropagation::Continue
+        });
+        let left_group = top_bar_group((switcher_button, theme_button, interface_font_button, heading_font_button, inspect_button));
+        let account = account_button(signals_for_account, show_auth_modal);
+        top_bar(left_group, account)
+    };
+    let switcher_overlay = {
+        let signals_for_dyn = signals.clone();
+        dyn_view(move || {
+            let libraries = signals_for_dyn.libraries.get();
+            let list = if libraries.is_empty() {
+                Box::new(label_card("No libraries available")) as Box<dyn View>
+            } else {
+                let signals_for_iter = signals_for_dyn.clone();
+                let rows = libraries.into_iter().enumerate().map(move |(idx, library)| {
+                    let name = library.meta.name.clone();
+                    let library_id = library.meta.id.clone();
+                    let signals_for_select = signals_for_iter.clone();
+                    let select_button = create_switcher_select_button(name, move || selected_switcher_index.get() == idx).on_click(move |_| {
+                        switch_to_index(signals_for_select.clone(), idx, show_switcher);
+                        EventPropagation::Continue
+                    });
+                    let delete_button = switcher_delete_button().on_click(on_delete_library(library_id, signals_for_iter.clone()));
+                    switcher_item_row(select_button, delete_button)
+                });
+                Box::new(switcher_rows(stack_from_iter(rows))) as Box<dyn View>
+            };
+
+            let add_button = secondary_button("Add library").on_click(add_library_on_click(signals_for_dyn.clone()));
+            let header = switcher_header(switcher_title("Switch library"), add_button);
+            let panel = switcher_panel((header, list)).on_click(|_| EventPropagation::Stop);
+
+            Box::new(switcher_overlay_root(panel, show_switcher).on_click(move |_| {
+                show_switcher.set(false);
+                EventPropagation::Stop
+            })) as Box<dyn View>
+        })
+    };
     let auth_overlay = auth_modal(signals.clone(), show_auth_modal);
 
     let signals_for_content = signals.clone();
-    let content_view = full_page_container(dyn_view(move || match signals_for_content.active_library_id.get() {
-        None => Box::new(create_padded_label("Add a library to get started".to_string())) as Box<dyn View>,
+    let content_view = page_surface(dyn_view(move || match signals_for_content.active_library_id.get() {
+        None => Box::new(padded_text("Add a library to get started")) as Box<dyn View>,
         Some(id) => match signals_for_content.library_by_id(&id) {
             Some(state) => Box::new(state.library_view(signals_for_content.clone())) as Box<dyn View>,
-            None => Box::new(create_padded_label("Library not found".to_string())) as Box<dyn View>,
+            None => Box::new(padded_text("Library not found")) as Box<dyn View>,
         },
     }));
     let signals_for_l = signals.clone();
@@ -50,22 +125,14 @@ pub fn home_view(signals: Signals) -> impl View {
                 toggle_switcher(show_switcher, selected_switcher_index, signals_for_l.clone());
             },
         )
-        .on_key_down(
-            Key::Named(NamedKey::ArrowDown),
-            move |_mods: Modifiers| show_switcher.get(),
-            {
-                let signals = signals.clone();
-                move |_| move_selection(selected_switcher_index, &signals, 1)
-            },
-        )
-        .on_key_down(
-            Key::Named(NamedKey::ArrowUp),
-            move |_mods: Modifiers| show_switcher.get(),
-            {
-                let signals = signals.clone();
-                move |_| move_selection(selected_switcher_index, &signals, -1)
-            },
-        )
+        .on_key_down(Key::Named(NamedKey::ArrowDown), move |_mods: Modifiers| show_switcher.get(), {
+            let signals = signals.clone();
+            move |_| move_selection(selected_switcher_index, &signals, 1)
+        })
+        .on_key_down(Key::Named(NamedKey::ArrowUp), move |_mods: Modifiers| show_switcher.get(), {
+            let signals = signals.clone();
+            move |_| move_selection(selected_switcher_index, &signals, -1)
+        })
         .on_key_down(
             Key::Named(NamedKey::Enter),
             move |_mods: Modifiers| show_switcher.get(),
@@ -89,87 +156,60 @@ pub fn home_view(signals: Signals) -> impl View {
         );
 
     let home_root_id = home_root.id();
-    let home_root = home_root.on_click(move |_| {
+    home_root.on_click(move |_| {
         home_root_id.request_focus();
         EventPropagation::Continue
-    });
-
-    home_root
-}
-
-fn create_top_bar(signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>, show_auth_modal: RwSignal<bool>) -> impl View {
-    let signals_for_button = signals.clone();
-    let signals_for_account = signals.clone();
-    let active_name_signal = signals.clone();
-    let switcher_button = dialog_action_button(label(move || active_name_signal.active_library_name()))
-        .on_click(move |_| {
-            toggle_switcher(show_switcher, selected_switcher_index, signals_for_button.clone());
-            EventPropagation::Continue
-        });
-    let theme_button = dialog_action_button(label(theme_button_label)).on_click(move |_| {
-        toggle_theme();
-        EventPropagation::Continue
-    });
-    let inspect_button = create_dialog_button("Inspect").on_click(move |_| {
-        inspect();
-        EventPropagation::Continue
-    });
-    let left_group = top_bar_group((switcher_button, theme_button, inspect_button));
-    let account = account_button(signals_for_account, show_auth_modal);
-    top_bar(left_group, account)
-}
-
-fn create_switcher_item(index: usize, library: LibraryState, signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>) -> impl View {
-    let name = library.meta.name.clone();
-    let library_id = library.meta.id.clone();
-    let signals_for_select = signals.clone();
-    let select_button = create_switcher_select_button(name, move || selected_switcher_index.get() == index).on_click(move |_| {
-        switch_to_index(signals_for_select.clone(), index, show_switcher);
-        EventPropagation::Continue
-    });
-    let delete_button = create_danger_button("Delete")
-        .style(|s| s.width(88).height(36).flex_shrink(0.0))
-        .on_click(on_delete_library(library.meta.path.clone(), library_id, signals));
-    switcher_item_row(select_button.style(|s| s.flex_grow(1.0).height(36).justify_start().padding_horiz(12)), delete_button)
-}
-
-fn create_switcher_overlay(signals: Signals, show_switcher: RwSignal<bool>, selected_switcher_index: RwSignal<usize>) -> impl View {
-    let signals_for_dyn = signals.clone();
-    dyn_view(move || {
-        let libraries = signals_for_dyn.libraries.get();
-        let list = if libraries.is_empty() {
-            Box::new(create_label_background("No libraries available".to_string())) as Box<dyn View>
-        } else {
-            let signals_for_iter = signals_for_dyn.clone();
-            let rows = libraries
-                .into_iter()
-                .enumerate()
-                .map(move |(idx, library)| create_switcher_item(idx, library, signals_for_iter.clone(), show_switcher, selected_switcher_index));
-            Box::new(switcher_rows(stack_from_iter(rows))) as Box<dyn View>
-        };
-
-        let add_button = add_library_button().style(|s| s.height(36)).on_click(add_library_on_click(signals_for_dyn.clone()));
-        let header = switcher_header(switcher_title("Switch library"), add_button);
-        let list = switcher_list(list);
-        let panel = switcher_panel((header, list)).on_click(|_| EventPropagation::Stop);
-
-        Box::new(create_switcher_overlay_container(panel, show_switcher).on_click(move |_| {
-            show_switcher.set(false);
-            EventPropagation::Stop
-        })) as Box<dyn View>
-    })
-    .style(move |s| {
-        if show_switcher.get() {
-            s.absolute().inset(0).size_full().z_index(100)
-        } else {
-            s.hide()
-        }
     })
 }
 
-fn on_delete_library(library_path: String, library_id: String, signals: Signals) -> impl FnMut(&floem::event::Event) -> EventPropagation {
+fn add_library_on_click(signals: Signals) -> impl FnMut(&Event) -> EventPropagation {
     move |_| {
-        remove_library(&library_path);
+        let file_dialog_options = FileDialogOptions::new().select_directories().title("Select Folder");
+        open_file(file_dialog_options, {
+            let signals = signals.clone();
+            move |file_info| {
+                let Some(file_info) = file_info else { return };
+                for new_library_path in file_info.path.iter() {
+                    let name = new_library_path.file_name().and_then(|s| s.to_str()).unwrap_or("Library").to_string();
+                    if let Err(err) = signals.app_core.create_library(name, Some(new_library_path.clone())) {
+                        eprintln!("failed to create library at {}: {}", new_library_path.display(), err);
+                    }
+                }
+                let entries = signals.app_core.libraries().unwrap_or_else(|error| {
+                    eprintln!("failed to refresh library registry: {error}");
+                    Vec::new()
+                });
+                let signals = signals.clone();
+                exec_after(Duration::from_millis(0), move |_| {
+                    signals.libraries.update(|libs| {
+                        let mut existing_by_id: HashMap<String, LibraryState> = libs.iter().cloned().map(|s| (s.meta.id.clone(), s)).collect();
+                        let next = entries
+                            .iter()
+                            .map(|entry| {
+                                let library_id = entry.library_id().as_str().to_owned();
+                                existing_by_id.remove(&library_id).unwrap_or_else(|| LibraryState::new(library_id, entry.library_name().to_owned(), entry.library_path().to_string_lossy().into_owned()))
+                            })
+                            .collect::<Vec<_>>();
+                        *libs = next;
+                    });
+                    if signals.active_library_id.get_untracked().is_none() {
+                        let first_id = signals.libraries.with_untracked(|v| v.first().map(|s| s.meta.id.clone()));
+                        signals.active_library_id.set(first_id);
+                    }
+                });
+            }
+        });
+
+        EventPropagation::Continue
+    }
+}
+
+fn on_delete_library(library_id: String, signals: Signals) -> impl FnMut(&floem::event::Event) -> EventPropagation {
+    move |_| {
+        if let Err(error) = signals.app_core.remove_library(&library_id) {
+            eprintln!("failed to remove library {library_id}: {error}");
+            return EventPropagation::Stop;
+        }
         signals.libraries.update(|v| v.retain(|s| s.meta.id != library_id));
         if signals.active_library_id.get_untracked().as_deref() == Some(library_id.as_str()) {
             let next_id = signals.libraries.with_untracked(|v| v.first().map(|s| s.meta.id.clone()));
@@ -210,8 +250,4 @@ fn switch_to_index(signals: Signals, index: usize, show_switcher: RwSignal<bool>
 fn active_library_index(signals: &Signals) -> Option<usize> {
     let active_id = signals.active_library_id.get_untracked();
     signals.libraries.with_untracked(|v| active_id.as_deref().and_then(|active| v.iter().position(|s| s.meta.id == active)))
-}
-
-fn create_switcher_overlay_container(panel: impl View + 'static, show_switcher: RwSignal<bool>) -> impl View {
-    create_overlay_scrim(show_switcher, switcher_overlay_content(panel))
 }

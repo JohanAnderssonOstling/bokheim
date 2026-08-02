@@ -1,0 +1,60 @@
+{
+  "spacing": { "xs": 5, "sm": 9, "md": 14, "lg": 18, "xl": 28 },
+  "radius": { "sm": 8, "md": 11, "lg": 16, "xl": 24 },
+  "size": { "control_sm": 34, "control_md": 40, "nav_rail_width": 96, "nav_item_height": 88, "book_cover_width": 204, "book_cover_height": 326 },
+  "typography": { "text_xs": 12, "text_sm": 13, "text_md": 15, "text_lg": 17, "title_md": 21, "title_lg": 28 },
+  "themes": {
+    "library_serif": {
+      "app_bg": "#efe8db",
+      "surface_bg": "#f8f3e8",
+      "card_bg": "#fffaf2",
+      "ink_text": "#231d16",
+      "subtle_text": "#70614e",
+      "accent": "#7b4f2e",
+      "border_color": "#d3c4aa",
+      "hover_bg": "#f2e8d5",
+      "active_highlight": "#e8d6b7",
+      "disabled_text": "#a4947d",
+      "disabled_border": "#dbceb8",
+      "white_surface": "#fcf7ed",
+      "box_shadow": "#30231437",
+      "danger_text": "#892b25",
+      "danger_bg": "#f9e2d7",
+      "split_handle_bg": "#d3c4aa",
+      "split_handle_hover": "#ae9165",
+      "split_handle_active": "#7b4f2e",
+      "overlay_scrim": "#1f181084"
+    },
+    "greco_futuristic": {
+      "app_bg": "#eeebe2",
+      "surface_bg": "#f7f4ec",
+      "card_bg": "#fffcf6",
+      "ink_text": "#1f2220",
+      "subtle_text": "#65675d",
+      "accent": "#486754",
+      "border_color": "#d5cfbf",
+      "hover_bg": "#f0ebe0",
+      "active_highlight": "#e1e6d8",
+      "disabled_text": "#9a9c92",
+      "disabled_border": "#dcd8cc",
+      "white_surface": "#fcf9f2",
+      "box_shadow": "#2b271f2a",
+      "danger_text": "#9b312a",
+      "danger_bg": "#fbe4da",
+      "split_handle_bg": "#d5cfbf",
+      "split_handle_hover": "#a69d87",
+      "split_handle_active": "#486754",
+      "overlay_scrim": "#1f1b147e"
+    }
+  },
+  "reader_themes": {
+    "light": { "background": "#ffffff", "foreground": "#242424", "link": "#704717", "chrome": "#f5f5f5", "chrome_strong": "#dedede" },
+    "sepia": { "background": "#fbf8f1", "foreground": "#29251f", "link": "#7d4e18", "chrome": "#f3eee4", "chrome_strong": "#e6ded0" },
+    "dark": { "background": "#17191c", "foreground": "#ece8df", "link": "#e8b86a", "chrome": "#202226", "chrome_strong": "#303238" }
+  },
+  "font_families": {
+    "publisher": "",
+    "serif": "Georgia, \"Times New Roman\", serif",
+    "sans_serif": "Inter, system-ui, sans-serif"
+  }
+}

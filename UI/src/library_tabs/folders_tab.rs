@@ -1,87 +1,38 @@
-use crate::components::{create_resizable_hsplit, create_tab_button};
-use crate::components::library_views::{
-    books_grid, books_grid_with_empty_state, breadcrumb_part, breadcrumb_root, breadcrumb_separator, dashboard_folder_list, dashboard_folder_row,
-    dashboard_folder_section, folder_layout_bar, folder_tree_panel,
+use crate::components::{
+    books_scroll, centered_modal, create_overlay_scrim, danger_text, dynamic_button, empty_view, folder_books_panel, folder_books_slot, folder_breadcrumb_bar, folder_breadcrumb_crumb, folder_breadcrumb_part, folder_breadcrumb_root,
+    folder_breadcrumb_slots, folder_tree_panel, folder_tree_scroll, folder_tree_slot, folder_workspace, form_actions, form_field_row, inline_message, modal_panel, modal_title, page_surface, resizable_split, secondary_button,
+    toc_view_with_collapse_state_active_link, CollapseState, FixedSide, TocEntry,
 };
-use crate::page_navigation::{Page, ReaderState, Signals};
-use crate::style::{create_book_title_label, style_book_cover};
-use crate::toc::{toc_view_with_collapse_state_active_link, CollapseState, TocEntry};
-use epub_svelte_lib::library::{Book, Dir, DirContent, Library};
+use crate::library_tabs::create_books_grid;
+use crate::page_navigation::Signals;
+use epub_svelte_lib::app_core::AppCore;
+use epub_svelte_lib::library::{Dir, DirContent};
 use floem::event::EventPropagation;
-use floem::keyboard::{Key, Modifiers, NamedKey};
-use floem::prelude::{container, create_rw_signal, dyn_view, h_stack, label, v_stack, Decorators, RwSignal, ScrollExt, SignalGet, SignalUpdate, Stack};
-use floem::style::AlignItems;
-use floem::views::{img, stack_from_iter};
-use floem::View;
+use floem::prelude::{container, create_rw_signal, dyn_view, h_stack, text_input, Decorators, RwSignal, SignalGet, SignalUpdate, View};
+use floem::views::stack;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum FolderViewMode {
-    SplitPane,
-    Dashboard,
-}
-
 pub fn folders_tab_view(library_id: String, library_name: String, folder_stack: RwSignal<Vec<(String, String)>>, signals: Signals) -> impl View {
-    let folder_view_mode = create_rw_signal(FolderViewMode::SplitPane);
-    let library_id_for_content = library_id.clone();
-    let library_name_for_content = library_name.clone();
-    let content = dyn_view(move || match folder_view_mode.get() {
-        FolderViewMode::SplitPane => Box::new(split_pane_view(library_id_for_content.clone(), library_name_for_content.clone(), folder_stack, signals.clone()).style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0).min_width(0))) as Box<dyn View>,
-        FolderViewMode::Dashboard => Box::new(dashboard_view(library_id_for_content.clone(), library_name_for_content.clone(), folder_stack, signals.clone()).style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0).min_width(0))) as Box<dyn View>,
-    })
-    .style(|s| s.width_full().flex_grow(1.0).flex_basis(0).min_height(0).min_width(0));
-
-    let settings = create_folder_layout_settings(folder_view_mode);
-
-    v_stack((settings, content))
-        .on_key_down(
-            Key::Named(NamedKey::Backspace),
-            |_mods: Modifiers| true,
-            move |_| {
-                folder_stack.update(|stack| {
-                    if !stack.is_empty() {
-                        stack.pop();
-                    }
-                });
-            },
-        )
-        .style(|s| s.width_full().height_full().flex_col().flex_grow(1.0).flex_basis(0).min_height(0).min_width(0))
+    page_surface(folder_split_view(library_id, library_name, folder_stack, signals))
 }
 
-fn create_folder_layout_settings(folder_view_mode: RwSignal<FolderViewMode>) -> impl View {
-    let split = create_tab_button("Split", move || folder_view_mode.get() == FolderViewMode::SplitPane).on_click(move |_| {
-            folder_view_mode.set(FolderViewMode::SplitPane);
-            EventPropagation::Continue
-        });
-    let dashboard = create_tab_button("Dashboard", move || folder_view_mode.get() == FolderViewMode::Dashboard).on_click(move |_| {
-            folder_view_mode.set(FolderViewMode::Dashboard);
-            EventPropagation::Continue
-        });
-    folder_layout_bar(split, dashboard)
-}
-
-fn split_pane_view(
-    library_id: String,
-    library_name: String,
-    folder_stack: RwSignal<Vec<(String, String)>>,
-    signals: Signals,
-) -> impl View {
+fn folder_split_view(library_id: String, library_name: String, folder_stack: RwSignal<Vec<(String, String)>>, signals: Signals) -> impl View {
     let collapse_state: CollapseState = create_rw_signal(HashMap::new());
     let left_sidebar_width = create_rw_signal(280.0);
+    let show_create_folder = create_rw_signal(false);
+    let new_folder_name = create_rw_signal(String::new());
+    let create_folder_error = create_rw_signal(None::<String>);
+    let tree_library_name = library_name.clone();
+    let content_library_name = library_name.clone();
 
     let tree_panel = {
         let library_id_for_tree = library_id.clone();
         let signals_for_tree = signals.clone();
-        dyn_view(move || {
+        folder_tree_slot(dyn_view(move || {
             let _refresh_tick = signals_for_tree.library_refresh_tick.get();
             let tree_entries = build_folder_toc_entries(&signals_for_tree, &library_id_for_tree);
-            let root_entry = TocEntry {
-                title: library_name.clone(),
-                link: "__root__".to_string(),
-                resolved: None,
-                children: tree_entries,
-            };
+            let root_entry = TocEntry { title: tree_library_name.clone(), link: "__root__".to_string(), resolved: None, children: tree_entries };
             let tree_entries = vec![root_entry];
             let active_folder_link = create_rw_signal(Some(folder_stack.get().last().map(|(id, _)| id.clone()).unwrap_or_else(|| "__root__".to_string())));
             let tree_entries_for_click = Rc::new(tree_entries.clone());
@@ -92,88 +43,124 @@ fn split_pane_view(
                 }
                 folder_stack.set(path);
             });
-            let tree_view = if tree_entries.is_empty() { container(label(|| "No folders")).style(|s| s.padding_horiz(10).padding_vert(8)) } else { container(toc_view_with_collapse_state_active_link(tree_entries, on_folder_click, active_folder_link, 0, collapse_state.clone())) };
-            Box::new(folder_tree_panel(tree_view.scroll().style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0)))) as Box<dyn View>
-        })
-        .style(|s| s.height_full().min_height(0))
+            let tree_view = if tree_entries.is_empty() { container(inline_message("No folders")) } else { container(toc_view_with_collapse_state_active_link(tree_entries, on_folder_click, active_folder_link, 0, collapse_state)) };
+            Box::new(folder_tree_panel(folder_tree_scroll(tree_view))) as Box<dyn View>
+        }))
     };
 
     let books_panel = {
-        let library_id_for_books = library_id;
-        let signals_for_books = signals;
-        dyn_view(move || {
+        let library_id_for_books = library_id.clone();
+        let signals_for_books = signals.clone();
+        folder_books_slot(dyn_view(move || {
             let _refresh_tick = signals_for_books.library_refresh_tick.get();
             let folder_id = folder_stack.get().last().map(|(id, _)| id.clone()).unwrap_or_else(|| "__root__".to_string());
-            let dir_content = signals_for_books
-                .library_by_id(&library_id_for_books)
-                .map(|s| s.handle(signals_for_books.library_event_counter.clone()).get_dir_contents(&folder_id))
-                .unwrap_or(DirContent { books: vec![], dirs: vec![] });
+            let dir_content = signals_for_books.app_core.directory_in(&library_id_for_books, &folder_id).unwrap_or_else(|error| {
+                eprintln!("failed to load folder {folder_id}: {error}");
+                DirContent { books: vec![], dirs: vec![] }
+            });
 
-            let books_scroll = create_books_grid(dir_content.books, library_id_for_books.clone(), signals_for_books.clone())
-                .scroll()
-                .style(|s| s.size_full().min_height(0).min_width(0));
-            Box::new(container(books_scroll).style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0).min_width(0))) as Box<dyn View>
-        })
-        .style(|s| s.width_full().height_full().flex_grow(1.0).flex_basis(0).min_height(0).min_width(0))
+            let breadcrumb = create_folder_breadcrumb(folder_stack, content_library_name.clone());
+            let new_folder_button = secondary_button("New folder").on_click(move |_| {
+                new_folder_name.set(String::new());
+                create_folder_error.set(None);
+                show_create_folder.set(true);
+                EventPropagation::Stop
+            });
+            let header = h_stack((breadcrumb, new_folder_button)).style(|style| style.width_full().items_center().justify_between());
+            let grid_scroll = books_scroll(create_books_grid(dir_content.books, library_id_for_books.clone(), signals_for_books.clone()));
+            Box::new(folder_books_panel(header, grid_scroll)) as Box<dyn View>
+        }))
     };
 
-    create_resizable_hsplit(tree_panel, books_panel, left_sidebar_width, 220.0, 560.0).style(|s| s.width_full().height_full().flex_grow(1.0).flex_basis(0).min_height(0).min_width(0).padding(16))
+    let workspace = folder_workspace(resizable_split(FixedSide::Left, tree_panel, books_panel, left_sidebar_width, 120.0, 560.0));
+    let create_folder = create_folder_modal(library_id, folder_stack, signals, show_create_folder, new_folder_name, create_folder_error);
+    stack((workspace, create_folder))
 }
 
-fn dashboard_view(library_id: String, library_name: String, folder_stack: RwSignal<Vec<(String, String)>>, signals: Signals) -> impl View {
-    dyn_view(move || {
-        let _refresh_tick = signals.library_refresh_tick.get();
-        let folder_id = folder_stack.get().last().map(|(id, _)| id.clone()).unwrap_or_else(|| "__root__".to_string());
-        let dir_content = signals
-            .library_by_id(&library_id)
-            .map(|s| s.handle(signals.library_event_counter.clone()).get_dir_contents(&folder_id))
-            .unwrap_or(DirContent { books: vec![], dirs: vec![] });
+fn create_folder_modal(library_id: String, folder_stack: RwSignal<Vec<(String, String)>>, signals: Signals, show_modal: RwSignal<bool>, name: RwSignal<String>, error: RwSignal<Option<String>>) -> impl View {
+    let signals_for_submit = signals.clone();
+    let submit = dynamic_button(|| "Create".to_string()).on_click(move |_| {
+        error.set(None);
+        let parent_id = folder_stack.get_untracked().last().map(|(id, _)| id.clone()).unwrap_or_else(|| "__root__".to_string());
+        if signals_for_submit.library_by_id(&library_id).is_none() {
+            error.set(Some("Library is no longer available".to_string()));
+            return EventPropagation::Stop;
+        }
+        match signals_for_submit.app_core.create_directory_in(&library_id, &parent_id, &name.get_untracked()) {
+            Ok(created) => {
+                folder_stack.update(|path| path.push((created.id().as_str().to_owned(), created.name().as_str().to_owned())));
+                name.set(String::new());
+                show_modal.set(false);
+                signals_for_submit.library_refresh_tick.update(|tick| *tick = tick.saturating_add(1));
+            }
+            Err(create_error) => error.set(Some(create_error.to_string())),
+        }
+        EventPropagation::Stop
+    });
 
-        Box::new(
-            container(v_stack((
-                create_folder_breadcrumb(folder_stack, library_name.clone()),
-                render_folder_dashboard(dir_content, library_id.clone(), folder_stack, signals.clone()),
-            )))
-                .style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0).padding(16)),
-        ) as Box<dyn View>
-    })
+    let cancel = secondary_button("Cancel").on_click(move |_| {
+        error.set(None);
+        show_modal.set(false);
+        EventPropagation::Stop
+    });
+    let error_label = dyn_view(move || -> Box<dyn View> {
+        match error.get() {
+            Some(message) => Box::new(danger_text(message)),
+            None => Box::new(empty_view()),
+        }
+    });
+    let panel = modal_panel((modal_title("Create folder"), form_field_row("Folder name", text_input(name)), error_label, form_actions(submit, cancel))).on_click(|_| EventPropagation::Stop);
+    create_overlay_scrim(
+        show_modal,
+        centered_modal(panel).on_click(move |_| {
+            show_modal.set(false);
+            EventPropagation::Stop
+        }),
+    )
 }
 
 fn build_folder_toc_entries(signals: &Signals, library_id: &str) -> Vec<TocEntry> {
-    let Some(state) = signals.library_by_id(library_id) else {
+    if signals.library_by_id(library_id).is_none() {
         return vec![];
-    };
-    let library = state.handle(signals.library_event_counter.clone());
-    let root_dirs = library
-        .get_dir_contents("__root__")
+    }
+    let root_dirs = signals
+        .app_core
+        .directory_in(library_id, "__root__")
+        .unwrap_or_else(|error| {
+            eprintln!("failed to load root folders: {error}");
+            DirContent { books: vec![], dirs: vec![] }
+        })
         .dirs
         .into_iter()
-        .filter(|dir| dir.id != "__root__")
+        .filter(|dir| dir.id().as_str() != "__root__")
         .collect::<Vec<_>>();
     let mut ancestry = HashSet::new();
     ancestry.insert("__root__".to_string());
-    root_dirs.into_iter().map(|dir| build_folder_toc_node(&library, dir, &mut ancestry)).collect()
+    root_dirs.into_iter().map(|dir| build_folder_toc_node(&signals.app_core, library_id, dir, &mut ancestry)).collect()
 }
 
-fn build_folder_toc_node(library: &Library, dir: Dir, ancestry: &mut HashSet<String>) -> TocEntry {
-    let dir_id = dir.id;
-    let dir_name = dir.name;
-
-    let children = if ancestry.insert(dir_id.clone()) {
-        let built = library
-            .get_dir_contents(&dir_id)
+fn build_folder_toc_node(core: &AppCore, library_id: &str, dir: Dir, ancestry: &mut HashSet<String>) -> TocEntry {
+    let dir_link = dir.id().clone().into_string();
+    let dir_name = dir.name().as_str().to_owned();
+    let children = if ancestry.insert(dir_link.clone()) {
+        let built = core
+            .directory_in(library_id, &dir_link)
+            .unwrap_or_else(|error| {
+                eprintln!("failed to load folder {dir_link}: {error}");
+                DirContent { books: vec![], dirs: vec![] }
+            })
             .dirs
             .into_iter()
-            .filter(|child| child.id != "__root__")
-            .map(|child| build_folder_toc_node(library, child, ancestry))
+            .filter(|child| child.id().as_str() != "__root__")
+            .map(|child| build_folder_toc_node(core, library_id, child, ancestry))
             .collect();
-        ancestry.remove(&dir_id);
+        ancestry.remove(&dir_link);
         built
     } else {
         vec![]
     };
 
-    TocEntry { title: dir_name, link: dir_id, resolved: None, children }
+    TocEntry { title: dir_name, link: dir_link, resolved: None, children }
 }
 
 fn find_folder_path(entries: &[TocEntry], target: &str, path: &mut Vec<(String, String)>) -> bool {
@@ -198,94 +185,24 @@ fn find_folder_path(entries: &[TocEntry], target: &str, path: &mut Vec<(String, 
     false
 }
 
-fn render_folder_dashboard(dir_content: DirContent, library_id: String, folder_stack: RwSignal<Vec<(String, String)>>, signals: Signals) -> impl View {
-    let dashboard_dirs: Vec<Dir> = dir_content.dirs.into_iter().filter(|dir| dir.id != "__root__").collect();
-    let has_folders = !dashboard_dirs.is_empty();
-    let library_id_for_counts = library_id.clone();
-    let signals_for_counts = signals.clone();
-    let folder_list = dashboard_folder_list(dashboard_dirs.into_iter().map(move |dir| {
-        let count = get_book_count_for_folder(&library_id_for_counts, &dir.id, &signals_for_counts);
-        create_dashboard_folder_row(dir, count, folder_stack)
-    }));
-
-    let folders_section = dashboard_folder_section(has_folders, folder_list);
-
-    let books_section = container(create_books_grid(dir_content.books, library_id, signals).scroll().style(|s| s.width_full().height_full().flex_grow(1.0).min_height(0)))
-        .style(|s| s.width_full().height_full().min_height(0));
-
-    h_stack((books_section, folders_section)).style(move |s| {
-        let base = s.width_full().height_full().flex_grow(1.0).min_height(0);
-        if has_folders {
-            base.gap(16)
-        } else {
-            base
-        }
-    })
-}
-
-pub fn create_books_grid(books: Vec<Book>, library_id: String, signals: Signals) -> impl View {
-    let book_count = books.len();
-    let grid = books_grid(books.into_iter().map(move |book| create_book_cover(book, library_id.clone(), signals.clone())));
-
-    books_grid_with_empty_state(book_count, grid)
-}
-
-fn get_book_count_for_folder(library_id: &str, folder_id: &str, signals: &Signals) -> usize {
-    signals
-        .library_by_id(library_id)
-        .map(|s| s.handle(signals.library_event_counter.clone()).get_dir_contents(folder_id).books.len())
-        .unwrap_or(0)
-}
-
-fn create_dashboard_folder_row(dir: Dir, book_count: usize, folder_stack: RwSignal<Vec<(String, String)>>) -> impl View {
-    let dir_id = dir.id;
-    let dir_name = dir.name;
-    let dir_name_for_push = dir_name.clone();
-
-    dashboard_folder_row(dir_name, book_count)
-        .on_click(move |_| {
-            folder_stack.update(|stack| stack.push((dir_id.clone(), dir_name_for_push.clone())));
-            EventPropagation::Continue
-        })
-}
-
-pub fn create_book_cover(book: Book, library_id: String, signals: Signals) -> Stack {
-    let title_label = create_book_title_label(book.title.clone());
-    let cover = match book.cover {
-        None => container(label(move || "Placeholder".to_string())),
-        Some(book_cover) => {
-            let cover_image = img(move || book_cover.clone()).on_click(move |_| {
-                let reader_state = ReaderState { book_id: book.id.clone(), library_id: library_id.clone(), book_title: book.title.clone() };
-                signals.navigate(Page::Reader(reader_state));
-                EventPropagation::Continue
-            });
-            let cover_image = style_book_cover(cover_image);
-            container(cover_image)
-        }
-    };
-    v_stack((cover, title_label))
-}
-
 fn create_folder_breadcrumb(folder_stack: RwSignal<Vec<(String, String)>>, library_name: String) -> impl View {
     const MAX_BREADCRUMB_DEPTH: usize = 32;
-    let root_crumb = breadcrumb_root(library_name)
-        .on_click(move |_| {
-            folder_stack.set(vec![]);
-            EventPropagation::Continue
-        });
+    let root_crumb = folder_breadcrumb_root(library_name, move |_| {
+        folder_stack.set(vec![]);
+        EventPropagation::Continue
+    });
 
-    let crumb_slots = stack_from_iter((0..MAX_BREADCRUMB_DEPTH).map(move |idx| {
-        h_stack((
-            breadcrumb_separator(),
-            breadcrumb_part(move || {
+    let crumb_slots = folder_breadcrumb_slots((0..MAX_BREADCRUMB_DEPTH).map(move |idx| {
+        let part = folder_breadcrumb_part(
+            move || {
                 let crumbs = folder_stack.get();
                 if idx < crumbs.len() {
                     crumbs[idx].1.clone()
                 } else {
                     String::new()
                 }
-            })
-            .on_click(move |_| {
+            },
+            move |_| {
                 let len = folder_stack.get_untracked().len();
                 if idx < len {
                     folder_stack.update(|stack| {
@@ -293,18 +210,10 @@ fn create_folder_breadcrumb(folder_stack: RwSignal<Vec<(String, String)>>, libra
                     });
                 }
                 EventPropagation::Continue
-            }),
-        ))
-        .style(move |s| {
-            let len = folder_stack.get();
-            if idx < len.len() {
-                s.align_items(AlignItems::Center)
-            } else {
-                s.hide()
-            }
-        })
-    }))
-    .style(|s| s.flex_row().align_items(AlignItems::Center));
+            },
+        );
+        folder_breadcrumb_crumb(part, move || folder_stack.get().len() > idx)
+    }));
 
-    container(h_stack((root_crumb, crumb_slots))).style(|s| s.width_full().align_items(AlignItems::Center).justify_center().padding_vert(4))
+    folder_breadcrumb_bar(root_crumb, crumb_slots)
 }

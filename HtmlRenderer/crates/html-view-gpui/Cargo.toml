@@ -1,0 +1,15 @@
+[package]
+name = "html-view-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-channel = "2"
+gpui.workspace = true
+html-view-core = { path = "../html-view-core" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+kurbo.workspace = true
+peniko.workspace = true
+smallvec = "1"
+reader-style = { path = "../../../ReaderStyle" }
