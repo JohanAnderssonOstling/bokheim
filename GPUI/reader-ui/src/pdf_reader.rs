@@ -4,10 +4,11 @@ use std::sync::Arc;
 use bokheim_ui_components as components;
 use epub_svelte_lib::BookLocator;
 use epub_svelte_lib::library::Library;
+use epub_svelte_lib::preferences::PdfPageLayout;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Subscription, Window};
 use gpui_component::input::{Input, InputEvent, InputState};
-use pdf_view_gpui::{PdfView, PdfViewEvent};
+use pdf_view_gpui::{PdfPageLayout as ViewPageLayout, PdfView, PdfViewEvent};
 
 use crate::model::{ReaderSettings, ReaderWindowGeometry, ReaderWindowId};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextPage, PreviousPage, ToggleSearch, ToggleToc};
@@ -40,7 +41,12 @@ pub(crate) struct PdfReaderView {
 
 impl PdfReaderView {
     pub(crate) fn new(pending: PendingPdfReader, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let pdf = cx.new(|cx| PdfView::from_bytes(pending.path, pending.bytes, pending.initial_page, window, cx));
+        let page_layout = cx.global::<ReaderSettings>().preferences.pdf_page_layout;
+        let pdf = cx.new(|cx| {
+            let mut pdf = PdfView::from_bytes(pending.path, pending.bytes, pending.initial_page, window, cx);
+            pdf.set_page_layout(view_page_layout(page_layout), cx);
+            pdf
+        });
         let position_library = pending.library.clone();
         let position_book_id = pending.locator.book_id();
         let persistence_worker = cx.global::<ReaderSettings>().persistence_worker.clone();
@@ -161,6 +167,25 @@ impl PdfReaderView {
         });
     }
 
+    fn set_page_layout(&self, page_layout: PdfPageLayout, cx: &mut Context<Self>) {
+        let settings_to_save = {
+            let settings = cx.global_mut::<ReaderSettings>();
+            if settings.preferences.pdf_page_layout == page_layout {
+                None
+            } else {
+                settings.preferences.pdf_page_layout = page_layout;
+                Some((settings.preferences.clone(), settings.geometry, settings.save.clone()))
+            }
+        };
+        self.pdf.update(cx, |pdf, cx| {
+            pdf.set_page_layout(view_page_layout(page_layout), cx);
+        });
+        if let Some((preferences, geometry, Some(save))) = settings_to_save {
+            save(preferences, geometry, cx);
+        }
+        cx.notify();
+    }
+
     fn render_outline_with_context(&self, entity: Entity<Self>, cx: &App) -> gpui::AnyElement {
         let outline = self.pdf.read(cx).info().map(|info| info.outline().to_vec()).unwrap_or_default();
         let current = self.current_page.saturating_sub(1);
@@ -181,10 +206,41 @@ impl PdfReaderView {
 
     fn render_settings(&self, entity: Entity<Self>, cx: &App) -> gpui::AnyElement {
         let scale = self.pdf.read(cx).display_scale();
+        let page_layout = cx.global::<ReaderSettings>().preferences.pdf_page_layout;
         let decrease = entity.clone();
-        let increase = entity;
+        let increase = entity.clone();
+        let single_page = entity.clone();
+        let spread = entity.clone();
+        let automatic = entity;
         components::reader_settings_dropdown()
             .child(components::section_title("PDF settings"))
+            .child(
+                components::reader_setting_row("Page layout")
+                    .child(
+                        components::reader_choice_button("pdf-layout-single", "Single", page_layout == PdfPageLayout::Single)
+                            .on_click(move |_, _, cx| {
+                                single_page.update(cx, |this, cx| {
+                                    this.set_page_layout(PdfPageLayout::Single, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        components::reader_choice_button("pdf-layout-spread", "Spread", page_layout == PdfPageLayout::Spread)
+                            .on_click(move |_, _, cx| {
+                                spread.update(cx, |this, cx| {
+                                    this.set_page_layout(PdfPageLayout::Spread, cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        components::reader_choice_button("pdf-layout-automatic", "Auto", page_layout == PdfPageLayout::Automatic)
+                            .on_click(move |_, _, cx| {
+                                automatic.update(cx, |this, cx| {
+                                    this.set_page_layout(PdfPageLayout::Automatic, cx);
+                                });
+                            }),
+                    ),
+            )
             .child(
                 components::reader_setting_row("Zoom")
                     .child(components::reader_square_button("pdf-zoom-out", "−").tooltip("Zoom out (Ctrl+-)").on_click(move |_, _, cx| {
@@ -202,7 +258,7 @@ impl PdfReaderView {
             .child(
                 components::reader_shortcuts()
                     .child(components::section_title("Keyboard shortcuts"))
-                    .child(components::reader_shortcut("← / →: previous / next page"))
+                    .child(components::reader_shortcut("← / → or Page Up / Down: previous / next page or spread"))
                     .child(components::reader_shortcut("Ctrl + F: toggle search"))
                     .child(components::reader_shortcut("Ctrl + C: copy current selection"))
                     .child(components::reader_shortcut("Ctrl + +/-: zoom")),
@@ -269,9 +325,17 @@ impl Render for PdfReaderView {
         let previous_match = entity.clone();
         let next_match = entity.clone();
         let close_search = entity.clone();
-        let can_previous = self.current_page > 1;
-        let can_next = self.current_page < self.page_count;
         let outline_available = self.pdf.read(cx).info().is_some_and(|info| !info.outline().is_empty());
+        let toc_width = if self.toc_visible && outline_available { 300.0 } else { 0.0 };
+        let available_width = (f32::from(window.viewport_size().width) - toc_width).max(0.0);
+        self.pdf.update(cx, |pdf, cx| {
+            pdf.set_available_width(available_width, cx);
+        });
+        let (can_previous, can_next, visible_page_range) = {
+            let pdf = self.pdf.read(cx);
+            (pdf.can_previous_page(), pdf.can_next_page(), pdf.visible_page_range())
+        };
+        let page_indicator = format_page_indicator(visible_page_range, self.page_count);
 
         let mut body = components::reader_document_body().child(components::reader_content().child(self.pdf.clone()));
         if self.search_active {
@@ -304,7 +368,7 @@ impl Render for PdfReaderView {
                     this.previous_page(cx);
                 });
             }))
-            .child(components::reader_match_count(format!("{}/{}", self.current_page, self.page_count)))
+            .child(components::reader_match_count(page_indicator))
             .child(components::reader_control_button_state("pdf-next-page", "→", can_next).tooltip("Next page").on_click(move |_, _, cx| {
                 next.update(cx, |this, cx| {
                     this.next_page(cx);

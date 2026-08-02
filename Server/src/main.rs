@@ -38,7 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = ServerConfig::from_env()?;
     let transfer_limits = server_http::TransferLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let app = sync_server::app_with_client_address_source_and_transfer_limits(pool, server.client_address_source(), transfer_limits);
+    let catalog_path = std::env::var_os("BOKHEIM_OPDS_CATALOG_FILE").map(std::path::PathBuf::from);
+    let opds_catalogs = sync_server::load_opds_catalog_registry(catalog_path.as_deref())?;
+    let app = sync_server::app_with_catalog_registry(pool, server.client_address_source(), transfer_limits, opds_catalogs);
     sync_server::transport::serve(server, app).await?;
     Ok(())
 }
