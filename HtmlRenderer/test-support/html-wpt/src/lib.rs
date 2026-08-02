@@ -879,6 +879,19 @@ fn split_js_values(source: &str) -> Option<Vec<&str>> {
                 let quote = bytes[cursor];
                 skip_js_string(bytes, &mut cursor, &mut ignored_line, quote);
             }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor += 2;
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor += 2;
+                while cursor + 1 < bytes.len() && !(bytes[cursor] == b'*' && bytes[cursor + 1] == b'/') {
+                    cursor += 1;
+                }
+                cursor = (cursor + 2).min(bytes.len());
+            }
             b'(' => {
                 parentheses += 1;
                 cursor += 1;
