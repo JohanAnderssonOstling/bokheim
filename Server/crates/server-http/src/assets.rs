@@ -77,10 +77,7 @@ fn parse_range_start(value: &header::HeaderValue) -> Result<u64, StatusCode> {
 
 async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, raw_hash: &str, headers: &HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     let hash = ContentHash::parse(raw_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let content_length = headers
-        .get(header::CONTENT_LENGTH)
-        .map(|raw_len| raw_len.to_str().ok().and_then(|value| value.parse::<u64>().ok()).ok_or(StatusCode::BAD_REQUEST))
-        .transpose()?;
+    let content_length = headers.get(header::CONTENT_LENGTH).map(|raw_len| raw_len.to_str().ok().and_then(|value| value.parse::<u64>().ok()).ok_or(StatusCode::BAD_REQUEST)).transpose()?;
     if kind == AssetKind::Book && content_length.is_none() {
         return Err(StatusCode::LENGTH_REQUIRED);
     }

@@ -41,10 +41,7 @@ fn normalized_username(username: &str) -> Result<&str, AuthError> {
     if username.is_empty() {
         return Err(AuthError::EmptyUsername);
     }
-    if username.len() < MIN_USERNAME_LEN
-        || username.len() > MAX_USERNAME_BYTES
-        || !username.chars().all(|character| character.is_alphanumeric() || matches!(character, '.' | '_' | '-'))
-    {
+    if username.len() < MIN_USERNAME_LEN || username.len() > MAX_USERNAME_BYTES || !username.chars().all(|character| character.is_alphanumeric() || matches!(character, '.' | '_' | '-')) {
         return Err(AuthError::InvalidUsername);
     }
     Ok(username)

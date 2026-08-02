@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { commands } from "../../lib/bindings";
+  import { commands } from "../../lib/commands";
   import type { OpdsCatalog, OpdsEndpoint, OpdsEndpointId, OpdsEpubAcquisition, OpdsPublication, OpdsSearch } from "../../lib/bindings";
 
   let { activeLibraryId, onimported }: { activeLibraryId: string; onimported: () => void | Promise<void> } = $props();

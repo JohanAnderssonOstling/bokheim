@@ -63,6 +63,18 @@ pub(crate) fn asset_error(error: server_core::AssetError) -> StatusCode {
     }
 }
 
+pub(crate) fn storage_quota_error(error: server_core::StorageQuotaError) -> StatusCode {
+    match error {
+        server_core::StorageQuotaError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        server_core::StorageQuotaError::UserNotFound => StatusCode::NOT_FOUND,
+        server_core::StorageQuotaError::IdempotencyConflict => StatusCode::CONFLICT,
+        server_core::StorageQuotaError::Internal(reason) => {
+            tracing_fallback("storage quota", &reason);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 fn tracing_fallback(component: &str, reason: &str) {
     eprintln!("{component} error: {reason}");
 }

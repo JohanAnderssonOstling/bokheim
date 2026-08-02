@@ -1,4 +1,4 @@
-import { commands } from "./bindings";
+import { commands } from "./commands";
 import { measureInvoke } from "./performance";
 
 type BinaryPayload = ArrayBuffer | Uint8Array | number[];
@@ -63,4 +63,3 @@ export function clearThumbnailCache() {
   }
   cache.clear();
 }
-

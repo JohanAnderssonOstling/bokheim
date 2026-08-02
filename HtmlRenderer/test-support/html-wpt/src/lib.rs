@@ -154,7 +154,7 @@ pub fn extract_css_parsing_tests_with_prelude(source: &str, prelude: &str) -> Cs
                     }
                     open += 1;
                 }
-                if (!helper.starts_with("test_") && helper != "assert_valid" && !static_functions.contains_key(helper)) || bytes.get(open) != Some(&b'(') {
+                if (!helper.starts_with("test_") && helper != "assert_valid" && !helper.starts_with("fuzzy_test_") && !static_functions.contains_key(helper)) || bytes.get(open) != Some(&b'(') {
                     cursor = open;
                     continue;
                 }
@@ -169,7 +169,7 @@ pub fn extract_css_parsing_tests_with_prelude(source: &str, prelude: &str) -> Cs
                             }
                             continue;
                         }
-                        if let Some(expansion) = expand_custom_css_helper(source, helper, &raw_arguments, call_line) {
+                        if let Some(expansion) = expand_custom_css_helper(source, helper, &raw_arguments, start, call_line, &static_loops) {
                             match expansion {
                                 Ok(tests) => extraction.tests.extend(tests),
                                 Err(reason) => extraction.unsupported_calls.push(UnsupportedCssParsingCall { helper: helper.to_owned(), line: call_line, reason }),
@@ -638,7 +638,7 @@ fn expand_is_where_assertion(raw_arguments: &[&str], line: usize) -> Result<Vec<
         .collect())
 }
 
-fn expand_custom_css_helper(source: &str, helper: &str, arguments: &[&str], line: usize) -> Option<Result<Vec<CssParsingTest>, String>> {
+fn expand_custom_css_helper(source: &str, helper: &str, arguments: &[&str], call_offset: usize, line: usize, loops: &[StaticLoopBinding]) -> Option<Result<Vec<CssParsingTest>, String>> {
     let declaration_tests = |kind, property: &str, value_indices: &[usize]| -> Result<Vec<CssParsingTest>, String> {
         value_indices
             .iter()
@@ -665,6 +665,13 @@ fn expand_custom_css_helper(source: &str, helper: &str, arguments: &[&str], line
             | "test_invalid_keyframe_selector"
             | "test_display_computed"
             | "test_display_affected"
+            | "fuzzy_test_valid_color"
+            | "fuzzy_test_computed_color"
+            | "fuzzy_test_computed_color_property"
+            | "fuzzy_test_computed_color_using_currentcolor"
+            | "test_valid_color_layers_value"
+            | "test_inset_longhand"
+            | "test_inset_shorthand"
             | "test_various"
             | "test_valid"
             | "test_invalid"
@@ -714,6 +721,58 @@ fn expand_custom_css_helper(source: &str, helper: &str, arguments: &[&str], line
                 let property = literal_argument(arguments, 0, helper)?;
                 let value = literal_argument(arguments, 1, helper)?;
                 Ok(vec![CssParsingTest { kind: CssParsingTestKind::ComputedValue, arguments: vec![property, value], line }])
+            }
+            "fuzzy_test_valid_color" | "fuzzy_test_computed_color" | "fuzzy_test_computed_color_using_currentcolor" => {
+                let kind = if helper == "fuzzy_test_valid_color" { CssParsingTestKind::ValidValue } else { CssParsingTestKind::ComputedValue };
+                let property = if helper == "fuzzy_test_computed_color_using_currentcolor" { "background-color" } else { "color" };
+                let values = expand_static_arguments(arguments, call_offset, loops, 1).ok_or_else(|| format!("{helper} input is not a static string expansion"))?;
+                Ok(values.into_iter().map(|values| CssParsingTest { kind, arguments: vec![property.to_owned(), values[0].clone()], line }).collect())
+            }
+            "fuzzy_test_computed_color_property" => {
+                let values = expand_static_arguments(arguments, call_offset, loops, 2).ok_or_else(|| "fuzzy_test_computed_color_property arguments are not a static string expansion".to_owned())?;
+                Ok(values.into_iter().map(|arguments| CssParsingTest { kind: CssParsingTestKind::ComputedValue, arguments, line }).collect())
+            }
+            "test_valid_color_layers_value" => {
+                if !source.contains("function test_valid_color_layers_value(parsed, expected)") {
+                    return Err("test_valid_color_layers_value is not the known CSS Color 6 generator".to_owned());
+                }
+                let template = arguments
+                    .first()
+                    .map(|argument| argument.trim())
+                    .and_then(|argument| argument.strip_prefix('`'))
+                    .and_then(|argument| argument.strip_suffix('`'))
+                    .ok_or_else(|| "test_valid_color_layers_value input is not a template literal".to_owned())?;
+                if !template.contains("${blendMode}") {
+                    return Err("test_valid_color_layers_value template does not contain the known blendMode binding".to_owned());
+                }
+                let modes = [
+                    "",
+                    "normal, ",
+                    "multiply, ",
+                    "screen, ",
+                    "overlay, ",
+                    "darken, ",
+                    "lighten, ",
+                    "color-dodge, ",
+                    "color-burn, ",
+                    "hard-light, ",
+                    "soft-light, ",
+                    "difference, ",
+                    "exclusion, ",
+                    "hue, ",
+                    "saturation, ",
+                    "color, ",
+                    "luminosity, ",
+                ];
+                Ok(modes.into_iter().map(|mode| CssParsingTest { kind: CssParsingTestKind::ValidValue, arguments: vec!["color".to_owned(), template.replace("${blendMode}", mode)], line }).collect())
+            }
+            "test_inset_longhand" | "test_inset_shorthand" => {
+                let property = literal_argument(arguments, 0, helper)?;
+                let mut values = vec!["0deg", "calc(20deg)", "10"];
+                if helper == "test_inset_shorthand" {
+                    values.extend(["inherit auto", "inherit inherit"]);
+                }
+                Ok(values.into_iter().map(|value| CssParsingTest { kind: CssParsingTestKind::InvalidValue, arguments: vec![property.clone(), value.to_owned()], line }).collect())
             }
             // font-valid.html and font-computed.html deliberately generate all
             // permutations recursively. Reproduce that finite data generator
@@ -945,6 +1004,19 @@ fn advance_js_token(bytes: &[u8], cursor: &mut usize) {
     let mut ignored_line = 0;
     match bytes.get(*cursor).copied() {
         Some(quote @ (b'\'' | b'"' | b'`')) => skip_js_string(bytes, cursor, &mut ignored_line, quote),
+        Some(b'/') if bytes.get(*cursor + 1) == Some(&b'/') => {
+            *cursor += 2;
+            while *cursor < bytes.len() && bytes[*cursor] != b'\n' {
+                *cursor += 1;
+            }
+        }
+        Some(b'/') if bytes.get(*cursor + 1) == Some(&b'*') => {
+            *cursor += 2;
+            while *cursor + 1 < bytes.len() && !(bytes[*cursor] == b'*' && bytes[*cursor + 1] == b'/') {
+                *cursor += 1;
+            }
+            *cursor = (*cursor + 2).min(bytes.len());
+        }
         Some(_) => *cursor += 1,
         None => {}
     }
@@ -1440,6 +1512,23 @@ mod tests {
         assert_eq!(extraction.tests[0].arguments, ["font", "xx-small serif"]);
         assert_eq!(extraction.tests[1].arguments, ["font", "normal medium/normal sans-serif"]);
         assert!(extraction.tests.iter().all(|test| test.kind == CssParsingTestKind::ValidValue));
+    }
+
+    #[test]
+    fn expands_fuzzy_color_helpers_inside_static_loops() {
+        let source = r#"
+            // This doesn't require executing JavaScript.
+            for (const colorSpace of ["srgb", "display-p3"]) {
+                const resultColorSpace = colorSpace == "xyz" ? "xyz-d65" : colorSpace;
+                fuzzy_test_valid_color(`color-mix(in ${colorSpace}, red, blue)`, `ignored ${resultColorSpace}`);
+            }
+        "#;
+        let extraction = extract_css_parsing_tests(source);
+
+        assert_eq!(extraction.unsupported_calls, []);
+        assert_eq!(extraction.tests.len(), 2);
+        assert_eq!(extraction.tests[0].arguments, ["color", "color-mix(in srgb, red, blue)"]);
+        assert_eq!(extraction.tests[1].arguments, ["color", "color-mix(in display-p3, red, blue)"]);
     }
 
     #[test]
