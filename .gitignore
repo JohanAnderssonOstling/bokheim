@@ -1,36 +1,92 @@
-# Rust build output (root and per-crate)
-/target
+# Rust build output
+/target/
 **/target/
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
 
-# IDE
+# Workspace members use the root lockfile. The independently built server keeps
+# its own lockfile so application and release builds remain reproducible.
+**/Cargo.lock
+!/Cargo.lock
+!/Server/Cargo.lock
+
+# JavaScript dependencies, generated output, and tool caches
+**/node_modules/
+**/.svelte-kit/
+**/coverage/
+*.tsbuildinfo
+.npm/
+.pnpm-store/
+
+# IDEs, editors, and operating-system metadata
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
 
-# Databases
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Databases and journals
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
 *.db-shm
 *.db-wal
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
 
-# Generated application state and profiling output
+# Generated application state
 **/.biblos/thumbnails/
 **/.bookrium/thumbnails/
-perf.data
-perf.data.old
-
-# Signing material must never enter source control
-*.jks
-*.keystore
-keystore.properties
-
-# Python
-__pycache__/
-*.pyc
-
-# Books / large test assets
-*.epub
-/TestData/
+/books/
+/thumbnails/
 /Server/books/
 /Server/thumbnails/
+
+# Signing material and packaged Android applications
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+keystore.properties
+*.apk
+*.aab
+*.apks
+*.idsig
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local books, large test assets, and external reference checkouts
+*.epub
+/TestData/
+/Backend/tests/test_folder/
+/reference/plato/
 /data-analysis/
