@@ -154,6 +154,11 @@ pub fn property_value_syntax(property_name: &str, value: &str) -> PropertyValueS
 }
 
 fn declaration_syntax_impl(normalized_name: &str, value: &str) -> PropertySyntax {
+    // cssparser-color currently asserts while resolving non-finite hue math.
+    // Non-finite CSS math constants are nevertheless valid syntax, so validate
+    // the surrounding grammar with finite stand-ins at this boundary.
+    let finite_math_value = finite_css_math_surrogate(value);
+    let value = finite_math_value.as_deref().unwrap_or(value);
     if normalized_name == "white-space" && style::white_space::parse_shorthand(value).is_some() {
         return PropertySyntax::Valid;
     }
@@ -189,6 +194,37 @@ fn declaration_syntax_impl(normalized_name: &str, value: &str) -> PropertySyntax
         Ok(_) => PropertySyntax::Valid,
         Err(_) => PropertySyntax::Invalid,
     }
+}
+
+fn finite_css_math_surrogate(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while cursor < bytes.len() {
+        let replacement = if bytes.get(cursor..cursor + 8).is_some_and(|token| token.eq_ignore_ascii_case(b"infinity")) && css_identifier_boundary(bytes, cursor, cursor + 8) {
+            Some((8, "1"))
+        } else if bytes.get(cursor..cursor + 3).is_some_and(|token| token.eq_ignore_ascii_case(b"nan")) && css_identifier_boundary(bytes, cursor, cursor + 3) {
+            Some((3, "0"))
+        } else {
+            None
+        };
+        if let Some((length, replacement)) = replacement {
+            output.push_str(replacement);
+            cursor += length;
+            changed = true;
+        } else {
+            let character = value[cursor..].chars().next().expect("cursor remains on a character boundary");
+            output.push(character);
+            cursor += character.len_utf8();
+        }
+    }
+    changed.then_some(output)
+}
+
+fn css_identifier_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    start.checked_sub(1).and_then(|index| bytes.get(index)).is_none_or(|byte| !identifier(*byte)) && bytes.get(end).is_none_or(|byte| !identifier(*byte))
 }
 
 /// Parse selector syntax without exposing Lightning CSS types across the
@@ -335,6 +371,8 @@ mod boundary_tests {
         assert_eq!(property_value_syntax("tab-size", "2.5ch"), PropertyValueSyntax::Valid);
         assert_eq!(property_value_syntax("tab-size", "-20"), PropertyValueSyntax::Invalid);
         assert_eq!(property_value_syntax("tab-size", "-10px"), PropertyValueSyntax::Invalid);
+        assert_eq!(property_value_syntax("color", "hsl(calc(infinity) 100% 50%)"), PropertyValueSyntax::Valid);
+        assert_eq!(property_value_syntax("color", "rgb(calc(NaN), 0, 0)"), PropertyValueSyntax::Valid);
         assert_eq!(property_value_syntax("tab-size", "20%"), PropertyValueSyntax::Invalid);
     }
 

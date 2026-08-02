@@ -39,7 +39,10 @@ pub fn store_tab_view(signals: Signals) -> impl View {
     }))
 }
 
-fn source_picker(signals: Signals, selected: RwSignal<Option<OpdsEndpoint>>, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>, query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>) -> impl View {
+fn source_picker(
+    signals: Signals, selected: RwSignal<Option<OpdsEndpoint>>, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>,
+    query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>,
+) -> impl View {
     let endpoints = signals.app_core.opds_endpoints();
     let source_count = endpoints.len();
     let cards = stack_from_iter(endpoints.into_iter().map(move |endpoint| {
@@ -81,7 +84,10 @@ fn source_picker(signals: Signals, selected: RwSignal<Option<OpdsEndpoint>>, cat
     books_scroll(v_stack((heading, error_view, cards)).style(|style| style.width_full().padding(24).gap(20)))
 }
 
-fn catalog_workspace(signals: Signals, endpoint: OpdsEndpoint, selected: RwSignal<Option<OpdsEndpoint>>, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>, query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>, imports: RwSignal<HashMap<String, String>>) -> impl View {
+fn catalog_workspace(
+    signals: Signals, endpoint: OpdsEndpoint, selected: RwSignal<Option<OpdsEndpoint>>, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>,
+    password: RwSignal<String>, query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>, imports: RwSignal<HashMap<String, String>>,
+) -> impl View {
     let back = secondary_button("← Sources").on_click(move |_| {
         selected.set(None);
         catalog.set(None);
@@ -117,7 +123,10 @@ fn catalog_workspace(signals: Signals, endpoint: OpdsEndpoint, selected: RwSigna
     v_stack((header, body)).style(|style| style.size_full().min_height(0).padding(24).gap(18))
 }
 
-fn credentials_panel(core: AppCore, endpoint: OpdsEndpoint, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>) -> impl View {
+fn credentials_panel(
+    core: AppCore, endpoint: OpdsEndpoint, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>,
+    loading: RwSignal<bool>, error: RwSignal<Option<String>>,
+) -> impl View {
     let username_label = match &endpoint.authentication {
         OpdsEndpointAuthentication::Basic { username_label, .. } => username_label.clone(),
         OpdsEndpointAuthentication::None => "Username".to_owned(),
@@ -142,7 +151,10 @@ fn credentials_panel(core: AppCore, endpoint: OpdsEndpoint, catalog: RwSignal<Op
     .style(|style| style.width(480).padding(18).gap(10).border(1).border_color(palette().border_color).border_radius(10).background(palette().white_surface))
 }
 
-fn catalog_content(signals: Signals, endpoint: OpdsEndpoint, current: OpdsCatalog, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>, password: RwSignal<String>, query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>, imports: RwSignal<HashMap<String, String>>) -> impl View {
+fn catalog_content(
+    signals: Signals, endpoint: OpdsEndpoint, current: OpdsCatalog, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, username: RwSignal<String>,
+    password: RwSignal<String>, query: RwSignal<String>, loading: RwSignal<bool>, error: RwSignal<Option<String>>, imports: RwSignal<HashMap<String, String>>,
+) -> impl View {
     let endpoint_id = endpoint.id;
     let breadcrumb_core = signals.app_core.clone();
     let breadcrumb = stack_from_iter(levels.get().into_iter().enumerate().map(move |(index, (title, _))| {
@@ -195,7 +207,8 @@ fn catalog_content(signals: Signals, endpoint: OpdsEndpoint, current: OpdsCatalo
     let publication_count = publications.len();
     let no_navigation = links_are_empty(&current);
     let signals_for_books = signals.clone();
-    let books = stack_from_iter(publications.into_iter().map(move |publication| publication_card(publication, endpoint_id, signals_for_books.clone(), username, password, imports, error))).style(|style| style.width_full().gap(14).flex_row().flex_wrap(FlexWrap::Wrap));
+    let books = stack_from_iter(publications.into_iter().map(move |publication| publication_card(publication, endpoint_id, signals_for_books.clone(), username, password, imports, error)))
+        .style(|style| style.width_full().gap(14).flex_row().flex_wrap(FlexWrap::Wrap));
     let empty = inline_message("This catalog page has no EPUB books or folders.").style(move |style| if publication_count == 0 && no_navigation { style } else { style.hide() });
 
     let previous = current.pagination.previous.clone();
@@ -203,28 +216,57 @@ fn catalog_content(signals: Signals, endpoint: OpdsEndpoint, current: OpdsCatalo
     let has_previous = previous.is_some();
     let has_next = next.is_some();
     let previous_core = signals.app_core.clone();
-    let previous_button = secondary_button("← Previous").on_click(move |_| {
-        if let Some(url) = previous.clone() {
-            request_catalog(previous_core.clone(), endpoint_id, Some(url), credentials_from_signals(endpoint_id, username, password).ok().flatten(), CatalogTransition::Push("Previous page".to_owned()), catalog, search, levels, loading, error);
-        }
-        EventPropagation::Stop
-    }).style(move |style| if has_previous { style } else { style.hide() });
+    let previous_button = secondary_button("← Previous")
+        .on_click(move |_| {
+            if let Some(url) = previous.clone() {
+                request_catalog(
+                    previous_core.clone(),
+                    endpoint_id,
+                    Some(url),
+                    credentials_from_signals(endpoint_id, username, password).ok().flatten(),
+                    CatalogTransition::Push("Previous page".to_owned()),
+                    catalog,
+                    search,
+                    levels,
+                    loading,
+                    error,
+                );
+            }
+            EventPropagation::Stop
+        })
+        .style(move |style| if has_previous { style } else { style.hide() });
     let next_core = signals.app_core.clone();
-    let next_button = secondary_button("Next →").on_click(move |_| {
-        if let Some(url) = next.clone() {
-            request_catalog(next_core.clone(), endpoint_id, Some(url), credentials_from_signals(endpoint_id, username, password).ok().flatten(), CatalogTransition::Push("Next page".to_owned()), catalog, search, levels, loading, error);
-        }
-        EventPropagation::Stop
-    }).style(move |style| if has_next { style } else { style.hide() });
+    let next_button = secondary_button("Next →")
+        .on_click(move |_| {
+            if let Some(url) = next.clone() {
+                request_catalog(next_core.clone(), endpoint_id, Some(url), credentials_from_signals(endpoint_id, username, password).ok().flatten(), CatalogTransition::Push("Next page".to_owned()), catalog, search, levels, loading, error);
+            }
+            EventPropagation::Stop
+        })
+        .style(move |style| if has_next { style } else { style.hide() });
 
-    books_scroll(v_stack((breadcrumb, search_row, store_error(error), inline_message("Loading catalog…").style(move |style| if loading.get() { style } else { style.hide() }), folders, books, empty, h_stack((previous_button, next_button)).style(|style| style.gap(8)))).style(|style| style.width_full().gap(16)))
+    books_scroll(
+        v_stack((
+            breadcrumb,
+            search_row,
+            store_error(error),
+            inline_message("Loading catalog…").style(move |style| if loading.get() { style } else { style.hide() }),
+            folders,
+            books,
+            empty,
+            h_stack((previous_button, next_button)).style(|style| style.gap(8)),
+        ))
+        .style(|style| style.width_full().gap(16)),
+    )
 }
 
 fn links_are_empty(catalog: &OpdsCatalog) -> bool {
     catalog.navigation.is_empty() && catalog.groups.iter().all(|group| group.navigation.is_empty())
 }
 
-fn publication_card(publication: OpdsPublication, endpoint: OpdsEndpointId, signals: Signals, username: RwSignal<String>, password: RwSignal<String>, imports: RwSignal<HashMap<String, String>>, error: RwSignal<Option<String>>) -> impl View {
+fn publication_card(
+    publication: OpdsPublication, endpoint: OpdsEndpointId, signals: Signals, username: RwSignal<String>, password: RwSignal<String>, imports: RwSignal<HashMap<String, String>>, error: RwSignal<Option<String>>,
+) -> impl View {
     let publication_id = publication.id.clone();
     let title = publication.title.clone();
     let author = if publication.authors.is_empty() { "Unknown author".to_owned() } else { publication.authors.join(", ") };
@@ -262,7 +304,10 @@ fn credentials_from_signals(endpoint: OpdsEndpointId, username: RwSignal<String>
     OpdsCredentials::for_endpoint(endpoint, username, password.get_untracked()).map(Some).map_err(|error| error.to_string())
 }
 
-fn request_catalog(core: AppCore, endpoint: OpdsEndpointId, url: Option<String>, credentials: Option<OpdsCredentials>, transition: CatalogTransition, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>, levels: RwSignal<Vec<(String, String)>>, loading: RwSignal<bool>, error: RwSignal<Option<String>>) {
+fn request_catalog(
+    core: AppCore, endpoint: OpdsEndpointId, url: Option<String>, credentials: Option<OpdsCredentials>, transition: CatalogTransition, catalog: RwSignal<Option<OpdsCatalog>>, search: RwSignal<Option<OpdsSearch>>,
+    levels: RwSignal<Vec<(String, String)>>, loading: RwSignal<bool>, error: RwSignal<Option<String>>,
+) {
     if loading.get_untracked() {
         return;
     }
@@ -299,7 +344,10 @@ fn request_catalog(core: AppCore, endpoint: OpdsEndpointId, url: Option<String>,
     });
 }
 
-fn request_search(core: AppCore, search: OpdsSearch, query: String, credentials: Option<OpdsCredentials>, transition: CatalogTransition, catalog: RwSignal<Option<OpdsCatalog>>, levels: RwSignal<Vec<(String, String)>>, loading: RwSignal<bool>, error: RwSignal<Option<String>>) {
+fn request_search(
+    core: AppCore, search: OpdsSearch, query: String, credentials: Option<OpdsCredentials>, transition: CatalogTransition, catalog: RwSignal<Option<OpdsCatalog>>, levels: RwSignal<Vec<(String, String)>>, loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+) {
     if loading.get_untracked() {
         return;
     }

@@ -1,5 +1,5 @@
 use html_style::{PropertyValueSyntax, property_value_syntax, selector_syntax_is_valid, stylesheet_syntax_is_valid};
-use html_wpt_test_support::{CssParsingTestKind, extract_css_parsing_tests};
+use html_wpt_test_support::{CssParsingTestKind, extract_css_parsing_tests_with_prelude, relative_script_references};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,16 @@ fn runs_vendored_declarative_css_parsing_tests_directly() {
     for file in &files {
         let source = fs::read_to_string(file).unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
         let relative = file.strip_prefix(&root).expect("file is under WPT CSS root").to_string_lossy().replace('\\', "/");
-        let extraction = extract_css_parsing_tests(&source);
+        let mut script_prelude = String::new();
+        for reference in relative_script_references(&source) {
+            let script = file.parent().expect("WPT file has a parent").join(&reference);
+            if script.is_file() {
+                let contents = fs::read_to_string(&script).unwrap_or_else(|error| panic!("failed to read local WPT script {}: {error}", script.display()));
+                script_prelude.push_str(&contents);
+                script_prelude.push('\n');
+            }
+        }
+        let extraction = extract_css_parsing_tests_with_prelude(&source, &script_prelude);
         unsupported_calls += extraction.unsupported_calls.len();
         unsupported_details.extend(extraction.unsupported_calls.iter().map(|call| format!("{relative}|line={}|helper={}|reason={}", call.line, call.helper, call.reason)));
         extracted += extraction.tests.len();
@@ -53,6 +62,10 @@ fn runs_vendored_declarative_css_parsing_tests_directly() {
                 CssParsingTestKind::InvalidRule | CssParsingTestKind::InvalidSupportsImport => Some(false),
             };
             let Some(expected_valid) = expectation else { continue };
+
+            if std::env::var_os("HTML_WPT_TRACE").is_some() {
+                eprintln!("running CSS adapter assertion: {run_key}|arguments={:?}", test.arguments);
+            }
 
             let actual_valid = match test.kind {
                 CssParsingTestKind::ValidSelector | CssParsingTestKind::InvalidSelector | CssParsingTestKind::ValidForgivingSelector => {

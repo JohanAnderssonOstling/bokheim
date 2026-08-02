@@ -11,9 +11,7 @@ const BUF_SIZE: usize = 1024 * 1024;
 const RUNS: usize = 5;
 
 fn benchmark_epub_path() -> PathBuf {
-    std::env::var_os("BOKHEIM_HASH_BENCH_PATH")
-        .map(PathBuf::from)
-        .expect("set BOKHEIM_HASH_BENCH_PATH to an EPUB before running this benchmark")
+    std::env::var_os("BOKHEIM_HASH_BENCH_PATH").map(PathBuf::from).expect("set BOKHEIM_HASH_BENCH_PATH to an EPUB before running this benchmark")
 }
 
 fn hash_file_blake3(path: &Path) -> Result<String, Box<dyn std::error::Error>> {

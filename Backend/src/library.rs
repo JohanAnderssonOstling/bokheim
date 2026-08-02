@@ -1125,7 +1125,7 @@ mod tests {
     use crate::path_types::LibraryRoot;
     use crate::{BookId, ContentHash};
     use image::{DynamicImage, ImageOutputFormat};
-    use lopdf::{Document, Object, Stream, dictionary};
+    use lopdf::{dictionary, Document, Object, Stream};
     use std::io::{Cursor, Write};
     use std::path::Path;
     use zip::write::SimpleFileOptions;
