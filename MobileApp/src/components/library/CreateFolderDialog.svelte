@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { modalFocus } from "../../lib/keyboard-navigation";
 
   let {
     onclose,
@@ -12,10 +12,6 @@
   let name = $state("");
   let pending = $state(false);
   let error = $state("");
-  let input: HTMLInputElement;
-
-  onMount(() => input.focus());
-
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     const folderName = name.trim();
@@ -35,14 +31,14 @@
 </script>
 
 <button class="scrim" type="button" aria-label="Cancel folder creation" onclick={onclose}></button>
-<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-folder-title">
+<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-folder-title" use:modalFocus={{ onClose: onclose, initialFocus: "#folder-name" }}>
   <form onsubmit={submit}>
     <header>
       <h2 id="create-folder-title">New folder</h2>
       <button class="close" type="button" aria-label="Close" onclick={onclose}>×</button>
     </header>
     <label for="folder-name">Folder name</label>
-    <input id="folder-name" bind:this={input} bind:value={name} maxlength="255" autocomplete="off" />
+    <input id="folder-name" bind:value={name} maxlength="255" autocomplete="off" />
     {#if error}<p role="alert">{error}</p>{/if}
     <footer>
       <button class="cancel" type="button" onclick={onclose}>Cancel</button>

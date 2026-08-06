@@ -23,31 +23,48 @@ path = "tests/scan.rs"
 name = "blake3_hash_benchmark"
 path = "tests/blake3_hash_benchmark.rs"
 
+[[test]]
+name = "architecture"
+path = "tests/architecture.rs"
+
 [features]
 default = ["desktop"]
-desktop = ["dep:notify", "dep:pdf-reader-core"]
+desktop = ["watcher", "pdf"]
+scanner = []
+watcher = ["scanner", "dep:notify"]
+pdf = ["dep:pdf-reader-core"]
 mobile = []
 
 [dependencies]
+audiobook-library = { path = "../AudiobookLibrary" }
+bokheim-app-contract = { path = "../BokheimAppContract" }
+bokheim-catalog = { path = "../BokheimCatalogProvider" }
+bokheim-domain = { path = "../BokheimDomain" }
+bokheim-opds = { path = "../BokheimOpds" }
+bokheim-sync-client = { path = "../BokheimSyncClient" }
+bokheim-projection = { path = "../BokheimProjection" }
+bokheim-storage-sqlite = { path = "../BokheimStorageSqlite" }
 log = "0.4"
+mp4ameta = "0.13.0"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = {version = "0.37.0", features = ["bundled"] }
+rusqlite = {version = "0.37.0", features = ["bundled", "functions"] }
 include-sqlite-sql = "0.2.1"
 csv = "1.3.1"
 walkdir = "2.5.0"
-image = { version = "0.24.9", default-features = false, features = ["gif", "jpeg", "png"] }
+image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 fast_image_resize = {version = "5.2.0", features = ["image"] }
 uuid = { version = "1.0", features = ["v4"] }
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
-tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.31"
 notify = { version = "6.1", optional = true }
 futures-util = "0.3"
 epub_provider = { path = "../HtmlRenderer/epub_provider" }
+html-publication = { path = "../HtmlRenderer/crates/html-publication" }
 crossbeam-channel = "0.5"
 sync-common = { path = "../SyncCommon" }
 urlencoding = "2"
@@ -64,6 +81,6 @@ specta-typescript = "0.0.12"
 [dev-dependencies]
 axum = "0.7"
 lopdf = { version = "0.44", default-features = false }
-#sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "macros", "postgres"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
 tempfile = "3"
 zip = "2.4.2"

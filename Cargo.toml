@@ -2,26 +2,30 @@
 resolver = "3"
 members = [
     "Backend",
+    "BokheimDomain",
+    "BokheimOpds",
+    "BokheimAccountContract",
+    "BokheimAppContract",
+    "BokheimCatalogProvider",
+    "BokheimSyncClient",
+    "BokheimProjection",
+    "BokheimStorageSqlite",
+    "Catalogs",
+    "WebServer",
     "BookFormat",
+    "AudiobookLibrary",
+    "BokheimAlgorithms",
+    "BokheimWebAlgorithms",
+    "BokheimWire",
     "MobileApp/src-tauri",
     "SyncCommon",
-    "UI",
     "data-analysis",
     "HtmlRenderer",
-    "HtmlRenderer/crates/html-dom",
-    "HtmlRenderer/crates/html-style-model",
-    "HtmlRenderer/crates/html-style",
-    "HtmlRenderer/crates/html-parse",
-    "HtmlRenderer/crates/html-source",
-    "HtmlRenderer/crates/html-resources",
-    "HtmlRenderer/crates/html-layout",
-    "HtmlRenderer/crates/html-pipeline",
-    "HtmlRenderer/crates/html-view-core",
+    "HtmlRenderer/crates/html-publication",
     "HtmlRenderer/crates/html-view-gpui",
-    "HtmlRenderer/test-support/html-wpt",
-    "HtmlRenderer/gpui-smoke",
     "HtmlRenderer/floem-smoke",
     "ReaderStyle",
+    "PdfViewCommon",
     "PdfRenderer",
     "GPUI/bokheim-desktop",
     "GPUI/browser-ui",
@@ -29,17 +33,22 @@ members = [
     "GPUI/pdf-view-gpui",
     "GPUI/bokheim-ui-components",
     "GPUI/bokheim-ui-runtime"
+    ,"GPUI/audiobook-player",
+    "GPUI/kobo-device"
 ]
 exclude = ["Server"]
 
+[workspace.lints]
+
 [workspace.dependencies]
+html = { package = "html-engine", git = "https://github.com/JohanAnderssonOstling/HtmlEngine" }
+html-view-core = { git = "https://github.com/JohanAnderssonOstling/HtmlViewCore" }
 kurbo = "0.11.3"
 peniko = "0.2.0"
-lightningcss = { version = "1.0.0-alpha.68", features = ["substitute_variables"] }
+lightningcss = { version = "1.0.0-alpha.72", features = ["substitute_variables"] }
 parcel_selectors = "0.28.2"
 scraper = "0.27"
-html5ever = "0.39"
-ego-tree = "0.11"
+unicode-normalization = "0.1"
 gpui = { path = "../GPUI-Fork/crates/gpui" }
 gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform", features = ["wayland", "x11"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }

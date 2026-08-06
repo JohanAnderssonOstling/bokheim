@@ -1,16 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/state";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { listen } from "./lib/app-events";
 
   import Reader from "./components/Reader.svelte";
+  import LoginScreen from "./components/auth/LoginScreen.svelte";
   import BookGrid from "./components/library/BookGrid.svelte";
   import BookShelf from "./components/library/BookShelf.svelte";
+  import AuthorCatalogResults from "./components/library/AuthorCatalogResults.svelte";
   import CreateFolderDialog from "./components/library/CreateFolderDialog.svelte";
+  import CreateLibraryDialog from "./components/library/CreateLibraryDialog.svelte";
   import FolderCard from "./components/library/FolderCard.svelte";
   import AdaptiveNavigation from "./components/shell/AdaptiveNavigation.svelte";
   import AppTopbar from "./components/shell/AppTopbar.svelte";
   import BrowsingSettingsDialog from "./components/shell/BrowsingSettingsDialog.svelte";
+  import EmptyPage from "./components/shell/EmptyPage.svelte";
   import LibrarySwitcher from "./components/shell/LibrarySwitcher.svelte";
+  import ServerAccountDialog from "./components/shell/ServerAccountDialog.svelte";
   import Store from "./components/store/Store.svelte";
   import { applyApplicationAppearance } from "./lib/application-appearance";
   import { commands } from "./lib/commands";
@@ -19,13 +27,17 @@
   import { observeNetworkStatus, UNKNOWN_NETWORK_STATUS } from "./lib/network-status";
   import { commitAndMeasureRender, measureInvoke } from "./lib/performance";
   import { clearThumbnailCache } from "./lib/thumbnail-cache";
+  import { readUiSession, writeUiSession, type AppUiSession } from "./lib/ui-session";
   import {
+    BROWSING_CONTENT_CONTRACT,
+    BROWSING_LAYOUT_CONTRACT,
+    BROWSING_STATES_CONTRACT,
     DEFAULT_READER_PREFERENCES,
     DEFAULT_BROWSING_PREFERENCES,
+    type AccountSessionSummary,
     type AccountStatus,
-    type AuthorFolderBooks,
     type AuthorSummary,
-    type BookSummary,
+    type BookCardData,
     type BrowsingPreferencePatch,
     type BrowsingPreferences,
     type DirectoryContent,
@@ -43,7 +55,7 @@
     type TransferPreferences,
   } from "./lib/types";
   import { APP_NAME, APP_NAME_LOWER } from "./lib/application-name";
-  import { isWebDemo } from "./lib/platform";
+  import { isWebApp } from "./lib/platform";
 
   type FolderLevel = { id: string; name: string };
   type BookBytes = ArrayBuffer | Uint8Array | number[];
@@ -55,31 +67,132 @@
     library_id: string;
     event: { FolderDownloadStatusChanged: { dir_id: string; downloaded_books: number; total_books: number } };
   };
+  type LibraryViewMode = "cover" | "detailed";
 
-  const EMPTY_DIRECTORY: DirectoryContent = { books: [], dirs: [] };
-  const HOME_BOOK_LIMIT = 20;
-  const AUTHOR_PAGE_SIZE = 80;
+  const EMPTY_DIRECTORY: DirectoryContent = { books: [], directories: [] };
+  const SEARCH_DEBOUNCE_MS = BROWSING_CONTENT_CONTRACT.search_debounce_ms;
+  const naturalCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
   const WEB_PREFERENCES_KEY = `${APP_NAME_LOWER}-reader-preferences`;
+  const BROWSING_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-browsing-ui-preferences`;
+  const DEFAULT_LIBRARY_VIEW_MODE: LibraryViewMode = "cover";
+
+  function currentSessionFromWebRoute(): AppUiSession | null {
+    const libraryId = (page.url.searchParams.get("library") || page.params.libraryId || undefined)?.trim() || undefined;
+    const routeId = page.route.id;
+    if (routeId === "/reader/[bookId]" && page.params.bookId && page.params.bookId.trim()) {
+      return {
+        kind: "reader",
+        book_id: page.params.bookId,
+        library_id: libraryId,
+      };
+    }
+    if (routeId === "/library/[libraryId]/folder/[folderId]") {
+      const folderId = page.params.folderId?.trim() || "__root__";
+      return {
+        kind: "browse",
+        destination: "library",
+        library_id: page.params.libraryId || libraryId,
+        folder_id: folderId === "__root__" ? "__root__" : folderId,
+      };
+    }
+    if (routeId === "/library/[libraryId]/authors") {
+      return {
+        kind: "browse",
+        destination: "authors",
+        library_id: page.params.libraryId || libraryId,
+      };
+    }
+    if (routeId === "/library/[libraryId]/search") {
+      return {
+        kind: "browse",
+        destination: "search",
+        library_id: page.params.libraryId || libraryId,
+      };
+    }
+    if (routeId === "/store") {
+      return { kind: "browse", destination: "store" };
+    }
+    if (routeId === "/account") {
+      return { kind: "browse", destination: "account" };
+    }
+    if (routeId === "/settings") {
+      return { kind: "browse", destination: "settings" };
+    }
+    if (routeId === "/library" || routeId === "/" || routeId === "/login" || routeId === null) {
+      return {
+        kind: "browse",
+        destination: "home",
+        library_id: libraryId,
+      };
+    }
+    return {
+      kind: "browse",
+      destination: activeDestination || "home",
+      library_id: activeLibraryId || libraryId,
+      folder_id: folderStack.at(-1)?.id || "__root__",
+    };
+  }
+
+  function currentSessionFromRuntimeState(): AppUiSession {
+    if (readerBook?.bookId && !readerBook.bookId.startsWith("foliate-position:")) {
+      return {
+        kind: "reader",
+        book_id: readerBook.bookId,
+        library_id: activeLibraryId || undefined,
+      };
+    }
+    return {
+      kind: "browse",
+      destination: activeDestination,
+      library_id: activeLibraryId || undefined,
+      folder_id: activeDestination === "library" ? (folderStack.at(-1)?.id || "__root__") : undefined,
+    };
+  }
+
+  function naturalCompare(left: string, right: string) {
+    return naturalCollator.compare(left, right);
+  }
+
+  function sortedLibraries(entries: LibraryEntry[]) {
+    return [...entries].sort((left, right) => naturalCompare(left.library_name, right.library_name));
+  }
+  const browsingLayoutStyle = [
+    `--layout-sidebar-width: ${BROWSING_LAYOUT_CONTRACT.sidebar_width_px}px`,
+    `--layout-topbar-height: ${BROWSING_LAYOUT_CONTRACT.topbar_height_px}px`,
+    `--layout-topbar-action-height: ${BROWSING_LAYOUT_CONTRACT.topbar_action_height_px}px`,
+    `--layout-topbar-action-gap: ${BROWSING_LAYOUT_CONTRACT.topbar_action_gap_px}px`,
+    `--layout-topbar-action-horizontal-padding: ${BROWSING_LAYOUT_CONTRACT.topbar_action_horizontal_padding_px}px`,
+    `--layout-content-padding: ${BROWSING_LAYOUT_CONTRACT.content_padding_px}px`,
+    `--book-cover-width: ${BROWSING_LAYOUT_CONTRACT.book_cover_width_px}px`,
+    `--book-cover-height: ${BROWSING_LAYOUT_CONTRACT.book_cover_height_px}px`,
+    `--book-card-height: ${BROWSING_LAYOUT_CONTRACT.book_card_height_px}px`,
+    `--book-grid-column-gap: ${BROWSING_LAYOUT_CONTRACT.book_grid_column_gap_px}px`,
+    `--book-grid-row-height: ${BROWSING_LAYOUT_CONTRACT.book_grid_row_height_px}px`,
+  ].join("; ");
 
   let libraries = $state<LibraryEntry[]>([]);
   let activeLibraryId = $state("");
   let activeDestination = $state<Destination>("home");
-  let recentlyAdded = $state<BookSummary[]>([]);
-  let recentlyRead = $state<BookSummary[]>([]);
+  let recentlyAdded = $state<BookCardData[]>([]);
+  let recentlyRead = $state<BookCardData[]>([]);
+  const recentlyInProgress = $derived(recentlyRead.filter((book) => (book.progress ?? 0) < BROWSING_CONTENT_CONTRACT.finished_progress_threshold));
+  const recentlyFinished = $derived(recentlyRead.filter((book) => (book.progress ?? 0) >= BROWSING_CONTENT_CONTRACT.finished_progress_threshold));
   let directoryContent = $state<DirectoryContent>(EMPTY_DIRECTORY);
   let folderStack = $state<FolderLevel[]>([]);
   let authors = $state<AuthorSummary[]>([]);
   let authorFilter = $state("");
   let focusedAuthorIndex = $state(0);
-  let selectedAuthor = $state("");
-  let authorGroups = $state<AuthorFolderBooks[]>([]);
+  let selectedAuthorId = $state("");
+  let selectedAuthorName = $state("");
+  let authorBooks = $state<BookCardData[]>([]);
   let searchQuery = $state("");
-  let searchResults = $state<BookSummary[]>([]);
+  let searchResults = $state<BookCardData[]>([]);
+  let searchCompletedQuery = $state("");
   let searchPending = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let showLibrarySwitcher = $state(false);
   let showCreateFolder = $state(false);
-  let showBrowsingSettings = $state(false);
+  let showCreateLibrary = $state(false);
   let readerBook = $state<ReaderBook | null>(null);
   let loadingLibrary = $state(true);
   let homeLoading = $state(false);
@@ -89,39 +202,87 @@
   let homeLoadedFor = $state("");
   let folderLoadedFor = $state("");
   let authorsLoadedFor = $state("");
-  let visibleAuthorCount = $state(AUTHOR_PAGE_SIZE);
   let libraryGeneration = 0;
   let folderRequest = 0;
+  let folderPendingKey = "";
   let authorRequest = 0;
   let openingBookId = $state("");
+  let pendingOpenBook: BookCardData | null = null;
   let bookDownloadStates = $state<Record<string, DownloadState>>({});
   let folderDownloadStatuses = $state<Record<string, FolderDownloadStatus>>({});
   let activeFolderDownloads = $state<Record<string, boolean>>({});
   let libraryError = $state("");
-  let newLibraryName = $state("");
   let creatingLibrary = $state(false);
   let addingBook = $state(false);
   let browsingPreferences = $state<BrowsingPreferences>({ ...DEFAULT_BROWSING_PREFERENCES });
   let readerPreferences = $state<ReaderPreferences>({ ...DEFAULT_READER_PREFERENCES });
+  let libraryViewMode = $state<LibraryViewMode>(DEFAULT_LIBRARY_VIEW_MODE);
   let accountStatus = $state<AccountStatus>({ signed_in: false, server_url: null, username: null });
   let accountBusy = $state(false);
   let accountProgress = $state("");
   let accountError = $state("");
+  let settingsError = $state("");
+  let accountResolved = $state(!isWebApp);
+  let webAppReady = $state(!isWebApp);
   let librarySyncStatuses = $state<LibrarySyncStatus[]>([]);
   let libraryTransfers = $state<LibraryTransfers[]>([]);
-  let librarySyncBusyId = $state("");
+  let accountSessions = $state<AccountSessionSummary[]>([]);
   let networkStatus = $state<NetworkStatus>({ ...UNKNOWN_NETWORK_STATUS });
-  let transferPreferences = $state<TransferPreferences>({ allow_background_on_metered: false });
+  let transferPreferences = $state<TransferPreferences>({ allow_background_on_metered: false, auto_download_limit_mb: null });
   let browsingPreferenceSaveQueue = Promise.resolve();
   let browsingPreferenceVersion = 0;
   let preferenceSaveQueue = Promise.resolve();
   let preferenceVersion = 0;
+  let restoringReaderId = "";
+  let readerReturnPath = "";
+  const readerRouteCache = new Map<string, ReaderBook>();
 
-  const destinationTitle = $derived(NAV_ITEMS.find((item) => item.id === activeDestination)?.label ?? APP_NAME);
+  const destinationTitle = $derived(activeDestination === "account" ? "Account" : activeDestination === "settings" ? "Settings" : NAV_ITEMS.find((item) => item.id === activeDestination)?.label ?? APP_NAME);
   const activeLibrary = $derived(libraries.find((library) => library.library_id === activeLibraryId));
-  const authorBooks = $derived(authorGroups.flatMap((group) => group.books));
+  const visibleDirectoryBooks = $derived(directoryContent.books);
+  const visibleAuthorBooks = $derived(authorBooks);
+  const visibleSearchResults = $derived(searchResults);
+  const visibleRecentlyInProgress = $derived(recentlyInProgress);
+  const visibleRecentlyFinished = $derived(recentlyFinished);
+  const visibleRecentlyAdded = $derived(recentlyAdded);
   const filteredAuthors = $derived(authors.filter((author) => author.name.toLocaleLowerCase().includes(authorFilter.trim().toLocaleLowerCase())));
-  const visibleAuthors = $derived(filteredAuthors.slice(0, visibleAuthorCount));
+  const visibleAuthors = $derived(filteredAuthors);
+
+  function libraryRoute(destination: Destination = activeDestination, libraryId = activeLibraryId, folderId?: string) {
+    if (destination === "account") return "/account";
+    if (destination === "settings") return "/settings";
+    if (destination === "store") return "/store";
+    if (!libraryId) return "/library";
+    const library = `/library/${encodeURIComponent(libraryId)}`;
+    if (destination === "library") return folderId && folderId !== "__root__" ? `${library}/folder/${encodeURIComponent(folderId)}` : `${library}/folder/__root__`;
+    if (destination === "authors") return `${library}/authors`;
+    if (destination === "search") return `${library}/search`;
+    return library;
+  }
+
+  function navigate(path: string, replaceState = false) {
+    if (isWebApp && `${page.url.pathname}${page.url.search}` !== path) void goto(path, { replaceState, noScroll: true, keepFocus: true });
+  }
+
+  function closeReader() {
+    if (isWebApp && page.route.id === "/reader/[bookId]") {
+      const destination = readerReturnPath || libraryRoute("home", activeLibraryId);
+      readerBook = null;
+      navigate(destination, true);
+    } else {
+      readerBook = null;
+    }
+  }
+
+  function navigateToReader(bookId: string, book: ReaderBook) {
+    if (!isWebApp) return;
+    if (page.route.id !== "/reader/[bookId]") {
+      readerReturnPath = `${page.url.pathname}${page.url.search}`;
+    }
+    readerRouteCache.set(bookId, book);
+    const library = activeLibraryId ? `?library=${encodeURIComponent(activeLibraryId)}` : "";
+    navigate(`/reader/${encodeURIComponent(bookId)}${library}`);
+  }
 
   $effect(() => {
     applyApplicationAppearance(browsingPreferences);
@@ -129,34 +290,251 @@
 
   $effect(() => {
     authorFilter;
-    visibleAuthorCount = AUTHOR_PAGE_SIZE;
     focusedAuthorIndex = 0;
   });
 
   $effect(() => {
-    if (!showBrowsingSettings || !accountStatus.signed_in) return;
-    void loadServerTransferState().catch((reason) => (accountError = errorMessage(reason)));
-    const timer = window.setInterval(() => {
-      void loadTransferStatuses().catch(() => undefined);
-    }, 1200);
-    return () => window.clearInterval(timer);
+    if (activeDestination !== "account" || !accountStatus.signed_in) return;
+    void Promise.all([loadServerTransferState(), loadAccountSessions()]).catch((reason) => (accountError = errorMessage(reason)));
+  });
+
+  $effect(() => {
+    if (!isWebApp) return;
+    const route = {
+      id: page.route.id,
+      pathname: page.url.pathname,
+      libraryId: page.params.libraryId,
+      folderId: page.params.folderId,
+      bookId: page.params.bookId,
+      readerLibraryId: page.url.searchParams.get("library") ?? undefined,
+    };
+    void synchronizeWebRoute(route);
+  });
+
+  $effect(() => {
+    const session = buildSessionForPersistence();
+    writeUiSession(session);
   });
 
   function errorMessage(reason: unknown) {
     return reason instanceof Error ? reason.message : String(reason);
   }
 
-  function setDestination(destination: Destination) {
+  async function synchronizeWebRoute(route: {
+    id: string | null;
+    pathname: string;
+    libraryId?: string;
+    folderId?: string;
+    bookId?: string;
+    readerLibraryId?: string;
+  }) {
+    if (!accountResolved) return;
+    if (!accountStatus.signed_in) {
+      readerBook = null;
+      if (route.id !== "/login") navigate("/login", true);
+      return;
+    }
+    if (!webAppReady) return;
+
+    if (route.id === "/" || route.id === "/login" || route.id === "/library") {
+      navigate(libraryRoute("home"), true);
+      return;
+    }
+
+    if (route.id === "/reader/[bookId]" && route.bookId) {
+      if (route.readerLibraryId && route.readerLibraryId !== activeLibraryId && libraries.some((entry) => entry.library_id === route.readerLibraryId)) {
+        await selectLibrary(route.readerLibraryId, false);
+      }
+      await restoreReaderRoute(route.bookId);
+      return;
+    }
+
+    if (readerBook) readerBook = null;
+    if (route.id === "/store") {
+      setDestination("store", false);
+      return;
+    }
+
+    if (route.id === "/account" || route.id === "/settings") {
+      setDestination(route.id === "/account" ? "account" : "settings", false);
+      return;
+    }
+
+    const destination: Destination = route.id === "/library/[libraryId]/authors"
+      ? "authors"
+      : route.id === "/library/[libraryId]/search"
+        ? "search"
+        : route.id === "/library/[libraryId]/folder/[folderId]"
+          ? "library"
+          : "home";
+
+    if (route.libraryId && route.libraryId !== activeLibraryId && libraries.some((entry) => entry.library_id === route.libraryId)) {
+      await selectLibrary(route.libraryId, false);
+    }
+    if (!activeLibraryId) return;
     activeDestination = destination;
     libraryError = "";
-    void ensureDestination(destination);
+    if (destination === "library") {
+      const folderId = route.folderId ?? "__root__";
+      const stack = folderId === "__root__"
+        ? []
+        : folderStack.at(-1)?.id === folderId
+          ? folderStack
+          : [{ id: folderId, name: directoryContent.directories.find((folder) => folder.id === folderId)?.name ?? "Folder" }];
+      await loadDirectory(folderId, stack);
+    } else {
+      await ensureDestination(destination);
+    }
     if (destination === "search") {
       requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
     }
   }
 
+  function buildSessionForPersistence(): AppUiSession | null {
+    if (isWebApp) {
+      const session = currentSessionFromWebRoute();
+      if (!session) return null;
+      if (session.kind === "reader" && session.book_id.startsWith("foliate-position:")) return null;
+      return session;
+    }
+    const session = currentSessionFromRuntimeState();
+    if (session.kind === "reader" && session.book_id.startsWith("foliate-position:")) return null;
+    return session;
+  }
+
+  function routeFromSession(session: AppUiSession): string {
+    if (session.kind === "reader") {
+      const library = session.library_id ? `?library=${encodeURIComponent(session.library_id)}` : "";
+      return `/reader/${encodeURIComponent(session.book_id)}${library}`;
+    }
+    if (session.destination === "account") return "/account";
+    if (session.destination === "settings") return "/settings";
+    if (session.destination === "store") return "/store";
+    if (session.destination === "library") {
+      return libraryRoute("library", session.library_id, session.folder_id);
+    }
+    if (session.destination === "authors") {
+      return libraryRoute("authors", session.library_id);
+    }
+    if (session.destination === "search") {
+      return libraryRoute("search", session.library_id);
+    }
+    return libraryRoute("home", session.library_id);
+  }
+
+  async function selectSessionLibrary(libraryId: string | undefined): Promise<boolean> {
+    if (!libraryId) return Boolean(activeLibraryId);
+    if (libraryId === activeLibraryId) return true;
+    if (!libraries.some((entry) => entry.library_id === libraryId)) return false;
+    await selectLibrary(libraryId, false);
+    return activeLibraryId === libraryId;
+  }
+
+  async function restoreUiSession(session: AppUiSession | null) {
+    if (!session) return;
+    if (isWebApp) {
+      const current = `${page.url.pathname}${page.url.search}`;
+      if (page.route.id !== "/" && page.route.id !== "/library" && page.route.id !== "/login" && page.route.id !== null) return;
+      const route = routeFromSession(session);
+      if (route && route !== current) {
+        navigate(route, true);
+      }
+      return;
+    }
+
+    if (session.kind === "reader") {
+      const restored = await selectSessionLibrary(session.library_id);
+      if (restored) {
+        await restoreReaderRoute(session.book_id);
+      } else {
+        const fallback: AppUiSession = { kind: "browse", destination: "home" };
+        await restoreReaderSession(fallback);
+      }
+      return;
+    }
+    await restoreReaderSession(session);
+  }
+
+  async function restoreReaderSession(session: AppUiSession) {
+    if (session.kind === "reader") {
+      if (!session.book_id) return;
+      if (!(await selectSessionLibrary(session.library_id))) return;
+      await restoreReaderRoute(session.book_id);
+      return;
+    }
+    if (session.destination === "account" || session.destination === "settings" || session.destination === "store") {
+      activeDestination = session.destination;
+      libraryError = "";
+      return;
+    }
+    if (session.destination === "home") {
+      activeDestination = "home";
+      libraryError = "";
+      if (activeLibraryId) await ensureDestination("home");
+      return;
+    }
+    if (session.destination === "authors") {
+      activeDestination = "authors";
+      libraryError = "";
+      if (await selectSessionLibrary(session.library_id)) await ensureDestination("authors");
+      return;
+    }
+    if (session.destination === "search") {
+      activeDestination = "search";
+      libraryError = "";
+      if (await selectSessionLibrary(session.library_id)) {
+        await ensureDestination("search");
+        requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
+      }
+      return;
+    }
+    await selectSessionLibrary(session.library_id);
+    activeDestination = "library";
+    const folderId = session.folder_id && session.folder_id !== "__root__" ? session.folder_id : "__root__";
+    if (folderId === "__root__") {
+      if (activeLibraryId) await loadDirectory("__root__", []);
+    } else {
+      await loadDirectory(folderId, [{ id: folderId, name: "" }]);
+    }
+    if (activeDestination !== "library") return;
+  }
+
+  function setDestination(destination: Destination, updateRoute = true) {
+    activeDestination = destination;
+    libraryError = "";
+    void ensureDestination(destination);
+    if (updateRoute) navigate(libraryRoute(destination, activeLibraryId, folderStack.at(-1)?.id));
+    if (destination === "search") {
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
+    }
+    if (destination === "account" && accountStatus.signed_in) {
+      void loadServerTransferState().catch((reason) => (accountError = errorMessage(reason)));
+    }
+  }
+
+  function openLibrarySwitcher() {
+    showLibrarySwitcher = true;
+  }
+
+  async function retryActiveSection() {
+    libraryError = "";
+    if (pendingOpenBook) {
+      await openLibraryBook(pendingOpenBook);
+      return;
+    }
+    if (!libraries.length) {
+      await loadLibraries();
+      return;
+    }
+    if (activeDestination === "home") await loadHome(libraryGeneration, true);
+    if (activeDestination === "library") await loadDirectory(folderStack.at(-1)?.id ?? "__root__", folderStack, libraryGeneration, true);
+    if (activeDestination === "authors") await loadAuthors(libraryGeneration, true);
+    if (activeDestination === "account") await loadServerTransferState();
+  }
+
   function resetLibraryData() {
     folderRequest += 1;
+    folderPendingKey = "";
     authorRequest += 1;
     homeLoading = false;
     folderLoading = false;
@@ -168,23 +546,24 @@
     authors = [];
     authorFilter = "";
     focusedAuthorIndex = 0;
-    selectedAuthor = "";
-    authorGroups = [];
+    selectedAuthorId = "";
+    selectedAuthorName = "";
+    authorBooks = [];
     folderStack = [];
     searchQuery = "";
     searchResults = [];
-    visibleAuthorCount = AUTHOR_PAGE_SIZE;
     homeLoadedFor = "";
     folderLoadedFor = "";
     authorsLoadedFor = "";
     bookDownloadStates = {};
     folderDownloadStatuses = {};
     activeFolderDownloads = {};
+    pendingOpenBook = null;
   }
 
-  function mergeBookDownloadStates(books: BookSummary[]) {
+  function mergeBookDownloadStates(books: BookCardData[]) {
     const next = { ...bookDownloadStates };
-    for (const book of books) next[book.id] = book.download_state;
+    for (const book of books) next[book.book_id] = book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded";
     bookDownloadStates = next;
   }
 
@@ -196,15 +575,26 @@
     );
   }
 
-  async function downloadBook(book: BookSummary) {
-    if (bookDownloadStates[book.id] === "Downloaded") return Promise.resolve();
-    bookDownloadStates = { ...bookDownloadStates, [book.id]: "Queued" };
+  async function downloadBook(book: BookCardData) {
+    if (bookDownloadStates[book.book_id] === "Downloaded") return Promise.resolve();
+    bookDownloadStates = { ...bookDownloadStates, [book.book_id]: "Queued" };
     try {
-      const state = await commands.downloadBook(book.id);
-      bookDownloadStates = { ...bookDownloadStates, [book.id]: state };
+      const state = await commands.downloadBook(activeLibraryId, book.book_id);
+      if (bookDownloadStates[book.book_id] !== "Downloaded") bookDownloadStates = { ...bookDownloadStates, [book.book_id]: state };
     } catch (reason) {
       libraryError = errorMessage(reason);
       throw reason;
+    }
+  }
+
+  async function removeLocalBookCopy(book: BookCardData) {
+    if (!window.confirm(`Remove the downloaded copy of “${book.title || "Untitled"}” from this device? You can download it again later.`)) return;
+    libraryError = "";
+    try {
+      const state = await commands.removeLocalBookCopy(activeLibraryId, book.book_id);
+      bookDownloadStates = { ...bookDownloadStates, [book.book_id]: state };
+    } catch (reason) {
+      libraryError = errorMessage(reason);
     }
   }
 
@@ -213,7 +603,7 @@
     activeFolderDownloads = { ...activeFolderDownloads, [folder.id]: true };
     libraryError = "";
     try {
-      const status = await commands.downloadFolder(folder.id);
+      const status = await commands.downloadFolder(activeLibraryId, folder.id);
       folderDownloadStatuses = { ...folderDownloadStatuses, [folder.id]: status };
     } catch (reason) {
       libraryError = errorMessage(reason);
@@ -224,14 +614,15 @@
 
   function clearSelectedAuthor() {
     authorRequest += 1;
-    selectedAuthor = "";
-    authorGroups = [];
+    selectedAuthorId = "";
+    selectedAuthorName = "";
+    authorBooks = [];
     authorBooksLoading = false;
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-author-index="${focusedAuthorIndex}"]`)?.focus());
   }
 
   function focusAuthor(index: number) {
-    const lastVisibleIndex = Math.min(filteredAuthors.length, visibleAuthorCount) - 1;
+    const lastVisibleIndex = filteredAuthors.length - 1;
     if (lastVisibleIndex < 0) return;
     focusedAuthorIndex = Math.max(0, Math.min(index, lastVisibleIndex));
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-author-index="${focusedAuthorIndex}"]`)?.focus());
@@ -251,9 +642,6 @@
     let nextIndex: number | undefined;
     if (event.key === "ArrowDown") {
       nextIndex = index + 1;
-      if (nextIndex >= visibleAuthors.length && visibleAuthorCount < filteredAuthors.length) {
-        visibleAuthorCount = Math.min(filteredAuthors.length, visibleAuthorCount + AUTHOR_PAGE_SIZE);
-      }
     } else if (event.key === "ArrowUp") {
       nextIndex = index - 1;
     } else if (event.key === "Home") {
@@ -282,17 +670,14 @@
     if (!libraryId || homeLoading || (!force && homeLoadedFor === libraryId)) return;
     homeLoading = true;
     try {
-      const [added, read] = await Promise.all([
-        measureInvoke("recently_added", () => commands.getRecentlyAdded(HOME_BOOK_LIMIT)),
-        measureInvoke("recently_read", () => commands.getRecentlyRead(HOME_BOOK_LIMIT)),
-      ]);
+      const home = await measureInvoke("home", () => commands.getLibraryHome(libraryId, BROWSING_CONTENT_CONTRACT.home_book_limit));
       if (generation !== libraryGeneration || libraryId !== activeLibraryId) return;
       await commitAndMeasureRender("home", () => {
-        recentlyAdded = added;
-        recentlyRead = read;
+        recentlyAdded = home.recently_added;
+        recentlyRead = home.recently_read;
         homeLoadedFor = libraryId;
-      }, added.length + read.length);
-      mergeBookDownloadStates([...added, ...read]);
+      }, home.recently_added.length + home.recently_read.length);
+      mergeBookDownloadStates([...home.recently_added, ...home.recently_read]);
     } catch (reason) {
       if (generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
@@ -302,24 +687,34 @@
 
   async function loadDirectory(dirId: string, nextStack: FolderLevel[], generation = libraryGeneration, force = false) {
     const libraryId = activeLibraryId;
+    const key = `${libraryId}:${dirId}`;
+    if (!libraryId || (!force && folderLoadedFor === key) || (!force && folderPendingKey === key)) return;
     const request = ++folderRequest;
-    if (!libraryId || (!force && folderLoadedFor === `${libraryId}:${dirId}`)) return;
+    folderPendingKey = key;
     folderLoading = true;
     libraryError = "";
     try {
-      const content = await measureInvoke("directory", () => commands.getDirContents(dirId));
+      const content = await measureInvoke("directory", () => commands.getLibraryFolder(libraryId, dirId));
       if (request !== folderRequest || generation !== libraryGeneration || libraryId !== activeLibraryId) return;
+      const sortedContent = {
+        ...content,
+        directories: [...content.directories].sort((left, right) => naturalCompare(left.name, right.name)),
+        books: [...content.books].sort((left, right) => naturalCompare(left.title, right.title)),
+      };
       await commitAndMeasureRender("directory", () => {
-        directoryContent = content;
+        directoryContent = sortedContent;
         folderStack = nextStack;
-        folderLoadedFor = `${libraryId}:${dirId}`;
-      }, content.books.length + content.dirs.length);
+        folderLoadedFor = key;
+      }, content.books.length + content.directories.length);
       mergeBookDownloadStates(content.books);
-      replaceFolderDownloadStates(content.dirs);
+      replaceFolderDownloadStates(content.directories);
     } catch (reason) {
       if (request === folderRequest && generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
-      if (request === folderRequest && generation === libraryGeneration) folderLoading = false;
+      if (request === folderRequest && generation === libraryGeneration) {
+        folderPendingKey = "";
+        folderLoading = false;
+      }
     }
   }
 
@@ -328,13 +723,12 @@
     if (!libraryId || authorsLoading || (!force && authorsLoadedFor === libraryId)) return;
     authorsLoading = true;
     try {
-      const authorList = await measureInvoke("authors", () => commands.getAuthors());
+      const view = await measureInvoke("authors", () => commands.getLibraryAuthors(libraryId, null));
       if (generation !== libraryGeneration || libraryId !== activeLibraryId) return;
       await commitAndMeasureRender("authors", () => {
-        authors = authorList;
-        visibleAuthorCount = AUTHOR_PAGE_SIZE;
+        authors = view.authors;
         authorsLoadedFor = libraryId;
-      }, authorList.length);
+      }, view.authors.length);
     } catch (reason) {
       if (generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
@@ -342,19 +736,19 @@
     }
   }
 
-  async function selectLibrary(libraryId: string) {
+  async function selectLibrary(libraryId: string, updateRoute = true) {
     const generation = ++libraryGeneration;
     showLibrarySwitcher = false;
     showCreateFolder = false;
     activeLibraryId = libraryId;
+    activeDestination = "home";
     libraryError = "";
     loadingLibrary = true;
     resetLibraryData();
     try {
-      await measureInvoke("select_library", () => commands.selectLibrary(libraryId));
-      if (generation !== libraryGeneration) return;
       loadingLibrary = false;
-      await ensureDestination(activeDestination, generation);
+      await ensureDestination("home", generation);
+      if (updateRoute) navigate(libraryRoute("home", libraryId));
     } catch (reason) {
       if (generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
@@ -365,8 +759,11 @@
   async function loadLibraries() {
     try {
       const entries = await measureInvoke("libraries", () => commands.getLibraries());
-      await commitAndMeasureRender("libraries", () => (libraries = entries), entries.length);
-      if (entries.length) await selectLibrary(entries[0].library_id);
+      const sortedEntries = sortedLibraries(entries);
+      await commitAndMeasureRender("libraries", () => (libraries = sortedEntries), entries.length);
+      const routeLibraryId = page.params.libraryId ?? page.url.searchParams.get("library");
+      const initialLibrary = sortedEntries.find((entry) => entry.library_id === routeLibraryId) ?? sortedEntries[0];
+      if (initialLibrary) await selectLibrary(initialLibrary.library_id, false);
       else loadingLibrary = false;
     } catch (reason) {
       // The standalone browser build still supports opening a local EPUB.
@@ -377,11 +774,41 @@
 
   async function loadAccountStatus() {
     try {
-      accountStatus = await commands.getAccountStatus();
-      if (accountStatus.signed_in) await loadServerTransferState();
-    } catch {
+      const status = await commands.getAccountStatus();
+      accountStatus = status;
+    } catch (reason) {
       accountStatus = { signed_in: false, server_url: null, username: null };
+      if (isWebApp) accountError = `Could not check your session: ${errorMessage(reason)}`;
+    } finally {
+      accountResolved = true;
     }
+  }
+
+  async function prepareAuthenticatedWebApp() {
+    webAppReady = false;
+    const enrollment = await Promise.allSettled([commands.bootstrapRemoteLibraries()]);
+    const results = [...enrollment, ...await Promise.allSettled([
+      loadServerTransferState(),
+      loadBrowsingPreferences(),
+      loadReaderPreferences(),
+      loadTransferPreferences(),
+    ])];
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") libraryError = errorMessage(failed.reason);
+    clearThumbnailCache();
+    await loadLibraries();
+    try {
+      networkStatus = await commands.updateNetworkStatus(networkStatus);
+    } catch {
+      // Network reporting is advisory and must not prevent the application opening.
+    }
+    await restoreUiSession(readUiSession());
+    webAppReady = true;
+  }
+
+  async function initializeWebApp() {
+    await loadAccountStatus();
+    if (accountStatus.signed_in) await prepareAuthenticatedWebApp();
   }
 
   async function loadServerTransferState() {
@@ -394,9 +821,17 @@
       commands.reconcileLibraryCatalogue(),
       commands.getTransferStatuses(),
     ]);
-    libraries = catalogue.libraries;
+    libraries = sortedLibraries(catalogue.libraries);
     librarySyncStatuses = catalogue.sync_statuses;
     libraryTransfers = transfers;
+  }
+
+  async function loadAccountSessions() {
+    if (!accountStatus.signed_in) {
+      accountSessions = [];
+      return;
+    }
+    accountSessions = await commands.getAccountSessions();
   }
 
   async function loadTransferStatuses() {
@@ -411,55 +846,87 @@
     try {
       transferPreferences = await commands.getTransferPreferences();
     } catch {
-      transferPreferences = { allow_background_on_metered: false };
+      transferPreferences = { allow_background_on_metered: false, auto_download_limit_mb: null };
     }
   }
 
   async function saveTransferPreference(patch: TransferPreferencePatch) {
     const previous = transferPreferences;
+    settingsError = "";
     transferPreferences = { ...transferPreferences, [patch.preference]: patch.value };
     try {
       transferPreferences = await commands.updateTransferPreference(patch);
     } catch (reason) {
       transferPreferences = previous;
-      accountError = errorMessage(reason);
+      settingsError = `Could not save transfer setting: ${errorMessage(reason)}`;
     }
   }
 
-  async function loginToServer(username: string, password: string) {
-    if (accountBusy) return;
+  async function finishAccountAuthentication(status: AccountStatus) {
+    accountStatus = status;
+    accountProgress = "Fetching libraries…";
+    if (isWebApp) await prepareAuthenticatedWebApp();
+    else {
+      await loadServerTransferState();
+      clearThumbnailCache();
+      await loadLibraries();
+    }
+    accountProgress = "";
+    if (isWebApp) navigate(libraryRoute("home"), true);
+  }
+
+  async function loginToServer(username: string, password: string): Promise<boolean> {
+    if (accountBusy) return false;
     accountBusy = true;
     accountError = "";
     accountProgress = "Signing in…";
     try {
-      accountStatus = await commands.login(username, password);
-      accountProgress = "Fetching libraries…";
-      await loadServerTransferState();
-      accountProgress = "";
-      clearThumbnailCache();
-      await loadLibraries();
+      await finishAccountAuthentication(await commands.login(username, password));
+      return true;
     } catch (reason) {
       accountError = errorMessage(reason);
       accountProgress = "";
+      return false;
     } finally {
       accountBusy = false;
     }
   }
 
-  async function syncServerLibraries() {
-    if (accountBusy) return;
+  async function runAccountRequest(progress: string, success: string, request: () => Promise<unknown>): Promise<boolean> {
+    if (accountBusy) return false;
     accountBusy = true;
     accountError = "";
-    accountProgress = "Syncing libraries…";
+    accountProgress = progress;
     try {
-      await commands.bootstrapRemoteLibraries();
-      clearThumbnailCache();
-      await loadLibraries();
-      await loadServerTransferState();
-      accountProgress = "Up to date";
+      await request();
+      accountProgress = success;
+      return true;
     } catch (reason) {
       accountError = errorMessage(reason);
       accountProgress = "";
+      return false;
+    } finally {
+      accountBusy = false;
+    }
+  }
+
+  const registerAccount = (email: string, username: string, password: string) => runAccountRequest("Creating account…", "Check your email for the verification token.", () => commands.requestPublicRegistration(email, username, password));
+  const resendAccountVerification = (email: string) => runAccountRequest("Sending verification token…", "If the registration is pending, a new token has been sent.", () => commands.resendVerification(email));
+  const requestAccountPasswordReset = (email: string) => runAccountRequest("Requesting password reset…", "If the account exists, a reset token has been sent.", () => commands.requestPasswordReset(email));
+  const resetAccountPassword = (token: string, password: string) => runAccountRequest("Updating password…", "Password updated. Sign in with the new password.", () => commands.resetPassword(token, password));
+
+  async function verifyAccountEmail(token: string): Promise<boolean> {
+    if (accountBusy) return false;
+    accountBusy = true;
+    accountError = "";
+    accountProgress = "Verifying email…";
+    try {
+      await finishAccountAuthentication(await commands.verifyEmail(token));
+      return true;
+    } catch (reason) {
+      accountError = errorMessage(reason);
+      accountProgress = "";
+      return false;
     } finally {
       accountBusy = false;
     }
@@ -475,7 +942,19 @@
       accountProgress = "";
       librarySyncStatuses = [];
       libraryTransfers = [];
-      await loadLibraries();
+      accountSessions = [];
+      if (isWebApp) {
+        webAppReady = false;
+        readerBook = null;
+        libraries = [];
+        activeLibraryId = "";
+        loadingLibrary = true;
+        libraryError = "";
+        resetLibraryData();
+        navigate("/login", true);
+      } else {
+        await loadLibraries();
+      }
     } catch (reason) {
       accountError = errorMessage(reason);
       accountProgress = "";
@@ -484,33 +963,68 @@
     }
   }
 
-  async function syncLibraryToServer(libraryId: string) {
-    if (librarySyncBusyId || accountBusy) return;
-    librarySyncBusyId = libraryId;
+  async function revokeAccountSession(sessionId: string) {
+    if (accountBusy) return;
+    const selected = accountSessions.find((session) => session.session_id === sessionId);
+    const prompt = selected?.current ? "Sign out this session?" : "Revoke this session? The device will need to sign in again.";
+    if (!window.confirm(prompt)) return;
+    accountBusy = true;
     accountError = "";
-    accountProgress = "Preparing library…";
+    accountProgress = selected?.current ? "Signing out this session…" : "Revoking session…";
     try {
-      await commands.uploadAndSyncLibrary(libraryId);
-      accountProgress = "Up to date";
-      await loadServerTransferState();
+      accountStatus = await commands.revokeAccountSession(sessionId);
+      accountProgress = "";
+      if (accountStatus.signed_in) {
+        await loadAccountSessions();
+      } else {
+        accountSessions = [];
+        librarySyncStatuses = [];
+        libraryTransfers = [];
+        if (isWebApp) {
+          webAppReady = false;
+          readerBook = null;
+          libraries = [];
+          activeLibraryId = "";
+          resetLibraryData();
+          navigate("/login", true);
+        } else {
+          await loadLibraries();
+        }
+      }
     } catch (reason) {
       accountError = errorMessage(reason);
       accountProgress = "";
     } finally {
-      librarySyncBusyId = "";
+      accountBusy = false;
     }
   }
 
-  async function createFirstLibrary(event: SubmitEvent) {
-    event.preventDefault();
+  async function revokeOtherAccountSessions() {
+    if (accountBusy || accountSessions.length <= 1 || !window.confirm("Sign out every other session? Those devices will need to sign in again.")) return;
+    accountBusy = true;
+    accountError = "";
+    accountProgress = "Signing out other sessions…";
+    try {
+      const revoked = await commands.revokeOtherAccountSessions();
+      await loadAccountSessions();
+      accountProgress = revoked === 1 ? "Signed out 1 other session." : `Signed out ${revoked} other sessions.`;
+    } catch (reason) {
+      accountError = errorMessage(reason);
+      accountProgress = "";
+    } finally {
+      accountBusy = false;
+    }
+  }
+
+  async function createLibrary(name: string) {
     if (creatingLibrary) return;
 
     creatingLibrary = true;
     libraryError = "";
     try {
-      const library = await measureInvoke("create_library", () => commands.createLibrary(newLibraryName.trim() || "Library"));
-      libraries = [library];
-      newLibraryName = "";
+      const library = await measureInvoke("create_library", () => commands.createLibrary(name));
+      libraries = sortedLibraries([...libraries.filter((entry) => entry.library_id !== library.library_id), library]);
+      showCreateLibrary = false;
       await selectLibrary(library.library_id);
     } catch (reason) {
       libraryError = errorMessage(reason);
@@ -519,38 +1033,65 @@
     }
   }
 
+  async function openLibraryFolders() {
+    showLibrarySwitcher = false;
+    libraryError = "";
+    const selected = await openDialog({ title: "Open libraries", directory: true, multiple: true });
+    const paths = typeof selected === "string" ? [selected] : selected ?? [];
+    if (!paths.length) return;
+    const opened: LibraryEntry[] = [];
+    const failures: string[] = [];
+    for (const path of paths) {
+      try {
+        opened.push(await commands.openLibraryFolder(path));
+      } catch (reason) {
+        failures.push(`${path}: ${errorMessage(reason)}`);
+      }
+    }
+    if (opened.length) {
+      libraries = sortedLibraries(await commands.getLibraries());
+      await selectLibrary(opened.at(-1)!.library_id);
+    }
+    if (failures.length) libraryError = `Could not open some libraries: ${failures.join("; ")}`;
+  }
+
   async function openFolder(folder: LibraryDirectory) {
     await loadDirectory(folder.id, [...folderStack, { id: folder.id, name: folder.name }]);
+    navigate(libraryRoute("library", activeLibraryId, folder.id));
   }
 
   async function goToFolder(level: number) {
     const nextStack = folderStack.slice(0, level);
     const dirId = nextStack.at(-1)?.id ?? "__root__";
     await loadDirectory(dirId, nextStack);
+    navigate(libraryRoute("library", activeLibraryId, dirId));
   }
 
   async function createFolder(name: string) {
     const parentId = folderStack.at(-1)?.id ?? "__root__";
-    const created = await measureInvoke("create_directory", () => commands.createDirectory(parentId, name));
-    const dirs = directoryContent.dirs.filter((folder) => folder.id !== created.id);
+    const created = await measureInvoke("create_directory", () => commands.createDirectory(activeLibraryId, parentId, name));
+    const dirs = directoryContent.directories.filter((folder) => folder.id !== created.id);
     directoryContent = {
       ...directoryContent,
-      dirs: [...dirs, created].sort((left, right) => left.name.localeCompare(right.name)),
+      directories: [...dirs, created].sort((left, right) => naturalCompare(left.name, right.name)),
     };
   }
 
-  async function selectAuthor(authorName: string) {
+  async function selectAuthor(authorId: string, authorName: string) {
     const request = ++authorRequest;
     const generation = libraryGeneration;
-    selectedAuthor = authorName;
-    authorGroups = [];
     authorBooksLoading = true;
     libraryError = "";
     try {
-      const groups = await measureInvoke("author_books", () => commands.getAuthorFolderBooks(authorName));
-      if (request !== authorRequest || generation !== libraryGeneration || authorName !== selectedAuthor) return;
-      await commitAndMeasureRender("author_books", () => (authorGroups = groups), groups.reduce((count, group) => count + group.books.length, 0));
-      mergeBookDownloadStates(groups.flatMap((group) => group.books));
+      const view = await measureInvoke("author_books", () => commands.getLibraryAuthors(activeLibraryId, authorId));
+      if (request !== authorRequest || generation !== libraryGeneration) return;
+      const books = view.books ?? [];
+      await commitAndMeasureRender("author_books", () => {
+        selectedAuthorId = authorId;
+        selectedAuthorName = authorName;
+        authorBooks = books;
+      }, books.length);
+      mergeBookDownloadStates(books);
     } catch (reason) {
       if (request === authorRequest && generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
@@ -563,18 +1104,20 @@
     const query = searchQuery.trim();
     if (!query) {
       searchResults = [];
+      searchCompletedQuery = "";
       searchPending = false;
       return;
     }
     searchPending = true;
-    searchTimer = setTimeout(() => void runSearch(query), 220);
+    searchTimer = setTimeout(() => void runSearch(query), SEARCH_DEBOUNCE_MS);
   }
 
   async function runSearch(query: string) {
     try {
-      const results = await measureInvoke("search", () => commands.searchBooks(query, 100));
+      const results = await measureInvoke("search", () => commands.searchLibrary(activeLibraryId, query, BROWSING_CONTENT_CONTRACT.search_result_limit));
       if (query === searchQuery.trim()) {
         await commitAndMeasureRender("search", () => (searchResults = results), results.length);
+        searchCompletedQuery = query;
         mergeBookDownloadStates(results);
       }
     } catch (reason) {
@@ -607,8 +1150,32 @@
     }
   }
 
+  function loadLibraryViewPreferences() {
+    try {
+      const saved = localStorage.getItem(BROWSING_UI_PREFERENCES_KEY);
+      const parsed = saved ? JSON.parse(saved) : {};
+      if (parsed?.library_view_mode === "cover" || parsed?.library_view_mode === "detailed") {
+        libraryViewMode = parsed.library_view_mode;
+      } else {
+        libraryViewMode = DEFAULT_LIBRARY_VIEW_MODE;
+      }
+    } catch {
+      libraryViewMode = DEFAULT_LIBRARY_VIEW_MODE;
+    }
+  }
+
+  function saveLibraryViewPreference(mode: LibraryViewMode) {
+    libraryViewMode = mode;
+    try {
+      localStorage.setItem(BROWSING_UI_PREFERENCES_KEY, JSON.stringify({ library_view_mode: mode }));
+    } catch {
+      // Ignore persistence failures for optional local preference state.
+    }
+  }
+
   function saveBrowsingPreference(patch: BrowsingPreferencePatch) {
     const previous = browsingPreferences;
+    settingsError = "";
     const preferences = { ...browsingPreferences, [patch.preference]: patch.value } as BrowsingPreferences;
     browsingPreferences = preferences;
     const version = ++browsingPreferenceVersion;
@@ -616,8 +1183,9 @@
       try {
         const saved = await commands.updateBrowsingPreference(patch);
         if (version === browsingPreferenceVersion) browsingPreferences = saved;
-      } catch {
+      } catch (reason) {
         if (version === browsingPreferenceVersion) browsingPreferences = previous;
+        settingsError = `Could not save browsing setting: ${errorMessage(reason)}`;
       }
     });
     return browsingPreferenceSaveQueue;
@@ -638,40 +1206,91 @@
     return preferenceSaveQueue;
   }
 
-  async function openLibraryBook(book: BookSummary) {
-    openingBookId = book.id;
+  async function openLibraryBook(book: BookCardData) {
+    openingBookId = book.book_id;
     libraryError = "";
     try {
-      if ((bookDownloadStates[book.id] ?? book.download_state) !== "Downloaded") {
+      if ((bookDownloadStates[book.book_id] ?? (book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded")) !== "Downloaded") {
+        pendingOpenBook = book;
         await measureInvoke("download_book", () => downloadBook(book));
-        if (bookDownloadStates[book.id] !== "Downloaded") {
-          throw new Error("This book is queued for download and is not available offline yet.");
+        if (bookDownloadStates[book.book_id] !== "Downloaded") {
+          return;
         }
       }
-      const [rawBytes, initialCfi] = await Promise.all([
-        measureInvoke("open_book", () => commands.openBook(book.id) as unknown as Promise<BookBytes>),
-        measureInvoke("reading_position", () => commands.getBookReadingPosition(book.id)),
+      pendingOpenBook = null;
+      const openedBook = await openDownloadedBook(book.book_id, book.title || "Untitled", book.author);
+      readerBook = openedBook;
+      navigateToReader(book.book_id, openedBook);
+    } catch (reason) {
+      libraryError = errorMessage(reason);
+    } finally {
+      openingBookId = "";
+    }
+  }
+
+  async function openDownloadedBook(bookId: string, title?: string, author?: string): Promise<ReaderBook> {
+      const libraryId = activeLibraryId;
+      if (!libraryId) throw new Error("No library is selected");
+      const [rawBytes, fileName, initialCfi] = await Promise.all([
+        measureInvoke("open_book", () => commands.openBook(libraryId, bookId) as unknown as Promise<BookBytes>),
+        commands.getBookFileName(libraryId, bookId),
+        measureInvoke("reading_position", () => commands.getBookReadingPosition(libraryId, bookId)),
       ]);
       const buffer = rawBytes instanceof ArrayBuffer
         ? rawBytes
         : rawBytes instanceof Uint8Array
           ? rawBytes.slice().buffer
           : Uint8Array.from(rawBytes).buffer;
-      const title = book.title || "Untitled";
-      const file = new File([buffer], `${title}.epub`, { type: "application/epub+zip" });
-      await measureInvoke("update_last_read", () => commands.updateLastRead(book.id));
-      readerBook = {
-        key: `library:${activeLibraryId}:${book.id}`,
+      const resolvedTitle = title || fileName.replace(/\.[^.]+$/, "") || "Untitled";
+      const extension = fileName.split(".").at(-1)?.toLocaleLowerCase();
+      const mediaType = extension === "epub" ? "application/epub+zip"
+        : extension === "fb2" ? "application/x-fictionbook+xml"
+        : extension === "cbz" ? "application/vnd.comicbook+zip"
+        : extension === "webpub" ? "application/webpub+zip"
+        : extension === "html" || extension === "htm" ? "text/html"
+        : extension === "xhtml" ? "application/xhtml+xml"
+        : extension === "mobi" || extension === "azw" || extension === "azw3" ? "application/x-mobipocket-ebook"
+        : "application/octet-stream";
+      const file = new File([buffer], fileName, { type: mediaType });
+      void measureInvoke("update_last_read", () => commands.updateLastRead(libraryId, bookId)).catch((reason) => {
+        console.error("Could not update the book's last-read time", reason);
+      });
+      return {
+        key: `library:${libraryId}:${bookId}`,
+        bookId,
         file,
-        title,
-        author: book.author,
+        title: resolvedTitle,
+        author,
         initialCfi,
-        saveCfi: async (cfi) => { await measureInvoke("update_reading_position", () => commands.updateReadingPosition(book.id, cfi)); },
+        saveCfi: async (cfi, progress) => { await measureInvoke("update_reading_position", () => commands.updateReadingPosition(libraryId, bookId, cfi, progress)); },
+        loadAnnotations: () => commands.getAnnotations(libraryId, bookId),
+        upsertAnnotation: async (annotation) => { await commands.upsertAnnotation(libraryId, annotation); },
+        deleteAnnotation: async (annotationId, modifiedAt) => { await commands.deleteAnnotation(libraryId, annotationId, modifiedAt); },
+        loadBookmarks: () => commands.getBookmarks(libraryId, bookId),
+        upsertBookmark: async (bookmark) => { await commands.upsertBookmark(libraryId, bookmark); },
+        deleteBookmark: async (bookmarkId, modifiedAt) => { await commands.deleteBookmark(libraryId, bookmarkId, modifiedAt); },
       };
+  }
+
+  async function restoreReaderRoute(bookId: string) {
+    if (readerBook?.bookId === bookId || restoringReaderId === bookId) return;
+    const cached = readerRouteCache.get(bookId);
+    if (cached) {
+      readerBook = cached;
+      return;
+    }
+    restoringReaderId = bookId;
+    try {
+      const knownBook = [...recentlyAdded, ...recentlyRead, ...directoryContent.books, ...authorBooks, ...searchResults]
+        .find((book) => book.book_id === bookId);
+      const openedBook = await openDownloadedBook(bookId, knownBook?.title, knownBook?.author);
+      readerRouteCache.set(bookId, openedBook);
+      readerBook = openedBook;
     } catch (reason) {
       libraryError = errorMessage(reason);
+      navigate(libraryRoute("home"), true);
     } finally {
-      openingBookId = "";
+      restoringReaderId = "";
     }
   }
 
@@ -688,13 +1307,15 @@
     try {
       const file = await picked.asFile();
       const storageKey = `foliate-position:${file.name}:${file.size}:${file.lastModified}`;
-      readerBook = {
+      const openedBook: ReaderBook = {
         key: storageKey,
         file,
         title: file.name.replace(/\.epub$/i, ""),
         initialCfi: localStorage.getItem(storageKey),
         saveCfi: (cfi) => localStorage.setItem(storageKey, cfi),
       };
+      readerBook = openedBook;
+      navigateToReader(storageKey, openedBook);
     } catch (reason) {
       libraryError = errorMessage(reason);
     } finally {
@@ -707,7 +1328,7 @@
     libraryError = "";
     let picked: PickedEpub | null;
     try {
-      picked = await pickEpub();
+      picked = await pickEpub(true);
     } catch (reason) {
       libraryError = errorMessage(reason);
       return;
@@ -718,7 +1339,7 @@
       const sourcePath = await picked.asImportPath();
       if (!sourcePath) throw new Error("Adding books requires the native application.");
       const parentId = folderStack.at(-1)?.id ?? "__root__";
-      await measureInvoke("import_book", () => commands.importBook(parentId, sourcePath, picked.name));
+      await measureInvoke("import_book", () => commands.importBook({ library_id: activeLibraryId, directory_id: parentId }, sourcePath, picked.name));
       homeLoadedFor = "";
       authorsLoadedFor = "";
       await loadDirectory(parentId, folderStack, libraryGeneration, true);
@@ -740,19 +1361,38 @@
     let disposed = false;
     let unlistenDownloadStatus: (() => void) | undefined;
     let unlistenFolderDownloadStatus: (() => void) | undefined;
+    let unlistenTransferStatus: (() => void) | undefined;
+    let transferRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    loadLibraryViewPreferences();
     const unobserveNetwork = observeNetworkStatus((status) => {
       networkStatus = status;
-      void commands.updateNetworkStatus(status).then((reported) => (networkStatus = reported)).catch(() => undefined);
+      if (!isWebApp || accountStatus.signed_in) {
+        void commands.updateNetworkStatus(status).then((reported) => (networkStatus = reported)).catch(() => undefined);
+      }
     });
-    void loadLibraries();
-    void loadAccountStatus();
-    void loadBrowsingPreferences();
-    void loadReaderPreferences();
-    void loadTransferPreferences();
+    if (isWebApp) {
+      void initializeWebApp();
+    } else {
+      void (async () => {
+        await loadLibraries();
+        await restoreUiSession(readUiSession());
+        await loadAccountStatus();
+        await loadBrowsingPreferences();
+        await loadReaderPreferences();
+        await loadTransferPreferences();
+      })();
+    }
     void listen<DownloadStatusEvent>("library:download-status", ({ payload }) => {
       if (payload.library_id !== activeLibraryId) return;
       const change = payload.event.DownloadStatusChanged;
       bookDownloadStates = { ...bookDownloadStates, [change.book_id]: change.state };
+      if (pendingOpenBook?.book_id === change.book_id && change.state === "Downloaded" && openingBookId !== change.book_id) {
+        const book = pendingOpenBook;
+        pendingOpenBook = null;
+        queueMicrotask(() => void openLibraryBook(book));
+      } else if (pendingOpenBook?.book_id === change.book_id && change.state === "NotDownloaded") {
+        libraryError = "Could not download the book.";
+      }
     }).then((unlisten) => {
       if (disposed) unlisten();
       else unlistenDownloadStatus = unlisten;
@@ -772,10 +1412,33 @@
       if (disposed) unlisten();
       else unlistenFolderDownloadStatus = unlisten;
     }).catch(() => undefined);
+    void listen("library:transfer-status", () => {
+      if (activeDestination !== "account" || !accountStatus.signed_in) return;
+      if (transferRefreshTimer) clearTimeout(transferRefreshTimer);
+      transferRefreshTimer = setTimeout(() => void loadServerTransferState().catch((reason) => (accountError = errorMessage(reason))), 120);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenTransferStatus = unlisten;
+    }).catch(() => undefined);
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (isWebApp || readerBook || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      const destination = ({ "1": "home", "2": "library", "3": "authors", "4": "search", "5": "store", "6": "account", "7": "settings" } as const)[event.key];
+      if (destination) {
+        event.preventDefault();
+        setDestination(destination);
+      } else if (event.key.toLocaleLowerCase() === "f") {
+        event.preventDefault();
+        setDestination("search");
+      }
+    };
+    document.addEventListener("keydown", handleShortcut);
     return () => {
       disposed = true;
       unlistenDownloadStatus?.();
       unlistenFolderDownloadStatus?.();
+      unlistenTransferStatus?.();
+      if (transferRefreshTimer) clearTimeout(transferRefreshTimer);
+      document.removeEventListener("keydown", handleShortcut);
       unobserveNetwork();
       if (searchTimer) clearTimeout(searchTimer);
       clearThumbnailCache();
@@ -783,97 +1446,166 @@
   });
 </script>
 
-<svelte:head><title>{readerBook ? `${readerBook.title} · Reader` : `${destinationTitle} · ${APP_NAME}`}</title></svelte:head>
+<svelte:head><title>{isWebApp && !accountStatus.signed_in ? `Account · ${APP_NAME}` : readerBook ? `${readerBook.title} · Reader` : `${destinationTitle} · ${APP_NAME}`}</title></svelte:head>
 
-{#if readerBook}
+{#if isWebApp && (!accountResolved || (accountStatus.signed_in && !webAppReady))}
+  <main class="auth-loading" aria-live="polite">
+    <span class="loader"></span>
+    <strong>{accountResolved ? "Opening your library" : "Checking your session"}</strong>
+  </main>
+{:else if isWebApp && !accountStatus.signed_in}
+  <LoginScreen
+    busy={accountBusy}
+    progress={accountProgress}
+    error={accountError}
+    onlogin={loginToServer}
+    onregister={registerAccount}
+    onresendverification={resendAccountVerification}
+    onverifyemail={verifyAccountEmail}
+    onrequestpasswordreset={requestAccountPasswordReset}
+    onresetpassword={resetAccountPassword}
+  />
+{:else if readerBook}
   {#key readerBook.key}
     <Reader
       book={readerBook}
       preferences={readerPreferences}
+      applicationTheme={browsingPreferences.theme}
       onpreferenceschange={saveReaderPreference}
-      onclose={() => (readerBook = null)}
+      onclose={closeReader}
     />
   {/key}
 {:else}
-  <div class="adaptive-shell">
-    <AdaptiveNavigation active={activeDestination} onnavigate={setDestination} onsettings={() => (showBrowsingSettings = true)} />
+  <div class="adaptive-shell" style={browsingLayoutStyle}>
+    <AdaptiveNavigation
+      active={activeDestination}
+      libraryName={activeLibrary?.library_name ?? "Libraries"}
+      onnavigate={setDestination}
+      onlibraries={openLibrarySwitcher}
+      onaccount={() => setDestination("account")}
+      onsettings={() => setDestination("settings")}
+    />
 
     <div class="app-column">
       <AppTopbar
+        pageTitle={destinationTitle}
         libraryName={activeLibrary?.library_name ?? "Libraries"}
         folders={folderStack}
         showBreadcrumb={activeDestination === "library"}
         showLibraryActions={activeDestination === "library"}
         {addingBook}
-        onlibraries={() => (showLibrarySwitcher = true)}
-        onsettings={() => (showBrowsingSettings = true)}
+        accountSignedIn={accountStatus.signed_in}
+        onlibraries={openLibrarySwitcher}
+        onaccount={() => setDestination("account")}
+        onsettings={() => setDestination("settings")}
         onaddbook={addBookToCurrentFolder}
         onnewfolder={() => (showCreateFolder = true)}
         onfolder={goToFolder}
       />
 
-      <main class:library-view={activeDestination === "library"} class:authors-view={activeDestination === "authors"} class="content">
-        {#if activeDestination === "store"}
-          <Store {activeLibraryId} onimported={storeBookImported} />
+      <main class:library-view={activeDestination === "library"} class:authors-view={activeDestination === "authors"} class:store-view={activeDestination === "store"} class="content">
+        {#if activeDestination === "account"}
+          <ServerAccountDialog
+            account={accountStatus}
+            {accountBusy}
+            {accountProgress}
+            {accountError}
+            {librarySyncStatuses}
+            {libraryTransfers}
+            {accountSessions}
+            onlogin={loginToServer}
+            onlogout={logoutFromServer}
+            onrevokesession={revokeAccountSession}
+            onrevokeothersessions={revokeOtherAccountSessions}
+            onregister={registerAccount}
+            onresendverification={resendAccountVerification}
+            onverifyemail={verifyAccountEmail}
+            onrequestpasswordreset={requestAccountPasswordReset}
+            onresetpassword={resetAccountPassword}
+          />
+        {:else if activeDestination === "settings"}
+          <BrowsingSettingsDialog
+            preferences={browsingPreferences}
+            {networkStatus}
+            {transferPreferences}
+            {libraryViewMode}
+            error={settingsError}
+            onchange={saveBrowsingPreference}
+            ontransferpreference={saveTransferPreference}
+            onlibraryviewmode={saveLibraryViewPreference}
+          />
+        {:else if activeDestination === "store" && !activeLibraryId}
+          <EmptyPage
+            title={BROWSING_STATES_CONTRACT.no_libraries_title}
+            description={BROWSING_STATES_CONTRACT.no_libraries_description}
+            primaryLabel={BROWSING_STATES_CONTRACT.create_library_label}
+            onprimary={() => setDestination("library")}
+          />
+        {:else if activeDestination === "store"}
+          <Store {activeLibraryId} libraryName={activeLibrary?.library_name ?? "library"} onimported={storeBookImported} />
         {:else if loadingLibrary}
           <section class="page-state" aria-live="polite">
             <span class="loader"></span>
-            <strong>Loading your library</strong>
+            <strong>{BROWSING_STATES_CONTRACT.loading_library_label}</strong>
           </section>
         {:else if !libraries.length}
-          <section class="first-library">
-            <strong>No libraries</strong>
-            <p>Add a library to organize your books.</p>
-            <form class="first-library-form" onsubmit={createFirstLibrary}>
-              <input aria-label="Library name" bind:value={newLibraryName} placeholder="Library name" maxlength="255" />
-              <button type="submit" disabled={creatingLibrary}>{creatingLibrary ? "Adding…" : "Add library"}</button>
-            </form>
-          </section>
+          <EmptyPage title={BROWSING_STATES_CONTRACT.no_libraries_title} description={BROWSING_STATES_CONTRACT.no_libraries_description} primaryLabel={BROWSING_STATES_CONTRACT.create_library_label} onprimary={() => { showCreateLibrary = true; }} />
         {:else if activeDestination === "home"}
-          {#if isWebDemo}
-            <section class="web-demo-banner">
-              <div><strong>Browser demo</strong><span>Explore the interface, or open an EPUB from your device in the full reader.</span></div>
-              <button type="button" onclick={() => void openDeviceFile()}>Open an EPUB</button>
-            </section>
-          {/if}
-          {#if homeLoading && homeLoadedFor !== activeLibraryId}
-            <div class="inline-empty">Loading books…</div>
+          {#if !visibleRecentlyInProgress.length && !visibleRecentlyFinished.length && !visibleRecentlyAdded.length}
+            <EmptyPage primaryLabel="Add book" onprimary={addBookToCurrentFolder} />
           {:else}
-          {#if recentlyRead.length}
+          {#if visibleRecentlyInProgress.length}
             <BookShelf
+              libraryId={activeLibraryId}
               id="recently-read-carousel"
               title="Recently read"
-              books={recentlyRead}
+              books={visibleRecentlyInProgress}
               emptyMessage="No books in progress yet."
               first
               {openingBookId}
               downloadStates={bookDownloadStates}
               onopen={openLibraryBook}
               ondownload={downloadBook}
+              onremove={removeLocalBookCopy}
             />
           {/if}
 
-          <BookShelf
+          {#if visibleRecentlyFinished.length}
+            <BookShelf
+              libraryId={activeLibraryId}
+              id="finished-carousel"
+              title="Finished"
+              books={visibleRecentlyFinished}
+              emptyMessage="No finished books yet."
+              first={!visibleRecentlyInProgress.length}
+              {openingBookId}
+              downloadStates={bookDownloadStates}
+              onopen={openLibraryBook}
+              ondownload={downloadBook}
+              onremove={removeLocalBookCopy}
+            />
+          {/if}
+
+          {#if visibleRecentlyAdded.length}<BookShelf
+            libraryId={activeLibraryId}
             id="recently-added-carousel"
             title="Recently added"
-            books={recentlyAdded}
+            books={visibleRecentlyAdded}
             emptyMessage="No books have been added yet."
-            first={!recentlyRead.length}
-            maxItems={20}
+            first={!visibleRecentlyInProgress.length && !visibleRecentlyFinished.length}
+            maxItems={BROWSING_CONTENT_CONTRACT.home_book_limit}
             {openingBookId}
             downloadStates={bookDownloadStates}
             onopen={openLibraryBook}
             ondownload={downloadBook}
-          />
+            onremove={removeLocalBookCopy}
+          />{/if}
           {/if}
         {:else if activeDestination === "library"}
           <section class="content-section library-section">
-            {#if folderLoading}
-              <div class="inline-empty">Loading folder…</div>
-            {:else}
-              {#if directoryContent.dirs.length}
+              {#if directoryContent.directories.length}
                 <div class="folder-grid">
-                  {#each directoryContent.dirs.filter((folder) => folder.id !== "__root__") as folder}
+                  {#each directoryContent.directories.filter((folder) => folder.id !== "__root__") as folder}
                     <FolderCard
                       {folder}
                       status={folderDownloadStatuses[folder.id]}
@@ -885,36 +1617,46 @@
                 </div>
               {/if}
               <BookGrid
-                books={directoryContent.books}
-                emptyMessage={directoryContent.dirs.length ? "" : "This folder is empty."}
+                libraryId={activeLibraryId}
+                books={visibleDirectoryBooks}
+                detailed={libraryViewMode === "detailed"}
+                emptyMessage=""
                 {openingBookId}
                 downloadStates={bookDownloadStates}
                 onopen={openLibraryBook}
                 ondownload={downloadBook}
+                onremove={removeLocalBookCopy}
               />
-            {/if}
+              {#if !directoryContent.directories.length && !visibleDirectoryBooks.length}
+                <EmptyPage
+                  title={folderStack.length ? BROWSING_STATES_CONTRACT.empty_folder_title : BROWSING_STATES_CONTRACT.empty_library_title}
+                  description={folderStack.length ? BROWSING_STATES_CONTRACT.empty_folder_description : BROWSING_STATES_CONTRACT.empty_library_description}
+                  primaryLabel="Add book"
+                  secondaryLabel="New folder"
+                  onprimary={addBookToCurrentFolder}
+                  onsecondary={() => { showCreateFolder = true; }}
+                />
+              {/if}
           </section>
         {:else if activeDestination === "authors"}
           <section class="authors-layout" aria-label="Authors">
-            <div class:has-selection={selectedAuthor} class="author-list-panel">
+            <div class:has-selection={selectedAuthorId} class="author-list-panel">
               <label class="author-filter">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
                 <input id="author-filter" type="search" bind:value={authorFilter} onkeydown={handleAuthorFilterKeydown} autocomplete="off" aria-label="Filter authors" />
               </label>
-              {#if authorsLoading && authorsLoadedFor !== activeLibraryId}
-                <div class="inline-empty">Loading authors…</div>
-              {:else if filteredAuthors.length}
+              {#if filteredAuthors.length}
                 <div class="author-list-scroll">
                   <div class="author-list">
                     {#each visibleAuthors as author, index}
                       <button
-                        class:active={selectedAuthor === author.name}
+                        class:active={selectedAuthorId === author.id}
                         type="button"
                         data-author-index={index}
                         tabindex={index === focusedAuthorIndex ? 0 : -1}
                         onfocus={() => (focusedAuthorIndex = index)}
                         onkeydown={(event) => handleAuthorKeydown(event, index)}
-                        onclick={() => { focusedAuthorIndex = index; void selectAuthor(author.name); }}
+                        onclick={() => { focusedAuthorIndex = index; void selectAuthor(author.id, author.name); }}
                       >
                         <span class="author-avatar">{author.name.slice(0, 1).toUpperCase() || "?"}</span>
                         <span><strong>{author.name || "Unknown author"}</strong><small>{author.book_count} {author.book_count === 1 ? "book" : "books"}</small></span>
@@ -922,48 +1664,63 @@
                       </button>
                     {/each}
                   </div>
-                  {#if visibleAuthorCount < filteredAuthors.length}
-                    <button class="author-load-more" type="button" onclick={() => (visibleAuthorCount += AUTHOR_PAGE_SIZE)}>
-                      Show more ({filteredAuthors.length - visibleAuthorCount})
-                    </button>
-                  {/if}
                 </div>
               {:else}
-                <div class="inline-empty">{authorFilter.trim() ? "No matching authors." : "No authors found."}</div>
+                {#if authorFilter.trim()}
+                  <div class="inline-empty">No matching authors.</div>
+                {:else}
+                  <EmptyPage title="No authors" primaryLabel="Add book" onprimary={addBookToCurrentFolder} />
+                {/if}
               {/if}
             </div>
 
             <div class="author-books-panel">
-              {#if authorBooksLoading}
-                <div class="inline-empty">Loading books…</div>
-              {:else if selectedAuthor}
+              {#if selectedAuthorId}
                 <div class="section-heading author-heading">
                   <button class="author-back" type="button" onclick={clearSelectedAuthor}>← <span>Authors</span></button>
-                  <div><h2>{selectedAuthor}</h2><p>{authorBooks.length} {authorBooks.length === 1 ? "book" : "books"}</p></div>
+                <div><h2>{selectedAuthorName}</h2><p>{visibleAuthorBooks.length} {visibleAuthorBooks.length === 1 ? "book" : "books"}</p></div>
                 </div>
-                <BookGrid books={authorBooks} emptyMessage="No books found for this author." {openingBookId} downloadStates={bookDownloadStates} onopen={openLibraryBook} ondownload={downloadBook} />
+                <BookGrid
+                  libraryId={activeLibraryId}
+                  books={visibleAuthorBooks}
+                  detailed={libraryViewMode === "detailed"}
+                  emptyMessage="No books found for this author."
+                  {openingBookId}
+                  downloadStates={bookDownloadStates}
+                  onopen={openLibraryBook}
+                  ondownload={downloadBook}
+                  onremove={removeLocalBookCopy}
+                />
+                {#key selectedAuthorId}
+                  <AuthorCatalogResults authorId={selectedAuthorId} authorName={selectedAuthorName} {activeLibraryId} onimported={storeBookImported} />
+                {/key}
               {/if}
             </div>
           </section>
         {:else}
           <section class="search-page">
-            <div class="search-intro">
-              <h2>Search</h2>
-            </div>
             <label class="search-field">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
-              <input id="library-search" type="search" bind:value={searchQuery} oninput={scheduleSearch} placeholder="Title or author" autocomplete="off" />
-              {#if searchPending}<span class="loader small"></span>{/if}
+              <input id="library-search" type="search" bind:value={searchQuery} oninput={scheduleSearch} placeholder="Title" autocomplete="off" />
             </label>
-            {#if searchQuery.trim()}
-              <div class="search-status">{searchPending ? "Searching…" : `${searchResults.length} ${searchResults.length === 1 ? "result" : "results"}`}</div>
-              <BookGrid books={searchResults} emptyMessage={searchPending ? "" : "No matching books."} {openingBookId} downloadStates={bookDownloadStates} onopen={openLibraryBook} ondownload={downloadBook} />
+            {#if searchCompletedQuery}
+              <BookGrid
+                libraryId={activeLibraryId}
+                books={visibleSearchResults}
+                detailed={libraryViewMode === "detailed"}
+                emptyMessage={BROWSING_STATES_CONTRACT.no_search_results_label}
+                {openingBookId}
+                downloadStates={bookDownloadStates}
+                onopen={openLibraryBook}
+                ondownload={downloadBook}
+                onremove={removeLocalBookCopy}
+              />
             {/if}
           </section>
         {/if}
 
         {#if libraryError}
-          <p class="error-banner">Library unavailable: {libraryError}</p>
+          <div class="error-banner" role="alert"><span>Library unavailable: {libraryError}</span><button type="button" onclick={() => void retryActiveSection()}>{BROWSING_STATES_CONTRACT.retry_label}</button></div>
         {/if}
       </main>
     </div>
@@ -974,7 +1731,8 @@
         {activeLibraryId}
         onclose={() => (showLibrarySwitcher = false)}
         onselect={selectLibrary}
-        onopenfile={() => { showLibrarySwitcher = false; return openDeviceFile(); }}
+        oncreate={() => { showLibrarySwitcher = false; showCreateLibrary = true; }}
+        onopen={openLibraryFolders}
       />
     {/if}
 
@@ -982,27 +1740,10 @@
       <CreateFolderDialog onclose={() => (showCreateFolder = false)} oncreate={createFolder} />
     {/if}
 
-    {#if showBrowsingSettings}
-      <BrowsingSettingsDialog
-        preferences={browsingPreferences}
-        account={accountStatus}
-        accountBusy={accountBusy}
-        accountProgress={accountProgress}
-        accountError={accountError}
-        {librarySyncStatuses}
-        {libraryTransfers}
-        {librarySyncBusyId}
-        {networkStatus}
-        {transferPreferences}
-        onclose={() => (showBrowsingSettings = false)}
-        onchange={saveBrowsingPreference}
-        onlogin={loginToServer}
-        onsync={syncServerLibraries}
-        onsynclibrary={syncLibraryToServer}
-        ontransferpreference={saveTransferPreference}
-        onlogout={logoutFromServer}
-      />
+    {#if showCreateLibrary}
+      <CreateLibraryDialog busy={creatingLibrary} onclose={() => (showCreateLibrary = false)} oncreate={createLibrary} />
     {/if}
+
   </div>
 {/if}
 
@@ -1020,9 +1761,12 @@
   :global(*) { box-sizing: border-box; }
   :global(html), :global(body), :global(#app) { height: 100%; }
   :global(body) { margin: 0; min-width: 20rem; overflow: hidden; }
+  :global(:where(button, a, input, select, textarea, [tabindex]):focus-visible) { outline: 2px solid var(--color-accent); outline-offset: 2px; }
   button, input { font: inherit; }
   button, label { -webkit-tap-highlight-color: transparent; }
   svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+
+  .auth-loading { display: grid; min-height: 100dvh; place-content: center; justify-items: center; gap: .8rem; color: var(--color-subtle-text); background: var(--color-surface-bg); font-size: .8rem; }
 
   .adaptive-shell {
     --page-gutter: 1rem;
@@ -1065,7 +1809,7 @@
   .content::-webkit-scrollbar-thumb { border: .14rem solid transparent; border-radius: 999px; background: var(--color-disabled-text); background-clip: padding-box; }
   .content.library-view { padding-top: 0; }
 
-  .section-heading h2, .search-intro h2 {
+  .section-heading h2 {
     margin: 0;
     font-family: var(--font-heading-family);
     font-weight: 500;
@@ -1073,9 +1817,9 @@
   }
   .content-section { margin-top: 2rem; }
   .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: .9rem; }
-  .section-heading h2, .search-intro h2 { font-size: clamp(1.55rem, 7vw, 2.15rem); }
+  .section-heading h2 { font-size: clamp(1.55rem, 7vw, 2.15rem); }
 
-  .page-state, .first-library {
+  .page-state {
     display: grid;
     place-items: center;
     min-height: 17rem;
@@ -1085,22 +1829,14 @@
   }
   .page-state { gap: .75rem; }
   .loader { width: 1.4rem; height: 1.4rem; border: .18rem solid var(--color-border-color); border-top-color: var(--color-accent); border-radius: 50%; animation: spin .8s linear infinite; }
-  .loader.small { width: 1rem; height: 1rem; border-width: .13rem; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .inline-empty { display: grid; place-items: center; min-height: 8rem; color: var(--color-subtle-text); font-size: .84rem; text-align: center; }
-
-  .web-demo-banner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.4rem; padding: .9rem 1rem; border: 1px solid color-mix(in srgb, var(--color-accent) 35%, var(--color-border-color)); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-accent) 8%, var(--color-white-surface)); }
-  .web-demo-banner div { display: grid; gap: .18rem; }
-  .web-demo-banner strong { font-size: .82rem; }
-  .web-demo-banner span { color: var(--color-subtle-text); font-size: .74rem; line-height: 1.4; }
-  .web-demo-banner button { flex: none; min-height: 2.45rem; padding: .5rem .8rem; border: 0; border-radius: var(--radius-sm); color: var(--color-white-surface); background: var(--color-accent); font-size: .74rem; font-weight: 750; cursor: pointer; }
-  @media (max-width: 31rem) { .web-demo-banner { align-items: stretch; flex-direction: column; } }
 
   .library-section { margin-top: 0; }
   .folder-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .45rem; margin-bottom: 1.25rem; }
 
   .content.authors-view { display: flex; flex-direction: column; overflow: hidden; }
-  .authors-layout { display: grid; flex: 1; min-height: 0; gap: 2rem; overflow: hidden; }
+  .authors-layout { display: grid; flex: 1; width: min(1200px, 100%); min-height: 0; margin: 0 auto; gap: 2rem; overflow: hidden; }
   .author-list-panel { display: flex; flex-direction: column; min-height: 0; }
   .author-list-panel.has-selection { display: none; }
   .author-books-panel { display: none; min-height: 0; overflow-y: auto; }
@@ -1113,7 +1849,6 @@
   .author-filter input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; font-size: .82rem; }
   .author-list-scroll { flex: 1; min-height: 0; padding-right: .2rem; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-color: var(--color-disabled-text) transparent; scrollbar-width: thin; }
   .author-list { display: grid; gap: .4rem; }
-  .author-load-more { display: block; min-height: 2.5rem; margin: .8rem auto 0; padding: .5rem .9rem; border: 1px solid var(--color-border-color); border-radius: .6rem; color: var(--color-accent); background: var(--color-white-surface); font-size: .72rem; font-weight: 750; cursor: pointer; }
   .author-list button {
     display: grid;
     grid-template-columns: 2.65rem minmax(0, 1fr) auto;
@@ -1136,38 +1871,26 @@
   .author-list i { color: var(--color-disabled-text); font-style: normal; }
   .author-avatar { display: grid; place-items: center; width: 2.65rem; aspect-ratio: 1; border-radius: 50%; color: var(--color-white-surface); background: var(--color-accent); font: 500 1rem var(--font-heading-family); }
 
-  .search-intro { margin: 1rem 0 1.2rem; }
   .search-field { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-height: 3.6rem; padding: 0 1rem; border: 1px solid var(--color-border-color); border-radius: 1rem; background: color-mix(in srgb, var(--color-white-surface) 70%, transparent); box-shadow: 0 .7rem 2rem color-mix(in srgb, var(--color-box-shadow) 20%, transparent); }
   .search-field svg { width: 1.25rem; color: var(--color-accent); }
   .search-field input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font-size: 1rem; }
-  .search-status { min-height: 2.8rem; padding: 1rem .15rem .5rem; color: var(--color-subtle-text); font-size: .74rem; }
 
-  .first-library { min-height: 19rem; align-content: center; gap: .5rem; border: 1px dashed var(--color-border-color); border-radius: 1.25rem; }
-  .first-library strong { color: var(--color-ink-text); font: 500 1.35rem var(--font-heading-family); }
-  .first-library p { margin: 0 0 .6rem; font-size: .82rem; }
-  .first-library-form { display: flex; width: min(100%, 23rem); gap: .5rem; }
-  .first-library-form input { min-width: 0; flex: 1; min-height: 2.75rem; padding: .65rem .8rem; border: 1px solid var(--color-border-color); border-radius: .6rem; color: var(--color-ink-text); background: var(--color-card-bg); }
-  .first-library-form button { min-height: 2.75rem; padding: .65rem 1rem; border: 0; border-radius: .6rem; color: var(--color-white-surface); background: var(--color-accent); font-size: .8rem; font-weight: 750; cursor: pointer; }
-  .first-library-form button:disabled { opacity: .6; cursor: default; }
-  .error-banner { margin: 1rem 0; padding: .75rem 1rem; border-radius: .75rem; color: var(--color-danger-text); background: var(--color-danger-bg); font-size: .75rem; overflow-wrap: anywhere; }
+  .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1rem 0; padding: .75rem 1rem; border-radius: .75rem; color: var(--color-danger-text); background: var(--color-danger-bg); font-size: .75rem; overflow-wrap: anywhere; }
+  .error-banner button { flex: none; min-height: 2.2rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
 
   @media (min-width: 45rem) {
-    .adaptive-shell { --page-gutter: 1.5rem; display: grid; grid-template-columns: 5.25rem minmax(0, 1fr); }
-    .content { padding-top: 1.5rem; padding-right: max(var(--page-gutter), env(safe-area-inset-right)); padding-bottom: 3rem; padding-left: max(var(--page-gutter), env(safe-area-inset-left)); }
+    .adaptive-shell { --page-gutter: var(--layout-content-padding); display: grid; grid-template-columns: var(--layout-sidebar-width) minmax(0, 1fr); }
+    .content { padding-top: var(--layout-content-padding); padding-right: max(var(--page-gutter), env(safe-area-inset-right)); padding-bottom: 3rem; padding-left: max(var(--page-gutter), env(safe-area-inset-left)); }
     .content.authors-view { padding-bottom: 1.5rem; }
-    .authors-layout { grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr); align-items: stretch; }
+    .authors-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: stretch; }
     .author-list-panel.has-selection { display: flex; }
     .author-books-panel { display: block; }
     .author-back { display: none; }
     .author-list-panel { position: static; max-height: none; overflow: hidden; }
   }
 
-  @media (min-width: 70rem) {
-    .adaptive-shell { grid-template-columns: 14.5rem minmax(0, 1fr); }
-  }
-
   @media (min-width: 88rem) {
-    .adaptive-shell { --page-gutter: 2rem; grid-template-columns: 15.5rem minmax(0, 1fr); }
+    .adaptive-shell { --page-gutter: 2rem; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -1176,19 +1899,13 @@
 
   /* Compact library UI, aligned with the Floem desktop application. */
   .adaptive-shell { background: var(--color-app-bg); }
-  .content { max-width: 78rem; padding-top: 1.1rem; }
+  .content { max-width: none; padding-top: 1.1rem; }
   .content-section { margin-top: 1.8rem; }
   .section-heading { margin-bottom: .8rem; }
-  .section-heading h2, .search-intro h2 { font-size: 1.35rem; letter-spacing: -.02em; }
+  .section-heading h2 { font-size: 1.35rem; letter-spacing: -.02em; }
   .inline-empty { min-height: 5rem; justify-items: start; text-align: left; }
-  .first-library { min-height: 12rem; align-content: center; border: 0; border-radius: 0; }
-  .first-library strong { font-family: inherit; font-size: 1rem; }
-  .search-intro { margin-top: 0; }
   .search-field { border-radius: .65rem; box-shadow: none; }
   .author-list button { border-radius: .55rem; }
   .author-list button.active { background: var(--color-active-highlight); }
 
-  @media (min-width: 88rem) {
-    .adaptive-shell { grid-template-columns: 15.5rem minmax(0, 1fr); }
-  }
 </style>

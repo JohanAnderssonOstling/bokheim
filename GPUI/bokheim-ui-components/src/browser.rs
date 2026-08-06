@@ -1,25 +1,27 @@
 use gpui::prelude::*;
 use gpui::{Div, ElementId, FontWeight, Pixels, SharedString, Stateful, div, px};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::popover::Popover;
 use gpui_component::radio::Radio;
-use gpui_component::scroll::{Scrollable, ScrollableElement};
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
-use crate::{BrowserTheme, NAV_RAIL_WIDTH, content};
+use crate::{BrowserTheme, CONTENT_PADDING, NAV_RAIL_WIDTH, Scrollable, ScrollableElement, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT, content};
 
-pub fn nav_rail_item(id: impl Into<ElementId>, icon: IconName, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
+pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
     let label = label.into();
     Button::new(id)
         .ghost()
         .selected(selected)
         .w(px(NAV_RAIL_WIDTH - 16.0))
-        .h(px(72.0))
+        .h(px(64.0))
         .p_0()
         .rounded(px(10.0))
         .text_color(if selected { theme.accent } else { theme.text_muted })
-        .tooltip(label.clone())
+        .when(selected, |button| button.bg(theme.accent).text_color(theme.surface_alt).border_1().border_color(theme.accent))
         .child(div().size_full().flex().flex_col().items_center().justify_center().gap(px(6.0)).child(Icon::new(icon).large()).child(div().text_size(gpui::rems(11.0 / 16.0)).font_weight(FontWeight::SEMIBOLD).child(label)))
+}
+
+pub fn home_navigation_icon() -> Icon {
+    Icon::empty().path("icons/bokheim-home.svg")
 }
 
 pub fn browser_search_box() -> Div {
@@ -35,11 +37,11 @@ pub fn library_section_content() -> Div {
 }
 
 pub fn library_switcher_group() -> Div {
-    div().flex().items_center().gap(px(9.0))
+    div().w_full().h(px(72.0)).flex_none().flex().items_center().gap(px(9.0))
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
-    div().h(px(64.0)).flex_none().flex().flex_row().items_center().gap(px(12.0)).px(px(20.0)).bg(theme.surface).border_b_1().border_color(theme.border)
+    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(12.0)).px(px(CONTENT_PADDING)).bg(theme.surface).border_b_1().border_color(theme.border)
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -51,17 +53,58 @@ pub fn browser_topbar_center() -> Div {
 }
 
 pub fn browser_topbar_right() -> Div {
-    div().flex_1().min_w_0().flex().items_center().justify_end().gap(px(10.0))
+    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(TOPBAR_ACTION_GAP))
 }
 
 pub fn browser_search_page() -> Div {
     div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(18.0)).p(px(20.0))
 }
 
-pub fn library_switcher_popover(label: impl Into<SharedString>) -> Popover {
-    Popover::new("library-switcher")
-        .anchor(gpui::Anchor::BottomLeft)
-        .trigger(Button::new("library-switcher-trigger").label(label).ghost().dropdown_caret(true).h(px(42.0)).max_w(px(240.0)).px(px(10.0)).text_size(gpui::rems(15.0 / 16.0)).font_weight(FontWeight::BOLD))
+pub fn browser_actionable_empty(title: impl Into<SharedString>, description: impl Into<SharedString>, actions: impl IntoElement, font_family: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .min_h(px(240.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(9.0))
+        .text_center()
+        .child(div().text_size(gpui::rems(19.0 / 16.0)).font_weight(FontWeight::SEMIBOLD).font_family(font_family).child(title.into()))
+        .child(div().text_size(gpui::rems(13.0 / 16.0)).text_color(theme.text_muted).child(description.into()))
+        .child(div().mt(px(5.0)).child(actions))
+}
+
+pub fn library_switcher_trigger(label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    Button::new("library-switcher-trigger")
+        .ghost()
+        .w(px(NAV_RAIL_WIDTH - 16.0))
+        .h(px(64.0))
+        .px_0()
+        .overflow_hidden()
+        .text_size(gpui::rems(10.0 / 16.0))
+        .font_weight(FontWeight::BOLD)
+        .tooltip(label.clone())
+        .child(div().w(px(NAV_RAIL_WIDTH - 16.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+}
+
+pub fn library_switcher_overlay() -> Div {
+    div().absolute().inset_0().size_full().flex().items_center().justify_center().p(px(22.0))
+}
+
+pub fn library_switcher_scrim(theme: BrowserTheme) -> Stateful<Div> {
+    div().id("library-switcher-scrim").absolute().inset_0().size_full().bg(theme.overlay_scrim).cursor_default()
+}
+
+pub fn library_switcher_dialog(theme: BrowserTheme) -> Scrollable<Div> {
+    div().relative().w(px(304.0)).max_w_full().max_h_full().occlude().overflow_y_scrollbar().p(px(12.0)).rounded(px(12.0)).border_1().border_color(theme.border).bg(theme.card_bg).shadow(vec![gpui_component::box_shadow(
+        px(0.0),
+        px(14.0),
+        px(34.0),
+        px(0.0),
+        theme.shadow,
+    )])
 }
 
 pub fn library_switcher_panel() -> Div {
@@ -73,15 +116,58 @@ pub fn library_switcher_title(text: impl Into<SharedString>, theme: BrowserTheme
 }
 
 pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
-    Button::new(id).label(label).ghost().selected(selected).when(selected, |button| button.icon(IconName::Check)).w_full().h(px(40.0)).px(px(10.0)).text_size(gpui::rems(14.0 / 16.0))
+    let label = label.into();
+    Button::new(id)
+        .ghost()
+        .selected(selected)
+        .when(selected, |button| button.icon(IconName::Check))
+        .w_full()
+        .h(px(40.0))
+        .px(px(10.0))
+        .overflow_hidden()
+        .text_size(gpui::rems(14.0 / 16.0))
+        .tooltip(label.clone())
+        .child(div().w(px(220.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+}
+
+pub fn library_switcher_actions_label(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().mt(px(6.0)).pt(px(10.0)).px(px(10.0)).border_t_1().border_color(theme.border).text_size(gpui::rems(11.0 / 16.0)).font_weight(FontWeight::BOLD).text_color(theme.text_muted).child(text.into())
+}
+
+pub fn library_switcher_action_item(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
+    Button::new(id)
+        .label(label)
+        .icon(icon)
+        .secondary()
+        .outline()
+        .justify_start()
+        .w_full()
+        .h(px(40.0))
+        .px(px(10.0))
+        .rounded(px(9.0))
+        .border_color(theme.border)
+        .text_color(theme.accent)
+        .text_size(gpui::rems(13.0 / 16.0))
+        .font_weight(FontWeight::BOLD)
 }
 
 pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id).label(label).icon(icon).secondary().outline().h(px(40.0)).px(px(11.0)).rounded(px(10.0)).border_color(theme.border).text_color(theme.accent).text_size(gpui::rems(13.0 / 16.0)).font_weight(FontWeight::BOLD)
+    Button::new(id)
+        .label(label)
+        .icon(icon)
+        .secondary()
+        .outline()
+        .h(px(TOPBAR_ACTION_HEIGHT))
+        .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
+        .rounded(px(10.0))
+        .border_color(theme.border)
+        .text_color(theme.accent)
+        .text_size(gpui::rems(13.0 / 16.0))
+        .font_weight(FontWeight::BOLD)
 }
 
 pub fn browser_settings_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().items_center().p(px(28.0)).overflow_y_scrollbar()
+    div().size_full().min_h_0().min_w_0().flex().flex_col().items_center().p(px(18.0)).overflow_y_scrollbar()
 }
 
 pub fn browser_settings_content() -> Div {

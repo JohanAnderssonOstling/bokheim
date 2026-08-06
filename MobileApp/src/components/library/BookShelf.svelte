@@ -1,11 +1,12 @@
 <script lang="ts">
-  import type { BookSummary, DownloadState } from "../../lib/types";
+  import type { BookCardData, DownloadState } from "../../lib/types";
   import BookCard from "./BookCard.svelte";
 
   let {
     id,
     title,
     books,
+    libraryId,
     emptyMessage,
     first = false,
     maxItems,
@@ -13,17 +14,20 @@
     downloadStates = {},
     onopen,
     ondownload,
+    onremove,
   }: {
     id: string;
     title: string;
-    books: BookSummary[];
+    books: BookCardData[];
+    libraryId: string;
     emptyMessage: string;
     first?: boolean;
     maxItems?: number;
     openingBookId?: string;
     downloadStates?: Record<string, DownloadState>;
-    onopen: (book: BookSummary) => void | Promise<void>;
-    ondownload: (book: BookSummary) => void | Promise<void>;
+    onopen: (book: BookCardData) => void | Promise<void>;
+    ondownload: (book: BookCardData) => void | Promise<void>;
+    onremove: (book: BookCardData) => void | Promise<void>;
   } = $props();
 
   const visibleBooks = $derived(maxItems ? books.slice(0, maxItems) : books);
@@ -53,8 +57,8 @@
 
   {#if visibleBooks.length}
     <div class="track" {id} role="region" aria-label={`${title}, scrollable books`}>
-      {#each visibleBooks as book (book.id)}
-        <div class="slide"><BookCard {book} opening={openingBookId === book.id} downloadState={downloadStates[book.id]} {onopen} {ondownload} /></div>
+      {#each visibleBooks as book (book.book_id)}
+        <div class="slide"><BookCard {book} {libraryId} opening={openingBookId === book.book_id} downloadState={downloadStates[book.book_id]} {onopen} {ondownload} {onremove} /></div>
       {/each}
     </div>
   {:else}
@@ -81,6 +85,5 @@
   .slide { min-width: 0; scroll-snap-align: start; }
   .inline-empty { display: grid; min-height: 5rem; place-items: center start; color: var(--color-subtle-text); font-size: .84rem; text-align: left; }
   @media (min-width: 36rem) { .track { grid-auto-columns: minmax(8.5rem, 30%); gap: 1rem; } }
-  @media (min-width: 45rem) { .track { grid-auto-columns: minmax(8.5rem, 10.5rem); } }
-  @media (min-width: 70rem) { .track { grid-auto-columns: minmax(9rem, 11rem); } }
+  @media (min-width: 45rem) { .track { grid-auto-columns: var(--book-cover-width); column-gap: var(--book-grid-column-gap); } }
 </style>

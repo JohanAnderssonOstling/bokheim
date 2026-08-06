@@ -29,16 +29,17 @@ function evictOverflow() {
   }
 }
 
-export function getThumbnailUrl(bookId: string): Promise<string | null> {
-  const existing = cache.get(bookId);
+export function getThumbnailUrl(libraryId: string, bookId: string): Promise<string | null> {
+  const key = `${libraryId}:${bookId}`;
+  const existing = cache.get(key);
   if (existing) {
-    cache.delete(bookId);
-    cache.set(bookId, existing);
+    cache.delete(key);
+    cache.set(key, existing);
     return existing.promise;
   }
 
   const entry: CacheEntry = { active: true, promise: Promise.resolve(null) };
-  entry.promise = measureInvoke("thumbnail", () => commands.getBookThumbnail(bookId) as unknown as Promise<BinaryPayload>)
+  entry.promise = measureInvoke("thumbnail", () => commands.getBookThumbnail(libraryId, bookId) as unknown as Promise<BinaryPayload>)
     .then((payload) => {
       const bytes = asBytes(payload);
       if (!bytes.byteLength) return null;
@@ -51,7 +52,7 @@ export function getThumbnailUrl(bookId: string): Promise<string | null> {
       return url;
     })
     .catch(() => null);
-  cache.set(bookId, entry);
+  cache.set(key, entry);
   evictOverflow();
   return entry.promise;
 }

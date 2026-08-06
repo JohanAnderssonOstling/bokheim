@@ -64,7 +64,7 @@ pub fn apply(&mut self, cmd: RendererCommand);
 
 covering navigation (`nav_request_signal`, `nav_anchor_signal`, `history_nav_signal`,
 `position_update`, `cfi_position`), settings (`current_column_width`, `current_font_size`,
-`current_scale`, `current_line_numbers`), and search (`search_active`,
+`current_scale`), and search (`search_active`,
 `search_query_pending`, `search_nav`). The floem adapter keeps its `create_effect`s and
 translates each into an `apply` call.
 

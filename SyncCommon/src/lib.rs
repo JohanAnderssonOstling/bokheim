@@ -1,13 +1,101 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::str::FromStr;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use uuid::Uuid;
 
+pub use bokheim_algorithms::{audiobook_position_millis, audiobook_reading_position, pdf_page_from_reading_position, pdf_page_reading_position, valid_epub_cfi, valid_reading_position};
+
+mod contributor_roles;
+pub use contributor_roles::{ContentRole, ContributorRole, InvalidMarcRelatorCode, MarcRelatorCode, PerformanceRole, ProductionRole, ProvenanceRole, SupplementaryWriterRole, SupportRole, VisualRole};
+
 pub mod api;
+pub use bokheim_wire as wire;
+
+/// Maximum encoded size of a synchronized JPEG cover.
+pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
+/// Maximum width or height of a synchronized cover.
+pub const MAX_THUMBNAIL_DIMENSION: u32 = 2048;
+/// Maximum decoded pixel count of a synchronized cover.
+pub const MAX_THUMBNAIL_PIXELS: u64 = 4 * 1024 * 1024;
+/// Maximum number of synchronization mutations returned by one pull response.
+/// Clients drain additional pages using the explicit library revision cursor.
+pub const MAX_PULL_CHANGES: usize = 1_000;
+/// Maximum mutations accepted in one push/exchange page. Clients checkpoint
+/// larger durable outboxes page by page instead of creating unbounded database
+/// transactions or exceeding the HTTP body limit.
+pub const MAX_PUSH_MUTATIONS: usize = 1_000;
+/// Target maximum encoded mutation bytes selected by clients for one page.
+/// The HTTP request has additional envelope overhead and an 8 MiB hard limit.
+pub const MAX_PUSH_MUTATION_BYTES: usize = 4 * 1024 * 1024;
+/// Normal clock skew is harmless. A mutation further ahead than this is most
+/// likely produced by a misconfigured device and must not pin an LWW register.
+pub const MAX_LWW_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
+
+/// A non-negative Unix timestamp measured in milliseconds.
+///
+/// Synchronization uses this type for every wall-clock value so independent
+/// clients cannot accidentally mix seconds, milliseconds, and microseconds.
+/// The upper bound matches the signed PostgreSQL and SQLite integer storage
+/// used by the protocol implementations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct UnixMillis(u64);
+
+impl UnixMillis {
+    pub const MAX: u64 = i64::MAX as u64;
+
+    pub const fn new(value: u64) -> Result<Self, TimestampError> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(TimestampError)
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn storage_i64(self) -> i64 {
+        self.0 as i64
+    }
+
+    pub const fn saturating_add(self, milliseconds: u64) -> Self {
+        let value = self.0.saturating_add(milliseconds);
+        if value > Self::MAX {
+            Self(Self::MAX)
+        } else {
+            Self(value)
+        }
+    }
+}
+
+impl fmt::Display for UnixMillis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnixMillis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimestampError;
+
+impl fmt::Display for TimestampError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Unix-millisecond timestamps must fit signed 64-bit storage")
+    }
+}
+
+impl std::error::Error for TimestampError {}
 
 /// Stable logical identity of a book.
 ///
@@ -58,12 +146,19 @@ impl FromStr for BookId {
 
 impl Serialize for BookId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.canonical())
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.canonical())
+        } else {
+            serializer.serialize_u64(self.0)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for BookId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            return u64::deserialize(deserializer).map(Self::new);
+        }
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum CompatibleBookId {
@@ -127,12 +222,30 @@ impl FromStr for ContentHash {
 
 impl Serialize for ContentHash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        if serializer.is_human_readable() {
+            return serializer.serialize_str(self.as_str());
+        }
+        let encoded = self.as_str().as_bytes();
+        let mut bytes = [0_u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = (decode_hex_nibble(encoded[index * 2]) << 4) | decode_hex_nibble(encoded[index * 2 + 1]);
+        }
+        bytes.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for ContentHash {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            let bytes = <[u8; 32]>::deserialize(deserializer)?;
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut encoded = String::with_capacity(64);
+            for byte in bytes {
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            return Ok(Self(encoded));
+        }
         let value = String::deserialize(deserializer)?;
         Self::parse(&value).map_err(serde::de::Error::custom)
     }
@@ -208,8 +321,7 @@ macro_rules! domain_text_type {
     };
 }
 
-domain_text_type!(ActorId, "actor id");
-domain_text_type!(ClientId, "client id");
+domain_text_type!(ClientId, "replica id");
 domain_text_type!(LibraryId, "library id");
 domain_text_type!(DirId, "directory id");
 
@@ -217,54 +329,62 @@ domain_text_type!(DirId, "directory id");
 /// sequence this remains unique when a library database is copied and both
 /// copies subsequently produce changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EventId(Uuid);
+pub struct MutationId(Uuid);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EventIdError;
+pub struct MutationIdError;
 
-impl fmt::Display for EventIdError {
+impl fmt::Display for MutationIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("event id must be a non-nil UUID")
+        formatter.write_str("mutation id must be a non-nil UUID")
     }
 }
 
-impl std::error::Error for EventIdError {}
+impl std::error::Error for MutationIdError {}
 
-impl EventId {
+impl MutationId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
-    pub fn parse(value: &str) -> Result<Self, EventIdError> {
-        let value = Uuid::parse_str(value).map_err(|_| EventIdError)?;
+    pub fn parse(value: &str) -> Result<Self, MutationIdError> {
+        let value = Uuid::parse_str(value).map_err(|_| MutationIdError)?;
         if value.is_nil() {
-            Err(EventIdError)
+            Err(MutationIdError)
         } else {
             Ok(Self(value))
         }
     }
 }
 
-impl Default for EventId {
+impl Default for MutationId {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl fmt::Display for EventId {
+impl fmt::Display for MutationId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
-impl Serialize for EventId {
+impl Serialize for MutationId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_string())
+        } else {
+            self.0.into_bytes().serialize(serializer)
+        }
     }
 }
 
-impl<'de> Deserialize<'de> for EventId {
+impl<'de> Deserialize<'de> for MutationId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            let value = Uuid::from_bytes(<[u8; 16]>::deserialize(deserializer)?);
+            return if value.is_nil() { Err(serde::de::Error::custom(MutationIdError)) } else { Ok(Self(value)) };
+        }
         let value = String::deserialize(deserializer)?;
         Self::parse(&value).map_err(serde::de::Error::custom)
     }
@@ -326,27 +446,224 @@ fn decode_hex_nibble(byte: u8) -> u8 {
     }
 }
 
-/// Event types that collapse to one row per `(library_id, entity_id, event_type)`
-/// under LWW semantics. All other event types are append-only and deduped by
-/// `(library_id, event_id)`.
-///
-/// The Postgres partial indexes `idx_library_events_lww` / `idx_library_events_dedup`
-/// in the latest server migration hardcode the same list — keep them in sync.
-pub const SINGLETON_EVENT_TYPES: &[&str] = &["dir_state", "reading_position_updated", "book_opened", "book_metadata_updated"];
-
-/// Renders `SINGLETON_EVENT_TYPES` as a parenthesised SQL list, e.g.
-/// `('reading_position_updated', 'book_opened')`. Use to interpolate into
-/// `WHERE event_type IN ...` / `NOT IN ...` so the SQL matches the constant.
-pub fn singleton_event_types_sql_list() -> String {
-    let quoted: Vec<String> = SINGLETON_EVENT_TYPES.iter().map(|s| format!("'{}'", s)).collect();
-    format!("({})", quoted.join(", "))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum DirectoryState {
     Present { parent_id: DirId, name: FileName },
     Deleted { parent_id: DirId, name: FileName },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationStyle {
+    Highlight,
+    Underline,
+    Squiggly,
+    Strikethrough,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize, specta::Type)]
+pub struct PdfAnnotationRect {
+    #[specta(type = specta_typescript::Number)]
+    pub left: f32,
+    #[specta(type = specta_typescript::Number)]
+    pub top: f32,
+    #[specta(type = specta_typescript::Number)]
+    pub width: f32,
+    #[specta(type = specta_typescript::Number)]
+    pub height: f32,
+}
+
+impl PdfAnnotationRect {
+    pub fn new(left: f32, top: f32, width: f32, height: f32) -> Option<Self> {
+        let rect = Self { left, top, width, height };
+        rect.is_valid().then_some(rect)
+    }
+
+    pub fn is_valid(self) -> bool {
+        [self.left, self.top, self.width, self.height].into_iter().all(f32::is_finite)
+            && self.left >= 0.0
+            && self.top >= 0.0
+            && self.width > 0.0
+            && self.height > 0.0
+            && self.left + self.width <= 1.000_01
+            && self.top + self.height <= 1.000_01
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, specta::Type)]
+pub struct PdfAnnotationAnchor {
+    #[specta(type = specta_typescript::Number)]
+    pub page_index: u32,
+    pub rects: Vec<PdfAnnotationRect>,
+    pub fallback_cfi: Option<String>,
+}
+
+impl PdfAnnotationAnchor {
+    pub fn new(page_index: u32, rects: Vec<PdfAnnotationRect>, fallback_cfi: Option<String>) -> Option<Self> {
+        let fallback_valid = fallback_cfi.as_deref().is_none_or(valid_epub_cfi);
+        (!rects.is_empty() && rects.len() <= 4096 && rects.iter().all(|rect| rect.is_valid()) && fallback_valid).then_some(Self { page_index, rects, fallback_cfi })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnnotationAnchor {
+    EpubCfi {
+        cfi: String,
+    },
+    Pdf {
+        #[specta(type = specta_typescript::Number)]
+        page_index: u32,
+        rects: Vec<PdfAnnotationRect>,
+        fallback_cfi: Option<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "AnnotationAnchor")]
+enum AnnotationAnchorBinary {
+    EpubCfi { cfi: String },
+    Pdf { page_index: u32, rects: Vec<PdfAnnotationRect>, fallback_cfi: Option<String> },
+}
+
+mod annotation_anchor_binary {
+    use super::{AnnotationAnchor, AnnotationAnchorBinary};
+
+    pub fn serialize<S: serde::Serializer>(value: &AnnotationAnchor, serializer: S) -> Result<S::Ok, S::Error> {
+        AnnotationAnchorBinary::serialize(value, serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AnnotationAnchor, D::Error> {
+        AnnotationAnchorBinary::deserialize(deserializer)
+    }
+}
+
+impl AnnotationAnchor {
+    pub fn epub_cfi(cfi: impl Into<String>) -> Option<Self> {
+        let cfi = cfi.into();
+        valid_epub_cfi(&cfi).then_some(Self::EpubCfi { cfi })
+    }
+
+    pub fn pdf(anchor: PdfAnnotationAnchor) -> Option<Self> {
+        PdfAnnotationAnchor::new(anchor.page_index, anchor.rects, anchor.fallback_cfi).map(|anchor| Self::Pdf { page_index: anchor.page_index, rects: anchor.rects, fallback_cfi: anchor.fallback_cfi })
+    }
+
+    pub fn epub_cfi_value(&self) -> Option<&str> {
+        match self {
+            Self::EpubCfi { cfi } => Some(cfi),
+            Self::Pdf { fallback_cfi, .. } => fallback_cfi.as_deref(),
+        }
+    }
+
+    pub fn pdf_anchor(&self) -> Option<PdfAnnotationAnchor> {
+        match self {
+            Self::EpubCfi { .. } => None,
+            Self::Pdf { page_index, rects, fallback_cfi } => PdfAnnotationAnchor::new(*page_index, rects.clone(), fallback_cfi.clone()),
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::EpubCfi { cfi } => valid_epub_cfi(cfi),
+            Self::Pdf { .. } => self.pdf_anchor().is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationState {
+    pub book_id: BookId,
+    pub anchor: AnnotationAnchor,
+    pub exact_text: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub style: AnnotationStyle,
+    pub color: String,
+    pub note: String,
+    pub created_at: UnixMillis,
+    pub modified_at: UnixMillis,
+    pub deleted: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "AnnotationState")]
+struct AnnotationStateHuman {
+    pub book_id: BookId,
+    pub anchor: AnnotationAnchor,
+    pub exact_text: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub style: AnnotationStyle,
+    pub color: String,
+    pub note: String,
+    pub created_at: UnixMillis,
+    pub modified_at: UnixMillis,
+    pub deleted: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "AnnotationState")]
+struct AnnotationStateBinary {
+    pub book_id: BookId,
+    #[serde(with = "annotation_anchor_binary")]
+    pub anchor: AnnotationAnchor,
+    pub exact_text: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub style: AnnotationStyle,
+    pub color: String,
+    pub note: String,
+    pub created_at: UnixMillis,
+    pub modified_at: UnixMillis,
+    pub deleted: bool,
+}
+
+impl Serialize for AnnotationState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            AnnotationStateHuman::serialize(self, serializer)
+        } else {
+            AnnotationStateBinary::serialize(self, serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnotationState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            AnnotationStateHuman::deserialize(deserializer)
+        } else {
+            AnnotationStateBinary::deserialize(deserializer)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookmarkState {
+    pub book_id: BookId,
+    pub cfi: String,
+    pub label: String,
+    pub created_at: UnixMillis,
+    pub modified_at: UnixMillis,
+    pub deleted: bool,
+}
+
+/// A user-authored, directed semantic edge between two books.
+///
+/// `relation` is intentionally user-defined rather than a closed enum: a
+/// reader can express links such as "responds to", "expands", or "contrasts
+/// with" without requiring a protocol migration. The stable link id gives the
+/// whole record LWW semantics, including deletion through a tombstone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookLinkState {
+    pub source_book_id: BookId,
+    pub target_book_id: BookId,
+    pub relation: String,
+    pub note: String,
+    pub created_at: UnixMillis,
+    pub modified_at: UnixMillis,
+    pub deleted: bool,
 }
 
 impl DirectoryState {
@@ -367,20 +684,1068 @@ impl DirectoryState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SyncOp {
-    DirState { dir_id: DirId, directory: DirectoryState },
-    BookAdded { book_id: BookId, title: String, added_at: i64 },
-    BookDeleted { book_id: BookId },
-    BookDirAdded { book_id: BookId, dir_id: DirId, file_name: FileName, content_hash: ContentHash },
-    BookDirRemoved { book_id: BookId, dir_id: DirId, file_name: FileName },
-    ReadingPositionUpdated { book_id: BookId, cfi: String },
-    BookOpened { book_id: BookId, last_read: i64 },
-    BookMetadataUpdated { book_id: BookId, title: String, author: String },
+/// Stable Bokheim identity for one provisional or externally-resolved person
+/// or organization credited by a publication. It is generated offline and
+/// remains independent of any particular external authority identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(Uuid);
+
+impl AgentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AgentIdError> {
+        let value = Uuid::parse_str(value).map_err(|_| AgentIdError)?;
+        if value.is_nil() {
+            Err(AgentIdError)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Deterministic bridge for assigning IDs while migrating credits written
+    /// before stable agent identities existed. New agents must use `new`.
+    pub fn from_migration_seed(seed: &[u8]) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_bytes([0x7f, 0xe7, 0x7e, 0x34, 0x29, 0x7f, 0x4a, 0xfa, 0x99, 0x8d, 0x2f, 0x86, 0xf0, 0x58, 0x7b, 0x31]);
+        Self(Uuid::new_v5(&NAMESPACE, seed))
+    }
 }
 
-/// A protocol-domain violation in a [`SyncOp`].
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for AgentId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_string())
+        } else {
+            self.0.into_bytes().serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            let value = Uuid::from_bytes(<[u8; 16]>::deserialize(deserializer)?);
+            return if value.is_nil() { Err(serde::de::Error::custom(AgentIdError)) } else { Ok(Self(value)) };
+        }
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentIdError;
+
+impl fmt::Display for AgentIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("agent id must be a non-nil UUID")
+    }
+}
+
+impl std::error::Error for AgentIdError {}
+
+/// Source-compatible names used where a role-specific identity communicates
+/// intent. All publication agents share the same underlying identity domain.
+pub type AuthorId = AgentId;
+pub type PublisherId = AgentId;
+pub type ContributorId = AgentId;
+pub type AuthorIdError = AgentIdError;
+
+/// One ordered creator credit exactly as a publication presents it. The ID
+/// selects Bokheim's author entity while the names remain the publication's
+/// credited text. External authority resolution is a separate projection.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AuthorCredit {
+    author_id: AgentId,
+    name: String,
+    sort_name: Option<String>,
+}
+
+impl AuthorCredit {
+    pub fn new(name: impl Into<String>, sort_name: Option<String>) -> Result<Self, AuthorCreditError> {
+        Self::with_id(AuthorId::new(), name, sort_name)
+    }
+
+    pub fn with_id(author_id: AgentId, name: impl Into<String>, sort_name: Option<String>) -> Result<Self, AuthorCreditError> {
+        let name = name.into();
+        let name = name.trim();
+        if !valid_author_credit_text(name) {
+            return Err(AuthorCreditError);
+        }
+        let sort_name = sort_name.map(|value| value.trim().to_owned()).map(|value| valid_author_credit_text(&value).then_some(value).ok_or(AuthorCreditError)).transpose()?;
+        Ok(Self { author_id, name: name.to_owned(), sort_name })
+    }
+
+    pub fn from_name(name: impl Into<String>) -> Result<Self, AuthorCreditError> {
+        Self::new(name, None)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn author_id(&self) -> AuthorId {
+        self.author_id
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.author_id
+    }
+
+    pub fn sort_name(&self) -> Option<&str> {
+        self.sort_name.as_deref()
+    }
+
+    pub fn reidentified(&self, author_id: AgentId) -> Self {
+        Self { author_id, name: self.name.clone(), sort_name: self.sort_name.clone() }
+    }
+
+    fn encoded_text_len(&self) -> usize {
+        self.name.len() + self.sort_name.as_ref().map_or(0, String::len)
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthorCredit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedAuthorCredit {
+            author_id: AgentId,
+            name: String,
+            #[serde(default)]
+            sort_name: Option<String>,
+        }
+
+        let encoded = EncodedAuthorCredit::deserialize(deserializer)?;
+        Self::with_id(encoded.author_id, encoded.name, encoded.sort_name).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorCreditError;
+
+impl fmt::Display for AuthorCreditError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("author credits must contain bounded non-empty names without control characters")
+    }
+}
+
+impl std::error::Error for AuthorCreditError {}
+
+fn valid_author_credit_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+}
+
+/// A publisher spelling exactly as credited by a publication. Equality is
+/// deliberately distinct from publisher identity; [`PublisherName::match_key`]
+/// supplies the conservative grouping key used by library indexes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PublisherName(String);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PublisherMatchKey(String);
+
+impl PublisherName {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, PublicationMetadataError> {
+        normalized_publication_text(value.as_ref()).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn match_key(&self) -> PublisherMatchKey {
+        let normalized = self.0.nfkc().collect::<String>();
+        let mut key = String::with_capacity(normalized.len());
+        let mut separator_pending = false;
+        for character in normalized.chars() {
+            if character.is_alphanumeric() || is_combining_mark(character) {
+                if separator_pending && !key.is_empty() {
+                    key.push(' ');
+                }
+                separator_pending = false;
+                key.extend(character.to_lowercase());
+            } else {
+                separator_pending = true;
+            }
+        }
+        PublisherMatchKey(key)
+    }
+}
+
+impl PublisherMatchKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PublisherName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One exact publisher credit linked to a stable Bokheim agent. The credited
+/// spelling remains publication evidence; identity resolution can later add
+/// authority identifiers without rewriting that evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublisherCredit {
+    publisher_id: PublisherId,
+    name: PublisherName,
+}
+
+impl PublisherCredit {
+    pub fn new(name: impl AsRef<str>) -> Result<Self, PublicationMetadataError> {
+        Self::with_id(PublisherId::new(), name)
+    }
+
+    pub fn with_id(publisher_id: PublisherId, name: impl AsRef<str>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self { publisher_id, name: PublisherName::parse(name)? })
+    }
+
+    pub const fn publisher_id(&self) -> PublisherId {
+        self.publisher_id
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.publisher_id
+    }
+
+    pub fn name(&self) -> &PublisherName {
+        &self.name
+    }
+}
+
+impl<'de> Deserialize<'de> for PublisherCredit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedPublisherCredit {
+            publisher_id: PublisherId,
+            name: PublisherName,
+        }
+
+        let encoded = EncodedPublisherCredit::deserialize(deserializer)?;
+        Self::with_id(encoded.publisher_id, encoded.name.as_str()).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Canonical, case-insensitive representation of an EPUB language tag.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LanguageTag(String);
+
+impl LanguageTag {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, PublicationMetadataError> {
+        let value = value.as_ref().trim();
+        let syntactically_valid = !value.is_empty()
+            && value.len() <= 63
+            && value.split('-').all(|part| !part.is_empty() && part.len() <= 8 && part.chars().all(|character| character.is_ascii_alphanumeric()))
+            && value.split('-').next().is_some_and(|part| ((2..=8).contains(&part.len()) || part.eq_ignore_ascii_case("x")) && part.chars().all(|character| character.is_ascii_alphabetic()));
+        if !syntactically_valid {
+            return Err(PublicationMetadataError);
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for LanguageTag {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationIdentifierScheme {
+    Unspecified,
+    Isbn,
+    Asin,
+    Doi,
+    Issn,
+    Oclc,
+    Lccn,
+    Uuid,
+    Calibre,
+    Google,
+    Goodreads,
+    Kobo,
+    Other(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationIdentifierType {
+    value: String,
+    scheme: Option<String>,
+}
+
+impl PublicationIdentifierType {
+    pub fn new(value: impl AsRef<str>, scheme: Option<String>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self { value: bounded_publication_text(value.as_ref())?, scheme: scheme.map(|value| bounded_publication_text(&value)).transpose()? })
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn scheme(&self) -> Option<&str> {
+        self.scheme.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationIdentifierType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedPublicationIdentifierType {
+            value: String,
+            #[serde(default)]
+            scheme: Option<String>,
+        }
+
+        let encoded = EncodedPublicationIdentifierType::deserialize(deserializer)?;
+        Self::new(encoded.value, encoded.scheme).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationIdentifier {
+    value: String,
+    canonical_value: Option<String>,
+    scheme: PublicationIdentifierScheme,
+    identifier_types: Vec<PublicationIdentifierType>,
+}
+
+impl PublicationIdentifier {
+    pub fn new(value: impl AsRef<str>, scheme: PublicationIdentifierScheme, identifier_types: Vec<PublicationIdentifierType>) -> Result<Self, PublicationMetadataError> {
+        let value = bounded_publication_text(value.as_ref())?;
+        if identifier_types.len() > 32 {
+            return Err(PublicationMetadataError);
+        }
+        let canonical_value = canonical_identifier_value(&scheme, &value);
+        Ok(Self { value, canonical_value, scheme, identifier_types })
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn canonical_value(&self) -> Option<&str> {
+        self.canonical_value.as_deref()
+    }
+
+    pub fn lookup_value(&self) -> &str {
+        self.canonical_value.as_deref().unwrap_or(&self.value)
+    }
+
+    pub fn scheme(&self) -> &PublicationIdentifierScheme {
+        &self.scheme
+    }
+
+    pub fn identifier_types(&self) -> &[PublicationIdentifierType] {
+        &self.identifier_types
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationIdentifier {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedPublicationIdentifier {
+            value: String,
+            canonical_value: Option<String>,
+            scheme: PublicationIdentifierScheme,
+            #[serde(default)]
+            identifier_types: Vec<PublicationIdentifierType>,
+        }
+
+        let encoded = EncodedPublicationIdentifier::deserialize(deserializer)?;
+        let decoded = Self::new(encoded.value, encoded.scheme, encoded.identifier_types).map_err(serde::de::Error::custom)?;
+        if encoded.canonical_value != decoded.canonical_value {
+            return Err(serde::de::Error::custom("publication identifier canonical value does not match its source value"));
+        }
+        Ok(decoded)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationContributor {
+    contributor_id: ContributorId,
+    name: String,
+    sort_name: Option<String>,
+    role: MarcRelatorCode,
+}
+
+impl PublicationContributor {
+    pub fn new(name: impl AsRef<str>, sort_name: Option<String>, role: MarcRelatorCode) -> Result<Self, PublicationMetadataError> {
+        Self::with_id(ContributorId::new(), name, sort_name, role)
+    }
+
+    pub fn with_id(contributor_id: ContributorId, name: impl AsRef<str>, sort_name: Option<String>, role: MarcRelatorCode) -> Result<Self, PublicationMetadataError> {
+        Ok(Self { contributor_id, name: normalized_publication_text(name.as_ref())?, sort_name: sort_name.map(|value| normalized_publication_text(&value)).transpose()?, role })
+    }
+
+    pub const fn contributor_id(&self) -> ContributorId {
+        self.contributor_id
+    }
+
+    pub const fn agent_id(&self) -> AgentId {
+        self.contributor_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sort_name(&self) -> Option<&str> {
+        self.sort_name.as_deref()
+    }
+
+    pub const fn role_code(&self) -> MarcRelatorCode {
+        self.role
+    }
+
+    pub const fn role(&self) -> ContributorRole {
+        self.role.role()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationContributor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedPublicationContributor {
+            contributor_id: ContributorId,
+            name: String,
+            sort_name: Option<String>,
+            role: MarcRelatorCode,
+        }
+
+        let encoded = EncodedPublicationContributor::deserialize(deserializer)?;
+        Self::with_id(encoded.contributor_id, encoded.name, encoded.sort_name, encoded.role).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialDate {
+    year: i32,
+    month: Option<u8>,
+    day: Option<u8>,
+}
+
+impl PartialDate {
+    pub const fn year(self) -> i32 {
+        self.year
+    }
+
+    pub const fn month(self) -> Option<u8> {
+        self.month
+    }
+
+    pub const fn day(self) -> Option<u8> {
+        self.day
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationDate {
+    id: Option<String>,
+    value: String,
+    normalized: Option<PartialDate>,
+    event: Option<String>,
+}
+
+impl PublicationDate {
+    pub fn new(id: Option<String>, value: impl AsRef<str>, event: Option<String>) -> Result<Self, PublicationMetadataError> {
+        let id = id.map(|value| bounded_publication_text(&value)).transpose()?;
+        let value = bounded_publication_text(value.as_ref())?;
+        let normalized = parse_partial_date(&value);
+        let event = event.map(|value| bounded_publication_text(&value)).transpose()?;
+        Ok(Self { id, value, normalized, event })
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub const fn normalized(&self) -> Option<PartialDate> {
+        self.normalized
+    }
+
+    pub fn event(&self) -> Option<&str> {
+        self.event.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationDate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EncodedPublicationDate {
+            id: Option<String>,
+            value: String,
+            normalized: Option<PartialDate>,
+            event: Option<String>,
+        }
+
+        let encoded = EncodedPublicationDate::deserialize(deserializer)?;
+        let decoded = Self::new(encoded.id, encoded.value, encoded.event).map_err(serde::de::Error::custom)?;
+        if encoded.normalized != decoded.normalized {
+            return Err(serde::de::Error::custom("publication date normalization does not match its source value"));
+        }
+        Ok(decoded)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationSubject {
+    id: Option<String>,
+    name: String,
+    authority: Option<String>,
+    code: Option<String>,
+}
+
+impl PublicationSubject {
+    pub fn new(id: Option<String>, name: impl AsRef<str>, authority: Option<String>, code: Option<String>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self {
+            id: id.map(|value| bounded_publication_text(&value)).transpose()?,
+            name: bounded_publication_text(name.as_ref())?,
+            authority: authority.map(|value| bounded_publication_text(&value)).transpose()?,
+            code: code.map(|value| bounded_publication_text(&value)).transpose()?,
+        })
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn authority(&self) -> Option<&str> {
+        self.authority.as_deref()
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationSubject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Encoded {
+            id: Option<String>,
+            name: String,
+            authority: Option<String>,
+            code: Option<String>,
+        }
+        let encoded = Encoded::deserialize(deserializer)?;
+        Self::new(encoded.id, encoded.name, encoded.authority, encoded.code).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationCollection {
+    name: String,
+    collection_type: Option<String>,
+    position: Option<String>,
+}
+
+impl PublicationCollection {
+    pub fn new(name: impl AsRef<str>, collection_type: Option<String>, position: Option<String>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self { name: bounded_publication_text(name.as_ref())?, collection_type: collection_type.map(|value| bounded_publication_text(&value)).transpose()?, position: position.map(|value| bounded_publication_text(&value)).transpose()? })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn collection_type(&self) -> Option<&str> {
+        self.collection_type.as_deref()
+    }
+
+    pub fn position(&self) -> Option<&str> {
+        self.position.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationCollection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Encoded {
+            name: String,
+            collection_type: Option<String>,
+            position: Option<String>,
+        }
+        let encoded = Encoded::deserialize(deserializer)?;
+        Self::new(encoded.name, encoded.collection_type, encoded.position).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationTitle {
+    id: Option<String>,
+    value: String,
+    title_type: Option<String>,
+    sort_as: Option<String>,
+}
+
+impl PublicationTitle {
+    pub fn new(id: Option<String>, value: impl AsRef<str>, title_type: Option<String>, sort_as: Option<String>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self {
+            id: id.map(|value| bounded_publication_text(&value)).transpose()?,
+            value: bounded_publication_text(value.as_ref())?,
+            title_type: title_type.map(|value| bounded_publication_text(&value)).transpose()?,
+            sort_as: sort_as.map(|value| bounded_publication_text(&value)).transpose()?,
+        })
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn title_type(&self) -> Option<&str> {
+        self.title_type.as_deref()
+    }
+
+    pub fn sort_as(&self) -> Option<&str> {
+        self.sort_as.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationTitle {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Encoded {
+            id: Option<String>,
+            value: String,
+            title_type: Option<String>,
+            sort_as: Option<String>,
+        }
+        let encoded = Encoded::deserialize(deserializer)?;
+        Self::new(encoded.id, encoded.value, encoded.title_type, encoded.sort_as).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Lossless storage for useful EPUB metadata we do not yet project into a
+/// dedicated field. `refines` retains EPUB 3 relationships between values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationProperty {
+    id: Option<String>,
+    property: String,
+    value: String,
+    refines: Option<String>,
+    scheme: Option<String>,
+    language: Option<String>,
+}
+
+impl PublicationProperty {
+    pub fn new(id: Option<String>, property: impl AsRef<str>, value: impl AsRef<str>, refines: Option<String>, scheme: Option<String>, language: Option<String>) -> Result<Self, PublicationMetadataError> {
+        Ok(Self {
+            id: id.map(|value| bounded_publication_text(&value)).transpose()?,
+            property: bounded_publication_text(property.as_ref())?,
+            value: bounded_publication_text(value.as_ref())?,
+            refines: refines.map(|value| bounded_publication_text(&value)).transpose()?,
+            scheme: scheme.map(|value| bounded_publication_text(&value)).transpose()?,
+            language: language.map(|value| bounded_publication_text(&value)).transpose()?,
+        })
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub fn property(&self) -> &str {
+        &self.property
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn refines(&self) -> Option<&str> {
+        self.refines.as_deref()
+    }
+
+    pub fn scheme(&self) -> Option<&str> {
+        self.scheme.as_deref()
+    }
+
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationProperty {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Encoded {
+            id: Option<String>,
+            property: String,
+            value: String,
+            refines: Option<String>,
+            scheme: Option<String>,
+            language: Option<String>,
+        }
+        let encoded = Encoded::deserialize(deserializer)?;
+        Self::new(encoded.id, encoded.property, encoded.value, encoded.refines, encoded.scheme, encoded.language).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Bibliographic metadata that accompanies the title, author credits, and
+/// description already present in [`BookMetadataState`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PublicationMetadata {
+    #[serde(default)]
+    pub identifiers: Vec<PublicationIdentifier>,
+    #[serde(default)]
+    pub publishers: Vec<PublisherCredit>,
+    #[serde(default)]
+    pub languages: Vec<LanguageTag>,
+    #[serde(default)]
+    pub dates: Vec<PublicationDate>,
+    #[serde(default)]
+    pub contributors: Vec<PublicationContributor>,
+    #[serde(default)]
+    pub subjects: Vec<PublicationSubject>,
+    #[serde(default)]
+    pub collections: Vec<PublicationCollection>,
+    #[serde(default)]
+    pub alternate_titles: Vec<PublicationTitle>,
+    #[serde(default)]
+    pub rights: Vec<String>,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    #[serde(default)]
+    pub relations: Vec<String>,
+    #[serde(default)]
+    pub coverage: Vec<String>,
+    #[serde(default)]
+    pub properties: Vec<PublicationProperty>,
+}
+
+impl PublicationMetadata {
+    pub fn validate(&self) -> Result<(), PublicationMetadataError> {
+        valid_publication_metadata(self).then_some(()).ok_or(PublicationMetadataError)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicationMetadata {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        struct Encoded {
+            #[serde(default)]
+            identifiers: Vec<PublicationIdentifier>,
+            #[serde(default)]
+            publishers: Vec<PublisherCredit>,
+            #[serde(default)]
+            languages: Vec<LanguageTag>,
+            #[serde(default)]
+            dates: Vec<PublicationDate>,
+            #[serde(default)]
+            contributors: Vec<PublicationContributor>,
+            #[serde(default)]
+            subjects: Vec<PublicationSubject>,
+            #[serde(default)]
+            collections: Vec<PublicationCollection>,
+            #[serde(default)]
+            alternate_titles: Vec<PublicationTitle>,
+            #[serde(default)]
+            rights: Vec<String>,
+            #[serde(default)]
+            sources: Vec<String>,
+            #[serde(default)]
+            types: Vec<String>,
+            #[serde(default)]
+            formats: Vec<String>,
+            #[serde(default)]
+            relations: Vec<String>,
+            #[serde(default)]
+            coverage: Vec<String>,
+            #[serde(default)]
+            properties: Vec<PublicationProperty>,
+        }
+        let encoded = Encoded::deserialize(deserializer)?;
+        let decoded = Self {
+            identifiers: encoded.identifiers,
+            publishers: encoded.publishers,
+            languages: encoded.languages,
+            dates: encoded.dates,
+            contributors: encoded.contributors,
+            subjects: encoded.subjects,
+            collections: encoded.collections,
+            alternate_titles: encoded.alternate_titles,
+            rights: encoded.rights,
+            sources: encoded.sources,
+            types: encoded.types,
+            formats: encoded.formats,
+            relations: encoded.relations,
+            coverage: encoded.coverage,
+            properties: encoded.properties,
+        };
+        decoded.validate().map_err(serde::de::Error::custom)?;
+        Ok(decoded)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicationMetadataError;
+
+impl fmt::Display for PublicationMetadataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("publication metadata must contain bounded valid text")
+    }
+}
+
+impl std::error::Error for PublicationMetadataError {}
+
+const MAX_PUBLICATION_TEXT_BYTES: usize = 4096;
+const MAX_PUBLICATION_ITEMS_PER_KIND: usize = 256;
+const MAX_PUBLICATION_ITEMS_TOTAL: usize = 2048;
+
+fn bounded_publication_text(value: &str) -> Result<String, PublicationMetadataError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_PUBLICATION_TEXT_BYTES || value.chars().any(char::is_control) {
+        return Err(PublicationMetadataError);
+    }
+    Ok(value.to_owned())
+}
+
+fn normalized_publication_text(value: &str) -> Result<String, PublicationMetadataError> {
+    let value = bounded_publication_text(value)?;
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (normalized.len() <= MAX_PUBLICATION_TEXT_BYTES).then_some(normalized).ok_or(PublicationMetadataError)
+}
+
+fn canonical_identifier_value(scheme: &PublicationIdentifierScheme, value: &str) -> Option<String> {
+    match scheme {
+        PublicationIdentifierScheme::Isbn => canonical_isbn(value),
+        PublicationIdentifierScheme::Doi => canonical_doi(value),
+        PublicationIdentifierScheme::Uuid => {
+            let lower = value.trim().to_ascii_lowercase();
+            let value = lower.strip_prefix("urn:uuid:").unwrap_or(&lower);
+            Uuid::parse_str(value).ok().map(|value| value.hyphenated().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn canonical_isbn(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value.strip_prefix("urn:isbn:").or_else(|| value.strip_prefix("URN:ISBN:")).unwrap_or(value);
+    let compact = value.chars().filter(|character| !matches!(character, '-' | ' ')).map(|character| character.to_ascii_uppercase()).collect::<String>();
+    let bytes = compact.as_bytes();
+    let valid = match bytes.len() {
+        10 => {
+            bytes[..9].iter().all(u8::is_ascii_digit)
+                && (bytes[9].is_ascii_digit() || bytes[9] == b'X')
+                && bytes.iter().enumerate().map(|(index, byte)| u32::from(if *byte == b'X' { 10 } else { *byte - b'0' }) * (10 - index as u32)).sum::<u32>() % 11 == 0
+        }
+        13 => bytes.iter().all(u8::is_ascii_digit) && bytes.iter().enumerate().map(|(index, byte)| u32::from(*byte - b'0') * if index % 2 == 0 { 1 } else { 3 }).sum::<u32>() % 10 == 0,
+        _ => false,
+    };
+    valid.then_some(compact)
+}
+
+fn canonical_doi(value: &str) -> Option<String> {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let value = lower
+        .strip_prefix("https://doi.org/")
+        .or_else(|| lower.strip_prefix("http://doi.org/"))
+        .or_else(|| lower.strip_prefix("https://dx.doi.org/"))
+        .or_else(|| lower.strip_prefix("http://dx.doi.org/"))
+        .or_else(|| lower.strip_prefix("doi:"))
+        .unwrap_or(&lower);
+    let valid = value.starts_with("10.")
+        && value.split_once('/').is_some_and(|(registrant, suffix)| (4..=9).contains(&registrant[3..].len()) && registrant[3..].bytes().all(|byte| byte.is_ascii_digit()) && !suffix.is_empty())
+        && !value.bytes().any(|byte| byte.is_ascii_whitespace());
+    valid.then_some(value.to_owned())
+}
+
+fn parse_partial_date(value: &str) -> Option<PartialDate> {
+    let parts = value.split('-').collect::<Vec<_>>();
+    if !(1..=3).contains(&parts.len()) || parts[0].len() != 4 || !parts[0].bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let year = parts[0].parse::<i32>().ok()?;
+    let month = match parts.get(1) {
+        Some(part) if part.len() == 2 => Some(part.parse::<u8>().ok()?),
+        Some(_) => return None,
+        None => None,
+    };
+    if month.is_some_and(|month| !(1..=12).contains(&month)) {
+        return None;
+    }
+    let day = match parts.get(2) {
+        Some(part) if part.len() == 2 => Some(part.parse::<u8>().ok()?),
+        Some(_) => return None,
+        None => None,
+    };
+    if let Some(day) = day {
+        let month = month?;
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let maximum = match month {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        if !(1..=maximum).contains(&day) {
+            return None;
+        }
+    }
+    Some(PartialDate { year, month, day })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BookLifecycleState {
+    Present { metadata: BookMetadataState, added_at: UnixMillis },
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementState {
+    Present { book_id: BookId, content_hash: ContentHash },
+    Vacant { removed_book_id: BookId },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadingPositionState {
+    pub location: String,
+    pub progress: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookMetadataState {
+    pub title: String,
+    pub authors: Vec<AuthorCredit>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub publication: PublicationMetadata,
+}
+
+/// Identity of one canonical replicated state cell. It is derived from a
+/// mutation body, never supplied independently on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateKind {
+    Directory,
+    BookLifecycle,
+    Placement,
+    ReadingPosition,
+    Annotation,
+    Bookmark,
+    BookLink,
+    LastOpened,
+    Metadata,
+}
+
+impl StateKind {
+    pub const ALL: [Self; 9] = [Self::Directory, Self::BookLifecycle, Self::Placement, Self::ReadingPosition, Self::Annotation, Self::Bookmark, Self::BookLink, Self::LastOpened, Self::Metadata];
+
+    pub const fn policy(self) -> StatePolicy {
+        // This exhaustive declaration forces every new state domain to choose
+        // conflict semantics instead of inheriting them accidentally.
+        match self {
+            Self::Directory | Self::BookLifecycle | Self::ReadingPosition | Self::Annotation | Self::Bookmark | Self::BookLink | Self::LastOpened | Self::Metadata => {
+                StatePolicy { merge: MergePolicy::LastWriterWins { maximum_future_skew_ms: MAX_LWW_FUTURE_SKEW_MS }, replacement: ReplacementPolicy::Unconditional }
+            }
+            Self::Placement => StatePolicy { merge: MergePolicy::ServerOrderedConditional { maximum_future_skew_ms: MAX_LWW_FUTURE_SKEW_MS }, replacement: ReplacementPolicy::PlacementRemovalTargetsCurrentBook },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergePolicy {
+    /// The greatest wall-clock timestamp wins. The remaining version fields
+    /// exist only to make equal timestamps deterministic.
+    LastWriterWins { maximum_future_skew_ms: u64 },
+    /// Placement removals are compare-and-set transitions against the book
+    /// currently occupying a physical path. They retain replica order and are
+    /// serialized by the server because reducing them to one maximum value can
+    /// change which book a removal observes.
+    ServerOrderedConditional { maximum_future_skew_ms: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplacementPolicy {
+    Unconditional,
+    /// A removal identifies the book it observed at a path. It cannot remove a
+    /// different book which subsequently took ownership of that path.
+    PlacementRemovalTargetsCurrentBook,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatePolicy {
+    pub merge: MergePolicy,
+    pub replacement: ReplacementPolicy,
+}
+
+impl StatePolicy {
+    pub const fn maximum_accepted_timestamp(self, server_now_ms: u64) -> u64 {
+        match self.merge {
+            MergePolicy::LastWriterWins { maximum_future_skew_ms } | MergePolicy::ServerOrderedConditional { maximum_future_skew_ms } => server_now_ms.saturating_add(maximum_future_skew_ms),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StateKey {
+    Directory(DirId),
+    BookLifecycle(BookId),
+    Placement { dir_id: DirId, file_name: FileName },
+    ReadingPosition(BookId),
+    Annotation(String),
+    Bookmark(String),
+    BookLink(String),
+    LastOpened(BookId),
+    Metadata(BookId),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationBody {
+    Directory { dir_id: DirId, value: DirectoryState },
+    BookLifecycle { book_id: BookId, value: BookLifecycleState },
+    Placement { dir_id: DirId, file_name: FileName, value: PlacementState },
+    ReadingPosition { book_id: BookId, value: ReadingPositionState },
+    Annotation { annotation_id: String, value: AnnotationState },
+    Bookmark { bookmark_id: String, value: BookmarkState },
+    BookLink { link_id: String, value: BookLinkState },
+    LastOpened { book_id: BookId, last_read: UnixMillis },
+    Metadata { book_id: BookId, value: BookMetadataState },
+}
+
+/// A protocol-domain violation in a [`MutationBody`].
 ///
 /// This validation is shared by producers and consumers. Transport, storage,
 /// authorization, and dependency checks remain the responsibility of each
@@ -389,12 +1754,16 @@ pub enum SyncOp {
 pub enum ProtocolValidationError {
     RootDirectoryMutation,
     DirectorySelfParent,
-    NegativeBookAddedTimestamp,
     InvalidBookTitle,
     InvalidReadingPosition,
-    NegativeLastReadTimestamp,
+    InvalidReadProgress,
+    InvalidAnnotation,
+    InvalidBookmark,
+    InvalidBookLink,
     InvalidMetadataTitle,
     InvalidMetadataAuthor,
+    InvalidMetadataDescription,
+    InvalidPublicationMetadata,
 }
 
 impl fmt::Display for ProtocolValidationError {
@@ -402,12 +1771,16 @@ impl fmt::Display for ProtocolValidationError {
         formatter.write_str(match self {
             Self::RootDirectoryMutation => "the reserved root directory cannot be mutated",
             Self::DirectorySelfParent => "a directory cannot be its own parent",
-            Self::NegativeBookAddedTimestamp => "a book-added timestamp cannot be negative",
             Self::InvalidBookTitle => "a book title must be bounded text without control characters",
             Self::InvalidReadingPosition => "a reading position must be a bounded EPUB CFI or PDF page",
-            Self::NegativeLastReadTimestamp => "a last-read timestamp cannot be negative",
+            Self::InvalidReadProgress => "reading progress must be finite and between zero and one hundred",
+            Self::InvalidAnnotation => "annotation state is invalid",
+            Self::InvalidBookmark => "bookmark state is invalid",
+            Self::InvalidBookLink => "book link state is invalid",
             Self::InvalidMetadataTitle => "a metadata title must be bounded text without control characters",
             Self::InvalidMetadataAuthor => "a metadata author must be bounded text without control characters",
+            Self::InvalidMetadataDescription => "a metadata description must be bounded text",
+            Self::InvalidPublicationMetadata => "publication metadata must be bounded and structurally valid",
         })
     }
 }
@@ -459,203 +1832,176 @@ macro_rules! sequence_type {
     };
 }
 
-sequence_type!(LocalSeq);
-sequence_type!(ServerSeq);
+sequence_type!(ReplicaSeq);
+sequence_type!(LibraryRevision);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LocalChange {
-    /// Stable retry/idempotency key. It is mandatory on the wire, and every
-    /// newly persisted local event receives one before its first send.
-    pub event_id: EventId,
-    pub op: SyncOp,
-    pub changed_at: u64,
-    #[serde(default)]
-    pub hlc: Hlc,
-    pub local_seq: LocalSeq,
+pub struct StateMutation {
+    /// Stable retry/idempotency key used for conditional outbox acknowledgement.
+    pub mutation_id: MutationId,
+    pub body: MutationBody,
+    pub changed_at: UnixMillis,
+    pub replica_seq: ReplicaSeq,
+}
+
+/// Reduces pending mutations produced by one replica without changing their
+/// observable server-side meaning.
+///
+/// Ordinary state domains are unconditional registers and safely collapse to
+/// their greatest local version. Placements are conditional transitions: an
+/// add followed by a removal can produce a different result depending on the
+/// server's current occupant, so every unacknowledged placement transition is
+/// retained in replica sequence order.
+pub fn reduce_same_replica_mutations<'a>(mutations: impl IntoIterator<Item = &'a StateMutation>) -> Vec<&'a StateMutation> {
+    let mut registers = HashMap::<StateKey, &'a StateMutation>::new();
+    let mut reduced = Vec::new();
+    for mutation in mutations {
+        if matches!(mutation.body, MutationBody::Placement { .. }) {
+            reduced.push(mutation);
+            continue;
+        }
+        let key = mutation.body.state_key();
+        match registers.get(&key) {
+            Some(current) if !same_replica_candidate_wins(current, mutation) => {}
+            _ => {
+                registers.insert(key, mutation);
+            }
+        }
+    }
+    reduced.extend(registers.into_values());
+    reduced.sort_by_key(|mutation| (mutation.replica_seq, mutation.mutation_id));
+    reduced
+}
+
+fn same_replica_candidate_wins(current: &StateMutation, candidate: &StateMutation) -> bool {
+    candidate.body.may_replace(&current.body)
+        && (candidate.changed_at, candidate.body.conflict_rank(), candidate.replica_seq, candidate.mutation_id) > (current.changed_at, current.body.conflict_rank(), current.replica_seq, current.mutation_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ServerChange {
-    #[serde(flatten)]
-    pub change: LocalChange,
-    pub actor_id: ActorId,
-    pub server_seq: ServerSeq,
+pub struct ServerMutation {
+    pub mutation: StateMutation,
+    pub replica_id: ClientId,
+    pub revision: LibraryRevision,
 }
 
-impl Deref for ServerChange {
-    type Target = LocalChange;
+impl Deref for ServerMutation {
+    type Target = StateMutation;
 
     fn deref(&self) -> &Self::Target {
-        &self.change
+        &self.mutation
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Hlc {
-    pub pt: u64,
-    pub l: u64,
 }
 
 /// Total conflict-resolution key shared by clients and the server.
 ///
-/// HLC preserves causal/wall-clock ordering. `conflict_rank` makes destructive
-/// state win an otherwise exact tie, while actor id and actor-local sequence
-/// make concurrent values totally ordered regardless of delivery order.
+/// `changed_at` supplies the user-facing last-writer-wins order.
+/// `conflict_rank` makes destructive state win an exact timestamp tie, while
+/// replica identity, sequence, and mutation identity make all remaining ties
+/// deterministic regardless of delivery order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VersionKey {
-    pub hlc_pt: u64,
-    pub hlc_l: u64,
+    pub changed_at: UnixMillis,
     pub conflict_rank: u8,
-    pub actor_id: ActorId,
-    pub actor_seq: u64,
-    pub event_id: EventId,
+    pub replica_id: ClientId,
+    pub replica_seq: u64,
+    pub mutation_id: MutationId,
 }
 
 impl VersionKey {
-    pub fn new(hlc: Hlc, conflict_rank: u8, actor_id: ActorId, actor_seq: u64, event_id: EventId) -> Self {
-        Self { hlc_pt: hlc.pt, hlc_l: hlc.l, conflict_rank, actor_id, actor_seq, event_id }
+    pub fn new(changed_at: UnixMillis, conflict_rank: u8, replica_id: ClientId, replica_seq: u64, mutation_id: MutationId) -> Self {
+        Self { changed_at, conflict_rank, replica_id, replica_seq, mutation_id }
     }
 }
 
-impl Hlc {
-    pub fn tick_recv(prev: Hlc, remote: Hlc, wall_now: u64) -> Hlc {
-        let pt = prev.pt.max(remote.pt).max(wall_now);
-        let l = match (pt == prev.pt, pt == remote.pt) {
-            (true, true) => prev.l.max(remote.l).saturating_add(1),
-            (true, false) => prev.l.saturating_add(1),
-            (false, true) => remote.l.saturating_add(1),
-            (false, false) => 0,
-        };
-        Hlc { pt, l }
-    }
-}
-
-impl SyncOp {
-    /// Whether a persisted event type is understood by this protocol build.
-    /// Includes accepted legacy aliases that are no longer emitted.
-    pub fn is_known_event_type(event_type: &str) -> bool {
-        matches!(event_type, "dir_state" | "book_added" | "book_deleted" | "book_dir_added" | "book_dir_removed" | "book_dir_deleted" | "reading_position_updated" | "book_opened" | "book_metadata_updated")
-    }
-
-    pub fn event_type(&self) -> &'static str {
+impl MutationBody {
+    pub fn state_key(&self) -> StateKey {
         match self {
-            SyncOp::DirState { .. } => "dir_state",
-            SyncOp::BookAdded { .. } => "book_added",
-            SyncOp::BookDeleted { .. } => "book_deleted",
-            SyncOp::BookDirAdded { .. } => "book_dir_added",
-            SyncOp::BookDirRemoved { .. } => "book_dir_removed",
-            SyncOp::ReadingPositionUpdated { .. } => "reading_position_updated",
-            SyncOp::BookOpened { .. } => "book_opened",
-            SyncOp::BookMetadataUpdated { .. } => "book_metadata_updated",
+            Self::Directory { dir_id, .. } => StateKey::Directory(dir_id.clone()),
+            Self::BookLifecycle { book_id, .. } => StateKey::BookLifecycle(*book_id),
+            Self::Placement { dir_id, file_name, .. } => StateKey::Placement { dir_id: dir_id.clone(), file_name: file_name.clone() },
+            Self::ReadingPosition { book_id, .. } => StateKey::ReadingPosition(*book_id),
+            Self::Annotation { annotation_id, .. } => StateKey::Annotation(annotation_id.clone()),
+            Self::Bookmark { bookmark_id, .. } => StateKey::Bookmark(bookmark_id.clone()),
+            Self::BookLink { link_id, .. } => StateKey::BookLink(link_id.clone()),
+            Self::LastOpened { book_id, .. } => StateKey::LastOpened(*book_id),
+            Self::Metadata { book_id, .. } => StateKey::Metadata(*book_id),
         }
     }
 
-    pub fn entity_id(&self) -> Cow<'_, str> {
+    /// Stable storage discriminator. Unlike the former event type this names a
+    /// canonical state domain; every mutation in a domain has one state key.
+    pub const fn state_kind(&self) -> StateKind {
         match self {
-            SyncOp::DirState { dir_id, .. } => Cow::Borrowed(dir_id.as_str()),
-            SyncOp::BookAdded { book_id, .. }
-            | SyncOp::BookDeleted { book_id }
-            | SyncOp::BookDirAdded { book_id, .. }
-            | SyncOp::BookDirRemoved { book_id, .. }
-            | SyncOp::ReadingPositionUpdated { book_id, .. }
-            | SyncOp::BookOpened { book_id, .. }
-            | SyncOp::BookMetadataUpdated { book_id, .. } => Cow::Owned(book_id.canonical()),
+            Self::Directory { .. } => StateKind::Directory,
+            Self::BookLifecycle { .. } => StateKind::BookLifecycle,
+            Self::Placement { .. } => StateKind::Placement,
+            Self::ReadingPosition { .. } => StateKind::ReadingPosition,
+            Self::Annotation { .. } => StateKind::Annotation,
+            Self::Bookmark { .. } => StateKind::Bookmark,
+            Self::BookLink { .. } => StateKind::BookLink,
+            Self::LastOpened { .. } => StateKind::LastOpened,
+            Self::Metadata { .. } => StateKind::Metadata,
         }
     }
 
-    pub fn is_singleton(&self) -> bool {
-        SINGLETON_EVENT_TYPES.contains(&self.event_type())
+    pub const fn policy(&self) -> StatePolicy {
+        self.state_kind().policy()
     }
 
-    /// Rank used inside [`VersionKey`]. A tombstone wins an exact HLC tie, then
-    /// actor identity and actor-local sequence break ties within the same rank.
+    /// Domain-specific precondition applied before the declared merge order.
+    /// This is deliberately centralized with the policy declaration so every
+    /// implementation agrees on whether two values describe the same state
+    /// transition.
+    pub fn may_replace(&self, current: &Self) -> bool {
+        if self.state_key() != current.state_key() {
+            return false;
+        }
+        match self.policy().replacement {
+            ReplacementPolicy::Unconditional => true,
+            ReplacementPolicy::PlacementRemovalTargetsCurrentBook => match (self, current) {
+                (Self::Placement { value: PlacementState::Present { .. }, .. }, Self::Placement { .. }) => true,
+                (Self::Placement { value: PlacementState::Vacant { removed_book_id }, .. }, Self::Placement { value: PlacementState::Present { book_id, .. }, .. }) => removed_book_id == book_id,
+                (Self::Placement { value: PlacementState::Vacant { removed_book_id }, .. }, Self::Placement { value: PlacementState::Vacant { removed_book_id: current_book_id }, .. }) => removed_book_id == current_book_id,
+                _ => false,
+            },
+        }
+    }
+
+    /// Rank used inside [`VersionKey`]. Tombstones in unconditional registers
+    /// win an exact timestamp tie. Conditional placement transitions all use
+    /// rank zero so a later sequence from one replica cannot lose to its own
+    /// earlier removal merely because both occurred in the same millisecond.
     pub fn conflict_rank(&self) -> u8 {
         match self {
-            SyncOp::DirState { directory: DirectoryState::Deleted { .. }, .. } | SyncOp::BookDeleted { .. } | SyncOp::BookDirRemoved { .. } => 1,
+            Self::Directory { value: DirectoryState::Deleted { .. }, .. }
+            | Self::BookLifecycle { value: BookLifecycleState::Deleted, .. }
+            | Self::Annotation { value: AnnotationState { deleted: true, .. }, .. }
+            | Self::Bookmark { value: BookmarkState { deleted: true, .. }, .. }
+            | Self::BookLink { value: BookLinkState { deleted: true, .. }, .. } => 1,
             _ => 0,
         }
     }
 
-    pub fn payload(&self) -> Value {
-        match self {
-            SyncOp::DirState { directory, .. } => json!({ "parent_id": directory.parent_id(), "name": directory.name(), "deleted": if directory.is_deleted() { 1 } else { 0 } }),
-            SyncOp::BookAdded { title, added_at, .. } => json!({ "title": title, "added_at": added_at }),
-            SyncOp::BookDeleted { .. } => json!({}),
-            SyncOp::BookDirAdded { dir_id, file_name, content_hash, .. } => json!({
-                "dir_id": dir_id,
-                "file_name": file_name,
-                "content_hash": content_hash,
-            }),
-            SyncOp::BookDirRemoved { dir_id, file_name, .. } => json!({
-                "dir_id": dir_id,
-                "file_name": file_name,
-            }),
-            SyncOp::ReadingPositionUpdated { cfi, .. } => json!({ "cfi": cfi }),
-            SyncOp::BookOpened { last_read, .. } => json!({ "last_read": last_read }),
-            SyncOp::BookMetadataUpdated { title, author, .. } => json!({ "title": title, "author": author }),
-        }
-    }
-
-    /// Reconstructs and validates an operation from its normalized storage
-    /// columns. `None` means either decoding or protocol-domain validation
-    /// failed.
-    pub fn from_event_parts(entity_type: &str, entity_id: String, payload: &Value, changed_at: u64) -> Option<Self> {
-        let op = match entity_type {
-            "dir_state" => {
-                let dir_id = DirId::parse(&entity_id).ok()?;
-                let parent_id = DirId::parse(&string_field(payload, "parent_id")?).ok()?;
-                let name = FileName::parse(&string_field(payload, "name")?).ok()?;
-                let deleted = bool_field(payload, "deleted")?;
-                let directory = if deleted { DirectoryState::Deleted { parent_id, name } } else { DirectoryState::Present { parent_id, name } };
-                Some(SyncOp::DirState { dir_id, directory })
-            }
-            "book_added" => Some(SyncOp::BookAdded {
-                title: payload.get("title").and_then(|v| v.as_str()).unwrap_or(&entity_id).to_string(),
-                added_at: payload.get("added_at").and_then(|v| v.as_i64()).unwrap_or(changed_at as i64),
-                book_id: BookId::parse(&entity_id).ok()?,
-            }),
-            "book_deleted" => Some(SyncOp::BookDeleted { book_id: BookId::parse(&entity_id).ok()? }),
-            "book_dir_added" => Some(SyncOp::BookDirAdded {
-                book_id: BookId::parse(&entity_id).ok()?,
-                dir_id: DirId::parse(&string_field(payload, "dir_id")?).ok()?,
-                file_name: FileName::parse(&string_field(payload, "file_name")?).ok()?,
-                content_hash: ContentHash::parse(&string_field(payload, "content_hash")?).ok()?,
-            }),
-            "book_dir_removed" | "book_dir_deleted" => {
-                Some(SyncOp::BookDirRemoved { book_id: BookId::parse(&entity_id).ok()?, dir_id: DirId::parse(&string_field(payload, "dir_id")?).ok()?, file_name: FileName::parse(&string_field(payload, "file_name")?).ok()? })
-            }
-            "reading_position_updated" => {
-                let cfi = string_field(payload, "cfi")?;
-                Some(SyncOp::ReadingPositionUpdated { book_id: BookId::parse(&entity_id).ok()?, cfi })
-            }
-            "book_opened" => Some(SyncOp::BookOpened { book_id: BookId::parse(&entity_id).ok()?, last_read: payload.get("last_read").and_then(|v| v.as_i64())? }),
-            "book_metadata_updated" => Some(SyncOp::BookMetadataUpdated { book_id: BookId::parse(&entity_id).ok()?, title: string_field(payload, "title")?, author: string_field(payload, "author")? }),
-            _ => None,
-        }?;
-        op.validate().ok()?;
-        Some(op)
-    }
-
-    /// Validation that cannot be expressed by the wire representation alone.
-    /// Servers call this before persistence so one malformed event can never
-    /// become a permanent pull-cursor barrier.
     pub fn validate(&self) -> Result<(), ProtocolValidationError> {
         match self {
-            Self::DirState { dir_id, .. } if dir_id.as_str() == "__root__" => Err(ProtocolValidationError::RootDirectoryMutation),
-            Self::DirState { dir_id, directory } if dir_id == directory.parent_id() => Err(ProtocolValidationError::DirectorySelfParent),
-            Self::BookAdded { added_at, .. } if *added_at < 0 => Err(ProtocolValidationError::NegativeBookAddedTimestamp),
-            Self::BookAdded { title, .. } if !valid_metadata_text(title) => Err(ProtocolValidationError::InvalidBookTitle),
-            Self::ReadingPositionUpdated { cfi, .. } if !valid_reading_position(cfi) => Err(ProtocolValidationError::InvalidReadingPosition),
-            Self::BookOpened { last_read, .. } if *last_read < 0 => Err(ProtocolValidationError::NegativeLastReadTimestamp),
-            Self::BookMetadataUpdated { title, .. } if !valid_metadata_text(title) => Err(ProtocolValidationError::InvalidMetadataTitle),
-            Self::BookMetadataUpdated { author, .. } if !valid_metadata_text(author) => Err(ProtocolValidationError::InvalidMetadataAuthor),
+            Self::Directory { dir_id, .. } if dir_id.as_str() == "__root__" => Err(ProtocolValidationError::RootDirectoryMutation),
+            Self::Directory { dir_id, value } if dir_id == value.parent_id() => Err(ProtocolValidationError::DirectorySelfParent),
+            Self::BookLifecycle { value: BookLifecycleState::Present { metadata, .. }, .. } if !valid_metadata_text(&metadata.title) => Err(ProtocolValidationError::InvalidBookTitle),
+            Self::BookLifecycle { value: BookLifecycleState::Present { metadata, .. }, .. } if !valid_metadata_authors(&metadata.authors) => Err(ProtocolValidationError::InvalidMetadataAuthor),
+            Self::BookLifecycle { value: BookLifecycleState::Present { metadata, .. }, .. } if !valid_metadata_description(&metadata.description) => Err(ProtocolValidationError::InvalidMetadataDescription),
+            Self::BookLifecycle { value: BookLifecycleState::Present { metadata, .. }, .. } if !valid_publication_metadata(&metadata.publication) => Err(ProtocolValidationError::InvalidPublicationMetadata),
+            Self::ReadingPosition { value, .. } if !valid_reading_position(&value.location) => Err(ProtocolValidationError::InvalidReadingPosition),
+            Self::ReadingPosition { value, .. } if !value.progress.is_finite() || !(0.0..=100.0).contains(&value.progress) => Err(ProtocolValidationError::InvalidReadProgress),
+            Self::Annotation { annotation_id, value } if !valid_uuid(annotation_id) || !valid_annotation(value) => Err(ProtocolValidationError::InvalidAnnotation),
+            Self::Bookmark { bookmark_id, value } if !valid_uuid(bookmark_id) || !valid_bookmark(value) => Err(ProtocolValidationError::InvalidBookmark),
+            Self::BookLink { link_id, value } if !valid_uuid(link_id) || !valid_book_link(value) => Err(ProtocolValidationError::InvalidBookLink),
+            Self::Metadata { value, .. } if !valid_metadata_text(&value.title) => Err(ProtocolValidationError::InvalidMetadataTitle),
+            Self::Metadata { value, .. } if !valid_metadata_authors(&value.authors) => Err(ProtocolValidationError::InvalidMetadataAuthor),
+            Self::Metadata { value, .. } if !valid_metadata_description(&value.description) => Err(ProtocolValidationError::InvalidMetadataDescription),
+            Self::Metadata { value, .. } if !valid_publication_metadata(&value.publication) => Err(ProtocolValidationError::InvalidPublicationMetadata),
             _ => Ok(()),
         }
-    }
-
-    /// Compatibility helper for callers that only need a yes/no answer.
-    pub fn is_semantically_valid(&self) -> bool {
-        self.validate().is_ok()
     }
 }
 
@@ -663,319 +2009,493 @@ fn valid_metadata_text(value: &str) -> bool {
     value.len() <= 4096 && !value.chars().any(char::is_control)
 }
 
-/// Protocol-level EPUB CFI validation shared by clients and the server.
-pub fn valid_epub_cfi(value: &str) -> bool {
-    if value.len() > 8 * 1024 || value.trim() != value || value.chars().any(char::is_control) {
-        return false;
-    }
-    let Some(inner) = value.strip_prefix("epubcfi(").and_then(|value| value.strip_suffix(')')) else {
-        return false;
-    };
-    if !inner.starts_with('/') || inner.len() == 1 {
-        return false;
-    }
-    let mut square_depth = 0_u32;
-    let mut escaped = false;
-    for character in inner.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if character == '^' {
-            escaped = true;
-            continue;
-        }
-        match character {
-            '[' => square_depth = square_depth.saturating_add(1),
-            ']' if square_depth == 0 => return false,
-            ']' => square_depth -= 1,
-            '(' | ')' => return false,
-            _ => {}
-        }
-    }
-    !escaped && square_depth == 0
+fn valid_metadata_authors(authors: &[AuthorCredit]) -> bool {
+    authors.len() <= 64 && authors.iter().map(AuthorCredit::encoded_text_len).sum::<usize>() <= 16 * 1024
 }
 
-/// Validates the synchronized position representation used by every supported
-/// reader. EPUB retains its standard CFI representation; PDF uses a zero-based
-/// page marker so the same LWW register can resume either format.
-pub fn valid_reading_position(value: &str) -> bool {
-    valid_epub_cfi(value) || pdf_page_from_reading_position(value).is_some()
+fn valid_metadata_description(value: &str) -> bool {
+    value.len() <= 65_536 && !value.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
-pub fn pdf_page_from_reading_position(value: &str) -> Option<u32> {
-    let page = value.strip_prefix("pdfpage(")?.strip_suffix(')')?;
-    if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
-        return None;
-    }
-    page.parse().ok()
+fn valid_publication_value(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_PUBLICATION_TEXT_BYTES && !value.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
-pub fn pdf_page_reading_position(page_index: u32) -> String {
-    format!("pdfpage({page_index})")
+fn valid_publication_metadata(value: &PublicationMetadata) -> bool {
+    let counts = [
+        value.identifiers.len(),
+        value.publishers.len(),
+        value.languages.len(),
+        value.dates.len(),
+        value.contributors.len(),
+        value.subjects.len(),
+        value.collections.len(),
+        value.alternate_titles.len(),
+        value.rights.len(),
+        value.sources.len(),
+        value.types.len(),
+        value.formats.len(),
+        value.relations.len(),
+        value.coverage.len(),
+        value.properties.len(),
+    ];
+    counts.iter().all(|count| *count <= MAX_PUBLICATION_ITEMS_PER_KIND)
+        && counts.iter().sum::<usize>() <= MAX_PUBLICATION_ITEMS_TOTAL
+        && value.identifiers.iter().all(|identifier| {
+            valid_publication_value(identifier.value())
+                && identifier.identifier_types().iter().all(|kind| valid_publication_value(kind.value()) && kind.scheme().is_none_or(valid_publication_value))
+                && !matches!(identifier.scheme(), PublicationIdentifierScheme::Other(other) if !valid_publication_value(other))
+        })
+        && value.dates.iter().all(|date| date.id().is_none_or(valid_publication_value) && valid_publication_value(date.value()) && date.event().is_none_or(valid_publication_value))
+        && value.contributors.iter().all(|contributor| valid_publication_value(contributor.name()) && contributor.sort_name().is_none_or(valid_publication_value))
+        && value
+            .subjects
+            .iter()
+            .all(|subject| subject.id().is_none_or(valid_publication_value) && valid_publication_value(subject.name()) && subject.authority().is_none_or(valid_publication_value) && subject.code().is_none_or(valid_publication_value))
+        && value.collections.iter().all(|collection| valid_publication_value(collection.name()) && collection.collection_type().is_none_or(valid_publication_value) && collection.position().is_none_or(valid_publication_value))
+        && value
+            .alternate_titles
+            .iter()
+            .all(|title| title.id().is_none_or(valid_publication_value) && valid_publication_value(title.value()) && title.title_type().is_none_or(valid_publication_value) && title.sort_as().is_none_or(valid_publication_value))
+        && [&value.rights, &value.sources, &value.types, &value.formats, &value.relations, &value.coverage].into_iter().flatten().all(|text| valid_publication_value(text))
+        && value.properties.iter().all(|property| {
+            property.id().is_none_or(valid_publication_value)
+                && valid_publication_value(property.property())
+                && valid_publication_value(property.value())
+                && property.refines().is_none_or(valid_publication_value)
+                && property.scheme().is_none_or(valid_publication_value)
+                && property.language().is_none_or(valid_publication_value)
+        })
 }
 
-impl ServerChange {
+fn valid_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn valid_reader_text(value: &str, maximum: usize) -> bool {
+    value.len() <= maximum && !value.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn valid_annotation(value: &AnnotationState) -> bool {
+    value.anchor.is_valid()
+        && valid_reader_text(&value.exact_text, 64 * 1024)
+        && value.prefix.as_deref().is_none_or(|text| valid_reader_text(text, 4096))
+        && value.suffix.as_deref().is_none_or(|text| valid_reader_text(text, 4096))
+        && valid_reader_text(&value.note, 64 * 1024)
+        && value.color.len() <= 64
+        && !value.color.is_empty()
+        && value.modified_at >= value.created_at
+}
+
+fn valid_bookmark(value: &BookmarkState) -> bool {
+    valid_epub_cfi(&value.cfi) && valid_reader_text(&value.label, 4096) && value.modified_at >= value.created_at
+}
+
+fn valid_book_link(value: &BookLinkState) -> bool {
+    value.source_book_id != value.target_book_id
+        && !value.relation.trim().is_empty()
+        && value.relation.trim() == value.relation
+        && valid_reader_text(&value.relation, 255)
+        && valid_reader_text(&value.note, 64 * 1024)
+        && value.modified_at >= value.created_at
+}
+
+impl ServerMutation {
     pub fn version_key(&self) -> VersionKey {
-        VersionKey::new(self.hlc, self.op.conflict_rank(), self.actor_id.clone(), self.local_seq.get(), self.event_id)
+        VersionKey::new(self.changed_at, self.body.conflict_rank(), self.replica_id.clone(), self.replica_seq.get(), self.mutation_id)
+    }
+
+    pub fn wins_over(&self, current: &Self) -> bool {
+        self.body.may_replace(&current.body) && self.version_key() > current.version_key()
     }
 }
 
-fn string_field(payload: &Value, key: &str) -> Option<String> {
-    payload.get(key).and_then(|v| v.as_str()).map(ToString::to_string)
-}
-
-fn bool_field(payload: &Value, key: &str) -> Option<bool> {
-    let value = payload.get(key)?;
-    value.as_bool().or_else(|| value.as_i64().map(|v| v != 0))
+impl StateMutation {
+    /// Applies the admission rules declared by this state domain. Servers call
+    /// this with their current Unix time. Offline clients only validate the
+    /// body because they cannot impose the server's clock policy.
+    pub fn rejection_at(&self, server_now_ms: u64) -> Option<MutationRejectionReason> {
+        if self.body.validate().is_err() {
+            return Some(MutationRejectionReason::InvalidPayload);
+        }
+        if self.changed_at.get() > self.body.policy().maximum_accepted_timestamp(server_now_ms) {
+            return Some(MutationRejectionReason::TimestampTooFarFuture);
+        }
+        None
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PushChangesRequest {
-    pub user_id: String,
+pub struct PushMutationsRequest {
     pub library_id: LibraryId,
-    pub client_id: ClientId,
-    pub changes: Vec<LocalChange>,
+    pub replica_id: ClientId,
+    pub mutations: Vec<StateMutation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PushChangesResponse {
+pub struct PushMutationsResponse {
     #[serde(default)]
-    pub handled_local_seqs: Vec<LocalSeq>,
+    pub accepted: Vec<MutationId>,
     #[serde(default)]
-    pub rejected: Vec<PushRejection>,
+    pub rejected: Vec<MutationRejection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PushRejection {
-    pub local_seq: LocalSeq,
-    pub reason: PushRejectionReason,
+pub struct MutationRejection {
+    pub mutation_id: MutationId,
+    pub reason: MutationRejectionReason,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PushRejectionReason {
-    HlcTooFarFuture,
-    ValueOutsideStorageRange,
+pub enum MutationRejectionReason {
+    TimestampTooFarFuture,
     InvalidPayload,
     MissingDependency,
 }
 
-impl PushRejectionReason {
+impl MutationRejectionReason {
     /// Whether the rejection is temporary, so the change should be retried later
     /// rather than dropped from the outbox. Clock-skew rejections are transient;
     /// other malformed changes are rejected during deserialization.
     pub fn is_transient(self) -> bool {
-        matches!(self, PushRejectionReason::HlcTooFarFuture | PushRejectionReason::MissingDependency)
+        matches!(self, MutationRejectionReason::TimestampTooFarFuture | MutationRejectionReason::MissingDependency)
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PullChangesResponse {
-    pub changes: Vec<ServerChange>,
+pub struct PullStateResponse {
+    pub mutations: Vec<ServerMutation>,
+    pub next_cursor: Option<LibraryRevision>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PullQuery {
-    pub user_id: String,
+pub struct PullStateQuery {
     pub library_id: LibraryId,
-    pub client_id: ClientId,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_server_cursor")]
-    pub since_server_seq: Option<ServerSeq>,
+    pub replica_id: ClientId,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_library_cursor")]
+    pub cursor: Option<LibraryRevision>,
 }
 
-fn deserialize_server_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<ServerSeq>, D::Error> {
+/// One canonical bidirectional state exchange.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncExchangeRequest {
+    pub library_id: LibraryId,
+    pub replica_id: ClientId,
+    #[serde(default)]
+    pub mutations: Vec<StateMutation>,
+    #[serde(default, deserialize_with = "deserialize_library_cursor")]
+    pub cursor: Option<LibraryRevision>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncExchangeResponse {
+    pub push: PushMutationsResponse,
+    pub pull: PullStateResponse,
+}
+
+fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<LibraryRevision>, D::Error> {
     match Option::<u64>::deserialize(deserializer)? {
         None | Some(0) => Ok(None),
-        Some(value) => ServerSeq::new(value).map(Some).map_err(serde::de::Error::custom),
+        Some(value) => LibraryRevision::new(value).map(Some).map_err(serde::de::Error::custom),
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod canonical_state_tests {
     use super::*;
 
-    fn content_hash() -> ContentHash {
-        ContentHash::parse(&"a".repeat(64)).unwrap()
-    }
-
-    fn dir_id(value: &str) -> DirId {
+    fn dir(value: &str) -> DirId {
         DirId::parse(value).unwrap()
     }
 
-    fn file_name(value: &str) -> FileName {
+    fn file(value: &str) -> FileName {
         FileName::parse(value).unwrap()
     }
 
-    fn actor_id(value: &str) -> ActorId {
-        ActorId::parse(value).unwrap()
-    }
-
-    fn variants() -> Vec<SyncOp> {
-        vec![
-            SyncOp::DirState { dir_id: dir_id("d1"), directory: DirectoryState::Present { parent_id: dir_id("__root__"), name: file_name("foo") } },
-            SyncOp::DirState { dir_id: dir_id("d2"), directory: DirectoryState::Deleted { parent_id: dir_id("__root__"), name: file_name("gone") } },
-            SyncOp::BookAdded { book_id: BookId::new(1), title: "Title".into(), added_at: 1234 },
-            SyncOp::BookDeleted { book_id: BookId::new(1) },
-            SyncOp::BookDirAdded { book_id: BookId::new(1), dir_id: dir_id("d1"), file_name: file_name("f.epub"), content_hash: content_hash() },
-            SyncOp::BookDirRemoved { book_id: BookId::new(1), dir_id: dir_id("d1"), file_name: file_name("f.epub") },
-            SyncOp::ReadingPositionUpdated { book_id: BookId::new(1), cfi: "epubcfi(/6/4)".into() },
-            SyncOp::BookOpened { book_id: BookId::new(1), last_read: 9999 },
-            SyncOp::BookMetadataUpdated { book_id: BookId::new(1), title: "Updated title".into(), author: "Author".into() },
-        ]
+    #[test]
+    fn every_mutation_derives_its_canonical_key() {
+        let body = MutationBody::Placement { dir_id: dir("shelf"), file_name: file("book.epub"), value: PlacementState::Present { book_id: BookId::new(7), content_hash: ContentHash::parse(&"a".repeat(64)).unwrap() } };
+        assert_eq!(body.state_key(), StateKey::Placement { dir_id: dir("shelf"), file_name: file("book.epub") });
+        assert_eq!(body.state_kind(), StateKind::Placement);
     }
 
     #[test]
-    fn round_trip_payload_and_parts() {
-        for op in variants() {
-            let event_type = op.event_type();
-            let entity_id = op.entity_id().to_string();
-            let payload = op.payload();
-            let reconstructed = SyncOp::from_event_parts(event_type, entity_id, &payload, 0).unwrap_or_else(|| panic!("from_event_parts returned None for {event_type}"));
-            assert_eq!(op, reconstructed, "round-trip mismatch for {event_type}");
-        }
+    fn only_unconditional_tombstones_use_destructive_tie_priority() {
+        assert_eq!(MutationBody::BookLifecycle { book_id: BookId::new(1), value: BookLifecycleState::Deleted }.conflict_rank(), 1);
+        assert_eq!(MutationBody::Placement { dir_id: dir("shelf"), file_name: file("book.epub"), value: PlacementState::Vacant { removed_book_id: BookId::new(1) } }.conflict_rank(), 0,);
     }
 
     #[test]
-    fn pdf_page_positions_round_trip_and_reject_noncanonical_values() {
-        let value = pdf_page_reading_position(42);
-        assert_eq!(value, "pdfpage(42)");
-        assert_eq!(pdf_page_from_reading_position(&value), Some(42));
-        assert!(valid_reading_position(&value));
-        assert!(valid_reading_position("epubcfi(/6/4)"));
-        assert_eq!(pdf_page_from_reading_position("pdfpage(01)"), None);
-        assert_eq!(pdf_page_from_reading_position("pdfpage(-1)"), None);
-    }
+    fn wire_round_trips_canonical_state_variants_and_explicit_cursor() {
+        let positional = MutationBody::LastOpened { book_id: BookId::new(42), last_read: UnixMillis::new(5).unwrap() };
+        assert_eq!(wire::encode(&positional).unwrap(), b"BKHM\x05\x07\x2a\x05");
+        assert_eq!(wire::decode::<MutationBody>(b"BKHM\x05\x07\x2a\x05", 64).unwrap(), positional);
 
-    #[test]
-    fn event_type_matches_serde_tag() {
-        for op in variants() {
-            let value = serde_json::to_value(&op).expect("serialize");
-            let tag = value.get("type").and_then(|v| v.as_str()).expect("serde tag present");
-            assert_eq!(op.event_type(), tag, "event_type() must match serde rename_all = snake_case");
-            assert!(SyncOp::is_known_event_type(op.event_type()));
-        }
-        assert!(SyncOp::is_known_event_type("book_dir_deleted"));
-        assert!(!SyncOp::is_known_event_type("future_event"));
-    }
-
-    #[test]
-    fn sync_wire_keeps_book_ids_as_decimal_strings() {
-        let value = serde_json::to_value(SyncOp::BookDeleted { book_id: BookId::new(42) }).expect("serialize");
-        assert_eq!(value.get("book_id"), Some(&Value::String("42".to_string())));
-        assert_eq!(serde_json::from_value::<SyncOp>(value).expect("deserialize"), SyncOp::BookDeleted { book_id: BookId::new(42) });
-    }
-
-    #[test]
-    fn book_id_json_uses_the_canonical_string_and_reads_legacy_numbers() {
-        assert_eq!(serde_json::to_value(BookId::new(42)).expect("serialize"), json!("42"));
-        assert_eq!(serde_json::from_value::<BookId>(json!(42)).expect("deserialize legacy number"), BookId::new(42));
-    }
-
-    #[test]
-    fn storage_codecs_round_trip_without_exposing_the_inner_representation() {
-        let book_id = BookId::new(u64::MAX);
-        assert_eq!(BookId::parse(&book_id.canonical()), Ok(book_id));
-        let content_hash = content_hash();
-        assert_eq!(serde_json::from_value::<ContentHash>(serde_json::to_value(&content_hash).unwrap()).unwrap(), content_hash);
-        assert!(ContentHash::parse("legacy-or-blake3-key").is_err());
-        assert!(ContentHash::parse(&"A".repeat(64)).is_err());
-        assert!(serde_json::from_value::<ContentHash>(json!("legacy-or-blake3-key")).is_err());
-        assert!(ActorId::parse("").is_err());
-        assert!(DirId::parse("a/b").is_err());
-        assert!(FileName::parse("..").is_err());
-        assert!(LocalSeq::new(0).is_err());
-        assert!(ServerSeq::new(i64::MAX as u64 + 1).is_err());
-    }
-
-    #[test]
-    fn wire_lifecycle_requires_the_fields_owned_by_each_stage() {
-        let local = LocalChange { event_id: EventId::new(), op: SyncOp::BookDeleted { book_id: BookId::new(1) }, changed_at: 1, hlc: Hlc::default(), local_seq: LocalSeq::new(1).unwrap() };
-        let local_json = serde_json::to_value(&local).unwrap();
-        assert!(serde_json::from_value::<ServerChange>(local_json).is_err());
-        assert!(
-            serde_json::from_value::<LocalChange>(json!({
-                "op": { "type": "book_deleted", "book_id": "1" },
-                "changed_at": 1,
-                "hlc": { "pt": 1, "l": 0 },
-                "local_seq": 1
-            }))
-            .is_err(),
-            "a retry-safe mutation identity is mandatory on the wire"
-        );
-
-        let query = PullQuery { user_id: "user".into(), library_id: LibraryId::parse("library").unwrap(), client_id: ClientId::parse("client").unwrap(), since_server_seq: None };
-        assert!(serde_json::to_value(query).unwrap().get("since_server_seq").is_none());
-        let legacy_zero = serde_json::from_value::<PullQuery>(json!({ "user_id": "user", "library_id": "library", "client_id": "client", "since_server_seq": 0 })).unwrap();
-        assert_eq!(legacy_zero.since_server_seq, None);
-    }
-
-    #[test]
-    fn book_id_derives_from_the_first_eight_blake3_bytes() {
-        let content_hash = ContentHash::parse("d75c7dd40485dd0ff2be7cfcb0cf2708634a6f1718c5e694345d513a89f4af5b").unwrap();
-        assert_eq!(BookId::from_content_hash(&content_hash), BookId::new(1143216136213322967));
-    }
-
-    #[test]
-    fn singleton_list_matches_is_singleton() {
-        for op in variants() {
-            let by_const = SINGLETON_EVENT_TYPES.contains(&op.event_type());
-            assert_eq!(op.is_singleton(), by_const);
-        }
-    }
-
-    #[test]
-    fn version_key_totally_orders_equal_hlc_changes() {
-        let local = LocalChange {
-            event_id: EventId::new(),
-            op: SyncOp::BookDirAdded { book_id: BookId::new(1), dir_id: dir_id("d"), file_name: file_name("f"), content_hash: content_hash() },
-            changed_at: 0,
-            hlc: Hlc { pt: 10, l: 0 },
-            local_seq: LocalSeq::new(1).unwrap(),
+        let mutation = StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "epubcfi(/6/4)".into(), progress: 42.0 } },
+            changed_at: UnixMillis::new(1).unwrap(),
+            replica_seq: ReplicaSeq::new(1).unwrap(),
         };
-        let mut add = ServerChange { change: local, actor_id: actor_id("actor-a"), server_seq: ServerSeq::new(1).unwrap() };
-        let mut other_add = add.clone();
-        other_add.actor_id = actor_id("actor-b");
-        assert!(other_add.version_key() > add.version_key());
-
-        add.change.local_seq = LocalSeq::new(2).unwrap();
-        other_add.actor_id = add.actor_id.clone();
-        other_add.change.local_seq = LocalSeq::new(3).unwrap();
-        assert!(other_add.version_key() > add.version_key());
-
-        let remove = ServerChange { change: LocalChange { op: SyncOp::BookDirRemoved { book_id: BookId::new(1), dir_id: dir_id("d"), file_name: file_name("f") }, ..add.change.clone() }, ..add.clone() };
-        assert!(remove.version_key() > add.version_key());
+        let encoded = wire::encode(&mutation).unwrap();
+        let decoded: StateMutation = wire::decode(&encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, mutation);
+        let response = PullStateResponse { mutations: Vec::new(), next_cursor: LibraryRevision::new(9).ok(), has_more: false };
+        let encoded = wire::encode(&response).unwrap();
+        let decoded: PullStateResponse = wire::decode(&encoded, wire::MAX_DECODED_RESPONSE_BYTES).unwrap();
+        assert_eq!(decoded.next_cursor.unwrap().get(), 9);
     }
 
     #[test]
-    fn missing_dependencies_are_retryable_without_dropping_the_outbox_event() {
-        assert!(PushRejectionReason::MissingDependency.is_transient());
-        assert!(!PushRejectionReason::InvalidPayload.is_transient());
+    fn binary_identifiers_use_fixed_bytes_while_json_keeps_canonical_strings() {
+        let mutation_id = MutationId::parse("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        let encoded = wire::encode(&mutation_id).unwrap();
+        assert_eq!(&encoded[..5], b"BKHM\x05");
+        assert_eq!(&encoded[5..], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(wire::decode::<MutationId>(&encoded, 64).unwrap(), mutation_id);
+
+        let hash = ContentHash::parse(&"a".repeat(64)).unwrap();
+        let encoded = wire::encode(&hash).unwrap();
+        assert_eq!(encoded.len(), 5 + 32);
+        assert!(encoded[5..].iter().all(|byte| *byte == 0xaa));
+        assert_eq!(wire::decode::<ContentHash>(&encoded, 64).unwrap(), hash);
+
+        assert_eq!(serde_json::to_string(&mutation_id).unwrap(), "\"00112233-4455-6677-8899-aabbccddeeff\"");
+        assert_eq!(serde_json::to_string(&hash).unwrap(), format!("\"{}\"", "a".repeat(64)));
     }
 
     #[test]
-    fn directory_semantics_reserve_the_root_and_reject_self_parenting() {
-        let root_mutation = SyncOp::DirState { dir_id: dir_id("__root__"), directory: DirectoryState::Present { parent_id: dir_id("shelf"), name: file_name("Root") } };
-        let self_parent = SyncOp::DirState { dir_id: dir_id("shelf"), directory: DirectoryState::Present { parent_id: dir_id("shelf"), name: file_name("Shelf") } };
-        assert_eq!(root_mutation.validate(), Err(ProtocolValidationError::RootDirectoryMutation));
-        assert_eq!(self_parent.validate(), Err(ProtocolValidationError::DirectorySelfParent));
+    fn wire_preserves_ordered_author_credits() {
+        let publication = PublicationMetadata {
+            identifiers: vec![PublicationIdentifier::new("9781234567897", PublicationIdentifierScheme::Isbn, vec![PublicationIdentifierType::new("15", Some("onix:codelist5".to_owned())).unwrap()]).unwrap()],
+            publishers: vec![PublisherCredit::new("North Wind Press").unwrap()],
+            languages: vec![LanguageTag::parse("sv-SE").unwrap()],
+            dates: vec![PublicationDate::new(Some("publication-date".to_owned()), "2026-08-04", Some("publication".to_owned())).unwrap()],
+            contributors: vec![PublicationContributor::new("Example Translator", Some("Translator, Example".to_owned()), MarcRelatorCode::parse("trl").unwrap()).unwrap()],
+            subjects: vec![PublicationSubject::new(Some("subject-1".to_owned()), "Distributed systems", Some("BISAC".to_owned()), Some("COM046000".to_owned())).unwrap()],
+            collections: vec![PublicationCollection::new("Bokheim Studies", Some("series".to_owned()), Some("2".to_owned())).unwrap()],
+            alternate_titles: vec![PublicationTitle::new(Some("subtitle".to_owned()), "An offline-first study", Some("subtitle".to_owned()), None).unwrap()],
+            rights: vec!["Copyright example".to_owned()],
+            properties: vec![PublicationProperty::new(Some("meta-1".to_owned()), "dcterms:modified", "2026-08-04T12:00:00Z", None, None, None).unwrap()],
+            ..PublicationMetadata::default()
+        };
+        let mutation = StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::Metadata {
+                book_id: BookId::new(1),
+                value: BookMetadataState {
+                    title: "A collaboration".to_owned(),
+                    authors: vec![AuthorCredit::new("Le Guin, Ursula K.", Some("Le Guin, Ursula K.".to_owned())).unwrap(), AuthorCredit::from_name("Jane Doe").unwrap()],
+                    description: String::new(),
+                    publication,
+                },
+            },
+            changed_at: UnixMillis::new(1).unwrap(),
+            replica_seq: ReplicaSeq::new(1).unwrap(),
+        };
+
+        let encoded = wire::encode(&mutation).unwrap();
+        let decoded: StateMutation = wire::decode(&encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, mutation);
     }
 
     #[test]
-    fn protocol_validation_reports_each_invalid_payload_domain() {
-        let invalid = [
-            (SyncOp::BookAdded { book_id: BookId::new(1), title: "Title".into(), added_at: -1 }, ProtocolValidationError::NegativeBookAddedTimestamp),
-            (SyncOp::BookAdded { book_id: BookId::new(1), title: "bad\ntitle".into(), added_at: 1 }, ProtocolValidationError::InvalidBookTitle),
-            (SyncOp::ReadingPositionUpdated { book_id: BookId::new(1), cfi: "not-a-cfi".into() }, ProtocolValidationError::InvalidReadingPosition),
-            (SyncOp::BookOpened { book_id: BookId::new(1), last_read: -1 }, ProtocolValidationError::NegativeLastReadTimestamp),
-            (SyncOp::BookMetadataUpdated { book_id: BookId::new(1), title: "bad\ntitle".into(), author: "Author".into() }, ProtocolValidationError::InvalidMetadataTitle),
-            (SyncOp::BookMetadataUpdated { book_id: BookId::new(1), title: "Title".into(), author: "bad\nauthor".into() }, ProtocolValidationError::InvalidMetadataAuthor),
-        ];
+    fn publication_agents_keep_stable_ids_across_wire_round_trips() {
+        let publisher = PublisherCredit::new("North Wind Press").unwrap();
+        let contributor = PublicationContributor::new("Example Translator", Some("Translator, Example".to_owned()), MarcRelatorCode::parse("trl").unwrap()).unwrap();
+        let publication = PublicationMetadata { publishers: vec![publisher.clone()], contributors: vec![contributor.clone()], ..PublicationMetadata::default() };
 
-        for (op, expected) in invalid {
-            assert_eq!(op.validate(), Err(expected));
-            assert!(!op.is_semantically_valid());
-            assert!(SyncOp::from_event_parts(op.event_type(), op.entity_id().into_owned(), &op.payload(), 0).is_none());
+        let encoded = wire::encode(&publication).unwrap();
+        let decoded = wire::decode::<PublicationMetadata>(&encoded, 4096).unwrap();
+        assert_eq!(decoded.publishers[0].agent_id(), publisher.agent_id());
+        assert_eq!(decoded.contributors[0].agent_id(), contributor.agent_id());
+    }
+
+    #[test]
+    fn identifiers_only_expose_verified_canonical_values() {
+        let isbn = PublicationIdentifier::new("urn:isbn:978-1-23456-789-7", PublicationIdentifierScheme::Isbn, Vec::new()).unwrap();
+        assert_eq!(isbn.canonical_value(), Some("9781234567897"));
+        assert_eq!(isbn.lookup_value(), "9781234567897");
+
+        let invalid_isbn = PublicationIdentifier::new("978-1-23456-789-8", PublicationIdentifierScheme::Isbn, Vec::new()).unwrap();
+        assert_eq!(invalid_isbn.canonical_value(), None);
+        assert_eq!(invalid_isbn.lookup_value(), "978-1-23456-789-8");
+
+        let doi = PublicationIdentifier::new("HTTPS://DOI.ORG/10.1000/Example", PublicationIdentifierScheme::Doi, Vec::new()).unwrap();
+        assert_eq!(doi.canonical_value(), Some("10.1000/example"));
+
+        let invalid_doi = PublicationIdentifier::new("10./not-a-doi", PublicationIdentifierScheme::Doi, Vec::new()).unwrap();
+        assert_eq!(invalid_doi.canonical_value(), None);
+    }
+
+    #[test]
+    fn publication_dates_normalize_only_real_calendar_dates() {
+        let leap_day = PublicationDate::new(None, "2024-02-29", None).unwrap();
+        let normalized = leap_day.normalized().unwrap();
+        assert_eq!((normalized.year(), normalized.month(), normalized.day()), (2024, Some(2), Some(29)));
+
+        let invalid_leap_day = PublicationDate::new(None, "2023-02-29", None).unwrap();
+        assert_eq!(invalid_leap_day.normalized(), None);
+
+        let year_only = PublicationDate::new(None, "1965", None).unwrap();
+        assert_eq!(year_only.normalized().unwrap().year(), 1965);
+        assert_eq!(year_only.normalized().unwrap().month(), None);
+    }
+
+    #[test]
+    fn publication_metadata_deserialization_enforces_leaf_and_collection_bounds() {
+        let mut invalid_text = PublicationMetadata::default();
+        invalid_text.rights.push("x".repeat(MAX_PUBLICATION_TEXT_BYTES + 1));
+        let encoded = wire::encode(&invalid_text).unwrap();
+        assert!(wire::decode::<PublicationMetadata>(&encoded, 16 * 1024).is_err());
+
+        let mut too_many = PublicationMetadata::default();
+        too_many.rights = (0..=MAX_PUBLICATION_ITEMS_PER_KIND).map(|index| format!("right {index}")).collect();
+        let encoded = wire::encode(&too_many).unwrap();
+        assert!(wire::decode::<PublicationMetadata>(&encoded, 64 * 1024).is_err());
+    }
+
+    #[test]
+    fn derived_identifier_values_cannot_be_forged_on_the_wire() {
+        #[derive(Serialize)]
+        struct UncheckedIdentifier {
+            value: String,
+            canonical_value: Option<String>,
+            scheme: PublicationIdentifierScheme,
+            identifier_types: Vec<PublicationIdentifierType>,
         }
+
+        let encoded = wire::encode(&UncheckedIdentifier { value: "9781234567897".to_owned(), canonical_value: Some("9780000000000".to_owned()), scheme: PublicationIdentifierScheme::Isbn, identifier_types: Vec::new() }).unwrap();
+        assert!(wire::decode::<PublicationIdentifier>(&encoded, 4096).is_err());
+    }
+
+    #[test]
+    fn author_credit_deserialization_cannot_bypass_validation() {
+        #[derive(Serialize)]
+        struct UncheckedAuthorCredit {
+            author_id: String,
+            name: String,
+            sort_name: Option<String>,
+        }
+
+        let empty_name = wire::encode(&UncheckedAuthorCredit { author_id: AuthorId::new().to_string(), name: "  ".to_owned(), sort_name: None }).unwrap();
+        assert!(wire::decode::<AuthorCredit>(&empty_name, 1024).is_err());
+        let invalid_sort_name = wire::encode(&UncheckedAuthorCredit { author_id: AuthorId::new().to_string(), name: "Valid author".to_owned(), sort_name: Some("bad\nsort".to_owned()) }).unwrap();
+        assert!(wire::decode::<AuthorCredit>(&invalid_sort_name, 1024).is_err());
+        let nil_id = wire::encode(&UncheckedAuthorCredit { author_id: Uuid::nil().to_string(), name: "Valid author".to_owned(), sort_name: None }).unwrap();
+        assert!(wire::decode::<AuthorCredit>(&nil_id, 1024).is_err());
+        assert_eq!(AuthorId::from_migration_seed(b"same legacy credit"), AuthorId::from_migration_seed(b"same legacy credit"));
+    }
+
+    #[test]
+    fn protocol_validation_bounds_the_complete_author_list() {
+        let metadata = |authors| MutationBody::Metadata { book_id: BookId::new(1), value: BookMetadataState { title: "Book".to_owned(), authors, description: String::new(), publication: PublicationMetadata::default() } };
+
+        assert!(AuthorCredit::from_name("").is_err());
+        assert!(AuthorCredit::from_name("a".repeat(4097)).is_err());
+        assert_eq!(metadata((0..65).map(|index| AuthorCredit::from_name(format!("Author {index}")).unwrap()).collect()).validate(), Err(ProtocolValidationError::InvalidMetadataAuthor));
+    }
+
+    #[test]
+    fn unix_milliseconds_round_trip_with_storage_bounds() {
+        let timestamp = UnixMillis::new(1_700_000_000_123).unwrap();
+        let encoded = wire::encode(&timestamp).unwrap();
+        assert_eq!(wire::decode::<UnixMillis>(&encoded, 1024).unwrap(), timestamp);
+        assert!(UnixMillis::new(i64::MAX as u64 + 1).is_err());
+    }
+
+    #[test]
+    fn protocol_validation_rejects_invalid_canonical_values() {
+        let invalid = MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "not-a-location".into(), progress: 0.0 } };
+        assert_eq!(invalid.validate(), Err(ProtocolValidationError::InvalidReadingPosition));
+    }
+
+    #[test]
+    fn every_state_domain_declares_its_merge_semantics() {
+        for kind in StateKind::ALL {
+            let expected = if kind == StateKind::Placement { MergePolicy::ServerOrderedConditional { maximum_future_skew_ms: MAX_LWW_FUTURE_SKEW_MS } } else { MergePolicy::LastWriterWins { maximum_future_skew_ms: MAX_LWW_FUTURE_SKEW_MS } };
+            assert_eq!(kind.policy().merge, expected);
+        }
+    }
+
+    #[test]
+    fn unconditional_register_reduction_is_permutation_invariant() {
+        let mutation = |sequence, changed_at, location: &str| StateMutation {
+            mutation_id: MutationId::parse(&format!("00000000-0000-4000-8000-{sequence:012}")).unwrap(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: location.to_owned(), progress: changed_at as f32 } },
+            changed_at: UnixMillis::new(changed_at).unwrap(),
+            replica_seq: ReplicaSeq::new(sequence).unwrap(),
+        };
+        let mutations = [mutation(1, 10, "epubcfi(/6/2)"), mutation(2, 30, "epubcfi(/6/4)"), mutation(3, 20, "epubcfi(/6/6)")];
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let input = order.map(|index| &mutations[index]);
+            let reduced = reduce_same_replica_mutations(input);
+            assert_eq!(reduced.len(), 1);
+            assert_eq!(reduced[0].mutation_id, mutations[1].mutation_id);
+        }
+    }
+
+    #[test]
+    fn conditional_placement_reduction_preserves_every_transition() {
+        let path = |sequence, value| StateMutation {
+            mutation_id: MutationId::parse(&format!("00000000-0000-4000-8000-{sequence:012}")).unwrap(),
+            body: MutationBody::Placement { dir_id: dir("shelf"), file_name: file("book.epub"), value },
+            changed_at: UnixMillis::new(sequence * 10).unwrap(),
+            replica_seq: ReplicaSeq::new(sequence).unwrap(),
+        };
+        let mutations = [
+            path(1, PlacementState::Present { book_id: BookId::new(1), content_hash: ContentHash::parse(&"a".repeat(64)).unwrap() }),
+            path(2, PlacementState::Present { book_id: BookId::new(2), content_hash: ContentHash::parse(&"b".repeat(64)).unwrap() }),
+            path(3, PlacementState::Vacant { removed_book_id: BookId::new(2) }),
+        ];
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let input = order.map(|index| &mutations[index]);
+            let reduced = reduce_same_replica_mutations(input);
+            assert_eq!(reduced.iter().map(|mutation| mutation.replica_seq.get()).collect::<Vec<_>>(), vec![1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn placement_removal_only_targets_the_book_it_observed() {
+        let path = |value| MutationBody::Placement { dir_id: dir("shelf"), file_name: file("book.epub"), value };
+        let current = path(PlacementState::Present { book_id: BookId::new(2), content_hash: ContentHash::parse(&"b".repeat(64)).unwrap() });
+        let stale_removal = path(PlacementState::Vacant { removed_book_id: BookId::new(1) });
+        let matching_removal = path(PlacementState::Vacant { removed_book_id: BookId::new(2) });
+
+        assert_eq!(StateKind::Placement.policy().replacement, ReplacementPolicy::PlacementRemovalTargetsCurrentBook);
+        assert!(!stale_removal.may_replace(&current));
+        assert!(matching_removal.may_replace(&current));
+    }
+
+    #[test]
+    fn same_millisecond_placement_sequence_can_claim_after_removal() {
+        let replica = ClientId::parse("scanner").unwrap();
+        let removal = VersionKey::new(UnixMillis::new(10).unwrap(), 0, replica.clone(), 1, MutationId::new());
+        let later_claim = VersionKey::new(UnixMillis::new(10).unwrap(), 0, replica, 2, MutationId::new());
+        assert!(later_claim > removal);
+    }
+
+    #[test]
+    fn server_rejects_lww_timestamps_beyond_the_clock_skew_allowance() {
+        let server_now = 1_000_000;
+        let mutation = |changed_at| StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "epubcfi(/6/4)".into(), progress: 42.0 } },
+            changed_at,
+            replica_seq: ReplicaSeq::new(1).unwrap(),
+        };
+
+        assert_eq!(mutation(UnixMillis::new(server_now + MAX_LWW_FUTURE_SKEW_MS).unwrap()).rejection_at(server_now), None);
+        assert_eq!(mutation(UnixMillis::new(server_now + MAX_LWW_FUTURE_SKEW_MS + 1).unwrap()).rejection_at(server_now), Some(MutationRejectionReason::TimestampTooFarFuture),);
+    }
+
+    #[test]
+    fn lww_order_uses_wall_clock_before_deterministic_tie_breakers() {
+        let replica = ClientId::parse("reader").unwrap();
+        let older = VersionKey::new(UnixMillis::new(10).unwrap(), 0, replica.clone(), 2, MutationId::new());
+        let newer = VersionKey::new(UnixMillis::new(11).unwrap(), 0, replica, 1, MutationId::new());
+        assert!(newer > older);
     }
 }

@@ -2,6 +2,10 @@
 Description=Bokheim synchronization server
 Wants=network-online.target
 After=network-online.target postgresql.service
+RequiresMountsFor=/var/lib/bokheim/assets
+AssertPathIsMountPoint=/var/lib/bokheim/assets
+StartLimitIntervalSec=2min
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -11,11 +15,29 @@ WorkingDirectory=/var/lib/bokheim
 ExecStart=/usr/local/bin/sync-server
 Environment=SYNC_SERVER_SOCKET=/run/bokheim/sync.sock
 Environment=RUST_LOG=info
+Environment=BOKHEIM_PUBLIC_REGISTRATION=false
+Environment=BOKHEIM_BOOKS_DIR=/var/lib/bokheim/assets/books
+Environment=BOKHEIM_THUMBNAILS_DIR=/var/lib/bokheim/assets/thumbnails
 Environment=BOKHEIM_UPLOAD_BYTES_PER_SECOND=104857600
 Environment=BOKHEIM_DOWNLOAD_BYTES_PER_SECOND=104857600
 Environment=BOKHEIM_TRANSFER_BURST_BYTES=1048576
+Environment=BOKHEIM_MAX_IN_FLIGHT_REQUESTS=512
+Environment=BOKHEIM_REQUEST_TIMEOUT_SECONDS=7200
+Environment=BOKHEIM_BODY_IDLE_TIMEOUT_SECONDS=60
+Environment=BOKHEIM_NOTIFICATION_HEARTBEAT_SECS=60
+Environment=BOKHEIM_NOTIFICATION_TIMEOUT_SECS=150
+Environment=BOKHEIM_MAX_NOTIFICATION_CONNECTIONS=100000
+Environment=BOKHEIM_MAX_NOTIFICATION_CONNECTIONS_PER_ACCOUNT=16
+Environment=BOKHEIM_DATABASE_MAX_CONNECTIONS=32
+Environment=BOKHEIM_DATABASE_MIN_CONNECTIONS=2
+Environment=BOKHEIM_DATABASE_ACQUIRE_TIMEOUT_SECONDS=5
+Environment=BOKHEIM_DATABASE_IDLE_TIMEOUT_SECONDS=600
+Environment=BOKHEIM_MAX_CONCURRENT_BOOK_VALIDATIONS=2
+Environment=BOKHEIM_MAX_STAGED_BOOK_UPLOADS=16
+Environment=BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT=4
+Environment=BOKHEIM_MAX_STAGED_BOOK_BYTES=4294967296
+Environment=BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT=2147483648
 LoadCredential=database_url:/etc/bokheim/database-url
-LoadCredential=admin_password:/etc/bokheim/admin-password
 
 RuntimeDirectory=bokheim
 RuntimeDirectoryMode=0750
@@ -25,6 +47,13 @@ UMask=0007
 
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=35s
+KillSignal=SIGTERM
+OOMPolicy=kill
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=65536
 
 NoNewPrivileges=true
 PrivateDevices=true

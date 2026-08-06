@@ -1,65 +1,29 @@
 extern crate core;
 
-pub mod app_core;
-pub mod app_name;
-pub mod auth;
-mod blob;
-mod db;
-mod download;
-pub mod epub;
-pub mod frontend_contract;
-pub mod home;
+pub mod app;
+pub(crate) use app::account as auth;
+pub mod catalog;
 pub mod library;
-pub mod opds;
-mod path_types;
-pub mod preferences;
-mod reading;
-#[cfg(all(feature = "desktop", not(target_os = "android")))]
-pub mod scanner;
-#[cfg(not(all(feature = "desktop", not(target_os = "android"))))]
-#[path = "scanner_stub.rs"]
-pub mod scanner;
-mod server_url;
+mod paths;
+pub mod platform;
+mod storage;
 mod sync;
-mod transfer;
 
 #[cfg(test)]
 #[path = "../tests/convergence.rs"]
 mod convergence_tests;
 
-pub use app_name::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_HIDDEN_SESSION_PATH, APP_HIDDEN_THUMBNAILS_PATH, APP_NAME, APP_NAME_LOWER};
-pub use blob::{BlobKey, BlobKind, TransferJobKind};
-pub use download::{BookDownloadStatus, DownloadProgress, DownloadState, FolderDownloadStatus};
-pub use path_types::{BookPlacement, RelativeBookPath, RelativeDirPath, RelativeDirPathError};
-pub use reading::{EpubCfi, ReadProgress};
-pub use server_url::{api_server_url, ServerUrl, ServerUrlError, API_SERVER_ORIGIN};
-pub use sync_common::{BookId, ContentHash, DirId, LibraryId};
-pub use transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
-
-/// Stable identity for a book within one configured library.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct BookLocator {
-    library_id: LibraryId,
-    book_id: BookId,
-}
-
-impl BookLocator {
-    pub fn new(library_id: LibraryId, book_id: BookId) -> Self {
-        Self { library_id, book_id }
-    }
-
-    pub fn parse(library_id: &str, book_id: BookId) -> Result<Self, sync_common::DomainTextError> {
-        Ok(Self::new(LibraryId::parse(library_id)?, book_id))
-    }
-
-    pub fn library_id(&self) -> &LibraryId {
-        &self.library_id
-    }
-
-    pub fn book_id(&self) -> BookId {
-        self.book_id
-    }
-}
+pub use app::{api_server_url, catalog_server_url, ServerUrl, ServerUrlError, API_SERVER_ORIGIN, CATALOG_SERVER_ORIGIN};
+pub use app::{AppBackend, AppDataLocation, BackendContext, BackendError, LibraryEntry};
+pub use app::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_HIDDEN_SESSION_PATH, APP_HIDDEN_THUMBNAILS_PATH, APP_NAME, APP_NAME_LOWER};
+pub use bokheim_app_contract::download::{BookDownloadStatus, DownloadProgress, DownloadState, FolderDownloadStatus};
+pub use bokheim_app_contract::frontend::*;
+pub use bokheim_domain::{BookLocator, EpubCfi, ReadProgress};
+pub use library::LibraryBackend;
+pub use paths::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
+pub use sync::blob::{BlobKey, BlobKind, TransferJobKind};
+pub use sync::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
+pub use sync_common::{AuthorId, BookId, ContentHash, DirId, LibraryId};
 
 /// Initialize the logging system. Call this once at the start of your application.
 ///
@@ -101,7 +65,7 @@ mod domain_tests {
 
     #[test]
     fn library_event_keeps_its_existing_string_id_wire_format() {
-        let value = serde_json::to_value(crate::scanner::LibraryEvent::BookOpened { book_id: BookId::new(42) }).unwrap();
+        let value = serde_json::to_value(crate::platform::scanner::LibraryEvent::BookOpened { book_id: BookId::new(42) }).unwrap();
         assert_eq!(value["BookOpened"]["book_id"], serde_json::json!("42"));
     }
 }

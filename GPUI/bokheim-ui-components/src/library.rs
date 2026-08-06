@@ -2,19 +2,41 @@ use gpui::prelude::*;
 use gpui::{Div, ElementId, FontWeight, ImageSource, Img, ObjectFit, SharedString, Stateful, StyledImage, UniformList, div, img, px};
 use gpui_component::box_shadow;
 use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::popover::Popover;
 use gpui_component::resizable::{ResizablePanelGroup, h_resizable, resizable_panel};
-use gpui_component::scroll::{Scrollable, ScrollableElement};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
-use crate::{ACCENT_SOFT, AUTHOR_LIST_PANEL_WIDTH, BOOK_COVER_HEIGHT, BOOK_COVER_WIDTH, BOOK_GRID_GAP, BOOK_GRID_ROW_HEIGHT, BORDER, BrowserTheme, CARD_BG, PAGE_BG, SHADOW, SURFACE, SURFACE_ALT, TEXT_MUTED};
+use crate::{ACCENT_SOFT, AUTHOR_PAGE_MAX_WIDTH, BOOK_COVER_HEIGHT, BOOK_COVER_WIDTH, BOOK_GRID_GAP, BOOK_GRID_ROW_HEIGHT, BORDER, BrowserTheme, CARD_BG, PAGE_BG, SHADOW, SURFACE, SURFACE_ALT, Scrollable, ScrollableElement, TEXT_MUTED};
 
 pub fn book_card(id: impl Into<ElementId>) -> Stateful<Div> {
-    div().id(id).w(px(BOOK_COVER_WIDTH)).flex().flex_col().gap(px(5.0)).cursor_pointer()
+    div().id(id).w(px(BOOK_COVER_WIDTH)).h(px(BOOK_GRID_ROW_HEIGHT - 6.0)).flex_none().flex().flex_col().gap(px(5.0)).cursor_pointer()
 }
 
 pub fn book_cover(theme: BrowserTheme) -> Div {
     div().w(px(BOOK_COVER_WIDTH)).h(px(BOOK_COVER_HEIGHT)).overflow_hidden().rounded(px(8.0)).border_1().border_color(theme.border).shadow(vec![box_shadow(px(2.0), px(8.0), px(14.0), px(0.0), theme.shadow)])
+}
+
+pub fn book_cover_frame() -> Div {
+    div().relative().w(px(BOOK_COVER_WIDTH)).h(px(BOOK_COVER_HEIGHT))
+}
+
+pub fn book_actions_overlay(actions: impl IntoElement) -> Div {
+    div().absolute().top(px(8.0)).right(px(8.0)).child(actions)
+}
+
+pub fn book_actions_popover(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Popover {
+    let id = id.into();
+    let label = label.into();
+    Popover::new(id.clone()).anchor(gpui::Anchor::BottomRight).trigger(Button::new((id, "trigger")).icon(IconName::EllipsisVertical).ghost().size(px(34.0)).rounded_full().bg(theme.card_bg).text_color(theme.text).tooltip(label))
+}
+
+pub fn book_actions_panel() -> Div {
+    div().w(px(190.0)).flex().flex_col().gap(px(3.0)).p(px(4.0))
+}
+
+pub fn book_action_item(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, danger: bool, theme: BrowserTheme) -> Button {
+    Button::new(id).label(label).icon(icon).ghost().w_full().h(px(38.0)).justify_start().text_color(if danger { theme.danger } else { theme.text })
 }
 
 pub fn book_cover_image(source: impl Into<ImageSource>) -> Img {
@@ -26,11 +48,15 @@ pub fn missing_book_cover(theme: BrowserTheme) -> Div {
 }
 
 pub fn book_card_title() -> Div {
-    div().w(px(BOOK_COVER_WIDTH)).h(px(24.0)).mt(px(9.0)).text_size(gpui::rems(17.0 / 16.0)).font_weight(FontWeight::SEMIBOLD).line_clamp(1)
+    div().w(px(BOOK_COVER_WIDTH)).h(px(42.0)).mt(px(9.0)).text_size(gpui::rems(17.0 / 16.0)).line_height(gpui::relative(1.15)).font_weight(FontWeight::SEMIBOLD).line_clamp(2)
 }
 
 pub fn book_card_author(theme: BrowserTheme) -> Div {
     div().w(px(BOOK_COVER_WIDTH)).h(px(22.0)).text_size(gpui::rems(15.0 / 16.0)).text_color(theme.text_muted).line_clamp(1)
+}
+
+pub fn audiobook_badge(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().px(px(8.0)).py(px(4.0)).rounded_full().bg(theme.accent).text_color(theme.surface_alt).text_size(gpui::rems(10.0 / 16.0)).font_weight(FontWeight::BOLD).child(label.into())
 }
 
 pub fn book_grid_row() -> Div {
@@ -46,7 +72,7 @@ pub fn embedded_virtual_list(list: UniformList, height: f32) -> UniformList {
 }
 
 pub fn home_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(16.0)).p(px(16.0)).overflow_y_scrollbar()
+    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(16.0)).p(px(crate::CONTENT_PADDING)).overflow_y_scrollbar()
 }
 
 pub fn carousel_section() -> Div {
@@ -61,8 +87,10 @@ pub fn carousel_row(id: impl Into<ElementId>) -> Stateful<Div> {
     div().id(id).w_full().h(px(390.0)).min_w_0().flex().flex_row().gap(px(16.0)).pb(px(6.0)).overflow_x_scroll()
 }
 
-pub fn book_progress(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w(px(200.0)).pl(px(4.0)).text_size(gpui::rems(12.0 / 16.0)).text_color(theme.text_muted).child(text.into())
+pub fn book_progress(progress: Option<f32>, theme: BrowserTheme) -> Div {
+    div().w(px(BOOK_COVER_WIDTH)).h(px(16.0)).flex_none().pt(px(6.0)).when_some(progress, |track, progress| {
+        track.child(div().w(px(BOOK_COVER_WIDTH * 0.7)).h(px(3.0)).overflow_hidden().rounded_full().bg(theme.border).child(div().w(px(BOOK_COVER_WIDTH * 0.7 * progress.clamp(0.0, 100.0) / 100.0)).h_full().rounded_full().bg(theme.accent)))
+    })
 }
 
 pub fn author_detail() -> Div {
@@ -70,11 +98,11 @@ pub fn author_detail() -> Div {
 }
 
 pub fn authors_split_page() -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_row()
+    div().w_full().max_w(px(AUTHOR_PAGE_MAX_WIDTH)).h_full().min_h_0().min_w_0().mx_auto().flex().flex_row()
 }
 
-pub fn author_list_panel(theme: BrowserTheme) -> Div {
-    div().w(px(AUTHOR_LIST_PANEL_WIDTH)).h_full().min_h_0().flex_none().flex().flex_col().gap(px(12.0)).p(px(16.0)).border_r_1().border_color(theme.border)
+pub fn author_list_panel(width: f32, theme: BrowserTheme) -> Div {
+    div().w(px(width)).h_full().min_h_0().flex_none().flex().flex_col().gap(px(12.0)).p(px(16.0)).border_r_1().border_color(theme.border)
 }
 
 pub fn author_filter_box() -> Div {
@@ -196,7 +224,7 @@ pub fn folder_content() -> Div {
 }
 
 pub fn folder_dashboard() -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(20.0)).p(px(20.0))
+    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(20.0)).p(px(crate::CONTENT_PADDING))
 }
 
 pub fn folder_workspace() -> Div {
@@ -236,7 +264,12 @@ pub fn folder_breadcrumb() -> Breadcrumb {
 }
 
 pub fn folder_breadcrumb_item(label: impl Into<SharedString>, current: bool) -> BreadcrumbItem {
-    BreadcrumbItem::new(label).px(px(5.0)).py(px(4.0)).when(current, |item| item.font_weight(FontWeight::BOLD))
+    let label = label.into();
+    let max_characters = usize::from(bokheim_app_contract::frontend::BREADCRUMB_ITEM_MAX_CHARACTERS);
+    let mut characters = label.chars();
+    let visible = characters.by_ref().take(max_characters).collect::<String>();
+    let visible = if characters.next().is_some() { format!("{}…", visible.chars().take(max_characters.saturating_sub(1)).collect::<String>()) } else { visible };
+    BreadcrumbItem::new(visible).px(px(5.0)).py(px(4.0)).when(current, |item| item.font_weight(FontWeight::BOLD))
 }
 
 pub fn breadcrumb_root(id: impl Into<ElementId>) -> Stateful<Div> {
@@ -264,10 +297,19 @@ pub fn folder_buttons() -> Div {
 }
 
 pub fn folder_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
+    folder_navigation_button(id, label, IconName::Folder, theme)
+}
+
+pub fn folder_navigation_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
     let label = label.into();
-    crate::action_button(id, label.clone())
-        .icon(IconName::Folder)
+    Button::new(id)
+        .secondary()
+        .outline()
+        .icon(icon)
         .tooltip(format!("Open {label}"))
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
         .h(px(41.0))
         .px(px(11.0))
         .rounded(px(10.0))
@@ -275,4 +317,45 @@ pub fn folder_button(id: impl Into<ElementId>, label: impl Into<SharedString>, t
         .bg(theme.surface_alt)
         .text_size(gpui::rems(13.0 / 16.0))
         .font_weight(FontWeight::BOLD)
+        .child(div().w(px(190.0)).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+}
+
+pub fn catalog_facet_button(id: impl Into<ElementId>, label: impl Into<SharedString>, active: bool, disabled: bool) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .secondary()
+        .outline()
+        .selected(active)
+        .disabled(active || disabled)
+        .h(px(32.0))
+        .max_w(px(crate::FOLDER_CARD_WIDTH))
+        .px(px(10.0))
+        .overflow_hidden()
+        .rounded_full()
+        .text_size(gpui::rems(11.0 / 16.0))
+        .tooltip(label.clone())
+        .child(div().max_w(px(crate::FOLDER_CARD_WIDTH - 24.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+}
+
+pub fn folder_card(open: impl IntoElement, download: Option<impl IntoElement>) -> Div {
+    div().w(px(crate::FOLDER_CARD_WIDTH)).h(px(41.0)).flex().items_center().gap(px(2.0)).child(open).children(download)
+}
+
+pub fn folder_download_button(id: impl Into<ElementId>, label: impl Into<SharedString>, complete: bool, theme: BrowserTheme) -> Button {
+    Button::new(id).icon(if complete { IconName::Check } else { IconName::ArrowDown }).tooltip(label).secondary().outline().size(px(41.0)).rounded(px(10.0)).border_color(theme.border).text_color(theme.accent)
+}
+
+pub fn folder_download_indicator(label: impl Into<SharedString>, downloaded: usize, total: usize, theme: BrowserTheme) -> Div {
+    let complete = total > 0 && downloaded >= total;
+    let label = label.into();
+    div()
+        .size(px(41.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.accent)
+        .when(complete, |indicator| indicator.child(Icon::new(IconName::Check).size(px(16.0))))
+        .when(!complete, |indicator| indicator.child(div().text_size(gpui::rems(9.0 / 16.0)).font_weight(FontWeight::SEMIBOLD).child(format!("{downloaded}/{total}"))))
+        .child(div().hidden().child(label))
 }

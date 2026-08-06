@@ -1,455 +1,1109 @@
-use serde_json::Value;
-use sqlx::postgres::PgArguments;
-use sqlx::query::Query;
+use server_core::{LibraryUpsertOutcome, LiveAssets, UserThumbnail};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
-use sync_common::{singleton_event_types_sql_list, ActorId, ClientId, ContentHash, EventId, Hlc, LibraryId, LocalChange, LocalSeq, PushRejection, PushRejectionReason, ServerChange, ServerSeq, SyncOp};
+use sync_common::{
+    AnnotationAnchor, AnnotationState, AnnotationStyle, AuthorCredit, AuthorId,
+    BookId, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState,
+    ClientId, ContentHash, DirId, DirectoryState, FileName, LibraryId,
+    LibraryRevision, MutationBody, MutationId, MutationRejection,
+    MutationRejectionReason, PdfAnnotationAnchor, PdfAnnotationRect,
+    PlacementState, PublicationMetadata, ReadingPositionState, ReplicaSeq,
+    ServerMutation, StateMutation, UnixMillis, MAX_PULL_CHANGES,
+};
 
-const HLC_FUTURE_TOLERANCE_MS: u64 = 60 * 60 * 1000;
+const LIST_LIBRARIES_SQL: &str = include_str!("sql/sync/list_libraries.sql");
+const UPSERT_LIBRARY_SQL: &str = include_str!("sql/sync/upsert_library.sql");
+const GET_LIBRARY_OWNER_SQL: &str = include_str!("sql/sync/get_library_owner.sql");
+const ENSURE_LIBRARY_SQL: &str = include_str!("sql/sync/ensure_library.sql");
+const OWNS_LIBRARY_SQL: &str = include_str!("sql/sync/owns_library.sql");
+const LIVE_ASSETS_SQL: &str = include_str!("sql/sync/live_assets.sql");
+const UPSERT_DIRECTORY_SQL: &str = include_str!("sql/sync/upsert_directory.sql");
+const UPSERT_BOOK_PRESENT_SQL: &str = include_str!("sql/sync/upsert_book_present.sql");
+const UPSERT_BOOK_DELETED_SQL: &str = include_str!("sql/sync/upsert_book_deleted.sql");
+const UPSERT_PLACEMENT_PRESENT_SQL: &str = include_str!("sql/sync/upsert_placement_present.sql");
+const UPSERT_PLACEMENT_VACANT_SQL: &str = include_str!("sql/sync/upsert_placement_vacant.sql");
+const UPSERT_READING_POSITION_SQL: &str = include_str!("sql/sync/upsert_reading_position.sql");
+const UPSERT_ANNOTATION_SQL: &str = include_str!("sql/sync/upsert_annotation.sql");
+const UPSERT_BOOKMARK_SQL: &str = include_str!("sql/sync/upsert_bookmark.sql");
+const UPSERT_BOOK_LINK_SQL: &str = include_str!("sql/sync/upsert_book_link.sql");
+const UPSERT_LAST_OPENED_SQL: &str = include_str!("sql/sync/upsert_last_opened.sql");
+const UPSERT_METADATA_SQL: &str = include_str!("sql/sync/upsert_metadata.sql");
+const EXISTING_DEPENDENCIES_SQL: &str = include_str!("sql/sync/existing_dependencies.sql");
+const UPSERT_DIRECTORY_BATCH_SQL: &str = include_str!("sql/sync/upsert_directory_batch.sql");
+const UPSERT_BOOK_LIFECYCLE_BATCH_SQL: &str = include_str!("sql/sync/upsert_book_lifecycle_batch.sql");
+const UPSERT_PLACEMENT_BATCH_SQL: &str = include_str!("sql/sync/upsert_placement_batch.sql");
+const UPSERT_READING_POSITION_BATCH_SQL: &str = include_str!("sql/sync/upsert_reading_position_batch.sql");
+const UPSERT_METADATA_BATCH_SQL: &str = include_str!("sql/sync/upsert_metadata_batch.sql");
+const INSERT_AUTHORIZED_READING_POSITION_SQL: &str = include_str!("sql/sync/insert_authorized_reading_position.sql");
+const EXCHANGE_AUTHORIZED_READING_POSITION_SQL: &str = include_str!("sql/sync/exchange_authorized_reading_position.sql");
+const FETCH_PAGE_SQL: &str = include_str!("sql/sync/fetch_page.sql");
+const GET_PULL_HEADS_SQL: &str = include_str!("sql/sync/get_pull_heads.sql");
+const VALIDATE_OWNED_CURSOR_SQL: &str = include_str!("sql/sync/validate_owned_cursor.sql");
+const FETCH_READING_POSITION_PAGE_SQL: &str = include_str!("sql/sync/fetch_reading_position_page.sql");
 
-pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<LibrarySummary>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, name FROM libraries WHERE user_id = $1 ORDER BY lower(name), id").bind(user_id).fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|row| {
-            let raw_id: String = row.try_get("id")?;
-            let library_id = LibraryId::parse(&raw_id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-            Ok(LibrarySummary { library_id, library_name: row.try_get("name")? })
-        })
-        .collect()
+#[derive(serde::Deserialize)]
+struct LegacyAuthorCredit {
+    name: String,
+    #[serde(default)]
+    sort_name: Option<String>,
 }
 
-pub(super) async fn upsert_library(pool: &PgPool, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibrarySummary>, sqlx::Error> {
-    let row = sqlx::query(
-        "INSERT INTO libraries (id, user_id, name) VALUES ($1, $2, $3)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
-         WHERE libraries.user_id = EXCLUDED.user_id
-         RETURNING id, name",
-    )
-    .bind(request.library_id.as_str())
-    .bind(user_id)
-    .bind(&request.library_name)
-    .fetch_optional(pool)
-    .await?;
+pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<LibrarySummary>, sqlx::Error> {
+    let rows = sqlx::query(LIST_LIBRARIES_SQL).bind(user_id).fetch_all(pool).await?;
+    rows.into_iter().map(|row| {
+        let raw: String = row.try_get("id")?;
+        Ok(LibrarySummary { library_id: LibraryId::parse(&raw).map_err(|error| sqlx::Error::Decode(Box::new(error)))?, library_name: row.try_get("name")? })
+    }).collect()
+}
+
+pub(super) async fn upsert_library(pool: &PgPool, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibraryUpsertOutcome>, sqlx::Error> {
+    let row = sqlx::query(UPSERT_LIBRARY_SQL).bind(request.library_id.as_str()).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
     row.map(|row| {
-        let raw_id: String = row.try_get("id")?;
-        let library_id = LibraryId::parse(&raw_id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        Ok(LibrarySummary { library_id, library_name: row.try_get("name")? })
-    })
-    .transpose()
+        let raw: String = row.try_get("id")?;
+        Ok(LibraryUpsertOutcome {
+            library: LibrarySummary { library_id: LibraryId::parse(&raw).map_err(|error| sqlx::Error::Decode(Box::new(error)))?, library_name: row.try_get("name")? },
+            changed: row.try_get("changed")?,
+        })
+    }).transpose()
 }
 
 pub(super) async fn ensure_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
-    // Atomic create-or-fetch-owner. On a fresh library this inserts our row; on
-    // an existing one the no-op `DO UPDATE` makes RETURNING surface the current
-    // owner (a plain `DO NOTHING` returns no row on conflict). Doing it in one
-    // statement closes the TOCTOU where a separate SELECT-then-INSERT could let
-    // a second user be granted access to a library another user just created.
-    let owner = sqlx::query_scalar::<_, String>(
-        "insert into libraries (id, user_id) values ($1, $2)
-         on conflict (id) do update set user_id = libraries.user_id
-         returning user_id",
-    )
-    .bind(library_id.as_str())
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
+    if let Some(owner) = sqlx::query_scalar::<_, String>(GET_LIBRARY_OWNER_SQL).bind(library_id.as_str()).fetch_optional(pool).await? { return Ok(owner == user_id); }
+    let owner = sqlx::query_scalar::<_, String>(ENSURE_LIBRARY_SQL)
+        .bind(library_id.as_str()).bind(user_id).fetch_one(pool).await?;
     Ok(owner == user_id)
 }
 
-pub(super) struct InsertChangesResult {
-    pub handled_local_seqs: Vec<LocalSeq>,
-    pub rejected: Vec<PushRejection>,
+pub(super) async fn owns_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(OWNS_LIBRARY_SQL).bind(library_id.as_str()).bind(user_id).fetch_one(pool).await
 }
 
-pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, client_id: &ClientId, changes: &[LocalChange]) -> Result<InsertChangesResult, sqlx::Error> {
-    let mut handled_local_seqs = Vec::new();
-    let mut rejected = Vec::new();
+pub(super) struct PlacementHashDelta { pub previous: Option<ContentHash>, pub current: Option<ContentHash> }
+pub(super) struct InsertChangesResult { pub accepted: Vec<MutationId>, pub rejected: Vec<MutationRejection>, pub placement_deltas: Vec<PlacementHashDelta> }
 
-    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let max_allowed_hlc_pt = now_ms.saturating_add(HLC_FUTURE_TOLERANCE_MS);
+pub(super) fn server_now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0)
+}
+
+pub(super) fn storage_rejection(change: &StateMutation, server_now_ms: u64) -> Option<MutationRejectionReason> {
+    change.rejection_at(server_now_ms)
+}
+
+pub(super) fn supports_atomic_singleton(change: &StateMutation) -> bool { matches!(change.body, MutationBody::ReadingPosition { .. }) }
+
+fn common<'a>(change: &StateMutation, client_id: &'a ClientId) -> (i64, &'a str, i64, i16, String) {
+    (
+        change.changed_at.storage_i64(),
+        client_id.as_str(),
+        change.replica_seq.get() as i64,
+        change.body.conflict_rank() as i16,
+        change.mutation_id.to_string(),
+    )
+}
+
+fn encoded_authors(authors: &[AuthorCredit]) -> Result<Vec<u8>, sqlx::Error> {
+    sync_common::wire::encode(&authors).map_err(|error| sqlx::Error::Protocol(error.to_string()))
+}
+
+fn encoded_publication(metadata: &PublicationMetadata) -> Result<Vec<u8>, sqlx::Error> {
+    sync_common::wire::encode(metadata).map_err(|error| sqlx::Error::Protocol(error.to_string()))
+}
+
+fn author_label(authors: &[AuthorCredit]) -> String {
+    authors.iter().map(AuthorCredit::name).collect::<Vec<_>>().join(", ")
+}
+
+async fn upsert_typed_state(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, change: &StateMutation) -> Result<(), sqlx::Error> {
+    let (changed_at, actor, actor_seq, rank, event_id) = common(change, client_id);
+    match &change.body {
+        MutationBody::Directory { dir_id, value: directory } => {
+            sqlx::query(UPSERT_DIRECTORY_SQL)
+                .bind(library_id.as_str())
+                .bind(dir_id.as_str())
+                .bind(directory.parent_id().as_str())
+                .bind(directory.name().as_str())
+                .bind(directory.is_deleted())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::BookLifecycle {
+            book_id,
+            value: BookLifecycleState::Present { metadata, added_at },
+        } => {
+            sqlx::query(UPSERT_BOOK_PRESENT_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(&metadata.title)
+                .bind(author_label(&metadata.authors))
+                .bind(encoded_authors(&metadata.authors)?)
+                .bind(&metadata.description)
+                .bind(encoded_publication(&metadata.publication)?)
+                .bind(added_at.storage_i64())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::BookLifecycle { book_id, value: BookLifecycleState::Deleted } => {
+            sqlx::query(UPSERT_BOOK_DELETED_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::Placement {
+            dir_id,
+            file_name,
+            value: PlacementState::Present { book_id, content_hash },
+        } => {
+            sqlx::query(UPSERT_PLACEMENT_PRESENT_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(dir_id.as_str())
+                .bind(file_name.as_str())
+                .bind(content_hash.as_str())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::Placement {
+            dir_id,
+            file_name,
+            value: PlacementState::Vacant { removed_book_id: book_id },
+        } => {
+            sqlx::query(UPSERT_PLACEMENT_VACANT_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(dir_id.as_str())
+                .bind(file_name.as_str())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::ReadingPosition {
+            book_id,
+            value: ReadingPositionState { location: cfi, progress },
+        } => {
+            sqlx::query(UPSERT_READING_POSITION_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(cfi)
+                .bind(progress)
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::Annotation { annotation_id, value: annotation } => {
+            let (anchor_kind, cfi, page_index, left, top, width, height, fallback) = match &annotation.anchor {
+                AnnotationAnchor::EpubCfi { cfi } => {
+                    ("epub_cfi", Some(cfi.as_str()), None, None, None, None, None, None)
+                }
+                AnnotationAnchor::Pdf { page_index, rects, fallback_cfi } => (
+                    "pdf",
+                    None,
+                    Some(i64::from(*page_index)),
+                    Some(rects.iter().map(|rect| rect.left).collect::<Vec<_>>()),
+                    Some(rects.iter().map(|rect| rect.top).collect::<Vec<_>>()),
+                    Some(rects.iter().map(|rect| rect.width).collect::<Vec<_>>()),
+                    Some(rects.iter().map(|rect| rect.height).collect::<Vec<_>>()),
+                    fallback_cfi.as_deref(),
+                ),
+            };
+            let style = match annotation.style {
+                AnnotationStyle::Highlight => "highlight",
+                AnnotationStyle::Underline => "underline",
+                AnnotationStyle::Squiggly => "squiggly",
+                AnnotationStyle::Strikethrough => "strikethrough",
+            };
+            sqlx::query(UPSERT_ANNOTATION_SQL)
+                .bind(library_id.as_str())
+                .bind(annotation_id)
+                .bind(annotation.book_id.canonical())
+                .bind(anchor_kind)
+                .bind(cfi)
+                .bind(page_index)
+                .bind(left)
+                .bind(top)
+                .bind(width)
+                .bind(height)
+                .bind(fallback)
+                .bind(&annotation.exact_text)
+                .bind(&annotation.prefix)
+                .bind(&annotation.suffix)
+                .bind(style)
+                .bind(&annotation.color)
+                .bind(&annotation.note)
+                .bind(annotation.created_at.storage_i64())
+                .bind(annotation.modified_at.storage_i64())
+                .bind(annotation.deleted)
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::Bookmark { bookmark_id, value: bookmark } => {
+            sqlx::query(UPSERT_BOOKMARK_SQL)
+                .bind(library_id.as_str())
+                .bind(bookmark_id)
+                .bind(bookmark.book_id.canonical())
+                .bind(&bookmark.cfi)
+                .bind(&bookmark.label)
+                .bind(bookmark.created_at.storage_i64())
+                .bind(bookmark.modified_at.storage_i64())
+                .bind(bookmark.deleted)
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::BookLink { link_id, value: link } => {
+            sqlx::query(UPSERT_BOOK_LINK_SQL)
+                .bind(library_id.as_str())
+                .bind(link_id)
+                .bind(link.source_book_id.canonical())
+                .bind(link.target_book_id.canonical())
+                .bind(&link.relation)
+                .bind(&link.note)
+                .bind(link.created_at.storage_i64())
+                .bind(link.modified_at.storage_i64())
+                .bind(link.deleted)
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::LastOpened { book_id, last_read } => {
+            sqlx::query(UPSERT_LAST_OPENED_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(last_read.storage_i64())
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        MutationBody::Metadata {
+            book_id,
+            value: BookMetadataState {
+                title,
+                authors,
+                description,
+                publication,
+            },
+        } => {
+            sqlx::query(UPSERT_METADATA_SQL)
+                .bind(library_id.as_str())
+                .bind(book_id.canonical())
+                .bind(title)
+                .bind(author_label(authors))
+                .bind(encoded_authors(authors)?)
+                .bind(description)
+                .bind(encoded_publication(publication)?)
+                .bind(changed_at)
+                .bind(actor)
+                .bind(actor_seq)
+                .bind(rank)
+                .bind(event_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_directory_batch(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, changes: &[&StateMutation]) -> Result<(), sqlx::Error> {
+    if changes.is_empty() { return Ok(()); }
+    let mut ids=Vec::with_capacity(changes.len());let mut parents=Vec::with_capacity(changes.len());let mut names=Vec::with_capacity(changes.len());let mut deleted=Vec::with_capacity(changes.len());let mut changed=Vec::with_capacity(changes.len());let mut seqs=Vec::with_capacity(changes.len());let mut ranks=Vec::with_capacity(changes.len());let mut events=Vec::with_capacity(changes.len());
+    for change in changes { let MutationBody::Directory { dir_id,value }=&change.body else { unreachable!() };let (at,_,seq,rank,event)=common(change,client_id);ids.push(dir_id.as_str().to_owned());parents.push(value.parent_id().as_str().to_owned());names.push(value.name().as_str().to_owned());deleted.push(value.is_deleted());changed.push(at);seqs.push(seq);ranks.push(rank);events.push(event); }
+    sqlx::query(UPSERT_DIRECTORY_BATCH_SQL).bind(library_id.as_str()).bind(client_id.as_str()).bind(ids).bind(parents).bind(names).bind(deleted).bind(changed).bind(seqs).bind(ranks).bind(events).execute(&mut **tx).await?;Ok(())
+}
+
+async fn upsert_book_lifecycle_batch(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, changes: &[&StateMutation]) -> Result<(), sqlx::Error> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+
+    let mut books = Vec::with_capacity(changes.len());
+    let mut titles = Vec::with_capacity(changes.len());
+    let mut author_labels = Vec::with_capacity(changes.len());
+    let mut author_payloads = Vec::with_capacity(changes.len());
+    let mut descriptions = Vec::with_capacity(changes.len());
+    let mut publications = Vec::with_capacity(changes.len());
+    let mut added = Vec::with_capacity(changes.len());
+    let mut deleted = Vec::with_capacity(changes.len());
+    let mut changed = Vec::with_capacity(changes.len());
+    let mut seqs = Vec::with_capacity(changes.len());
+    let mut ranks = Vec::with_capacity(changes.len());
+    let mut events = Vec::with_capacity(changes.len());
 
     for change in changes {
-        let local_seq = change.local_seq.get() as i64;
-        if change.op.validate().is_err() {
-            rejected.push(PushRejection { local_seq: change.local_seq, reason: PushRejectionReason::InvalidPayload });
-            continue;
-        }
-        if let Some(required_dir) = required_directory(&change.op) {
-            let exists = required_dir.as_str() == "__root__"
-                || sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM library_events
-                         WHERE library_id=$1 AND event_type='dir_state' AND entity_id=$2
-                     )",
+        let MutationBody::BookLifecycle { book_id, value } = &change.body else {
+            unreachable!()
+        };
+        let (title, authors, description, publication, added_at, is_deleted) = match value {
+            BookLifecycleState::Present { metadata, added_at } => (
+                Some(metadata.title.clone()),
+                metadata.authors.clone(),
+                metadata.description.clone(),
+                encoded_publication(&metadata.publication)?,
+                Some(added_at.storage_i64()),
+                false,
+            ),
+            BookLifecycleState::Deleted => (
+                None,
+                Vec::new(),
+                String::new(),
+                Vec::new(),
+                None,
+                true,
+            ),
+        };
+        let (at, _, seq, rank, event) = common(change, client_id);
+
+        books.push(book_id.canonical());
+        titles.push(title);
+        author_labels.push(Some(author_label(&authors)));
+        author_payloads.push(encoded_authors(&authors)?);
+        descriptions.push(description);
+        publications.push(publication);
+        added.push(added_at);
+        deleted.push(is_deleted);
+        changed.push(at);
+        seqs.push(seq);
+        ranks.push(rank);
+        events.push(event);
+    }
+
+    sqlx::query(UPSERT_BOOK_LIFECYCLE_BATCH_SQL)
+        .bind(library_id.as_str())
+        .bind(client_id.as_str())
+        .bind(books)
+        .bind(titles)
+        .bind(author_labels)
+        .bind(author_payloads)
+        .bind(descriptions)
+        .bind(publications)
+        .bind(added)
+        .bind(deleted)
+        .bind(changed)
+        .bind(seqs)
+        .bind(ranks)
+        .bind(events)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn upsert_placement_batch(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, changes: &[&StateMutation]) -> Result<Vec<PlacementHashDelta>, sqlx::Error> {
+    if changes.is_empty() { return Ok(Vec::new()); }
+    let mut books=Vec::with_capacity(changes.len());let mut dirs=Vec::with_capacity(changes.len());let mut names=Vec::with_capacity(changes.len());let mut hashes=Vec::with_capacity(changes.len());let mut present=Vec::with_capacity(changes.len());let mut changed=Vec::with_capacity(changes.len());let mut seqs=Vec::with_capacity(changes.len());let mut ranks=Vec::with_capacity(changes.len());let mut events=Vec::with_capacity(changes.len());
+    for change in changes { let MutationBody::Placement { dir_id,file_name,value }=&change.body else { unreachable!() };let (book,hash,is_present)=match value{PlacementState::Present{book_id,content_hash}=>(*book_id,content_hash.as_str().to_owned(),true),PlacementState::Vacant{removed_book_id}=>(*removed_book_id,String::new(),false)};let (at,_,seq,rank,event)=common(change,client_id);books.push(book.canonical());dirs.push(dir_id.as_str().to_owned());names.push(file_name.as_str().to_owned());hashes.push(hash);present.push(is_present);changed.push(at);seqs.push(seq);ranks.push(rank);events.push(event); }
+    let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(UPSERT_PLACEMENT_BATCH_SQL).bind(library_id.as_str()).bind(client_id.as_str()).bind(books).bind(dirs).bind(names).bind(hashes).bind(present).bind(changed).bind(seqs).bind(ranks).bind(events).fetch_all(&mut **tx).await?;
+    rows.into_iter().map(|(previous,current)| Ok(PlacementHashDelta {
+        previous: previous.map(|hash| ContentHash::parse(&hash).map_err(|error| sqlx::Error::Decode(Box::new(error)))).transpose()?,
+        current: current.map(|hash| ContentHash::parse(&hash).map_err(|error| sqlx::Error::Decode(Box::new(error)))).transpose()?,
+    })).collect()
+}
+
+async fn upsert_reading_position_batch(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, changes: &[&StateMutation]) -> Result<(), sqlx::Error> {
+    if changes.is_empty() { return Ok(()); }
+    let mut books=Vec::with_capacity(changes.len());let mut positions=Vec::with_capacity(changes.len());let mut progress=Vec::with_capacity(changes.len());let mut changed=Vec::with_capacity(changes.len());let mut seqs=Vec::with_capacity(changes.len());let mut ranks=Vec::with_capacity(changes.len());let mut events=Vec::with_capacity(changes.len());
+    for change in changes { let MutationBody::ReadingPosition { book_id,value }=&change.body else { unreachable!() };let (at,_,seq,rank,event)=common(change,client_id);books.push(book_id.canonical());positions.push(value.location.clone());progress.push(value.progress);changed.push(at);seqs.push(seq);ranks.push(rank);events.push(event); }
+    sqlx::query(UPSERT_READING_POSITION_BATCH_SQL).bind(library_id.as_str()).bind(client_id.as_str()).bind(books).bind(positions).bind(progress).bind(changed).bind(seqs).bind(ranks).bind(events).execute(&mut **tx).await?;Ok(())
+}
+
+async fn upsert_metadata_batch(tx: &mut Transaction<'_, Postgres>, library_id: &LibraryId, client_id: &ClientId, changes: &[&StateMutation]) -> Result<(), sqlx::Error> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+
+    let mut books = Vec::with_capacity(changes.len());
+    let mut titles = Vec::with_capacity(changes.len());
+    let mut author_labels = Vec::with_capacity(changes.len());
+    let mut author_payloads = Vec::with_capacity(changes.len());
+    let mut descriptions = Vec::with_capacity(changes.len());
+    let mut publications = Vec::with_capacity(changes.len());
+    let mut changed = Vec::with_capacity(changes.len());
+    let mut seqs = Vec::with_capacity(changes.len());
+    let mut ranks = Vec::with_capacity(changes.len());
+    let mut events = Vec::with_capacity(changes.len());
+
+    for change in changes {
+        let MutationBody::Metadata { book_id, value } = &change.body else {
+            unreachable!()
+        };
+        let (at, _, seq, rank, event) = common(change, client_id);
+
+        books.push(book_id.canonical());
+        titles.push(value.title.clone());
+        author_labels.push(author_label(&value.authors));
+        author_payloads.push(encoded_authors(&value.authors)?);
+        descriptions.push(value.description.clone());
+        publications.push(encoded_publication(&value.publication)?);
+        changed.push(at);
+        seqs.push(seq);
+        ranks.push(rank);
+        events.push(event);
+    }
+
+    sqlx::query(UPSERT_METADATA_BATCH_SQL)
+        .bind(library_id.as_str())
+        .bind(client_id.as_str())
+        .bind(books)
+        .bind(titles)
+        .bind(author_labels)
+        .bind(author_payloads)
+        .bind(descriptions)
+        .bind(publications)
+        .bind(changed)
+        .bind(seqs)
+        .bind(ranks)
+        .bind(events)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn insert_changes(tx:&mut Transaction<'_,Postgres>,_user_id:&str,library_id:&LibraryId,client_id:&ClientId,changes:&[StateMutation])->Result<InsertChangesResult,sqlx::Error>{
+    let server_now=server_now_ms();let mut rejected=Vec::new();let mut candidates=Vec::new();
+    for change in changes { if let Some(reason)=storage_rejection(change,server_now){rejected.push(MutationRejection{mutation_id:change.mutation_id,reason});}else{candidates.push(change);} }
+
+    let provided_dirs=candidates.iter().filter_map(|change|match &change.body{MutationBody::Directory{dir_id,..}=>Some(dir_id.as_str().to_owned()),_=>None}).collect::<std::collections::HashSet<_>>();
+    let provided_books=candidates.iter().filter_map(|change|match &change.body{MutationBody::BookLifecycle{book_id,..}=>Some(book_id.canonical()),MutationBody::Placement{value:PlacementState::Present{book_id,..},..}=>Some(book_id.canonical()),MutationBody::Placement{value:PlacementState::Vacant{removed_book_id},..}=>Some(removed_book_id.canonical()),_=>None}).collect::<std::collections::HashSet<_>>();
+    let required_dirs=candidates.iter().filter_map(|change|required_directory(&change.body)).filter(|dir|dir.as_str()!="__root__"&&!provided_dirs.contains(dir.as_str())).map(|dir|dir.as_str().to_owned()).collect::<std::collections::HashSet<_>>();
+    let required_book_ids=candidates.iter().flat_map(|change|required_books(&change.body).into_iter().flatten()).map(|book|book.canonical()).filter(|book|!provided_books.contains(book)).collect::<std::collections::HashSet<_>>();
+    let required_dir_values=required_dirs.iter().cloned().collect::<Vec<_>>();let required_book_values=required_book_ids.iter().cloned().collect::<Vec<_>>();
+    let rows=sqlx::query(EXISTING_DEPENDENCIES_SQL).bind(library_id.as_str()).bind(&required_dir_values).bind(&required_book_values).fetch_all(&mut **tx).await?;
+    let mut existing_dirs=std::collections::HashSet::new();let mut existing_books=std::collections::HashSet::new();
+    for row in rows { let kind:String=row.try_get("kind")?;let id:String=row.try_get("id")?;if kind=="directory"{existing_dirs.insert(id);}else{existing_books.insert(id);} }
+
+    let mut accepted=Vec::new();
+    for change in candidates {
+        let missing_dir=required_directory(&change.body).is_some_and(|dir|dir.as_str()!="__root__"&&!provided_dirs.contains(dir.as_str())&&!existing_dirs.contains(dir.as_str()));
+        let missing_book=required_books(&change.body).into_iter().flatten().map(|book|book.canonical()).any(|book|!provided_books.contains(&book)&&!existing_books.contains(&book));
+        if missing_dir||missing_book{rejected.push(MutationRejection{mutation_id:change.mutation_id,reason:MutationRejectionReason::MissingDependency});}else{accepted.push(change);}
+    }
+
+    let storage_changes=sync_common::reduce_same_replica_mutations(accepted.iter().copied());
+    let directories=storage_changes.iter().copied().filter(|change|matches!(change.body,MutationBody::Directory{..})).collect::<Vec<_>>();
+    let lifecycles=storage_changes.iter().copied().filter(|change|matches!(change.body,MutationBody::BookLifecycle{..})).collect::<Vec<_>>();
+    let placements=storage_changes.iter().copied().filter(|change|matches!(change.body,MutationBody::Placement{..})).collect::<Vec<_>>();
+    let readings=storage_changes.iter().copied().filter(|change|matches!(change.body,MutationBody::ReadingPosition{..})).collect::<Vec<_>>();
+    let metadata=storage_changes.iter().copied().filter(|change|matches!(change.body,MutationBody::Metadata{..})).collect::<Vec<_>>();
+    upsert_directory_batch(tx,library_id,client_id,&directories).await?;upsert_book_lifecycle_batch(tx,library_id,client_id,&lifecycles).await?;
+    let mut placement_counts=std::collections::HashMap::new();
+    for change in &placements { let MutationBody::Placement{dir_id,file_name,..}=&change.body else{unreachable!()};*placement_counts.entry((dir_id.as_str(),file_name.as_str())).or_insert(0_usize)+=1; }
+    let unique_placements=placements.iter().copied().filter(|change|{let MutationBody::Placement{dir_id,file_name,..}=&change.body else{unreachable!()};placement_counts[&(dir_id.as_str(),file_name.as_str())]==1}).collect::<Vec<_>>();
+    let mut placement_deltas=upsert_placement_batch(tx,library_id,client_id,&unique_placements).await?;
+    let mut repeated=std::collections::BTreeMap::<(String,String),Vec<&StateMutation>>::new();
+    for change in placements { let MutationBody::Placement{dir_id,file_name,..}=&change.body else{unreachable!()};if placement_counts[&(dir_id.as_str(),file_name.as_str())]>1{repeated.entry((dir_id.as_str().to_owned(),file_name.as_str().to_owned())).or_default().push(change);} }
+    for changes in repeated.values_mut(){changes.sort_by_key(|change|(change.replica_seq,change.mutation_id));for change in changes.iter().copied(){placement_deltas.extend(upsert_placement_batch(tx,library_id,client_id,&[change]).await?);}}
+    upsert_reading_position_batch(tx,library_id,client_id,&readings).await?;
+    for change in storage_changes.iter().copied().filter(|change|!matches!(change.body,MutationBody::Directory{..}|MutationBody::BookLifecycle{..}|MutationBody::Placement{..}|MutationBody::ReadingPosition{..}|MutationBody::Metadata{..})){upsert_typed_state(tx,library_id,client_id,change).await?;}
+    upsert_metadata_batch(tx,library_id,client_id,&metadata).await?;
+    Ok(InsertChangesResult{accepted:accepted.into_iter().map(|change|change.mutation_id).collect(),rejected,placement_deltas})
+}
+
+fn required_directory(body:&MutationBody)->Option<&DirId>{match body{MutationBody::Directory{value,..}=>Some(value.parent_id()),MutationBody::Placement{dir_id,..}=>Some(dir_id),_=>None}}
+fn required_books(body:&MutationBody)->[Option<BookId>;2]{match body{MutationBody::BookLink{value,..}=>[Some(value.source_book_id),Some(value.target_book_id)],_=>[None,None]}}
+
+pub(super) enum AtomicSingletonInsert{Unauthorized,Handled}
+pub(super) async fn insert_authorized_singleton(pool:&PgPool,user_id:&str,library_id:&LibraryId,client_id:&ClientId,change:&StateMutation)->Result<AtomicSingletonInsert,sqlx::Error>{
+    let MutationBody::ReadingPosition{book_id,value:ReadingPositionState { location:cfi,progress }}=&change.body else{unreachable!()};let (changed_at,actor,seq,rank,id)=common(change,client_id);
+    let (authorized,_):(bool,bool)=sqlx::query_as(INSERT_AUTHORIZED_READING_POSITION_SQL).bind(library_id.as_str()).bind(user_id).bind(book_id.canonical()).bind(cfi).bind(progress).bind(changed_at).bind(actor).bind(seq).bind(rank).bind(id).fetch_one(pool).await?;Ok(if authorized{AtomicSingletonInsert::Handled}else{AtomicSingletonInsert::Unauthorized})
+}
+
+#[derive(Debug,thiserror::Error)]pub(super)enum FetchChangesError{#[error(transparent)]Database(#[from]sqlx::Error),#[error("client cursor is ahead of server state")]CursorAhead,#[error("corrupt stored state at revision {revision}: {reason}")]CorruptStoredEvent{revision:i64,reason:&'static str}}
+pub(super)struct FetchChangesPage{pub changes:Vec<ServerMutation>,pub has_more:bool}
+pub(super)enum FetchChangesResult{Unauthorized,Page(FetchChangesPage)}
+
+fn at<'a, T>(values: &'a [T], index: usize) -> Result<&'a T, sqlx::Error> {
+    values
+        .get(index)
+        .ok_or_else(|| sqlx::Error::Decode("typed sync projection is missing a field".into()))
+}
+
+fn millis(value: i64) -> Result<UnixMillis, sqlx::Error> {
+    let value = u64::try_from(value)
+        .map_err(|_| sqlx::Error::Decode("negative Unix-millisecond timestamp".into()))?;
+    UnixMillis::new(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+fn decode_operation(
+    event_type: &str,
+    entity: String,
+    texts: Vec<String>,
+    ints: Vec<i64>,
+    reals: Vec<f32>,
+    bools: Vec<bool>,
+    left: Vec<f32>,
+    top: Vec<f32>,
+    width: Vec<f32>,
+    height: Vec<f32>,
+    authors_payload: Vec<u8>,
+    publication_payload: Vec<u8>,
+) -> Result<MutationBody, sqlx::Error> {
+    let book = || {
+        BookId::parse(&entity).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+    };
+    let migrated_credit = |index: usize, name: String, sort_name: Option<String>| {
+        let seed = format!("{event_type}:{entity}:{index}:{name}");
+        AuthorCredit::with_id(
+            AuthorId::from_migration_seed(seed.as_bytes()),
+            name,
+            sort_name,
+        )
+        .map_err(|error| sync_common::wire::WireError::Decode(error.to_string()))
+    };
+    let decoded_authors = || {
+        sync_common::wire::decode::<Vec<AuthorCredit>>(&authors_payload, 64 * 1024)
+            .or_else(|_| {
+                sync_common::wire::decode::<Vec<LegacyAuthorCredit>>(
+                    &authors_payload,
+                    64 * 1024,
                 )
-                .bind(library_id.as_str())
-                .bind(required_dir.as_str())
-                .fetch_one(&mut **tx)
-                .await?;
-            if !exists {
-                rejected.push(PushRejection { local_seq: change.local_seq, reason: PushRejectionReason::MissingDependency });
-                continue;
+                .and_then(|legacy| {
+                    legacy
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, credit)| {
+                            migrated_credit(index, credit.name, credit.sort_name)
+                        })
+                        .collect()
+                })
+                .or_else(|_| {
+                    sync_common::wire::decode::<Vec<String>>(
+                        &authors_payload,
+                        64 * 1024,
+                    )
+                    .and_then(|legacy| {
+                        legacy
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, name)| migrated_credit(index, name, None))
+                            .collect()
+                    })
+                })
+            })
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+    };
+    let decoded_publication = || {
+        if publication_payload.is_empty() {
+            Ok(PublicationMetadata::default())
+        } else {
+            sync_common::wire::decode(
+                &publication_payload,
+                sync_common::wire::MAX_DECODED_REQUEST_BYTES,
+            )
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+        }
+    };
+
+    let operation = match event_type {
+        "dir_state" => {
+            let dir_id = DirId::parse(&entity)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let parent_id = DirId::parse(at(&texts, 0)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let name = FileName::parse(at(&texts, 1)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            let value = if *at(&bools, 0)? {
+                DirectoryState::Deleted { parent_id, name }
+            } else {
+                DirectoryState::Present { parent_id, name }
+            };
+            MutationBody::Directory { dir_id, value }
+        }
+        "book_added" => {
+            let mut authors = decoded_authors()?;
+            if authors.is_empty() && !at(&texts, 1)?.is_empty() {
+                authors.push(
+                    migrated_credit(0, at(&texts, 1)?.clone(), None)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                );
+            }
+            MutationBody::BookLifecycle {
+                book_id: book()?,
+                value: BookLifecycleState::Present {
+                    metadata: BookMetadataState {
+                        title: at(&texts, 0)?.clone(),
+                        authors,
+                        description: at(&texts, 2)?.clone(),
+                        publication: decoded_publication()?,
+                    },
+                    added_at: millis(*at(&ints, 0)?)?,
+                },
             }
         }
-        if change.hlc.pt > max_allowed_hlc_pt {
-            rejected.push(PushRejection { local_seq: change.local_seq, reason: PushRejectionReason::HlcTooFarFuture });
-            continue;
+        "book_deleted" => MutationBody::BookLifecycle {
+            book_id: book()?,
+            value: BookLifecycleState::Deleted,
+        },
+        "book_dir_added" => MutationBody::Placement {
+            dir_id: DirId::parse(at(&texts, 0)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            file_name: FileName::parse(at(&texts, 1)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            value: PlacementState::Present {
+                book_id: book()?,
+                content_hash: ContentHash::parse(at(&texts, 2)?)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            },
+        },
+        "book_dir_removed" => MutationBody::Placement {
+            dir_id: DirId::parse(at(&texts, 0)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            file_name: FileName::parse(at(&texts, 1)?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+            value: PlacementState::Vacant {
+                removed_book_id: book()?,
+            },
+        },
+        "reading_position_updated" => MutationBody::ReadingPosition {
+            book_id: book()?,
+            value: ReadingPositionState {
+                location: at(&texts, 0)?.clone(),
+                progress: *at(&reals, 0)?,
+            },
+        },
+        "annotation_state" => {
+            let anchor = if at(&texts, 1)? == "epub_cfi" {
+                AnnotationAnchor::epub_cfi(at(&texts, 2)?.clone())
+                    .ok_or_else(|| sqlx::Error::Decode("invalid EPUB annotation anchor".into()))?
+            } else {
+                if left.len() != top.len()
+                    || left.len() != width.len()
+                    || left.len() != height.len()
+                {
+                    return Err(sqlx::Error::Decode(
+                        "mismatched annotation rectangles".into(),
+                    ));
+                }
+                let rects = left
+                    .into_iter()
+                    .zip(top)
+                    .zip(width)
+                    .zip(height)
+                    .map(|(((left, top), width), height)| {
+                        PdfAnnotationRect::new(left, top, width, height).ok_or_else(|| {
+                            sqlx::Error::Decode("invalid annotation rectangle".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let page_index = u32::try_from(*at(&ints, 0)?)
+                    .map_err(|_| sqlx::Error::Decode("invalid annotation page".into()))?;
+                let fallback_cfi = if *at(&bools, 1)? {
+                    Some(at(&texts, 3)?.clone())
+                } else {
+                    None
+                };
+                AnnotationAnchor::pdf(PdfAnnotationAnchor {
+                    page_index,
+                    rects,
+                    fallback_cfi,
+                })
+                .ok_or_else(|| sqlx::Error::Decode("invalid PDF annotation anchor".into()))?
+            };
+            let style = match at(&texts, 7)?.as_str() {
+                "highlight" => AnnotationStyle::Highlight,
+                "underline" => AnnotationStyle::Underline,
+                "squiggly" => AnnotationStyle::Squiggly,
+                "strikethrough" => AnnotationStyle::Strikethrough,
+                _ => return Err(sqlx::Error::Decode("invalid annotation style".into())),
+            };
+            MutationBody::Annotation {
+                annotation_id: entity,
+                value: AnnotationState {
+                    book_id: BookId::parse(at(&texts, 0)?)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                    anchor,
+                    exact_text: at(&texts, 4)?.clone(),
+                    prefix: if *at(&bools, 2)? {
+                        Some(at(&texts, 5)?.clone())
+                    } else {
+                        None
+                    },
+                    suffix: if *at(&bools, 3)? {
+                        Some(at(&texts, 6)?.clone())
+                    } else {
+                        None
+                    },
+                    style,
+                    color: at(&texts, 8)?.clone(),
+                    note: at(&texts, 9)?.clone(),
+                    created_at: millis(*at(&ints, 1)?)?,
+                    modified_at: millis(*at(&ints, 2)?)?,
+                    deleted: *at(&bools, 0)?,
+                },
+            }
         }
-        let (Ok(changed_at), Ok(hlc_pt), Ok(hlc_l)) = (i64::try_from(change.changed_at), i64::try_from(change.hlc.pt), i64::try_from(change.hlc.l)) else {
-            rejected.push(PushRejection { local_seq: change.local_seq, reason: PushRejectionReason::ValueOutsideStorageRange });
-            continue;
-        };
-        let entity_id = change.op.entity_id();
-        let row = EventRow {
-            library_id: library_id.as_str(),
-            user_id,
-            event_type: change.op.event_type(),
-            entity_id: entity_id.as_ref(),
-            payload: change.op.payload(),
-            changed_at,
-            client_id: client_id.as_str(),
-            local_seq,
-            hlc_pt,
-            hlc_l,
-            version_rank: change.op.conflict_rank() as i16,
-            event_id: change.event_id.to_string(),
-        };
-
-        if change.op.is_singleton() {
-            insert_singleton(tx, &row).await?;
-        } else {
-            insert_append(tx, &row).await?;
+        "bookmark_state" => MutationBody::Bookmark {
+            bookmark_id: entity,
+            value: BookmarkState {
+                book_id: BookId::parse(at(&texts, 0)?)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                cfi: at(&texts, 1)?.clone(),
+                label: at(&texts, 2)?.clone(),
+                created_at: millis(*at(&ints, 0)?)?,
+                modified_at: millis(*at(&ints, 1)?)?,
+                deleted: *at(&bools, 0)?,
+            },
+        },
+        "book_link_state" => MutationBody::BookLink {
+            link_id: entity,
+            value: BookLinkState {
+                source_book_id: BookId::parse(at(&texts, 0)?)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                target_book_id: BookId::parse(at(&texts, 1)?)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                relation: at(&texts, 2)?.clone(),
+                note: at(&texts, 3)?.clone(),
+                created_at: millis(*at(&ints, 0)?)?,
+                modified_at: millis(*at(&ints, 1)?)?,
+                deleted: *at(&bools, 0)?,
+            },
+        },
+        "book_opened" => MutationBody::LastOpened {
+            book_id: book()?,
+            last_read: millis(*at(&ints, 0)?)?,
+        },
+        "book_metadata_updated" => {
+            let mut authors = decoded_authors()?;
+            if authors.is_empty() && !at(&texts, 1)?.is_empty() {
+                authors.push(
+                    migrated_credit(0, at(&texts, 1)?.clone(), None)
+                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                );
+            }
+            MutationBody::Metadata {
+                book_id: book()?,
+                value: BookMetadataState {
+                    title: at(&texts, 0)?.clone(),
+                    authors,
+                    description: at(&texts, 2)?.clone(),
+                    publication: decoded_publication()?,
+                },
+            }
         }
-
-        handled_local_seqs.push(change.local_seq);
-    }
-
-    Ok(InsertChangesResult { handled_local_seqs, rejected })
+        other => {
+            return Err(sqlx::Error::Decode(
+                format!("unsupported typed state {other}").into(),
+            ));
+        }
+    };
+    operation
+        .validate()
+        .map_err(|_| sqlx::Error::Decode("typed state violates protocol validation".into()))?;
+    Ok(operation)
 }
 
-fn required_directory(op: &SyncOp) -> Option<&sync_common::DirId> {
-    match op {
-        SyncOp::DirState { directory, .. } => Some(directory.parent_id()),
-        SyncOp::BookDirAdded { dir_id, .. } | SyncOp::BookDirRemoved { dir_id, .. } => Some(dir_id),
-        _ => None,
-    }
+fn cursor(value: Option<LibraryRevision>) -> i64 {
+    value.map(|revision| i64::try_from(revision.get()).unwrap_or(i64::MAX)).unwrap_or(0)
 }
 
-/// One `library_events` row's worth of bound columns, shared by both insert paths.
-struct EventRow<'a> {
-    library_id: &'a str,
-    user_id: &'a str,
-    event_type: &'a str,
-    entity_id: &'a str,
-    payload: Value,
-    changed_at: i64,
-    client_id: &'a str,
-    local_seq: i64,
-    hlc_pt: i64,
-    hlc_l: i64,
-    version_rank: i16,
-    event_id: String,
+fn cursor_is_ahead(value: Option<LibraryRevision>, current_revision: i64) -> bool {
+    cursor(value) > current_revision
 }
-
-fn bind_event<'q>(q: Query<'q, Postgres, PgArguments>, row: &'q EventRow<'q>) -> Query<'q, Postgres, PgArguments> {
-    q.bind(row.library_id)
-        .bind(row.user_id)
-        .bind(row.event_type)
-        .bind(row.entity_id)
-        .bind(sqlx::types::Json(&row.payload))
-        .bind(row.changed_at)
-        .bind(row.client_id)
-        .bind(row.local_seq)
-        .bind(row.hlc_pt)
-        .bind(row.hlc_l)
-        .bind(row.version_rank)
-        .bind(&row.event_id)
-}
-
-/// Singleton (LWW) insert: one row per `(library, entity, event_type)`, updated
-/// only when the incoming total version is strictly greater. The
-/// winning update re-draws `server_seq` so it resurfaces to clients that already
-/// pulled the previous value.
-async fn insert_singleton(tx: &mut Transaction<'_, Postgres>, row: &EventRow<'_>) -> Result<(), sqlx::Error> {
-    let sql = format!(
-        "INSERT INTO library_events (
-            library_id, user_id, event_type, entity_id,
-            data, timestamp, client_id, client_seq, hlc_pt, hlc_l, version_rank, event_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        ON CONFLICT (library_id, entity_id, event_type)
-        WHERE event_type IN {list}
-        DO UPDATE SET
-            data = EXCLUDED.data,
-            timestamp = EXCLUDED.timestamp,
-            client_id = EXCLUDED.client_id,
-            client_seq = EXCLUDED.client_seq,
-            hlc_pt = EXCLUDED.hlc_pt,
-            hlc_l = EXCLUDED.hlc_l,
-            version_rank = EXCLUDED.version_rank,
-            event_id = EXCLUDED.event_id,
-            server_seq = DEFAULT
-        WHERE (EXCLUDED.hlc_pt, EXCLUDED.hlc_l, EXCLUDED.version_rank, EXCLUDED.client_id COLLATE \"C\", EXCLUDED.client_seq, EXCLUDED.event_id COLLATE \"C\")
-            > (library_events.hlc_pt, library_events.hlc_l, library_events.version_rank, library_events.client_id COLLATE \"C\", library_events.client_seq, library_events.event_id COLLATE \"C\")",
-        list = singleton_event_types_sql_list(),
-    );
-    bind_event(sqlx::query(&sql), row).execute(&mut **tx).await?;
-    Ok(())
-}
-
-/// Append insert: deduplicated by `(library, event_id)`. Re-sends
-/// of an already-stored event are no-ops.
-async fn insert_append(tx: &mut Transaction<'_, Postgres>, row: &EventRow<'_>) -> Result<(), sqlx::Error> {
-    let sql = "INSERT INTO library_events (
-            library_id, user_id, event_type, entity_id,
-            data, timestamp, client_id, client_seq, hlc_pt, hlc_l, version_rank, event_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        ON CONFLICT (library_id, event_id)
-        DO NOTHING";
-    bind_event(sqlx::query(sql), row).execute(&mut **tx).await?;
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum FetchChangesError {
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-    #[error("unsupported stored event type '{event_type}' at server_seq {server_seq}")]
-    UnsupportedEventType { server_seq: i64, event_type: String },
-    #[error("corrupt stored event at server_seq {server_seq}: {reason}")]
-    CorruptStoredEvent { server_seq: i64, reason: &'static str },
-}
-
-#[derive(Clone, Debug)]
-struct StoredChangeRow {
-    event_id: String,
-    entity_id: String,
-    event_type: String,
-    payload: Value,
-    changed_at: i64,
-    actor_id: String,
-    client_seq: i64,
-    server_seq: i64,
-    hlc_pt: i64,
-    hlc_l: i64,
-}
-
-fn decode_stored_change(row: StoredChangeRow) -> Result<ServerChange, FetchChangesError> {
-    let raw_server_seq = row.server_seq;
-    let corrupt = |reason| FetchChangesError::CorruptStoredEvent { server_seq: raw_server_seq, reason };
-    let changed_at = u64::try_from(row.changed_at).map_err(|_| corrupt("negative timestamp"))?;
-    let client_seq = u64::try_from(row.client_seq).map_err(|_| corrupt("negative client sequence"))?;
-    let server_seq = u64::try_from(row.server_seq).map_err(|_| corrupt("negative server sequence"))?;
-    let hlc_pt = u64::try_from(row.hlc_pt).map_err(|_| corrupt("negative HLC physical component"))?;
-    let hlc_l = u64::try_from(row.hlc_l).map_err(|_| corrupt("negative HLC logical component"))?;
-    let event_id = EventId::parse(&row.event_id).map_err(|_| corrupt("invalid event identity"))?;
-
-    if !SyncOp::is_known_event_type(&row.event_type) {
-        return Err(FetchChangesError::UnsupportedEventType { server_seq: raw_server_seq, event_type: row.event_type });
-    }
-    let op = SyncOp::from_event_parts(&row.event_type, row.entity_id, &row.payload, changed_at).ok_or_else(|| corrupt("known event has invalid identity or payload"))?;
-    let actor_id = ActorId::parse(&row.actor_id).map_err(|_| corrupt("invalid actor identity"))?;
-    let local_seq = LocalSeq::new(client_seq).map_err(|_| corrupt("client sequence must be positive"))?;
-    let server_seq = ServerSeq::new(server_seq).map_err(|_| corrupt("server sequence must be positive"))?;
-    let change = LocalChange { event_id, op, changed_at, hlc: Hlc { pt: hlc_pt, l: hlc_l }, local_seq };
-    Ok(ServerChange { change, actor_id, server_seq })
-}
-
-pub(super) async fn fetch_changes(pool: &PgPool, library_id: &LibraryId, _client_id: &ClientId, since_server_seq: Option<ServerSeq>) -> Result<Vec<ServerChange>, FetchChangesError> {
-    let rows = sqlx::query(
-        "SELECT event_id, entity_id, event_type, data, timestamp, client_id, client_seq, server_seq, hlc_pt, hlc_l
-         FROM library_events
-         WHERE library_id = $1 AND server_seq > $2
-         ORDER BY server_seq ASC",
-    )
-    .bind(library_id.as_str())
-    .bind(since_server_seq.map(ServerSeq::get).unwrap_or(0) as i64)
-    .fetch_all(pool)
-    .await?;
-
+async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(
+    executor: E,
+    statement: &str,
+    library: &LibraryId,
+    since: Option<LibraryRevision>,
+) -> Result<FetchChangesPage, FetchChangesError> {
+    let rows = sqlx::query(statement)
+        .bind(library.as_str())
+        .bind(cursor(since))
+        .bind((MAX_PULL_CHANGES + 1) as i64)
+        .fetch_all(executor)
+        .await?;
     let mut changes = Vec::with_capacity(rows.len());
     for row in rows {
-        changes.push(decode_stored_change(StoredChangeRow {
-            event_id: row.try_get("event_id")?,
-            entity_id: row.try_get("entity_id")?,
-            event_type: row.try_get("event_type")?,
-            payload: row.try_get("data")?,
-            changed_at: row.try_get("timestamp")?,
-            actor_id: row.try_get("client_id")?,
-            client_seq: row.try_get("client_seq")?,
-            server_seq: row.try_get("server_seq")?,
-            hlc_pt: row.try_get("hlc_pt")?,
-            hlc_l: row.try_get("hlc_l")?,
-        })?);
+        let raw: i64 = row.try_get("server_seq")?;
+        let corrupt = |reason| FetchChangesError::CorruptStoredEvent { revision: raw, reason };
+        let event_type: String = row.try_get("event_type")?;
+        let body = decode_operation(
+            &event_type,
+            row.try_get("entity_id")?,
+            row.try_get("texts")?,
+            row.try_get("integers")?,
+            row.try_get("reals")?,
+            row.try_get("booleans")?,
+            row.try_get("rect_left")?,
+            row.try_get("rect_top")?,
+            row.try_get("rect_width")?,
+            row.try_get("rect_height")?,
+            row.try_get("authors_payload")?,
+            row.try_get("publication_payload")?,
+        )?;
+        let changed_at = millis(row.try_get::<i64, _>("changed_at")?).map_err(|_| corrupt("invalid timestamp"))?;
+        let replica_id = ClientId::parse(&row.try_get::<String, _>("client_id")?).map_err(|_| corrupt("invalid replica"))?;
+        let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("client_seq")?).map_err(|_| corrupt("negative replica sequence"))?)
+            .map_err(|_| corrupt("invalid replica sequence"))?;
+        let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?)
+            .map_err(|_| corrupt("invalid library revision"))?;
+        let mutation_id = MutationId::parse(&row.try_get::<String, _>("event_id")?).map_err(|_| corrupt("invalid mutation identity"))?;
+        changes.push(ServerMutation { mutation: StateMutation { mutation_id, body, changed_at, replica_seq }, replica_id, revision });
     }
-
-    Ok(changes)
+    let has_more = changes.len() > MAX_PULL_CHANGES;
+    changes.truncate(MAX_PULL_CHANGES);
+    Ok(FetchChangesPage { changes, has_more })
 }
 
-pub(super) async fn authorized_content_hashes(pool: &PgPool, user_id: &str, library_id: &LibraryId, candidates: &[ContentHash]) -> Result<Option<std::collections::HashSet<ContentHash>>, sqlx::Error> {
-    let owns_library = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM libraries WHERE id=$1 AND user_id=$2)").bind(library_id.as_str()).bind(user_id).fetch_one(pool).await?;
-    if !owns_library {
-        return Ok(None);
-    }
-    if candidates.is_empty() {
-        return Ok(Some(std::collections::HashSet::new()));
-    }
-
-    let raw_candidates: Vec<&str> = candidates.iter().map(ContentHash::as_str).collect();
-    let rows = sqlx::query_scalar::<_, Option<String>>(
-        "WITH latest_per_occupant AS (
-             SELECT DISTINCT ON (entity_id, data->>'dir_id', data->>'file_name')
-                 data->>'dir_id' AS dir_id,
-                 data->>'file_name' AS file_name,
-                 event_type,
-                 data->>'content_hash' AS content_hash,
-                 hlc_pt, hlc_l, version_rank, client_id, client_seq, event_id
-             FROM library_events
-             WHERE library_id=$1 AND event_type IN ('book_dir_added', 'book_dir_removed')
-             ORDER BY entity_id, data->>'dir_id', data->>'file_name',
-                      hlc_pt DESC, hlc_l DESC, version_rank DESC,
-                      client_id COLLATE \"C\" DESC, client_seq DESC, event_id COLLATE \"C\" DESC
-         ), latest_per_path AS (
-             SELECT DISTINCT ON (dir_id, file_name) content_hash
-             FROM latest_per_occupant
-             WHERE event_type='book_dir_added'
-             ORDER BY dir_id, file_name,
-                      hlc_pt DESC, hlc_l DESC, version_rank DESC,
-                      client_id COLLATE \"C\" DESC, client_seq DESC, event_id COLLATE \"C\" DESC
-         )
-         SELECT DISTINCT content_hash
-         FROM latest_per_path
-         WHERE content_hash=ANY($2)",
-    )
-    .bind(library_id.as_str())
-    .bind(&raw_candidates)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(Some(rows.into_iter().flatten().filter_map(|raw| ContentHash::parse(&raw).ok()).collect()))
+async fn fetch_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
+    fetch_projected_page(executor, FETCH_PAGE_SQL, library, since).await
 }
 
-/// Set of content hashes still referenced by the greatest-VersionKey event for
-/// each physical `(library_id, dir_id, file_name)` path.
-pub(super) async fn live_blob_hashes(tx: &mut Transaction<'_, Postgres>) -> Result<std::collections::HashSet<ContentHash>, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, Option<String>>(
-        "WITH latest_per_occupant AS (
-             SELECT DISTINCT ON (library_id, entity_id, data->>'dir_id', data->>'file_name')
-                 library_id,
-                 data->>'dir_id' AS dir_id,
-                 data->>'file_name' AS file_name,
-                 event_type,
-                 data->>'content_hash' AS content_hash,
-                 hlc_pt, hlc_l, version_rank, client_id, client_seq, event_id
-             FROM library_events
-             WHERE event_type IN ('book_dir_added', 'book_dir_removed')
-             ORDER BY library_id,
-                      entity_id,
-                      data->>'dir_id',
-                      data->>'file_name',
-                      hlc_pt DESC,
-                      hlc_l DESC,
-                      version_rank DESC,
-                      client_id COLLATE \"C\" DESC,
-                      client_seq DESC,
-                      event_id COLLATE \"C\" DESC
-         ), latest_per_path AS (
-             SELECT DISTINCT ON (library_id, dir_id, file_name) content_hash
-             FROM latest_per_occupant
-             WHERE event_type = 'book_dir_added'
-             ORDER BY library_id, dir_id, file_name,
-                      hlc_pt DESC, hlc_l DESC, version_rank DESC,
-                      client_id COLLATE \"C\" DESC, client_seq DESC,
-                      event_id COLLATE \"C\" DESC
-         )
-         SELECT DISTINCT content_hash
-         FROM latest_per_path
-         WHERE content_hash IS NOT NULL AND content_hash <> ''",
-    )
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .flatten()
-        .filter_map(|raw| match ContentHash::parse(&raw) {
-            Ok(content_hash) => Some(content_hash),
-            Err(_) => {
-                eprintln!("live_blob_hashes: ignoring malformed content hash '{raw}'");
-                None
-            }
-        })
-        .collect())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PullRoute { Empty, ReadingOnly, Full }
+
+fn pull_route(since: Option<LibraryRevision>, reading_revision: i64, other_revision: i64) -> PullRoute {
+    let since = cursor(since);
+    if reading_revision <= since && other_revision <= since {
+        PullRoute::Empty
+    } else if other_revision <= since {
+        PullRoute::ReadingOnly
+    } else {
+        PullRoute::Full
+    }
 }
+
+async fn fetch_reading_position_page(pool: &PgPool, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
+    fetch_projected_page(pool, FETCH_READING_POSITION_PAGE_SQL, library, since).await
+}
+
+pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId, _client: &ClientId, since: Option<LibraryRevision>) -> Result<FetchChangesResult, FetchChangesError> {
+    let heads = sqlx::query(GET_PULL_HEADS_SQL)
+        .bind(library.as_str())
+        .bind(user)
+        .fetch_optional(pool)
+        .await?;
+    let Some(heads) = heads else { return Ok(FetchChangesResult::Unauthorized) };
+    let reading_revision: i64 = heads.try_get("reading_revision")?;
+    let other_revision: i64 = heads.try_get("other_revision")?;
+    if cursor_is_ahead(since, std::cmp::max(reading_revision, other_revision)) {
+        return Err(FetchChangesError::CursorAhead);
+    }
+    let page = match pull_route(since, reading_revision, other_revision) {
+        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), has_more: false },
+        PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since).await?,
+        PullRoute::Full => fetch_page(pool, library, since).await?,
+    };
+    Ok(FetchChangesResult::Page(page))
+}
+
+pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: Option<LibraryRevision>) -> Result<(), FetchChangesError> {
+    let current: i64 = sqlx::query_scalar(VALIDATE_OWNED_CURSOR_SQL).bind(library.as_str()).fetch_one(&mut **tx).await?;
+    if cursor_is_ahead(since, current) {
+        return Err(FetchChangesError::CursorAhead);
+    }
+    Ok(())
+}
+
+pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
+    fetch_page(&mut **tx, library, since).await
+}
+
+pub(super)enum AtomicSingletonExchange{Unauthorized,CursorAhead,Handled(FetchChangesPage)}
+pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, library: &LibraryId, client: &ClientId, change: &StateMutation, since: Option<LibraryRevision>) -> Result<AtomicSingletonExchange, FetchChangesError> {
+    let MutationBody::ReadingPosition { book_id, value: ReadingPositionState { location: cfi, progress } } = &change.body else { unreachable!() };
+    let (changed_at, actor, seq, rank, id) = common(change, client);
+    let row = sqlx::query(EXCHANGE_AUTHORIZED_READING_POSITION_SQL)
+        .bind(library.as_str())
+        .bind(user_id)
+        .bind(book_id.canonical())
+        .bind(cfi)
+        .bind(progress)
+        .bind(changed_at)
+        .bind(actor)
+        .bind(seq)
+        .bind(rank)
+        .bind(id)
+        .bind(cursor(since))
+        .fetch_one(pool)
+        .await?;
+    if !row.try_get::<bool, _>("authorized")? {
+        return Ok(AtomicSingletonExchange::Unauthorized);
+    }
+    if row.try_get::<bool, _>("cursor_ahead")? {
+        return Ok(AtomicSingletonExchange::CursorAhead);
+    }
+
+    let changed_revision = row.try_get::<Option<i64>, _>("server_seq")?;
+    if row.try_get::<bool, _>("caught_up")? {
+        let changes = if let Some(raw) = changed_revision {
+            vec![ServerMutation {
+                mutation: change.clone(),
+                replica_id: ClientId::parse(client.as_str()).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid replica" })?,
+                revision: LibraryRevision::new(raw as u64).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid revision" })?,
+            }]
+        } else {
+            Vec::new()
+        };
+        return Ok(AtomicSingletonExchange::Handled(FetchChangesPage { changes, has_more: false }));
+    }
+
+    let prior_reading = row.try_get::<Option<i64>, _>("reading_revision")?.unwrap_or(0);
+    let prior_other = row.try_get::<Option<i64>, _>("other_revision")?.unwrap_or(0);
+    let reading_after_write = changed_revision.map_or(prior_reading, |revision| std::cmp::max(prior_reading, revision));
+    let page = match pull_route(since, reading_after_write, prior_other) {
+        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), has_more: false },
+        PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since).await?,
+        PullRoute::Full => fetch_page(pool, library, since).await?,
+    };
+    Ok(AtomicSingletonExchange::Handled(page))
+}
+
+pub(super)async fn live_assets(tx:&mut Transaction<'_,Postgres>)->Result<LiveAssets,sqlx::Error>{let rows:Vec<(String,String)>=sqlx::query_as(LIVE_ASSETS_SQL).fetch_all(&mut**tx).await?;let mut books=std::collections::HashSet::new();let mut thumbnails=std::collections::HashSet::new();for(user_id,raw)in rows{if let Ok(hash)=ContentHash::parse(&raw){books.insert(hash.clone());thumbnails.insert(UserThumbnail{user_id,content_hash:hash});}}Ok(LiveAssets::new(books,thumbnails))}
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_stored_change, required_directory, FetchChangesError, StoredChangeRow};
-    use serde_json::json;
-    use sync_common::SyncOp;
+    use super::{
+        cursor_is_ahead, decode_operation, pull_route, required_books,
+        required_directory, storage_rejection, PullRoute,
+        UPSERT_READING_POSITION_SQL,
+    };
+    use sync_common::{
+        AuthorCredit, BookId, BookLifecycleState, DirId, DirectoryState,
+        FileName, LanguageTag, LibraryRevision, MutationBody, MutationId,
+        MutationRejectionReason, PublicationIdentifier,
+        PublicationIdentifierScheme, PublicationMetadata, PublisherCredit,
+        ReadingPositionState, ReplicaSeq, StateMutation,
+        MAX_LWW_FUTURE_SKEW_MS,
+    };
 
-    fn valid_row() -> StoredChangeRow {
-        StoredChangeRow {
-            event_id: "00000000-0000-4000-8000-000000000001".to_string(),
-            entity_id: "1".to_string(),
-            event_type: "book_deleted".to_string(),
-            payload: json!({}),
-            changed_at: 10,
-            actor_id: "actor-a".to_string(),
-            client_seq: 1,
-            server_seq: 2,
-            hlc_pt: 10,
-            hlc_l: 0,
+    #[test]
+    fn projected_lifecycle_decoding_preserves_publication_metadata() {
+        let authors = vec![AuthorCredit::from_name("Ursula K. Le Guin").unwrap()];
+        let publication = PublicationMetadata {
+            identifiers: vec![PublicationIdentifier::new(
+                "9781234567897",
+                PublicationIdentifierScheme::Isbn,
+                Vec::new(),
+            )
+            .unwrap()],
+            publishers: vec![PublisherCredit::new("North Wind Press").unwrap()],
+            languages: vec![LanguageTag::parse("sv-SE").unwrap()],
+            rights: vec!["Copyright example".to_owned()],
+            ..PublicationMetadata::default()
+        };
+        let decoded = decode_operation(
+            "book_added",
+            BookId::new(7).canonical(),
+            vec![
+                "The Dispossessed".to_owned(),
+                "Ursula K. Le Guin".to_owned(),
+                "A description".to_owned(),
+            ],
+            vec![1_700_000_000_000],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            sync_common::wire::encode(&authors).unwrap(),
+            sync_common::wire::encode(&publication).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            decoded,
+            MutationBody::BookLifecycle {
+                book_id,
+                value: BookLifecycleState::Present { metadata, .. },
+            } if book_id == BookId::new(7)
+                && metadata.authors == authors
+                && metadata.publication == publication
+        ));
+    }
+
+    #[test]
+    fn pull_routing_preserves_the_global_cursor_boundary() {
+        let cursor = LibraryRevision::new(10).ok();
+        assert_eq!(pull_route(cursor, 10, 10), PullRoute::Empty);
+        assert_eq!(pull_route(cursor, 11, 10), PullRoute::ReadingOnly);
+        assert_eq!(pull_route(cursor, 10, 11), PullRoute::Full);
+        assert_eq!(pull_route(cursor, 12, 11), PullRoute::Full);
+        assert_eq!(pull_route(None, 1, 0), PullRoute::ReadingOnly);
+        assert_eq!(pull_route(None, 0, 1), PullRoute::Full);
+    }
+
+    #[test]
+    fn a_cursor_may_equal_but_never_exceed_the_server_head() {
+        assert!(!cursor_is_ahead(None, 0));
+        assert!(!cursor_is_ahead(LibraryRevision::new(10).ok(), 10));
+        assert!(cursor_is_ahead(LibraryRevision::new(11).ok(), 10));
+    }
+
+    #[test]
+    fn relational_dependencies_are_explicit() {
+        let directory = DirId::parse("parent").unwrap();
+        let body = MutationBody::Directory { dir_id: DirId::parse("child").unwrap(), value: DirectoryState::Present { parent_id: directory.clone(), name: FileName::parse("Child").unwrap() } };
+        assert_eq!(required_directory(&body), Some(&directory));
+        assert_eq!(required_books(&MutationBody::BookLifecycle { book_id: BookId::new(1), value: BookLifecycleState::Deleted }), [None, None]);
+    }
+
+    fn reading_mutation(changed_at: u64) -> StateMutation {
+        StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "epubcfi(/6/4)".into(), progress: 25.0 } },
+            changed_at: sync_common::UnixMillis::new(changed_at).unwrap(),
+            replica_seq: ReplicaSeq::new(1).unwrap(),
         }
     }
 
     #[test]
-    fn stored_change_decoder_accepts_valid_rows() {
-        let change = decode_stored_change(valid_row()).expect("valid stored event");
-        assert_eq!(change.server_seq.get(), 2);
-        assert_eq!(change.actor_id.as_str(), "actor-a");
+    fn server_admission_rejects_future_wall_clock() {
+        let server_now = 1_000_000;
+        assert_eq!(
+            storage_rejection(&reading_mutation(server_now + MAX_LWW_FUTURE_SKEW_MS + 1), server_now),
+            Some(MutationRejectionReason::TimestampTooFarFuture),
+        );
+        assert_eq!(storage_rejection(&reading_mutation(server_now), server_now), None);
     }
 
     #[test]
-    fn stored_change_decoder_distinguishes_unknown_event_types() {
-        let mut row = valid_row();
-        row.event_type = "future_event".to_string();
-        assert!(matches!(decode_stored_change(row), Err(FetchChangesError::UnsupportedEventType { server_seq: 2, .. })));
-    }
-
-    #[test]
-    fn stored_change_decoder_rejects_malformed_known_payloads() {
-        let mut row = valid_row();
-        row.event_type = "book_dir_added".to_string();
-        assert!(matches!(decode_stored_change(row), Err(FetchChangesError::CorruptStoredEvent { server_seq: 2, .. })));
-    }
-
-    #[test]
-    fn stored_change_decoder_rejects_semantically_invalid_payloads() {
-        let mut row = valid_row();
-        row.event_type = "reading_position_updated".to_string();
-        row.payload = json!({ "cfi": "not-a-cfi" });
-        assert!(matches!(decode_stored_change(row), Err(FetchChangesError::CorruptStoredEvent { server_seq: 2, .. })));
-    }
-
-    #[test]
-    fn relational_events_declare_the_directory_the_server_must_already_know() {
-        let directory = sync_common::DirId::parse("parent").unwrap();
-        let op = SyncOp::DirState { dir_id: sync_common::DirId::parse("child").unwrap(), directory: sync_common::DirectoryState::Present { parent_id: directory.clone(), name: sync_common::FileName::parse("Child").unwrap() } };
-        assert_eq!(required_directory(&op), Some(&directory));
-        assert!(required_directory(&SyncOp::BookDeleted { book_id: sync_common::BookId::new(1) }).is_none());
-    }
-
-    #[test]
-    fn stored_change_decoder_rejects_invalid_actor_identity() {
-        let mut row = valid_row();
-        row.actor_id.clear();
-        assert!(matches!(decode_stored_change(row), Err(FetchChangesError::CorruptStoredEvent { server_seq: 2, .. })));
-    }
-
-    #[test]
-    fn stored_change_decoder_rejects_invalid_sequences() {
-        let mut row = valid_row();
-        row.server_seq = 0;
-        assert!(matches!(decode_stored_change(row), Err(FetchChangesError::CorruptStoredEvent { server_seq: 0, .. })));
+    fn postgres_winner_order_begins_with_wall_clock_time() {
+        let comparison = UPSERT_READING_POSITION_SQL.split("WHERE (").nth(1).expect("LWW predicate");
+        assert!(comparison.trim_start().starts_with("EXCLUDED.changed_at,"));
+        assert!(!UPSERT_READING_POSITION_SQL.contains("hlc_"));
     }
 }

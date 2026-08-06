@@ -50,7 +50,38 @@ SYNC_E2E_DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_na
 CARGO_TARGET_DIR="$server_target" \
 cargo test \
     --manifest-path "$repo_root/Server/Cargo.toml" \
+    -p server-account-postgres \
     -p server-postgres \
+    -- \
+    --ignored \
+    --test-threads=1
+
+SYNC_E2E_DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
+CARGO_TARGET_DIR="$server_target" \
+cargo test \
+    --manifest-path "$repo_root/Server/Cargo.toml" \
+    -p sync-server \
+    --test public_registration \
+    -- \
+    --ignored \
+    --test-threads=1
+
+gc_books="$e2e_tmp/gc-books"
+gc_thumbnails="$e2e_tmp/gc-thumbnails"
+mkdir -p "$gc_books" "$gc_thumbnails"
+DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
+BOKHEIM_BOOKS_DIR="$gc_books" \
+BOKHEIM_THUMBNAILS_DIR="$gc_thumbnails" \
+BOKHEIM_GC_GRACE_HOURS=1 \
+"$server_target/debug/sync-server" gc
+
+SYNC_E2E_DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
+SYNC_E2E_SERVER_BIN="$server_target/debug/sync-server" \
+CARGO_TARGET_DIR="$backend_target" \
+cargo test \
+    --manifest-path "$repo_root/Backend/Cargo.toml" \
+    --lib \
+    app_core::tests::production_http_postgres_ \
     -- \
     --ignored \
     --test-threads=1

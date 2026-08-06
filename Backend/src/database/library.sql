@@ -93,23 +93,180 @@ SELECT
 FROM dir AS root
 JOIN descendants ON descendants.root_id = root.id
 LEFT JOIN book_dir AS placement ON placement.dir_id = descendants.id AND placement.deleted_at IS NULL
-LEFT JOIN book ON book.id = placement.book_id AND book.deleted_at IS NULL
+LEFT JOIN book ON book.id = placement.book_id AND book.deleted_at IS NULL AND book.hidden_at IS NULL
 WHERE root.parent_id = :dir_id
   AND root.id != :dir_id
   AND root.deleted_at IS NULL
 GROUP BY root.id, root.name;
 
--- name: get_books_in_dir?
+-- Card-shaped reads.
+--
+-- A rendered book card needs download state, audiobook details and progress
+-- alongside the identity columns. Fetching identity first and asking per book
+-- for the rest costs three extra queries per row, so these queries project
+-- everything a card renders in one pass.
+
+-- name: search_book_cards?
+-- param: query: &str
+-- param: downloaded_only: i32
+-- param: limit: i64
+SELECT
+    book.id,
+    book.title,
+    COALESCE(NULLIF(book.author_name, ''), author.name),
+    book.description,
+    book.read_progress,
+    EXISTS (
+        SELECT 1 FROM book_dir downloaded
+        WHERE downloaded.book_id = book.id
+          AND downloaded.deleted_at IS NULL
+          AND downloaded.is_downloaded = 1
+    ),
+    EXISTS (
+        SELECT 1 FROM book_download_requests request
+        WHERE request.book_id = book.id
+    ) OR EXISTS (
+        SELECT 1
+        FROM book_dir requested
+        JOIN asset_requests request
+          ON request.kind = 'book'
+         AND request.hash = requested.content_hash
+        WHERE requested.book_id = book.id
+          AND requested.deleted_at IS NULL
+    ),
+    EXISTS (
+        SELECT 1 FROM book_dir placement
+        WHERE placement.book_id = book.id
+          AND placement.deleted_at IS NULL
+          AND LOWER(placement.file_name) LIKE '%.m4b'
+    ),
+    (
+        SELECT metadata.duration_ms
+        FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    ),
+    (
+        SELECT metadata.chapter_count
+        FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    )
+FROM book
+LEFT JOIN author ON author.id = book.author_id
+WHERE book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
+  AND instr(LOWER(COALESCE(book.title, '')), :query) > 0
+  AND EXISTS (
+      SELECT 1 FROM book_dir placement
+      WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+  )
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
+ORDER BY LOWER(COALESCE(book.title, '')), book.id
+LIMIT :limit;
+
+-- name: get_book_cards_in_dir?
 -- param: dir_id: &str
-SELECT book.id, book.title, author.name
-from book_dir as book_mapping
-join book as book
-    on book.id = book_mapping.book_id
-left join author as author
-    on author.id = book.author_id
-where book_mapping.dir_id = :dir_id
-  and book_mapping.deleted_at is null
-  and book.deleted_at is null;
+-- param: downloaded_only: i32
+SELECT
+    book.id,
+    book.title,
+    COALESCE(NULLIF(book.author_name, ''), author.name),
+    book.description,
+    book.read_progress,
+    EXISTS (
+        SELECT 1 FROM book_dir downloaded
+        WHERE downloaded.book_id = book.id
+          AND downloaded.deleted_at IS NULL
+          AND downloaded.is_downloaded = 1
+    ),
+    EXISTS (
+        SELECT 1 FROM book_download_requests request
+        WHERE request.book_id = book.id
+    ) OR EXISTS (
+        SELECT 1
+        FROM book_dir requested
+        JOIN asset_requests request
+          ON request.kind = 'book'
+         AND request.hash = requested.content_hash
+        WHERE requested.book_id = book.id
+          AND requested.deleted_at IS NULL
+    ),
+    -- Audiobook presentation follows the placed file's extension, so a book
+    -- whose metadata has not been scanned yet still presents as one.
+    LOWER(placement.file_name) LIKE '%.m4b',
+    metadata.duration_ms,
+    metadata.chapter_count
+FROM book_dir AS placement
+JOIN book ON book.id = placement.book_id
+LEFT JOIN author ON author.id = book.author_id
+LEFT JOIN audiobook_metadata AS metadata ON metadata.content_hash = placement.content_hash
+WHERE placement.dir_id = :dir_id
+  AND placement.deleted_at IS NULL
+  AND book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
+ORDER BY LOWER(COALESCE(book.title, '')), book.id;
+
+-- name: get_book_cards_by_author?
+-- param: stable_id: &str
+-- param: downloaded_only: i32
+SELECT
+    book.id,
+    book.title,
+    COALESCE(NULLIF(book.author_name, ''), author.name),
+    book.description,
+    book.read_progress,
+    EXISTS (
+        SELECT 1 FROM book_dir downloaded
+        WHERE downloaded.book_id = book.id
+          AND downloaded.deleted_at IS NULL
+          AND downloaded.is_downloaded = 1
+    ),
+    EXISTS (
+        SELECT 1 FROM book_download_requests request
+        WHERE request.book_id = book.id
+    ) OR EXISTS (
+        SELECT 1
+        FROM book_dir requested
+        JOIN asset_requests request
+          ON request.kind = 'book'
+         AND request.hash = requested.content_hash
+        WHERE requested.book_id = book.id
+          AND requested.deleted_at IS NULL
+    ),
+    LOWER(placement.file_name) LIKE '%.m4b',
+    metadata.duration_ms,
+    metadata.chapter_count
+FROM book
+JOIN book_author ON book_author.book_id = book.id
+JOIN author_identity ON author_identity.id = book_author.author_identity_id
+LEFT JOIN author ON author.id = book.author_id
+JOIN book_dir AS placement ON placement.book_id = book.id
+LEFT JOIN audiobook_metadata AS metadata ON metadata.content_hash = placement.content_hash
+WHERE placement.deleted_at IS NULL
+  AND book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
+  AND author_identity.stable_id = :stable_id
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
+ORDER BY LOWER(book.title);
 
 -- name: get_descendant_book_ids?
 -- param: dir_id: &str
@@ -128,6 +285,7 @@ JOIN subtree ON subtree.id = placement.dir_id
 JOIN book ON book.id = placement.book_id
 WHERE placement.deleted_at IS NULL
   AND book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
 ORDER BY placement.book_id;
 
 -- name: get_folder_download_counts?
@@ -148,7 +306,8 @@ FROM book_dir placement
 JOIN subtree ON subtree.id = placement.dir_id
 JOIN book ON book.id = placement.book_id
 WHERE placement.deleted_at IS NULL
-  AND book.deleted_at IS NULL;
+  AND book.deleted_at IS NULL
+  AND book.hidden_at IS NULL;
 
 -- name: get_book_ancestor_dir_ids?
 -- param: book_id: &str
@@ -167,34 +326,66 @@ WITH RECURSIVE ancestors(id) AS (
 SELECT id FROM ancestors ORDER BY id;
 
 -- name: get_authors?
+-- param: downloaded_only: i32
 SELECT
-    author.name,
+    author_identity.stable_id AS author_id,
+    MIN(book_author.credited_name) AS display_name,
     COUNT(DISTINCT book.id) AS book_count
-FROM author
-JOIN book ON book.author_id = author.id
+FROM author_identity
+JOIN book_author ON book_author.author_identity_id = author_identity.id
+JOIN book ON book.id = book_author.book_id
 JOIN book_dir ON book_dir.book_id = book.id
 WHERE book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
   AND book_dir.deleted_at IS NULL
-  AND author.name IS NOT NULL
-  AND TRIM(author.name) != ''
-GROUP BY author.id, author.name
-ORDER BY LOWER(author.name);
+  AND TRIM(book_author.credited_name) != ''
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
+GROUP BY author_identity.id, author_identity.stable_id
+ORDER BY LOWER(display_name);
+
+-- name: get_author_discovery_seed?
+-- param: stable_id: &str
+SELECT
+    MIN(book_author.credited_name) AS display_name,
+    book_identifier.scheme,
+    COALESCE(book_identifier.canonical_value, book_identifier.value) AS identifier_value
+FROM author_identity
+JOIN book_author ON book_author.author_identity_id = author_identity.id
+JOIN book ON book.id = book_author.book_id
+JOIN book_dir ON book_dir.book_id = book.id
+LEFT JOIN book_identifier ON book_identifier.book_id = book.id
+WHERE author_identity.stable_id = :stable_id
+  AND book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
+  AND book_dir.deleted_at IS NULL
+  AND TRIM(book_author.credited_name) != ''
+GROUP BY book_identifier.scheme, COALESCE(book_identifier.canonical_value, book_identifier.value)
+ORDER BY book_identifier.scheme, identifier_value;
 
 -- name: get_author_books?
--- param: author_name: &str
+-- param: stable_id: &str
 SELECT
     dp.id AS dir_id,
     CASE WHEN dp.path = '' THEN '(Root)' ELSE dp.path END AS folder_path,
     book.id AS book_id,
     book.title AS title,
-    author.name AS author_name
+    COALESCE(NULLIF(book.author_name, ''), author.name) AS author_name,
+    book.description
 FROM book
-JOIN author ON author.id = book.author_id
+JOIN book_author ON book_author.book_id = book.id
+JOIN author_identity ON author_identity.id = book_author.author_identity_id
+LEFT JOIN author ON author.id = book.author_id
 JOIN book_dir ON book_dir.book_id = book.id
 JOIN dir_paths dp ON dp.id = book_dir.dir_id
 WHERE book_dir.deleted_at IS NULL
   AND book.deleted_at IS NULL
-  AND author.name = :author_name
+  AND book.hidden_at IS NULL
+  AND author_identity.stable_id = :stable_id
 ORDER BY folder_path, LOWER(book.title);
 
 -- name: insert_book!
@@ -210,7 +401,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 -- name: get_book_version?
 -- param: id: &str
-SELECT hlc_pt, hlc_l, hlc_actor, hlc_seq, deleted_at IS NOT NULL, hlc_event
+SELECT version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, deleted_at IS NOT NULL, version_mutation_id
 FROM book
 WHERE id = :id;
 
@@ -218,41 +409,41 @@ WHERE id = :id;
 -- param: id: &str
 -- param: title: &str
 -- param: timestamp: i64
--- param: hlc_pt: i64
--- param: hlc_l: i64
--- param: hlc_actor: &str
--- param: hlc_seq: i64
--- param: hlc_event: &str
-INSERT INTO book (id, title, read_pos, read_progress, last_read, added_at, hlc_pt, hlc_l, hlc_actor, hlc_seq, hlc_event, deleted_at)
-VALUES (:id, :title, NULL, 0, 0, :timestamp, :hlc_pt, :hlc_l, :hlc_actor, :hlc_seq, :hlc_event, NULL)
+-- param: version_changed_at: i64
+-- param: version_tie_breaker: i64
+-- param: version_replica_id: &str
+-- param: version_replica_seq: i64
+-- param: version_mutation_id: &str
+INSERT INTO book (id, title, read_pos, read_progress, last_read, added_at, version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, version_mutation_id, deleted_at)
+VALUES (:id, :title, NULL, 0, 0, :timestamp, :version_changed_at, :version_tie_breaker, :version_replica_id, :version_replica_seq, :version_mutation_id, NULL)
 ON CONFLICT(id) DO UPDATE SET
     title = COALESCE(book.title, excluded.title),
     added_at = excluded.added_at,
-    hlc_pt = excluded.hlc_pt,
-    hlc_l = excluded.hlc_l,
-    hlc_actor = excluded.hlc_actor,
-    hlc_seq = excluded.hlc_seq,
-    hlc_event = excluded.hlc_event,
+    version_changed_at = excluded.version_changed_at,
+    version_tie_breaker = excluded.version_tie_breaker,
+    version_replica_id = excluded.version_replica_id,
+    version_replica_seq = excluded.version_replica_seq,
+    version_mutation_id = excluded.version_mutation_id,
     deleted_at = NULL;
 
 -- name: apply_remote_book_deleted!
 -- param: id: &str
 -- param: timestamp: i64
--- param: hlc_pt: i64
--- param: hlc_l: i64
--- param: hlc_actor: &str
--- param: hlc_seq: i64
--- param: hlc_event: &str
+-- param: version_changed_at: i64
+-- param: version_tie_breaker: i64
+-- param: version_replica_id: &str
+-- param: version_replica_seq: i64
+-- param: version_mutation_id: &str
 -- Upsert a tombstone even when this device has never observed the book. Without
 -- a row carrying the winning version, a later stale add could resurrect it.
-INSERT INTO book (id, added_at, hlc_pt, hlc_l, hlc_actor, hlc_seq, hlc_event, deleted_at)
-VALUES (:id, :timestamp, :hlc_pt, :hlc_l, :hlc_actor, :hlc_seq, :hlc_event, :timestamp)
+INSERT INTO book (id, added_at, version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, version_mutation_id, deleted_at)
+VALUES (:id, :timestamp, :version_changed_at, :version_tie_breaker, :version_replica_id, :version_replica_seq, :version_mutation_id, :timestamp)
 ON CONFLICT(id) DO UPDATE SET
-    hlc_pt = excluded.hlc_pt,
-    hlc_l = excluded.hlc_l,
-    hlc_actor = excluded.hlc_actor,
-    hlc_seq = excluded.hlc_seq,
-    hlc_event = excluded.hlc_event,
+    version_changed_at = excluded.version_changed_at,
+    version_tie_breaker = excluded.version_tie_breaker,
+    version_replica_id = excluded.version_replica_id,
+    version_replica_seq = excluded.version_replica_seq,
+    version_mutation_id = excluded.version_mutation_id,
     deleted_at = excluded.deleted_at;
 
 -- name: first_book_insert!
@@ -285,26 +476,26 @@ ON CONFLICT(id) DO UPDATE SET
 -- param: parent_id: &str
 -- param: name: &str
 -- param: deleted: bool
--- param: hlc_pt: i64
--- param: hlc_l: i64
--- param: hlc_actor: &str
--- param: hlc_seq: i64
--- param: hlc_event: &str
-INSERT INTO dir (id, parent_id, name, intent_parent_id, intent_name, intent_deleted, deleted_at, hlc_pt, hlc_l, hlc_actor, hlc_seq, hlc_event)
-VALUES (:id, :parent_id, :name, :parent_id, :name, :deleted, 1, :hlc_pt, :hlc_l, :hlc_actor, :hlc_seq, :hlc_event)
+-- param: version_changed_at: i64
+-- param: version_tie_breaker: i64
+-- param: version_replica_id: &str
+-- param: version_replica_seq: i64
+-- param: version_mutation_id: &str
+INSERT INTO dir (id, parent_id, name, intent_parent_id, intent_name, intent_deleted, deleted_at, version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, version_mutation_id)
+VALUES (:id, :parent_id, :name, :parent_id, :name, :deleted, 1, :version_changed_at, :version_tie_breaker, :version_replica_id, :version_replica_seq, :version_mutation_id)
 ON CONFLICT(id) DO UPDATE SET
     intent_parent_id = excluded.intent_parent_id,
     intent_name = excluded.intent_name,
     intent_deleted = excluded.intent_deleted,
-    hlc_pt = excluded.hlc_pt,
-    hlc_l = excluded.hlc_l,
-    hlc_actor = excluded.hlc_actor,
-    hlc_seq = excluded.hlc_seq,
-    hlc_event = excluded.hlc_event;
+    version_changed_at = excluded.version_changed_at,
+    version_tie_breaker = excluded.version_tie_breaker,
+    version_replica_id = excluded.version_replica_id,
+    version_replica_seq = excluded.version_replica_seq,
+    version_mutation_id = excluded.version_mutation_id;
 
 -- name: get_dir_version?
 -- param: id: &str
-SELECT hlc_pt, hlc_l, hlc_actor, hlc_seq, COALESCE(intent_deleted, deleted_at IS NOT NULL), hlc_event
+SELECT version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, COALESCE(intent_deleted, deleted_at IS NOT NULL), version_mutation_id
 FROM dir WHERE id = :id;
 
 -- name: get_dir_path_components?
@@ -325,10 +516,12 @@ WHERE id != '__root__'
 ORDER BY level DESC;
 
 
--- name: get_book_dir_by_hash?
--- param: local_hash: &str
-SELECT book_id, dir_id, file_name, content_hash  FROM book_dir
-WHERE local_hash = :local_hash;
+-- name: get_local_fingerprint_book_dirs?
+SELECT placement.local_hash, placement.book_id, placement.dir_id, placement.file_name, placement.content_hash,
+       book.description_scanned = 0 AS description_missing
+FROM book_dir placement
+JOIN book ON book.id = placement.book_id
+WHERE placement.deleted_at IS NULL AND placement.local_hash != '' AND placement.content_hash != '';
 
 -- name: get_book_hashes?
 -- param: book_id: &str
@@ -355,20 +548,13 @@ ON CONFLICT(dir_id, book_id, file_name) DO UPDATE SET
     is_downloaded = max(book_dir.is_downloaded, excluded.is_downloaded),
     local_hash = excluded.local_hash;
 
--- name: mark_vanished_book_dirs_deleted!
+-- name: mark_vanished_book_dirs_unavailable!
 -- param: scan_id: i64
 -- param: grace: i64
--- param: deleted_at: i64
--- Soft-delete locally-materialized placements missing for at least `grace`
--- consecutive scans. is_downloaded = 1 restricts this to files that were on disk;
--- last_scan > 0 to a file an actual scan once confirmed present (so a freshly
--- downloaded, not-yet-scanned file isn't deleted). The grace window rides out
--- transient misses (a file briefly locked, a partial mount). Fires
--- trig_book_dir_deleted per row, emitting book_dir_removed for sync, which
--- propagates the deletion (and the local file) to other devices.
+-- Mark locally-materialized placements unavailable after the grace window.
+-- This is device-local availability only and emits no deletion mutation.
 UPDATE book_dir
-SET deleted_at = :deleted_at,
-    intent_deleted = 1
+SET is_downloaded = 0
 WHERE deleted_at IS NULL
   AND is_downloaded = 1
   AND last_scan > 0
@@ -387,12 +573,14 @@ WHERE deleted_at IS NULL
   AND last_scan < :scan_id
   AND (:scan_id - last_scan) < :grace;
 
--- name: get_recently_read?
+-- name: get_recently_read_cards?
 -- param: limit: i32
+-- param: downloaded_only: i32
 SELECT
     book.id,
     book.title,
-    author.name AS author,
+    COALESCE(NULLIF(book.author_name, ''), author.name) AS author,
+    book.description,
     CASE
         WHEN book.read_progress > 0 THEN book.read_progress
         WHEN book.read_pos IS NOT NULL
@@ -409,24 +597,61 @@ SELECT
             THEN CAST(book.read_pos AS REAL)
         ELSE 0
     END AS progress_pct,
-    book.last_read
+    EXISTS (
+        SELECT 1 FROM book_dir downloaded
+        WHERE downloaded.book_id = book.id
+          AND downloaded.deleted_at IS NULL
+          AND downloaded.is_downloaded = 1
+    ),
+    EXISTS (SELECT 1 FROM book_download_requests request WHERE request.book_id = book.id)
+      OR EXISTS (
+        SELECT 1 FROM book_dir requested
+        JOIN asset_requests request ON request.kind = 'book' AND request.hash = requested.content_hash
+        WHERE requested.book_id = book.id AND requested.deleted_at IS NULL
+    ),
+    EXISTS (
+        SELECT 1 FROM book_dir placement
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+          AND LOWER(placement.file_name) LIKE '%.m4b'
+    ),
+    (
+        SELECT metadata.duration_ms FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    ),
+    (
+        SELECT metadata.chapter_count FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    )
 FROM book
 LEFT JOIN author ON author.id = book.author_id
 WHERE book.deleted_at IS NULL
+  AND book.hidden_at IS NULL
   AND book.last_read > 0
   -- A book whose every placement was removed (e.g. its file was deleted on
   -- another device) keeps its metadata row but is un-openable. Require a live
   -- placement so it drops out of the carousel and reappears if one returns.
   AND EXISTS (SELECT 1 FROM book_dir bd WHERE bd.book_id = book.id AND bd.deleted_at IS NULL)
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
 ORDER BY book.last_read DESC
 LIMIT :limit;
 
--- name: get_recently_added?
+-- name: get_recently_added_cards?
 -- param: limit: i32
+-- param: downloaded_only: i32
 SELECT
     book.id,
     book.title,
-    author.name AS author,
+    COALESCE(NULLIF(book.author_name, ''), author.name) AS author,
+    book.description,
     CASE
         WHEN book.read_progress > 0 THEN book.read_progress
         WHEN book.read_pos IS NOT NULL
@@ -443,25 +668,61 @@ SELECT
             THEN CAST(book.read_pos AS REAL)
         ELSE 0
     END AS progress_pct,
-    book.added_at
+    EXISTS (
+        SELECT 1 FROM book_dir downloaded
+        WHERE downloaded.book_id = book.id
+          AND downloaded.deleted_at IS NULL
+          AND downloaded.is_downloaded = 1
+    ),
+    EXISTS (SELECT 1 FROM book_download_requests request WHERE request.book_id = book.id)
+      OR EXISTS (
+        SELECT 1 FROM book_dir requested
+        JOIN asset_requests request ON request.kind = 'book' AND request.hash = requested.content_hash
+        WHERE requested.book_id = book.id AND requested.deleted_at IS NULL
+    ),
+    EXISTS (
+        SELECT 1 FROM book_dir placement
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+          AND LOWER(placement.file_name) LIKE '%.m4b'
+    ),
+    (
+        SELECT metadata.duration_ms FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    ),
+    (
+        SELECT metadata.chapter_count FROM book_dir placement
+        JOIN audiobook_metadata metadata ON metadata.content_hash = placement.content_hash
+        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        ORDER BY placement.rowid DESC LIMIT 1
+    )
 FROM book
 LEFT JOIN author ON author.id = book.author_id
 WHERE book.deleted_at IS NULL
-  AND book.added_at IS NOT NULL AND book.added_at > 0
+  AND book.hidden_at IS NULL
   -- See get_recently_read: exclude books with no live placement.
   AND EXISTS (SELECT 1 FROM book_dir bd WHERE bd.book_id = book.id AND bd.deleted_at IS NULL)
-ORDER BY book.added_at DESC
+  AND (:downloaded_only = 0 OR EXISTS (
+      SELECT 1 FROM book_dir available
+      WHERE available.book_id = book.id
+        AND available.deleted_at IS NULL
+        AND available.is_downloaded = 1
+  ))
+ORDER BY COALESCE(book.added_at, 0) DESC, LOWER(COALESCE(book.title, '')), book.id
 LIMIT :limit;
 
 -- name: count_all_books?
 -- Counts only books with a live placement, matching what the carousels display.
 SELECT COUNT(*) FROM book
 WHERE deleted_at IS NULL
+  AND hidden_at IS NULL
   AND EXISTS (SELECT 1 FROM book_dir bd WHERE bd.book_id = book.id AND bd.deleted_at IS NULL);
 
 -- name: count_books_with_added_at?
 SELECT COUNT(*) FROM book
 WHERE deleted_at IS NULL AND added_at IS NOT NULL AND added_at > 0
+  AND hidden_at IS NULL
   AND EXISTS (SELECT 1 FROM book_dir bd WHERE bd.book_id = book.id AND bd.deleted_at IS NULL);
 
 -- name: get_book_file_path?
@@ -542,6 +803,12 @@ SELECT
     );
 
 -- name: update_reading_position!
+-- param: book_id: &str
+-- param: cfi: &str
+-- param: progress: f32
+UPDATE book SET read_pos = :cfi, read_progress = :progress WHERE id = :book_id;
+
+-- name: update_pdf_reading_position!
 -- param: book_id: &str
 -- param: cfi: &str
 UPDATE book SET read_pos = :cfi WHERE id = :book_id;
@@ -667,11 +934,11 @@ SET deleted_at = 1,
 WHERE dir_id = :dir_id AND book_id = :book_id AND file_name = :file_name
   AND deleted_at IS NULL;
 
--- name: get_book_dir_hlc?
+-- name: get_book_dir_version?
 -- param: dir_id: &str
 -- param: book_id: &str
 -- param: file_name: &str
-SELECT hlc_pt, hlc_l, hlc_actor, hlc_seq, COALESCE(intent_deleted, deleted_at IS NOT NULL), hlc_event FROM book_dir
+SELECT version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, COALESCE(intent_deleted, deleted_at IS NOT NULL), version_mutation_id FROM book_dir
 WHERE dir_id = :dir_id AND book_id = :book_id AND file_name = :file_name;
 
 -- name: resolve_removed_book_dir?
@@ -703,55 +970,55 @@ WHERE bd.dir_id = :dir_id AND bd.book_id = :book_id AND bd.file_name = :file_nam
   AND bd.deleted_at IS NOT NULL
 LIMIT 1;
 
--- Remote LWW apply of book_dir add/remove. The caller gates on the HLC first
--- (see apply_remote_book_dir), so these set the placement's hlc unconditionally.
+-- Remote LWW apply of book_dir add/remove. The caller gates on the wall-clock version first
+-- (see apply_remote_book_dir), so these set the placement version unconditionally.
 -- change_origin is 'remote' during apply, so the book_dir triggers don't fire.
 -- name: apply_remote_book_dir_added!
 -- param: dir_id: &str
 -- param: book_id: &str
 -- param: file_name: &str
 -- param: content_hash: &str
--- param: hlc_pt: i64
--- param: hlc_l: i64
--- param: hlc_actor: &str
--- param: hlc_seq: i64
--- param: hlc_event: &str
-INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, content_hash, last_scan, is_downloaded, hlc_pt, hlc_l, hlc_actor, hlc_seq, hlc_event, intent_deleted, deleted_at)
-VALUES (:dir_id, :book_id, :file_name, :content_hash, :content_hash, 0, 0, :hlc_pt, :hlc_l, :hlc_actor, :hlc_seq, :hlc_event, 0, NULL)
+-- param: version_changed_at: i64
+-- param: version_tie_breaker: i64
+-- param: version_replica_id: &str
+-- param: version_replica_seq: i64
+-- param: version_mutation_id: &str
+INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, content_hash, last_scan, is_downloaded, version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, version_mutation_id, intent_deleted, deleted_at)
+VALUES (:dir_id, :book_id, :file_name, :content_hash, :content_hash, 0, 0, :version_changed_at, :version_tie_breaker, :version_replica_id, :version_replica_seq, :version_mutation_id, 0, NULL)
 ON CONFLICT(dir_id, book_id, file_name) DO UPDATE SET
     intent_deleted = 0,
     deleted_at = NULL,
     content_hash = excluded.content_hash,
     local_hash = excluded.local_hash,
     is_downloaded = max(book_dir.is_downloaded, excluded.is_downloaded),
-    hlc_pt = excluded.hlc_pt,
-    hlc_l = excluded.hlc_l,
-    hlc_actor = excluded.hlc_actor,
-    hlc_seq = excluded.hlc_seq,
-    hlc_event = excluded.hlc_event;
+    version_changed_at = excluded.version_changed_at,
+    version_tie_breaker = excluded.version_tie_breaker,
+    version_replica_id = excluded.version_replica_id,
+    version_replica_seq = excluded.version_replica_seq,
+    version_mutation_id = excluded.version_mutation_id;
 
 -- name: apply_remote_book_dir_removed!
 -- param: dir_id: &str
 -- param: book_id: &str
 -- param: file_name: &str
 -- param: tombstone_hash: &str
--- param: hlc_pt: i64
--- param: hlc_l: i64
--- param: hlc_actor: &str
--- param: hlc_seq: i64
--- param: hlc_event: &str
+-- param: version_changed_at: i64
+-- param: version_tie_breaker: i64
+-- param: version_replica_id: &str
+-- param: version_replica_seq: i64
+-- param: version_mutation_id: &str
 -- Upserts a tombstone (deleted_at set) even if the placement was never seen
--- locally, so a later lower-HLC add still loses the LWW comparison.
-INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, content_hash, last_scan, is_downloaded, hlc_pt, hlc_l, hlc_actor, hlc_seq, hlc_event, intent_deleted, deleted_at)
-VALUES (:dir_id, :book_id, :file_name, :tombstone_hash, '', 0, 0, :hlc_pt, :hlc_l, :hlc_actor, :hlc_seq, :hlc_event, 1, 1)
+-- locally, so a later older wall-clock version add still loses the LWW comparison.
+INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, content_hash, last_scan, is_downloaded, version_changed_at, version_tie_breaker, version_replica_id, version_replica_seq, version_mutation_id, intent_deleted, deleted_at)
+VALUES (:dir_id, :book_id, :file_name, :tombstone_hash, '', 0, 0, :version_changed_at, :version_tie_breaker, :version_replica_id, :version_replica_seq, :version_mutation_id, 1, 1)
 ON CONFLICT(dir_id, book_id, file_name) DO UPDATE SET
     intent_deleted = 1,
     deleted_at = 1,
-    hlc_pt = excluded.hlc_pt,
-    hlc_l = excluded.hlc_l,
-    hlc_actor = excluded.hlc_actor,
-    hlc_seq = excluded.hlc_seq,
-    hlc_event = excluded.hlc_event;
+    version_changed_at = excluded.version_changed_at,
+    version_tie_breaker = excluded.version_tie_breaker,
+    version_replica_id = excluded.version_replica_id,
+    version_replica_seq = excluded.version_replica_seq,
+    version_mutation_id = excluded.version_mutation_id;
 
 -- name: set_book_downloaded!
 -- param: dir_id: &str
@@ -773,37 +1040,19 @@ SET local_hash = :local_hash
 WHERE dir_id = :dir_id AND book_id = :book_id AND file_name = :file_name
   AND deleted_at IS NULL;
 
--- Event sourcing queries
--- name: get_events_after_local_seq?
--- param: local_seq: u64
-SELECT entity_id, event_type, payload, timestamp, local_seq
-FROM event_log
-WHERE local_seq > :local_seq
-ORDER BY local_seq ASC;
+-- Canonical synchronization outbox queries
+-- name: get_pending_mutations?
+SELECT mutation_id, state_kind, state_key, body, changed_at, replica_seq,
+       placement_dir_id, placement_file_name, placement_book_id
+FROM sync_outbox
+ORDER BY replica_seq ASC;
 
--- name: get_unpushed_events?
--- param: last_local_seq_sent: u64
-SELECT event_id, entity_id, event_type, payload, timestamp, local_seq, hlc_pt, hlc_l
-FROM event_log
-WHERE local_seq > :last_local_seq_sent
-ORDER BY local_seq ASC;
-
--- name: get_max_unpushed_hlc?
--- param: last_pushed_local_seq: u64
--- param: entity_id: &str
--- param: event_type: &str
-SELECT hlc_pt, hlc_l, local_seq, event_id,
-       CASE
-           WHEN event_type = 'dir_state'
-            AND COALESCE(json_extract(payload, '$.deleted'), 0) != 0
-           THEN 1 ELSE 0
-       END AS conflict_rank
-FROM event_log
-WHERE local_seq > :last_pushed_local_seq
-  AND entity_id = :entity_id
-  AND event_type = :event_type
-ORDER BY hlc_pt DESC, hlc_l DESC, conflict_rank DESC, local_seq DESC
-LIMIT 1;
+-- name: get_pending_mutation_version?
+-- param: state_kind: &str
+-- param: state_key: &str
+SELECT changed_at, replica_seq, mutation_id, conflict_rank
+FROM sync_outbox
+WHERE state_kind = :state_kind AND state_key = :state_key;
 
 -- name: get_sync_metadata_value?
 -- param: key: &str
@@ -892,6 +1141,19 @@ SET attempts = attempts + 1,
     claim_token = '',
     last_error = :last_error,
     next_retry_at = :next_retry_at,
+    updated_at = :now_ts
+WHERE id = :id AND claim_token = :claim_token;
+
+-- name: release_transfer_job_for_auth_refresh!
+-- param: id: i64
+-- param: claim_token: &str
+-- param: last_error: &str
+-- param: now_ts: i64
+UPDATE transfer_jobs
+SET claimed_at = NULL,
+    claim_token = '',
+    last_error = :last_error,
+    next_retry_at = :now_ts,
     updated_at = :now_ts
 WHERE id = :id AND claim_token = :claim_token;
 

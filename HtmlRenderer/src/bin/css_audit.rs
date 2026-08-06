@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use epub_provider::{EpubProvider, ResourceProvider};
-use html_style::property_name_is_supported;
+use html::style::property_name_is_supported;
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::rules::CssRule;
@@ -170,7 +170,7 @@ fn collect_css_from_html(html: &str, provider: &dyn ResourceProvider, base_uri: 
     out
 }
 
-fn collect_unsupported_properties(sheet: &StyleSheet<'_, '_>, out: &mut HashMap<String, PropertyInfo>, book_path: &str) {
+fn collect_unsupported_properties(sheet: &StyleSheet<'_>, out: &mut HashMap<String, PropertyInfo>, book_path: &str) {
     for rule in &sheet.rules.0 {
         let CssRule::Style(style_rule) = rule else {
             continue;

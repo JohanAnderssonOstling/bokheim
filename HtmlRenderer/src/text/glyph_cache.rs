@@ -1,8 +1,7 @@
 use crate::document::MemoryUsageReport;
-use crate::document::{FontStyle, GlyphId, GlyphMetric};
 use floem::text::{Attrs, AttrsList, FamilyOwned, Style as TextFontStyle, TextLayout};
-use html_style_model::StyleStringId;
 use html_view_core::layout::ShapeError;
+use html_view_core::text_backend::{FontSlant, GlyphId, GlyphMetric, GlyphRegistry, GlyphShaper};
 use lightningcss::properties::text::TextAlign;
 use peniko::Color;
 use rustc_data_structures::fx::FxHashMap;
@@ -50,15 +49,22 @@ impl Default for ParseState {
 }
 
 pub struct GlyphCache {
-    table: FxHashMap<(char, u16, u16, u8, u32, Option<StyleStringId>), GlyphId>,
-    family_cache: FxHashMap<StyleStringId, Vec<FamilyOwned>>,
+    table: FxHashMap<(char, u16, u16, u8, u32, String), GlyphId>,
+    family_cache: FxHashMap<String, Vec<FamilyOwned>>,
     reverse: Vec<TextLayout>,
     pub layout_time: Duration,
+    previous_document: Option<GlyphDocumentResources>,
+}
+
+struct GlyphDocumentResources {
+    table: FxHashMap<(char, u16, u16, u8, u32, String), GlyphId>,
+    reverse: Vec<TextLayout>,
+    layout_time: Duration,
 }
 
 impl Default for GlyphCache {
     fn default() -> Self {
-        Self { table: FxHashMap::default(), family_cache: FxHashMap::default(), reverse: Vec::with_capacity(100), layout_time: Duration::ZERO }
+        Self { table: FxHashMap::default(), family_cache: FxHashMap::default(), reverse: Vec::with_capacity(100), layout_time: Duration::ZERO, previous_document: None }
     }
 }
 
@@ -81,7 +87,7 @@ impl GlyphCache {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn get_or_insert(&mut self, metrics: &mut html_view_core::GlyphRegistry<'_>, char: char, mut font: Attrs, parse_state: &ParseState) -> (&TextLayout, GlyphId) {
+    pub fn get_or_insert(&mut self, metrics: &mut GlyphRegistry<'_>, char: char, mut font: Attrs, parse_state: &ParseState) -> (&TextLayout, GlyphId) {
         use std::collections::hash_map::Entry;
 
         let font_size = quantize_font_size(font.font_size);
@@ -94,7 +100,7 @@ impl GlyphCache {
             TextFontStyle::Italic => 1,
             TextFontStyle::Oblique => 2,
         };
-        let key = (char, font_size, parse_state.font_weight, style_key, 0x000000FF, None);
+        let key = (char, font_size, parse_state.font_weight, style_key, 0x000000FF, String::new());
         let index = match self.table.entry(key) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
@@ -122,20 +128,19 @@ impl GlyphCache {
     }
 
     /// Shape a character using font properties
-    pub fn shape_with_font_properties(
-        &mut self, metrics: &mut html_view_core::GlyphRegistry<'_>, c: char, font_size: f32, font_weight: u16, font_style: FontStyle, color: u32, font_family: Option<StyleStringId>, family: Option<&str>,
-    ) -> Result<GlyphId, ShapeError> {
+    pub fn shape_with_font_properties(&mut self, metrics: &mut GlyphRegistry<'_>, c: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>) -> Result<GlyphId, ShapeError> {
         use std::collections::hash_map::Entry;
         // Use provided properties
         let font_size = quantize_font_size(font_size);
-        let text_style = if font_style == FontStyle::Italic { TextFontStyle::Italic } else { TextFontStyle::Normal };
+        let text_style = if font_slant == FontSlant::Italic { TextFontStyle::Italic } else { TextFontStyle::Normal };
 
         let style_key = match text_style {
             TextFontStyle::Normal => 0,
             TextFontStyle::Italic => 1,
             TextFontStyle::Oblique => 2,
         };
-        let key = (c, font_size, font_weight, style_key, color, font_family);
+        let family_key = family.unwrap_or_default().to_owned();
+        let key = (c, font_size, font_weight, style_key, color, family_key.clone());
         let metric_id = match self.table.entry(key) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
@@ -147,7 +152,7 @@ impl GlyphCache {
 
                 let color = Color::rgba8((color >> 24) as u8, (color >> 16) as u8, (color >> 8) as u8, (color & 0xFF) as u8);
                 let mut font = Attrs::new().font_size(quantized_font_size_px(font_size)).raw_weight(font_weight).style(text_style).color(color);
-                if let (Some(family_key), Some(family)) = (font_family, family) {
+                if let Some(family) = family {
                     let families = self.family_cache.entry(family_key).or_insert_with(|| FamilyOwned::parse_list(family).collect());
                     if !families.is_empty() {
                         font = font.family(families);
@@ -177,8 +182,8 @@ impl GlyphCache {
 
     pub fn memory_usage_report(&self) -> MemoryUsageReport {
         let mut report = MemoryUsageReport::new();
-        report.add_slice_storage::<((char, u16, u16, u8, u32, Option<StyleStringId>), GlyphId)>("GlyphCache.table.storage", self.table.capacity(), self.table.len());
-        report.add_slice_storage::<(StyleStringId, Vec<FamilyOwned>)>("GlyphCache.family_cache.storage", self.family_cache.capacity(), self.family_cache.len());
+        report.add_slice_storage::<((char, u16, u16, u8, u32, String), GlyphId)>("GlyphCache.table.storage", self.table.capacity(), self.table.len());
+        report.add_slice_storage::<(String, Vec<FamilyOwned>)>("GlyphCache.family_cache.storage", self.family_cache.capacity(), self.family_cache.len());
         let family_values_bytes: usize = self.family_cache.values().map(|families| families.capacity() * size_of::<FamilyOwned>()).sum();
         report.add("GlyphCache.family_cache.values.storage", family_values_bytes, self.family_cache.len());
         report.add_slice_storage::<TextLayout>("GlyphCache.reverse.storage", self.reverse.capacity(), self.reverse.len());
@@ -186,25 +191,40 @@ impl GlyphCache {
     }
 }
 
-impl html_view_core::GlyphShaper for GlyphCache {
+impl GlyphShaper for GlyphCache {
     fn reset(&mut self) {
         *self = Self::default();
     }
 
-    fn shape_glyph<'a>(
-        &mut self, glyph_metrics: &mut html_view_core::GlyphRegistry<'a>, ch: char, font_size: f32, font_weight: u16, font_style: FontStyle, color: u32, font_family: Option<html_style_model::StyleStringId>, family: Option<&str>,
-    ) -> Result<GlyphId, ShapeError> {
-        self.shape_with_font_properties(glyph_metrics, ch, font_size, font_weight, font_style, color, font_family, family)
+    fn begin_document_shaping(&mut self) {
+        debug_assert!(self.previous_document.is_none(), "document shaping transactions cannot be nested");
+        self.previous_document = Some(GlyphDocumentResources { table: std::mem::take(&mut self.table), reverse: std::mem::replace(&mut self.reverse, Vec::with_capacity(100)), layout_time: std::mem::take(&mut self.layout_time) });
+    }
+
+    fn commit_document_shaping(&mut self) {
+        self.previous_document = None;
+    }
+
+    fn rollback_document_shaping(&mut self) {
+        if let Some(previous) = self.previous_document.take() {
+            self.table = previous.table;
+            self.reverse = previous.reverse;
+            self.layout_time = previous.layout_time;
+        }
+    }
+
+    fn shape_glyph<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, ch: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>) -> Result<GlyphId, ShapeError> {
+        self.shape_with_font_properties(glyph_metrics, ch, font_size, font_weight, font_slant, color, family)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::GlyphCache;
-    use crate::document::{GlyphId, GlyphMetric};
     use floem::text::{FONT_SYSTEM, TextLayout};
-    use html_layout::LayoutConstraints;
-    use html_pipeline::DocumentFactory;
+    use html::layout::LayoutConstraints;
+    use html::pipeline::DocumentFactory;
+    use html_view_core::text_backend::{GlyphId, GlyphMetric, GlyphShaper};
     use std::mem::size_of;
 
     fn shape(cache: &mut GlyphCache, c: char, size: f32, extra_style: &str) -> (GlyphId, GlyphMetric) {
@@ -224,6 +244,20 @@ mod tests {
         let legacy = size_of::<(char, TextLayout, GlyphMetric)>();
         let split = size_of::<TextLayout>() + size_of::<GlyphMetric>();
         assert!(split <= legacy, "split storage uses {split} bytes per glyph versus {legacy} bytes for the legacy tuple");
+    }
+
+    #[test]
+    fn document_transaction_rollback_restores_the_previous_layouts() {
+        let mut cache = GlyphCache::new();
+        let (glyph, _) = shape(&mut cache, 'A', 16.0, "");
+        assert_eq!(cache.len(), 1);
+
+        cache.begin_document_shaping();
+        assert_eq!(cache.len(), 0);
+        cache.rollback_document_shaping();
+
+        assert_eq!(cache.len(), 1);
+        let _ = cache.get(glyph);
     }
 
     #[test]

@@ -1,5 +1,15 @@
 {
 	email {$ACME_EMAIL}
+	grace_period 35s
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 2h
+			write 2h
+			idle 2m
+		}
+		max_header_size 64KB
+	}
 }
 
 {$BOKHEIM_DOMAIN} {
@@ -9,4 +19,13 @@
 	}
 
 	reverse_proxy unix//run/bokheim/sync.sock
+}
+
+{$BOKHEIM_CATALOG_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8090
 }

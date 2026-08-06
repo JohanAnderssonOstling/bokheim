@@ -1,13 +1,12 @@
 use gpui::prelude::*;
 use gpui::{Div, ElementId, FontWeight, SharedString, div, px};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::scroll::{Scrollable, ScrollableElement};
 use gpui_component::{Disableable, IconName};
 
-use crate::BrowserTheme;
+use crate::{BrowserTheme, Scrollable, ScrollableElement};
 
 pub fn cloud_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().p(px(24.0)).overflow_y_scrollbar()
+    div().size_full().min_h_0().min_w_0().p(px(18.0)).overflow_y_scrollbar()
 }
 
 pub fn cloud_page_content() -> Div {

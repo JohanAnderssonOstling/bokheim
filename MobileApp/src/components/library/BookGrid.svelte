@@ -1,53 +1,50 @@
 <script lang="ts">
-  import type { BookSummary, DownloadState } from "../../lib/types";
+  import type { BookCardData, DownloadState } from "../../lib/types";
   import BookCard from "./BookCard.svelte";
+  import EmptyPage from "../shell/EmptyPage.svelte";
 
   let {
     books,
+    libraryId,
+    detailed = false,
     emptyMessage = "",
     openingBookId = "",
     downloadStates = {},
-    pageSize = 48,
     onopen,
     ondownload,
+    onremove,
   }: {
-    books: BookSummary[];
+    books: BookCardData[];
+    libraryId: string;
+    detailed?: boolean;
     emptyMessage?: string;
     openingBookId?: string;
     downloadStates?: Record<string, DownloadState>;
-    pageSize?: number;
-    onopen: (book: BookSummary) => void | Promise<void>;
-    ondownload: (book: BookSummary) => void | Promise<void>;
+    onopen: (book: BookCardData) => void | Promise<void>;
+    ondownload: (book: BookCardData) => void | Promise<void>;
+    onremove: (book: BookCardData) => void | Promise<void>;
   } = $props();
 
-  let visibleCount = $state(48);
-  const visibleBooks = $derived(books.slice(0, visibleCount));
-
-  $effect(() => {
-    books;
-    visibleCount = pageSize;
-  });
 </script>
 
 {#if books.length}
-  <div class="book-grid">
-    {#each visibleBooks as book (book.id)}
-      <BookCard {book} opening={openingBookId === book.id} downloadState={downloadStates[book.id]} {onopen} {ondownload} />
+  <div class={detailed ? "book-grid detailed" : "book-grid"}>
+    {#each books as book (book.book_id)}
+    <BookCard {book} {libraryId} detailed={detailed} opening={openingBookId === book.book_id} downloadState={downloadStates[book.book_id]} {onopen} {ondownload} {onremove} />
     {/each}
   </div>
-  {#if visibleCount < books.length}
-    <button class="load-more" type="button" onclick={() => (visibleCount += pageSize)}>
-      Show more ({books.length - visibleCount})
-    </button>
-  {/if}
 {:else if emptyMessage}
-  <div class="inline-empty">{emptyMessage}</div>
+  <EmptyPage title={emptyMessage} />
 {/if}
 
 <style>
   .book-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.15rem .8rem; }
-  .load-more { display: block; min-height: 2.6rem; margin: 1.25rem auto 0; padding: .55rem 1rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-white-surface); font: 700 .76rem var(--font-interface-family); cursor: pointer; }
-  .inline-empty { display: grid; min-height: 5rem; place-items: center start; color: var(--color-subtle-text); font-size: .84rem; text-align: left; }
+  .book-grid.detailed { grid-template-columns: minmax(0, 1fr); gap: .8rem; }
+  .book-grid :global(.book-card) { content-visibility: auto; contain-intrinsic-size: var(--book-cover-width) var(--book-card-height); }
+  .book-grid.detailed :global(.book-card) { width: 100%; }
   @media (min-width: 36rem) { .book-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.35rem 1rem; } }
-  @media (min-width: 45rem) { .book-grid { grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); } }
+  @media (min-width: 45rem) {
+    .book-grid { grid-template-columns: repeat(auto-fill, var(--book-cover-width)); column-gap: var(--book-grid-column-gap); row-gap: calc(var(--book-grid-row-height) - var(--book-card-height)); }
+    .book-grid.detailed { grid-template-columns: 1fr; row-gap: .9rem; }
+  }
 </style>

@@ -8,12 +8,17 @@ publish = false
 workspace = true
 
 [dependencies]
-axum = "0.7"
-base64 = "0.22"
-chrono = { version = "0.4", features = ["serde"] }
+axum = { version = "0.7", features = ["ws"] }
+bokheim-app-contract = { path = "../../../BokheimAppContract" }
+bokheim-wire = { path = "../../../BokheimWire" }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
+server-account-core = { path = "../server-account-core" }
 server-core = { path = "../server-core" }
+server-wire-http = { path = "../server-wire-http" }
 sync-common = { path = "../../../SyncCommon" }
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["limit", "util"] }
+tower-http = { version = "0.6", features = ["timeout"] }
+tracing = "0.1"

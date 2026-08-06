@@ -6,10 +6,18 @@ publish = false
 
 [dependencies]
 async-channel = "2"
+bokheim-app-contract = { path = "../../../BokheimAppContract" }
 gpui.workspace = true
-html-view-core = { path = "../html-view-core" }
+html-view-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 kurbo.workspace = true
 peniko.workspace = true
+quick-xml = "0.38"
 smallvec = "1"
-reader-style = { path = "../../../ReaderStyle" }
+
+[dev-dependencies]
+epub_provider = { path = "../../epub_provider" }
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+gpui_wgpu = { path = "../../../../GPUI-Fork/crates/gpui_wgpu", features = ["font-kit", "test-support"] }
+html = { workspace = true, features = ["testing"] }

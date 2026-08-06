@@ -1,5 +1,6 @@
 use gpui::prelude::*;
-use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui::{AnyElement, App, Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::button::{Button, ButtonVariants};
 
@@ -10,7 +11,27 @@ pub fn page() -> Div {
 }
 
 pub fn browser_page(font_family: impl Into<SharedString>, font_size_px: u8, theme: BrowserTheme) -> Div {
-    div().size_full().relative().flex().flex_col().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
+    div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
+}
+
+pub fn browser_loading_placeholder(theme: BrowserTheme) -> AnyElement {
+    div().size_full().min_h_0().flex().items_center().justify_center().child(browser_inline_message("Loading…", theme)).into_any_element()
+}
+
+pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedString, theme: BrowserTheme, body: AnyElement, on_retry: impl Fn(&mut App) + 'static) -> AnyElement {
+    let Some(error) = error else {
+        return body;
+    };
+    let retry = crate::topbar_action_button("retry-section", retry_label, IconName::Redo2, theme).on_click(move |_, _, cx| on_retry(cx));
+    div()
+        .size_full()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(div().w_full().flex().items_center().justify_between().gap(px(10.0)).px(px(10.0)).py(px(7.0)).rounded(px(8.0)).bg(theme.surface_alt).child(browser_inline_message(error, theme)).child(retry))
+        .child(div().flex_1().min_h_0().child(body))
+        .into_any_element()
 }
 
 pub fn toolbar() -> Div {
@@ -18,7 +39,7 @@ pub fn toolbar() -> Div {
 }
 
 pub fn sidebar(theme: BrowserTheme) -> Div {
-    div().w(px(NAV_RAIL_WIDTH)).h_full().flex().flex_col().gap(px(8.0)).p(px(8.0)).bg(theme.page_bg).border_r_1().border_color(theme.border)
+    div().w(px(NAV_RAIL_WIDTH)).h_full().min_h_0().flex_none().flex().flex_col().gap_0().px(px(8.0)).bg(theme.page_bg).border_r_1().border_color(theme.border)
 }
 
 pub fn content() -> Div {
@@ -73,7 +94,7 @@ pub fn action_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -
 }
 
 pub fn spacer() -> Div {
-    div().flex_1()
+    div().flex_1().min_h_0()
 }
 
 pub fn inline_message(text: impl Into<SharedString>) -> Div {
