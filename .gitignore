@@ -90,3 +90,4 @@ venv/
 /Backend/tests/test_folder/
 /reference/plato/
 /data-analysis/
+/MobileApp/src/vendor/foliate-js/html.js
