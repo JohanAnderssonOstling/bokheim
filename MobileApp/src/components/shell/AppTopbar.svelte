@@ -1,22 +1,30 @@
 <script lang="ts">
+  import { ACCOUNT_CONTRACT, LIBRARY_ACTIONS_CONTRACT, SETTINGS_CONTRACT } from "../../lib/types";
+  import FolderBreadcrumbs from "../library/FolderBreadcrumbs.svelte";
   let {
     libraryName,
+    pageTitle,
     folders,
     showBreadcrumb,
     showLibraryActions,
     addingBook,
+    accountSignedIn,
     onlibraries,
+    onaccount,
     onsettings,
     onaddbook,
     onnewfolder,
     onfolder,
   }: {
     libraryName: string;
+    pageTitle: string;
     folders: { id: string; name: string }[];
     showBreadcrumb: boolean;
     showLibraryActions: boolean;
     addingBook: boolean;
+    accountSignedIn: boolean;
     onlibraries: () => void;
+    onaccount: () => void;
     onsettings: () => void;
     onaddbook: () => void | Promise<void>;
     onnewfolder: () => void;
@@ -24,34 +32,35 @@
   } = $props();
 </script>
 
-<header class="topbar">
+<header class:large-hidden={!showBreadcrumb && !showLibraryActions} class="topbar">
   <button class="library-button" type="button" aria-haspopup="dialog" onclick={onlibraries}>
     <span>{libraryName}</span>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9.5 5 5 5-5"></path></svg>
   </button>
 
   {#if showBreadcrumb}
-    <nav class="breadcrumbs" aria-label="Folder breadcrumbs">
-      <button type="button" class:current={!folders.length} onclick={() => onfolder(0)}>Library</button>
-      {#each folders as folder, index}
-        <span aria-hidden="true">/</span>
-        <button class:current={index === folders.length - 1} type="button" onclick={() => onfolder(index + 1)}>{folder.name}</button>
-      {/each}
-    </nav>
+    <FolderBreadcrumbs levels={folders} onselect={onfolder} />
+  {:else}
+    <h1>{pageTitle}</h1>
   {/if}
 
   {#if showLibraryActions}
     <div class="library-actions" aria-label="Library actions">
-      <button type="button" disabled={addingBook} aria-label={addingBook ? "Adding book" : "Add book"} title={addingBook ? "Adding book…" : "Add book"} onclick={() => void onaddbook()}>
+      <button type="button" disabled={addingBook} aria-label={addingBook ? "Adding book" : LIBRARY_ACTIONS_CONTRACT.add_book_label} title={addingBook ? "Adding book…" : LIBRARY_ACTIONS_CONTRACT.add_book_label} onclick={() => void onaddbook()}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h10a2 2 0 0 1 2 2V20H7a2 2 0 0 1-2-2zM17 8h2a1 1 0 0 1 1 1v11h-3M11 9v6M8 12h6"></path></svg>
+        <span>{addingBook ? "Adding…" : LIBRARY_ACTIONS_CONTRACT.add_book_label}</span>
       </button>
-      <button type="button" aria-label="New folder" title="New folder" onclick={onnewfolder}>
+      <button type="button" aria-label={LIBRARY_ACTIONS_CONTRACT.new_folder_label} title={LIBRARY_ACTIONS_CONTRACT.new_folder_label} onclick={onnewfolder}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 11v7M8.5 14.5h7"></path></svg>
+        <span>{LIBRARY_ACTIONS_CONTRACT.new_folder_label}</span>
       </button>
     </div>
   {/if}
 
-  <button class="settings-button" type="button" aria-label="Browsing settings" onclick={onsettings}>
+  <button class="account-button" type="button" aria-label={accountSignedIn ? ACCOUNT_CONTRACT.navigation_label : "Sign in"} onclick={onaccount}>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12.5a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4.5 21a7.5 7.5 0 0 1 15 0"></path></svg>
+  </button>
+  <button class="settings-button" type="button" aria-label={SETTINGS_CONTRACT.navigation_label} onclick={onsettings}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.05.08h-4l-.05-.08a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.05v-4L4 9.9a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.05-.08h4l.05.08a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.12.4.33.75.6 1l.08.05v4L20 14.1c-.27.25-.48.6-.6.9z"></path></svg>
   </button>
 </header>
@@ -64,20 +73,20 @@
   .library-button:hover { background: var(--color-hover-bg); }
   .library-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .library-button svg { flex: none; width: 1rem; }
-  .breadcrumbs { display: flex; flex: 1; align-items: center; justify-content: safe center; gap: .45rem; min-width: 0; min-height: 2.65rem; overflow-x: auto; color: var(--color-disabled-text); scrollbar-width: none; }
-  .breadcrumbs::-webkit-scrollbar { display: none; }
-  .breadcrumbs button { flex: none; min-height: 2.65rem; padding: .55rem .25rem; border: 0; color: var(--color-subtle-text); background: none; font-size: .86rem; cursor: pointer; }
-  .breadcrumbs button.current { color: var(--color-ink-text); font-weight: 750; }
-  .library-actions { display: flex; flex: none; align-items: center; gap: .15rem; }
-  .library-actions button { display: grid; place-items: center; width: 2.65rem; height: 2.65rem; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--color-accent); background: transparent; cursor: pointer; }
+  h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--color-ink-text); font: 500 1.25rem var(--font-heading-family); text-overflow: ellipsis; white-space: nowrap; }
+  .library-actions { display: flex; flex: none; align-items: center; gap: var(--layout-topbar-action-gap); }
+  .library-actions button { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; width: auto; height: var(--layout-topbar-action-height); padding: 0 var(--layout-topbar-action-horizontal-padding); border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-white-surface); font-size: .8125rem; font-weight: 750; cursor: pointer; }
   .library-actions button:hover { background: var(--color-hover-bg); }
   .library-actions button:disabled { opacity: .5; cursor: default; }
   .library-actions svg { width: 1.2rem; }
-  .settings-button { display: grid; flex: none; place-items: center; width: 2.65rem; height: 2.65rem; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; cursor: pointer; }
-  .settings-button:hover { color: var(--color-accent); background: var(--color-hover-bg); }
-  .settings-button svg { width: 1.2rem; }
+  .library-actions button span { display: none; }
+  .account-button, .settings-button { display: grid; flex: none; place-items: center; width: 2.65rem; height: 2.65rem; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; cursor: pointer; }
+  .account-button:hover, .settings-button:hover { color: var(--color-accent); background: var(--color-hover-bg); }
+  .account-button svg, .settings-button svg { width: 1.2rem; }
   @media (min-width: 45rem) {
-    .topbar { min-height: calc(4rem + env(safe-area-inset-top)); }
-    .settings-button { display: none; }
+    .topbar { min-height: calc(var(--layout-topbar-height) + env(safe-area-inset-top)); }
+    .topbar.large-hidden { display: none; }
+    .library-button, .account-button, .settings-button { display: none; }
+    .library-actions button span { display: inline; }
   }
 </style>

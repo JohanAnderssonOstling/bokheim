@@ -1,7 +1,45 @@
 -- name: create_author_table!
 create table if not exists author(
     id              INTEGER primary key autoincrement,
-    name            TEXT not null unique
+    -- A normalized name cluster, not proof that every matching credit is the
+    -- same real person. Resolved identities are represented separately below.
+    name            TEXT not null unique,
+    normalized_name TEXT not null
+);
+
+-- name: create_author_normalized_name_index!
+create unique index if not exists idx_author_normalized_name
+on author(normalized_name);
+
+-- name: create_author_identity_table!
+create table if not exists author_identity(
+    id              INTEGER primary key autoincrement,
+    stable_id       TEXT not null unique,
+    preferred_name  TEXT not null,
+    is_provisional  INTEGER not null default 1 check(is_provisional in (0, 1)),
+    created_at      INTEGER not null
+);
+
+-- name: create_author_identity_stable_id_index!
+create unique index if not exists idx_author_identity_stable_id
+on author_identity(stable_id);
+
+-- name: create_author_external_identifier_table!
+create table if not exists author_external_identifier(
+    author_identity_id INTEGER not null references author_identity(id) on delete cascade,
+    authority          TEXT not null check(authority in ('wikidata', 'open_library', 'viaf', 'isni', 'orcid', 'library_of_congress')),
+    external_id        TEXT not null,
+    verified_at        INTEGER not null,
+    primary key(authority, external_id)
+);
+
+-- One normalized spelling may belong to multiple people, and one person may
+-- have multiple spellings. This table records that many-to-many possibility.
+-- name: create_author_identity_name_table!
+create table if not exists author_identity_name(
+    author_identity_id INTEGER not null references author_identity(id) on delete cascade,
+    author_id          INTEGER not null references author(id) on delete cascade,
+    primary key(author_identity_id, author_id)
 );
 
 -- name: create_book_table!
@@ -9,36 +47,146 @@ create table if not exists book(
     id              TEXT primary key,
     title           TEXT,
     author_id       INTEGER references author(id) on delete set null,
+    -- The exact synchronized spelling for this book. author_id only groups
+    -- equivalent spellings for the library's author index.
+    author_name     TEXT not null default '',
+    -- Canonical ordered author credits encoded with the shared binary wire
+    -- codec. book_author is the relational query projection of this register.
+    authors         BLOB not null default X'424B484D0500',
+    description     TEXT not null default '',
+    description_scanned INTEGER not null default 0,
+    -- Canonical synchronized bibliographic metadata. Dedicated tables below
+    -- are disposable query projections rebuilt from this value.
+    publication_metadata BLOB not null default X'',
+    -- Device-local library visibility. This is intentionally not synchronized.
+    hidden_at       INTEGER,
     read_pos        TEXT                DEFAULT NULL,
     read_progress   REAL                DEFAULT 0,
     last_read       INTEGER             DEFAULT 0,
     added_at        INTEGER,
     -- Total version of the last add/delete that won this book's lifecycle
     -- state. The deletion rank is derived from deleted_at.
-    hlc_pt          INTEGER not null default 0,
-    hlc_l           INTEGER not null default 0,
-    hlc_actor       TEXT not null default '',
-    hlc_seq         INTEGER not null default 0,
-    hlc_event       TEXT not null default '',
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default '',
     deleted_at      INTEGER
 );
 
--- name: create_book_search_document_table!
-create table if not exists book_search_document(
-    book_id          TEXT primary key references book(id) on delete cascade,
-    normalized_text  TEXT not null
+-- name: create_book_author_table!
+create table if not exists book_author(
+    book_id         TEXT not null references book(id) on delete cascade,
+    author_id       INTEGER not null references author(id) on delete cascade,
+    author_identity_id INTEGER references author_identity(id) on delete set null,
+    position        INTEGER not null check(position >= 0),
+    credited_name   TEXT not null,
+    primary key(book_id, position)
 );
 
--- name: create_book_search_bigram_table!
-create table if not exists book_search_bigram(
+-- name: create_book_author_author_index!
+create index if not exists idx_book_author_author
+on book_author(author_id, book_id);
+
+-- name: create_book_author_identity_index!
+create index if not exists idx_book_author_identity
+on book_author(author_identity_id, book_id) where author_identity_id is not null;
+
+-- name: create_publication_metadata_projection_tables &
+create table if not exists publisher(
+    id              INTEGER primary key,
+    name            TEXT not null,
+    normalized_name TEXT not null unique
+);
+create table if not exists book_publisher(
+    book_id         TEXT not null references book(id) on delete cascade,
+    publisher_id    INTEGER not null references publisher(id) on delete cascade,
+    agent_identity_id INTEGER not null references author_identity(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    credited_name   TEXT not null,
+    primary key(book_id, position)
+);
+create index if not exists idx_book_publisher_publisher on book_publisher(publisher_id, book_id);
+create index if not exists idx_book_publisher_agent on book_publisher(agent_identity_id, book_id);
+create table if not exists book_identifier(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    scheme          TEXT not null,
+    value           TEXT not null,
+    canonical_value TEXT,
+    type_evidence   BLOB not null,
+    primary key(book_id, position)
+);
+create index if not exists idx_book_identifier_lookup on book_identifier(scheme, value, book_id);
+create table if not exists book_language(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    language_tag    TEXT not null,
+    primary key(book_id, position)
+);
+create index if not exists idx_book_language_tag on book_language(language_tag, book_id);
+create table if not exists book_contributor(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    agent_identity_id INTEGER not null references author_identity(id) on delete cascade,
+    name            TEXT not null,
+    sort_name       TEXT,
+    role            BLOB not null check(typeof(role) = 'blob' and length(role) = 3),
+    primary key(book_id, position)
+);
+create index if not exists idx_book_contributor_agent on book_contributor(agent_identity_id, book_id);
+create table if not exists book_subject(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    name            TEXT not null,
+    authority       TEXT,
+    code            TEXT,
+    primary key(book_id, position)
+);
+create index if not exists idx_book_subject_name on book_subject(name, book_id);
+create table if not exists book_collection(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    name            TEXT not null,
+    collection_type TEXT,
+    group_position  TEXT,
+    primary key(book_id, position)
+);
+create table if not exists book_publication_date(
+    book_id         TEXT not null references book(id) on delete cascade,
+    position        INTEGER not null check(position >= 0),
+    value           TEXT not null,
+    normalized_year INTEGER,
+    normalized_month INTEGER,
+    normalized_day INTEGER,
+    event           TEXT,
+    primary key(book_id, position)
+);
+create table if not exists book_publication_value(
+    book_id         TEXT not null references book(id) on delete cascade,
+    kind            TEXT not null,
+    position        INTEGER not null check(position >= 0),
+    value           TEXT not null,
+    qualifier       TEXT,
+    secondary_value TEXT,
+    primary key(book_id, kind, position)
+);
+create index if not exists idx_book_publication_value_lookup on book_publication_value(kind, value, book_id);
+
+-- name: create_catalog_import_table!
+create table if not exists catalog_import(
+    source_id        TEXT not null,
+    publication_id   TEXT not null,
+    work_id          TEXT,
+    acquisition_url  TEXT not null,
     book_id          TEXT not null references book(id) on delete cascade,
-    gram             TEXT not null,
-    primary key (book_id, gram)
+    imported_at      INTEGER not null,
+    primary key (source_id, publication_id)
 );
 
--- name: create_book_search_bigram_index!
-create index if not exists idx_book_search_bigram_gram
-on book_search_bigram(gram, book_id);
+-- name: create_catalog_import_work_index!
+create index if not exists idx_catalog_import_work
+on catalog_import(source_id, work_id) where work_id is not null;
 
 -- name: create_dir_table!
 create table if not exists dir(
@@ -51,11 +199,11 @@ create table if not exists dir(
     intent_parent_id TEXT,
     intent_name      TEXT,
     intent_deleted   INTEGER,
-    hlc_pt          INTEGER not null default 0,
-    hlc_l           INTEGER not null default 0,
-    hlc_actor       TEXT not null default '',
-    hlc_seq         INTEGER not null default 0,
-    hlc_event       TEXT not null default '',
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default '',
     deleted_at      INTEGER,
     CHECK (id != '__root__' OR deleted_at IS NULL)
 );
@@ -90,14 +238,14 @@ create table if not exists book_dir(
     -- never downloaded keep 0 and are excluded via the is_downloaded filter.
     last_scan       INTEGER not null default 0,
     -- Total version of the last add/remove that won this placement, making it
-    -- an LWW register. Local mutations stamp it via trig_event_log_hlc; remote
+    -- an LWW register. Local mutations stamp it from the canonical outbox; remote
     -- applies gate on it (see apply_remote_book_dir) so concurrent operations
-    -- converge even when their HLC components are equal.
-    hlc_pt          INTEGER not null default 0,
-    hlc_l           INTEGER not null default 0,
-    hlc_actor       TEXT not null default '',
-    hlc_seq         INTEGER not null default 0,
-    hlc_event       TEXT not null default '',
+    -- converge even when their wall-clock version components are equal.
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default '',
     -- Authoritative placement lifecycle. deleted_at is the derived physical
     -- path projection and may suppress a losing same-path occupant.
     intent_deleted  INTEGER,
@@ -117,28 +265,114 @@ CREATE INDEX IF NOT EXISTS idx_book_dir_local_hash ON book_dir(local_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_book_dir_live_path
 ON book_dir(dir_id, file_name) WHERE deleted_at IS NULL;
 
--- name: create_event_log_table!
-create table if not exists event_log(
-    local_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id        TEXT not null default (
+-- The durable synchronization outbox stores a validated binary protocol body.
+-- Placement coordinates are columns because local version stamping must never
+-- parse a serialized payload. Registers coalesce by their canonical state key;
+-- conditional placement transitions retain nonce identities and ordering.
+-- name: create_sync_outbox_table!
+create table if not exists sync_outbox(
+    replica_seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+    mutation_id     TEXT not null default (
         lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
         lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
         lower(hex(randomblob(6)))
+    ) unique,
+    state_kind      TEXT not null check(state_kind in (
+        'directory', 'book_lifecycle', 'placement', 'reading_position',
+        'annotation', 'bookmark', 'book_link', 'last_opened', 'metadata'
+    )),
+    state_key       TEXT not null,
+    body            BLOB not null,
+    changed_at      INTEGER not null check(changed_at >= 0),
+    conflict_rank   INTEGER not null default 0 check(conflict_rank in (0, 1)),
+    placement_dir_id TEXT,
+    placement_file_name TEXT,
+    placement_book_id TEXT,
+    check(
+        (state_kind = 'placement' AND placement_dir_id IS NOT NULL AND placement_file_name IS NOT NULL AND placement_book_id IS NOT NULL)
+        OR
+        (state_kind != 'placement' AND placement_dir_id IS NULL AND placement_file_name IS NULL AND placement_book_id IS NULL)
     ),
-    entity_id       TEXT not null,
-    event_type      TEXT not null,
-    payload         TEXT not null,
-    timestamp       INTEGER not null,
-    hlc_pt          INTEGER not null default 0,
-    hlc_l           INTEGER not null default 0
+    unique(state_kind, state_key)
 );
 
--- name: create_event_log_event_id_index!
-CREATE UNIQUE INDEX IF NOT EXISTS idx_event_log_event_id ON event_log(event_id);
+-- name: create_annotation_table!
+create table if not exists annotation(
+    id              TEXT primary key,
+    book_id         TEXT not null references book(id) on delete cascade,
+    anchor_kind     TEXT not null check(anchor_kind in ('epub_cfi', 'pdf')),
+    anchor_cfi      TEXT,
+    anchor_page     INTEGER,
+    anchor_rects    BLOB,
+    anchor_fallback_cfi TEXT,
+    exact_text      TEXT not null,
+    prefix          TEXT,
+    suffix          TEXT,
+    style           TEXT not null check(style in ('highlight', 'underline', 'squiggly', 'strikethrough')),
+    color           TEXT not null,
+    note            TEXT not null default '',
+    created_at      INTEGER not null,
+    modified_at     INTEGER not null,
+    deleted_at      INTEGER,
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default ''
+    ,check(
+        (anchor_kind='epub_cfi' AND anchor_cfi IS NOT NULL AND anchor_page IS NULL AND anchor_rects IS NULL AND anchor_fallback_cfi IS NULL)
+        OR
+        (anchor_kind='pdf' AND anchor_cfi IS NULL AND anchor_page IS NOT NULL AND anchor_page >= 0 AND anchor_rects IS NOT NULL)
+    )
+);
 
--- name: create_event_log_singleton_guard_index!
-CREATE INDEX IF NOT EXISTS idx_event_log_singleton_guard
-ON event_log(entity_id, event_type, local_seq, hlc_pt, hlc_l);
+-- name: create_annotation_book_index!
+create index if not exists idx_annotation_book on annotation(book_id, deleted_at, modified_at);
+
+-- name: create_bookmark_table!
+create table if not exists bookmark(
+    id              TEXT primary key,
+    book_id         TEXT not null references book(id) on delete cascade,
+    cfi             TEXT not null,
+    label           TEXT not null default '',
+    created_at      INTEGER not null,
+    modified_at     INTEGER not null,
+    deleted_at      INTEGER,
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default ''
+);
+
+-- name: create_bookmark_book_index!
+create index if not exists idx_bookmark_book on bookmark(book_id, deleted_at, modified_at);
+
+-- User-authored semantic graph edges. Rows are retained after deletion so the
+-- tombstone and its LWW version can synchronize to every replica.
+-- name: create_book_link_table!
+create table if not exists book_link(
+    id              TEXT primary key,
+    source_book_id  TEXT not null references book(id) on delete cascade,
+    target_book_id  TEXT not null references book(id) on delete cascade,
+    relation        TEXT not null,
+    note            TEXT not null default '',
+    created_at      INTEGER not null,
+    modified_at     INTEGER not null,
+    deleted_at      INTEGER,
+    version_changed_at          INTEGER not null default 0,
+    version_tie_breaker           INTEGER not null default 0,
+    version_replica_id       TEXT not null default '',
+    version_replica_seq         INTEGER not null default 0,
+    version_mutation_id       TEXT not null default '',
+    check(source_book_id != target_book_id)
+);
+
+-- name: create_book_link_source_index!
+create index if not exists idx_book_link_source on book_link(source_book_id, deleted_at, modified_at);
+
+-- name: create_book_link_target_index!
+create index if not exists idx_book_link_target on book_link(target_book_id, deleted_at, modified_at);
 
 -- name: create_sync_metadata_table!
 create table if not exists sync_metadata(

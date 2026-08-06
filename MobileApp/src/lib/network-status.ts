@@ -1,5 +1,6 @@
 import type { NetworkStatus, NetworkTransport } from "./bindings";
 import { APP_NAME_LOWER } from "./application-name";
+import { SETTINGS_CONTRACT } from "./types";
 
 const EVENT_NAME = `${APP_NAME_LOWER}-network-changed`;
 const TRANSPORTS = new Set<NetworkTransport>(["offline", "wifi", "cellular", "ethernet", "vpn", "other", "unknown"]);
@@ -42,12 +43,5 @@ export function observeNetworkStatus(handler: (status: NetworkStatus) => void) {
 
 export function networkStatusLabel(status: NetworkStatus) {
   if (!status.connected || status.transport === "offline") return "Offline";
-  switch (status.transport) {
-    case "wifi": return "Wi-Fi";
-    case "cellular": return "Mobile data";
-    case "ethernet": return "Ethernet";
-    case "vpn": return "VPN";
-    case "other": return "Connected";
-    default: return "Network unknown";
-  }
+  return SETTINGS_CONTRACT.network_transports.find((definition) => definition.transport === status.transport)?.label ?? "Network unknown";
 }

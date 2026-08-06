@@ -1,10 +1,11 @@
 import type { AppFeature } from "./bindings";
 import { FRONTEND_CONTRACT } from "./types";
 
-export type Destination = AppFeature;
+export type PrimaryDestination = AppFeature;
+export type Destination = PrimaryDestination | "account" | "settings";
 
 export interface NavigationItem {
-  id: Destination;
+  id: PrimaryDestination;
   label: string;
   path: string;
 }

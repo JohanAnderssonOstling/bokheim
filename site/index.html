@@ -201,6 +201,32 @@
     font-size: 0.95rem;
   }
 
+  .sync {
+    padding: 3rem 1.5rem;
+    border-top: 1px solid var(--sage);
+  }
+
+  .sync-inner {
+    width: min(100%, 44rem);
+    margin: 0 auto;
+  }
+
+  .sync h2 {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: clamp(1.6rem, 3.5vw, 2.1rem);
+    font-style: italic;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+  }
+
+  .sync-copy {
+    margin: 1rem 0 0;
+    font-size: clamp(1rem, 1.8vw, 1.1rem);
+  }
+
   :focus-visible {
     outline: 3px solid var(--ink);
     outline-offset: 3px;
@@ -288,6 +314,13 @@
       <h2>Made for reading</h2>
       <p>A focused reader that keeps your books on your devices and within reach.</p>
     </article>
+  </section>
+
+  <section class="sync" aria-labelledby="sync-heading">
+    <div class="sync-inner">
+      <h2 id="sync-heading">Synchronization</h2>
+      <p class="sync-copy">Every device keeps your whole library, so you can read anywhere, online or not. When your devices meet again they catch each other up, and reading on two of them never costs you either side's progress.</p>
+    </div>
   </section>
 </main>
 

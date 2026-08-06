@@ -5,6 +5,8 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+image = { version = "0.25", default-features = false }
+pdf-view-common = { path = "../PdfViewCommon" }
 pdfium-render = { workspace = true, features = ["pdfium_latest", "thread_safe"] }
 reader-style = { path = "../ReaderStyle" }
 

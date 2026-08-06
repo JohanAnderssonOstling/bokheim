@@ -8,13 +8,19 @@ export const commands = {
 	backendLinkStatus: () => __TAURI_INVOKE<string>("backend_link_status"),
 	getLibraries: () => __TAURI_INVOKE<LibraryEntry[]>("get_libraries"),
 	getAccountStatus: () => __TAURI_INVOKE<AccountStatus>("get_account_status"),
+	getAccountSessions: () => __TAURI_INVOKE<AccountSessionSummary[]>("get_account_sessions"),
+	revokeAccountSession: (sessionId: string) => __TAURI_INVOKE<AccountStatus>("revoke_account_session", { sessionId }),
+	revokeOtherAccountSessions: () => __TAURI_INVOKE<number>("revoke_other_account_sessions"),
 	login: (username: string, password: string) => __TAURI_INVOKE<AccountStatus>("login", { username, password }),
+	requestPublicRegistration: (email: string, username: string, password: string) => __TAURI_INVOKE<null>("request_public_registration", { email, username, password }),
+	resendVerification: (email: string) => __TAURI_INVOKE<null>("resend_verification", { email }),
+	verifyEmail: (token: string) => __TAURI_INVOKE<AccountStatus>("verify_email", { token }),
+	requestPasswordReset: (email: string) => __TAURI_INVOKE<null>("request_password_reset", { email }),
+	resetPassword: (token: string, newPassword: string) => __TAURI_INVOKE<null>("reset_password", { token, newPassword }),
 	bootstrapRemoteLibraries: () => __TAURI_INVOKE<LibraryEntry[]>("bootstrap_remote_libraries"),
 	syncAllLibraries: () => __TAURI_INVOKE<null>("sync_all_libraries"),
 	getLibrarySyncStatuses: () => __TAURI_INVOKE<LibrarySyncStatus[]>("get_library_sync_statuses"),
 	reconcileLibraryCatalogue: () => __TAURI_INVOKE<LibraryCatalogueState>("reconcile_library_catalogue"),
-	uploadAndSyncLibrary: (libraryId: string) => __TAURI_INVOKE<null>("upload_and_sync_library", { libraryId }),
-	disableLibrarySync: (libraryId: string) => __TAURI_INVOKE<null>("disable_library_sync", { libraryId }),
 	getTransferStatuses: () => __TAURI_INVOKE<LibraryTransfers[]>("get_transfer_statuses"),
 	getNetworkStatus: () => __TAURI_INVOKE<NetworkStatus>("get_network_status"),
 	updateNetworkStatus: (status: NetworkStatus) => __TAURI_INVOKE<NetworkStatus>("update_network_status", { status }),
@@ -26,39 +32,99 @@ export const commands = {
 	getBrowsingPreferences: () => __TAURI_INVOKE<BrowsingPreferences_Serialize>("get_browsing_preferences"),
 	updateBrowsingPreference: (patch: BrowsingPreferencePatch_Deserialize) => __TAURI_INVOKE<BrowsingPreferences_Serialize>("update_browsing_preference", { patch }),
 	createLibrary: (name: string) => __TAURI_INVOKE<LibraryEntry>("create_library", { name }),
+	openLibraryFolder: (path: string) => __TAURI_INVOKE<LibraryEntry>("open_library_folder", { path }),
 	removeLibrary: (libraryId: string) => __TAURI_INVOKE<null>("remove_library", { libraryId }),
-	selectLibrary: (libraryId: string) => __TAURI_INVOKE<null>("select_library", { libraryId }),
-	getDirContents: (dirId: string) => __TAURI_INVOKE<DirSummaryContent_Serialize>("get_dir_contents", { dirId }),
-	createDirectory: (parentId: string, name: string) => __TAURI_INVOKE<Dir>("create_directory", { parentId, name }),
-	importBook: (parentId: string, sourcePath: string, fileName: string) => __TAURI_INVOKE<BookSummary_Serialize>("import_book", { parentId, sourcePath, fileName }),
+	getLibraryFolder: (libraryId: string, dirId: string) => __TAURI_INVOKE<LibraryFolderView>("get_library_folder", { libraryId, dirId }),
+	getChildDirectories: (libraryId: string, parentId: string) => __TAURI_INVOKE<Dir[]>("get_child_directories", { libraryId, parentId }),
+	createDirectory: (libraryId: string, parentId: string, name: string) => __TAURI_INVOKE<Dir>("create_directory", { libraryId, parentId, name }),
+	importBook: (destination: BookImportDestination, sourcePath: string, fileName: string) => __TAURI_INVOKE<null>("import_book", { destination, sourcePath, fileName }),
 	getOpdsEndpoints: () => __TAURI_INVOKE<OpdsEndpoint[]>("get_opds_endpoints"),
-	getOpdsCatalog: (endpoint: OpdsEndpointId, url: string | null, username: string | null, password: string | null) => __TAURI_INVOKE<OpdsCatalog>("get_opds_catalog", { endpoint, url, username, password }),
-	searchOpdsCatalog: (endpoint: OpdsEndpointId, search: OpdsSearch, query: string, username: string | null, password: string | null) => __TAURI_INVOKE<OpdsCatalog>("search_opds_catalog", { endpoint, search, query, username, password }),
-	importOpdsEpub: (endpoint: OpdsEndpointId, acquisition: OpdsEpubAcquisition, username: string | null, password: string | null) => __TAURI_INVOKE<BookSummary_Serialize>("import_opds_epub", { endpoint, acquisition, username, password }),
-	getRecentlyRead: (limit: number) => __TAURI_INVOKE<BookSummary_Serialize[]>("get_recently_read", { limit }),
-	getRecentlyAdded: (limit: number) => __TAURI_INVOKE<BookSummary_Serialize[]>("get_recently_added", { limit }),
-	searchBooks: (query: string, limit: number) => __TAURI_INVOKE<BookSummary_Serialize[]>("search_books", { query, limit }),
-	getAuthors: () => __TAURI_INVOKE<AuthorSummary[]>("get_authors"),
-	getAuthorFolderBooks: (authorName: string) => __TAURI_INVOKE<AuthorFolderBookSummaries_Serialize[]>("get_author_folder_books", { authorName }),
-	getBookThumbnail: (bookId: string) => __TAURI_INVOKE<BinaryBytes>("get_book_thumbnail", { bookId }),
-	openBook: (bookId: string) => __TAURI_INVOKE<BinaryBytes>("open_book", { bookId }),
-	getBookReadingPosition: (bookId: string) => __TAURI_INVOKE<string | null>("get_book_reading_position", { bookId }),
-	updateReadingPosition: (bookId: string, cfi: string) => __TAURI_INVOKE<null>("update_reading_position", { bookId, cfi }),
-	updateLastRead: (bookId: string) => __TAURI_INVOKE<null>("update_last_read", { bookId }),
-	downloadBook: (bookId: string) => __TAURI_INVOKE<DownloadState>("download_book", { bookId }),
-	downloadFolder: (dirId: string) => __TAURI_INVOKE<FolderDownloadStatus>("download_folder", { dirId }),
-	syncOnce: () => __TAURI_INVOKE<null>("sync_once"),
+	refreshOpdsEndpoints: () => __TAURI_INVOKE<OpdsEndpoint[]>("refresh_opds_endpoints"),
+	getCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("get_catalog_sources"),
+	refreshCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("refresh_catalog_sources"),
+	getCustomCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("get_custom_catalog_sources"),
+	addCustomCatalog: (title: string, url: string, usernameLabel: string | null, passwordRequired: boolean) => __TAURI_INVOKE<CatalogSource>("add_custom_catalog", { title, url, usernameLabel, passwordRequired }),
+	removeCustomCatalog: (sourceId: CatalogSourceId) => __TAURI_INVOKE<null>("remove_custom_catalog", { sourceId }),
+	searchCatalogs: (query: string) => __TAURI_INVOKE<CatalogWideSearchResult>("search_catalogs", { query }),
+	getCatalogPage: (sourceId: CatalogSourceId, locator: string | null, username: string | null, password: string | null) => __TAURI_INVOKE<CatalogPage>("get_catalog_page", { sourceId, locator, username, password }),
+	searchCatalog: (sourceId: CatalogSourceId, search: CatalogSearch, query: CatalogSearchQuery, username: string | null, password: string | null) => __TAURI_INVOKE<CatalogPage>("search_catalog", { sourceId, search, query, username, password }),
+	getCatalogCover: (sourceId: CatalogSourceId, imageUrl: string) => __TAURI_INVOKE<BinaryBytes>("get_catalog_cover", { sourceId, imageUrl }),
+	getCatalogOwnership: (libraryId: string, sourceId: CatalogSourceId, publications: CatalogPublicationIdentity[]) => __TAURI_INVOKE<CatalogPublicationOwnership[]>("get_catalog_ownership", { libraryId, sourceId, publications }),
+	importCatalogBook: (destination: BookImportDestination, request: CatalogImportRequest, username: string | null, password: string | null) => __TAURI_INVOKE<null>("import_catalog_book", { destination, request, username, password }),
+	getLibraryHome: (libraryId: string, limit: number) => __TAURI_INVOKE<LibraryHomeView>("get_library_home", { libraryId, limit }),
+	searchLibrary: (libraryId: string, query: string, limit: number) => __TAURI_INVOKE<BookCardRow[]>("search_library", { libraryId, query, limit }),
+	getLibraryAuthors: (libraryId: string, selectedAuthorId: string | null) => __TAURI_INVOKE<LibraryAuthorsView>("get_library_authors", { libraryId, selectedAuthorId }),
+	discoverCatalogAuthorBooks: (libraryId: string, authorId: string) => __TAURI_INVOKE<CatalogAuthorDiscoveryResult>("discover_catalog_author_books", { libraryId, authorId }),
+	getBookThumbnail: (libraryId: string, bookId: string) => __TAURI_INVOKE<BinaryBytes>("get_book_thumbnail", { libraryId, bookId }),
+	openBook: (libraryId: string, bookId: string) => __TAURI_INVOKE<BinaryBytes>("open_book", { libraryId, bookId }),
+	getBookFileName: (libraryId: string, bookId: string) => __TAURI_INVOKE<string>("get_book_file_name", { libraryId, bookId }),
+	getBookReadingPosition: (libraryId: string, bookId: string) => __TAURI_INVOKE<string | null>("get_book_reading_position", { libraryId, bookId }),
+	updateReadingPosition: (libraryId: string, bookId: string, cfi: string, progress: number | null) => __TAURI_INVOKE<null>("update_reading_position", { libraryId, bookId, cfi, progress }),
+	updateLastRead: (libraryId: string, bookId: string) => __TAURI_INVOKE<null>("update_last_read", { libraryId, bookId }),
+	getAnnotations: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderAnnotation[]>("get_annotations", { libraryId, bookId }),
+	upsertAnnotation: (libraryId: string, annotation: ReaderAnnotation) => __TAURI_INVOKE<null>("upsert_annotation", { libraryId, annotation }),
+	deleteAnnotation: (libraryId: string, annotationId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_annotation", { libraryId, annotationId, modifiedAt }),
+	getBookmarks: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderBookmark[]>("get_bookmarks", { libraryId, bookId }),
+	upsertBookmark: (libraryId: string, bookmark: ReaderBookmark) => __TAURI_INVOKE<null>("upsert_bookmark", { libraryId, bookmark }),
+	deleteBookmark: (libraryId: string, bookmarkId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_bookmark", { libraryId, bookmarkId, modifiedAt }),
+	getBookLinks: (libraryId: string, bookId: string) => __TAURI_INVOKE<BookLink[]>("get_book_links", { libraryId, bookId }),
+	upsertBookLink: (libraryId: string, link: BookLink) => __TAURI_INVOKE<null>("upsert_book_link", { libraryId, link }),
+	deleteBookLink: (libraryId: string, linkId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_book_link", { libraryId, linkId, modifiedAt }),
+	downloadBook: (libraryId: string, bookId: string) => __TAURI_INVOKE<DownloadState>("download_book", { libraryId, bookId }),
+	removeLocalBookCopy: (libraryId: string, bookId: string) => __TAURI_INVOKE<DownloadState>("remove_local_book_copy", { libraryId, bookId }),
+	downloadFolder: (libraryId: string, dirId: string) => __TAURI_INVOKE<FolderDownloadStatus>("download_folder", { libraryId, dirId }),
 };
 
 /* Constants */
-export const FRONTEND_CONTRACT = {"browsing_preferences":{"constraints":{"ui_font_size_px":[12,24]},"defaults":{"heading_font":"serif","interface_font":"sans_serif","theme":"greco_futuristic","ui_font_size_px":16},"options":{"fonts":[{"font_name":"sans-serif","generic_family":"sans-serif","value":"sans_serif"},{"font_name":"serif","generic_family":"serif","value":"serif"}],"themes":[{"description":"Cool, restrained surfaces with muted green accents.","label":"Greco futuristic","value":"greco_futuristic"},{"description":"Warm, bookish surfaces with brown accents.","label":"Library serif","value":"library_serif"}]}},"navigation":[{"id":"home","label":"Home"},{"id":"library","label":"Library"},{"id":"authors","label":"Authors"},{"id":"search","label":"Search"},{"id":"store","label":"Store"}],"reader_preferences":{"constraints":{"font_size_px":[8.0,64.0],"line_height":[1.0,2.4000000953674316],"max_column_count":[1,4],"max_line_width_px":[200.0,1200.0],"zoom":[0.5,3.0]},"defaults":{"flow":"paginated","font_family":"publisher","font_size_px":20.0,"hyphenation":true,"line_height":1.5,"line_numbers":true,"max_column_count":2,"max_line_width_px":600.0,"text_alignment":"publisher","theme":"sepia","zoom":1.0},"foliate_capabilities":{"engine":"foliate","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","flow","font_family","text_alignment","hyphenation","max_column_count"]},"native_capabilities":{"engine":"native","supported_preferences":["font_size_px","max_line_width_px","zoom","line_numbers"]},"options":{"flows":[{"label":"Pages","value":"paginated"},{"label":"Scrolling","value":"scrolled"}],"font_families":[{"label":"Publisher","value":"publisher"},{"label":"Serif","value":"serif"},{"label":"Sans serif","value":"sans_serif"}],"text_alignments":[{"label":"Publisher","value":"publisher"},{"label":"Left","value":"start"},{"label":"Justified","value":"justify"}],"themes":[{"label":"Light","value":"light"},{"label":"Sepia","value":"sepia"},{"label":"Dark","value":"dark"}]}}} as const;
+export const FRONTEND_CONTRACT = {"account":{"capabilities":{"email_verification":true,"password_recovery":true,"public_registration":true,"resend_verification":true},"libraries_section_label":"Libraries on this device","navigation_label":"Account","no_active_transfers_label":"No active batch jobs","no_local_libraries_label":"No local libraries","refresh_label":"Refresh","sign_out_label":"Sign out","sync_states":[{"description":"Stored only on this device","label":"Local","state":"local_only"},{"description":"Synchronized with the account","label":"Synced","state":"synced"},{"description":"Sign in to resume synchronization","label":"Sign in required","state":"sign_in_required"},{"description":"Linked to another account","label":"Different account","state":"different_account"},{"description":"Ready to create on the server","label":"Upload pending","state":"remote_missing"}],"title":"Account","transfers_section_label":"Batch jobs","validation":{"email_max_bytes":254,"one_time_token_bytes":43,"password_max_bytes":1024,"password_min_characters":12,"username_max_bytes":64,"username_min_bytes":3}},"book_actions":{"download_in_progress_label":"Download in progress","download_label":"Download","hide_label":"Hide from library","menu_label":"Book actions","open_label":"Open","remove_local_copy_label":"Remove local copy","restore_label":"Add back to library"},"browsing_content":{"breadcrumb_item_max_characters":24,"finished_progress_threshold":98,"home_book_limit":20,"import_extensions":["epub","pdf","mobi","azw","azw3","fb2","cbz","html","htm","xhtml","webpub"],"minimum_search_characters":1,"search_debounce_ms":220,"search_result_limit":100,"semantic_link_relations":["related to","continues","continued by","inspired by","adaptation of","contrasts with","commentary on","translation of"]},"browsing_layout":{"book_card_height_px":432,"book_cover_height_px":306,"book_cover_width_px":204,"book_grid_column_gap_px":28,"book_grid_row_height_px":438,"content_padding_px":18,"large_viewport_breakpoint_px":720,"sidebar_width_px":96,"topbar_action_gap_px":10,"topbar_action_height_px":40,"topbar_action_horizontal_padding_px":11,"topbar_height_px":64},"browsing_preferences":{"constraints":{"ui_font_size_px":[12,24]},"defaults":{"heading_font":"serif","interface_font":"sans_serif","library_view":"covers","show_unavailable_books":false,"theme":"greco_futuristic","ui_font_size_px":16},"options":{"fonts":[{"font_name":"Noto Sans","generic_family":"sans-serif","value":"sans_serif"},{"font_name":"Libertinus Serif","generic_family":"serif","value":"serif"}],"themes":[{"description":"Cool, restrained surfaces with muted green accents.","label":"Greco futuristic","value":"greco_futuristic"},{"description":"Warm, bookish surfaces with brown accents.","label":"Library serif","value":"library_serif"}]}},"browsing_states":{"create_library_label":"Create library","empty_folder_description":"Add a book or create a folder here.","empty_folder_title":"This folder is empty","empty_library_description":"Add a book or create a folder to get started.","empty_library_title":"Your library is empty","load_error_title":"Could not load this section","loading_authors_label":"Loading authors…","loading_books_label":"Loading books…","loading_folder_label":"Loading folder…","loading_library_label":"Loading library…","no_libraries_description":"Create a library to organize your books.","no_libraries_title":"No libraries","no_search_results_label":"No matching books","retry_label":"Retry","searching_label":"Searching…"},"library_actions":{"add_book_label":"Add book","download_folder_label":"Download folder","folder_downloaded_label":"Downloaded","new_folder_label":"New folder","show_bulk_download_in_topbar":false},"navigation":[{"id":"home","label":"Home"},{"id":"library","label":"Library"},{"id":"authors","label":"Authors"},{"id":"search","label":"Search"},{"id":"store","label":"Store"}],"reader_navigation":{"shortcuts":[{"action":"previous_line","alt":false,"key":"arrow_up","primary_modifier":false,"shift":false},{"action":"next_line","alt":false,"key":"arrow_down","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"arrow_right","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"page_up","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"page_down","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"space","primary_modifier":false,"shift":false},{"action":"previous_section","alt":false,"key":"arrow_left","primary_modifier":true,"shift":false},{"action":"next_section","alt":false,"key":"arrow_right","primary_modifier":true,"shift":false},{"action":"history_back","alt":true,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"history_forward","alt":true,"key":"arrow_right","primary_modifier":false,"shift":false}]},"reader_preferences":{"constraints":{"font_size_px":[8.0,64.0],"line_height":[1.0,2.4000000953674316],"max_column_count":[1,4],"max_line_width_px":[200.0,1200.0],"zoom":[0.5,3.0]},"defaults":{"flow":"paginated","font_family":"publisher","font_size_px":20.0,"hyphenation":true,"line_height":1.5,"max_column_count":2,"max_line_width_px":600.0,"pdf_page_layout":"automatic","pdf_trim_margins":true,"text_alignment":"publisher","theme":"sepia","zoom":1.0},"foliate_capabilities":{"engine":"foliate","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","flow","font_family","text_alignment","hyphenation","max_column_count"]},"native_capabilities":{"engine":"native","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","font_family","text_alignment","max_column_count","pdf_page_layout","pdf_trim_margins"]},"options":{"flows":[{"label":"Pages","value":"paginated"},{"label":"Scrolling","value":"scrolled"}],"font_families":[{"label":"Publisher","value":"publisher"},{"label":"Serif","value":"serif"},{"label":"Sans serif","value":"sans_serif"}],"pdf_page_layouts":[{"label":"Single page","value":"single"},{"label":"Two-page spread","value":"spread"},{"label":"Automatic","value":"automatic"}],"text_alignments":[{"label":"Publisher","value":"publisher"},{"label":"Left","value":"start"},{"label":"Justified","value":"justify"}],"themes":[{"label":"Light","value":"light"},{"label":"Sepia","value":"sepia"},{"label":"Dark","value":"dark"}]}},"reader_settings":{"anchor":"reader_toolbar_end","gap_px":13,"keeps_document_visible":true,"max_height_px":620,"max_width_px":400,"minimum_column_width_px":176,"padding_px":16,"presentation":"contextual_overlay","title":"Appearance","trigger_label":"Aa"},"settings":{"appearance_section_label":"Appearance","application_theme_label":"Application theme","auto_download_description":"Download server books up to this size on this device.","auto_download_label":"Automatic book downloads","background_metered_description":"Manual uploads and downloads always continue.","background_metered_label":"Background transfers on metered connections","current_network_label":"Current network","heading_font_label":"Heading font","interface_font_label":"Interface font","library_section_label":"Library","library_view_label":"Book display","navigation_label":"Settings","network_transports":[{"label":"Offline","transport":"offline"},{"label":"Wi-Fi","transport":"wifi"},{"label":"Mobile data","transport":"cellular"},{"label":"Ethernet","transport":"ethernet"},{"label":"VPN","transport":"vpn"},{"label":"Connected","transport":"other"},{"label":"Network unknown","transport":"unknown"}],"show_unavailable_books_label":"Show books not on this device","title":"Settings","transfers_section_label":"Batch jobs","ui_font_size_label":"UI font size"},"store":{"add_label":"Add","adding_label":"Adding…","catalog_three_column_breakpoint_px":1152,"catalog_two_column_breakpoint_px":720,"catalogs_label":"Catalogs","description_scrollbar_width_px":8,"max_width_px":1248,"open_label":"Open","publication_height_px":432,"publication_min_width_px":400,"publication_three_column_breakpoint_px":1232,"publication_two_column_breakpoint_px":816,"retry_label":"Retry","search_all_placeholder":"Search all catalogs","search_label":"Search","sign_in_needed_label":"Sign in needed"},"web_preference_profiles":{"desktop_min_width_px":720,"profiles":["mobile","desktop"]}} as const;
 
 /* Types */
+export type AccountCapabilities = {
+	public_registration: boolean,
+	email_verification: boolean,
+	resend_verification: boolean,
+	password_recovery: boolean,
+};
+
+export type AccountContract = {
+	navigation_label: string,
+	title: string,
+	libraries_section_label: string,
+	transfers_section_label: string,
+	no_local_libraries_label: string,
+	no_active_transfers_label: string,
+	refresh_label: string,
+	sign_out_label: string,
+	capabilities: AccountCapabilities,
+	validation: AccountValidationContract,
+	sync_states: LibrarySyncStateDefinition[],
+};
+
+export type AccountSessionSummary = {
+	session_id: string,
+	created_at: number | null,
+	expires_at: number | null,
+	current: boolean,
+};
+
 export type AccountStatus = {
 	signed_in: boolean,
 	server_url: string | null,
 	username: string | null,
 };
+
+export type AccountValidationContract = {
+	username_min_bytes: number,
+	username_max_bytes: number,
+	password_min_characters: number,
+	password_max_bytes: number,
+	email_max_bytes: number,
+	one_time_token_bytes: number,
+};
+
+export type AnnotationAnchor = { kind: "epub_cfi"; cfi: string } | { kind: "pdf"; page_index: number; rects: PdfAnnotationRect[]; fallback_cfi: string | null };
+
+export type AnnotationStyle = "highlight" | "underline" | "squiggly" | "strikethrough";
 
 export type AppFeature = "home" | "library" | "authors" | "search" | "store";
 
@@ -70,26 +136,66 @@ export type ApplicationThemeOption = {
 	description: string,
 };
 
-export type AuthorFolderBookSummaries = AuthorFolderBookSummaries_Serialize | AuthorFolderBookSummaries_Deserialize;
-
-export type AuthorFolderBookSummaries_Deserialize = {
-	folder_id: string,
-	folder_path: string,
-	books: BookSummary_Deserialize[],
-};
-
-export type AuthorFolderBookSummaries_Serialize = {
-	folder_id: string,
-	folder_path: string,
-	books: BookSummary_Serialize[],
-};
-
 export type AuthorSummary = {
+	id: string,
 	name: string,
 	book_count: number,
 };
 
 export type BinaryBytes = number[];
+
+export type BookActionsContract = {
+	menu_label: string,
+	open_label: string,
+	download_label: string,
+	download_in_progress_label: string,
+	remove_local_copy_label: string,
+	hide_label: string,
+	restore_label: string,
+};
+
+/**
+ *  Everything a browsing card renders for one book, read in a single row.
+ *
+ *  Deliberately a read model rather than a [`Book`]: the identity columns alone
+ *  left callers asking for download state, audiobook details and progress one
+ *  book at a time.
+ */
+export type BookCardRow = {
+	book_id: string,
+	title: string,
+	author: string,
+	description: string,
+	progress: number | null,
+	downloaded: boolean,
+	download_requested: boolean,
+	audiobook: boolean,
+	/**  Present only once the scanner has parsed the file. */
+	audiobook_duration_ms: number | null,
+	audiobook_chapter_count: number | null,
+};
+
+/**
+ *  The complete, stable destination for a book import.
+ *  Frontends must choose both identities before starting an asynchronous
+ *  download. The backend still verifies their relationship against the live
+ *  library database when the import is committed.
+ */
+export type BookImportDestination = {
+	library_id: string,
+	directory_id: string,
+};
+
+/**  A directed, user-authored relationship between two books in one library. */
+export type BookLink = {
+	id: string,
+	source_book_id: string,
+	target_book_id: string,
+	relation: string,
+	note: string,
+	created_at: number,
+	modified_at: number,
+};
 
 /**
  *  Lightweight book metadata for IPC and list views.
@@ -137,6 +243,32 @@ export type BookSummary_Serialize = {
 	download_state: DownloadState,
 };
 
+export type BrowsingContentContract = {
+	minimum_search_characters: number,
+	search_debounce_ms: number,
+	breadcrumb_item_max_characters: number,
+	search_result_limit: number,
+	home_book_limit: number,
+	finished_progress_threshold: number,
+	import_extensions: string[],
+	semantic_link_relations: string[],
+};
+
+export type BrowsingLayoutContract = {
+	large_viewport_breakpoint_px: number,
+	sidebar_width_px: number,
+	topbar_height_px: number,
+	topbar_action_height_px: number,
+	topbar_action_gap_px: number,
+	topbar_action_horizontal_padding_px: number,
+	content_padding_px: number,
+	book_cover_width_px: number,
+	book_cover_height_px: number,
+	book_card_height_px: number,
+	book_grid_column_gap_px: number,
+	book_grid_row_height_px: number,
+};
+
 export type BrowsingPreferenceConstraints = {
 	ui_font_size_px: [number, number],
 };
@@ -155,9 +287,9 @@ export type BrowsingPreferenceOptions_Serialize = {
 
 export type BrowsingPreferencePatch = BrowsingPreferencePatch_Serialize | BrowsingPreferencePatch_Deserialize;
 
-export type BrowsingPreferencePatch_Deserialize = { preference: "theme"; value: ApplicationTheme } | { preference: "interface_font"; value: UiFontFamily_Deserialize } | { preference: "heading_font"; value: UiFontFamily_Deserialize } | { preference: "ui_font_size_px"; value: number };
+export type BrowsingPreferencePatch_Deserialize = { preference: "theme"; value: ApplicationTheme } | { preference: "interface_font"; value: UiFontFamily_Deserialize } | { preference: "heading_font"; value: UiFontFamily_Deserialize } | { preference: "ui_font_size_px"; value: number } | { preference: "library_view"; value: LibraryView } | { preference: "show_unavailable_books"; value: boolean };
 
-export type BrowsingPreferencePatch_Serialize = { preference: "theme"; value: ApplicationTheme } | { preference: "interface_font"; value: UiFontFamily_Serialize } | { preference: "heading_font"; value: UiFontFamily_Serialize } | { preference: "ui_font_size_px"; value: number };
+export type BrowsingPreferencePatch_Serialize = { preference: "theme"; value: ApplicationTheme } | { preference: "interface_font"; value: UiFontFamily_Serialize } | { preference: "heading_font"; value: UiFontFamily_Serialize } | { preference: "ui_font_size_px"; value: number } | { preference: "library_view"; value: LibraryView } | { preference: "show_unavailable_books"; value: boolean };
 
 export type BrowsingPreferences = BrowsingPreferences_Serialize | BrowsingPreferences_Deserialize;
 
@@ -180,6 +312,8 @@ export type BrowsingPreferences_Deserialize = {
 	interface_font: UiFontFamily_Deserialize,
 	heading_font: UiFontFamily_Deserialize,
 	ui_font_size_px: number,
+	library_view: LibraryView,
+	show_unavailable_books: boolean,
 };
 
 export type BrowsingPreferences_Serialize = {
@@ -187,6 +321,189 @@ export type BrowsingPreferences_Serialize = {
 	interface_font: UiFontFamily_Serialize,
 	heading_font: UiFontFamily_Serialize,
 	ui_font_size_px: number,
+	library_view: LibraryView,
+	show_unavailable_books: boolean,
+};
+
+export type BrowsingStatesContract = {
+	loading_library_label: string,
+	loading_folder_label: string,
+	loading_books_label: string,
+	loading_authors_label: string,
+	searching_label: string,
+	no_search_results_label: string,
+	load_error_title: string,
+	no_libraries_title: string,
+	no_libraries_description: string,
+	create_library_label: string,
+	empty_library_title: string,
+	empty_library_description: string,
+	empty_folder_title: string,
+	empty_folder_description: string,
+	retry_label: string,
+};
+
+export type CatalogAuthentication = { kind: "none" } | { kind: "basic"; username_label: string; password: CatalogPasswordRequirement } | { kind: "external"; action_label: string; url: string };
+
+export type CatalogAuthorCredit = {
+	name: string,
+	sort_name: string | null,
+	identifiers: string[],
+	provider_link: CatalogLinkTarget | null,
+};
+
+export type CatalogAuthorDiscoveryEvidence = { kind: "book_identifier"; identifier: CatalogPublicationIdentifier } | { kind: "author_name" };
+
+export type CatalogAuthorDiscoveryMatch = {
+	source: CatalogSource,
+	publication: CatalogPublication,
+	evidence: CatalogAuthorDiscoveryEvidence,
+};
+
+export type CatalogAuthorDiscoveryResult = {
+	author_name: string,
+	matches: CatalogAuthorDiscoveryMatch[],
+};
+
+export type CatalogBookFormat = "epub" | "pdf";
+
+export type CatalogCapability = "browse" | "search" | "facets" | "import" | "external_fulfillment" | "borrow" | "holds" | "loans";
+
+export type CatalogDescription = { format: "plain_text"; text: string } | { format: "rich_html"; safe_html: string; plain_text: string };
+
+export type CatalogExternalActionKind = "open" | "preview" | "buy" | "borrow" | "subscribe";
+
+export type CatalogFacet = {
+	title: string,
+	links: CatalogLink[],
+};
+
+export type CatalogFreshness = "current" | "stale";
+
+export type CatalogGroup = {
+	title: string,
+	page_locator: string | null,
+	number_of_items: number | null,
+	navigation: CatalogLink[],
+	publications: CatalogPublication[],
+};
+
+export type CatalogImportRequest = {
+	source_id: CatalogSourceId,
+	catalog_locator: string,
+	publication: CatalogPublicationIdentity,
+	download_url: string,
+	book_format: CatalogBookFormat,
+};
+
+export type CatalogLink = {
+	title: string,
+	target: CatalogLinkTarget,
+	number_of_items: number | null,
+	active: boolean,
+};
+
+export type CatalogLinkTarget = { kind: "page"; locator: string } | { kind: "external"; url: string };
+
+export type CatalogOwnershipStatus = "not_owned" | "other_edition_owned" | "exact_edition_owned";
+
+export type CatalogPage = {
+	source_id: CatalogSourceId,
+	freshness: CatalogFreshness,
+	title: string,
+	locator: string,
+	navigation: CatalogLink[],
+	publications: CatalogPublication[],
+	groups: CatalogGroup[],
+	facets: CatalogFacet[],
+	pagination: CatalogPagination,
+	search: CatalogSearch | null,
+};
+
+export type CatalogPagination = {
+	first: string | null,
+	previous: string | null,
+	next: string | null,
+	last: string | null,
+	number_of_items: number | null,
+	items_per_page: number | null,
+	current_page: number | null,
+};
+
+export type CatalogPasswordRequirement = "required" | "empty";
+
+export type CatalogPrice = {
+	currency: string,
+	value: string,
+};
+
+export type CatalogProviderKind = "opds" | "overdrive";
+
+export type CatalogPublication = {
+	identity: CatalogPublicationIdentity,
+	title: string,
+	authors: CatalogAuthorCredit[],
+	description: CatalogDescription | null,
+	image_url: string | null,
+	actions: CatalogPublicationAction[],
+};
+
+export type CatalogPublicationAction = { kind: "import"; request: CatalogImportRequest } | { kind: "external"; purpose: CatalogExternalActionKind; url: string; price: CatalogPrice | null; available_formats: CatalogBookFormat[] };
+
+export type CatalogPublicationIdentifier = {
+	scheme: CatalogPublicationIdentifierScheme,
+	value: string,
+};
+
+export type CatalogPublicationIdentifierScheme = "isbn" | "asin" | "doi" | "oclc" | "lccn" | "google" | "goodreads" | "kobo";
+
+export type CatalogPublicationIdentity = {
+	edition_id: string,
+	work_id: string | null,
+};
+
+export type CatalogPublicationOwnership = {
+	edition_id: string,
+	status: CatalogOwnershipStatus,
+};
+
+export type CatalogSearch = {
+	definition: CatalogSearchDefinition,
+	fields: CatalogSearchField[],
+};
+
+export type CatalogSearchDefinition = { kind: "opds_uri_template"; base_url: string; template: string } | { kind: "opds_open_search_description"; url: string } | { kind: "overdrive" };
+
+export type CatalogSearchField = "query" | "title" | "author";
+
+export type CatalogSearchQuery = {
+	query: string,
+	title: string | null,
+	author: string | null,
+};
+
+export type CatalogSource = {
+	id: CatalogSourceId,
+	provider: CatalogProviderKind,
+	title: string,
+	description: string,
+	languages: string[],
+	authentication: CatalogAuthentication,
+	capabilities: CatalogCapability[],
+};
+
+export type CatalogSourceId = string;
+
+export type CatalogWideSearchGroup = {
+	source: CatalogSource,
+	outcome: CatalogWideSearchOutcome,
+};
+
+export type CatalogWideSearchOutcome = { kind: "results"; page: CatalogPage } | { kind: "authentication_required" } | { kind: "unsupported" } | { kind: "timed_out" } | { kind: "failed"; message: string };
+
+export type CatalogWideSearchResult = {
+	query: string,
+	groups: CatalogWideSearchGroup[],
 };
 
 export type Dir = {
@@ -194,18 +511,6 @@ export type Dir = {
 	name: string,
 	book_count: number,
 	downloaded_book_count: number,
-};
-
-export type DirSummaryContent = DirSummaryContent_Serialize | DirSummaryContent_Deserialize;
-
-export type DirSummaryContent_Deserialize = {
-	books: BookSummary_Deserialize[],
-	dirs: Dir[],
-};
-
-export type DirSummaryContent_Serialize = {
-	books: BookSummary_Serialize[],
-	dirs: Dir[],
 };
 
 export type DownloadState = "NotDownloaded" | "Queued" | { Downloading: number } | "Downloaded";
@@ -225,14 +530,49 @@ export type FrontendContract = FrontendContract_Serialize | FrontendContract_Des
 
 export type FrontendContract_Deserialize = {
 	navigation: FeatureDefinition[],
+	browsing_layout: BrowsingLayoutContract,
+	library_actions: LibraryActionsContract,
+	store: StoreContract,
+	browsing_states: BrowsingStatesContract,
+	book_actions: BookActionsContract,
+	account: AccountContract,
+	settings: SettingsContract,
+	browsing_content: BrowsingContentContract,
 	browsing_preferences: BrowsingPreferencesContract_Deserialize,
 	reader_preferences: ReaderPreferencesContract,
+	reader_settings: ReaderSettingsPresentationContract,
+	reader_navigation: ReaderNavigationContract,
+	web_preference_profiles: WebPreferenceProfilesContract,
 };
 
 export type FrontendContract_Serialize = {
 	navigation: FeatureDefinition[],
+	browsing_layout: BrowsingLayoutContract,
+	library_actions: LibraryActionsContract,
+	store: StoreContract,
+	browsing_states: BrowsingStatesContract,
+	book_actions: BookActionsContract,
+	account: AccountContract,
+	settings: SettingsContract,
+	browsing_content: BrowsingContentContract,
 	browsing_preferences: BrowsingPreferencesContract_Serialize,
 	reader_preferences: ReaderPreferencesContract,
+	reader_settings: ReaderSettingsPresentationContract,
+	reader_navigation: ReaderNavigationContract,
+	web_preference_profiles: WebPreferenceProfilesContract,
+};
+
+export type LibraryActionsContract = {
+	add_book_label: string,
+	new_folder_label: string,
+	download_folder_label: string,
+	folder_downloaded_label: string,
+	show_bulk_download_in_topbar: boolean,
+};
+
+export type LibraryAuthorsView = {
+	authors: AuthorSummary[],
+	books: BookCardRow[] | null,
 };
 
 export type LibraryCatalogueState = {
@@ -244,15 +584,32 @@ export type LibraryEntry = {
 	library_id: string,
 	library_name: string,
 	library_path: string,
-	sync_binding: LibrarySyncBinding | null,
 };
 
-export type LibrarySyncBinding = {
-	server_url: string,
-	account_id: string,
+export type LibraryFolderEntry = {
+	id: string,
+	name: string,
+	book_count: number,
+	downloaded_book_count: number,
+};
+
+export type LibraryFolderView = {
+	directories: LibraryFolderEntry[],
+	books: BookCardRow[],
+};
+
+export type LibraryHomeView = {
+	recently_read: BookCardRow[],
+	recently_added: BookCardRow[],
 };
 
 export type LibrarySyncState = "local_only" | "synced" | "sign_in_required" | "different_account" | "remote_missing";
+
+export type LibrarySyncStateDefinition = {
+	state: LibrarySyncState,
+	label: string,
+	description: string,
+};
 
 export type LibrarySyncStatus = {
 	library_id: string,
@@ -268,6 +625,8 @@ export type LibraryTransfers = {
 	transfers: TransferStatus[],
 };
 
+export type LibraryView = "covers" | "detailed";
+
 export type NetworkStatus = {
 	transport: NetworkTransport,
 	connected: boolean,
@@ -277,31 +636,9 @@ export type NetworkStatus = {
 
 export type NetworkTransport = "offline" | "wifi" | "cellular" | "ethernet" | "vpn" | "other" | "unknown";
 
-export type OpdsAcquisition = {
-	format: "epub",
-} & OpdsEpubAcquisition | {
-	format: "unsupported",
-} & OpdsUnsupportedAcquisition;
-
-export type OpdsAcquisitionKind = "open_access" | "borrow" | "buy" | "preview" | "subscribe" | "generic";
-
-export type OpdsCatalog = {
-	version: OpdsVersion,
-	title: string,
-	source_url: string,
-	self_url: string | null,
-	start_url: string | null,
-	navigation: OpdsCatalogLink[],
-	publications: OpdsPublication[],
-	groups: OpdsGroup[],
-	facets: OpdsFacet[],
-	pagination: OpdsPagination,
-	search: OpdsSearch | null,
-};
-
-export type OpdsCatalogLink = {
-	title: string,
-	url: string,
+export type NetworkTransportDefinition = {
+	transport: NetworkTransport,
+	label: string,
 };
 
 export type OpdsEndpoint = {
@@ -318,56 +655,46 @@ export type OpdsEndpointAccess = "open" | "membership";
 
 export type OpdsEndpointAuthentication = { kind: "none" } | { kind: "basic"; username_label: string; password: OpdsPasswordRequirement };
 
-export type OpdsEndpointId = "project_gutenberg" | "standard_ebooks" | "standard_ebooks_new_releases" | "feedbooks_public_domain" | "unglue_it" | "textos_info" | "ebooks_gratuits" | "office_of_the_historian" | "gallica";
-
-export type OpdsEpubAcquisition = {
-	url: string,
-	kind: OpdsAcquisitionKind,
-	suggested_file_name: string,
-};
-
-export type OpdsFacet = {
-	title: string,
-	links: OpdsCatalogLink[],
-};
-
-export type OpdsGroup = {
-	title: string,
-	navigation: OpdsCatalogLink[],
-	publications: OpdsPublication[],
-};
-
-export type OpdsPagination = {
-	first: string | null,
-	previous: string | null,
-	next: string | null,
-	last: string | null,
-	number_of_items: number | null,
-	items_per_page: number | null,
-	current_page: number | null,
-};
+export type OpdsEndpointId = string;
 
 export type OpdsPasswordRequirement = "required" | "empty";
 
-export type OpdsPublication = {
+export type PdfAnnotationRect = {
+	left: number,
+	top: number,
+	width: number,
+	height: number,
+};
+
+export type PdfPageLayout = "single" | "spread" | "automatic";
+
+export type PdfPageLayoutOption = {
+	value: PdfPageLayout,
+	label: string,
+};
+
+export type ReaderAnnotation = {
 	id: string,
-	title: string,
-	authors: string[],
-	description: string | null,
-	image_url: string | null,
-	free_epub: OpdsEpubAcquisition | null,
-	acquisitions: OpdsAcquisition[],
+	book_id: string,
+	anchor: AnnotationAnchor,
+	exact_text: string,
+	prefix: string | null,
+	suffix: string | null,
+	style: AnnotationStyle,
+	color: string,
+	note: string,
+	created_at: number,
+	modified_at: number,
 };
 
-export type OpdsSearch = { kind: "uri_template"; base_url: string; template: string } | { kind: "open_search_description"; url: string };
-
-export type OpdsUnsupportedAcquisition = {
-	url: string,
-	kind: OpdsAcquisitionKind,
-	media_type: string | null,
+export type ReaderBookmark = {
+	id: string,
+	book_id: string,
+	cfi: string,
+	label: string,
+	created_at: number,
+	modified_at: number,
 };
-
-export type OpdsVersion = "v1_2" | "v2_0";
 
 export type ReaderCapabilities = {
 	engine: ReaderEngine,
@@ -390,31 +717,47 @@ export type ReaderFontFamilyOption = {
 	label: string,
 };
 
+export type ReaderNavigationAction = "previous_line" | "next_line" | "previous_page" | "next_page" | "previous_section" | "next_section" | "history_back" | "history_forward";
+
+export type ReaderNavigationContract = {
+	shortcuts: ReaderNavigationShortcut[],
+};
+
+export type ReaderNavigationKey = "arrow_up" | "arrow_down" | "arrow_left" | "arrow_right" | "page_up" | "page_down" | "space";
+
+export type ReaderNavigationShortcut = {
+	key: ReaderNavigationKey,
+	/**  Ctrl on Linux/Windows and Cmd on macOS or the web. */
+	primary_modifier: boolean,
+	alt: boolean,
+	shift: boolean,
+	action: ReaderNavigationAction,
+};
+
 export type ReaderPreferenceConstraints = {
-	font_size_px: [number, number],
-	max_line_width_px: [number, number],
-	zoom: [number, number],
-	line_height: [number, number],
+	font_size_px: [(number | null), (number | null)],
+	max_line_width_px: [(number | null), (number | null)],
+	zoom: [(number | null), (number | null)],
+	line_height: [(number | null), (number | null)],
 	max_column_count: [number, number],
 };
 
-export type ReaderPreferenceKey = "font_size_px" | "max_line_width_px" | "zoom" | "line_height" | "theme" | "flow" | "font_family" | "text_alignment" | "hyphenation" | "max_column_count" | "line_numbers";
+export type ReaderPreferenceKey = "font_size_px" | "max_line_width_px" | "zoom" | "line_height" | "theme" | "flow" | "font_family" | "text_alignment" | "hyphenation" | "max_column_count" | "pdf_page_layout" | "pdf_trim_margins";
 
 export type ReaderPreferenceOptions = {
 	themes: ReaderThemeOption[],
 	flows: ReaderFlowOption[],
 	font_families: ReaderFontFamilyOption[],
 	text_alignments: ReaderTextAlignmentOption[],
+	pdf_page_layouts: PdfPageLayoutOption[],
 };
 
-export type ReaderPreferencePatch = { preference: "font_size_px"; value: number } | { preference: "max_line_width_px"; value: number } | { preference: "zoom"; value: number } | { preference: "line_height"; value: number } | { preference: "theme"; value: ReaderTheme } | { preference: "flow"; value: ReaderFlow } | { preference: "font_family"; value: ReaderFontFamily } | { preference: "text_alignment"; value: ReaderTextAlignment } | { preference: "hyphenation"; value: boolean } | { preference: "max_column_count"; value: number } | { preference: "line_numbers"; value: boolean };
+export type ReaderPreferencePatch = { preference: "font_size_px"; value: number } | { preference: "max_line_width_px"; value: number } | { preference: "zoom"; value: number } | { preference: "line_height"; value: number } | { preference: "theme"; value: ReaderTheme } | { preference: "flow"; value: ReaderFlow } | { preference: "font_family"; value: ReaderFontFamily } | { preference: "text_alignment"; value: ReaderTextAlignment } | { preference: "hyphenation"; value: boolean } | { preference: "max_column_count"; value: number } | { preference: "pdf_page_layout"; value: PdfPageLayout } | { preference: "pdf_trim_margins"; value: boolean };
 
 /**
- *  Device-local reading preferences shared by all frontends.
- * 
- *  These values deliberately live outside the library databases and sync log.
- *  Each installation gets its own preferences file in its application-data
- *  directory.
+ *  Complete reader settings consumed by every frontend. Account-wide fields
+ *  are synchronized separately; layout-sensitive fields remain in a local
+ *  device or web form-factor profile. Neither belongs in the library event log.
  */
 export type ReaderPreferences = {
 	font_size_px: number,
@@ -427,8 +770,10 @@ export type ReaderPreferences = {
 	text_alignment: ReaderTextAlignment,
 	hyphenation: boolean,
 	max_column_count: number,
-	/**  Supported by the native renderer. Foliate ignores this preference. */
-	line_numbers: boolean,
+	/**  Controls how many PDF pages the native reader presents together. */
+	pdf_page_layout: PdfPageLayout,
+	/**  Automatically removes uniform outer margins from rendered PDF pages. */
+	pdf_trim_margins: boolean,
 };
 
 export type ReaderPreferencesContract = {
@@ -437,6 +782,23 @@ export type ReaderPreferencesContract = {
 	options: ReaderPreferenceOptions,
 	native_capabilities: ReaderCapabilities,
 	foliate_capabilities: ReaderCapabilities,
+};
+
+export type ReaderSettingsAnchor = "reader_toolbar_end";
+
+export type ReaderSettingsPresentation = "contextual_overlay";
+
+export type ReaderSettingsPresentationContract = {
+	presentation: ReaderSettingsPresentation,
+	anchor: ReaderSettingsAnchor,
+	trigger_label: string,
+	title: string,
+	max_width_px: number,
+	max_height_px: number,
+	padding_px: number,
+	gap_px: number,
+	minimum_column_width_px: number,
+	keeps_document_visible: boolean,
 };
 
 export type ReaderTextAlignment = "publisher" | "start" | "justify";
@@ -453,18 +815,59 @@ export type ReaderThemeOption = {
 	label: string,
 };
 
+export type SettingsContract = {
+	navigation_label: string,
+	title: string,
+	appearance_section_label: string,
+	transfers_section_label: string,
+	application_theme_label: string,
+	interface_font_label: string,
+	heading_font_label: string,
+	ui_font_size_label: string,
+	library_section_label: string,
+	library_view_label: string,
+	show_unavailable_books_label: string,
+	background_metered_label: string,
+	background_metered_description: string,
+	auto_download_label: string,
+	auto_download_description: string,
+	current_network_label: string,
+	network_transports: NetworkTransportDefinition[],
+};
+
+export type StoreContract = {
+	max_width_px: number,
+	catalog_two_column_breakpoint_px: number,
+	catalog_three_column_breakpoint_px: number,
+	publication_min_width_px: number,
+	publication_two_column_breakpoint_px: number,
+	publication_three_column_breakpoint_px: number,
+	publication_height_px: number,
+	description_scrollbar_width_px: number,
+	catalogs_label: string,
+	search_all_placeholder: string,
+	search_label: string,
+	add_label: string,
+	adding_label: string,
+	open_label: string,
+	retry_label: string,
+	sign_in_needed_label: string,
+};
+
 export type TransferJobKind = "upload_book" | "upload_thumbnail" | "download_book" | "download_thumbnail";
 
 export type TransferOrigin = "background" | "user_initiated";
 
-export type TransferPreferencePatch = { preference: "allow_background_on_metered"; value: boolean };
+export type TransferPreferencePatch = { preference: "allow_background_on_metered"; value: boolean } | { preference: "auto_download_limit_mb"; value: number | null };
 
 /**
- *  Device-local policy for transfers started by background synchronization.
- *  Explicit user actions are never suppressed by this preference.
+ *  Host-local policy for transfers started by background synchronization.
+ *  Web hosts may persist it in an account-scoped form-factor profile. Explicit
+ *  user actions are never suppressed by this preference.
  */
 export type TransferPreferences = {
 	allow_background_on_metered: boolean,
+	auto_download_limit_mb: number | null,
 };
 
 export type TransferState = "queued" | "running" | "retrying";
@@ -504,3 +907,9 @@ export type UiFontOption_Serialize = {
 	generic_family: string,
 };
 
+export type WebPreferenceProfile = "mobile" | "desktop";
+
+export type WebPreferenceProfilesContract = {
+	profiles: WebPreferenceProfile[],
+	desktop_min_width_px: number,
+};

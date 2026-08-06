@@ -47,11 +47,6 @@
       "overlay_scrim": "#1f1b147e"
     }
   },
-  "reader_themes": {
-    "light": { "background": "#ffffff", "foreground": "#242424", "link": "#704717", "chrome": "#f5f5f5", "chrome_strong": "#dedede" },
-    "sepia": { "background": "#fbf8f1", "foreground": "#29251f", "link": "#7d4e18", "chrome": "#f3eee4", "chrome_strong": "#e6ded0" },
-    "dark": { "background": "#17191c", "foreground": "#ece8df", "link": "#e8b86a", "chrome": "#202226", "chrome_strong": "#303238" }
-  },
   "font_families": {
     "publisher": "",
     "serif": "Georgia, \"Times New Roman\", serif",

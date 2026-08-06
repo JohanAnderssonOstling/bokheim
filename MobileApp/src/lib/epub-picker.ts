@@ -4,9 +4,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { platform } from "@tauri-apps/plugin-os";
 import { APP_NAME_LOWER } from "./application-name";
+import { BROWSING_CONTENT_CONTRACT } from "./types";
 
 const EPUB_MIME = "application/epub+zip";
+const BOOK_EXTENSIONS: readonly string[] = BROWSING_CONTENT_CONTRACT.import_extensions;
 const ANDROID_PICKED_EVENT = `${APP_NAME_LOWER}-epub-picked`;
+const browserImports = new Map<string, File>();
+
+export function takeBrowserImport(token: string): File | undefined {
+  const file = browserImports.get(token);
+  browserImports.delete(token);
+  return file;
+}
 
 interface AndroidPickerResult {
   requestId: string;
@@ -29,21 +38,38 @@ function fileNameFromPath(path: string) {
     decodedPath = decodeURIComponent(withoutQuery);
   } catch {}
   const name = decodedPath.split(/[\\/:]/).at(-1) || "book.epub";
-  return /\.epub$/i.test(name) ? name : "book.epub";
+  const extension = name.split(".").at(-1)?.toLocaleLowerCase();
+  return extension && BOOK_EXTENSIONS.includes(extension) ? name : "book.epub";
 }
 
-function pickInBrowser(): Promise<PickedEpub | null> {
+function publicationMime(name: string) {
+  const extension = name.split(".").at(-1)?.toLocaleLowerCase();
+  if (extension === "epub") return EPUB_MIME;
+  if (extension === "fb2") return "application/x-fictionbook+xml";
+  if (extension === "cbz") return "application/vnd.comicbook+zip";
+  if (extension === "webpub") return "application/webpub+zip";
+  if (extension === "html" || extension === "htm") return "text/html";
+  if (extension === "xhtml") return "application/xhtml+xml";
+  if (extension === "mobi" || extension === "azw" || extension === "azw3") return "application/x-mobipocket-ebook";
+  return "application/octet-stream";
+}
+
+function pickInBrowser(importFormats: boolean): Promise<PickedEpub | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = `.epub,${EPUB_MIME}`;
+    input.accept = importFormats ? BOOK_EXTENSIONS.map((extension) => `.${extension}`).join(",") : `.epub,${EPUB_MIME}`;
     input.addEventListener("change", () => {
       const file = input.files?.[0];
       resolve(file
         ? {
             name: file.name,
             asFile: async () => file,
-            asImportPath: async () => null,
+            asImportPath: async () => {
+              const token = `browser-upload:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+              browserImports.set(token, file);
+              return token;
+            },
             dispose: async () => undefined,
           }
         : null);
@@ -77,7 +103,7 @@ function pickOnAndroid(): Promise<PickedEpub | null> {
         const loadBytes = () => (bytes ??= readFile(path));
         resolve({
           name,
-          asFile: async () => new File([await loadBytes()], name, { type: EPUB_MIME }),
+          asFile: async () => new File([await loadBytes()], name, { type: publicationMime(name) }),
           asImportPath: async () => path,
           dispose: async () => remove(path).catch(() => undefined),
         });
@@ -94,8 +120,8 @@ function pickOnAndroid(): Promise<PickedEpub | null> {
 }
 
 /** Opens the platform picker with the narrowest EPUB filter it supports. */
-export async function pickEpub(): Promise<PickedEpub | null> {
-  if (!isTauri()) return pickInBrowser();
+export async function pickEpub(importFormats = false): Promise<PickedEpub | null> {
+  if (!isTauri()) return pickInBrowser(importFormats);
 
   if (platform() === "android" && window.BokheimAndroid?.pickEpub) {
     return pickOnAndroid();
@@ -108,9 +134,9 @@ export async function pickEpub(): Promise<PickedEpub | null> {
     pickerMode: "document",
     fileAccessMode: "copy",
     filters: [{
-      name: "EPUB books",
+      name: importFormats ? "Books" : "EPUB books",
       // Android's document picker filters by MIME type, not extension.
-      extensions: platform() === "android" ? [EPUB_MIME] : ["epub"],
+      extensions: platform() === "android" ? [EPUB_MIME] : (importFormats ? [...BOOK_EXTENSIONS] : ["epub"]),
     }],
   });
   if (!selected) return null;
@@ -124,13 +150,15 @@ export async function pickEpub(): Promise<PickedEpub | null> {
     name,
     asFile: async () => {
       const contents = await loadBytes();
-      return new File([contents], name, { type: EPUB_MIME });
+      return new File([contents], name, { type: publicationMime(name) });
     },
     asImportPath: async () => {
       if (!path.startsWith("content://")) return path;
       if (stagedPath) return stagedPath;
       const nonce = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      stagedPath = await join(await appCacheDir(), `epub-import-${nonce}.epub`);
+      const extension = name.split(".").at(-1)?.toLocaleLowerCase();
+      const safeExtension = extension && BOOK_EXTENSIONS.includes(extension) ? extension : "epub";
+      stagedPath = await join(await appCacheDir(), `book-import-${nonce}.${safeExtension}`);
       await writeFile(stagedPath, await loadBytes());
       return stagedPath;
     },

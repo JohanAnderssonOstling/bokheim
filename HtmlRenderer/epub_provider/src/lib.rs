@@ -1,36 +1,107 @@
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, Cursor, Read, Seek};
+use std::io::{self, Read, Seek};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-pub use html_source::{ResourceProvider, TocEntry};
+pub use html::resources::{ResourceProvider, TocEntry};
 
 mod definitions;
 pub use definitions::{CreatorRole, IdentifierScheme, parse_creator_role, parse_identifier_scheme};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpubIdentifier {
     pub value: String,
     pub scheme: IdentifierScheme,
+    /// Raw EPUB 3 `identifier-type` refinement. Keeping this evidence avoids
+    /// losing proprietary or future identifier systems that Bokheim does not
+    /// yet understand.
+    pub identifier_types: Vec<EpubIdentifierType>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpubIdentifierType {
+    pub value: String,
+    pub scheme: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct EpubCreator {
+    pub id: Option<String>,
     pub name: String,            // Display name (from text content)
     pub file_as: Option<String>, // Sort name (from opf:file-as)
     pub role: CreatorRole,
 }
 
+impl EpubCreator {
+    pub fn author(name: String) -> Self {
+        Self { id: None, name, file_as: None, role: CreatorRole::author() }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct EpubMetadata {
     pub title: String,
+    pub alternate_titles: Vec<EpubTitle>,
     pub identifiers: Vec<EpubIdentifier>,
     pub creators: Vec<EpubCreator>,
     pub contributors: Vec<EpubCreator>,
     pub description: String,
     pub publisher: String,
+    pub publishers: Vec<String>,
     pub language: String,
+    pub languages: Vec<String>,
     pub date: String,
+    pub dates: Vec<EpubDate>,
+    pub subjects: Vec<EpubSubject>,
+    pub rights: Vec<String>,
+    pub sources: Vec<String>,
+    pub types: Vec<String>,
+    pub formats: Vec<String>,
+    pub relations: Vec<String>,
+    pub coverage: Vec<String>,
+    pub properties: Vec<EpubMetadataProperty>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpubMetadataProperty {
+    pub id: Option<String>,
+    pub property: String,
+    pub value: String,
+    pub refines: Option<String>,
+    pub scheme: Option<String>,
+    pub language: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpubDate {
+    pub id: Option<String>,
+    pub value: String,
+    pub event: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpubSubject {
+    pub id: Option<String>,
+    pub value: String,
+    pub authority: Option<String>,
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpubTitle {
+    pub id: Option<String>,
+    pub value: String,
+    pub title_type: Option<String>,
+    pub sort_as: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaOverlayCue {
+    pub text_href: String,
+    pub audio_href: String,
+    pub clip_begin_seconds: f64,
+    pub clip_end_seconds: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +110,7 @@ struct ManifestItem {
     href: String,
     media_type: Option<String>,
     properties: Option<String>,
+    media_overlay: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,8 +121,11 @@ struct ParsedManifest {
     ncx_href: Option<String>,
 }
 
+trait ReadSeekSend: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeekSend for T {}
+
 pub struct EpubProvider {
-    archive: Mutex<zip::ZipArchive<Cursor<Vec<u8>>>>,
+    archive: Arc<Mutex<zip::ZipArchive<Box<dyn ReadSeekSend>>>>,
     opf_path: String,
     opf_dir: String,
     opf_xml: String,
@@ -63,14 +138,11 @@ impl EpubProvider {
         Self::try_from_reader(file)
     }
 
-    pub fn try_from_reader<R>(mut reader: R) -> io::Result<Self>
+    pub fn try_from_reader<R>(reader: R) -> io::Result<Self>
     where
         R: Read + Seek + Send + 'static,
     {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
-        let cursor = Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let mut archive = zip::ZipArchive::new(Box::new(reader) as Box<dyn ReadSeekSend>).map_err(io::Error::other)?;
 
         // Read and parse container.xml to get OPF path
         let container_xml = {
@@ -92,9 +164,9 @@ impl EpubProvider {
         };
 
         // Pre-compute OPF directory for path resolution
-        let opf_dir = opf_path.rsplitn(2, '/').nth(1).unwrap_or("").to_string();
+        let opf_dir = opf_path.rsplit_once('/').map(|x| x.0).unwrap_or("").to_string();
 
-        Ok(Self { archive: Mutex::new(archive), opf_path, opf_dir, opf_xml, manifest_cache: OnceLock::new() })
+        Ok(Self { archive: Arc::new(Mutex::new(archive)), opf_path, opf_dir, opf_xml, manifest_cache: OnceLock::new() })
     }
 
     pub fn new(epub_path: PathBuf) -> Self {
@@ -103,6 +175,25 @@ impl EpubProvider {
 
     pub fn metadata(&self) -> io::Result<EpubMetadata> {
         Ok(parse_opf_metadata(&self.opf_xml))
+    }
+
+    pub fn media_overlay_cues(&self) -> io::Result<Vec<MediaOverlayCue>> {
+        let manifest = self.get_or_parse_manifest();
+        let mut cues = Vec::new();
+        for idref in &manifest.spine {
+            let Some(content) = manifest.items.iter().find(|item| &item.id == idref) else { continue };
+            let Some(overlay_id) = content.media_overlay.as_deref() else { continue };
+            let Some(overlay) = manifest.items.iter().find(|item| item.id == overlay_id) else { continue };
+            let smil_path = normalize_epub_path(&resolve_href(&self.opf_dir, &overlay.href));
+            let smil = self.read_entry_string(&smil_path)?;
+            cues.extend(parse_smil_cues(&smil, &smil_path));
+        }
+        Ok(cues)
+    }
+
+    pub fn is_fixed_layout(&self) -> bool {
+        let package = self.opf_xml.to_ascii_lowercase();
+        (package.contains("rendition:layout") && package.contains("pre-paginated")) || (package.contains("fixed-layout") && (package.contains("content=\"true\"") || package.contains("content='true'")))
     }
 
     pub fn cover_image_path(&self) -> io::Result<Option<String>> {
@@ -123,10 +214,10 @@ impl EpubProvider {
 
         // Look for cover-image property
         for item in &manifest.items {
-            if let Some(ref props) = item.properties {
-                if props.contains("cover-image") {
-                    return Some(item.href.clone());
-                }
+            if let Some(ref props) = item.properties
+                && props.contains("cover-image")
+            {
+                return Some(item.href.clone());
             }
         }
 
@@ -134,10 +225,10 @@ impl EpubProvider {
         if let Some(cover_id) = parse_opf_cover_id(&self.opf_xml) {
             for item in &manifest.items {
                 if item.id == cover_id {
-                    if is_manifest_item_html(item) {
-                        if let Some(found) = self.find_cover_from_html(&item.href) {
-                            return Some(found);
-                        }
+                    if is_manifest_item_html(item)
+                        && let Some(found) = self.find_cover_from_html(&item.href)
+                    {
+                        return Some(found);
                     }
                     return Some(item.href.clone());
                 }
@@ -149,24 +240,24 @@ impl EpubProvider {
             if let Some(found) = self.find_cover_from_html(&guide_href) {
                 return Some(found);
             }
-            if let Some(item) = self.find_manifest_item_by_href(&guide_href) {
-                if is_manifest_item_image(item) {
-                    return Some(item.href.clone());
-                }
+            if let Some(item) = self.find_manifest_item_by_href(&guide_href)
+                && is_manifest_item_image(item)
+            {
+                return Some(item.href.clone());
             }
             return Some(guide_href);
         }
 
         // Check first spine item, often coverpage/cover html in EPUB2 files.
-        if let Some(first_spine_idref) = parse_opf_first_spine_idref(&self.opf_xml) {
-            if let Some(item) = manifest.items.iter().find(|item| item.id == first_spine_idref) {
-                if is_manifest_item_html(item) {
-                    if let Some(found) = self.find_cover_from_html(&item.href) {
-                        return Some(found);
-                    }
-                } else if is_manifest_item_image(item) {
-                    return Some(item.href.clone());
+        if let Some(first_spine_idref) = parse_opf_first_spine_idref(&self.opf_xml)
+            && let Some(item) = manifest.items.iter().find(|item| item.id == first_spine_idref)
+        {
+            if is_manifest_item_html(item) {
+                if let Some(found) = self.find_cover_from_html(&item.href) {
+                    return Some(found);
                 }
+            } else if is_manifest_item_image(item) {
+                return Some(item.href.clone());
             }
         }
 
@@ -174,10 +265,11 @@ impl EpubProvider {
         for item in &manifest.items {
             let lower_href = item.href.to_ascii_lowercase();
             let lower_id = item.id.to_ascii_lowercase();
-            if (lower_href.contains("cover") || lower_id.contains("cover")) && is_manifest_item_html(item) {
-                if let Some(found) = self.find_cover_from_html(&item.href) {
-                    return Some(found);
-                }
+            if (lower_href.contains("cover") || lower_id.contains("cover"))
+                && is_manifest_item_html(item)
+                && let Some(found) = self.find_cover_from_html(&item.href)
+            {
+                return Some(found);
             }
         }
 
@@ -223,22 +315,22 @@ impl EpubProvider {
         if let Some(ref nav_href) = manifest.nav_href {
             let resolved = resolve_href(&self.opf_dir, nav_href);
             let nav_path = normalize_epub_path(&resolved);
-            if let Ok(nav_xml) = self.read_entry_string(&nav_path) {
-                if let Some(mut entries) = Self::parse_nav_toc(&nav_xml) {
-                    resolve_toc_links(&nav_path, &mut entries);
-                    return Ok(Some(entries));
-                }
+            if let Ok(nav_xml) = self.read_entry_string(&nav_path)
+                && let Some(mut entries) = Self::parse_nav_toc(&nav_xml)
+            {
+                resolve_toc_links(&nav_path, &mut entries);
+                return Ok(Some(entries));
             }
         }
 
         if let Some(ref ncx_href) = manifest.ncx_href {
             let resolved = resolve_href(&self.opf_dir, ncx_href);
             let ncx_path = normalize_epub_path(&resolved);
-            if let Ok(ncx_xml) = self.read_entry_string(&ncx_path) {
-                if let Some(mut entries) = Self::parse_ncx_toc(&ncx_xml) {
-                    resolve_toc_links(&ncx_path, &mut entries);
-                    return Ok(Some(entries));
-                }
+            if let Ok(ncx_xml) = self.read_entry_string(&ncx_path)
+                && let Some(mut entries) = Self::parse_ncx_toc(&ncx_xml)
+            {
+                resolve_toc_links(&ncx_path, &mut entries);
+                return Ok(Some(entries));
             }
         }
 
@@ -277,10 +369,8 @@ impl EpubProvider {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e)) => {
-                    if e.name().as_ref().ends_with(b"rootfile") {
-                        return read_xml_attr(e.attributes(), b"full-path");
-                    }
+                Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e)) if e.name().as_ref().ends_with(b"rootfile") => {
+                    return read_xml_attr(e.attributes(), b"full-path");
                 }
                 Ok(quick_xml::events::Event::Eof) => break,
                 Err(_) => break,
@@ -319,6 +409,7 @@ impl EpubProvider {
                         let mut href = None;
                         let mut media_type = None;
                         let mut properties = None;
+                        let mut media_overlay = None;
 
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
@@ -330,21 +421,24 @@ impl EpubProvider {
                                 media_type = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             } else if key.ends_with(b"properties") {
                                 properties = Some(String::from_utf8_lossy(&attr.value).into_owned());
+                            } else if key.ends_with(b"media-overlay") {
+                                media_overlay = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             }
                         }
 
                         if let (Some(id), Some(href)) = (id, href) {
-                            if let Some(ref props) = properties {
-                                if props.split_whitespace().any(|v| v == "nav") {
-                                    nav_href = Some(href.clone());
-                                }
+                            if let Some(ref props) = properties
+                                && props.split_whitespace().any(|v| v == "nav")
+                            {
+                                nav_href = Some(href.clone());
                             }
-                            items.push(ManifestItem { id, href, media_type, properties });
+                            items.push(ManifestItem { id, href, media_type, properties, media_overlay });
                         }
-                    } else if in_spine && e.name().as_ref().ends_with(b"itemref") {
-                        if let Some(idref) = read_xml_attr(e.attributes(), b"idref") {
-                            spine.push(idref);
-                        }
+                    } else if in_spine
+                        && e.name().as_ref().ends_with(b"itemref")
+                        && let Some(idref) = read_xml_attr(e.attributes(), b"idref")
+                    {
+                        spine.push(idref);
                     }
                 }
                 Ok(quick_xml::events::Event::End(e)) => {
@@ -405,18 +499,16 @@ impl EpubProvider {
                     }
                 }
                 Ok(quick_xml::events::Event::Empty(e)) => {
-                    if in_toc_nav && e.name().as_ref().ends_with(b"a") {
-                        if let Some(href) = read_xml_attr(e.attributes(), b"href") {
-                            if let Some(list) = list_stack.last_mut() {
-                                list.push(TocEntry { title: String::new(), link: href, children: Vec::new() });
-                            }
-                        }
+                    if in_toc_nav
+                        && e.name().as_ref().ends_with(b"a")
+                        && let Some(href) = read_xml_attr(e.attributes(), b"href")
+                        && let Some(list) = list_stack.last_mut()
+                    {
+                        list.push(TocEntry { title: String::new(), link: href, children: Vec::new() });
                     }
                 }
-                Ok(quick_xml::events::Event::Text(e)) => {
-                    if in_a {
-                        current_text.push_str(&e.unescape().unwrap_or_default());
-                    }
+                Ok(quick_xml::events::Event::Text(e)) if in_a => {
+                    current_text.push_str(&e.unescape().unwrap_or_default());
                 }
                 Ok(quick_xml::events::Event::End(e)) => {
                     if e.name().as_ref().ends_with(b"a") && in_a {
@@ -431,12 +523,11 @@ impl EpubProvider {
                     } else if in_toc_nav && e.name().as_ref().ends_with(b"ol") {
                         if list_stack.len() > 1 {
                             let children = list_stack.pop().unwrap_or_default();
-                            if let Some(parent_idx) = parent_idx_stack.pop() {
-                                if let Some(parent_list) = list_stack.last_mut() {
-                                    if let Some(parent) = parent_list.get_mut(parent_idx) {
-                                        parent.children = children;
-                                    }
-                                }
+                            if let Some(parent_idx) = parent_idx_stack.pop()
+                                && let Some(parent_list) = list_stack.last_mut()
+                                && let Some(parent) = parent_list.get_mut(parent_idx)
+                            {
+                                parent.children = children;
                             }
                         } else {
                             in_root_ol = false;
@@ -478,29 +569,25 @@ impl EpubProvider {
                         text_buf.clear();
                     } else if e.name().as_ref().ends_with(b"content") {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref().ends_with(b"src") {
-                                if let Some(entry) = stack.last_mut() {
-                                    entry.link = String::from_utf8_lossy(&attr.value).into_owned();
-                                }
+                            if attr.key.as_ref().ends_with(b"src")
+                                && let Some(entry) = stack.last_mut()
+                            {
+                                entry.link = String::from_utf8_lossy(&attr.value).into_owned();
                             }
                         }
                     }
                 }
-                Ok(quick_xml::events::Event::Empty(e)) => {
-                    if e.name().as_ref().ends_with(b"content") {
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref().ends_with(b"src") {
-                                if let Some(entry) = stack.last_mut() {
-                                    entry.link = String::from_utf8_lossy(&attr.value).into_owned();
-                                }
-                            }
+                Ok(quick_xml::events::Event::Empty(e)) if e.name().as_ref().ends_with(b"content") => {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref().ends_with(b"src")
+                            && let Some(entry) = stack.last_mut()
+                        {
+                            entry.link = String::from_utf8_lossy(&attr.value).into_owned();
                         }
                     }
                 }
-                Ok(quick_xml::events::Event::Text(e)) => {
-                    if in_text {
-                        text_buf.push_str(&e.unescape().unwrap_or_default());
-                    }
+                Ok(quick_xml::events::Event::Text(e)) if in_text => {
+                    text_buf.push_str(&e.unescape().unwrap_or_default());
                 }
                 Ok(quick_xml::events::Event::End(e)) => {
                     if e.name().as_ref().ends_with(b"text") && in_text {
@@ -508,13 +595,13 @@ impl EpubProvider {
                         if let Some(entry) = stack.last_mut() {
                             entry.title = text_buf.trim().to_string();
                         }
-                    } else if e.name().as_ref().ends_with(b"navPoint") {
-                        if let Some(entry) = stack.pop() {
-                            if let Some(parent) = stack.last_mut() {
-                                parent.children.push(entry);
-                            } else {
-                                root.push(entry);
-                            }
+                    } else if e.name().as_ref().ends_with(b"navPoint")
+                        && let Some(entry) = stack.pop()
+                    {
+                        if let Some(parent) = stack.last_mut() {
+                            parent.children.push(entry);
+                        } else {
+                            root.push(entry);
                         }
                     }
                 }
@@ -559,6 +646,8 @@ impl ResourceProvider for EpubProvider {
         let mut bytes = Vec::with_capacity(entry.size() as usize);
         use std::io::Read;
         entry.read_to_end(&mut bytes)?;
+        drop(entry);
+        drop(archive);
         Ok(bytes)
     }
 
@@ -574,7 +663,7 @@ impl ResourceProvider for EpubProvider {
         let href = href.split('#').next().unwrap_or(href);
         let href = href.split('?').next().unwrap_or(href);
         let href = href.trim_start_matches('/');
-        let base_dir = base.rsplitn(2, '/').nth(1).unwrap_or("");
+        let base_dir = base.rsplit_once('/').map(|x| x.0).unwrap_or("");
         let combined = if base_dir.is_empty() { href.to_string() } else { format!("{}/{}", base_dir.trim_end_matches('/'), href) };
         normalize_epub_path(&combined)
     }
@@ -587,7 +676,7 @@ impl ResourceProvider for EpubProvider {
         let mut archive = self.archive.lock().unwrap();
         let mut candidates = Vec::new();
         for i in 0..archive.len() {
-            let name = archive.by_index(i).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?.name().to_string();
+            let name = archive.by_index(i).map_err(io::Error::other)?.name().to_string();
             if Self::is_html_entry(&name) {
                 candidates.push(name);
             }
@@ -598,6 +687,59 @@ impl ResourceProvider for EpubProvider {
     fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
         EpubProvider::toc(self)
     }
+}
+
+fn referenced_resources(base: &str, bytes: &[u8]) -> Vec<String> {
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    reader.trim_text(false);
+    let mut buffer = Vec::new();
+    let mut resources = HashSet::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(quick_xml::events::Event::Start(element)) | Ok(quick_xml::events::Event::Empty(element)) => {
+                for attribute in element.attributes().flatten() {
+                    if !matches!(attribute.key.as_ref(), b"src" | b"href" | b"poster") {
+                        continue;
+                    }
+                    let value = String::from_utf8_lossy(attribute.value.as_ref());
+                    if value.starts_with('#') || value.contains("://") || value.starts_with("data:") {
+                        continue;
+                    }
+                    let value = value.split(['#', '?']).next().unwrap_or_default();
+                    let base_dir = base.rsplit_once('/').map(|(directory, _)| directory).unwrap_or_default();
+                    let resolved = normalize_epub_path(&format!("{base_dir}/{value}"));
+                    if !resolved.is_empty() && !EpubProvider::is_html_entry(&resolved) {
+                        resources.insert(resolved);
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    resources.into_iter().collect()
+}
+
+fn referenced_css_resources(base: &str, bytes: &[u8]) -> Vec<String> {
+    let css = String::from_utf8_lossy(bytes);
+    let base_dir = base.rsplit_once('/').map(|(directory, _)| directory).unwrap_or_default();
+    let mut resources = HashSet::new();
+    let mut remainder = css.as_ref();
+    while let Some(index) = remainder.find("url(") {
+        remainder = &remainder[index + 4..];
+        let Some(end) = remainder.find(')') else { break };
+        let value = remainder[..end].trim().trim_matches(['\'', '"']);
+        if !value.is_empty() && !value.starts_with("data:") && !value.contains("://") {
+            let value = value.split(['#', '?']).next().unwrap_or_default();
+            let resolved = normalize_epub_path(&format!("{base_dir}/{value}"));
+            if !resolved.is_empty() {
+                resources.insert(resolved);
+            }
+        }
+        remainder = &remainder[end + 1..];
+    }
+    resources.into_iter().collect()
 }
 
 fn normalize_epub_path(path: &str) -> String {
@@ -645,15 +787,146 @@ fn resolve_toc_href(base_path: &str, href: &str) -> String {
     } else if path_part.contains(':') {
         return href.to_string();
     } else {
-        let base_dir = base_path.rsplitn(2, '/').nth(1).unwrap_or("");
+        let base_dir = base_path.rsplit_once('/').map(|x| x.0).unwrap_or("");
         let combined = if base_dir.is_empty() { path_part.to_string() } else { format!("{}/{}", base_dir.trim_end_matches('/'), path_part) };
         normalize_epub_path(&combined)
     };
     if fragment.is_empty() { resolved_path } else { format!("{}#{}", resolved_path, fragment) }
 }
 
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use std::io::{Cursor, SeekFrom, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingReader {
+        cursor: Cursor<Vec<u8>>,
+        bytes_read: Arc<AtomicUsize>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.cursor.read(buffer)?;
+            self.bytes_read.fetch_add(count, Ordering::Relaxed);
+            Ok(count)
+        }
+    }
+
+    impl Seek for CountingReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn opening_and_reading_a_chapter_does_not_read_the_whole_epub() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", stored).unwrap();
+        archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
+        archive.start_file("OEBPS/content.opf", stored).unwrap();
+        archive
+            .write_all(br#"<package><metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#)
+            .unwrap();
+        archive.start_file("OEBPS/chapter.xhtml", stored).unwrap();
+        archive.write_all(b"<html><body>Only this chapter</body></html>").unwrap();
+        archive.start_file("OEBPS/unused.bin", stored).unwrap();
+        archive.write_all(&vec![7_u8; 4 * 1024 * 1024]).unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let provider = EpubProvider::try_from_reader(CountingReader { cursor: Cursor::new(bytes.clone()), bytes_read: Arc::clone(&bytes_read) }).unwrap();
+        assert_eq!(provider.list_html_candidates("").unwrap(), vec!["OEBPS/chapter.xhtml"]);
+        assert_eq!(provider.read_string("OEBPS/chapter.xhtml").unwrap(), "<html><body>Only this chapter</body></html>");
+        assert!(bytes_read.load(Ordering::Relaxed) < bytes.len() / 2, "EPUB provider read the unused archive payload");
+    }
+}
+
+fn parse_clock_seconds(value: &str) -> Option<f64> {
+    let value = value.trim().strip_prefix("npt=").unwrap_or(value.trim()).trim_end_matches('s');
+    let parts = value.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [seconds] => seconds.parse().ok(),
+        [minutes, seconds] => Some(minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?),
+        [hours, minutes, seconds] => Some(hours.parse::<f64>().ok()? * 3600.0 + minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?),
+        _ => None,
+    }
+}
+
+fn parse_smil_cues(smil: &str, smil_path: &str) -> Vec<MediaOverlayCue> {
+    let mut reader = quick_xml::Reader::from_str(smil);
+    reader.trim_text(true);
+    let mut buffer = Vec::new();
+    let mut text_href = None;
+    let mut cues = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(quick_xml::events::Event::Start(element)) | Ok(quick_xml::events::Event::Empty(element)) => {
+                let name = element.name();
+                if name.as_ref().ends_with(b"par") {
+                    text_href = None;
+                } else if name.as_ref().ends_with(b"text") {
+                    text_href = read_xml_attr(element.attributes(), b"src").map(|href| resolve_toc_href(smil_path, &href));
+                } else if name.as_ref().ends_with(b"audio") {
+                    let audio_href = read_xml_attr(element.attributes(), b"src").map(|href| resolve_toc_href(smil_path, &href));
+                    let begin = read_xml_attr(element.attributes(), b"clipBegin").or_else(|| read_xml_attr(element.attributes(), b"clip-begin")).as_deref().and_then(parse_clock_seconds).unwrap_or(0.0);
+                    let end = read_xml_attr(element.attributes(), b"clipEnd").or_else(|| read_xml_attr(element.attributes(), b"clip-end")).as_deref().and_then(parse_clock_seconds);
+                    if let (Some(text_href), Some(audio_href)) = (text_href.clone(), audio_href) {
+                        cues.push(MediaOverlayCue { text_href, audio_href, clip_begin_seconds: begin, clip_end_seconds: end });
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    cues
+}
+
 fn compact_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn infer_identifier_scheme(value: &str) -> IdentifierScheme {
+    let value = value.trim().to_ascii_lowercase();
+    if value.starts_with("urn:isbn:") || value.starts_with("isbn:") {
+        IdentifierScheme::ISBN
+    } else if value.starts_with("urn:uuid:") || value.starts_with("uuid:") {
+        IdentifierScheme::UUID
+    } else if value.starts_with("urn:asin:") || value.starts_with("asin:") {
+        IdentifierScheme::ASIN
+    } else if value.starts_with("doi:") || value.starts_with("https://doi.org/") || value.starts_with("http://dx.doi.org/") {
+        IdentifierScheme::DOI
+    } else if value.starts_with("urn:issn:") || value.starts_with("issn:") {
+        IdentifierScheme::ISSN
+    } else if value.starts_with("oclc:") || value.starts_with("urn:oclc:") {
+        IdentifierScheme::OCLC
+    } else if value.starts_with("lccn:") || value.starts_with("urn:lccn:") {
+        IdentifierScheme::LCCN
+    } else if value.starts_with("calibre:") || value.starts_with("urn:calibre:") {
+        IdentifierScheme::CALIBRE
+    } else {
+        IdentifierScheme::Unspecified
+    }
+}
+
+fn identifier_scheme_from_type(identifier_type: &EpubIdentifierType) -> Option<IdentifierScheme> {
+    let type_scheme = identifier_type.scheme.as_deref().unwrap_or_default().to_ascii_lowercase();
+    if type_scheme.contains("onix") && type_scheme.contains("codelist5") {
+        return match identifier_type.value.trim() {
+            "02" | "15" | "24" => Some(IdentifierScheme::ISBN),
+            "06" => Some(IdentifierScheme::DOI),
+            "13" => Some(IdentifierScheme::LCCN),
+            "23" => Some(IdentifierScheme::OCLC),
+            _ => None,
+        };
+    }
+    let parsed = parse_identifier_scheme(&identifier_type.value);
+    (!matches!(parsed, IdentifierScheme::Unspecified | IdentifierScheme::Other(_))).then_some(parsed)
 }
 
 fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
@@ -662,10 +935,17 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
     let mut buf = Vec::new();
     let mut metadata = EpubMetadata::default();
     let mut current = None;
-    let mut current_scheme: Option<IdentifierScheme> = None;
+    let mut current_scheme = IdentifierScheme::Unspecified;
+    let mut current_identifier_id: Option<String> = None;
+    let mut current_identifier_type_target: Option<String> = None;
+    let mut current_identifier_type_scheme: Option<String> = None;
+    let mut current_property: Option<(Option<String>, String, Option<String>, Option<String>, Option<String>)> = None;
+    let mut current_value_id: Option<String> = None;
+    let mut current_date_event: Option<String> = None;
     let mut current_role: Option<CreatorRole> = None;
     let mut current_file_as: Option<String> = None;
-    let mut skip_identifier = false;
+    let mut parsed_identifiers = Vec::<(Option<String>, EpubIdentifier)>::new();
+    let mut identifier_type_refinements = Vec::<(String, EpubIdentifierType)>::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -673,41 +953,32 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
                 let name = e.name();
                 if name.as_ref().ends_with(b"title") {
                     current = Some(MetaField::Title);
+                    current_value_id = read_xml_attr(e.attributes(), b"id");
                 } else if name.as_ref().ends_with(b"identifier") {
                     current = Some(MetaField::Identifier);
-                    skip_identifier = false;
-
-                    // Extract scheme attribute - skip identifier if no scheme or unknown scheme
-                    if let Some(scheme_str) = read_xml_attr(e.attributes(), b"scheme") {
-                        match parse_identifier_scheme(&scheme_str) {
-                            Some(scheme) => current_scheme = Some(scheme),
-                            None => {
-                                // Unknown scheme, skip this identifier
-                                skip_identifier = true;
-                                current_scheme = None;
-                            }
-                        }
-                    } else {
-                        // No scheme attribute, skip this identifier
-                        skip_identifier = true;
-                        current_scheme = None;
+                    current_scheme = read_xml_attr(e.attributes(), b"scheme").map(|scheme| parse_identifier_scheme(&scheme)).unwrap_or(IdentifierScheme::Unspecified);
+                    current_identifier_id = read_xml_attr(e.attributes(), b"id");
+                } else if name.as_ref().ends_with(b"meta") && read_xml_attr(e.attributes(), b"property").as_deref().is_some_and(|property| property.rsplit(':').next() == Some("identifier-type")) {
+                    current_identifier_type_target = read_xml_attr(e.attributes(), b"refines").and_then(|target| target.strip_prefix('#').map(str::to_owned));
+                    current_identifier_type_scheme = read_xml_attr(e.attributes(), b"scheme");
+                    current = current_identifier_type_target.as_ref().map(|_| MetaField::IdentifierType);
+                } else if name.as_ref().ends_with(b"meta") {
+                    if let Some(property) = read_xml_attr(e.attributes(), b"property") {
+                        current_property = Some((read_xml_attr(e.attributes(), b"id"), property, read_xml_attr(e.attributes(), b"refines"), read_xml_attr(e.attributes(), b"scheme"), read_xml_attr(e.attributes(), b"lang")));
+                        current = Some(MetaField::Property);
                     }
                 } else if name.as_ref().ends_with(b"creator") {
                     current = Some(MetaField::Creator);
                     // Extract role attribute (opf:role), default to Author if not present
-                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or(CreatorRole::Author));
+                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::author));
+                    current_value_id = read_xml_attr(e.attributes(), b"id");
                     // Extract file-as attribute (opf:file-as)
                     current_file_as = read_xml_attr(e.attributes(), b"file-as");
                 } else if name.as_ref().ends_with(b"contributor") {
-                    // Extract role attribute (opf:role), skip if not present
-                    current_role = read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r));
-
-                    // Only process contributors with a role
-                    if current_role.is_some() {
-                        current = Some(MetaField::Contributor);
-                        // Extract file-as attribute (opf:file-as)
-                        current_file_as = read_xml_attr(e.attributes(), b"file-as");
-                    }
+                    current_role = Some(read_xml_attr(e.attributes(), b"role").map(|r| parse_creator_role(&r)).unwrap_or_else(CreatorRole::contributor));
+                    current_value_id = read_xml_attr(e.attributes(), b"id");
+                    current = Some(MetaField::Contributor);
+                    current_file_as = read_xml_attr(e.attributes(), b"file-as");
                 } else if name.as_ref().ends_with(b"description") {
                     current = Some(MetaField::Description);
                 } else if name.as_ref().ends_with(b"publisher") {
@@ -716,6 +987,48 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
                     current = Some(MetaField::Language);
                 } else if name.as_ref().ends_with(b"date") {
                     current = Some(MetaField::Date);
+                    current_value_id = read_xml_attr(e.attributes(), b"id");
+                    current_date_event = read_xml_attr(e.attributes(), b"event");
+                } else if name.as_ref().ends_with(b"subject") {
+                    current = Some(MetaField::Subject);
+                    current_value_id = read_xml_attr(e.attributes(), b"id");
+                } else if name.as_ref().ends_with(b"rights") {
+                    current = Some(MetaField::Rights);
+                } else if name.as_ref().ends_with(b"source") {
+                    current = Some(MetaField::Source);
+                } else if name.as_ref().ends_with(b"type") {
+                    current = Some(MetaField::Type);
+                } else if name.as_ref().ends_with(b"format") {
+                    current = Some(MetaField::Format);
+                } else if name.as_ref().ends_with(b"relation") {
+                    current = Some(MetaField::Relation);
+                } else if name.as_ref().ends_with(b"coverage") {
+                    current = Some(MetaField::Coverage);
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(e)) => {
+                let name = e.name();
+                if name.as_ref().ends_with(b"meta") && read_xml_attr(e.attributes(), b"property").as_deref().is_some_and(|property| property.rsplit(':').next() == Some("identifier-type")) {
+                    if let (Some(target), Some(value)) = (read_xml_attr(e.attributes(), b"refines").and_then(|target| target.strip_prefix('#').map(str::to_owned)), read_xml_attr(e.attributes(), b"content")) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            identifier_type_refinements.push((target, EpubIdentifierType { value: value.to_owned(), scheme: read_xml_attr(e.attributes(), b"scheme") }));
+                        }
+                    }
+                } else if name.as_ref().ends_with(b"meta") {
+                    if let (Some(property), Some(value)) = (read_xml_attr(e.attributes(), b"property"), read_xml_attr(e.attributes(), b"content")) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            metadata.properties.push(EpubMetadataProperty {
+                                id: read_xml_attr(e.attributes(), b"id"),
+                                property,
+                                value: value.to_owned(),
+                                refines: read_xml_attr(e.attributes(), b"refines"),
+                                scheme: read_xml_attr(e.attributes(), b"scheme"),
+                                language: read_xml_attr(e.attributes(), b"lang"),
+                            });
+                        }
+                    }
                 }
             }
             Ok(quick_xml::events::Event::End(e)) => {
@@ -728,12 +1041,25 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
                     || name.as_ref().ends_with(b"publisher")
                     || name.as_ref().ends_with(b"language")
                     || name.as_ref().ends_with(b"date")
+                    || name.as_ref().ends_with(b"subject")
+                    || name.as_ref().ends_with(b"rights")
+                    || name.as_ref().ends_with(b"source")
+                    || name.as_ref().ends_with(b"type")
+                    || name.as_ref().ends_with(b"format")
+                    || name.as_ref().ends_with(b"relation")
+                    || name.as_ref().ends_with(b"coverage")
+                    || name.as_ref().ends_with(b"meta")
                 {
                     current = None;
-                    current_scheme = None;
+                    current_scheme = IdentifierScheme::Unspecified;
+                    current_identifier_id = None;
+                    current_identifier_type_target = None;
+                    current_identifier_type_scheme = None;
                     current_role = None;
                     current_file_as = None;
-                    skip_identifier = false;
+                    current_property = None;
+                    current_value_id = None;
+                    current_date_event = None;
                 }
             }
             Ok(quick_xml::events::Event::Text(t)) => {
@@ -743,32 +1069,68 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
                         continue;
                     }
                     match field {
-                        MetaField::Title if metadata.title.is_empty() => {
-                            metadata.title = text;
+                        MetaField::Title => {
+                            if metadata.title.is_empty() {
+                                metadata.title = text;
+                            } else {
+                                metadata.alternate_titles.push(EpubTitle { id: current_value_id.clone(), value: text, title_type: None, sort_as: None });
+                            }
                         }
-                        MetaField::Identifier if !skip_identifier => {
-                            // unwrap is safe here because skip_identifier=false means scheme exists
-                            metadata.identifiers.push(EpubIdentifier { value: text, scheme: current_scheme.clone().unwrap() });
+                        MetaField::Identifier => {
+                            let value = text.trim();
+                            if !value.is_empty() {
+                                let scheme = if matches!(current_scheme, IdentifierScheme::Unspecified) { infer_identifier_scheme(value) } else { current_scheme.clone() };
+                                parsed_identifiers.push((current_identifier_id.clone(), EpubIdentifier { value: value.to_owned(), scheme, identifier_types: Vec::new() }));
+                            }
+                        }
+                        MetaField::IdentifierType => {
+                            if let Some(target) = current_identifier_type_target.clone() {
+                                let value = text.trim();
+                                if !value.is_empty() {
+                                    identifier_type_refinements.push((target, EpubIdentifierType { value: value.to_owned(), scheme: current_identifier_type_scheme.clone() }));
+                                }
+                            }
                         }
                         MetaField::Creator => {
                             // unwrap is safe here because we always set current_role for creators
-                            metadata.creators.push(EpubCreator { name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
+                            metadata.creators.push(EpubCreator { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
                         }
                         MetaField::Contributor => {
                             // unwrap is safe here because we only set current=Contributor if role exists
-                            metadata.contributors.push(EpubCreator { name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
+                            metadata.contributors.push(EpubCreator { id: current_value_id.clone(), name: text, file_as: current_file_as.clone(), role: current_role.clone().unwrap() });
                         }
                         MetaField::Description if metadata.description.is_empty() => {
                             metadata.description = text;
                         }
-                        MetaField::Publisher if metadata.publisher.is_empty() => {
-                            metadata.publisher = text;
+                        MetaField::Publisher => {
+                            if metadata.publisher.is_empty() {
+                                metadata.publisher = text.clone();
+                            }
+                            metadata.publishers.push(text);
                         }
-                        MetaField::Language if metadata.language.is_empty() => {
-                            metadata.language = text;
+                        MetaField::Language => {
+                            if metadata.language.is_empty() {
+                                metadata.language = text.clone();
+                            }
+                            metadata.languages.push(text);
                         }
-                        MetaField::Date if metadata.date.is_empty() => {
-                            metadata.date = text;
+                        MetaField::Date => {
+                            if metadata.date.is_empty() {
+                                metadata.date = text.clone();
+                            }
+                            metadata.dates.push(EpubDate { id: current_value_id.clone(), value: text, event: current_date_event.clone() });
+                        }
+                        MetaField::Subject => metadata.subjects.push(EpubSubject { id: current_value_id.clone(), value: text, authority: None, code: None }),
+                        MetaField::Rights => metadata.rights.push(text),
+                        MetaField::Source => metadata.sources.push(text),
+                        MetaField::Type => metadata.types.push(text),
+                        MetaField::Format => metadata.formats.push(text),
+                        MetaField::Relation => metadata.relations.push(text),
+                        MetaField::Coverage => metadata.coverage.push(text),
+                        MetaField::Property => {
+                            if let Some((id, property, refines, scheme, language)) = current_property.clone() {
+                                metadata.properties.push(EpubMetadataProperty { id, property, value: text, refines, scheme, language });
+                            }
                         }
                         _ => {}
                     }
@@ -779,6 +1141,43 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
             _ => {}
         }
         buf.clear();
+    }
+
+    for (source_id, mut identifier) in parsed_identifiers {
+        if let Some(source_id) = source_id {
+            identifier.identifier_types.extend(identifier_type_refinements.iter().filter(|(target, _)| target == &source_id).map(|(_, identifier_type)| identifier_type.clone()));
+        }
+        if matches!(identifier.scheme, IdentifierScheme::Unspecified) {
+            if let Some(scheme) = identifier.identifier_types.iter().find_map(identifier_scheme_from_type) {
+                identifier.scheme = scheme;
+            }
+        }
+        metadata.identifiers.push(identifier);
+    }
+
+    for property in &metadata.properties {
+        if property.property.rsplit(':').next() != Some("role") {
+            continue;
+        }
+        let Some(target) = property.refines.as_deref().and_then(|target| target.strip_prefix('#')) else {
+            continue;
+        };
+        if let Some(credit) = metadata.creators.iter_mut().chain(metadata.contributors.iter_mut()).find(|credit| credit.id.as_deref() == Some(target)) {
+            credit.role = parse_creator_role(&property.value);
+        }
+    }
+
+    let refinement = |id: &Option<String>, property_name: &str| {
+        let target = id.as_deref().map(|id| format!("#{id}"));
+        metadata.properties.iter().find(|property| property.refines == target && property.property.rsplit(':').next() == Some(property_name)).map(|property| property.value.clone())
+    };
+    for title in &mut metadata.alternate_titles {
+        title.title_type = refinement(&title.id, "title-type");
+        title.sort_as = refinement(&title.id, "file-as");
+    }
+    for subject in &mut metadata.subjects {
+        subject.authority = refinement(&subject.id, "authority");
+        subject.code = refinement(&subject.id, "term");
     }
 
     metadata
@@ -794,12 +1193,21 @@ fn parse_creator_name(name: &str) -> String {
 enum MetaField {
     Title,
     Identifier,
+    IdentifierType,
     Creator,
     Contributor,
     Description,
     Publisher,
     Language,
     Date,
+    Subject,
+    Rights,
+    Source,
+    Type,
+    Format,
+    Relation,
+    Coverage,
+    Property,
 }
 
 fn parse_opf_cover_id(opf_xml: &str) -> Option<String> {
@@ -872,10 +1280,8 @@ fn parse_opf_guide_cover_href(opf_xml: &str) -> Option<String> {
                     }
                 }
             }
-            Ok(quick_xml::events::Event::End(e)) => {
-                if e.name().as_ref().ends_with(b"guide") {
-                    break;
-                }
+            Ok(quick_xml::events::Event::End(e)) if e.name().as_ref().ends_with(b"guide") => {
+                break;
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(_) => break,
@@ -899,16 +1305,15 @@ fn parse_opf_first_spine_idref(opf_xml: &str) -> Option<String> {
                 let name = e.name();
                 if name.as_ref().ends_with(b"spine") {
                     in_spine = true;
-                } else if in_spine && name.as_ref().ends_with(b"itemref") {
-                    if let Some(idref) = read_xml_attr(e.attributes(), b"idref") {
-                        return Some(idref);
-                    }
+                } else if in_spine
+                    && name.as_ref().ends_with(b"itemref")
+                    && let Some(idref) = read_xml_attr(e.attributes(), b"idref")
+                {
+                    return Some(idref);
                 }
             }
-            Ok(quick_xml::events::Event::End(e)) => {
-                if e.name().as_ref().ends_with(b"spine") {
-                    break;
-                }
+            Ok(quick_xml::events::Event::End(e)) if e.name().as_ref().ends_with(b"spine") => {
+                break;
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(_) => break,
@@ -932,10 +1337,10 @@ fn parse_first_image_href_from_html(html: &str) -> Option<String> {
                     if let Some(src) = read_xml_attr(e.attributes(), b"src") {
                         return Some(src);
                     }
-                } else if tag.as_ref().ends_with(b"image") {
-                    if let Some(href) = read_xml_attr(e.attributes(), b"href").or_else(|| read_xml_attr(e.attributes(), b"xlink:href")) {
-                        return Some(href);
-                    }
+                } else if tag.as_ref().ends_with(b"image")
+                    && let Some(href) = read_xml_attr(e.attributes(), b"href").or_else(|| read_xml_attr(e.attributes(), b"xlink:href"))
+                {
+                    return Some(href);
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
@@ -1016,9 +1421,120 @@ fn pick_best_cover_image_item(items: &[ManifestItem]) -> Option<&ManifestItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IdentifierScheme::Other;
+
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn smil_media_overlay_cues_resolve_paths_and_clock_values() {
+        let cues = parse_smil_cues(
+            r#"<smil xmlns="http://www.w3.org/ns/SMIL"><body><seq><par><text src="chapter.xhtml#p1"/><audio src="../audio/ch1.mp3" clipBegin="00:01.5" clipEnd="3.25s"/></par></seq></body></smil>"#,
+            "OPS/overlays/chapter.smil",
+        );
+        assert_eq!(cues, vec![MediaOverlayCue { text_href: "OPS/overlays/chapter.xhtml#p1".to_owned(), audio_href: "OPS/audio/ch1.mp3".to_owned(), clip_begin_seconds: 1.5, clip_end_seconds: Some(3.25) }]);
+    }
+
+    #[test]
+    fn opf_metadata_preserves_every_publication_identifier_and_its_type_evidence() {
+        let metadata = parse_opf_metadata(
+            r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+                <metadata>
+                    <dc:title>Identifiers</dc:title>
+                    <dc:identifier id="isbn13">9781234567897</dc:identifier>
+                    <meta refines="#isbn13" property="identifier-type" scheme="onix:codelist5">15</meta>
+                    <dc:identifier opf:scheme="UUID">urn:uuid:12345678-1234-1234-1234-123456789abc</dc:identifier>
+                    <dc:identifier>publisher-private-42</dc:identifier>
+                    <dc:identifier opf:scheme="VendorCase">vendor-value</dc:identifier>
+                    <dc:identifier id="doi">10.1000/example</dc:identifier>
+                    <meta refines="#doi" property="identifier-type" scheme="onix:codelist5" content="06"/>
+                    <dc:identifier opf:scheme="CALIBRE">calibre:legacy-value</dc:identifier>
+                    <dc:identifier>   </dc:identifier>
+                </metadata>
+            </package>"##,
+        );
+
+        assert_eq!(metadata.identifiers.len(), 6);
+        assert_eq!(
+            metadata.identifiers[0],
+            EpubIdentifier { value: "9781234567897".to_owned(), scheme: IdentifierScheme::ISBN, identifier_types: vec![EpubIdentifierType { value: "15".to_owned(), scheme: Some("onix:codelist5".to_owned()) }] }
+        );
+        assert_eq!(metadata.identifiers[1].scheme, IdentifierScheme::UUID);
+        assert_eq!(metadata.identifiers[2].scheme, IdentifierScheme::Unspecified);
+        assert_eq!(metadata.identifiers[2].value, "publisher-private-42");
+        assert_eq!(metadata.identifiers[3].scheme, IdentifierScheme::Other("VendorCase".to_owned()));
+        assert_eq!(
+            metadata.identifiers[4],
+            EpubIdentifier { value: "10.1000/example".to_owned(), scheme: IdentifierScheme::DOI, identifier_types: vec![EpubIdentifierType { value: "06".to_owned(), scheme: Some("onix:codelist5".to_owned()) }] }
+        );
+        assert_eq!(metadata.identifiers[5].scheme, IdentifierScheme::CALIBRE);
+    }
+
+    #[test]
+    fn opf_metadata_applies_epub3_role_refinements_and_keeps_untyped_contributors() {
+        let metadata = parse_opf_metadata(
+            r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+                <metadata>
+                    <dc:title>Credits</dc:title>
+                    <dc:creator id="translator">A Translator</dc:creator>
+                    <meta refines="#translator" property="role" scheme="marc:relators">trl</meta>
+                    <dc:creator opf:role="aut">An Author</dc:creator>
+                    <dc:contributor id="editor">An Editor</dc:contributor>
+                    <meta refines="#editor" property="role" scheme="marc:relators" content="edt"/>
+                    <dc:contributor>Untyped Credit</dc:contributor>
+                </metadata>
+            </package>"##,
+        );
+
+        assert_eq!(metadata.creators[0].id.as_deref(), Some("translator"));
+        assert_eq!(metadata.creators[0].role.as_str(), "trl");
+        assert_eq!(metadata.creators[1].role.as_str(), "aut");
+        assert_eq!(metadata.contributors[0].role.as_str(), "edt");
+        assert_eq!(metadata.contributors[1].role.as_str(), "ctb");
+    }
+
+    #[test]
+    fn opf_metadata_preserves_useful_dublin_core_values_and_epub_refinements() {
+        let metadata = parse_opf_metadata(
+            r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+                <metadata>
+                    <dc:title>Main title</dc:title>
+                    <dc:title>Alternate title</dc:title>
+                    <dc:publisher>North Wind Press</dc:publisher>
+                    <dc:publisher>South Wind Imprint</dc:publisher>
+                    <dc:language>sv-SE</dc:language>
+                    <dc:language>en</dc:language>
+                    <dc:date opf:event="publication">2026-08-04</dc:date>
+                    <dc:date>2026</dc:date>
+                    <dc:subject>Libraries</dc:subject>
+                    <dc:rights>Copyright example</dc:rights>
+                    <dc:source>urn:isbn:9781234567897</dc:source>
+                    <dc:type>Text</dc:type>
+                    <dc:format>application/epub+zip</dc:format>
+                    <dc:relation>urn:example:related</dc:relation>
+                    <dc:coverage>Sweden</dc:coverage>
+                    <meta id="series" property="belongs-to-collection">Bokheim Studies</meta>
+                    <meta refines="#series" property="collection-type">series</meta>
+                    <meta refines="#series" property="group-position">2</meta>
+                    <meta property="schema:accessMode" content="textual"/>
+                </metadata>
+            </package>"##,
+        );
+
+        assert_eq!(metadata.title, "Main title");
+        assert_eq!(metadata.alternate_titles, vec![EpubTitle { id: None, value: "Alternate title".to_owned(), title_type: None, sort_as: None }],);
+        assert_eq!(metadata.publishers, vec!["North Wind Press", "South Wind Imprint"]);
+        assert_eq!(metadata.languages, vec!["sv-SE", "en"]);
+        assert_eq!(metadata.dates, vec![EpubDate { id: None, value: "2026-08-04".to_owned(), event: Some("publication".to_owned()) }, EpubDate { id: None, value: "2026".to_owned(), event: None },],);
+        assert_eq!(metadata.subjects, vec![EpubSubject { id: None, value: "Libraries".to_owned(), authority: None, code: None }],);
+        assert_eq!(metadata.rights, vec!["Copyright example"]);
+        assert_eq!(metadata.sources, vec!["urn:isbn:9781234567897"]);
+        assert_eq!(metadata.types, vec!["Text"]);
+        assert_eq!(metadata.formats, vec!["application/epub+zip"]);
+        assert_eq!(metadata.relations, vec!["urn:example:related"]);
+        assert_eq!(metadata.coverage, vec!["Sweden"]);
+        assert!(metadata.properties.iter().any(|property| { property.id.as_deref() == Some("series") && property.property == "belongs-to-collection" && property.value == "Bokheim Studies" }));
+        assert!(metadata.properties.iter().any(|property| { property.property == "schema:accessMode" && property.value == "textual" }));
+    }
 
     #[test]
     #[ignore] // Run with: cargo test -- --ignored --nocapture
@@ -1051,36 +1567,16 @@ mod tests {
                 // println!("{}", "-".repeat(80));
 
                 match EpubProvider::try_new(path.clone()) {
-                    Ok(provider) => {
-                        match provider.metadata() {
-                            Ok(metadata) => {
-                                for id in &metadata.identifiers {
-                                    match &id.scheme {
-                                        //Other(other) => {eprintln!("scheme: {:?}, open: {:?}", other, path)}
-                                        _ => (),
-                                    }
-                                }
-
-                                for creator in &metadata.contributors {
-                                    match &creator.role {
-                                        CreatorRole::Author => {}
-                                        CreatorRole::Other(other) => {
-                                            if other.eq("bkp") {
-                                                continue;
-                                            }
-                                            eprintln!("Book: {}", path.display());
-
-                                            eprintln!("Unsupported creator role: {:?} {}", other, creator.name);
-                                        }
-                                        other => {
-                                            println!("Other role: {:?}", other);
-                                        }
-                                    }
+                    Ok(provider) => match provider.metadata() {
+                        Ok(metadata) => {
+                            for creator in &metadata.contributors {
+                                if creator.role.as_str() != "bkp" {
+                                    println!("Contributor role: {}", creator.role.as_str());
                                 }
                             }
-                            Err(e) => eprintln!("  ❌ Failed to extract metadata: {}", e),
                         }
-                    }
+                        Err(e) => eprintln!("  ❌ Failed to extract metadata: {}", e),
+                    },
                     Err(e) => eprintln!("  ❌ Failed to open EPUB: {}", e),
                 }
             }

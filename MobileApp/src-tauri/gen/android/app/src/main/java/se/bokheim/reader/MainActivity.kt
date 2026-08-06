@@ -21,6 +21,16 @@ import org.json.JSONObject
 class MainActivity : TauriActivity() {
   companion object {
     private const val EPUB_MIME = "application/epub+zip"
+    private val BOOK_MIME_TYPES = arrayOf(
+      EPUB_MIME,
+      "application/pdf",
+      "application/x-mobipocket-ebook",
+      "application/x-fictionbook+xml",
+      "application/vnd.comicbook+zip",
+      "application/webpub+zip",
+      "text/html",
+      "application/xhtml+xml",
+    )
     private const val APP_NAME_LOWER = "bokheim"
     private const val EPUB_PICKED_EVENT = "${APP_NAME_LOWER}-epub-picked"
     private const val VOLUME_PAGE_TURN_EVENT = "${APP_NAME_LOWER}-volume-page"
@@ -48,10 +58,10 @@ class MainActivity : TauriActivity() {
     }
 
     try {
-      val (path, name) = stageEpub(uri)
+      val (path, name) = stagePublication(uri)
       emitEpubPickerResult(requestId, path, name)
     } catch (error: Exception) {
-      emitEpubPickerResult(requestId, error = error.message ?: "Could not read the selected EPUB")
+      emitEpubPickerResult(requestId, error = error.message ?: "Could not read the selected publication")
     }
   }
 
@@ -150,7 +160,7 @@ class MainActivity : TauriActivity() {
     }
   }
 
-  private fun stageEpub(uri: Uri): Pair<String, String> {
+  private fun stagePublication(uri: Uri): Pair<String, String> {
     val displayName = contentResolver.query(
       uri,
       arrayOf(OpenableColumns.DISPLAY_NAME),
@@ -164,13 +174,14 @@ class MainActivity : TauriActivity() {
     val safeName = displayName
       ?.substringAfterLast('/')
       ?.substringAfterLast('\\')
-      ?.takeIf { it.endsWith(".epub", ignoreCase = true) }
+      ?.takeIf { name -> listOf("epub", "pdf", "mobi", "azw", "azw3", "fb2", "cbz", "html", "htm", "xhtml", "webpub").any { name.endsWith(".$it", ignoreCase = true) } }
       ?: "book.epub"
-    val staged = File(cacheDir, "epub-import-${UUID.randomUUID()}.epub")
+    val extension = safeName.substringAfterLast('.', "epub").lowercase()
+    val staged = File(cacheDir, "book-import-${UUID.randomUUID()}.$extension")
     try {
       contentResolver.openInputStream(uri)?.use { input ->
         staged.outputStream().use { output -> input.copyTo(output) }
-      } ?: error("Could not open the selected EPUB")
+      } ?: error("Could not open the selected publication")
     } catch (error: Exception) {
       staged.delete()
       throw error
@@ -217,7 +228,8 @@ class MainActivity : TauriActivity() {
         pendingEpubRequestId = requestId
         val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
           addCategory(Intent.CATEGORY_OPENABLE)
-          type = EPUB_MIME
+          type = "*/*"
+          putExtra(Intent.EXTRA_MIME_TYPES, BOOK_MIME_TYPES)
           addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {

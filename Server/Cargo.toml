@@ -8,10 +8,16 @@ publish = false
 resolver = "2"
 members = [
     ".",
+    "crates/server-account-core",
+    "crates/server-account-http",
+    "crates/server-account-mail",
+    "crates/server-account-postgres",
     "crates/server-core",
+    "crates/server-database",
     "crates/server-postgres",
     "crates/server-asset-store",
     "crates/server-http",
+    "crates/server-wire-http",
 ]
 
 [workspace.lints.rust]
@@ -25,17 +31,29 @@ workspace = true
 [dependencies]
 axum = "0.7"
 axum-server = "0.8"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }
 server-core = { path = "crates/server-core" }
 server-postgres = { path = "crates/server-postgres" }
 server-asset-store = { path = "crates/server-asset-store" }
 server-http = { path = "crates/server-http" }
-sync-common = { path = "../SyncCommon" }
-serde_json = "1"
-url = "2"
+server-account-core = { path = "crates/server-account-core" }
+server-account-http = { path = "crates/server-account-http" }
+server-account-mail = { path = "crates/server-account-mail" }
+server-account-postgres = { path = "crates/server-account-postgres" }
+server-database = { path = "crates/server-database" }
 
 [dev-dependencies]
+bokheim-account-contract = { path = "../BokheimAccountContract" }
+bokheim-wire = { path = "../BokheimWire" }
+blake3 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+sync-common = { path = "../SyncCommon" }
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

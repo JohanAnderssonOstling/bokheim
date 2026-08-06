@@ -12,18 +12,24 @@ use serde::{Deserialize, Serialize};
 
 const SESSION_VERSION: u32 = 1;
 
+fn default_kobo_auto_rotate() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSession {
     version: u32,
     pub browser: BrowserSession,
     pub browser_window: Option<BrowserWindowGeometry>,
+    #[serde(default = "default_kobo_auto_rotate")]
+    pub kobo_auto_rotate: bool,
     pub reader_preferences: ReaderPreferences,
     pub reader_window: Option<ReaderWindowGeometry>,
 }
 
 impl Default for UiSession {
     fn default() -> Self {
-        Self { version: SESSION_VERSION, browser: BrowserSession::default(), browser_window: None, reader_preferences: ReaderPreferences::default(), reader_window: None }
+        Self { version: SESSION_VERSION, browser: BrowserSession::default(), browser_window: None, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), reader_window: None }
     }
 }
 
@@ -46,11 +52,11 @@ impl UiSession {
     }
 
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if let Err(error) = fs::create_dir_all(parent) {
-                log::error!("failed to create GPUI session directory: {error}");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            log::error!("failed to create GPUI session directory: {error}");
+            return;
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {

@@ -1,13 +1,55 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use bokheim_app_contract::preferences::{AccountPreferencePatch, AccountPreferences};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
-use sync_common::{ContentHash, LibraryId, PullChangesResponse, PullQuery, PushChangesRequest, PushChangesResponse};
+use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
+use sync_common::{ContentHash, LibraryId, PullStateResponse, PullStateQuery, PushMutationsRequest, PushMutationsResponse, StateMutation, SyncExchangeRequest, SyncExchangeResponse};
 use tokio::io::AsyncRead;
 
 pub type AssetReader = Box<dyn AsyncRead + Unpin + Send>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PreferenceError {
+    #[error("invalid account preference patch")]
+    InvalidPatch,
+    #[error("preference persistence failed: {0}")]
+    Internal(String),
+}
+
+#[async_trait]
+pub trait PreferenceRepository: Send + Sync {
+    async fn initialize(&self, user_id: &str, seed: AccountPreferences) -> Result<AccountPreferences, PreferenceError>;
+    async fn apply(&self, user_id: &str, patch: AccountPreferencePatch) -> Result<AccountPreferences, PreferenceError>;
+}
+
+#[async_trait]
+pub trait PreferenceService: Send + Sync {
+    async fn initialize(&self, user_id: &str, seed: AccountPreferences) -> Result<AccountPreferences, PreferenceError>;
+    async fn apply(&self, user_id: &str, patch: AccountPreferencePatch) -> Result<AccountPreferences, PreferenceError>;
+}
+
+pub struct PreferenceApplication {
+    repository: Arc<dyn PreferenceRepository>,
+}
+
+impl PreferenceApplication {
+    pub fn new(repository: Arc<dyn PreferenceRepository>) -> Self {
+        Self { repository }
+    }
+}
+
+#[async_trait]
+impl PreferenceService for PreferenceApplication {
+    async fn initialize(&self, user_id: &str, seed: AccountPreferences) -> Result<AccountPreferences, PreferenceError> {
+        self.repository.initialize(user_id, seed).await
+    }
+
+    async fn apply(&self, user_id: &str, patch: AccountPreferencePatch) -> Result<AccountPreferences, PreferenceError> {
+        self.repository.apply(user_id, patch).await
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetKind {
@@ -18,8 +60,8 @@ pub enum AssetKind {
 impl AssetKind {
     pub const fn max_bytes(self) -> u64 {
         match self {
-            Self::Book => 1024 * 1024 * 1024,
-            Self::Thumbnail => 16 * 1024 * 1024,
+            Self::Book => book_format::MAX_BOOK_BYTES,
+            Self::Thumbnail => sync_common::MAX_THUMBNAIL_BYTES,
         }
     }
 }
@@ -28,6 +70,35 @@ pub struct StoredAsset {
     pub reader: AssetReader,
     pub total_len: u64,
     pub offset: u64,
+}
+
+/// A live cover is identified by both its owner and the book content it
+/// represents. Book blobs remain globally content-addressed, but covers are
+/// deliberately not shared across accounts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UserThumbnail {
+    pub user_id: String,
+    pub content_hash: ContentHash,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveAssets {
+    books: HashSet<ContentHash>,
+    thumbnails: HashSet<UserThumbnail>,
+}
+
+impl LiveAssets {
+    pub fn new(books: HashSet<ContentHash>, thumbnails: HashSet<UserThumbnail>) -> Self {
+        Self { books, thumbnails }
+    }
+
+    pub fn books(&self) -> &HashSet<ContentHash> {
+        &self.books
+    }
+
+    pub fn thumbnails(&self) -> &HashSet<UserThumbnail> {
+        &self.thumbnails
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +122,8 @@ pub enum AssetError {
     LengthMismatch { expected: u64, actual: u64 },
     #[error("an upload for this user and book is already in progress")]
     UploadInProgress,
+    #[error("book upload staging capacity is temporarily exhausted")]
+    Busy,
     #[error("book storage quota exceeded: limit={limit}, used={used}, reserved={reserved}, requested={requested}")]
     QuotaExceeded { limit: u64, used: u64, reserved: u64, requested: u64 },
     #[error("asset exceeds the {limit}-byte limit")]
@@ -104,21 +177,26 @@ pub trait StorageQuotaService: Send + Sync {
 #[async_trait]
 pub trait AssetStore: Send + Sync {
     async fn initialize(&self) -> Result<(), AssetError>;
-    async fn exists(&self, kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError>;
-    async fn existing(&self, kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError>;
-    async fn size(&self, kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError>;
-    async fn open_from(&self, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError>;
-    async fn put(&self, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<u64, AssetError>;
-    async fn sweep(&self, kind: AssetKind, live: &HashSet<ContentHash>, cutoff: SystemTime) -> Result<SweepReport, AssetError>;
+    /// Re-check durable storage without creating a missing storage root.
+    /// Production readiness uses this to distinguish a healthy process from
+    /// one whose asset mount has disappeared or become unwritable.
+    async fn check_ready(&self) -> Result<(), AssetError>;
+    /// `user_id` scopes thumbnails to an account. Implementations must not use
+    /// it to partition book blobs, which are globally deduplicated by hash.
+    async fn exists(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError>;
+    async fn existing(&self, user_id: &str, kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError>;
+    async fn size(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError>;
+    async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError>;
+    async fn put(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<u64, AssetError>;
+    async fn sweep(&self, kind: AssetKind, live: &LiveAssets, cutoff: SystemTime) -> Result<SweepReport, AssetError>;
 }
 
 /// Persistence boundary used to authorize content-addressed assets without
 /// exposing database technology to the application or HTTP layers.
 #[async_trait]
 pub trait AssetRepository: Send + Sync {
-    /// Returns `None` when the user does not own the library. Otherwise returns
-    /// the subset of candidates referenced by the library's current projection.
-    async fn authorized_content_hashes(&self, user_id: &str, library_id: &LibraryId, candidates: &[ContentHash]) -> Result<Option<HashSet<ContentHash>>, AssetError>;
+    async fn owns_library(&self, user_id: &str, library_id: &LibraryId) -> Result<bool, AssetError>;
+    async fn negotiate_books(&self, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError>;
     async fn claim_existing_book(&self, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError>;
     async fn reserve_book_upload(&self, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<BookUploadAdmission, AssetError>;
     async fn finish_book_upload(&self, reservation: &BookUploadReservation, actual_size_bytes: u64) -> Result<(), AssetError>;
@@ -144,11 +222,12 @@ pub enum BookUploadAdmission {
 pub trait AssetService: Send + Sync {
     async fn exists(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError>;
     async fn existing(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError>;
+    async fn negotiate_books(&self, user_id: &str, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError>;
     async fn open_from(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError>;
     async fn put(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<(), AssetError>;
 }
 
-/// Asset use cases and library/reference authorization. Raw storage remains an
+/// Asset use cases and library-ownership authorization. Raw storage remains an
 /// adapter detail and is never exposed directly to HTTP.
 pub struct AssetApplication {
     repository: Arc<dyn AssetRepository>,
@@ -160,9 +239,8 @@ impl AssetApplication {
         Self { repository, store }
     }
 
-    async fn require_hash(&self, user_id: &str, library_id: &LibraryId, hash: &ContentHash) -> Result<(), AssetError> {
-        let authorized = self.repository.authorized_content_hashes(user_id, library_id, std::slice::from_ref(hash)).await?.ok_or(AssetError::Forbidden)?;
-        if authorized.contains(hash) {
+    async fn require_library(&self, user_id: &str, library_id: &LibraryId) -> Result<(), AssetError> {
+        if self.repository.owns_library(user_id, library_id).await? {
             Ok(())
         } else {
             Err(AssetError::Forbidden)
@@ -170,7 +248,7 @@ impl AssetApplication {
     }
 
     async fn claim_existing_book(&self, user_id: &str, library_id: &LibraryId, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
-        let Some(size) = self.store.size(AssetKind::Book, hash).await? else {
+        let Some(size) = self.store.size(user_id, AssetKind::Book, hash).await? else {
             return Ok(None);
         };
         self.repository.claim_existing_book(user_id, library_id, hash, size).await?;
@@ -181,22 +259,21 @@ impl AssetApplication {
 #[async_trait]
 impl AssetService for AssetApplication {
     async fn exists(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError> {
-        self.require_hash(user_id, library_id, hash).await?;
+        self.require_library(user_id, library_id).await?;
         if kind == AssetKind::Book {
             Ok(self.claim_existing_book(user_id, library_id, hash).await?.is_some())
         } else {
-            self.store.exists(kind, hash).await
+            self.store.exists(user_id, kind, hash).await
         }
     }
 
     async fn existing(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError> {
-        let authorized = self.repository.authorized_content_hashes(user_id, library_id, &hashes).await?.ok_or(AssetError::Forbidden)?;
-        let candidates = hashes.into_iter().filter(|hash| authorized.contains(hash)).collect();
-        let present = self.store.existing(kind, candidates).await?;
+        self.require_library(user_id, library_id).await?;
+        let present = self.store.existing(user_id, kind, hashes).await?;
         if kind == AssetKind::Book {
             let mut accessible = Vec::with_capacity(present.len());
             for hash in present {
-                let Some(size) = self.store.size(kind, &hash).await? else {
+                let Some(size) = self.store.size(user_id, kind, &hash).await? else {
                     continue;
                 };
                 match self.repository.claim_existing_book(user_id, library_id, &hash, size).await {
@@ -210,18 +287,23 @@ impl AssetService for AssetApplication {
         Ok(present)
     }
 
+    async fn negotiate_books(&self, user_id: &str, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
+        self.require_library(user_id, library_id).await?;
+        self.repository.negotiate_books(user_id, library_id, &blobs).await
+    }
+
     async fn open_from(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
-        self.require_hash(user_id, library_id, hash).await?;
+        self.require_library(user_id, library_id).await?;
         if kind == AssetKind::Book && self.claim_existing_book(user_id, library_id, hash).await?.is_none() {
             return Ok(None);
         }
-        self.store.open_from(kind, hash, offset).await
+        self.store.open_from(user_id, kind, hash, offset).await
     }
 
     async fn put(&self, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<(), AssetError> {
-        self.require_hash(user_id, library_id, hash).await?;
+        self.require_library(user_id, library_id).await?;
         if kind == AssetKind::Thumbnail {
-            self.store.put(kind, hash, expected_len, reader).await?;
+            self.store.put(user_id, kind, hash, expected_len, reader).await?;
             return Ok(());
         }
         let expected_len = expected_len.ok_or(AssetError::LengthRequired)?;
@@ -235,7 +317,7 @@ impl AssetService for AssetApplication {
             BookUploadAdmission::AlreadyOwned => return Ok(()),
             BookUploadAdmission::Reserved(reservation) => reservation,
         };
-        match self.store.put(kind, hash, Some(expected_len), reader).await {
+        match self.store.put(user_id, kind, hash, Some(expected_len), reader).await {
             Ok(actual_size) => self.repository.finish_book_upload(&reservation, actual_size).await,
             Err(error) => {
                 if let Err(abort_error) = self.repository.abort_book_upload(&reservation).await {
@@ -247,52 +329,6 @@ impl AssetService for AssetApplication {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SessionRecord {
-    pub user_id: String,
-    pub username: String,
-}
-
-/// A newly issued opaque server-side session. The raw token crosses the
-/// boundary exactly once; persistence adapters store only its digest.
-#[derive(Clone)]
-pub struct IssuedSession {
-    pub token: String,
-    pub expires_at: DateTime<Utc>,
-    pub user: SessionRecord,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AuthError {
-    #[error("invalid credentials")]
-    InvalidCredentials,
-    #[error("username already taken")]
-    UsernameTaken,
-    #[error("invalid or expired invite")]
-    InvalidInvite,
-    #[error("forbidden")]
-    Forbidden,
-    #[error("password must be at least {min_characters} characters and at most {max_bytes} bytes")]
-    InvalidPassword { min_characters: usize, max_bytes: usize },
-    #[error("username must not be empty")]
-    EmptyUsername,
-    #[error("username must be 3-64 characters using letters, numbers, '.', '_' or '-'")]
-    InvalidUsername,
-    #[error("authentication service failed: {0}")]
-    Internal(String),
-}
-
-#[async_trait]
-pub trait AuthService: Send + Sync {
-    async fn bootstrap_admin(&self, password: Option<&str>) -> Result<(), AuthError>;
-    async fn resolve_token(&self, token: &str) -> Result<SessionRecord, AuthError>;
-    async fn login(&self, username: &str, password: &str) -> Result<IssuedSession, AuthError>;
-    async fn logout(&self, token: &str) -> Result<(), AuthError>;
-    async fn signup(&self, invite: &str, username: &str, password: &str) -> Result<IssuedSession, AuthError>;
-    async fn create_invite(&self, note: Option<&str>, expires_in_days: Option<i64>) -> Result<(String, DateTime<Utc>), AuthError>;
-    async fn verify_admin(&self, username: &str, password: &str) -> Result<(), AuthError>;
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("authenticated user does not match the request")]
@@ -301,32 +337,47 @@ pub enum SyncError {
     LibraryOwnershipConflict,
     #[error("invalid library name")]
     InvalidLibraryName,
+    #[error("synchronization request contains too many mutations")]
+    TooManyMutations,
+    #[error("synchronization request contains an ambiguous mutation identity")]
+    AmbiguousMutationIdentity,
     #[error("stored synchronization data requires a newer client")]
     UpgradeRequired,
+    #[error("client synchronization cursor is ahead of server state")]
+    CursorAhead,
     #[error("synchronization persistence failed: {0}")]
     Internal(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryUpsertOutcome {
+    pub library: LibrarySummary,
+    pub changed: bool,
 }
 
 #[async_trait]
 pub trait SyncService: Send + Sync {
     async fn list_libraries(&self, authenticated_user: &str) -> Result<Vec<LibrarySummary>, SyncError>;
-    async fn upsert_library(&self, authenticated_user: &str, request: UpsertLibraryRequest) -> Result<LibrarySummary, SyncError>;
-    async fn push(&self, authenticated_user: &str, request: PushChangesRequest) -> Result<PushChangesResponse, SyncError>;
-    async fn pull(&self, authenticated_user: &str, query: PullQuery) -> Result<PullChangesResponse, SyncError>;
+    async fn upsert_library(&self, authenticated_user: &str, request: UpsertLibraryRequest) -> Result<LibraryUpsertOutcome, SyncError>;
+    async fn push(&self, authenticated_user: &str, request: PushMutationsRequest) -> Result<PushMutationsResponse, SyncError>;
+    async fn pull(&self, authenticated_user: &str, query: PullStateQuery) -> Result<PullStateResponse, SyncError>;
+    async fn exchange(&self, authenticated_user: &str, request: SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError>;
 }
 
 #[async_trait]
 pub trait SyncRepository: Send + Sync {
     async fn list_libraries(&self, user_id: &str) -> Result<Vec<LibrarySummary>, SyncError>;
-    async fn upsert_library(&self, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibrarySummary>, SyncError>;
-    async fn ensure_library_owner(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, SyncError>;
-    async fn store_changes(&self, user_id: &str, request: &PushChangesRequest) -> Result<PushChangesResponse, SyncError>;
-    async fn load_changes(&self, query: &PullQuery) -> Result<PullChangesResponse, SyncError>;
+    async fn upsert_library(&self, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibraryUpsertOutcome>, SyncError>;
+    async fn store_changes(&self, user_id: &str, request: &PushMutationsRequest) -> Result<PushMutationsResponse, SyncError>;
+    async fn load_changes(&self, user_id: &str, query: &PullStateQuery) -> Result<PullStateResponse, SyncError>;
+    async fn exchange(&self, user_id: &str, request: &SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError>;
 }
 
-/// Synchronization use cases and protocol-level authorization. Persistence
-/// implementations only provide atomic storage operations through
-/// [`SyncRepository`].
+/// Synchronization use cases use the authenticated identity supplied by HTTP;
+/// user identity is deliberately absent from the untrusted request body.
+/// Persistence implementations atomically combine library ownership with each
+/// storage operation through [`SyncRepository`], so authorization cannot race
+/// the write or require a separate steady-state database round trip.
 pub struct SyncApplication {
     repository: Arc<dyn SyncRepository>,
 }
@@ -335,14 +386,17 @@ impl SyncApplication {
     pub fn new(repository: Arc<dyn SyncRepository>) -> Self {
         Self { repository }
     }
+}
 
-    async fn require_library_owner(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), SyncError> {
-        if self.repository.ensure_library_owner(user_id, library_id).await? {
-            Ok(())
-        } else {
-            Err(SyncError::LibraryOwnershipConflict)
-        }
+fn validate_mutation_batch(mutations: &[StateMutation]) -> Result<(), SyncError> {
+    if mutations.len() > sync_common::MAX_PUSH_MUTATIONS {
+        return Err(SyncError::TooManyMutations);
     }
+    let mut identities = HashSet::with_capacity(mutations.len());
+    if mutations.iter().any(|mutation| !identities.insert(mutation.mutation_id)) {
+        return Err(SyncError::AmbiguousMutationIdentity);
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -351,7 +405,7 @@ impl SyncService for SyncApplication {
         self.repository.list_libraries(authenticated_user).await
     }
 
-    async fn upsert_library(&self, authenticated_user: &str, request: UpsertLibraryRequest) -> Result<LibrarySummary, SyncError> {
+    async fn upsert_library(&self, authenticated_user: &str, request: UpsertLibraryRequest) -> Result<LibraryUpsertOutcome, SyncError> {
         let name = request.library_name.trim();
         if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
             return Err(SyncError::InvalidLibraryName);
@@ -360,29 +414,27 @@ impl SyncService for SyncApplication {
         self.repository.upsert_library(authenticated_user, &request).await?.ok_or(SyncError::LibraryOwnershipConflict)
     }
 
-    async fn push(&self, authenticated_user: &str, request: PushChangesRequest) -> Result<PushChangesResponse, SyncError> {
-        if request.user_id != authenticated_user {
-            return Err(SyncError::Forbidden);
+    async fn push(&self, authenticated_user: &str, request: PushMutationsRequest) -> Result<PushMutationsResponse, SyncError> {
+        validate_mutation_batch(&request.mutations)?;
+        if request.mutations.is_empty() {
+            return Ok(PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() });
         }
-        if request.changes.is_empty() {
-            return Ok(PushChangesResponse { handled_local_seqs: Vec::new(), rejected: Vec::new() });
-        }
-        self.require_library_owner(authenticated_user, &request.library_id).await?;
         self.repository.store_changes(authenticated_user, &request).await
     }
 
-    async fn pull(&self, authenticated_user: &str, query: PullQuery) -> Result<PullChangesResponse, SyncError> {
-        if query.user_id != authenticated_user {
-            return Err(SyncError::Forbidden);
-        }
-        self.require_library_owner(authenticated_user, &query.library_id).await?;
-        self.repository.load_changes(&query).await
+    async fn pull(&self, authenticated_user: &str, query: PullStateQuery) -> Result<PullStateResponse, SyncError> {
+        self.repository.load_changes(authenticated_user, &query).await
+    }
+
+    async fn exchange(&self, authenticated_user: &str, request: SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError> {
+        validate_mutation_batch(&request.mutations)?;
+        self.repository.exchange(authenticated_user, &request).await
     }
 }
 
 #[async_trait]
 pub trait GcLease: Send {
-    fn live_content(&self) -> &HashSet<ContentHash>;
+    fn live_assets(&self) -> &LiveAssets;
     async fn release(self: Box<Self>) -> Result<(), SyncError>;
 }
 
@@ -412,8 +464,8 @@ impl GarbageCollector {
 
     pub async fn collect(&self, cutoff: SystemTime) -> Result<GcReport, SyncError> {
         let lease = self.coordinator.begin_gc().await?;
-        let books = self.assets.sweep(AssetKind::Book, lease.live_content(), cutoff).await.map_err(|error| SyncError::Internal(error.to_string()))?;
-        let thumbnails = self.assets.sweep(AssetKind::Thumbnail, lease.live_content(), cutoff).await.map_err(|error| SyncError::Internal(error.to_string()))?;
+        let books = self.assets.sweep(AssetKind::Book, lease.live_assets(), cutoff).await.map_err(|error| SyncError::Internal(error.to_string()))?;
+        let thumbnails = self.assets.sweep(AssetKind::Thumbnail, lease.live_assets(), cutoff).await.map_err(|error| SyncError::Internal(error.to_string()))?;
         lease.release().await?;
         Ok(GcReport { blobs_scanned: books.scanned, blobs_deleted: books.deleted, thumbnails_scanned: thumbnails.scanned, thumbnails_deleted: thumbnails.deleted, bytes_reclaimed: books.bytes_reclaimed + thumbnails.bytes_reclaimed })
     }
@@ -423,26 +475,26 @@ impl GarbageCollector {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use sync_common::{ClientId, LibraryId};
+    use sync_common::{BookId, ClientId, LibraryId, MutationBody, MutationId, ReadingPositionState, ReplicaSeq, StateMutation};
 
     struct RecordingRepository {
         owns_library: bool,
-        ownership_checks: AtomicUsize,
+        stores: AtomicUsize,
         loads: AtomicUsize,
     }
 
     struct RecordingAssetRepository {
         owns_library: bool,
-        authorized: HashSet<ContentHash>,
     }
 
     #[async_trait]
     impl AssetRepository for RecordingAssetRepository {
-        async fn authorized_content_hashes(&self, _user_id: &str, _library_id: &LibraryId, candidates: &[ContentHash]) -> Result<Option<HashSet<ContentHash>>, AssetError> {
-            if !self.owns_library {
-                return Ok(None);
-            }
-            Ok(Some(candidates.iter().filter(|hash| self.authorized.contains(*hash)).cloned().collect()))
+        async fn owns_library(&self, _user_id: &str, _library_id: &LibraryId) -> Result<bool, AssetError> {
+            Ok(self.owns_library)
+        }
+
+        async fn negotiate_books(&self, _user_id: &str, _library_id: &LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError> {
+            Ok(BlobManifestResponse { upload: blobs.iter().map(|blob| blob.content_hash.clone()).collect(), ..BlobManifestResponse::default() })
         }
 
         async fn claim_existing_book(&self, _user_id: &str, _library_id: &LibraryId, _hash: &ContentHash, _size_bytes: u64) -> Result<(), AssetError> {
@@ -473,27 +525,30 @@ mod tests {
         async fn initialize(&self) -> Result<(), AssetError> {
             Ok(())
         }
-        async fn exists(&self, _kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError> {
+        async fn check_ready(&self) -> Result<(), AssetError> {
+            Ok(())
+        }
+        async fn exists(&self, _user_id: &str, _kind: AssetKind, hash: &ContentHash) -> Result<bool, AssetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.present.contains(hash))
         }
-        async fn existing(&self, _kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError> {
+        async fn existing(&self, _user_id: &str, _kind: AssetKind, hashes: Vec<ContentHash>) -> Result<Vec<ContentHash>, AssetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(hashes.into_iter().filter(|hash| self.present.contains(hash)).collect())
         }
-        async fn size(&self, _kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
+        async fn size(&self, _user_id: &str, _kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.present.contains(hash).then_some(1))
         }
-        async fn open_from(&self, _kind: AssetKind, _hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
+        async fn open_from(&self, _user_id: &str, _kind: AssetKind, _hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Some(StoredAsset { reader: Box::new(std::io::Cursor::new(Vec::new())), total_len: offset, offset }))
         }
-        async fn put(&self, _kind: AssetKind, _hash: &ContentHash, expected_len: Option<u64>, _reader: AssetReader) -> Result<u64, AssetError> {
+        async fn put(&self, _user_id: &str, _kind: AssetKind, _hash: &ContentHash, expected_len: Option<u64>, _reader: AssetReader) -> Result<u64, AssetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(expected_len.unwrap_or(0))
         }
-        async fn sweep(&self, _kind: AssetKind, _live: &HashSet<ContentHash>, _cutoff: SystemTime) -> Result<SweepReport, AssetError> {
+        async fn sweep(&self, _kind: AssetKind, _live: &LiveAssets, _cutoff: SystemTime) -> Result<SweepReport, AssetError> {
             Ok(SweepReport::default())
         }
     }
@@ -504,51 +559,129 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn upsert_library(&self, _user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibrarySummary>, SyncError> {
-            Ok(Some(LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() }))
+        async fn upsert_library(&self, _user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibraryUpsertOutcome>, SyncError> {
+            Ok(Some(LibraryUpsertOutcome { library: LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() }, changed: true }))
         }
 
-        async fn ensure_library_owner(&self, _user_id: &str, _library_id: &LibraryId) -> Result<bool, SyncError> {
-            self.ownership_checks.fetch_add(1, Ordering::SeqCst);
-            Ok(self.owns_library)
+        async fn store_changes(&self, _user_id: &str, _request: &PushMutationsRequest) -> Result<PushMutationsResponse, SyncError> {
+            self.stores.fetch_add(1, Ordering::SeqCst);
+            if self.owns_library {
+                Ok(PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() })
+            } else {
+                Err(SyncError::LibraryOwnershipConflict)
+            }
         }
 
-        async fn store_changes(&self, _user_id: &str, _request: &PushChangesRequest) -> Result<PushChangesResponse, SyncError> {
-            unreachable!("an empty push must not reach persistence")
-        }
-
-        async fn load_changes(&self, _query: &PullQuery) -> Result<PullChangesResponse, SyncError> {
+        async fn load_changes(&self, _user_id: &str, _query: &PullStateQuery) -> Result<PullStateResponse, SyncError> {
             self.loads.fetch_add(1, Ordering::SeqCst);
-            Ok(PullChangesResponse { changes: Vec::new() })
+            if self.owns_library {
+                Ok(PullStateResponse { mutations: Vec::new(), next_cursor: None, has_more: false })
+            } else {
+                Err(SyncError::LibraryOwnershipConflict)
+            }
+        }
+
+        async fn exchange(&self, _user_id: &str, _request: &SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError> {
+            self.stores.fetch_add(1, Ordering::SeqCst);
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            if self.owns_library {
+                Ok(SyncExchangeResponse {
+                    push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
+                    pull: PullStateResponse { mutations: Vec::new(), next_cursor: None, has_more: false },
+                })
+            } else {
+                Err(SyncError::LibraryOwnershipConflict)
+            }
         }
     }
 
     fn repository(owns_library: bool) -> Arc<RecordingRepository> {
-        Arc::new(RecordingRepository { owns_library, ownership_checks: AtomicUsize::new(0), loads: AtomicUsize::new(0) })
+        Arc::new(RecordingRepository { owns_library, stores: AtomicUsize::new(0), loads: AtomicUsize::new(0) })
     }
 
-    fn pull_query(user_id: &str) -> PullQuery {
-        PullQuery { user_id: user_id.to_string(), library_id: LibraryId::parse("library").unwrap(), client_id: ClientId::parse("client").unwrap(), since_server_seq: None }
+    fn pull_query() -> PullStateQuery {
+        PullStateQuery { library_id: LibraryId::parse("library").unwrap(), replica_id: ClientId::parse("client").unwrap(), cursor: None }
     }
 
     #[tokio::test]
     async fn empty_push_is_handled_without_opening_a_repository_transaction() {
         let repository = repository(true);
         let service = SyncApplication::new(repository.clone());
-        let response = service.push("user", PushChangesRequest { user_id: "user".to_string(), library_id: LibraryId::parse("library").unwrap(), client_id: ClientId::parse("client").unwrap(), changes: Vec::new() }).await.unwrap();
+        let response = service.push("user", PushMutationsRequest { library_id: LibraryId::parse("library").unwrap(), replica_id: ClientId::parse("client").unwrap(), mutations: Vec::new() }).await.unwrap();
 
-        assert!(response.handled_local_seqs.is_empty());
-        assert_eq!(repository.ownership_checks.load(Ordering::SeqCst), 0);
+        assert!(response.accepted.is_empty());
+        assert_eq!(repository.stores.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn core_rejects_cross_user_pull_before_persistence() {
+    async fn oversized_push_and_exchange_stop_before_the_repository() {
         let repository = repository(true);
         let service = SyncApplication::new(repository.clone());
+        let mutation = StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "epubcfi(/6/2)".to_owned(), progress: 1.0 } },
+            changed_at: sync_common::UnixMillis::new(1).unwrap(),
+            replica_seq: ReplicaSeq::new(1).unwrap(),
+        };
+        let mutations = vec![mutation; sync_common::MAX_PUSH_MUTATIONS + 1];
+        let library_id = LibraryId::parse("library").unwrap();
+        let replica_id = ClientId::parse("client").unwrap();
 
-        assert!(matches!(service.pull("authenticated", pull_query("claimed")).await, Err(SyncError::Forbidden)));
-        assert_eq!(repository.ownership_checks.load(Ordering::SeqCst), 0);
+        let push = service.push("user", PushMutationsRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: mutations.clone() }).await;
+        assert!(matches!(push, Err(SyncError::TooManyMutations)));
+        let exchange = service.exchange("user", SyncExchangeRequest { library_id, replica_id, mutations, cursor: None }).await;
+        assert!(matches!(exchange, Err(SyncError::TooManyMutations)));
+        assert_eq!(repository.stores.load(Ordering::SeqCst), 0);
         assert_eq!(repository.loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_mutation_identity_is_rejected_before_the_repository() {
+        let repository = repository(true);
+        let service = SyncApplication::new(repository.clone());
+        let mutation = StateMutation {
+            mutation_id: MutationId::new(),
+            body: MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: "epubcfi(/6/2)".to_owned(), progress: 1.0 } },
+            changed_at: sync_common::UnixMillis::new(1).unwrap(),
+            replica_seq: ReplicaSeq::new(1).unwrap(),
+        };
+        let library_id = LibraryId::parse("library").unwrap();
+        let replica_id = ClientId::parse("client").unwrap();
+        let duplicate = vec![mutation.clone(), mutation];
+
+        let push = service.push("user", PushMutationsRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: duplicate.clone() }).await;
+        assert!(matches!(push, Err(SyncError::AmbiguousMutationIdentity)));
+        let exchange = service.exchange("user", SyncExchangeRequest { library_id, replica_id, mutations: duplicate, cursor: None }).await;
+        assert!(matches!(exchange, Err(SyncError::AmbiguousMutationIdentity)));
+        assert_eq!(repository.stores.load(Ordering::SeqCst), 0);
+        assert_eq!(repository.loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn repository_authorizes_pull_using_the_authenticated_user() {
+        let repository = repository(false);
+        let service = SyncApplication::new(repository.clone());
+
+        assert!(matches!(service.pull("authenticated", pull_query()).await, Err(SyncError::LibraryOwnershipConflict)));
+        assert_eq!(repository.stores.load(Ordering::SeqCst), 0);
+        assert_eq!(repository.loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn repository_authorizes_exchange_using_the_authenticated_user() {
+        let repository = repository(false);
+        let service = SyncApplication::new(repository.clone());
+        let query = pull_query();
+        let request = SyncExchangeRequest {
+            library_id: query.library_id,
+            replica_id: query.replica_id,
+            mutations: Vec::new(),
+            cursor: query.cursor,
+        };
+
+        assert!(matches!(service.exchange("authenticated", request).await, Err(SyncError::LibraryOwnershipConflict)));
+        assert_eq!(repository.stores.load(Ordering::SeqCst), 1);
+        assert_eq!(repository.loads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -556,8 +689,8 @@ mod tests {
         let service = SyncApplication::new(repository(true));
         let library_id = LibraryId::parse("library").unwrap();
         let saved = service.upsert_library("user", UpsertLibraryRequest { library_id: library_id.clone(), library_name: "  History  ".to_string() }).await.unwrap();
-        assert_eq!(saved.library_id, library_id);
-        assert_eq!(saved.library_name, "History");
+        assert_eq!(saved.library.library_id, library_id);
+        assert_eq!(saved.library.library_name, "History");
 
         let invalid = service.upsert_library("user", UpsertLibraryRequest { library_id: LibraryId::parse("other").unwrap(), library_name: "\n".to_string() }).await;
         assert!(matches!(invalid, Err(SyncError::InvalidLibraryName)));
@@ -568,29 +701,27 @@ mod tests {
         let repository = repository(false);
         let service = SyncApplication::new(repository.clone());
 
-        assert!(matches!(service.pull("user", pull_query("user")).await, Err(SyncError::LibraryOwnershipConflict)));
-        assert_eq!(repository.ownership_checks.load(Ordering::SeqCst), 1);
-        assert_eq!(repository.loads.load(Ordering::SeqCst), 0);
+        assert!(matches!(service.pull("user", pull_query()).await, Err(SyncError::LibraryOwnershipConflict)));
+        assert_eq!(repository.loads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn asset_access_requires_both_library_ownership_and_a_live_reference() {
+    async fn asset_access_requires_library_ownership_but_not_a_live_reference() {
         let allowed = ContentHash::parse(&"a".repeat(64)).unwrap();
         let unreferenced = ContentHash::parse(&"b".repeat(64)).unwrap();
         let library = LibraryId::parse("library").unwrap();
 
         let store = Arc::new(RecordingAssetStore { calls: AtomicUsize::new(0), present: HashSet::from([allowed.clone(), unreferenced.clone()]) });
-        let foreign = AssetApplication::new(Arc::new(RecordingAssetRepository { owns_library: false, authorized: HashSet::from([allowed.clone()]) }), store.clone());
+        let foreign = AssetApplication::new(Arc::new(RecordingAssetRepository { owns_library: false }), store.clone());
         assert!(matches!(foreign.exists("intruder", &library, AssetKind::Book, &allowed).await, Err(AssetError::Forbidden)));
         assert_eq!(store.calls.load(Ordering::SeqCst), 0, "unauthorized access must stop before storage");
 
-        let owned = AssetApplication::new(Arc::new(RecordingAssetRepository { owns_library: true, authorized: HashSet::from([allowed.clone()]) }), store.clone());
-        assert!(matches!(owned.open_from("owner", &library, AssetKind::Book, &unreferenced, 0).await, Err(AssetError::Forbidden)));
-        assert!(matches!(owned.put("owner", &library, AssetKind::Book, &unreferenced, Some(0), Box::new(std::io::Cursor::new(Vec::new()))).await, Err(AssetError::Forbidden)));
-        assert_eq!(store.calls.load(Ordering::SeqCst), 0, "unreferenced hashes must stop before storage");
+        let owned = AssetApplication::new(Arc::new(RecordingAssetRepository { owns_library: true }), store.clone());
+        assert!(owned.open_from("owner", &library, AssetKind::Book, &unreferenced, 0).await.unwrap().is_some());
+        assert_eq!(store.calls.load(Ordering::SeqCst), 2, "an owned library may read a globally stored hash without a live metadata reference");
 
-        let present = owned.existing("owner", &library, AssetKind::Book, vec![allowed.clone(), unreferenced]).await.unwrap();
-        assert_eq!(present, vec![allowed]);
-        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+        let present = owned.existing("owner", &library, AssetKind::Book, vec![allowed.clone(), unreferenced.clone()]).await.unwrap();
+        assert_eq!(present, vec![allowed, unreferenced]);
+        assert_eq!(store.calls.load(Ordering::SeqCst), 5);
     }
 }

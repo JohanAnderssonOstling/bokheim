@@ -251,7 +251,6 @@ Move the existing ad hoc paths onto `PipelineChange`:
 - column width and effective viewport width -> layout;
 - root font size -> style onward while reusing source and parsed HTML;
 - scale -> paint only unless a backend explicitly changes layout-space units;
-- line-number visibility -> paint only after auxiliary glyphs exist;
 - font database/backend revision -> shape onward;
 - document navigation -> select or populate a different per-document cache.
 
@@ -372,4 +371,3 @@ Large. The highest-risk step is 9a because current shaping mutates the prepared
 glyph buffer. Land reusable input/output separation before adding cache policy;
 otherwise invalidation logic will be built around artifacts that cannot
 actually be reused.
-

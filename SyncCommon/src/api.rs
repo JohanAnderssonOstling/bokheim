@@ -4,41 +4,51 @@
 //! Each boundary still authenticates, validates status codes, and maps errors
 //! independently.
 
-pub mod auth {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize, PartialEq, Eq)]
-    pub struct LoginRequest {
-        pub username: String,
-        pub password: String,
-    }
-
-    #[derive(Serialize, Deserialize, PartialEq, Eq)]
-    pub struct SignupRequest {
-        pub username: String,
-        pub password: String,
-        pub invite: String,
-    }
-
-    #[derive(Serialize, Deserialize, PartialEq, Eq)]
-    pub struct AuthResponse {
-        pub token: String,
-        /// Absolute Unix timestamp after which the bearer token is invalid.
-        pub expires_at: i64,
-        pub user_id: String,
-        pub username: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct MeResponse {
-        pub user_id: String,
-        pub username: String,
-    }
-}
+pub use bokheim_account_contract as auth;
 
 pub mod assets {
     use crate::ContentHash;
     use serde::{Deserialize, Serialize};
+
+    pub const MAX_BLOB_MANIFEST_ENTRIES: usize = 4096;
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct BlobManifestEntry {
+        pub content_hash: ContentHash,
+        pub size_bytes: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct BlobManifestRequest {
+        pub blobs: Vec<BlobManifestEntry>,
+    }
+
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BlobManifestRejectionReason {
+        InvalidSize,
+        SizeMismatch,
+        QuotaExceeded,
+        UploadInProgress,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct RejectedBlobManifestEntry {
+        pub content_hash: ContentHash,
+        pub reason: BlobManifestRejectionReason,
+    }
+
+    /// Every requested hash appears exactly once across these four collections.
+    /// `claimed` means a globally stored, validated blob was charged to this
+    /// account atomically; `upload` means the bytes still require the ordinary
+    /// quota-checked upload admission path.
+    #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct BlobManifestResponse {
+        pub owned: Vec<ContentHash>,
+        pub claimed: Vec<ContentHash>,
+        pub upload: Vec<ContentHash>,
+        pub rejected: Vec<RejectedBlobManifestEntry>,
+    }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobsExistsRequest {
@@ -73,71 +83,59 @@ pub mod libraries {
     }
 }
 
-pub mod opds {
+pub mod notifications {
+    use crate::LibraryId;
     use serde::{Deserialize, Serialize};
 
-    pub const CATALOG_REGISTRY_SCHEMA_VERSION: u32 = 1;
-
+    /// Best-effort wakeups carried by the authenticated WebSocket. Durable
+    /// state and cursors remain in the ordinary synchronization protocol.
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
-    pub enum CatalogAccess {
-        Open,
-        Membership,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(tag = "kind", rename_all = "snake_case")]
-    pub enum CatalogAuthentication {
-        None,
-        Basic { username_label: String, password_required: bool },
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct CatalogSource {
-        pub id: String,
-        pub title: String,
-        pub description: String,
-        pub languages: Vec<String>,
-        pub url: String,
-        pub access: CatalogAccess,
-        pub authentication: CatalogAuthentication,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct CatalogRegistry {
-        pub schema_version: u32,
-        pub revision: u64,
-        pub catalogs: Vec<CatalogSource>,
+    pub enum NotificationMessage {
+        Hello { heartbeat_seconds: u64, timeout_seconds: u64 },
+        LibraryChanged { library_id: LibraryId, reading: bool, other: bool, assets: bool },
+        CatalogueChanged,
+        PreferencesChanged,
+        Reconcile,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{assets, auth, libraries, opds};
+    use super::{assets, auth, libraries, notifications};
     use crate::{ContentHash, LibraryId};
-    use serde_json::json;
+
+    fn round_trip<T>(value: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let encoded = crate::wire::encode(value).unwrap();
+        crate::wire::decode(&encoded, crate::wire::MAX_DECODED_REQUEST_BYTES).unwrap()
+    }
 
     fn hash(character: char) -> ContentHash {
         ContentHash::parse(&character.to_string().repeat(64)).unwrap()
     }
 
     #[test]
-    fn authentication_contracts_preserve_the_existing_wire_shape() {
+    fn authentication_contracts_have_distinct_access_and_refresh_credentials() {
         let login = auth::LoginRequest { username: "reader".into(), password: "secret".into() };
-        assert_eq!(serde_json::to_value(login).unwrap(), json!({ "username": "reader", "password": "secret" }));
+        let login = round_trip(&login);
+        assert_eq!((login.username.as_str(), login.password.as_str()), ("reader", "secret"));
 
         let signup = auth::SignupRequest { username: "reader".into(), password: "secret".into(), invite: "invite-code".into() };
-        assert_eq!(serde_json::to_value(signup).unwrap(), json!({ "username": "reader", "password": "secret", "invite": "invite-code" }));
+        let signup = round_trip(&signup);
+        assert_eq!((signup.username.as_str(), signup.password.as_str(), signup.invite.as_str()), ("reader", "secret", "invite-code"));
 
-        let response: auth::AuthResponse = serde_json::from_value(json!({
-            "token": "token",
-            "expires_at": 1_900_000_000,
-            "user_id": "user-1",
-            "username": "reader"
-        }))
-        .unwrap();
+        let registration = auth::PublicRegistrationRequest { email: "reader@example.com".into(), username: "reader".into(), password: "secret".into() };
+        let registration = round_trip(&registration);
+        assert_eq!((registration.email.as_str(), registration.username.as_str(), registration.password.as_str()), ("reader@example.com", "reader", "secret"));
+
+        let response = round_trip(&auth::AuthResponse { token: "token".into(), expires_at: 1_900_000_000, refresh_token: "refresh".into(), refresh_expires_at: 1_910_000_000, user_id: "user-1".into(), username: "reader".into() });
         assert_eq!(response.token, "token");
         assert_eq!(response.expires_at, 1_900_000_000);
+        assert_eq!(response.refresh_token, "refresh");
+        assert_eq!(response.refresh_expires_at, 1_910_000_000);
         assert_eq!(response.user_id, "user-1");
         assert_eq!(response.username, "reader");
     }
@@ -146,39 +144,41 @@ mod tests {
     fn asset_contracts_keep_book_and_thumbnail_request_keys_distinct() {
         let book_hash = hash('a');
         let thumbnail_hash = hash('b');
-        assert_eq!(serde_json::to_value(assets::BlobsExistsRequest { hashes: vec![book_hash.clone()] }).unwrap(), json!({ "hashes": [book_hash.as_str()] }));
-        assert_eq!(serde_json::to_value(assets::ThumbnailsExistsRequest { content_hashes: vec![thumbnail_hash.clone()] }).unwrap(), json!({ "content_hashes": [thumbnail_hash.as_str()] }));
-
-        let response: assets::ExistsResponse = serde_json::from_value(json!({ "present": [book_hash.as_str(), thumbnail_hash.as_str()] })).unwrap();
+        assert_eq!(round_trip(&assets::BlobsExistsRequest { hashes: vec![book_hash.clone()] }).hashes, vec![book_hash.clone()]);
+        assert_eq!(round_trip(&assets::ThumbnailsExistsRequest { content_hashes: vec![thumbnail_hash.clone()] }).content_hashes, vec![thumbnail_hash.clone()]);
+        let response = round_trip(&assets::ExistsResponse { present: vec![book_hash.clone(), thumbnail_hash.clone()] });
         assert_eq!(response.present, vec![book_hash, thumbnail_hash]);
+    }
+
+    #[test]
+    fn blob_manifest_contract_classifies_each_hash_without_ambiguous_booleans() {
+        let owned = hash('a');
+        let upload = hash('b');
+        let rejected = hash('c');
+        let request = assets::BlobManifestRequest { blobs: vec![assets::BlobManifestEntry { content_hash: upload.clone(), size_bytes: 42 }] };
+        assert_eq!(round_trip(&request), request);
+
+        let response = assets::BlobManifestResponse {
+            owned: vec![owned.clone()],
+            claimed: Vec::new(),
+            upload: vec![upload.clone()],
+            rejected: vec![assets::RejectedBlobManifestEntry { content_hash: rejected.clone(), reason: assets::BlobManifestRejectionReason::QuotaExceeded }],
+        };
+        assert_eq!(round_trip(&response), response);
     }
 
     #[test]
     fn library_catalogue_contract_preserves_stable_ids_and_names() {
         let request = libraries::UpsertLibraryRequest { library_id: LibraryId::parse("library-1").unwrap(), library_name: "History".to_string() };
-        let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value, json!({ "library_id": "library-1", "library_name": "History" }));
-        assert_eq!(serde_json::from_value::<libraries::LibrarySummary>(value).unwrap(), libraries::LibrarySummary { library_id: request.library_id, library_name: request.library_name });
+        let summary = libraries::LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() };
+        assert_eq!(round_trip(&request), request);
+        assert_eq!(round_trip(&summary), summary);
     }
 
     #[test]
-    fn opds_registry_contract_is_versioned_and_data_driven() {
-        let registry = opds::CatalogRegistry {
-            schema_version: opds::CATALOG_REGISTRY_SCHEMA_VERSION,
-            revision: 7,
-            catalogs: vec![opds::CatalogSource {
-                id: "example".to_owned(),
-                title: "Example".to_owned(),
-                description: "Example books".to_owned(),
-                languages: vec!["English".to_owned()],
-                url: "https://example.com/opds".to_owned(),
-                access: opds::CatalogAccess::Open,
-                authentication: opds::CatalogAuthentication::None,
-            }],
-        };
-        let value = serde_json::to_value(&registry).unwrap();
-        assert_eq!(value["schema_version"], opds::CATALOG_REGISTRY_SCHEMA_VERSION);
-        assert_eq!(value["revision"], 7);
-        assert_eq!(serde_json::from_value::<opds::CatalogRegistry>(value).unwrap(), registry);
+    fn notification_contract_is_granular_without_carrying_state() {
+        let message = notifications::NotificationMessage::LibraryChanged { library_id: LibraryId::parse("library-1").unwrap(), reading: true, other: false, assets: false };
+        assert_eq!(round_trip(&message), message);
+        assert_eq!(crate::wire::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap(), b"BKHM\x05\x02");
     }
 }

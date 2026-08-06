@@ -53,14 +53,18 @@ impl HTMLRenderer {
     pub fn from_source_path_with_nav(path: PathBuf, nav_state: Option<&str>) -> Self {
         let adapter = adapter::FloemAdapter::new();
         let host: Rc<dyn RendererHost> = adapter.clone();
-        let renderer = RendererSession::from_source_path_with_nav(host, GlyphCache::new(), path, nav_state);
+        let source = html_publication::PublicationSource::from_path(path).expect("failed to open HTML publication");
+        let (provider, document_uris, start_index) = source.into_parts();
+        let renderer = RendererSession::from_provider_with_nav(host, GlyphCache::new(), provider, document_uris, start_index, nav_state, Default::default());
         Self::from_renderer(adapter, renderer)
     }
 
     pub fn from_epub_bytes_with_nav(bytes: Vec<u8>, nav_state: Option<&str>) -> Self {
         let adapter = adapter::FloemAdapter::new();
         let host: Rc<dyn RendererHost> = adapter.clone();
-        let renderer = RendererSession::from_epub_bytes_with_nav(host, GlyphCache::new(), bytes, nav_state);
+        let source = html_publication::PublicationSource::from_epub_bytes(bytes).expect("failed to open EPUB publication");
+        let (provider, document_uris, start_index) = source.into_parts();
+        let renderer = RendererSession::from_provider_with_nav(host, GlyphCache::new(), provider, document_uris, start_index, nav_state, Default::default());
         Self::from_renderer(adapter, renderer)
     }
 
@@ -74,10 +78,6 @@ impl HTMLRenderer {
 
     pub fn current_scale(&self) -> f64 {
         self.renderer.scale()
-    }
-
-    pub fn current_line_numbers_enabled(&self) -> bool {
-        self.renderer.line_numbers_enabled()
     }
 
     pub fn command_handle(&self) -> RendererHandle {

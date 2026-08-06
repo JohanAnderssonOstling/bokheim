@@ -11,13 +11,13 @@ workspace = true
 async-trait = "0.1"
 blake3 = "1"
 book-format = { path = "../../../BookFormat" }
-image = { version = "0.24.9", default-features = false, features = ["png"] }
 server-core = { path = "../server-core" }
 sync-common = { path = "../../../SyncCommon" }
 tokio = { version = "1", features = ["fs", "io-util", "rt", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+image = { version = "0.24.9", default-features = false, features = ["jpeg"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

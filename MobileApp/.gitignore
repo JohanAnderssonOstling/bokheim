@@ -4,6 +4,7 @@ node_modules
 /dist
 /.svelte-kit
 /package
+/static/bokheim_web_algorithms.wasm
 .env
 .env.*
 !.env.example

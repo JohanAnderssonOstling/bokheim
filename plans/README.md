@@ -30,6 +30,10 @@ Update the Status column as work lands (✅ done · 🔶 partial · ⬜ open · 
 | 27 | [Timestamp unit convention](27-timestamp-units.md) | ⬜ open | — |
 | 28 | [Server URL consistency](28-server-url-consistency.md) | ⬜ open | — |
 | 33 | [Separate self-hosted blob service](33-separate-blob-service.md) | 💤 deferred | 18, 25 |
+| 34 | [Reader feature parity and quality roadmap](34-reader-feature-roadmap.md) | ⬜ open | — (annotations/bookmarks extend sync) |
+| 35 | [Repository structure cleanup](35-repository-structure-cleanup.md) | ⬜ open | checkpoint current work; renderer move after 32 |
+| 36 | [browser-ui ownership: universal vs library scope](36-browser-ui-ownership.md) | 🔶 partial — see [handoff](36-browser-ui-ownership-handoff.md) | — |
+| 37 | [reader-ui structure: god struct + shared shell](37-reader-ui-structure.md) | ✅ done — not yet run; manual checks pending | — |
 
 ## HtmlRenderer decoupling program
 
@@ -73,6 +77,17 @@ their own merits. 32 only locks in work already done — do not reorder it earli
 8. **23, 24, 25** — dormant by design; each file states its wake-up condition.
 9. **33** — optional deployment split; wake only when storage capacity, bandwidth,
    or independent scaling justifies a second service.
+10. **34** — reader product work; its initial progress/TOC/search improvements are
+    independent, while synchronized annotations/bookmarks should follow the sync
+    convergence conventions above.
+11. **36** — browser-ui ownership refactor; independent of the Backend/sync and
+    HtmlRenderer tracks (different crate, no shared files). Lands as a single
+    branch that does not build in the middle, so it wants a clean working tree
+    under `GPUI/browser-ui` before starting.
+12. **37** — reader-ui structure refactor; independent of every other track
+    (different crate). All eight steps have landed, including PDF bookmarks.
+    Verified by compilation and unit tests only — the manual checklist in the
+    plan has not been run.
 
 ## Conventions
 

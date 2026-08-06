@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-    echo "usage: sudo $0 sync.example.com" >&2
+if [[ $# -ne 2 ]]; then
+    echo "usage: sudo $0 api.bokheim.se catalogs.bokheim.se" >&2
     exit 2
 fi
 if [[ ${EUID} -ne 0 ]]; then
@@ -11,10 +11,13 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 domain=$1
-if [[ ! ${domain} =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || [[ ${domain} != *.* ]]; then
-    echo "invalid public DNS name: ${domain}" >&2
-    exit 2
-fi
+catalog_domain=$2
+for candidate in "${domain}" "${catalog_domain}"; do
+    if [[ ! ${candidate} =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || [[ ${candidate} != *.* ]]; then
+        echo "invalid public DNS name: ${candidate}" >&2
+        exit 2
+    fi
+done
 
 for command in caddy curl openssl ss stat systemctl; do
     if ! command -v "${command}" >/dev/null; then
@@ -28,7 +31,9 @@ caddy_config=${BOKHEIM_CADDY_CONFIG:-/etc/caddy/Caddyfile}
 socket=${BOKHEIM_SERVER_SOCKET:-/run/bokheim/sync.sock}
 
 systemctl is-active --quiet bokheim-sync.service
+systemctl is-active --quiet bokheim-catalogs.service
 systemctl is-active --quiet caddy.service
+systemctl is-active --quiet bokheim-gc.timer
 caddy validate --envfile "${caddy_env}" --config "${caddy_config}" >/dev/null
 
 if [[ ! -S ${socket} ]]; then
@@ -64,6 +69,12 @@ if [[ ${health} != ok ]]; then
     echo "unexpected HTTPS health response: ${health}" >&2
     exit 1
 fi
+live=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error "https://${domain}/api/live")
+ready=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error "https://${domain}/api/ready")
+if [[ ${live} != ok || ${ready} != ok ]]; then
+    echo "unexpected liveness/readiness response: live=${live} ready=${ready}" >&2
+    exit 1
+fi
 if ! grep -Eqi '^strict-transport-security:[[:space:]]*max-age=31536000([[:space:]]|\r)*$' "${headers}"; then
     echo "HTTPS response is missing the expected Strict-Transport-Security header" >&2
     exit 1
@@ -78,4 +89,23 @@ if ! openssl s_client -connect "${domain}:443" -servername "${domain}" -verify_r
     exit 1
 fi
 
-echo "public deployment verified: https://${domain}"
+catalog_health=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error "https://${catalog_domain}/health")
+if [[ ${catalog_health} != ok ]]; then
+    echo "unexpected catalog HTTPS health response: ${catalog_health}" >&2
+    exit 1
+fi
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --compressed --header 'Accept: application/vnd.bokheim+bincode; version=5' --header 'Accept-Encoding: zstd' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
+if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+bincode;[[:space:]]*version=2([[:space:]]|\r)*$' "${headers}"; then
+    echo "catalog registry did not use the current Bokheim binary media type" >&2
+    exit 1
+fi
+if ! grep -Eqi '^content-encoding:[[:space:]]*zstd([[:space:]]|\r)*$' "${headers}"; then
+    echo "catalog registry was not zstd-compressed" >&2
+    exit 1
+fi
+if ! openssl s_client -connect "${catalog_domain}:443" -servername "${catalog_domain}" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -checkend 604800 >/dev/null; then
+    echo "catalog TLS certificate verification failed or the certificate expires within seven days" >&2
+    exit 1
+fi
+
+echo "public deployment verified: https://${domain} and https://${catalog_domain}"

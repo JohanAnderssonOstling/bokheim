@@ -1,14 +1,16 @@
 use axum::Router;
-use server_http::ClientAddressSource;
+use server_account_http::ClientAddressSource;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:8080";
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOVED_TLS_SETTINGS: &[&str] = &["SYNC_TLS_MODE", "SYNC_TLS_CERT_PATH", "SYNC_TLS_KEY_PATH", "SYNC_ACME_DOMAINS", "SYNC_ACME_EMAIL", "SYNC_ACME_CACHE_DIR", "SYNC_ACME_ENVIRONMENT"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,16 +91,53 @@ pub async fn serve(config: ServerConfig, app: Router) -> Result<(), Box<dyn Erro
         Transport::Tcp(address) => {
             tracing::warn!(%address, "serving plain HTTP on TCP for local development or an explicitly accepted proxy deployment");
             let listener = tokio::net::TcpListener::bind(address).await?;
-            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await?;
         }
         #[cfg(unix)]
         Transport::Unix(path) => {
             let listener = bind_unix_socket(&path)?;
             tracing::info!(socket = %path.display(), "serving HTTP through a trusted Unix-socket proxy boundary");
-            axum_server::from_unix(listener)?.serve(app.into_make_service()).await?;
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                tracing::info!(timeout_seconds = GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(), "stopping new connections and draining active requests");
+                shutdown_handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_TIMEOUT));
+            });
+            axum_server::from_unix(listener)?.handle(handle).serve(app.into_make_service()).await?;
         }
     }
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl-C shutdown handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM shutdown handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 #[cfg(unix)]

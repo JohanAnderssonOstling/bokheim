@@ -15,11 +15,6 @@ peniko.workspace = true
 sha2 = "0.10"
 epub_provider = { path = "epub_provider" }
 arboard = "3.6.1"
-html-parse = { path = "crates/html-parse" }
-html-dom = { path = "crates/html-dom" }
-html-style-model = { path = "crates/html-style-model" }
-html-style = { path = "crates/html-style" }
-html-layout = { path = "crates/html-layout" }
-html-pipeline = { path = "crates/html-pipeline" }
-html-resources = { path = "crates/html-resources" }
-html-view-core = { path = "crates/html-view-core" }
+html.workspace = true
+html-publication = { path = "crates/html-publication" }
+html-view-core.workspace = true

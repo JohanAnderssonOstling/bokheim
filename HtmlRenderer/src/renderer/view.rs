@@ -49,7 +49,7 @@ impl View for HTMLRenderer {
                 }
                 let position = self.to_layout(pointer.pos);
                 let control = pointer.modifiers.control();
-                let options = html_view_core::PointerDownOptions { select_whole_lines: control, copy_image: control };
+                let options = html_view_core::PointerDownOptions { semantic_selection: control, copy_image: false };
                 if self.renderer.pointer_down(position, options) { EventPropagation::Stop } else { EventPropagation::Continue }
             }
             Event::PointerMove(pointer) => {
@@ -138,10 +138,6 @@ impl View for HTMLRenderer {
                     }
                 }
                 match &key_event.key.logical_key {
-                    Key::Character(character) if character.eq_ignore_ascii_case("l") => {
-                        self.renderer.toggle_line_numbers();
-                        EventPropagation::Stop
-                    }
                     Key::Named(NamedKey::ArrowUp) => {
                         self.renderer.previous_line();
                         EventPropagation::Stop

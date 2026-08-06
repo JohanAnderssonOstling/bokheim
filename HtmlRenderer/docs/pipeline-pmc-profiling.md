@@ -7,6 +7,30 @@ cd HtmlRenderer
 bash scripts/profile-html-pipeline-pmc.sh
 ```
 
+For stable wall-clock comparison, run the direct release binary repeatedly.
+The default workload reports both a cold pipeline pass and a second update of
+the same `PipelineSession`, which must reuse all pipeline stages.
+
+```bash
+BENCH_REPETITIONS=9 BENCH_MODE=both BENCH_CPU=2 \
+  bash scripts/benchmark-html-pipeline.sh
+```
+
+`BENCH_CPU` is optional. When set, it pins every run using `taskset`; keep the
+same CPU, release binary, EPUB corpus, and mode when comparing results.
+
+For allocation attribution, use a real heap profiler rather than RSS. The
+wrapper selects `heaptrack` when installed, otherwise `valgrind massif`.
+
+```bash
+PROFILE_MODE=cold bash scripts/profile-html-pipeline-memory.sh
+```
+
+The resource cache in `PipelineSession` is scoped to the pair of
+`resource_revision` and `stylesheet_revision`. Use cold mode to measure
+rebuilding work and warm mode to measure retained session reuse independently;
+updates to either resource content or stylesheets must advance its revision.
+
 The program reports pipeline stage timing on standard output. `perf stat`
 reports aggregate PMCs for the same run on standard error.
 

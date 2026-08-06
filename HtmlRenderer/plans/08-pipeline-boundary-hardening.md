@@ -130,8 +130,8 @@ negative ascent/descent and still produce a `ShapedDocument`.
 - Negative advance/ascent/descent are rejected.
 - A shaper returning an unregistered ID is rejected.
 - A valid shaper still produces identical glyph IDs and layout geometry.
-- Auxiliary line-number glyphs can be appended but existing metrics cannot be
-  modified or removed.
+- Auxiliary glyphs can be appended but existing metrics cannot be modified or
+  removed.
 
 ## Milestone 8b — Validate computed style values
 
