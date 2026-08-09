@@ -11,8 +11,8 @@ export const commands = {
 	getAccountSessions: () => __TAURI_INVOKE<AccountSessionSummary[]>("get_account_sessions"),
 	revokeAccountSession: (sessionId: string) => __TAURI_INVOKE<AccountStatus>("revoke_account_session", { sessionId }),
 	revokeOtherAccountSessions: () => __TAURI_INVOKE<number>("revoke_other_account_sessions"),
-	login: (username: string, password: string) => __TAURI_INVOKE<AccountStatus>("login", { username, password }),
-	requestPublicRegistration: (email: string, username: string, password: string) => __TAURI_INVOKE<null>("request_public_registration", { email, username, password }),
+	login: (email: string, password: string) => __TAURI_INVOKE<AccountStatus>("login", { email, password }),
+	requestPublicRegistration: (email: string, password: string) => __TAURI_INVOKE<null>("request_public_registration", { email, password }),
 	resendVerification: (email: string) => __TAURI_INVOKE<null>("resend_verification", { email }),
 	verifyEmail: (token: string) => __TAURI_INVOKE<AccountStatus>("verify_email", { token }),
 	requestPasswordReset: (email: string) => __TAURI_INVOKE<null>("request_password_reset", { email }),
@@ -60,13 +60,12 @@ export const commands = {
 	getBookFileName: (libraryId: string, bookId: string) => __TAURI_INVOKE<string>("get_book_file_name", { libraryId, bookId }),
 	getBookReadingPosition: (libraryId: string, bookId: string) => __TAURI_INVOKE<string | null>("get_book_reading_position", { libraryId, bookId }),
 	updateReadingPosition: (libraryId: string, bookId: string, cfi: string, progress: number | null) => __TAURI_INVOKE<null>("update_reading_position", { libraryId, bookId, cfi, progress }),
-	updateLastRead: (libraryId: string, bookId: string) => __TAURI_INVOKE<null>("update_last_read", { libraryId, bookId }),
 	getAnnotations: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderAnnotation[]>("get_annotations", { libraryId, bookId }),
 	upsertAnnotation: (libraryId: string, annotation: ReaderAnnotation) => __TAURI_INVOKE<null>("upsert_annotation", { libraryId, annotation }),
 	deleteAnnotation: (libraryId: string, annotationId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_annotation", { libraryId, annotationId, modifiedAt }),
 	getBookmarks: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderBookmark[]>("get_bookmarks", { libraryId, bookId }),
-	upsertBookmark: (libraryId: string, bookmark: ReaderBookmark) => __TAURI_INVOKE<null>("upsert_bookmark", { libraryId, bookmark }),
-	deleteBookmark: (libraryId: string, bookmarkId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_bookmark", { libraryId, bookmarkId, modifiedAt }),
+	createBookmark: (libraryId: string, bookmark: ReaderBookmark) => __TAURI_INVOKE<null>("create_bookmark", { libraryId, bookmark }),
+	deleteBookmark: (libraryId: string, bookmarkId: string, deletedAt: number | null) => __TAURI_INVOKE<null>("delete_bookmark", { libraryId, bookmarkId, deletedAt }),
 	getBookLinks: (libraryId: string, bookId: string) => __TAURI_INVOKE<BookLink[]>("get_book_links", { libraryId, bookId }),
 	upsertBookLink: (libraryId: string, link: BookLink) => __TAURI_INVOKE<null>("upsert_book_link", { libraryId, link }),
 	deleteBookLink: (libraryId: string, linkId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_book_link", { libraryId, linkId, modifiedAt }),
@@ -76,7 +75,7 @@ export const commands = {
 };
 
 /* Constants */
-export const FRONTEND_CONTRACT = {"account":{"capabilities":{"email_verification":true,"password_recovery":true,"public_registration":true,"resend_verification":true},"libraries_section_label":"Libraries on this device","navigation_label":"Account","no_active_transfers_label":"No active batch jobs","no_local_libraries_label":"No local libraries","refresh_label":"Refresh","sign_out_label":"Sign out","sync_states":[{"description":"Stored only on this device","label":"Local","state":"local_only"},{"description":"Synchronized with the account","label":"Synced","state":"synced"},{"description":"Sign in to resume synchronization","label":"Sign in required","state":"sign_in_required"},{"description":"Linked to another account","label":"Different account","state":"different_account"},{"description":"Ready to create on the server","label":"Upload pending","state":"remote_missing"}],"title":"Account","transfers_section_label":"Batch jobs","validation":{"email_max_bytes":254,"one_time_token_bytes":43,"password_max_bytes":1024,"password_min_characters":12,"username_max_bytes":64,"username_min_bytes":3}},"book_actions":{"download_in_progress_label":"Download in progress","download_label":"Download","hide_label":"Hide from library","menu_label":"Book actions","open_label":"Open","remove_local_copy_label":"Remove local copy","restore_label":"Add back to library"},"browsing_content":{"breadcrumb_item_max_characters":24,"finished_progress_threshold":98,"home_book_limit":20,"import_extensions":["epub","pdf","mobi","azw","azw3","fb2","cbz","html","htm","xhtml","webpub"],"minimum_search_characters":1,"search_debounce_ms":220,"search_result_limit":100,"semantic_link_relations":["related to","continues","continued by","inspired by","adaptation of","contrasts with","commentary on","translation of"]},"browsing_layout":{"book_card_height_px":432,"book_cover_height_px":306,"book_cover_width_px":204,"book_grid_column_gap_px":28,"book_grid_row_height_px":438,"content_padding_px":18,"large_viewport_breakpoint_px":720,"sidebar_width_px":96,"topbar_action_gap_px":10,"topbar_action_height_px":40,"topbar_action_horizontal_padding_px":11,"topbar_height_px":64},"browsing_preferences":{"constraints":{"ui_font_size_px":[12,24]},"defaults":{"heading_font":"serif","interface_font":"sans_serif","library_view":"covers","show_unavailable_books":false,"theme":"greco_futuristic","ui_font_size_px":16},"options":{"fonts":[{"font_name":"Noto Sans","generic_family":"sans-serif","value":"sans_serif"},{"font_name":"Libertinus Serif","generic_family":"serif","value":"serif"}],"themes":[{"description":"Cool, restrained surfaces with muted green accents.","label":"Greco futuristic","value":"greco_futuristic"},{"description":"Warm, bookish surfaces with brown accents.","label":"Library serif","value":"library_serif"}]}},"browsing_states":{"create_library_label":"Create library","empty_folder_description":"Add a book or create a folder here.","empty_folder_title":"This folder is empty","empty_library_description":"Add a book or create a folder to get started.","empty_library_title":"Your library is empty","load_error_title":"Could not load this section","loading_authors_label":"Loading authors…","loading_books_label":"Loading books…","loading_folder_label":"Loading folder…","loading_library_label":"Loading library…","no_libraries_description":"Create a library to organize your books.","no_libraries_title":"No libraries","no_search_results_label":"No matching books","retry_label":"Retry","searching_label":"Searching…"},"library_actions":{"add_book_label":"Add book","download_folder_label":"Download folder","folder_downloaded_label":"Downloaded","new_folder_label":"New folder","show_bulk_download_in_topbar":false},"navigation":[{"id":"home","label":"Home"},{"id":"library","label":"Library"},{"id":"authors","label":"Authors"},{"id":"search","label":"Search"},{"id":"store","label":"Store"}],"reader_navigation":{"shortcuts":[{"action":"previous_line","alt":false,"key":"arrow_up","primary_modifier":false,"shift":false},{"action":"next_line","alt":false,"key":"arrow_down","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"arrow_right","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"page_up","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"page_down","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"space","primary_modifier":false,"shift":false},{"action":"previous_section","alt":false,"key":"arrow_left","primary_modifier":true,"shift":false},{"action":"next_section","alt":false,"key":"arrow_right","primary_modifier":true,"shift":false},{"action":"history_back","alt":true,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"history_forward","alt":true,"key":"arrow_right","primary_modifier":false,"shift":false}]},"reader_preferences":{"constraints":{"font_size_px":[8.0,64.0],"line_height":[1.0,2.4000000953674316],"max_column_count":[1,4],"max_line_width_px":[200.0,1200.0],"zoom":[0.5,3.0]},"defaults":{"flow":"paginated","font_family":"publisher","font_size_px":20.0,"hyphenation":true,"line_height":1.5,"max_column_count":2,"max_line_width_px":600.0,"pdf_page_layout":"automatic","pdf_trim_margins":true,"text_alignment":"publisher","theme":"sepia","zoom":1.0},"foliate_capabilities":{"engine":"foliate","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","flow","font_family","text_alignment","hyphenation","max_column_count"]},"native_capabilities":{"engine":"native","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","font_family","text_alignment","max_column_count","pdf_page_layout","pdf_trim_margins"]},"options":{"flows":[{"label":"Pages","value":"paginated"},{"label":"Scrolling","value":"scrolled"}],"font_families":[{"label":"Publisher","value":"publisher"},{"label":"Serif","value":"serif"},{"label":"Sans serif","value":"sans_serif"}],"pdf_page_layouts":[{"label":"Single page","value":"single"},{"label":"Two-page spread","value":"spread"},{"label":"Automatic","value":"automatic"}],"text_alignments":[{"label":"Publisher","value":"publisher"},{"label":"Left","value":"start"},{"label":"Justified","value":"justify"}],"themes":[{"label":"Light","value":"light"},{"label":"Sepia","value":"sepia"},{"label":"Dark","value":"dark"}]}},"reader_settings":{"anchor":"reader_toolbar_end","gap_px":13,"keeps_document_visible":true,"max_height_px":620,"max_width_px":400,"minimum_column_width_px":176,"padding_px":16,"presentation":"contextual_overlay","title":"Appearance","trigger_label":"Aa"},"settings":{"appearance_section_label":"Appearance","application_theme_label":"Application theme","auto_download_description":"Download server books up to this size on this device.","auto_download_label":"Automatic book downloads","background_metered_description":"Manual uploads and downloads always continue.","background_metered_label":"Background transfers on metered connections","current_network_label":"Current network","heading_font_label":"Heading font","interface_font_label":"Interface font","library_section_label":"Library","library_view_label":"Book display","navigation_label":"Settings","network_transports":[{"label":"Offline","transport":"offline"},{"label":"Wi-Fi","transport":"wifi"},{"label":"Mobile data","transport":"cellular"},{"label":"Ethernet","transport":"ethernet"},{"label":"VPN","transport":"vpn"},{"label":"Connected","transport":"other"},{"label":"Network unknown","transport":"unknown"}],"show_unavailable_books_label":"Show books not on this device","title":"Settings","transfers_section_label":"Batch jobs","ui_font_size_label":"UI font size"},"store":{"add_label":"Add","adding_label":"Adding…","catalog_three_column_breakpoint_px":1152,"catalog_two_column_breakpoint_px":720,"catalogs_label":"Catalogs","description_scrollbar_width_px":8,"max_width_px":1248,"open_label":"Open","publication_height_px":432,"publication_min_width_px":400,"publication_three_column_breakpoint_px":1232,"publication_two_column_breakpoint_px":816,"retry_label":"Retry","search_all_placeholder":"Search all catalogs","search_label":"Search","sign_in_needed_label":"Sign in needed"},"web_preference_profiles":{"desktop_min_width_px":720,"profiles":["mobile","desktop"]}} as const;
+export const FRONTEND_CONTRACT = {"account":{"capabilities":{"email_verification":true,"password_recovery":true,"public_registration":true,"resend_verification":true},"libraries_section_label":"Libraries on this device","navigation_label":"Account","no_active_transfers_label":"No active batch jobs","no_local_libraries_label":"No local libraries","refresh_label":"Refresh","sign_out_label":"Sign out","sync_states":[{"description":"Stored only on this device","label":"Local","state":"local_only"},{"description":"Synchronized with the account","label":"Synced","state":"synced"},{"description":"Sign in to resume synchronization","label":"Sign in required","state":"sign_in_required"},{"description":"Linked to another account","label":"Different account","state":"different_account"},{"description":"Ready to create on the server","label":"Upload pending","state":"remote_missing"}],"title":"Account","transfers_section_label":"Batch jobs","validation":{"email_max_bytes":254,"one_time_token_bytes":43,"password_max_bytes":1024,"password_min_characters":12}},"book_actions":{"download_in_progress_label":"Download in progress","download_label":"Download","hide_label":"Hide from library","menu_label":"Book actions","open_label":"Open","remove_local_copy_label":"Remove local copy","restore_label":"Add back to library"},"browsing_content":{"breadcrumb_item_max_characters":24,"finished_progress_threshold":98,"home_book_limit":20,"import_extensions":["epub","pdf","mobi","azw","azw3","fb2","cbz","html","htm","xhtml","webpub"],"minimum_search_characters":1,"search_debounce_ms":220,"search_result_limit":100,"semantic_link_relations":["related to","continues","continued by","inspired by","adaptation of","contrasts with","commentary on","translation of"]},"browsing_layout":{"book_card_height_px":432,"book_cover_height_px":306,"book_cover_width_px":204,"book_grid_column_gap_px":28,"book_grid_row_height_px":438,"content_padding_px":18,"large_viewport_breakpoint_px":720,"sidebar_width_px":96,"topbar_action_gap_px":10,"topbar_action_height_px":40,"topbar_action_horizontal_padding_px":11,"topbar_height_px":64},"browsing_preferences":{"constraints":{"ui_font_size_px":[12,24]},"defaults":{"heading_font":"serif","interface_font":"sans_serif","library_view":"covers","show_unavailable_books":false,"theme":"greco_futuristic","ui_font_size_px":16},"options":{"fonts":[{"font_name":"Noto Sans","generic_family":"sans-serif","value":"sans_serif"},{"font_name":"Libertinus Serif","generic_family":"serif","value":"serif"}],"themes":[{"description":"Cool, restrained surfaces with muted green accents.","label":"Greco futuristic","value":"greco_futuristic"},{"description":"Warm, bookish surfaces with brown accents.","label":"Library serif","value":"library_serif"}]}},"browsing_states":{"create_library_label":"Create library","empty_folder_description":"Add a book or create a folder here.","empty_folder_title":"This folder is empty","empty_library_description":"Add a book or create a folder to get started.","empty_library_title":"Your library is empty","load_error_title":"Could not load this section","loading_authors_label":"Loading authors…","loading_books_label":"Loading books…","loading_folder_label":"Loading folder…","loading_library_label":"Loading library…","no_libraries_description":"Create a library to organize your books.","no_libraries_title":"No libraries","no_search_results_label":"No matching books","retry_label":"Retry","searching_label":"Searching…"},"library_actions":{"add_book_label":"Add book","download_folder_label":"Download folder","folder_downloaded_label":"Downloaded","new_folder_label":"New folder","show_bulk_download_in_topbar":false},"navigation":[{"id":"home","label":"Home"},{"id":"library","label":"Library"},{"id":"authors","label":"Authors"},{"id":"search","label":"Search"},{"id":"store","label":"Store"}],"reader_navigation":{"shortcuts":[{"action":"previous_line","alt":false,"key":"arrow_up","primary_modifier":false,"shift":false},{"action":"next_line","alt":false,"key":"arrow_down","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"arrow_right","primary_modifier":false,"shift":false},{"action":"previous_page","alt":false,"key":"page_up","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"page_down","primary_modifier":false,"shift":false},{"action":"next_page","alt":false,"key":"space","primary_modifier":false,"shift":false},{"action":"previous_section","alt":false,"key":"arrow_left","primary_modifier":true,"shift":false},{"action":"next_section","alt":false,"key":"arrow_right","primary_modifier":true,"shift":false},{"action":"history_back","alt":true,"key":"arrow_left","primary_modifier":false,"shift":false},{"action":"history_forward","alt":true,"key":"arrow_right","primary_modifier":false,"shift":false}]},"reader_preferences":{"constraints":{"font_size_px":[8.0,64.0],"line_height":[1.0,2.4000000953674316],"max_column_count":[1,4],"max_line_width_px":[200.0,1200.0],"zoom":[0.5,3.0]},"defaults":{"flow":"paginated","font_family":"publisher","font_size_px":20.0,"hyphenation":true,"line_height":1.5,"max_column_count":2,"max_line_width_px":600.0,"pdf_page_layout":"automatic","pdf_trim_margins":true,"text_alignment":"publisher","theme":"sepia","zoom":1.0},"foliate_capabilities":{"engine":"foliate","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","flow","font_family","text_alignment","hyphenation","max_column_count"]},"native_capabilities":{"engine":"native","supported_preferences":["font_size_px","max_line_width_px","zoom","line_height","theme","font_family","text_alignment","max_column_count","pdf_page_layout","pdf_trim_margins"]},"options":{"flows":[{"label":"Pages","value":"paginated"},{"label":"Scrolling","value":"scrolled"}],"font_families":[{"label":"Publisher","value":"publisher"},{"label":"Serif","value":"serif"},{"label":"Sans serif","value":"sans_serif"}],"pdf_page_layouts":[{"label":"Single page","value":"single"},{"label":"Two-page spread","value":"spread"},{"label":"Automatic","value":"automatic"}],"text_alignments":[{"label":"Publisher","value":"publisher"},{"label":"Left","value":"start"},{"label":"Justified","value":"justify"}],"themes":[{"label":"Light","value":"light"},{"label":"Sepia","value":"sepia"},{"label":"Dark","value":"dark"}]}},"reader_settings":{"anchor":"reader_toolbar_end","gap_px":13,"keeps_document_visible":true,"max_height_px":620,"max_width_px":400,"minimum_column_width_px":176,"padding_px":16,"presentation":"contextual_overlay","title":"Appearance","trigger_label":"Aa"},"settings":{"appearance_section_label":"Appearance","application_theme_label":"Application theme","auto_download_description":"Download server books up to this size on this device.","auto_download_label":"Automatic book downloads","background_metered_description":"Manual uploads and downloads always continue.","background_metered_label":"Background transfers on metered connections","current_network_label":"Current network","heading_font_label":"Heading font","interface_font_label":"Interface font","library_section_label":"Library","library_view_label":"Book display","navigation_label":"Settings","network_transports":[{"label":"Offline","transport":"offline"},{"label":"Wi-Fi","transport":"wifi"},{"label":"Mobile data","transport":"cellular"},{"label":"Ethernet","transport":"ethernet"},{"label":"VPN","transport":"vpn"},{"label":"Connected","transport":"other"},{"label":"Network unknown","transport":"unknown"}],"show_unavailable_books_label":"Show books not on this device","title":"Settings","transfers_section_label":"Batch jobs","ui_font_size_label":"UI font size"},"store":{"add_label":"Add","adding_label":"Adding…","catalog_three_column_breakpoint_px":1152,"catalog_two_column_breakpoint_px":720,"catalogs_label":"Catalogs","description_scrollbar_width_px":8,"max_width_px":1248,"open_label":"Open","publication_height_px":432,"publication_min_width_px":400,"publication_three_column_breakpoint_px":1232,"publication_two_column_breakpoint_px":816,"retry_label":"Retry","search_all_placeholder":"Search all catalogs","search_label":"Search","sign_in_needed_label":"Sign in needed"},"web_preference_profiles":{"desktop_min_width_px":720,"profiles":["mobile","desktop"]}} as const;
 
 /* Types */
 export type AccountCapabilities = {
@@ -110,12 +109,10 @@ export type AccountSessionSummary = {
 export type AccountStatus = {
 	signed_in: boolean,
 	server_url: string | null,
-	username: string | null,
+	email: string | null,
 };
 
 export type AccountValidationContract = {
-	username_min_bytes: number,
-	username_max_bytes: number,
 	password_min_characters: number,
 	password_max_bytes: number,
 	email_max_bytes: number,
@@ -154,13 +151,7 @@ export type BookActionsContract = {
 	restore_label: string,
 };
 
-/**
- *  Everything a browsing card renders for one book, read in a single row.
- *
- *  Deliberately a read model rather than a [`Book`]: the identity columns alone
- *  left callers asking for download state, audiobook details and progress one
- *  book at a time.
- */
+/**  Everything a browsing card renders for one book. */
 export type BookCardRow = {
 	book_id: string,
 	title: string,
@@ -170,7 +161,6 @@ export type BookCardRow = {
 	downloaded: boolean,
 	download_requested: boolean,
 	audiobook: boolean,
-	/**  Present only once the scanner has parsed the file. */
 	audiobook_duration_ms: number | null,
 	audiobook_chapter_count: number | null,
 };
@@ -195,52 +185,6 @@ export type BookLink = {
 	note: string,
 	created_at: number,
 	modified_at: number,
-};
-
-/**
- *  Lightweight book metadata for IPC and list views.
- * 
- *  Covers deliberately do not live in this type: embedding image bytes in a
- *  JSON list response multiplies the payload size and forces the webview to
- *  allocate the same image several times. Frontends fetch visible thumbnails
- *  separately through their native transport.
- */
-export type BookSummary = BookSummary_Serialize | BookSummary_Deserialize;
-
-/**
- *  Lightweight book metadata for IPC and list views.
- * 
- *  Covers deliberately do not live in this type: embedding image bytes in a
- *  JSON list response multiplies the payload size and forces the webview to
- *  allocate the same image several times. Frontends fetch visible thumbnails
- *  separately through their native transport.
- */
-export type BookSummary_Deserialize = {
-	id: string,
-	title: string,
-	author: string,
-	read_progress: number,
-	last_read: number,
-	added_at: number,
-	download_state: DownloadState,
-};
-
-/**
- *  Lightweight book metadata for IPC and list views.
- * 
- *  Covers deliberately do not live in this type: embedding image bytes in a
- *  JSON list response multiplies the payload size and forces the webview to
- *  allocate the same image several times. Frontends fetch visible thumbnails
- *  separately through their native transport.
- */
-export type BookSummary_Serialize = {
-	id: string,
-	title: string,
-	author: string,
-	read_progress: number,
-	last_read: number,
-	added_at: number,
-	download_state: DownloadState,
 };
 
 export type BrowsingContentContract = {
@@ -678,8 +622,6 @@ export type ReaderAnnotation = {
 	book_id: string,
 	anchor: AnnotationAnchor,
 	exact_text: string,
-	prefix: string | null,
-	suffix: string | null,
 	style: AnnotationStyle,
 	color: string,
 	note: string,
