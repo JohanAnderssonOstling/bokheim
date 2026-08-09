@@ -22,16 +22,16 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui_kobo = { path = "../../../../GPUI-Fork/crates/gpui_kobo", optional = true }
 html-view-core.workspace = true
-html-view-gpui = { path = "../../../HtmlRenderer/crates/html-view-gpui" }
+html-view-gpui = { path = "../../../renderers/html/crates/html-view-gpui" }
 html.workspace = true
-html-publication = { path = "../../../HtmlRenderer/crates/html-publication" }
-epub_provider = { path = "../../../HtmlRenderer/epub_provider" }
+html-publication = { path = "../../../renderers/html/crates/html-publication" }
+epub_provider = { path = "../../../renderers/html/epub_provider" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 smallvec = "1"
-pdf-reader-core = { path = "../../../PdfRenderer", optional = true }
+pdf-reader-core = { path = "../../../renderers/pdf/core", optional = true }
 pdf-view-gpui = { path = "../pdf-view", optional = true }
 kira = { version = "0.12.2", optional = true, default-features = false, features = ["cpal", "cpal-realtime", "mp3", "ogg", "vorbis", "flac", "wav", "pcm", "aac", "isomp4"] }
 tts = { version = "0.26.3", optional = true }

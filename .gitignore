@@ -98,4 +98,7 @@ venv/
 
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
 # live outside this directory.
+/renderers/html/testdata/wpt/
+# Keep pre-migration external WPT checkouts ignored in place. Set
+# HTML_WPT_ROOT to use them without moving local data automatically.
 /HtmlRenderer/testdata/wpt/
