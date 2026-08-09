@@ -5,7 +5,7 @@ members = [
     "BookFormat",
     "HtmlRenderer/crates/html-source",
     "HtmlRenderer/epub_provider",
-    "MobileApp/src-tauri",
+    "apps/mobile/src-tauri",
     "SyncCommon",
 ]
 

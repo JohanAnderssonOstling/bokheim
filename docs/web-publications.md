@@ -56,13 +56,13 @@ assets must be included.
 
 ## Reader and validation policy
 
-The native reader serves resources directly from the ZIP. MobileApp resolves
+The native reader serves resources directly from the ZIP. `apps/mobile` resolves
 archive resources to temporary blob URLs and revokes them when the publication
 closes. Both readers support multiple HTML documents in `readingOrder`.
 
 Validation rejects encrypted archives, unsafe or duplicate paths, missing and
 undeclared resources, invalid Readium contexts, missing titles, empty reading
 orders, unsupported reading-order media, and size-limit violations. Active HTML
-content and external active-resource URLs are not presented by MobileApp.
+content and external active-resource URLs are not presented by `apps/mobile`.
 
 Readium specification: <https://readium.org/webpub-manifest/>

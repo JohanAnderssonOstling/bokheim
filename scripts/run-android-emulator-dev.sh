@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname -- "$SCRIPT_DIR")"
-APP_DIR="$ROOT/MobileApp"
+APP_DIR="$ROOT/apps/mobile"
 AVD_NAME="${AVD_NAME:-Pixel_8a_x86_64}"
 EMULATOR_SERIAL="${EMULATOR_SERIAL:-emulator-5554}"
 JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}"

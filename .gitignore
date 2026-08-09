@@ -94,7 +94,7 @@ venv/
 /crates/backend/tests/test_folder/
 /reference/plato/
 /data-analysis/
-/MobileApp/src/vendor/foliate-js/html.js
+/apps/mobile/src/vendor/foliate-js/html.js
 
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
 # live outside this directory.

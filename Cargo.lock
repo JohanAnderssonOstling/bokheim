@@ -842,12 +842,12 @@ name = "audiobook-player"
 version = "0.1.0"
 dependencies = [
  "audiobook-library",
- "bokheim-ui-components",
  "crossbeam-channel",
  "gpui",
  "gpui-component",
  "mp4ameta",
  "rodio",
+ "ui-components",
  "wsola",
 ]
 
@@ -1243,46 +1243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-desktop"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "audiobook-player",
- "bokheim-ui-components",
- "bokheim-ui-runtime",
- "browser-ui",
- "epub-svelte",
- "gpui",
- "gpui-component",
- "gpui_kobo",
- "gpui_platform",
- "kobo-device",
- "log",
- "reader-ui",
- "rustls 0.23.38",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "bokheim-ui-components"
-version = "0.1.0"
-dependencies = [
- "app-contract",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
-]
-
-[[package]]
-name = "bokheim-ui-runtime"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "gpui",
-]
-
-[[package]]
 name = "book-metadata"
 version = "0.1.0"
 dependencies = [
@@ -1344,8 +1304,6 @@ dependencies = [
 name = "browser-ui"
 version = "0.1.0"
 dependencies = [
- "bokheim-ui-components",
- "bokheim-ui-runtime",
  "epub-svelte",
  "gpui",
  "gpui-component",
@@ -1354,6 +1312,8 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "ui-components",
+ "ui-runtime",
  "uuid",
 ]
 
@@ -2813,6 +2773,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "desktop-gpui"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "audiobook-player",
+ "browser-ui",
+ "epub-svelte",
+ "gpui",
+ "gpui-component",
+ "gpui_kobo",
+ "gpui_platform",
+ "kobo-device",
+ "log",
+ "reader-ui",
+ "rustls 0.23.38",
+ "serde",
+ "serde_json",
+ "ui-components",
+ "ui-runtime",
 ]
 
 [[package]]
@@ -8610,11 +8592,11 @@ version = "0.1.0"
 name = "pdf-view-gpui"
 version = "0.1.0"
 dependencies = [
- "bokheim-ui-components",
  "gpui",
  "image 0.25.10",
  "pdf-reader-core",
  "smallvec",
+ "ui-components",
 ]
 
 [[package]]
@@ -9623,8 +9605,6 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "audiobook-player",
- "bokheim-ui-components",
- "bokheim-ui-runtime",
  "epub-svelte",
  "epub_provider",
  "gpui",
@@ -9642,6 +9622,8 @@ dependencies = [
  "serde",
  "smallvec",
  "tts",
+ "ui-components",
+ "ui-runtime",
  "uuid",
 ]
 
@@ -13546,6 +13528,24 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ui-components"
+version = "0.1.0"
+dependencies = [
+ "app-contract",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+]
+
+[[package]]
+name = "ui-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "gpui",
 ]
 
 [[package]]

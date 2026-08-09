@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: MobileApp/package-lock.json
+          cache-dependency-path: apps/mobile/package-lock.json
 
       - name: Install Android SDK tooling
         uses: android-actions/setup-android@v3
@@ -61,18 +61,18 @@ jobs:
         run: cp .github/mobile-release-Cargo.toml Cargo.toml
 
       - name: Install frontend dependencies
-        working-directory: MobileApp
+        working-directory: apps/mobile
         run: npm ci
 
       - name: Check tagged version
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          VERSION=$(node -p "require('./MobileApp/src-tauri/tauri.conf.json').version")
+          VERSION=$(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")
           test "v${VERSION}" = "$GITHUB_REF_NAME"
 
       - name: Check frontend and generated bindings
-        working-directory: MobileApp
+        working-directory: apps/mobile
         run: |
           npm run check
           npm run check:bindings
@@ -99,17 +99,17 @@ jobs:
             printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
             printf 'keyAlias=%s\n' "$KEY_ALIAS"
             printf 'keyPassword=%s\n' "$KEY_PASSWORD"
-          } > MobileApp/src-tauri/gen/android/keystore.properties
+          } > apps/mobile/src-tauri/gen/android/keystore.properties
 
       - name: Build signed release APK
-        working-directory: MobileApp
+        working-directory: apps/mobile
         run: npm run tauri -- android build --apk --target aarch64
 
       - name: Verify and name release files
         shell: bash
         run: |
-          VERSION=$(node -p "require('./MobileApp/src-tauri/tauri.conf.json').version")
-          APK=$(find MobileApp/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' ! -name '*unsigned*' -print -quit)
+          VERSION=$(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")
+          APK=$(find apps/mobile/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' ! -name '*unsigned*' -print -quit)
           test -n "$APK"
           mkdir -p release
           cp "$APK" "release/bokheim-v${VERSION}-arm64.apk"

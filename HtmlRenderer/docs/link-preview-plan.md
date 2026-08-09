@@ -8,7 +8,7 @@ popover, without navigating away or touching history.
 - **Previewable** = the link resolves inside the book.
 - **Not previewable** = external links (`http(s)`, `mailto`, `tel`, `ftp`) and
   broken internal anchors.
-- **Desktop only.** No `MobileApp/src-tauri` changes; no long-press path.
+- **Desktop only.** No `apps/mobile/src-tauri` changes; no long-press path.
 
 ## How links work today (the foundation)
 
