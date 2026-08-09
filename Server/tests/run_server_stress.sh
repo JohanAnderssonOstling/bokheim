@@ -145,13 +145,14 @@ done
 server_target=${BOKHEIM_STRESS_TARGET_DIR:-$repo_root/Server/target}
 cargo build --release --manifest-path "$repo_root/Server/Cargo.toml" --bin sync-server --example sync_stress --target-dir "$server_target"
 
-admin_password="server-stress-admin-password"
-mkdir -p "$stress_tmp/books" "$stress_tmp/thumbnails"
+stress_email="server-stress@example.com"
+stress_password="server-stress-user-password"
+mkdir -p "$stress_tmp/assets/books" "$stress_tmp/assets/thumbnails"
+printf '%s\n' 'disposable.invalid' >"$stress_tmp/disposable-email-domains"
 DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
 SYNC_SERVER_ADDR="127.0.0.1:$server_port" \
-BOKHEIM_ADMIN_PASSWORD="$admin_password" \
-BOKHEIM_BOOKS_DIR="$stress_tmp/books" \
-BOKHEIM_THUMBNAILS_DIR="$stress_tmp/thumbnails" \
+BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE="$stress_tmp/disposable-email-domains" \
+BOKHEIM_ASSETS_DIR="$stress_tmp/assets" \
 RUST_LOG=warn \
 "$server_target/release/sync-server" >"$stress_tmp/server.log" 2>&1 &
 server_pid=$!
@@ -172,11 +173,28 @@ if [[ "$ready" != 1 ]]; then
     exit 1
 fi
 
-shared_token=
+BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
+BOKHEIM_STRESS_EMAIL="$stress_email" \
+BOKHEIM_STRESS_PASSWORD="$stress_password" \
+BOKHEIM_STRESS_MODE=register \
+"$server_target/release/examples/sync_stress"
+verification_token=$(psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d "$database_name" -Atc "SELECT token FROM account_email_outbox WHERE recipient = '$stress_email' AND message_kind = 'verify_email'")
+if [[ -z "$verification_token" ]]; then
+    echo "failed to obtain the stress account verification token" >&2
+    exit 1
+fi
+verification_response=$(BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
+    BOKHEIM_STRESS_VERIFICATION_TOKEN="$verification_token" \
+    BOKHEIM_STRESS_MODE=verify \
+    "$server_target/release/examples/sync_stress")
+shared_token=$(sed -n 's/^BOKHEIM_STRESS_TOKEN=//p' <<<"$verification_response")
+if [[ -z "$shared_token" ]]; then
+    echo "failed to extract the stress account bearer token" >&2
+    exit 1
+fi
+
 run_stress_client() {
     BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
-    BOKHEIM_STRESS_EMAIL=admin@bokheim.local \
-    BOKHEIM_STRESS_PASSWORD="$admin_password" \
     BOKHEIM_STRESS_TOKEN="$shared_token" \
     BOKHEIM_STRESS_WORKERS="${BOKHEIM_STRESS_WORKERS:-16}" \
     BOKHEIM_STRESS_REQUESTS_PER_WORKER="${BOKHEIM_STRESS_REQUESTS_PER_WORKER:-50}" \
@@ -194,19 +212,6 @@ else
     echo "BOKHEIM_STRESS_INGEST_CLIENTS must be between 1 and 128" >&2
     exit 1
 fi
-if (( ingest_clients > 1 )); then
-    login_response=$(BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
-        BOKHEIM_STRESS_EMAIL=admin@bokheim.local \
-        BOKHEIM_STRESS_PASSWORD="$admin_password" \
-        BOKHEIM_STRESS_MODE=token \
-        "$server_target/release/examples/sync_stress")
-    shared_token=$(sed -n 's/^BOKHEIM_STRESS_TOKEN=//p' <<<"$login_response")
-    if [[ -z "$shared_token" ]]; then
-        echo "failed to extract the temporary stress bearer token" >&2
-        exit 1
-    fi
-fi
-
 collect_metrics=${BOKHEIM_STRESS_COLLECT_METRICS:-0}
 case "$collect_metrics" in
     0|1) ;;

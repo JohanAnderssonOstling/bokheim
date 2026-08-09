@@ -98,7 +98,7 @@ mod tests {
     }
 
     fn hash(character: char) -> ContentHash {
-        ContentHash::parse(&character.to_string().repeat(64)).unwrap()
+        ContentHash::new(&character.to_string().repeat(64))
     }
 
     #[test]

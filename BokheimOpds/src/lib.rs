@@ -18,7 +18,7 @@ use uri_template::{HashValues, UriTemplate};
 
 mod registry;
 
-pub use registry::{CatalogAccess, CatalogAuthentication, CatalogRegistry, CatalogSource, CATALOG_REGISTRY_SCHEMA_VERSION};
+pub use registry::{CatalogRegistry, CatalogSource, CATALOG_REGISTRY_SCHEMA_VERSION};
 
 const MAX_CATALOG_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_PREFETCH_CATALOG_BYTES: u64 = 512 * 1024;
@@ -30,6 +30,7 @@ const CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_PERSISTENT_CATALOG_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MAX_CACHED_CATALOGS: usize = 32;
 const MAX_CATALOG_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CUSTOM_ENDPOINTS: usize = 64;
 const PERSISTENT_CATALOG_CACHE_SCHEMA_VERSION: u32 = 1;
 const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
 const PDF_MEDIA_TYPE: &str = "application/pdf";
@@ -61,43 +62,18 @@ impl<'de> Deserialize<'de> for OpdsEndpointId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OpdsEndpointAuthentication {
-    None,
-    Basic { username_label: String, password: OpdsPasswordRequirement },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum OpdsPasswordRequirement {
-    Required,
-    Empty,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum OpdsEndpointAccess {
-    Open,
-    Membership,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct OpdsEndpoint {
     pub id: OpdsEndpointId,
     pub title: String,
     pub description: String,
     pub languages: Vec<String>,
     pub url: String,
-    pub access: OpdsEndpointAccess,
-    pub authentication: OpdsEndpointAuthentication,
 }
 
 pub fn built_in_opds_endpoints() -> Vec<OpdsEndpoint> {
     vec![
         open_endpoint("project-gutenberg", "Project Gutenberg", "A large multilingual collection of free ebooks, with browsing and catalog search.", &["Multilingual"], "https://www.gutenberg.org/ebooks/search.opds/"),
         open_endpoint("open-library", "Open Library", "A multilingual Open Library and Internet Archive catalog with public-domain downloads and library lending links.", &["Multilingual"], "https://openlibrary.org/opds/"),
-        membership_endpoint("standard-ebooks", "Standard Ebooks", "Carefully produced public-domain ebooks. Feed access requires an eligible Standard Ebooks account.", &["English"], "https://standardebooks.org/feeds/opds"),
-        membership_endpoint("standard-ebooks-new-releases", "Standard Ebooks — New Releases", "The latest carefully produced Standard Ebooks releases.", &["English"], "https://standardebooks.org/feeds/opds/new-releases"),
         open_endpoint("unglue-it", "Unglue.it", "Open and Creative Commons ebooks collected by the Free Ebook Foundation.", &["Multilingual"], "https://unglue.it/api/opds/"),
         open_endpoint("textos-info", "textos.info", "A Spanish-language catalog of freely available literature.", &["Spanish"], "https://www.textos.info/catalogo.atom"),
         open_endpoint("ebooks-gratuits", "Ebooks Gratuits", "French-language public-domain and freely distributed ebooks.", &["French"], "https://www.ebooksgratuits.com/opds/index.php"),
@@ -113,20 +89,6 @@ fn open_endpoint(id: &str, title: &str, description: &str, languages: &[&str], u
         description: description.to_owned(),
         languages: languages.iter().map(|language| (*language).to_owned()).collect(),
         url: url.to_owned(),
-        access: OpdsEndpointAccess::Open,
-        authentication: OpdsEndpointAuthentication::None,
-    }
-}
-
-fn membership_endpoint(id: &str, title: &str, description: &str, languages: &[&str], url: &str) -> OpdsEndpoint {
-    OpdsEndpoint {
-        id: OpdsEndpointId::parse(id).expect("bundled catalog id is valid"),
-        title: title.to_owned(),
-        description: description.to_owned(),
-        languages: languages.iter().map(|language| (*language).to_owned()).collect(),
-        url: url.to_owned(),
-        access: OpdsEndpointAccess::Membership,
-        authentication: OpdsEndpointAuthentication::Basic { username_label: "Patrons Circle email address".to_owned(), password: OpdsPasswordRequirement::Empty },
     }
 }
 
@@ -169,14 +131,6 @@ pub fn registry_from_endpoints(revision: u64, endpoints: &[OpdsEndpoint]) -> Cat
                 description: endpoint.description.clone(),
                 languages: endpoint.languages.clone(),
                 url: endpoint.url.clone(),
-                access: match endpoint.access {
-                    OpdsEndpointAccess::Open => CatalogAccess::Open,
-                    OpdsEndpointAccess::Membership => CatalogAccess::Membership,
-                },
-                authentication: match &endpoint.authentication {
-                    OpdsEndpointAuthentication::None => CatalogAuthentication::None,
-                    OpdsEndpointAuthentication::Basic { username_label, password } => CatalogAuthentication::Basic { username_label: username_label.clone(), password_required: matches!(password, OpdsPasswordRequirement::Required) },
-                },
             })
             .collect(),
     }
@@ -187,10 +141,31 @@ pub fn load_registry_cache(path: &Path) -> Result<Option<(CatalogRegistry, Vec<O
 }
 
 pub fn load_custom_registry_cache(path: &Path) -> Result<Option<(CatalogRegistry, Vec<OpdsEndpoint>)>, OpdsError> {
-    load_registry_cache_with_policy(path, RegistryUrlPolicy::HttpOrHttps)
+    let Some(mut value) = load_registry_cache_value(path)? else { return Ok(None) };
+    if value.get("schema_version").and_then(Value::as_u64) == Some(1) {
+        value["schema_version"] = Value::from(CATALOG_REGISTRY_SCHEMA_VERSION);
+        if let Some(catalogs) = value.get_mut("catalogs").and_then(Value::as_array_mut) {
+            for catalog in catalogs {
+                if let Some(catalog) = catalog.as_object_mut() {
+                    catalog.remove("access");
+                    catalog.remove("authentication");
+                }
+            }
+        }
+    }
+    let registry: CatalogRegistry = serde_json::from_value(value).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))?;
+    let endpoints = endpoints_from_registry_with_policy(registry.clone(), RegistryUrlPolicy::HttpOrHttps)?;
+    Ok(Some((registry, endpoints)))
 }
 
 fn load_registry_cache_with_policy(path: &Path, url_policy: RegistryUrlPolicy) -> Result<Option<(CatalogRegistry, Vec<OpdsEndpoint>)>, OpdsError> {
+    let Some(value) = load_registry_cache_value(path)? else { return Ok(None) };
+    let registry: CatalogRegistry = serde_json::from_value(value).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))?;
+    let endpoints = endpoints_from_registry_with_policy(registry.clone(), url_policy)?;
+    Ok(Some((registry, endpoints)))
+}
+
+fn load_registry_cache_value(path: &Path) -> Result<Option<Value>, OpdsError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -199,9 +174,7 @@ fn load_registry_cache_with_policy(path: &Path, url_policy: RegistryUrlPolicy) -
     if bytes.len() as u64 > MAX_REGISTRY_BYTES {
         return Err(OpdsError::ResponseTooLarge { limit: MAX_REGISTRY_BYTES });
     }
-    let registry: CatalogRegistry = serde_json::from_slice(&bytes).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))?;
-    let endpoints = endpoints_from_registry_with_policy(registry.clone(), url_policy)?;
-    Ok(Some((registry, endpoints)))
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))
 }
 
 pub fn save_registry_cache(path: &Path, registry: &CatalogRegistry) -> Result<(), OpdsError> {
@@ -226,6 +199,113 @@ pub fn save_registry_cache(path: &Path, registry: &CatalogRegistry) -> Result<()
     result.map_err(OpdsError::Io)
 }
 
+/// Owns the persisted curated and device-local endpoint registries.
+///
+/// Invalid or missing caches are ignored during startup so bundled endpoints
+/// remain available. Mutations are persisted before the in-memory state is
+/// changed.
+#[derive(Debug)]
+pub struct OpdsEndpointStore {
+    curated_cache_path: PathBuf,
+    custom_cache_path: PathBuf,
+    curated_revision: u64,
+    curated: Vec<OpdsEndpoint>,
+    custom: Vec<OpdsEndpoint>,
+}
+
+impl OpdsEndpointStore {
+    pub fn load(curated_cache_path: PathBuf, custom_cache_path: PathBuf) -> Self {
+        let cached_curated = load_registry_cache(&curated_cache_path).ok().flatten().filter(|(_, endpoints)| !endpoints.is_empty());
+        let curated_revision = cached_curated.as_ref().map(|(registry, _)| registry.revision).unwrap_or(0);
+        let curated = cached_curated.map(|(_, endpoints)| endpoints).unwrap_or_else(built_in_opds_endpoints);
+        let custom = load_custom_registry_cache(&custom_cache_path).ok().flatten().map(|(_, endpoints)| endpoints).unwrap_or_default();
+        Self { curated_cache_path, custom_cache_path, curated_revision, curated, custom }
+    }
+
+    pub fn endpoints(&self) -> Vec<OpdsEndpoint> {
+        let mut endpoints = built_in_opds_endpoints();
+        merge_endpoints(&mut endpoints, self.curated.iter().cloned());
+        merge_endpoints(&mut endpoints, self.custom.iter().cloned());
+        endpoints
+    }
+
+    pub fn custom_endpoints(&self) -> &[OpdsEndpoint] {
+        &self.custom
+    }
+
+    pub fn is_curated_endpoint(&self, endpoint: &OpdsEndpoint) -> bool {
+        self.curated.iter().any(|candidate| candidate.id == endpoint.id)
+    }
+
+    pub fn add_custom_endpoint(&mut self, title: &str, url: &str) -> Result<OpdsEndpoint, OpdsError> {
+        let registry = CatalogRegistry {
+            schema_version: CATALOG_REGISTRY_SCHEMA_VERSION,
+            revision: 1,
+            catalogs: vec![CatalogSource {
+                id: format!("custom-{}", uuid::Uuid::new_v4().simple()),
+                title: title.to_owned(),
+                description: "User-supplied OPDS catalog".to_owned(),
+                languages: vec!["Unspecified".to_owned()],
+                url: url.to_owned(),
+            }],
+        };
+        let endpoint = custom_endpoints_from_registry(registry)?.into_iter().next().ok_or_else(|| OpdsError::InvalidEndpoint("custom OPDS endpoint was not created".to_owned()))?;
+        if self.custom.len() >= MAX_CUSTOM_ENDPOINTS {
+            return Err(OpdsError::InvalidEndpoint(format!("at most {MAX_CUSTOM_ENDPOINTS} custom OPDS catalogs can be configured")));
+        }
+        if self.custom.iter().any(|candidate| candidate.url == endpoint.url) {
+            return Err(OpdsError::InvalidEndpoint("this custom OPDS catalog is already configured".to_owned()));
+        }
+        let mut custom = self.custom.clone();
+        custom.push(endpoint.clone());
+        save_registry_cache(&self.custom_cache_path, &registry_from_endpoints(1, &custom))?;
+        self.custom = custom;
+        Ok(endpoint)
+    }
+
+    pub fn remove_custom_endpoint(&mut self, endpoint_id: &OpdsEndpointId) -> Result<(), OpdsError> {
+        let mut custom = self.custom.clone();
+        let previous_len = custom.len();
+        custom.retain(|endpoint| &endpoint.id != endpoint_id);
+        if custom.len() == previous_len {
+            return Err(OpdsError::InvalidEndpoint("custom OPDS endpoint was not found".to_owned()));
+        }
+        save_registry_cache(&self.custom_cache_path, &registry_from_endpoints(1, &custom))?;
+        self.custom = custom;
+        Ok(())
+    }
+
+    pub fn replace_curated_registry(&mut self, registry: CatalogRegistry) -> Result<(), OpdsError> {
+        let endpoints = endpoints_from_registry(registry.clone())?;
+        if endpoints.is_empty() {
+            return Err(OpdsError::InvalidEndpoint("the curated OPDS registry is empty".to_owned()));
+        }
+        if registry.revision < self.curated_revision {
+            return Err(OpdsError::InvalidEndpoint(format!(
+                "refusing stale OPDS registry revision {} because revision {} is cached",
+                registry.revision, self.curated_revision
+            )));
+        }
+        if registry.revision == self.curated_revision && self.curated_revision != 0 && endpoints != self.curated {
+            return Err(OpdsError::InvalidEndpoint(format!("OPDS registry revision {} changed without a revision increment", registry.revision)));
+        }
+        save_registry_cache(&self.curated_cache_path, &registry)?;
+        self.curated = endpoints;
+        self.curated_revision = registry.revision;
+        Ok(())
+    }
+}
+
+fn merge_endpoints(endpoints: &mut Vec<OpdsEndpoint>, replacements: impl IntoIterator<Item = OpdsEndpoint>) {
+    for endpoint in replacements {
+        if let Some(existing) = endpoints.iter_mut().find(|existing| existing.id == endpoint.id) {
+            *existing = endpoint;
+        } else {
+            endpoints.push(endpoint);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RegistryUrlPolicy {
     HttpsOnly,
@@ -247,20 +327,7 @@ fn endpoint_from_source(source: CatalogSource, ids: &mut std::collections::HashS
     if matches!(url_policy, RegistryUrlPolicy::HttpsOnly) && !url.starts_with("https://") {
         return Err(OpdsError::InvalidEndpoint(format!("curated catalog {} must use HTTPS", id.as_str())));
     }
-    let access = match source.access {
-        CatalogAccess::Open => OpdsEndpointAccess::Open,
-        CatalogAccess::Membership => OpdsEndpointAccess::Membership,
-    };
-    let authentication = match source.authentication {
-        CatalogAuthentication::None => OpdsEndpointAuthentication::None,
-        CatalogAuthentication::Basic { username_label, password_required } => {
-            OpdsEndpointAuthentication::Basic { username_label: bounded_endpoint_text(username_label, "username label", 120)?, password: if password_required { OpdsPasswordRequirement::Required } else { OpdsPasswordRequirement::Empty } }
-        }
-    };
-    if matches!(access, OpdsEndpointAccess::Membership) && matches!(authentication, OpdsEndpointAuthentication::None) {
-        return Err(OpdsError::InvalidEndpoint(format!("membership catalog {} must declare authentication", id.as_str())));
-    }
-    Ok(OpdsEndpoint { id, title, description, languages, url, access, authentication })
+    Ok(OpdsEndpoint { id, title, description, languages, url })
 }
 
 fn bounded_endpoint_text(value: String, field: &str, maximum: usize) -> Result<String, OpdsError> {
@@ -571,43 +638,10 @@ impl OpdsCatalog {
     }
 }
 
-#[derive(Clone)]
-pub struct OpdsCredentials {
-    username: String,
-    password: String,
-    origin: String,
-}
-
-impl OpdsCredentials {
-    pub fn for_endpoint(endpoint: &OpdsEndpoint, username: impl Into<String>, password: impl Into<String>) -> Result<Self, OpdsError> {
-        Self::for_url(&endpoint.url, username, password)
-    }
-
-    pub fn for_url(url: &str, username: impl Into<String>, password: impl Into<String>) -> Result<Self, OpdsError> {
-        let username = username.into();
-        if username.is_empty() || username.chars().any(char::is_control) {
-            return Err(OpdsError::InvalidCredentials);
-        }
-        let url = parse_http_url(url)?;
-        Ok(Self { username, password: password.into(), origin: url.origin().ascii_serialization() })
-    }
-
-    fn applies_to(&self, url: &Url) -> bool {
-        self.origin == url.origin().ascii_serialization()
-    }
-}
-
-impl fmt::Debug for OpdsCredentials {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("OpdsCredentials").field("username", &self.username).field("password", &"[redacted]").field("origin", &self.origin).finish()
-    }
-}
-
 #[derive(Debug)]
 pub enum OpdsError {
     InvalidEndpoint(String),
     InvalidUrl(String),
-    InvalidCredentials,
     Network(reqwest::Error),
     TimedOut,
     HttpStatus(reqwest::StatusCode),
@@ -626,7 +660,6 @@ impl fmt::Display for OpdsError {
         match self {
             Self::InvalidEndpoint(error) => write!(formatter, "invalid OPDS endpoint: {error}"),
             Self::InvalidUrl(error) => write!(formatter, "invalid OPDS URL: {error}"),
-            Self::InvalidCredentials => formatter.write_str("OPDS username must be non-empty and contain no control characters"),
             Self::Network(error) => write!(formatter, "OPDS network request failed: {error}"),
             Self::TimedOut => formatter.write_str("OPDS server did not respond before the timeout"),
             Self::HttpStatus(status) => write!(formatter, "OPDS server returned HTTP {status}"),
@@ -768,18 +801,18 @@ impl OpdsClient {
         Ok(Self { http, catalog_cache: Arc::new(Mutex::new(catalog_cache)), max_cached_catalogs, max_catalog_cache_bytes, persistent_cache_path: path.map(Arc::new), persistent_cache_write: Arc::new(AsyncMutex::new(())) })
     }
 
-    pub async fn fetch_catalog(&self, url: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, OpdsError> {
-        self.fetch_catalog_bounded(url, credentials, MAX_CATALOG_BYTES, true).await
+    pub async fn fetch_catalog(&self, url: &str) -> Result<OpdsCatalog, OpdsError> {
+        self.fetch_catalog_bounded(url, MAX_CATALOG_BYTES, true).await
     }
 
-    pub async fn fetch_catalog_fresh(&self, url: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, OpdsError> {
-        self.fetch_catalog_bounded(url, credentials, MAX_CATALOG_BYTES, false).await
+    pub async fn fetch_catalog_fresh(&self, url: &str) -> Result<OpdsCatalog, OpdsError> {
+        self.fetch_catalog_bounded(url, MAX_CATALOG_BYTES, false).await
     }
 
     /// Performs a cold catalog fetch and returns timings for each expensive stage.
     /// This intentionally bypasses the catalog cache so diagnostics measure the
     /// upstream server, transfer, discovery, and parser rather than a cache hit.
-    pub async fn profile_catalog_fetch(&self, url: &str, credentials: Option<&OpdsCredentials>) -> (Result<OpdsCatalog, OpdsError>, OpdsFetchProfile) {
+    pub async fn profile_catalog_fetch(&self, url: &str) -> (Result<OpdsCatalog, OpdsError>, OpdsFetchProfile) {
         let started = Instant::now();
         let parsed_url = match parse_http_url(url) {
             Ok(url) => url,
@@ -789,50 +822,44 @@ impl OpdsClient {
                 return (Err(error), profile);
             }
         };
-        let (result, mut profile) = self.fetch_catalog_url_profiled(parsed_url, credentials, MAX_CATALOG_BYTES).await;
+        let (result, mut profile) = self.fetch_catalog_url_profiled(parsed_url, MAX_CATALOG_BYTES).await;
         profile.total = started.elapsed();
         (result, profile)
     }
 
-    async fn fetch_catalog_bounded(&self, url: &str, credentials: Option<&OpdsCredentials>, byte_limit: u64, stale_while_revalidate: bool) -> Result<OpdsCatalog, OpdsError> {
+    async fn fetch_catalog_bounded(&self, url: &str, byte_limit: u64, stale_while_revalidate: bool) -> Result<OpdsCatalog, OpdsError> {
         let url = parse_http_url(url)?;
         let cache_key = url.to_string();
-        let cache_guard = if credentials.is_none() {
-            loop {
-                match self.lookup_or_start_catalog_fetch(&cache_key) {
-                    CatalogCacheLookup::Cached(catalog) => return Ok(catalog),
-                    CatalogCacheLookup::StaleWait(catalog) if stale_while_revalidate => return Ok(catalog),
-                    CatalogCacheLookup::StaleFetch(catalog) if stale_while_revalidate => {
-                        let client = self.clone();
-                        let refresh_url = url.clone();
-                        let refresh_key = cache_key.clone();
-                        tokio::spawn(async move {
-                            let guard = CatalogFetchGuard { cache: client.catalog_cache.clone(), cache_key: refresh_key.clone() };
-                            if let Ok(refreshed) = client.fetch_catalog_url(refresh_url, None, byte_limit).await {
-                                client.cache_catalog(refresh_key, &refreshed).await;
-                            }
-                            drop(guard);
-                        });
-                        return Ok(catalog);
-                    }
-                    CatalogCacheLookup::StaleFetch(_) => break Some(CatalogFetchGuard { cache: self.catalog_cache.clone(), cache_key: cache_key.clone() }),
-                    CatalogCacheLookup::StaleWait(_) => {
-                        let mut completed = self.catalog_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).in_flight.get(&cache_key).expect("stale wait has an in-flight sender").subscribe();
-                        let _ = completed.wait_for(|is_complete| *is_complete).await;
-                    }
-                    CatalogCacheLookup::Wait(mut completed) => {
-                        let _ = completed.wait_for(|is_complete| *is_complete).await;
-                    }
-                    CatalogCacheLookup::Fetch => break Some(CatalogFetchGuard { cache: self.catalog_cache.clone(), cache_key: cache_key.clone() }),
+        let cache_guard = loop {
+            match self.lookup_or_start_catalog_fetch(&cache_key) {
+                CatalogCacheLookup::Cached(catalog) => return Ok(catalog),
+                CatalogCacheLookup::StaleWait(catalog) if stale_while_revalidate => return Ok(catalog),
+                CatalogCacheLookup::StaleFetch(catalog) if stale_while_revalidate => {
+                    let client = self.clone();
+                    let refresh_url = url.clone();
+                    let refresh_key = cache_key.clone();
+                    tokio::spawn(async move {
+                        let guard = CatalogFetchGuard { cache: client.catalog_cache.clone(), cache_key: refresh_key.clone() };
+                        if let Ok(refreshed) = client.fetch_catalog_url(refresh_url, byte_limit).await {
+                            client.cache_catalog(refresh_key, &refreshed).await;
+                        }
+                        drop(guard);
+                    });
+                    return Ok(catalog);
                 }
+                CatalogCacheLookup::StaleFetch(_) => break CatalogFetchGuard { cache: self.catalog_cache.clone(), cache_key: cache_key.clone() },
+                CatalogCacheLookup::StaleWait(_) => {
+                    let mut completed = self.catalog_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).in_flight.get(&cache_key).expect("stale wait has an in-flight sender").subscribe();
+                    let _ = completed.wait_for(|is_complete| *is_complete).await;
+                }
+                CatalogCacheLookup::Wait(mut completed) => {
+                    let _ = completed.wait_for(|is_complete| *is_complete).await;
+                }
+                CatalogCacheLookup::Fetch => break CatalogFetchGuard { cache: self.catalog_cache.clone(), cache_key: cache_key.clone() },
             }
-        } else {
-            None
         };
-        let catalog = self.fetch_catalog_url(url, credentials, byte_limit).await?;
-        if credentials.is_none() {
-            self.cache_catalog(cache_key, &catalog).await;
-        }
+        let catalog = self.fetch_catalog_url(url, byte_limit).await?;
+        self.cache_catalog(cache_key, &catalog).await;
         drop(cache_guard);
         Ok(catalog)
     }
@@ -840,23 +867,23 @@ impl OpdsClient {
     pub async fn prefetch_catalog_metadata(&self, catalog: &OpdsCatalog) {
         futures_util::stream::iter(catalog.metadata_prefetch_urls(MAX_PREFETCH_CATALOGS))
             .for_each_concurrent(2, |url| async move {
-                let _ = self.fetch_catalog_bounded(&url, None, MAX_PREFETCH_CATALOG_BYTES, true).await;
+                let _ = self.fetch_catalog_bounded(&url, MAX_PREFETCH_CATALOG_BYTES, true).await;
             })
             .await;
     }
 
-    pub async fn search(&self, catalog: &OpdsCatalog, query: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, OpdsError> {
+    pub async fn search(&self, catalog: &OpdsCatalog, query: &str) -> Result<OpdsCatalog, OpdsError> {
         let search = catalog.search.as_ref().ok_or(OpdsError::SearchUnavailable)?;
-        self.search_definition(search, &OpdsSearchQuery { query: query.to_owned(), title: None, author: None }, credentials).await
+        self.search_definition(search, &OpdsSearchQuery { query: query.to_owned(), title: None, author: None }).await
     }
 
-    pub async fn search_definition(&self, search: &OpdsSearch, query: &OpdsSearchQuery, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, OpdsError> {
+    pub async fn search_definition(&self, search: &OpdsSearch, query: &OpdsSearchQuery) -> Result<OpdsCatalog, OpdsError> {
         validate_search_query(query)?;
         let (base_url, template) = match search {
             OpdsSearch::UriTemplate { base_url, template } => (parse_http_url(base_url)?, template.clone()),
             OpdsSearch::OpenSearchDescription { url } => {
                 let description_url = parse_http_url(url)?;
-                let response = self.send(self.request(description_url.clone(), credentials)).await?;
+                let response = self.send(self.request(description_url.clone())).await?;
                 let final_url = validated_response_url(&response)?;
                 let bytes = read_bounded(response, MAX_SEARCH_DESCRIPTION_BYTES).await?;
                 (final_url, parse_open_search_template(&bytes)?)
@@ -864,15 +891,15 @@ impl OpdsClient {
         };
         let expanded = expand_search_template(&template, query)?;
         let url = resolve_url(&base_url, &expanded)?;
-        self.fetch_catalog_url(url, credentials, MAX_CATALOG_BYTES).await
+        self.fetch_catalog_url(url, MAX_CATALOG_BYTES).await
     }
 
-    pub async fn download_book(&self, acquisition: &OpdsDirectAcquisition, credentials: Option<&OpdsCredentials>, temporary_directory: &Path) -> Result<DownloadedOpdsBook, OpdsError> {
+    pub async fn download_book(&self, acquisition: &OpdsDirectAcquisition, temporary_directory: &Path) -> Result<DownloadedOpdsBook, OpdsError> {
         if !is_importable_acquisition(acquisition) {
             return Err(OpdsError::NonFreeAcquisition);
         }
         let url = parse_http_url(&acquisition.url)?;
-        let response = self.send(self.request(url, credentials).header(reqwest::header::ACCEPT, acquisition.book_format.media_type())).await?;
+        let response = self.send(self.request(url).header(reqwest::header::ACCEPT, acquisition.book_format.media_type())).await?;
         let _ = validated_response_url(&response)?;
         let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(normalized_media_type);
         let expected_media_type = acquisition.book_format.media_type();
@@ -909,12 +936,12 @@ impl OpdsClient {
     /// storage, such as the browser guest runtime. The same media-type and size
     /// checks as the file-backed importer are applied, but no temporary file is
     /// created on the server.
-    pub async fn download_book_bytes(&self, acquisition: &OpdsDirectAcquisition, credentials: Option<&OpdsCredentials>) -> Result<Vec<u8>, OpdsError> {
+    pub async fn download_book_bytes(&self, acquisition: &OpdsDirectAcquisition) -> Result<Vec<u8>, OpdsError> {
         if !is_importable_acquisition(acquisition) {
             return Err(OpdsError::NonFreeAcquisition);
         }
         let url = parse_http_url(&acquisition.url)?;
-        let response = self.send(self.request(url, credentials).header(reqwest::header::ACCEPT, acquisition.book_format.media_type())).await?;
+        let response = self.send(self.request(url).header(reqwest::header::ACCEPT, acquisition.book_format.media_type())).await?;
         let _ = validated_response_url(&response)?;
         let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(normalized_media_type);
         let expected_media_type = acquisition.book_format.media_type();
@@ -928,22 +955,22 @@ impl OpdsClient {
         Ok(bytes)
     }
 
-    async fn fetch_catalog_url(&self, url: Url, credentials: Option<&OpdsCredentials>, byte_limit: u64) -> Result<OpdsCatalog, OpdsError> {
+    async fn fetch_catalog_url(&self, url: Url, byte_limit: u64) -> Result<OpdsCatalog, OpdsError> {
         let started = Instant::now();
-        let (result, mut profile) = self.fetch_catalog_url_profiled(url, credentials, byte_limit).await;
+        let (result, mut profile) = self.fetch_catalog_url_profiled(url, byte_limit).await;
         profile.total = started.elapsed();
         #[cfg(debug_assertions)]
         log_catalog_fetch_profile(&profile, result.as_ref().err());
         result
     }
 
-    async fn fetch_catalog_url_profiled(&self, url: Url, credentials: Option<&OpdsCredentials>, byte_limit: u64) -> (Result<OpdsCatalog, OpdsError>, OpdsFetchProfile) {
+    async fn fetch_catalog_url_profiled(&self, url: Url, byte_limit: u64) -> (Result<OpdsCatalog, OpdsError>, OpdsFetchProfile) {
         let mut profile = OpdsFetchProfile::new(url.to_string());
         let mut url = url;
         for discovery_attempt in 0..=1 {
             profile.http_fetches += 1;
             let headers_started = Instant::now();
-            let response = self.send(self.request(url, credentials).header(reqwest::header::ACCEPT, format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2"))).await;
+            let response = self.send(self.request(url).header(reqwest::header::ACCEPT, format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2"))).await;
             profile.response_headers += headers_started.elapsed();
             let response = match response {
                 Ok(response) => response,
@@ -981,13 +1008,8 @@ impl OpdsClient {
         (Err(OpdsError::UnsupportedCatalogFormat), profile)
     }
 
-    fn request(&self, url: Url, credentials: Option<&OpdsCredentials>) -> RequestBuilder {
-        let use_credentials = credentials.is_some_and(|credentials| credentials.applies_to(&url));
-        let request = self.http.get(url);
-        match (credentials, use_credentials) {
-            (Some(credentials), true) => request.basic_auth(&credentials.username, Some(&credentials.password)),
-            _ => request,
-        }
+    fn request(&self, url: Url) -> RequestBuilder {
+        self.http.get(url)
     }
 
     async fn send(&self, request: RequestBuilder) -> Result<Response, OpdsError> {
@@ -1090,7 +1112,6 @@ fn opds_error_kind(error: &OpdsError) -> &'static str {
     match error {
         OpdsError::InvalidEndpoint(_) => "invalid_endpoint",
         OpdsError::InvalidUrl(_) => "invalid_url",
-        OpdsError::InvalidCredentials => "invalid_credentials",
         OpdsError::Network(_) => "network_error",
         OpdsError::TimedOut => "timeout",
         OpdsError::HttpStatus(_) => "http_error",
@@ -2039,34 +2060,14 @@ mod tests {
     }"#;
 
     #[test]
-    fn standard_ebooks_endpoints_are_complete_and_safe() {
+    fn built_in_endpoints_are_complete_and_safe() {
         let endpoints = built_in_opds_endpoints();
-        assert_eq!(endpoints.len(), 9);
+        assert_eq!(endpoints.len(), 7);
         assert_eq!(endpoints.iter().map(|endpoint| endpoint.id.as_str()).collect::<HashSet<_>>().len(), endpoints.len());
         assert!(endpoints.iter().all(|endpoint| !endpoint.title.trim().is_empty() && !endpoint.description.trim().is_empty() && !endpoint.languages.is_empty()));
-        let standard_ebooks = endpoints.iter().find(|endpoint| endpoint.id.as_str() == "standard-ebooks").unwrap();
-        assert_eq!(standard_ebooks.url, "https://standardebooks.org/feeds/opds");
-        let new_releases = endpoints.iter().find(|endpoint| endpoint.id.as_str() == "standard-ebooks-new-releases").unwrap();
-        assert_eq!(new_releases.url, "https://standardebooks.org/feeds/opds/new-releases");
         let open_library = endpoints.iter().find(|endpoint| endpoint.id.as_str() == "open-library").unwrap();
         assert_eq!(open_library.url, "https://openlibrary.org/opds/");
-        for endpoint in endpoints.iter().filter(|endpoint| endpoint.access == OpdsEndpointAccess::Membership) {
-            assert_eq!(parse_http_url(&endpoint.url).unwrap().scheme(), "https");
-            let OpdsEndpointAuthentication::Basic { username_label, password } = &endpoint.authentication else { panic!("Standard Ebooks requires Basic authentication") };
-            assert_eq!(username_label, "Patrons Circle email address");
-            assert_eq!(*password, OpdsPasswordRequirement::Empty);
-        }
         assert!(endpoints.iter().all(|endpoint| parse_http_url(&endpoint.url).is_ok()));
-        assert_eq!(endpoints.iter().filter(|endpoint| endpoint.access == OpdsEndpointAccess::Open).count(), 7);
-    }
-
-    #[test]
-    fn credentials_hide_the_password_in_debug_output() {
-        let endpoint = built_in_opds_endpoints().into_iter().find(|endpoint| endpoint.id.as_str() == "standard-ebooks").unwrap();
-        let credentials = OpdsCredentials::for_endpoint(&endpoint, "reader@example.com", "very-secret").unwrap();
-        let output = format!("{credentials:?}");
-        assert!(output.contains("reader@example.com"));
-        assert!(!output.contains("very-secret"));
     }
 
     #[test]
@@ -2074,22 +2075,12 @@ mod tests {
         assert_eq!(profile_log_url("https://catalog.example/search?q=private#result"), "https://catalog.example/search");
     }
 
-    #[test]
-    fn credentials_are_sent_only_to_their_exact_origin() {
-        let client = OpdsClient::new().unwrap();
-        let credentials = OpdsCredentials::for_url("https://catalog.example/root", "reader", "secret").unwrap();
-        let same_origin = client.request(Url::parse("https://catalog.example/books").unwrap(), Some(&credentials)).build().unwrap();
-        let other_origin = client.request(Url::parse("https://downloads.example/book.epub").unwrap(), Some(&credentials)).build().unwrap();
-        assert!(same_origin.headers().contains_key(reqwest::header::AUTHORIZATION));
-        assert!(!other_origin.headers().contains_key(reqwest::header::AUTHORIZATION));
-    }
-
     #[tokio::test]
     #[ignore = "requires live third-party catalog servers"]
     async fn open_built_in_catalogs_are_live_and_parseable() {
         let client = OpdsClient::new().unwrap();
-        for endpoint in built_in_opds_endpoints().into_iter().filter(|endpoint| endpoint.access == OpdsEndpointAccess::Open) {
-            let catalog = client.fetch_catalog(&endpoint.url, None).await.unwrap_or_else(|error| panic!("{} failed: {error}", endpoint.title));
+        for endpoint in built_in_opds_endpoints() {
+            let catalog = client.fetch_catalog(&endpoint.url).await.unwrap_or_else(|error| panic!("{} failed: {error}", endpoint.title));
             assert!(!catalog.title.trim().is_empty(), "{} returned no title", endpoint.title);
             assert!(!catalog.navigation.is_empty() || !catalog.publications.is_empty() || !catalog.groups.is_empty(), "{} returned no browseable content", endpoint.title);
         }
@@ -2100,9 +2091,9 @@ mod tests {
     async fn curated_catalogs_are_live_and_parseable() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../Catalogs/opds.json");
         let registry: CatalogRegistry = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let endpoints = endpoints_from_registry(registry).unwrap().into_iter().filter(|endpoint| endpoint.access == OpdsEndpointAccess::Open).collect::<Vec<_>>();
+        let endpoints = endpoints_from_registry(registry).unwrap();
         let futures = endpoints.iter().map(|endpoint| async {
-            let result = OpdsClient::new().unwrap().fetch_catalog(&endpoint.url, None).await;
+            let result = OpdsClient::new().unwrap().fetch_catalog(&endpoint.url).await;
             (endpoint.title.clone(), result)
         });
         let results = futures_util::future::join_all(futures).await;
@@ -2114,15 +2105,15 @@ mod tests {
     #[ignore = "requires the live Open Library OPDS service"]
     async fn open_library_browse_search_and_acquisitions_are_live_and_parseable() {
         let client = OpdsClient::new().unwrap();
-        let root = client.fetch_catalog("https://openlibrary.org/opds/", None).await.unwrap();
+        let root = client.fetch_catalog("https://openlibrary.org/opds/").await.unwrap();
         assert_eq!(root.version, OpdsVersion::V2_0);
         assert_eq!(root.title, "Open Library");
         assert!(!root.navigation.is_empty());
         assert!(root.groups.iter().flat_map(|group| &group.publications).any(|publication| publication.id.starts_with("https://openlibrary.org/opds/books/") && !publication.acquisitions.is_empty()));
-        let navigation = client.fetch_catalog(&root.navigation[0].url, None).await.unwrap();
+        let navigation = client.fetch_catalog(&root.navigation[0].url).await.unwrap();
         assert!(!navigation.publications.is_empty() || !navigation.groups.is_empty());
         let search = root.search.as_ref().unwrap();
-        let results = client.search_definition(search, &OpdsSearchQuery { query: "Pride and Prejudice".to_owned(), title: None, author: None }, None).await.unwrap();
+        let results = client.search_definition(search, &OpdsSearchQuery { query: "Pride and Prejudice".to_owned(), title: None, author: None }).await.unwrap();
         assert!(!results.publications.is_empty() || !results.groups.is_empty());
     }
 
@@ -2325,8 +2316,6 @@ mod tests {
             description: "Books".to_owned(),
             languages: vec!["English".to_owned()],
             url: "https://example.com/opds".to_owned(),
-            access: CatalogAccess::Open,
-            authentication: CatalogAuthentication::None,
         };
         let registry = CatalogRegistry { schema_version: CATALOG_REGISTRY_SCHEMA_VERSION, revision: 3, catalogs: vec![source.clone()] };
         let endpoints = endpoints_from_registry(registry.clone()).unwrap();
@@ -2346,12 +2335,73 @@ mod tests {
                 description: "Local catalog".to_owned(),
                 languages: vec!["English".to_owned()],
                 url: "http://127.0.0.1:8080/opds".to_owned(),
-                access: CatalogAccess::Open,
-                authentication: CatalogAuthentication::None,
             }],
         };
         assert!(endpoints_from_registry(local.clone()).is_err());
         assert_eq!(custom_endpoints_from_registry(local).unwrap()[0].url, "http://127.0.0.1:8080/opds");
+
+        let legacy_path = temporary.path().join("legacy-custom-catalogs.json");
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "revision": 1,
+                "catalogs": [{
+                    "id": "legacy-local",
+                    "title": "Legacy local",
+                    "description": "Legacy custom catalog",
+                    "languages": ["English"],
+                    "url": "http://127.0.0.1:8081/opds",
+                    "access": "open",
+                    "authentication": { "kind": "none" }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (migrated, endpoints) = load_custom_registry_cache(&legacy_path).unwrap().unwrap();
+        assert_eq!(migrated.schema_version, CATALOG_REGISTRY_SCHEMA_VERSION);
+        assert_eq!(endpoints[0].id.as_str(), "legacy-local");
+    }
+
+    #[test]
+    fn endpoint_store_persists_custom_endpoints_and_keeps_bundled_fallbacks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let curated_path = temporary.path().join("curated.json");
+        let custom_path = temporary.path().join("custom.json");
+        let project_gutenberg = built_in_opds_endpoints().into_iter().find(|endpoint| endpoint.id.as_str() == "project-gutenberg").unwrap();
+        save_registry_cache(&curated_path, &registry_from_endpoints(2, &[project_gutenberg])).unwrap();
+
+        let mut store = OpdsEndpointStore::load(curated_path.clone(), custom_path.clone());
+        assert!(store.endpoints().iter().any(|endpoint| endpoint.id.as_str() == "open-library"));
+        let custom = store.add_custom_endpoint("Local books", "http://127.0.0.1:8080/opds").unwrap();
+        assert!(custom.id.as_str().starts_with("custom-"));
+        assert!(store.add_custom_endpoint("Duplicate", "http://127.0.0.1:8080/opds").unwrap_err().to_string().contains("already configured"));
+
+        drop(store);
+        let mut restored = OpdsEndpointStore::load(curated_path, custom_path);
+        assert_eq!(restored.custom_endpoints(), &[custom.clone()]);
+        restored.remove_custom_endpoint(&custom.id).unwrap();
+        assert!(restored.custom_endpoints().is_empty());
+    }
+
+    #[test]
+    fn endpoint_store_enforces_curated_registry_revisions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let curated_path = temporary.path().join("curated.json");
+        let custom_path = temporary.path().join("custom.json");
+        let mut store = OpdsEndpointStore::load(curated_path, custom_path);
+        let endpoint = OpdsEndpoint {
+            id: OpdsEndpointId::parse("example").unwrap(),
+            title: "Example".to_owned(),
+            description: "Books".to_owned(),
+            languages: vec!["English".to_owned()],
+            url: "https://example.com/opds".to_owned(),
+        };
+        store.replace_curated_registry(registry_from_endpoints(2, std::slice::from_ref(&endpoint))).unwrap();
+        let changed = OpdsEndpoint { title: "Changed".to_owned(), ..endpoint.clone() };
+        assert!(store.replace_curated_registry(registry_from_endpoints(2, &[changed])).unwrap_err().to_string().contains("without a revision increment"));
+        assert!(store.replace_curated_registry(registry_from_endpoints(1, &[endpoint])).unwrap_err().to_string().contains("refusing stale"));
     }
 
     #[tokio::test]
@@ -2370,7 +2420,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
-        let (catalog, profile) = OpdsClient::new().unwrap().profile_catalog_fetch(&format!("http://{address}/"), None).await;
+        let (catalog, profile) = OpdsClient::new().unwrap().profile_catalog_fetch(&format!("http://{address}/")).await;
         let catalog = catalog.unwrap();
         assert_eq!(catalog.title, "Discovered");
         assert_eq!(profile.http_fetches, 2);
@@ -2409,20 +2459,20 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
         let client = OpdsClient::new().unwrap();
-        let root = client.fetch_catalog(&format!("http://{address}/root"), None).await.unwrap();
+        let root = client.fetch_catalog(&format!("http://{address}/root")).await.unwrap();
         let urls = root.metadata_prefetch_urls(MAX_PREFETCH_CATALOGS);
         assert_eq!(urls, vec![format!("http://{address}/popular"), format!("http://{address}/new")]);
         let prefetch_client = client.clone();
         let prefetch_root = root.clone();
         let prefetch = tokio::spawn(async move { prefetch_client.prefetch_catalog_metadata(&prefetch_root).await });
         tokio::task::yield_now().await;
-        let clicked = client.fetch_catalog(&urls[0], None).await.unwrap();
+        let clicked = client.fetch_catalog(&urls[0]).await.unwrap();
         prefetch.await.unwrap();
         assert_eq!(clicked.title, "Popular");
         assert_eq!(popular_requests.load(Ordering::SeqCst), 1);
         assert_eq!(new_requests.load(Ordering::SeqCst), 1);
         assert_eq!(cover_requests.load(Ordering::SeqCst), 0);
-        let cached = client.fetch_catalog(&urls[0], None).await.unwrap();
+        let cached = client.fetch_catalog(&urls[0]).await.unwrap();
         assert_eq!(cached.title, "Popular");
         assert_eq!(popular_requests.load(Ordering::SeqCst), 1);
         server.abort();
@@ -2443,17 +2493,17 @@ mod tests {
         let cache_path = temporary.path().join("opds-pages.json");
         let url = format!("http://{address}/catalog");
         let first_client = OpdsClient::with_persistent_cache(cache_path.clone()).unwrap();
-        assert_eq!(first_client.fetch_catalog(&url, None).await.unwrap().title, "Persisted");
+        assert_eq!(first_client.fetch_catalog(&url).await.unwrap().title, "Persisted");
         let mut persisted: PersistentCatalogCache = serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
         persisted.entries[0].stored_at_unix_seconds = unix_seconds_now().saturating_sub(CATALOG_CACHE_TTL.as_secs() + 1);
         std::fs::write(&cache_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
         server.abort();
         let browsing_client = OpdsClient::with_persistent_cache(cache_path.clone()).unwrap();
-        let stale = browsing_client.fetch_catalog(&url, None).await.unwrap();
+        let stale = browsing_client.fetch_catalog(&url).await.unwrap();
         assert_eq!(stale.title, "Persisted");
         assert_eq!(stale.freshness, OpdsCatalogFreshness::Stale);
         let verification_client = OpdsClient::with_persistent_cache(cache_path).unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(2), verification_client.fetch_catalog_fresh(&url, None)).await.unwrap().is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(2), verification_client.fetch_catalog_fresh(&url)).await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -2478,14 +2528,14 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
         let client = OpdsClient::new().unwrap();
         let url = format!("http://{address}/catalog");
-        assert_eq!(client.fetch_catalog(&url, None).await.unwrap().title, "First");
+        assert_eq!(client.fetch_catalog(&url).await.unwrap().title, "First");
         client.catalog_cache.lock().unwrap().entries.get_mut(&url).unwrap().inserted_at = Instant::now().checked_sub(CATALOG_CACHE_TTL + Duration::from_secs(1)).unwrap();
-        let stale = client.fetch_catalog(&url, None).await.unwrap();
+        let stale = client.fetch_catalog(&url).await.unwrap();
         assert_eq!(stale.title, "First");
         assert_eq!(stale.freshness, OpdsCatalogFreshness::Stale);
         let refreshed = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let page = client.fetch_catalog(&url, None).await.unwrap();
+                let page = client.fetch_catalog(&url).await.unwrap();
                 if page.title == "Second" {
                     break page;
                 }

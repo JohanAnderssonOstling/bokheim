@@ -1,6 +1,5 @@
 //! Axum transport adapter for the synchronization server.
 
-mod api_wire;
 mod assets;
 mod bandwidth;
 mod extract;
@@ -16,8 +15,7 @@ use axum::{
 };
 use server_account::PostgresAccountService;
 use server_asset_store::FsAssetStore;
-use server_database::PostgresDatabase;
-use server_postgres::{AssetApplication, PostgresSyncRepository};
+use server_postgres::{AssetApplication, PostgresDatabase, PostgresSyncRepository};
 use state::AppState;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +27,8 @@ pub use bandwidth::TransferLimits;
 pub use notifications::NotificationConfig;
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = server_asset_store::MAX_BOOK_UPLOAD_DURATION;
+const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Coalesces concurrent readiness requests and briefly reuses their result.
 ///
@@ -56,7 +56,7 @@ impl Readiness {
         }
 
         let result = async {
-            tokio::time::timeout(Duration::from_secs(3), server_database::check_ready(&self.database)).await.map_err(|_| "database readiness timed out".to_string())?.map_err(|error| format!("database: {error}"))?;
+            tokio::time::timeout(Duration::from_secs(3), server_postgres::check_ready(&self.database)).await.map_err(|_| "database readiness timed out".to_string())?.map_err(|error| format!("database: {error}"))?;
             tokio::time::timeout(Duration::from_secs(3), self.assets.check_ready()).await.map_err(|_| "asset storage readiness timed out".to_string())?.map_err(|error| format!("asset storage: {error}"))
         }
         .await;
@@ -68,13 +68,11 @@ impl Readiness {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestLimits {
     max_in_flight: usize,
-    timeout: Duration,
-    body_idle_timeout: Duration,
 }
 
 impl Default for RequestLimits {
     fn default() -> Self {
-        Self { max_in_flight: 512, timeout: Duration::from_secs(2 * 60 * 60), body_idle_timeout: Duration::from_secs(60) }
+        Self { max_in_flight: 512 }
     }
 }
 
@@ -82,16 +80,14 @@ impl RequestLimits {
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let max_in_flight = parse_bounded("BOKHEIM_MAX_IN_FLIGHT_REQUESTS", defaults.max_in_flight, 1, 4096)?;
-        let timeout_seconds = parse_bounded("BOKHEIM_REQUEST_TIMEOUT_SECONDS", defaults.timeout.as_secs(), 30, 24 * 60 * 60)?;
-        let body_idle_seconds = parse_bounded("BOKHEIM_BODY_IDLE_TIMEOUT_SECONDS", defaults.body_idle_timeout.as_secs(), 5, 60 * 60)?;
-        Ok(Self { max_in_flight, timeout: Duration::from_secs(timeout_seconds), body_idle_timeout: Duration::from_secs(body_idle_seconds) })
+        Ok(Self { max_in_flight })
     }
 
     pub fn apply(self, router: Router) -> Router {
         // Axum's last applied layer is outermost. Keep the total deadline
         // outside the concurrency limiter so waiting for capacity is bounded
         // too, rather than only timing requests after they acquire a permit.
-        router.layer(ConcurrencyLimitLayer::new(self.max_in_flight)).layer(RequestBodyTimeoutLayer::new(self.body_idle_timeout)).layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, self.timeout))
+        router.layer(ConcurrencyLimitLayer::new(self.max_in_flight)).layer(RequestBodyTimeoutLayer::new(REQUEST_BODY_IDLE_TIMEOUT)).layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
     }
 }
 
@@ -137,90 +133,5 @@ fn readiness_response(result: Result<(), String>) -> (StatusCode, &'static str) 
             tracing::error!(%reason, "readiness probe failed");
             (StatusCode::SERVICE_UNAVAILABLE, "not ready")
         }
-    }
-}
-
-#[cfg(any())]
-mod tests {
-    use super::{parse_bounded, readiness_response, CachedReadiness, ReadinessProbe, RequestLimits};
-    use axum::{
-        extract::State,
-        http::{Request, StatusCode},
-        routing::get,
-        Router,
-    };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-    use std::time::Duration;
-    use tokio::sync::Notify;
-    use tower::ServiceExt;
-
-    struct CountingReadiness {
-        checks: Arc<AtomicUsize>,
-    }
-
-    #[axum::async_trait]
-    impl ReadinessProbe for CountingReadiness {
-        async fn check(&self) -> Result<(), String> {
-            self.checks.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn operational_limit_defaults_are_bounded() {
-        let limits = RequestLimits::default();
-        assert_eq!(limits.max_in_flight, 512);
-        assert_eq!(limits.timeout.as_secs(), 7200);
-        assert_eq!(limits.body_idle_timeout.as_secs(), 60);
-        assert!(parse_bounded::<usize>("UNSET_BOKHEIM_TEST_LIMIT", 12, 1, 20).is_ok());
-        assert!(parse_bounded::<u64>("UNSET_BOKHEIM_TEST_TIMEOUT", 30, 30, 60).is_ok());
-    }
-
-    #[test]
-    fn readiness_failure_is_not_reported_as_a_healthy_process() {
-        assert_eq!(readiness_response(Ok(())), (StatusCode::OK, "ok"));
-        assert_eq!(readiness_response(Err("database unavailable".to_string())), (StatusCode::SERVICE_UNAVAILABLE, "not ready"));
-    }
-
-    #[tokio::test]
-    async fn readiness_checks_are_reused_within_the_cache_window() {
-        let checks = Arc::new(AtomicUsize::new(0));
-        let probe: Arc<dyn ReadinessProbe> = Arc::new(CountingReadiness { checks: checks.clone() });
-        let cached = CachedReadiness::new(probe, Duration::from_secs(5));
-
-        cached.check().await.unwrap();
-        cached.check().await.unwrap();
-
-        assert_eq!(checks.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn total_deadline_includes_time_waiting_for_concurrency() {
-        #[derive(Clone)]
-        struct Gate {
-            entered: Arc<Notify>,
-            release: Arc<Notify>,
-        }
-
-        async fn blocked(State(gate): State<Gate>) -> StatusCode {
-            gate.entered.notify_one();
-            gate.release.notified().await;
-            StatusCode::OK
-        }
-
-        let gate = Gate { entered: Arc::new(Notify::new()), release: Arc::new(Notify::new()) };
-        let limits = RequestLimits { max_in_flight: 1, timeout: Duration::from_millis(50), body_idle_timeout: Duration::from_secs(1) };
-        let app = limits.apply(Router::new().route("/", get(blocked)).with_state(gate.clone()));
-        let first = tokio::spawn(app.clone().oneshot(Request::get("/").body(axum::body::Body::empty()).unwrap()));
-        gate.entered.notified().await;
-
-        let second = tokio::time::timeout(Duration::from_millis(500), app.oneshot(Request::get("/").body(axum::body::Body::empty()).unwrap())).await.expect("the outer deadline must bound the concurrency queue").unwrap();
-        assert_eq!(second.status(), StatusCode::REQUEST_TIMEOUT);
-
-        gate.release.notify_waiters();
-        let _ = first.await;
     }
 }

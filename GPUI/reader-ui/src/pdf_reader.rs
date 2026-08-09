@@ -61,13 +61,13 @@ impl PdfReaderView {
         let visible_page_count = ReaderSettings::preferences(cx).pdf_page_count as usize;
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
         let library = pending.library.clone();
-        let book_id = pending.locator.book_id();
-        let annotations = library.annotations(book_id).map(|items| items.into_iter().filter(|item| item.pdf_anchor().is_some()).collect::<Vec<_>>()).unwrap_or_else(|error| {
-            log::warn!("failed to load PDF annotations for book {book_id}: {error}");
+        let content_hash = pending.locator.content_hash();
+        let annotations = library.annotations(content_hash.clone()).map(|items| items.into_iter().filter(|item| item.pdf_anchor().is_some()).collect::<Vec<_>>()).unwrap_or_else(|error| {
+            log::warn!("failed to load PDF annotations for book {content_hash}: {error}");
             Vec::new()
         });
-        let bookmarks = library.bookmarks(book_id).unwrap_or_else(|error| {
-            log::warn!("failed to load PDF bookmarks for book {book_id}: {error}");
+        let bookmarks = library.bookmarks(content_hash.clone()).unwrap_or_else(|error| {
+            log::warn!("failed to load PDF bookmarks for book {content_hash}: {error}");
             Vec::new()
         });
         let pdf = cx.new(|cx| {
@@ -125,8 +125,8 @@ impl PdfReaderView {
         let bounds_subscription = crate::shell::geometry::observe(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let page_book_id = pending.locator.book_id();
-        let positions = PositionWriter::new(cx, "persist PDF page", move |library, page: &usize| library.update_pdf_reading_page(page_book_id, *page as u32).map_err(|error| error.to_string()), library.clone());
+        let page_content_hash = pending.locator.content_hash();
+        let positions = PositionWriter::new(cx, "persist PDF page", move |library, page: &usize| library.update_pdf_reading_page(page_content_hash.clone(), *page as u32).map_err(|error| error.to_string()), library.clone());
         Self {
             id: pending.id,
             locator: pending.locator,
@@ -274,7 +274,7 @@ impl PdfReaderView {
         let now = Self::now_millis();
         let annotation = ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
-            book_id: self.locator.book_id().canonical(),
+            content_hash: self.locator.content_hash().to_string(),
             anchor,
             exact_text: selection.text,
             style: AnnotationStyle::Highlight,
@@ -368,7 +368,7 @@ impl PdfReaderView {
     fn add_bookmark(&mut self, cx: &mut Context<Self>) {
         let now = Self::now_millis();
         let bookmark =
-            ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), book_id: self.locator.book_id().canonical(), cfi: pdf_page_cfi(self.current_page.saturating_sub(1)), label: self.bookmark_label(), created_at: now, modified_at: now };
+            ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash().to_string(), cfi: pdf_page_cfi(self.current_page.saturating_sub(1)), label: self.bookmark_label(), created_at: now, modified_at: now };
         let stored = bookmark.clone();
         persistence::write(
             cx,

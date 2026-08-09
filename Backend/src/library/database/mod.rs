@@ -3,7 +3,7 @@
 
 use crate::library::Dir;
 use crate::sync::transfer::TransferOrigin;
-use crate::{BlobKind, BookId, BookPlacement, ContentHash, RelativeBookPath};
+use crate::{BlobKind, ContentHash, BookPlacement, RelativeBookPath};
 use crate::{EpubCfi, ReadProgress};
 use crate::{LibraryRoot, RelativeDirPath};
 pub(crate) use bokheim_app_contract::library::BookCardRow;
@@ -13,7 +13,6 @@ use bokheim_domain::{AuthorAuthority, ExternalAuthorId};
 use include_sqlite_sql::{impl_sql, include_sql};
 use rusqlite::functions::{Context as FunctionContext, FunctionFlags};
 use rusqlite::types::Type;
-use rusqlite::OptionalExtension;
 use rusqlite::{Connection, Transaction};
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -27,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use sync_common::MarcRelatorCode;
 use sync_common::{
-    AuthorId, BookId as SyncBookId, ClientId, Contributor, DirId, FileName, MutationId, PublicationIdentifierScheme, PublicationMetadata, PublisherCredit, ReplicaSeq, ServerMutation, UnixMillis,
+    AuthorId, ContentHash as SyncContentHash, ClientId, Contributor, DirId, FileName, MutationId, PublicationIdentifierScheme, PublicationMetadata, PublisherCredit, ReplicaSeq, ServerMutation, UnixMillis,
 };
 use bokheim_domain::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, MutationBody, PdfAnnotationAnchor, PdfAnnotationRect, ReadingPositionState, StateMutation, VersionKey};
 use bokheim_domain::BookFormat;
@@ -48,36 +47,11 @@ include_sql!("src/library/database/sql/scanner.sql");
 include_sql!("src/library/database/sql/sync.sql");
 include_sql!("src/library/database/sql/views.sql");
 
-// Bumped 13 -> 14 to merge `book_author`/`book_contributor` into one
-// relational contributor register (see Contributor in SyncCommon) and drop
-// the wire-encoded `book.authors` BLOB column. `init_db` reacts to an older
-// stored `user_version` by dropping+recreating only the purely rescannable
-// projection tables (`book_author`, `book_contributor`) and altering `book`
-// to drop `authors` — never by dropping `book` itself, since `annotation`,
-// `bookmark`, and `book_link` cascade off `book.id` and hold local-only user
-// data that isn't rescannable from disk. This drop-and-rescan approach is a
-// deliberate pre-1.0 choice, not a permanent migration strategy.
-pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 14;
-
-/// Targeted upgrade for a database created before the merged contributor
-/// schema. A no-op on a fresh database (`stored_version == 0`) or one already
-/// current.
-fn migrate_legacy_contributor_schema(conn: &Connection) -> rusqlite::Result<()> {
-    let stored_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if stored_version == 0 || stored_version >= LIBRARY_SCHEMA_VERSION {
-        return Ok(());
-    }
-    conn.execute_batch("DROP TABLE IF EXISTS book_author; DROP TABLE IF EXISTS book_contributor; DROP VIEW IF EXISTS author_credit; DROP VIEW IF EXISTS book_cards;")?;
-    let has_authors_column = conn.prepare("SELECT 1 FROM pragma_table_info('book') WHERE name = 'authors'")?.query_row([], |row| row.get::<_, i64>(0)).optional()?.is_some();
-    if has_authors_column {
-        conn.execute_batch("ALTER TABLE book DROP COLUMN authors;")?;
-    }
-    Ok(())
-}
-
-fn fallback_content_hash() -> ContentHash {
-    ContentHash::parse(&"0".repeat(64)).unwrap()
-}
+// Version 15 uses the full content hash as the portable book identity and
+// uses integer row IDs for every local relationship. Pre-15 databases are
+// intentionally rebuilt by LibraryBackend::open; there is no compatibility
+// representation or mixed-key migration.
+pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 15;
 
 pub(crate) fn directory_exists(conn: &Connection, directory_id: &str) -> rusqlite::Result<bool> {
     let mut exists = false;
@@ -119,7 +93,7 @@ fn function_error(message: impl Into<String>) -> rusqlite::Error {
 
 fn function_timestamp(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<UnixMillis> {
     let value = context.get::<i64>(index)?;
-    UnixMillis::new(u64::try_from(value).map_err(|_| function_error("negative mutation timestamp"))?).map_err(|error| function_error(error.to_string()))
+    u64::try_from(value).map_err(|_| function_error("negative mutation timestamp"))
 }
 
 fn function_book_format(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<BookFormat> {
@@ -127,8 +101,8 @@ fn function_book_format(context: &FunctionContext<'_>, index: usize) -> rusqlite
     BookFormat::from_extension(&raw).ok_or_else(|| function_error(format!("book format '{raw}' is not a supported book format")))
 }
 
-fn function_book_id(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<SyncBookId> {
-    SyncBookId::parse(&context.get::<String>(index)?).map_err(|error| function_error(error.to_string()))
+fn function_content_hash(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<SyncContentHash> {
+    Ok(SyncContentHash::new(&context.get::<String>(index)?))
 }
 
 fn function_contributors(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<Vec<Contributor>> {
@@ -141,14 +115,14 @@ fn function_contributors(context: &FunctionContext<'_>, index: usize) -> rusqlit
 /// instead of decoding a passed-in blob, since the canonical `book.authors`
 /// column no longer exists — contributor state now only lives relationally.
 fn contributors_for_book(context: &FunctionContext<'_>) -> rusqlite::Result<Vec<u8>> {
-    let book_id = context.get::<String>(0)?;
+    let book_row_id = context.get::<i64>(0)?;
     // SAFETY: `contributors_for_book` is only invoked from within triggers
     // firing on the same connection that owns this function registration;
     // sqlite guarantees the context's db handle is that connection while the
     // triggering statement is executing.
     let connection = unsafe { context.get_connection()? };
-    let mut statement = connection.prepare_cached("SELECT author_identity_id, name, sort_name, role FROM book_contributor WHERE book_id = ?1 ORDER BY position")?;
-    let mut rows = statement.query([&book_id])?;
+    let mut statement = connection.prepare_cached("SELECT author_identity_id, name, sort_name, role FROM book_contributor WHERE book_row_id = ?1 ORDER BY position")?;
+    let mut rows = statement.query([book_row_id])?;
     let mut contributors = Vec::new();
     while let Some(row) = rows.next()? {
         let author_identity_id: i64 = row.get(0)?;
@@ -199,37 +173,36 @@ fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite::Result<Ve
             let dir_id = DirId::parse(&context.get::<String>(1)?).map_err(|error| function_error(error.to_string()))?;
             MutationBody::DirectoryLifecycle { dir_id, deleted: context.get(2)? }
         }
-        "book_lifecycle" if context.len() == 9 || context.len() == 10 => {
-            let book_id = function_book_id(context, 1)?;
+        "book_lifecycle" if context.len() == 9 => {
+            let content_hash = function_content_hash(context, 1)?;
             let value = if context.get::<bool>(2)? {
                 BookLifecycleState::Deleted
             } else {
                 BookLifecycleState::Present {
                     metadata: BookMetadataState { title: context.get(3)?, contributors: function_contributors(context, 4)?, description: context.get(5)?, publication: function_publication(context, 6)? },
                     added_at: function_timestamp(context, 7)?,
-                    content_hash: context.get::<String>(8).map(|raw| ContentHash::parse(&raw).unwrap_or_else(|_| fallback_content_hash())).unwrap_or_else(|_| fallback_content_hash()),
                     // A book is only ever added by the scanner, which refuses to
                     // index a file whose extension it cannot classify, so a live
                     // row always carries a format. There is deliberately no
                     // fallback: an unnamed format would silently become a wrong
                     // filename on every device that downloads the book.
-                    format: function_book_format(context, 9)?,
+                    format: function_book_format(context, 8)?,
                 }
             };
-            MutationBody::BookLifecycle { book_id, value }
+            MutationBody::BookLifecycle { content_hash, value }
         }
         "metadata" if context.len() == 6 => MutationBody::Metadata {
-            book_id: function_book_id(context, 1)?,
+            content_hash: function_content_hash(context, 1)?,
             value: BookMetadataState { title: context.get(2)?, contributors: function_contributors(context, 3)?, description: context.get(4)?, publication: function_publication(context, 5)? },
         },
         "placement" if context.len() == 4 => {
             let dir_id = DirId::parse(&context.get::<String>(1)?).map_err(|error| function_error(error.to_string()))?;
-            let book_id = function_book_id(context, 2)?;
+            let content_hash = function_content_hash(context, 2)?;
             let present = context.get(3)?;
-            MutationBody::Placement { dir_id, book_id, present }
+            MutationBody::Placement { dir_id, content_hash, present }
         }
         "reading_position" if context.len() == 4 => MutationBody::ReadingPosition {
-            book_id: function_book_id(context, 1)?,
+            content_hash: function_content_hash(context, 1)?,
             value: ReadingPositionState { location: sync_common::ReadingPosition::parse(&context.get::<String>(2)?).map_err(|error| function_error(error.to_string()))?, progress: context.get(3)? },
         },
         "annotation" if context.len() == 15 => {
@@ -249,7 +222,7 @@ fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite::Result<Ve
             MutationBody::Annotation {
                 annotation_id: context.get(1)?,
                 value: AnnotationState {
-                    book_id: function_book_id(context, 2)?,
+                    content_hash: function_content_hash(context, 2)?,
                     anchor,
                     exact_text: context.get(8)?,
                     style: function_annotation_style(&context.get::<String>(9)?)?,
@@ -263,13 +236,13 @@ fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite::Result<Ve
         }
         "bookmark" if context.len() == 8 => MutationBody::Bookmark {
             bookmark_id: context.get(1)?,
-            value: BookmarkState { book_id: function_book_id(context, 2)?, cfi: context.get(3)?, label: context.get(4)?, created_at: function_timestamp(context, 5)?, modified_at: function_timestamp(context, 6)?, deleted: context.get(7)? },
+            value: BookmarkState { content_hash: function_content_hash(context, 2)?, cfi: context.get(3)?, label: context.get(4)?, created_at: function_timestamp(context, 5)?, modified_at: function_timestamp(context, 6)?, deleted: context.get(7)? },
         },
         "book_link" if context.len() == 9 => MutationBody::BookLink {
             link_id: context.get(1)?,
             value: BookLinkState {
-                source_book_id: function_book_id(context, 2)?,
-                target_book_id: function_book_id(context, 3)?,
+                source_content_hash: function_content_hash(context, 2)?,
+                target_content_hash: function_content_hash(context, 3)?,
                 relation: context.get(4)?,
                 note: context.get(5)?,
                 created_at: function_timestamp(context, 6)?,
@@ -308,7 +281,7 @@ impl StoredVersion {
         }
         let actor = ClientId::parse(&actor).map_err(|error| invalid_text_column(columns[2], error.to_string()))?;
         let mutation_id = MutationId::parse(&mutation_id).map_err(|error| invalid_text_column(columns[4], error.to_string()))?;
-        let changed_at = UnixMillis::new(nonnegative_u64(changed_at, columns[0], "change timestamp")?).map_err(|error| invalid_integer_column(columns[0], error.to_string()))?;
+        let changed_at = nonnegative_u64(changed_at, columns[0], "change timestamp")?;
         let conflict_rank = bounded_u8(conflict_rank, columns[1], "conflict rank")?;
         let actor_seq = nonnegative_u64(actor_seq, columns[3], "actor sequence")?;
         Ok(Some(Self(VersionKey::new(changed_at, conflict_rank, actor, actor_seq, mutation_id))))
@@ -335,7 +308,6 @@ fn unix_secs() -> Result<i64, rusqlite::Error> {
 
 pub fn init_db(conn: &Connection) -> Result<ClientId, rusqlite::Error> {
     register_sync_functions(conn)?;
-    migrate_legacy_contributor_schema(conn)?;
 
     conn.create_author_identity_table()?;
     conn.create_author_identity_stable_id_index()?;
@@ -349,6 +321,7 @@ pub fn init_db(conn: &Connection) -> Result<ClientId, rusqlite::Error> {
     conn.create_live_dir_path_index()?;
     conn.create_book_dir_table()?;
     conn.create_book_dir_local_hash_index()?;
+    conn.create_book_dir_book_index()?;
     conn.create_live_book_path_index()?;
     conn.create_sync_outbox_table()?;
     conn.create_sync_state_version_table()?;
@@ -394,7 +367,7 @@ pub fn get_or_create_client_id(db: &Connection) -> Result<ClientId, rusqlite::Er
 
 /// Read models used by library browsing pages.
 pub(crate) mod browse;
-pub(crate) use browse::{get_book_ancestor_dir_ids, get_descendant_book_ids, get_folder_download_counts};
+pub(crate) use browse::{get_book_ancestor_dir_ids, get_descendant_content_hashes, get_folder_download_counts};
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
 pub(crate) use browse::{get_known_directory_scan_state, is_book_file_tombstoned, KnownDirectoryState};
 

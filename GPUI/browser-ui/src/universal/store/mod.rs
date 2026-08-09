@@ -2,9 +2,6 @@
 //!
 //! Route-scoped: sources, browsing state, and cover work are discarded when
 //! leaving the store. The selected library id is captured when entering.
-//!
-//! Catalogue authentication is not carried over. Sources requiring sign-in will
-//! report a failure instead of prompting for credentials.
 
 mod browse;
 mod search;
@@ -50,7 +47,6 @@ struct WideSearchGroup {
 #[derive(Clone)]
 enum WideSearchOutcome {
     Results { cards: CatalogCardGroup, external_links: Vec<CatalogLink> },
-    AuthenticationRequired,
     Unsupported,
     TimedOut,
     Failed(String),
@@ -95,7 +91,7 @@ impl StorePage {
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let wide_search_input = cx.new(|cx| InputState::new(window, cx));
         let import_library = library.clone();
-        let import = Rc::new(move |request| Ok(import_library.spawn(move |library| async move { library.import_catalog_book("__root__", &request, None).await.map(|_| ()).map_err(|error| error.to_string()) })));
+        let import = Rc::new(move |request| Ok(import_library.spawn(move |library| async move { library.import_catalog_book("__root__", &request).await.map(|_| ()).map_err(|error| error.to_string()) })));
         let cards = CatalogCardServices::new(&services, import);
         Self { services, library, sources: Arc::new(Vec::new()), mode: StoreMode::Catalogues, cards, loading: false, error: None, task: None, search_input, wide_search_input }
     }

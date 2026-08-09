@@ -1,12 +1,12 @@
 use bokheim_app_contract::catalog::{
     CatalogAuthentication, CatalogAuthorCredit, CatalogAuthorDiscoveryEvidence, CatalogAuthorDiscoveryMatch, CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogBookFormat, CatalogCapability, CatalogDescription,
-    CatalogExternalActionKind, CatalogFacet, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLink, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPasswordRequirement, CatalogPrice, CatalogProviderKind,
+    CatalogExternalActionKind, CatalogFacet, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLink, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPrice, CatalogProviderKind,
     CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentifier, CatalogPublicationIdentity, CatalogSearch, CatalogSearchDefinition, CatalogSearchField, CatalogSearchQuery, CatalogSource, CatalogSourceId,
     CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
 };
 use bokheim_domain::AuthorName;
 use bokheim_opds::{
-    CatalogRegistry, OpdsAcquisition, OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsCatalogLink, OpdsDescription, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointAuthentication, OpdsEndpointId, OpdsFacet, OpdsGroup,
+    CatalogRegistry, OpdsAcquisition, OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsCatalogLink, OpdsDescription, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsFacet, OpdsGroup,
     OpdsLinkTarget, OpdsPrice, OpdsPublication, OpdsPublicationIdentity, OpdsSearch, OpdsSearchQuery,
 };
 use futures_util::stream::{self, StreamExt};
@@ -974,11 +974,8 @@ fn wide_search_concurrency(source_count: usize) -> usize {
 }
 
 async fn search_opds_catalog(client: &bokheim_opds::OpdsClient, source: &CatalogSource, endpoint: &OpdsEndpoint, terms: &str) -> CatalogWideSearchOutcome {
-    if matches!(endpoint.authentication, OpdsEndpointAuthentication::Basic { .. }) {
-        return CatalogWideSearchOutcome::AuthenticationRequired;
-    }
     let search = async {
-        let root = client.fetch_catalog(&endpoint.url, None).await.map_err(|error| error.to_string())?;
+        let root = client.fetch_catalog(&endpoint.url).await.map_err(|error| error.to_string())?;
         validate_opds_catalog_locator(endpoint, &root.source_url).map_err(|error| error.to_string())?;
         let Some(definition) = root.search else { return Ok(None) };
         let search_origin = match &definition {
@@ -996,7 +993,7 @@ async fn search_opds_catalog(client: &bokheim_opds::OpdsClient, source: &Catalog
         } else {
             return Ok(None);
         };
-        let catalog = client.search_definition(&definition, &query, None).await.map_err(|error| error.to_string())?;
+        let catalog = client.search_definition(&definition, &query).await.map_err(|error| error.to_string())?;
         validate_opds_catalog_locator(endpoint, &catalog.source_url).map_err(|error| error.to_string())?;
         Ok::<_, String>(Some(limit_wide_search_page(opds_page(source.id.clone(), catalog))))
     };
@@ -1020,23 +1017,13 @@ fn limit_wide_search_page(mut page: CatalogPage) -> CatalogPage {
 }
 
 pub fn opds_source(endpoint: OpdsEndpoint) -> CatalogSource {
-    let authentication = match endpoint.authentication {
-        OpdsEndpointAuthentication::None => CatalogAuthentication::None,
-        OpdsEndpointAuthentication::Basic { username_label, password } => CatalogAuthentication::Basic {
-            username_label,
-            password: match password {
-                bokheim_opds::OpdsPasswordRequirement::Required => CatalogPasswordRequirement::Required,
-                bokheim_opds::OpdsPasswordRequirement::Empty => CatalogPasswordRequirement::Empty,
-            },
-        },
-    };
     CatalogSource {
         id: opds_catalog_source_id(&endpoint.id),
         provider: CatalogProviderKind::Opds,
         title: endpoint.title,
         description: endpoint.description,
         languages: endpoint.languages,
-        authentication,
+        authentication: CatalogAuthentication::None,
         capabilities: vec![CatalogCapability::Browse, CatalogCapability::Search, CatalogCapability::Facets, CatalogCapability::Import, CatalogCapability::ExternalFulfillment],
     }
 }
@@ -1524,8 +1511,6 @@ mod tests {
             description: "Example".to_owned(),
             languages: vec!["English".to_owned()],
             url: "https://catalog.example/root".to_owned(),
-            access: bokheim_opds::OpdsEndpointAccess::Open,
-            authentication: OpdsEndpointAuthentication::None,
         };
         assert!(validate_opds_catalog_locator(&endpoint, "https://catalog.example/page").is_ok());
         assert!(validate_opds_catalog_locator(&endpoint, "https://attacker.example/page").is_err());
@@ -1541,24 +1526,6 @@ mod tests {
         assert_eq!(advanced.fields, vec![CatalogSearchField::Query, CatalogSearchField::Title, CatalogSearchField::Author]);
         let encoded = bokheim_wire::encode(&advanced).unwrap();
         assert_eq!(bokheim_wire::decode::<CatalogSearch>(&encoded, bokheim_wire::MAX_DECODED_RESPONSE_BYTES).unwrap(), advanced);
-    }
-
-    #[tokio::test]
-    async fn wide_search_reports_authentication_without_contacting_the_catalog() {
-        let endpoint = OpdsEndpoint {
-            id: OpdsEndpointId::parse("members").unwrap(),
-            title: "Members".to_owned(),
-            description: "Members only".to_owned(),
-            languages: vec!["English".to_owned()],
-            url: "https://members.example/catalog".to_owned(),
-            access: bokheim_opds::OpdsEndpointAccess::Membership,
-            authentication: OpdsEndpointAuthentication::Basic { username_label: "Email".to_owned(), password: bokheim_opds::OpdsPasswordRequirement::Required },
-        };
-        let result = search_all_catalogs(&bokheim_opds::OpdsClient::new().unwrap(), vec![endpoint], "history").await.unwrap();
-        assert_eq!(result.query, "history");
-        assert!(matches!(result.groups[0].outcome, CatalogWideSearchOutcome::AuthenticationRequired));
-        assert!(matches!(result.groups[1].outcome, CatalogWideSearchOutcome::Results { .. }));
-        assert!(search_all_catalogs(&bokheim_opds::OpdsClient::new().unwrap(), Vec::new(), " ").await.is_err());
     }
 
     #[tokio::test]
@@ -1593,8 +1560,6 @@ mod tests {
             description: "Local fallback test".to_owned(),
             languages: vec!["English".to_owned()],
             url: format!("http://{address}/root"),
-            access: bokheim_opds::OpdsEndpointAccess::Open,
-            authentication: OpdsEndpointAuthentication::None,
         };
         let request = CatalogAuthorDiscoveryRequest { author_name: "Alex Smith".to_owned(), book_identifiers: vec![CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "9780306406157".to_owned() }] };
 

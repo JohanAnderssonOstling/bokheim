@@ -78,13 +78,13 @@ impl CbzReaderView {
         let bounds_subscription = crate::shell::geometry::observe(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let book_id = pending.locator.book_id();
+        let content_hash = pending.locator.content_hash();
         let positions = PositionWriter::new(
             cx,
             "persist CBZ page",
             move |library, page: &usize| {
                 let progress = if page_count <= 1 { 0.0 } else { *page as f32 / (page_count - 1) as f32 };
-                library.update_reading_position(book_id, &cbz_page_cfi(*page), progress).map_err(|error| error.to_string())
+                library.update_reading_position(content_hash.clone(), &cbz_page_cfi(*page), progress).map_err(|error| error.to_string())
             },
             pending.library.clone(),
         );

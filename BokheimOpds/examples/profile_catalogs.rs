@@ -1,4 +1,4 @@
-use bokheim_opds::{endpoints_from_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointAccess, OpdsEndpointAuthentication, OpdsEndpointId};
+use bokheim_opds::{endpoints_from_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointId};
 use futures_util::{stream, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,13 +24,10 @@ async fn main() {
             description: "Ad hoc profiling target".to_owned(),
             languages: vec!["Unspecified".to_owned()],
             url: url.clone(),
-            access: OpdsEndpointAccess::Open,
-            authentication: OpdsEndpointAuthentication::None,
         }],
         None => endpoints_from_registry(registry)
             .unwrap_or_else(|error| panic!("invalid catalog endpoints: {error}"))
             .into_iter()
-            .filter(|endpoint| endpoint.access == OpdsEndpointAccess::Open)
             .filter(|endpoint| options.only_id.as_deref().is_none_or(|id| endpoint.id.as_str() == id))
             .collect::<Vec<_>>(),
     };
@@ -49,7 +46,7 @@ async fn main() {
 }
 
 async fn profile_endpoint(client: &OpdsClient, endpoint: &OpdsEndpoint, run: usize) {
-    let (result, profile) = client.profile_catalog_fetch(&endpoint.url, None).await;
+    let (result, profile) = client.profile_catalog_fetch(&endpoint.url).await;
     match result {
         Ok(catalog) => {
             let items = catalog.navigation.len() + catalog.publications.len() + catalog.groups.len();

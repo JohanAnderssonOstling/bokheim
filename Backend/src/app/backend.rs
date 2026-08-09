@@ -1,10 +1,7 @@
 use super::data::{AppDataLocation, BackendContext, LibraryEntry};
 use super::executor::{BackendExecutor, BackendTask};
 use super::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
-use crate::catalog::opds::{
-    built_in_opds_endpoints, custom_endpoints_from_registry, endpoints_from_registry, load_custom_registry_cache, load_registry_cache, registry_from_endpoints, save_registry_cache, OpdsCatalog, OpdsClient, OpdsCredentials,
-    OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsPublicationIdentity, OpdsSearch, OpdsSearchQuery,
-};
+use crate::catalog::opds::{built_in_opds_endpoints, OpdsClient, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsEndpointStore, OpdsPublicationIdentity, OpdsSearch};
 use crate::catalog::{
     catalog_page_import_request, catalog_provider_route, catalog_sources, discover_author_books_locally, opds_import_request, opds_page, opds_search_definition, opds_search_query, opds_source, overdrive_page, overdrive_search_page,
     search_opds_catalogs, validate_opds_catalog_locator, CatalogAuthorDiscoveryResult, CatalogCoverCache, CatalogImportRequest, CatalogOwnershipStatus, CatalogPage, CatalogProviderRoute, CatalogPublicationIdentity,
@@ -14,15 +11,14 @@ use crate::library::database as db;
 use crate::library::BookImportDestination;
 use crate::platform::scanner::LibraryEvent;
 use crate::sync::{AssetSync, ReadingPositionSync, SyncPolicy};
-use crate::{BookId, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
-use bokheim_app_contract::frontend::FrontendContract;
+use crate::{ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use serde::Serialize;
 use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -37,7 +33,6 @@ const BACKGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const BACKGROUND_SYNC_DEBOUNCE: Duration = Duration::from_millis(750);
 const READING_POSITION_SYNC_DEBOUNCE: Duration = Duration::from_secs(30);
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
-const MAX_CUSTOM_OPDS_ENDPOINTS: usize = 64;
 const AUTH_REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
 
 fn catalog_ownership_key(source_id: &CatalogSourceId, edition_id: &str) -> String {
@@ -64,13 +59,13 @@ pub struct LibraryCatalogueState {
     pub sync_statuses: Vec<LibrarySyncStatus>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Type)]
 pub struct CatalogPageView {
     pub page: CatalogPage,
     pub owned_editions: HashSet<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Type)]
 pub struct CatalogWideSearchView {
     pub result: CatalogWideSearchResult,
     pub owned_editions: HashSet<String>,
@@ -86,7 +81,7 @@ pub struct CatalogAuthorDiscoveryView {
 pub struct BackendError(String);
 
 impl BackendError {
-    pub(crate) fn message(message: impl Into<String>) -> Self {
+    fn message(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 
@@ -120,9 +115,7 @@ pub(crate) struct AppState {
     opds_client: OpdsClient,
     catalog_server: CatalogServerClient,
     catalog_covers: CatalogCoverCache,
-    opds_endpoints: Mutex<Vec<OpdsEndpoint>>,
-    opds_registry_revision: Mutex<u64>,
-    custom_opds_endpoints: Mutex<Vec<OpdsEndpoint>>,
+    opds_endpoint_store: Mutex<OpdsEndpointStore>,
     event_tx: Sender<AppEvent>,
     event_rx: Mutex<Option<Receiver<AppEvent>>>,
     sync_wake_tx: Sender<()>,
@@ -387,7 +380,7 @@ impl AppBackend {
         Self::initialize_with_executor(location, executor)
     }
 
-    pub fn initialize_with_executor(location: AppDataLocation, executor: BackendExecutor) -> Result<Self, BackendError> {
+    fn initialize_with_executor(location: AppDataLocation, executor: BackendExecutor) -> Result<Self, BackendError> {
         Self::new_with_executor(BackendContext::initialize(location).map_err(BackendError::message)?, executor)
     }
 
@@ -398,18 +391,12 @@ impl AppBackend {
         Self::initialize_with_executor(location, executor)
     }
 
-    /// Reuses the Tokio runtime currently entered on this thread.
-    pub fn initialize_on_current_runtime(location: AppDataLocation) -> Result<Self, BackendError> {
-        let executor = BackendExecutor::from_current_tokio().map_err(BackendError::operation)?;
-        Self::initialize_with_executor(location, executor)
-    }
-
     pub fn new(backend: BackendContext) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         Self::new_with_executor(backend, executor)
     }
 
-    pub fn new_with_executor(backend: BackendContext, executor: BackendExecutor) -> Result<Self, BackendError> {
+    fn new_with_executor(backend: BackendContext, executor: BackendExecutor) -> Result<Self, BackendError> {
         let (event_tx, event_rx) = unbounded();
         let (sync_wake_tx, sync_wake_rx) = bounded(1);
         let pending_sync = Arc::new(Mutex::new(PendingSyncWork::default()));
@@ -421,10 +408,7 @@ impl AppBackend {
         let opds_client = OpdsClient::with_persistent_cache(backend.app_data_dir().join("opds-pages.json")).map_err(BackendError::operation)?;
         let catalog_server = CatalogServerClient::with_persistent_cache(crate::catalog_server_url().as_str(), backend.app_data_dir().join("catalog-server-pages.json")).map_err(BackendError::operation)?;
         let catalog_covers = CatalogCoverCache::new(backend.app_data_dir().join("catalog-covers")).map_err(BackendError::operation)?;
-        let cached_opds = load_registry_cache(&backend.app_data_dir().join("opds-catalogs.json")).ok().flatten().filter(|(_, endpoints)| !endpoints.is_empty());
-        let opds_registry_revision = cached_opds.as_ref().map(|(registry, _)| registry.revision).unwrap_or(0);
-        let opds_endpoints = cached_opds.map(|(_, endpoints)| endpoints).unwrap_or_else(built_in_opds_endpoints);
-        let custom_opds_endpoints = load_custom_registry_cache(&backend.app_data_dir().join("custom-opds-catalogs.json")).ok().flatten().map(|(_, endpoints)| endpoints).unwrap_or_default();
+        let opds_endpoint_store = OpdsEndpointStore::load(backend.app_data_dir().join("opds-catalogs.json"), backend.app_data_dir().join("custom-opds-catalogs.json"));
         backend.transfer_runtime().set_allow_background_on_metered(transfer_preferences.allow_background_on_metered());
         backend.transfer_runtime().set_auto_download_limit_mb(transfer_preferences.auto_download_limit_mb());
         let core = Self {
@@ -439,9 +423,7 @@ impl AppBackend {
                 opds_client,
                 catalog_server,
                 catalog_covers,
-                opds_endpoints: Mutex::new(opds_endpoints),
-                opds_registry_revision: Mutex::new(opds_registry_revision),
-                custom_opds_endpoints: Mutex::new(custom_opds_endpoints),
+                opds_endpoint_store: Mutex::new(opds_endpoint_store),
                 event_tx,
                 event_rx: Mutex::new(Some(event_rx)),
                 sync_wake_tx,
@@ -476,14 +458,6 @@ impl AppBackend {
         Fut: Future<Output = T> + Send + 'static,
     {
         self.state.executor.spawn(operation(self.clone()))
-    }
-
-    pub(crate) fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
-        self.state.executor.block_on(future)
-    }
-
-    pub fn app_data_dir(&self) -> &Path {
-        self.state.backend.app_data_dir()
     }
 
     pub fn take_events(&self) -> Result<Receiver<AppEvent>, BackendError> {
@@ -545,25 +519,7 @@ impl AppBackend {
     }
 
     pub fn opds_endpoints(&self) -> Vec<OpdsEndpoint> {
-        let registered = self.lock(&self.state.opds_endpoints).map(|endpoints| endpoints.clone()).unwrap_or_default();
-        let mut endpoints = built_in_opds_endpoints();
-        for endpoint in registered {
-            if let Some(existing) = endpoints.iter_mut().find(|existing| existing.id == endpoint.id) {
-                *existing = endpoint;
-            } else {
-                endpoints.push(endpoint);
-            }
-        }
-        if let Ok(custom) = self.lock(&self.state.custom_opds_endpoints) {
-            for endpoint in custom.iter().cloned() {
-                if let Some(existing) = endpoints.iter_mut().find(|existing| existing.id == endpoint.id) {
-                    *existing = endpoint;
-                } else {
-                    endpoints.push(endpoint);
-                }
-            }
-        }
-        endpoints
+        self.lock(&self.state.opds_endpoint_store).map(|store| store.endpoints()).unwrap_or_else(|_| built_in_opds_endpoints())
     }
 
     pub fn catalog_sources(&self) -> Vec<CatalogSource> {
@@ -571,11 +527,11 @@ impl AppBackend {
     }
 
     pub fn custom_catalog_sources(&self) -> Result<Vec<CatalogSource>, BackendError> {
-        Ok(self.lock(&self.state.custom_opds_endpoints)?.iter().cloned().map(opds_source).collect())
+        Ok(self.lock(&self.state.opds_endpoint_store)?.custom_endpoints().iter().cloned().map(opds_source).collect())
     }
 
-    pub async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchResult, BackendError> {
-        let custom = self.lock(&self.state.custom_opds_endpoints)?.clone();
+    async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchResult, BackendError> {
+        let custom = self.lock(&self.state.opds_endpoint_store)?.custom_endpoints().to_vec();
         let (shared, device_local) = tokio::join!(self.state.catalog_server.search_catalogs(query), search_opds_catalogs(&self.state.opds_client, custom, query));
         let device_local = device_local.map_err(BackendError::operation)?;
         let mut result = shared.map_err(BackendError::operation)?;
@@ -602,13 +558,13 @@ impl AppBackend {
         }
     }
 
-    pub async fn catalog_page(&self, source_id: &CatalogSourceId, locator: Option<&str>, credentials: Option<&OpdsCredentials>) -> Result<CatalogPage, BackendError> {
+    async fn catalog_page(&self, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPage, BackendError> {
         let Some(endpoint) = self.opds_endpoint_for_catalog_source(source_id)? else {
             return overdrive_page(locator).map_err(BackendError::operation);
         };
         let locator = locator.unwrap_or(&endpoint.url);
         validate_opds_catalog_locator(&endpoint, locator).map_err(BackendError::operation)?;
-        if credentials.is_none() && self.is_server_cached_endpoint(&endpoint) {
+        if self.is_server_cached_endpoint(&endpoint) {
             match self.state.catalog_server.catalog_page(source_id, Some(locator), false).await {
                 Ok(page) => {
                     self.state.catalog_covers.remember_page(&page).await;
@@ -617,25 +573,25 @@ impl AppBackend {
                 Err(error) => log::warn!(target: "catalog", "catalog server page unavailable; using direct OPDS: {error}"),
             }
         }
-        let catalog = self.opds_catalog(locator, credentials).await?;
+        let catalog = self.state.opds_client.fetch_catalog(locator).await.map_err(BackendError::operation)?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(BackendError::operation)?;
         let page = opds_page(source_id.clone(), catalog);
         self.state.catalog_covers.remember_page(&page).await;
         Ok(page)
     }
 
-    pub(crate) async fn catalog_page_in(&self, library_id: &str, source_id: &CatalogSourceId, locator: Option<&str>, credentials: Option<&OpdsCredentials>) -> Result<CatalogPageView, BackendError> {
-        let page = self.catalog_page(source_id, locator, credentials).await?;
+    pub(crate) async fn catalog_page_in(&self, library_id: &str, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPageView, BackendError> {
+        let page = self.catalog_page(source_id, locator).await?;
         let owned_editions = self.owned_catalog_editions_for_page(library_id, source_id, &page);
         Ok(CatalogPageView { page, owned_editions })
     }
 
-    pub async fn search_catalog(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery, credentials: Option<&OpdsCredentials>) -> Result<CatalogPage, BackendError> {
+    async fn search_catalog(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPage, BackendError> {
         if matches!(catalog_provider_route(source_id).map_err(BackendError::operation)?, CatalogProviderRoute::Overdrive) {
             return overdrive_search_page(search, &query).map_err(BackendError::operation);
         }
         let endpoint = self.opds_endpoint_for_catalog_source(source_id)?.ok_or_else(|| BackendError::message("catalog source is not an OPDS provider"))?;
-        if credentials.is_none() && self.is_server_cached_endpoint(&endpoint) {
+        if self.is_server_cached_endpoint(&endpoint) {
             match self.state.catalog_server.search_catalog(source_id, search.clone(), query.clone()).await {
                 Ok(page) => {
                     self.state.catalog_covers.remember_page(&page).await;
@@ -650,15 +606,15 @@ impl AppBackend {
             OpdsSearch::OpenSearchDescription { url } => url,
         };
         validate_opds_catalog_locator(&endpoint, search_origin).map_err(BackendError::operation)?;
-        let catalog = self.search_opds_advanced(&search, &opds_search_query(query), credentials).await?;
+        let catalog = self.state.opds_client.search_definition(&search, &opds_search_query(query)).await.map_err(BackendError::operation)?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(BackendError::operation)?;
         let page = opds_page(source_id.clone(), catalog);
         self.state.catalog_covers.remember_page(&page).await;
         Ok(page)
     }
 
-    pub(crate) async fn search_catalog_in(&self, library_id: &str, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery, credentials: Option<&OpdsCredentials>) -> Result<CatalogPageView, BackendError> {
-        let page = self.search_catalog(source_id, search, query, credentials).await?;
+    pub(crate) async fn search_catalog_in(&self, library_id: &str, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPageView, BackendError> {
+        let page = self.search_catalog(source_id, search, query).await?;
         let owned_editions = self.owned_catalog_editions_for_page(library_id, source_id, &page);
         Ok(CatalogPageView { page, owned_editions })
     }
@@ -676,10 +632,10 @@ impl AppBackend {
     }
 
     fn is_server_cached_endpoint(&self, endpoint: &OpdsEndpoint) -> bool {
-        matches!(endpoint.authentication, crate::catalog::opds::OpdsEndpointAuthentication::None) && self.lock(&self.state.opds_endpoints).is_ok_and(|endpoints| endpoints.iter().any(|candidate| candidate.id == endpoint.id))
+        self.lock(&self.state.opds_endpoint_store).is_ok_and(|store| store.is_curated_endpoint(endpoint))
     }
 
-    pub(crate) fn catalog_ownership_in(&self, _library_id: &str, _source_id: &CatalogSourceId, identities: &[CatalogPublicationIdentity]) -> Result<Vec<CatalogPublicationOwnership>, BackendError> {
+    fn catalog_ownership_in(&self, _library_id: &str, _source_id: &CatalogSourceId, identities: &[CatalogPublicationIdentity]) -> Result<Vec<CatalogPublicationOwnership>, BackendError> {
         Ok(identities.iter().map(|identity| CatalogPublicationOwnership { edition_id: identity.edition_id.clone(), status: CatalogOwnershipStatus::NotOwned }).collect())
     }
 
@@ -693,10 +649,10 @@ impl AppBackend {
             .collect()
     }
 
-    pub(crate) async fn import_catalog_book_in(&self, destination: &BookImportDestination, request: &CatalogImportRequest, credentials: Option<&OpdsCredentials>) -> Result<BookId, BackendError> {
+    pub(crate) async fn import_catalog_book_in(&self, destination: &BookImportDestination, request: &CatalogImportRequest) -> Result<ContentHash, BackendError> {
         let endpoint = self.opds_endpoint_for_catalog_source(&request.source_id)?.ok_or_else(|| BackendError::message("catalog source does not support imports"))?;
         validate_opds_catalog_locator(&endpoint, &request.catalog_locator).map_err(BackendError::operation)?;
-        let server_page = if credentials.is_none() && self.is_server_cached_endpoint(&endpoint) {
+        let server_page = if self.is_server_cached_endpoint(&endpoint) {
             match self.state.catalog_server.catalog_page(&request.source_id, Some(&request.catalog_locator), true).await {
                 Ok(page) => Some(page),
                 Err(error) => {
@@ -710,115 +666,37 @@ impl AppBackend {
         let (source_id, identity, acquisition) = if let Some(page) = server_page {
             catalog_page_import_request(request, &page).map_err(BackendError::operation)?
         } else {
-            let catalog = self.opds_catalog_fresh(&request.catalog_locator, credentials).await?;
+            let catalog = self.state.opds_client.fetch_catalog_fresh(&request.catalog_locator).await.map_err(BackendError::operation)?;
             validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(BackendError::operation)?;
             opds_import_request(request, &catalog).map_err(BackendError::operation)?
         };
-        self.import_opds_book(destination, &source_id, &identity, &acquisition, credentials).await
+        self.import_opds_book(destination, &source_id, &identity, &acquisition).await
     }
 
-    pub fn add_custom_opds_endpoint(&self, title: &str, url: &str, username_label: Option<&str>, password_required: bool) -> Result<OpdsEndpoint, BackendError> {
+    pub fn add_custom_opds_endpoint(&self, title: &str, url: &str) -> Result<OpdsEndpoint, BackendError> {
         let _guard = self.lock(&self.state.catalogue_updates)?;
-        let id = format!("custom-{}", uuid::Uuid::new_v4().simple());
-        let authentication = match username_label.map(str::trim).filter(|label| !label.is_empty()) {
-            Some(label) => bokheim_opds::CatalogAuthentication::Basic { username_label: label.to_owned(), password_required },
-            None => bokheim_opds::CatalogAuthentication::None,
-        };
-        let access = if matches!(authentication, bokheim_opds::CatalogAuthentication::None) { bokheim_opds::CatalogAccess::Open } else { bokheim_opds::CatalogAccess::Membership };
-        let registry = bokheim_opds::CatalogRegistry {
-            schema_version: bokheim_opds::CATALOG_REGISTRY_SCHEMA_VERSION,
-            revision: 1,
-            catalogs: vec![bokheim_opds::CatalogSource { id, title: title.to_owned(), description: "User-supplied OPDS catalog".to_owned(), languages: vec!["Unspecified".to_owned()], url: url.to_owned(), access, authentication }],
-        };
-        let endpoint = custom_endpoints_from_registry(registry).map_err(BackendError::operation)?.into_iter().next().ok_or_else(|| BackendError::message("custom OPDS endpoint was not created"))?;
-        let mut custom = self.lock(&self.state.custom_opds_endpoints)?.clone();
-        if custom.len() >= MAX_CUSTOM_OPDS_ENDPOINTS {
-            return Err(BackendError::message(format!("at most {MAX_CUSTOM_OPDS_ENDPOINTS} custom OPDS catalogs can be configured")));
-        }
-        if custom.iter().any(|candidate| candidate.url == endpoint.url) {
-            return Err(BackendError::message("this custom OPDS catalog is already configured"));
-        }
-        custom.push(endpoint.clone());
-        save_registry_cache(&self.app_data_dir().join("custom-opds-catalogs.json"), &registry_from_endpoints(1, &custom)).map_err(BackendError::operation)?;
-        *self.lock(&self.state.custom_opds_endpoints)? = custom;
-        Ok(endpoint)
+        self.lock(&self.state.opds_endpoint_store)?.add_custom_endpoint(title, url).map_err(BackendError::operation)
     }
 
     pub fn remove_custom_opds_endpoint(&self, endpoint_id: &OpdsEndpointId) -> Result<(), BackendError> {
         let _guard = self.lock(&self.state.catalogue_updates)?;
-        let mut custom = self.lock(&self.state.custom_opds_endpoints)?.clone();
-        let previous_len = custom.len();
-        custom.retain(|endpoint| &endpoint.id != endpoint_id);
-        if custom.len() == previous_len {
-            return Err(BackendError::message("custom OPDS endpoint was not found"));
-        }
-        save_registry_cache(&self.app_data_dir().join("custom-opds-catalogs.json"), &registry_from_endpoints(1, &custom)).map_err(BackendError::operation)?;
-        *self.lock(&self.state.custom_opds_endpoints)? = custom;
-        Ok(())
+        self.lock(&self.state.opds_endpoint_store)?.remove_custom_endpoint(endpoint_id).map_err(BackendError::operation)
     }
 
     pub async fn refresh_opds_endpoints(&self) -> Result<Vec<OpdsEndpoint>, BackendError> {
         let registry = self.state.catalog_server.registry().await.map_err(BackendError::operation)?;
-        let endpoints = endpoints_from_registry(registry.clone()).map_err(BackendError::operation)?;
-        if endpoints.is_empty() {
-            return Err(BackendError::message("the curated OPDS registry is empty"));
-        }
-        let mut current_revision = self.lock(&self.state.opds_registry_revision)?;
-        if registry.revision < *current_revision {
-            return Err(BackendError::message(format!("refusing stale OPDS registry revision {} because revision {} is cached", registry.revision, *current_revision)));
-        }
-        let mut current_endpoints = self.lock(&self.state.opds_endpoints)?;
-        if registry.revision == *current_revision && *current_revision != 0 && endpoints != *current_endpoints {
-            return Err(BackendError::message(format!("OPDS registry revision {} changed without a revision increment", registry.revision)));
-        }
-        save_registry_cache(&self.app_data_dir().join("opds-catalogs.json"), &registry).map_err(BackendError::operation)?;
-        *current_endpoints = endpoints;
-        *current_revision = registry.revision;
-        drop(current_endpoints);
-        drop(current_revision);
-        Ok(self.opds_endpoints())
-    }
-
-    pub fn refresh_opds_endpoints_blocking(&self) -> Result<Vec<OpdsEndpoint>, BackendError> {
-        self.state.executor.block_on(self.refresh_opds_endpoints())
-    }
-
-    pub async fn opds_catalog(&self, url: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, BackendError> {
-        self.state.opds_client.fetch_catalog(url, credentials).await.map_err(BackendError::operation)
-    }
-
-    pub async fn opds_catalog_fresh(&self, url: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, BackendError> {
-        self.state.opds_client.fetch_catalog_fresh(url, credentials).await.map_err(BackendError::operation)
-    }
-
-    pub fn opds_catalog_blocking(&self, url: &str, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, BackendError> {
-        self.state.executor.block_on(self.opds_catalog(url, credentials))
-    }
-
-    pub async fn prefetch_opds_catalog_metadata(&self, catalog: &OpdsCatalog) {
-        self.state.opds_client.prefetch_catalog_metadata(catalog).await;
-    }
-
-    pub fn prefetch_opds_catalog_metadata_blocking(&self, catalog: &OpdsCatalog) -> Result<(), BackendError> {
-        self.state.executor.block_on(self.prefetch_opds_catalog_metadata(catalog));
-        Ok(())
-    }
-
-    pub async fn search_opds_advanced(&self, search: &OpdsSearch, query: &OpdsSearchQuery, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, BackendError> {
-        self.state.opds_client.search_definition(search, query, credentials).await.map_err(BackendError::operation)
-    }
-
-    pub fn search_opds_advanced_blocking(&self, search: &OpdsSearch, query: &OpdsSearchQuery, credentials: Option<&OpdsCredentials>) -> Result<OpdsCatalog, BackendError> {
-        self.state.executor.block_on(self.search_opds_advanced(search, query, credentials))
+        let mut store = self.lock(&self.state.opds_endpoint_store)?;
+        store.replace_curated_registry(registry).map_err(BackendError::operation)?;
+        Ok(store.endpoints())
     }
 
     #[rustfmt::skip]
-    pub(crate) async fn import_opds_book(&self, destination: &BookImportDestination, source_id: &OpdsEndpointId, identity: &OpdsPublicationIdentity, acquisition: &OpdsDirectAcquisition, credentials: Option<&OpdsCredentials>) -> Result<BookId, BackendError> {
+    async fn import_opds_book(&self, destination: &BookImportDestination, source_id: &OpdsEndpointId, identity: &OpdsPublicationIdentity, acquisition: &OpdsDirectAcquisition) -> Result<ContentHash, BackendError> {
         identity.validate().map_err(BackendError::operation)?;
         let _ = source_id;
         let library = self.library(destination.library_id().as_str())?;
-        let temporary_directory = self.app_data_dir().join("opds-downloads");
-        let download = self.state.opds_client.download_book(acquisition, credentials, &temporary_directory).await.map_err(BackendError::operation)?;
+        let temporary_directory = self.state.backend.app_data_dir().join("opds-downloads");
+        let download = self.state.opds_client.download_book(acquisition, &temporary_directory).await.map_err(BackendError::operation)?;
         let directory_id = destination.directory_id().clone();
         tokio::task::spawn_blocking(move || library.import_book(directory_id.as_str(), download.path(), download.file_name()).map_err(|error| error.to_string()))
             .await
@@ -896,14 +774,14 @@ impl AppBackend {
         Ok(result)
     }
 
-    pub(crate) async fn download_book_in(&self, library_id: &str, book_id: BookId) -> Result<crate::DownloadState, BackendError> {
+    pub(crate) async fn download_book_in(&self, library_id: &str, content_hash: ContentHash) -> Result<crate::DownloadState, BackendError> {
         let library = self.library(library_id)?;
-        if matches!(library.download_state(book_id)?, crate::DownloadState::Downloaded) {
+        if matches!(library.download_state(content_hash.clone())?, crate::DownloadState::Downloaded) {
             return Ok(crate::DownloadState::Downloaded);
         }
-        library.request_book_download(book_id).map_err(BackendError::operation)?;
+        library.request_book_download(content_hash.clone()).map_err(BackendError::operation)?;
         self.sync_library(&library).await?;
-        library.download_state(book_id)
+        library.download_state(content_hash)
     }
 
     pub(crate) async fn download_folder_in(&self, library_id: &str, dir_id: crate::DirId) -> Result<FolderDownloadStatus, BackendError> {
@@ -1368,17 +1246,9 @@ impl AppBackend {
         self.state.backend.apply_browsing_preference_patch(patch).map_err(BackendError::operation)
     }
 
-    pub fn has_persisted_reader_preferences(&self) -> bool {
-        self.state.backend.reader_preferences_path().exists()
-    }
-
     pub fn update_reader_preference(&self, patch: ReaderPreferencePatch) -> Result<ReaderPreferences, BackendError> {
         let _guard = self.lock(&self.state.preference_updates)?;
         self.state.backend.apply_reader_preference_patch(patch).map_err(BackendError::operation)
-    }
-
-    pub fn frontend_contract(&self) -> FrontendContract {
-        FrontendContract::default()
     }
 
     pub fn adopt_session(&self, session: crate::auth::Session) -> Result<(), BackendError> {
@@ -1398,13 +1268,6 @@ impl AppBackend {
             return Err(error);
         }
         self.request_background_sync();
-        Ok(())
-    }
-
-    pub fn clear_library_sessions(&self) -> Result<(), BackendError> {
-        crate::auth::clear_session_from(&self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
-        *self.lock(&self.state.account)? = None;
-        *self.lock(&self.state.active_library)? = None;
         Ok(())
     }
 
@@ -1441,9 +1304,10 @@ impl AppBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::super::preferences::{ApplicationTheme, BrowsingPreferencePatch, ReaderPreferenceKey, ReaderTheme, UiFontFamily};
+    use super::super::preferences::{ApplicationTheme, BrowsingPreferencePatch, ReaderTheme, UiFontFamily};
     use super::*;
     use lopdf::{dictionary, Document, Object, Stream};
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Barrier;
 
@@ -1567,14 +1431,11 @@ mod tests {
     }
 
     #[test]
-    fn tokio_host_constructors_borrow_the_host_runtime() {
+    fn tokio_host_constructor_borrows_the_host_runtime() {
         let root = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
         let explicit = AppBackend::initialize_on_tokio_runtime(AppDataLocation::PlatformLocal(root.path().join("explicit")), runtime.handle().clone()).unwrap();
         assert!(!explicit.state.executor.owns_runtime());
-        drop(explicit);
-        let current = runtime.block_on(async { AppBackend::initialize_on_current_runtime(AppDataLocation::PlatformLocal(root.path().join("current"))).unwrap() });
-        assert!(!current.state.executor.owns_runtime());
     }
 
     #[test]
@@ -1596,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn app_backend_exposes_canonical_preferences_and_capabilities() {
+    fn app_backend_persists_canonical_preferences() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().to_path_buf())).unwrap();
         let preferences = core.update_reader_preference(ReaderPreferencePatch::Theme(ReaderTheme::Dark)).unwrap();
@@ -1606,9 +1467,6 @@ mod tests {
         let browsing = core.update_browsing_preference(BrowsingPreferencePatch::InterfaceFont(UiFontFamily::Serif)).unwrap();
         assert_eq!(browsing.interface_font(), UiFontFamily::Serif);
         assert_eq!(browsing.heading_font(), UiFontFamily::Serif);
-        let contract = core.frontend_contract().reader_preferences;
-        assert!(contract.foliate_capabilities.supports(ReaderPreferenceKey::Theme));
-        assert!(contract.native_capabilities.supports(ReaderPreferenceKey::Theme));
     }
 
     #[test]
@@ -1681,12 +1539,12 @@ mod tests {
         let live = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
         core.adopt_session(live).unwrap();
         let expired = crate::auth::Session::try_new_with_expiry(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43), Some(1)).unwrap();
-        crate::auth::save_session_to(&expired, &core.app_data_dir().join("session.json")).unwrap();
+        crate::auth::save_session_to(&expired, &core.state.backend.app_data_dir().join("session.json")).unwrap();
         *core.lock(&core.state.account).unwrap() = Some(expired);
 
         assert!(!core.account_status().unwrap().signed_in());
         assert_eq!(core.library(entry.library_id().as_str()).unwrap().account_state().unwrap().bound_user_id.as_deref(), Some("user-1"));
-        assert!(!core.app_data_dir().join("session.json").exists());
+        assert!(!core.state.backend.app_data_dir().join("session.json").exists());
     }
 
     #[test]
@@ -1699,7 +1557,7 @@ mod tests {
         core.adopt_session(session).unwrap();
 
         assert!(core.account_status().unwrap().signed_in());
-        assert!(core.app_data_dir().join("session.json").exists());
+        assert!(core.state.backend.app_data_dir().join("session.json").exists());
     }
 
     #[test]
@@ -1735,7 +1593,7 @@ mod tests {
         let account = library.account_state().unwrap();
         assert!(account.signed_in);
         assert_eq!(account.bound_user_id.as_deref(), Some("user-1"));
-        let registry = std::fs::read_to_string(core.app_data_dir().join("libraries.csv")).unwrap();
+        let registry = std::fs::read_to_string(core.state.backend.app_data_dir().join("libraries.csv")).unwrap();
         assert!(!registry.contains("sync_"));
     }
 
@@ -1786,13 +1644,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app_data = root.path().join("app-data");
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
-        let endpoint = core.add_custom_opds_endpoint("Local books", "http://127.0.0.1:8080/opds", Some("Member"), true).unwrap();
+        let endpoint = core.add_custom_opds_endpoint("Local books", "http://127.0.0.1:8080/opds").unwrap();
         assert!(endpoint.id.as_str().starts_with("custom-"));
         assert_eq!(endpoint.id.as_str().len(), "custom-".len() + 32);
         let source_id = crate::catalog::opds_catalog_source_id(&endpoint.id);
         assert!(core.custom_catalog_sources().unwrap().iter().any(|source| source.id == source_id));
         assert!(!core.is_server_cached_endpoint(&endpoint));
-        assert!(core.add_custom_opds_endpoint("Duplicate", "http://127.0.0.1:8080/opds", None, false).unwrap_err().to_string().contains("already configured"));
+        assert!(core.add_custom_opds_endpoint("Duplicate", "http://127.0.0.1:8080/opds").unwrap_err().to_string().contains("already configured"));
         drop(core);
         let restored = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
         assert_eq!(restored.custom_catalog_sources().unwrap().iter().map(|source| source.id.clone()).collect::<Vec<_>>(), vec![source_id.clone()]);
@@ -1805,8 +1663,11 @@ mod tests {
     #[test]
     fn bundled_catalogues_remain_available_when_the_cached_registry_is_incomplete() {
         let root = tempfile::tempdir().unwrap();
-        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        core.state.opds_endpoints.lock().unwrap().retain(|endpoint| endpoint.id.as_str() == "project-gutenberg");
+        let app_data = root.path().join("app-data");
+        let project_gutenberg = built_in_opds_endpoints().into_iter().find(|endpoint| endpoint.id.as_str() == "project-gutenberg").unwrap();
+        let registry = bokheim_opds::registry_from_endpoints(1, &[project_gutenberg]);
+        bokheim_opds::save_registry_cache(&app_data.join("opds-catalogs.json"), &registry).unwrap();
+        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data)).unwrap();
 
         let endpoints = core.opds_endpoints();
 
@@ -1829,9 +1690,9 @@ mod tests {
         let source_task = tokio::spawn(async move { axum::serve(source_listener, source).await.unwrap() });
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        let endpoint = core.add_custom_opds_endpoint("Redirecting", &format!("http://{source_address}/root"), None, false).unwrap();
+        let endpoint = core.add_custom_opds_endpoint("Redirecting", &format!("http://{source_address}/root")).unwrap();
         let source_id = crate::catalog::opds_catalog_source_id(&endpoint.id);
-        let error = core.catalog_page(&source_id, None, None).await.unwrap_err();
+        let error = core.catalog_page(&source_id, None).await.unwrap_err();
         assert!(error.to_string().contains("registered OPDS origin"), "{error}");
         source_task.abort();
         destination_task.abort();

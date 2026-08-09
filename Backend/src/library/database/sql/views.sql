@@ -28,17 +28,18 @@ SELECT id, path FROM dir_path;
 -- the `role = X'617574'` (MarcRelatorCode::AUTHOR) literal is not repeated
 -- across every query that only cares about credited authors.
 CREATE VIEW IF NOT EXISTS author_credit AS
-SELECT book_id, position, author_identity_id, name AS credited_name, sort_name
+SELECT book_row_id, position, author_identity_id, name AS credited_name, sort_name
 FROM book_contributor
 WHERE role = X'617574';
 
 CREATE VIEW IF NOT EXISTS book_cards AS
 SELECT
-    book.id AS book_id,
+    book.row_id AS book_row_id,
+    book.content_hash,
     book.title,
     COALESCE((
         SELECT group_concat(credit.credited_name, ', ')
-        FROM (SELECT credited_name FROM author_credit WHERE book_id = book.id ORDER BY position) AS credit
+        FROM (SELECT credited_name FROM author_credit WHERE book_row_id = book.row_id ORDER BY position) AS credit
     ), '') AS author,
     book.description,
     CASE
@@ -57,7 +58,7 @@ SELECT
     END AS progress,
     EXISTS (
         SELECT 1 FROM book_dir placement
-        WHERE placement.book_id = book.id
+        WHERE placement.book_row_id = book.row_id
           AND placement.deleted_at IS NULL
           AND placement.is_downloaded = 1
     ) AS downloaded,
@@ -66,23 +67,23 @@ SELECT
         JOIN download_requests request
           ON request.target_kind = 'book'
          AND request.target_key = book.content_hash
-        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
     ) AS download_requested,
     EXISTS (
         SELECT 1 FROM book_dir placement
-        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
           AND LOWER(placement.file_name) LIKE '%.m4b'
     ) AS audiobook,
     (
         SELECT metadata.duration_ms FROM book_dir placement
         JOIN audiobook_metadata metadata ON metadata.content_hash = book.content_hash
-        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
         ORDER BY placement.rowid DESC LIMIT 1
     ) AS audiobook_duration_ms,
     (
         SELECT metadata.chapter_count FROM book_dir placement
         JOIN audiobook_metadata metadata ON metadata.content_hash = book.content_hash
-        WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+        WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
         ORDER BY placement.rowid DESC LIMIT 1
     ) AS audiobook_chapter_count
 FROM book
@@ -90,5 +91,5 @@ WHERE book.deleted_at IS NULL
   AND book.hidden_at IS NULL
   AND EXISTS (
       SELECT 1 FROM book_dir placement
-      WHERE placement.book_id = book.id AND placement.deleted_at IS NULL
+      WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
   );

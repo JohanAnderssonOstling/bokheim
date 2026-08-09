@@ -60,11 +60,11 @@ WHERE dir_id = :dir_id
 
 -- name: book_has_live_placement?
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 SELECT EXISTS(
     SELECT 1
     FROM book_dir
     WHERE dir_id = :dir_id
-      AND book_id = :book_id
+      AND book_row_id = (SELECT row_id FROM book WHERE content_hash=:content_hash)
       AND deleted_at IS NULL
 );

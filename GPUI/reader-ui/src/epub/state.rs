@@ -74,9 +74,9 @@ impl ReaderView {
             this.handle_toolbar_event(*event, window, cx);
         });
         focus.focus(window, cx);
-        let reading_book_id = pending.locator.book_id();
+        let reading_content_hash = pending.locator.content_hash();
         let reading_positions =
-            PositionWriter::new(cx, "save reading position", move |library, (cfi, progress): &(String, f32)| library.update_reading_position(reading_book_id, cfi, *progress).map_err(|error| error.to_string()), pending.library.clone());
+            PositionWriter::new(cx, "save reading position", move |library, (cfi, progress): &(String, f32)| library.update_reading_position(reading_content_hash.clone(), cfi, *progress).map_err(|error| error.to_string()), pending.library.clone());
 
         let reader = Self {
             id: pending.id,
@@ -124,7 +124,7 @@ impl ReaderView {
         let publication = match result {
             Ok(publication) => publication,
             Err(error) => {
-                log::error!("failed to load reader {} for book {}: {error}", self.id.0, self.locator.book_id());
+                log::error!("failed to load reader {} for book {}: {error}", self.id.0, self.locator.content_hash());
                 self.load_state = LoadState::Failed;
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
                 return;
@@ -171,14 +171,14 @@ impl ReaderView {
     }
 
     fn load_reader_state(&mut self, cx: &mut Context<Self>) {
-        let book_id = self.locator.book_id();
+        let content_hash = self.locator.content_hash();
         persistence::write(
             cx,
             self.library.clone(),
             "load reader state",
             move |library| {
-                let annotations = library.annotations(book_id).map_err(|error| error.to_string())?;
-                let bookmarks = library.bookmarks(book_id).map_err(|error| error.to_string())?;
+                let annotations = library.annotations(content_hash.clone()).map_err(|error| error.to_string())?;
+                let bookmarks = library.bookmarks(content_hash).map_err(|error| error.to_string())?;
                 Ok((annotations, bookmarks))
             },
             |this, cx, (annotations, bookmarks)| {
@@ -197,7 +197,7 @@ impl ReaderView {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0);
         let annotation = epub_svelte_lib::library::marks::ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
-            book_id: self.locator.book_id().canonical(),
+            content_hash: self.locator.content_hash().to_string(),
             anchor: epub_svelte_lib::library::marks::AnnotationAnchor::epub_cfi(selection.cfi_range),
             exact_text: selection.text,
             style: epub_svelte_lib::library::marks::AnnotationStyle::Highlight,
@@ -295,7 +295,7 @@ impl ReaderView {
     pub(crate) fn add_bookmark(&mut self, cx: &mut Context<Self>) {
         let Some(cfi) = self.current_cfi.clone() else { return };
         let now = Self::now_millis();
-        let bookmark = epub_svelte_lib::library::marks::ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), book_id: self.locator.book_id().canonical(), cfi, label: self.display_title(), created_at: now, modified_at: now };
+        let bookmark = epub_svelte_lib::library::marks::ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash().to_string(), cfi, label: self.display_title(), created_at: now, modified_at: now };
         let stored = bookmark.clone();
         persistence::write(
             cx,

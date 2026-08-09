@@ -10,7 +10,7 @@ use bokheim_ui_runtime::BlockingWorker;
 use epub_svelte_lib::library::ReaderFormat;
 #[cfg(any(feature = "pdf", feature = "audiobooks"))]
 use epub_svelte_lib::library::ResolvedBook;
-use epub_svelte_lib::{BookId, BookLocator, LibraryBackend};
+use epub_svelte_lib::{ContentHash, BookLocator, LibraryBackend};
 use gpui::{AnyWindowHandle, App, AppContext, Bounds, Global, SharedString, Subscription, WeakEntity, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
@@ -88,7 +88,7 @@ pub fn configure_audio_backend(backend: Arc<dyn crate::NativeAudioBackend>, cx: 
 
 pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryBackend, cx: &mut App) {
     let startup_started = Instant::now();
-    startup_phase!("phase=request book_id={} elapsed_ms=0", locator.book_id());
+    startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
     #[cfg(feature = "kobo")]
     if let Err(error) = gpui_kobo::begin_book_launch_profile(startup_started) {
         log::error!("failed to start Kobo book launch profile: {error}");
@@ -98,23 +98,23 @@ pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryB
     let prepare_dispatched_at = Instant::now();
     let prepare = blocking_worker.dispatch(move || {
         let worker_started = Instant::now();
-        startup_phase!("phase=prepare_worker_started book_id={} elapsed_ms={} queue_ms={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), prepare_dispatched_at.elapsed().as_millis(),);
+        startup_phase!("phase=prepare_worker_started content_hash={} elapsed_ms={} queue_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), prepare_dispatched_at.elapsed().as_millis(),);
 
         let phase_started = Instant::now();
-        let book = library.resolve_book_for_reader(prepare_locator.book_id()).map_err(|error| format!("stage=book_resolve: {error}"))?;
-        startup_phase!("phase=path_resolved book_id={} elapsed_ms={} phase_ms={} path={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(), book.path.display(),);
+        let book = library.resolve_book_for_reader(prepare_locator.content_hash()).map_err(|error| format!("stage=book_resolve: {error}"))?;
+        startup_phase!("phase=path_resolved content_hash={} elapsed_ms={} phase_ms={} path={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(), book.path.display(),);
 
         let prepared = match book.format {
             #[cfg(feature = "pdf")]
             ReaderFormat::Pdf => {
                 let phase_started = Instant::now();
-                let initial_page = library.pdf_reading_page(prepare_locator.book_id()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0) as usize;
-                startup_phase!("phase=reading_position_ready book_id={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.book_id(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
+                let initial_page = library.pdf_reading_page(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0) as usize;
+                startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
                 PreparedBook::Pdf { book, initial_page }
             }
             #[cfg(feature = "audiobooks")]
             ReaderFormat::Audiobook => {
-                let initial_position = library.audiobook_reading_position(prepare_locator.book_id()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0);
+                let initial_position = library.audiobook_reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0);
                 PreparedBook::Audiobook { book, initial_position: Duration::from_millis(initial_position) }
             }
             #[cfg(not(feature = "audiobooks"))]
@@ -122,28 +122,28 @@ pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryB
             _ => {
                 let phase_started = Instant::now();
                 let publication = crate::publication::NativePublication::from_reader(&book.path, book.reader).map_err(|error| format!("stage=publication_open: {error}"))?;
-                startup_phase!("phase=publication_opened book_id={} elapsed_ms={} phase_ms={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
-                let nav_state = library.reading_position(prepare_locator.book_id()).map_err(|error| format!("stage=reading_position: {error}"))?;
+                startup_phase!("phase=publication_opened content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
+                let nav_state = library.reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?;
                 PreparedBook::Publication { publication: Arc::new(publication), nav_state }
             }
         };
-        startup_phase!("phase=prepare_worker_complete book_id={} elapsed_ms={} worker_ms={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), worker_started.elapsed().as_millis(),);
+        startup_phase!("phase=prepare_worker_complete content_hash={} elapsed_ms={} worker_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), worker_started.elapsed().as_millis(),);
         Ok::<_, String>((library, prepared))
     });
     cx.spawn(async move |cx| {
         let Ok(result) = prepare.recv().await else {
             return;
         };
-        startup_phase!("phase=prepare_result_received book_id={} elapsed_ms={}", locator.book_id(), startup_started.elapsed().as_millis(),);
+        startup_phase!("phase=prepare_result_received content_hash={} elapsed_ms={}", locator.content_hash(), startup_started.elapsed().as_millis(),);
         cx.update(|cx| {
             let (library, prepared) = match result {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    log::error!("cannot open book {} in library {}: {error}", locator.book_id(), locator.library_id());
+                    log::error!("cannot open book {} in library {}: {error}", locator.content_hash(), locator.library_id());
                     return;
                 }
             };
-            startup_phase!("phase=prepared book_id={} elapsed_ms={}", locator.book_id(), startup_started.elapsed().as_millis());
+            startup_phase!("phase=prepared content_hash={} elapsed_ms={}", locator.content_hash(), startup_started.elapsed().as_millis());
             open_prepared_reader_window(locator, title, library, prepared, startup_started, cx);
         });
     })
@@ -172,11 +172,11 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, library: Lib
         move |window, cx| match prepared {
             #[cfg(feature = "audiobooks")]
             PreparedBook::Audiobook { book, initial_position } => {
-                let book_id = locator_for_window.book_id();
+                let content_hash = locator_for_window.content_hash();
                 let positions = PositionWriter::new(
                     cx,
                     "persist audiobook position",
-                    move |library, (position, progress): &(Duration, f32)| library.update_audiobook_reading_position(book_id, position.as_millis() as u64, *progress).map_err(|error| error.to_string()),
+                    move |library, (position, progress): &(Duration, f32)| library.update_audiobook_reading_position(content_hash.clone(), position.as_millis() as u64, *progress).map_err(|error| error.to_string()),
                     library_for_window.clone(),
                 );
                 let save_position: audiobook_player::SavePlaybackPosition = Rc::new(move |position, progress| positions.record((position, progress), "audiobook position"));
@@ -207,12 +207,12 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, library: Lib
     ) {
         Ok(handle) => handle,
         Err(error) => {
-            log::error!("failed to open reader window for book {}: {error}", locator.book_id());
+            log::error!("failed to open reader window for book {}: {error}", locator.content_hash());
             return;
         }
     };
     let Some(reader) = reader_out.borrow_mut().take() else {
-        log::error!("reader window for book {} was created without a reader view", locator.book_id());
+        log::error!("reader window for book {} was created without a reader view", locator.content_hash());
         return;
     };
     cx.default_global::<ReaderWindowRegistry>().windows.insert(id, ReaderRecord { locator, handle: handle.into(), view: reader });
@@ -223,12 +223,12 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, library: Lib
     }
 }
 
-pub fn handle_book_removed(library_id: &str, book_id: BookId, cx: &mut App) {
+pub fn handle_book_removed(library_id: &str, content_hash: ContentHash, cx: &mut App) {
     let readers = cx
         .default_global::<ReaderWindowRegistry>()
         .windows
         .values()
-        .filter(|record| record.locator.library_id().as_str() == library_id && record.locator.book_id() == book_id)
+        .filter(|record| record.locator.library_id().as_str() == library_id && record.locator.content_hash() == content_hash)
         .map(|record| match &record.view {
             ReaderViewHandle::Epub(view) => ReaderViewHandle::Epub(view.clone()),
             ReaderViewHandle::Cbz(view) => ReaderViewHandle::Cbz(view.clone()),
@@ -243,20 +243,20 @@ pub fn handle_book_removed(library_id: &str, book_id: BookId, cx: &mut App) {
             ReaderViewHandle::Epub(reader) => {
                 let _ = reader.update(cx, |reader, _| {
                     reader.unavailable = true;
-                    log::warn!("book {} disappeared while reader {} remained open", reader.locator.book_id(), reader.id.0);
+                    log::warn!("book {} disappeared while reader {} remained open", reader.locator.content_hash(), reader.id.0);
                 });
             }
             #[cfg(feature = "pdf")]
             ReaderViewHandle::Pdf(reader) => {
                 let _ = reader.update(cx, |reader, _| {
                     reader.unavailable = true;
-                    log::warn!("book {} disappeared while PDF reader {} remained open", reader.locator.book_id(), reader.id.0);
+                    log::warn!("book {} disappeared while PDF reader {} remained open", reader.locator.content_hash(), reader.id.0);
                 });
             }
             ReaderViewHandle::Cbz(reader) => {
                 let _ = reader.update(cx, |reader, _| {
                     reader.unavailable = true;
-                    log::warn!("book {} disappeared while CBZ reader {} remained open", reader.locator.book_id(), reader.id.0);
+                    log::warn!("book {} disappeared while CBZ reader {} remained open", reader.locator.content_hash(), reader.id.0);
                 });
             }
             #[cfg(feature = "audiobooks")]

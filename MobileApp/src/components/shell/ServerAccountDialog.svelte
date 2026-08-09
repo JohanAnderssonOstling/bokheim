@@ -108,7 +108,7 @@
           {#each libraryTransfers as group (group.library_id)}
             {#each group.transfers as transfer (transfer.id)}
               <div class="transfer-row">
-                <span class="library-copy"><strong>{transfer.book_id ?? "Library asset"}</strong><small>{group.library_name} · {transferKindLabel(transfer.kind)} · attempt {transfer.attempts}{#if transfer.path} · {transfer.path}{/if}{#if transfer.last_error} · {transfer.last_error}{/if}</small></span>
+                <span class="library-copy"><strong>{transfer.book_content_hash ?? "Library asset"}</strong><small>{group.library_name} · {transferKindLabel(transfer.kind)} · attempt {transfer.attempts}{#if transfer.path} · {transfer.path}{/if}{#if transfer.last_error} · {transfer.last_error}{/if}</small></span>
                 <span class:running={transfer.state === "running"} class="sync-membership">{transfer.state}</span>
               </div>
             {/each}

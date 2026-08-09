@@ -9,11 +9,11 @@ function randomUuid() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
-export function createBookLink(sourceBookId: string, targetBookId: string, relation: string, note: string, now = Date.now()): BookLink {
+export function createBookLink(sourceContentHash: string, targetContentHash: string, relation: string, note: string, now = Date.now()): BookLink {
   return {
     id: randomUuid(),
-    source_book_id: sourceBookId,
-    target_book_id: targetBookId,
+    source_content_hash: sourceContentHash,
+    target_content_hash: targetContentHash,
     relation: relation.trim(),
     note: note.trim(),
     created_at: now,

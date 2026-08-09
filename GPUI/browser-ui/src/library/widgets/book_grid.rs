@@ -77,11 +77,11 @@ impl BookGrid {
 
     /// Reuses card entities for books that remain in the result set.
     pub(crate) fn set_books<P: 'static>(&mut self, books: Vec<BookCardRow>, cx: &mut Context<P>) {
-        let previous_order = self.cards.iter().map(|card| card.read(cx).book_id()).collect::<Vec<_>>();
-        let mut existing = self.cards.drain(..).map(|card| (card.read(cx).book_id(), card)).collect::<HashMap<_, _>>();
+        let previous_order = self.cards.iter().map(|card| card.read(cx).content_hash()).collect::<Vec<_>>();
+        let mut existing = self.cards.drain(..).map(|card| (card.read(cx).content_hash(), card)).collect::<HashMap<_, _>>();
         let mut cards = Vec::with_capacity(books.len());
         for book in books {
-            if let Some(view) = existing.remove(&book.book_id) {
+            if let Some(view) = existing.remove(&book.content_hash) {
                 view.update(cx, |view, cx| view.set_book(book, self.show_progress, cx));
                 cards.push(view);
                 continue;
@@ -90,7 +90,7 @@ impl BookGrid {
             let show_progress = self.show_progress;
             cards.push(cx.new(|cx| BookCardView::new(book, ui, show_progress, cx)));
         }
-        let order_changed = previous_order != cards.iter().map(|card| card.read(cx).book_id()).collect::<Vec<_>>();
+        let order_changed = previous_order != cards.iter().map(|card| card.read(cx).content_hash()).collect::<Vec<_>>();
         self.cards = cards;
         if order_changed {
             cx.notify();

@@ -36,14 +36,14 @@ impl LibraryBackend {
         fs::create_dir_all(metadata_dir.join("thumbnails"))?;
         let db_path = metadata_dir.join("library.db");
 
-        // A stale-but-recognized schema version is migrated in place by
-        // `db::init_db` (see `migrate_legacy_contributor_schema`), preserving
-        // local-only user data (annotations, bookmarks, book links). Only a
-        // database whose `user_version` isn't a valid PRAGMA integer at all
-        // (corrupt or foreign file) is wiped and rebuilt from scratch.
+        // The content-hash/row-id schema deliberately has no compatibility
+        // mode. A stale, corrupt, or foreign database is rebuilt and the
+        // scanner repopulates it from the library files.
         if db_path.exists() {
-            let readable = rusqlite::Connection::open(&db_path).and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))).is_ok();
-            if !readable {
+            let current = rusqlite::Connection::open(&db_path)
+                .and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)))
+                .is_ok_and(|version| version == db::LIBRARY_SCHEMA_VERSION);
+            if !current {
                 for suffix in ["", "-wal", "-shm"] {
                     let mut path = db_path.as_os_str().to_os_string();
                     path.push(suffix);

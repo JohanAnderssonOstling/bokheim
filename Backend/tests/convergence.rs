@@ -10,7 +10,7 @@
 //! Exercise the real HTTP/PostgreSQL boundary as well:
 //! `Backend/tests/run_sync_e2e.sh`
 
-use crate::{db, BookId, ContentHash};
+use crate::{db, ContentHash};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use bokheim_domain::{
@@ -20,7 +20,7 @@ use bokheim_domain::{
 };
 use sync_common::{
     ClientId, Contributor, DirId, FileName, LibraryRevision, MarcRelatorCode, MutationId,
-    ReplicaSeq, ServerMutation, UnixMillis,
+    ReplicaSeq, ServerMutation,
 };
 
 #[derive(Clone)]
@@ -78,11 +78,11 @@ impl FakeServer {
 
     /// Mirrors placement resolution with the protocol's total VersionKey,
     /// independently of server arrival order.
-    fn live_books_by_version(&self) -> HashSet<BookId> {
+    fn live_books_by_version(&self) -> HashSet<ContentHash> {
         self.all_rows()
             .into_iter()
             .filter_map(|row| match &row.change.body {
-                MutationBody::Placement { present: true, book_id, .. } => Some(*book_id),
+                MutationBody::Placement { present: true, content_hash, .. } => Some(content_hash.clone()),
                 _ => None,
             })
             .collect()
@@ -106,11 +106,11 @@ impl Device {
         Self { replica_id: ClientId::parse(replica_id).expect("valid test actor id"), cursor: 0, conn }
     }
 
-    fn seed_book(&self, book_id: BookId) {
+    fn seed_book(&self, content_hash: ContentHash) {
         self.remote_sql(
-            "INSERT OR IGNORE INTO book(id, title, added_at, deleted_at)
+            "INSERT OR IGNORE INTO book(content_hash, title, added_at, deleted_at)
              VALUES (?1, 'seed', 1, NULL)",
-            params![book_id.canonical()],
+            params![content_hash.as_str()],
         );
     }
 
@@ -122,20 +122,19 @@ impl Device {
         );
     }
 
-    fn seed_placement(&self, book_id: BookId, dir_id: &str, file_name: &str, content_hash: &ContentHash, changed_at: u64) {
+    fn seed_placement(&self, content_hash: ContentHash, dir_id: &str, file_name: &str, changed_at: u64) {
         let event_id = "11111111-1111-5111-8111-111111111111";
         // A placement is (book, directory); the file name is local-only and the
         // content identity belongs to the book, not to the placement.
         self.remote_sql(
-            "INSERT INTO book_dir(dir_id, book_id, file_name, local_hash, is_downloaded, last_scan, deleted_at)
-             VALUES (?1, ?2, ?3, 'fingerprint', 1, 1, NULL)
-             ON CONFLICT(dir_id, book_id) DO UPDATE SET
+            "INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded, last_scan, deleted_at)
+             VALUES (?1, (SELECT row_id FROM book WHERE content_hash=?2), ?3, 'fingerprint', 1, 1, NULL)
+             ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
                  file_name=excluded.file_name,
                  deleted_at=NULL",
-            params![dir_id, book_id.canonical(), file_name],
+            params![dir_id, content_hash.as_str(), file_name],
         );
-        self.remote_sql("UPDATE book SET content_hash=?2 WHERE id=?1", params![book_id.canonical(), content_hash.as_str()]);
-        self.force_state_version("placement", &book_id.canonical(), dir_id, changed_at, 0, "0-legacy", 1, event_id);
+        self.force_state_version("placement", content_hash.as_str(), dir_id, changed_at, 0, "0-legacy", 1, event_id);
     }
 
     /// Writes the durable winning version for one state cell. Merge ordering
@@ -158,20 +157,20 @@ impl Device {
             .expect("force deterministic state version");
     }
 
-    fn set_reading_position(&self, book_id: BookId, cfi: &str) {
-        self.remote_sql("UPDATE book SET read_pos=?2 WHERE id=?1", params![book_id.canonical(), cfi]);
+    fn set_reading_position(&self, content_hash: ContentHash, cfi: &str) {
+        self.remote_sql("UPDATE book SET read_pos=?2 WHERE content_hash=?1", params![content_hash.as_str(), cfi]);
     }
 
-    fn set_book_deleted(&self, book_id: BookId, deleted: bool) {
+    fn set_book_deleted(&self, content_hash: ContentHash, deleted: bool) {
         let deleted_at = deleted.then_some(1_i64);
-        self.remote_sql("UPDATE book SET deleted_at=?2 WHERE id=?1", params![book_id.canonical(), deleted_at]);
+        self.remote_sql("UPDATE book SET deleted_at=?2 WHERE content_hash=?1", params![content_hash.as_str(), deleted_at]);
     }
 
     #[allow(dead_code)]
-    fn set_placement_deleted(&self, book_id: BookId, dir_id: &str, deleted: bool, changed_at: u64) {
+    fn set_placement_deleted(&self, content_hash: ContentHash, dir_id: &str, deleted: bool, changed_at: u64) {
         let deleted_at = deleted.then_some(1_i64);
-        self.remote_sql("UPDATE book_dir SET deleted_at=?3 WHERE dir_id=?1 AND book_id=?2", params![dir_id, book_id.canonical(), deleted_at]);
-        self.force_state_version("placement", &book_id.canonical(), dir_id, changed_at, i64::from(deleted), "0-legacy", 1, "11111111-1111-5111-8111-111111111112");
+        self.remote_sql("UPDATE book_dir SET deleted_at=?3 WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", params![dir_id, content_hash.as_str(), deleted_at]);
+        self.force_state_version("placement", content_hash.as_str(), dir_id, changed_at, i64::from(deleted), "0-legacy", 1, "11111111-1111-5111-8111-111111111112");
     }
 
     fn queue(&self, change: &StateMutation) {
@@ -184,13 +183,13 @@ impl Device {
                  ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
                     replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
                     body=excluded.body, changed_at=excluded.changed_at",
-                params![change.mutation_id.to_string(), state_kind, state_key, state_subkey, sync_common::wire::encode(&change.body).unwrap(), change.changed_at.storage_i64(), change.body.conflict_rank()],
+                params![change.mutation_id.to_string(), state_kind, state_key, state_subkey, sync_common::wire::encode(&change.body).unwrap(), i64::try_from(change.changed_at).unwrap(), change.body.conflict_rank()],
             )
             .expect("queue local mutation");
         let local_seq = self.conn.last_insert_rowid();
-        if let MutationBody::BookLifecycle { book_id, .. } = &change.body {
+        if let MutationBody::BookLifecycle { content_hash, .. } = &change.body {
             let replica_id = self.replica_id.as_str().to_owned();
-            self.force_state_version("book_lifecycle", &book_id.canonical(), "", change.changed_at.get(), change.body.conflict_rank() as i64, &replica_id, local_seq, &change.mutation_id.to_string());
+            self.force_state_version("book_lifecycle", content_hash.as_str(), "", change.changed_at, change.body.conflict_rank() as i64, &replica_id, local_seq, &change.mutation_id.to_string());
         }
     }
 
@@ -224,41 +223,41 @@ impl Device {
         Ok(())
     }
 
-    fn read_position(&self, book_id: BookId) -> String {
-        self.conn.query_row("SELECT read_pos FROM book WHERE id=?1", params![book_id.canonical()], |row| row.get(0)).expect("book read position")
+    fn read_position(&self, content_hash: ContentHash) -> String {
+        self.conn.query_row("SELECT read_pos FROM book WHERE content_hash=?1", params![content_hash.as_str()], |row| row.get(0)).expect("book read position")
     }
 
-    fn book_is_live(&self, book_id: BookId) -> bool {
-        self.conn.query_row("SELECT deleted_at IS NULL FROM book WHERE id=?1", params![book_id.canonical()], |row| row.get(0)).expect("book liveness")
+    fn book_is_live(&self, content_hash: ContentHash) -> bool {
+        self.conn.query_row("SELECT deleted_at IS NULL FROM book WHERE content_hash=?1", params![content_hash.as_str()], |row| row.get(0)).expect("book liveness")
     }
 
     /// Content identity belongs to the book; a placement only records membership
     /// in a directory. Returns None when the placement is not live, so callers
     /// must distinguish "no placement" from "placement with unknown bytes".
-    fn placement_hash(&self, book_id: BookId, dir_id: &str) -> Option<ContentHash> {
+    fn placement_hash(&self, content_hash: ContentHash, dir_id: &str) -> Option<ContentHash> {
         self.conn
             .query_row(
                 "SELECT book.content_hash FROM book_dir
-                 JOIN book ON book.id = book_dir.book_id
-                 WHERE book_dir.dir_id=?1 AND book_dir.book_id=?2
+                 JOIN book ON book.row_id = book_dir.book_row_id
+                 WHERE book_dir.dir_id=?1 AND book.content_hash=?2
                    AND book_dir.deleted_at IS NULL",
-                params![dir_id, book_id.canonical()],
+                params![dir_id, content_hash.as_str()],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .expect("placement lookup")
-            .and_then(|hash| ContentHash::parse(&hash).ok())
+            .map(|hash| ContentHash::new(&hash))
     }
 
-    fn live_placements(&self, dir_id: &str) -> Vec<BookId> {
-        let mut statement = self.conn.prepare("SELECT book_id FROM book_dir WHERE dir_id=?1 AND deleted_at IS NULL ORDER BY book_id").expect("prepare placement query");
+    fn live_placements(&self, dir_id: &str) -> Vec<ContentHash> {
+        let mut statement = self.conn.prepare("SELECT book.content_hash FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id WHERE dir_id=?1 AND book_dir.deleted_at IS NULL ORDER BY book.content_hash").expect("prepare placement query");
         let ids = statement.query_map(params![dir_id], |row| row.get::<_, String>(0)).expect("query placements").collect::<Result<Vec<_>, _>>().expect("read placements");
-        ids.iter().map(|id| BookId::parse(id).expect("stored book id")).collect()
+        ids.iter().map(|id| ContentHash::new(&id.as_str())).collect()
     }
 
-    fn placement_is_live(&self, book_id: BookId, dir_id: &str) -> bool {
+    fn placement_is_live(&self, content_hash: ContentHash, dir_id: &str) -> bool {
         self.conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM book_dir WHERE dir_id=?1 AND book_id=?2 AND deleted_at IS NULL)", params![dir_id, book_id.canonical()], |row| row.get(0))
+            .query_row("SELECT EXISTS(SELECT 1 FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id WHERE dir_id=?1 AND book.content_hash=?2 AND book_dir.deleted_at IS NULL)", params![dir_id, content_hash.as_str()], |row| row.get(0))
             .expect("placement liveness")
     }
 
@@ -277,13 +276,13 @@ fn outbox_storage_key(body: &MutationBody) -> (&'static str, String) {
         MutationBody::DirectoryName { dir_id, .. } => ("directory_name", dir_id.as_str().to_owned()),
         MutationBody::DirectoryParent { dir_id, .. } => ("directory_parent", dir_id.as_str().to_owned()),
         MutationBody::DirectoryLifecycle { dir_id, .. } => ("directory_lifecycle", dir_id.as_str().to_owned()),
-        MutationBody::BookLifecycle { book_id, .. } => ("book_lifecycle", book_id.canonical()),
-        MutationBody::Placement { book_id, .. } => ("placement", book_id.canonical()),
-        MutationBody::ReadingPosition { book_id, .. } => ("reading_position", book_id.canonical()),
+        MutationBody::BookLifecycle { content_hash, .. } => ("book_lifecycle", content_hash.to_string()),
+        MutationBody::Placement { content_hash, .. } => ("placement", content_hash.to_string()),
+        MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone()),
         MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone()),
         MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone()),
-        MutationBody::Metadata { book_id, .. } => ("metadata", book_id.canonical()),
+        MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string()),
     }
 }
 
@@ -303,35 +302,35 @@ fn outbox_storage_subkey(body: &MutationBody) -> String {
 }
 
 fn change(body: MutationBody, pt: u64) -> StateMutation {
-    StateMutation { mutation_id: MutationId::new(), body, changed_at: UnixMillis::new(pt).unwrap(), replica_seq: ReplicaSeq::new(1).unwrap() }
+    StateMutation { mutation_id: MutationId::new(), body, changed_at: pt, replica_seq: ReplicaSeq::new(1).unwrap() }
 }
 
 fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookMetadataState {
     BookMetadataState { title: title.into(), contributors: authors, description: description.into(), publication: Default::default() }
 }
 
-fn placement_add(book_id: BookId, dir_id: &str, _file_name: &str, _content_hash: &ContentHash, pt: u64) -> StateMutation {
-    change(MutationBody::Placement { dir_id: DirId::parse(dir_id).unwrap(), book_id, present: true }, pt)
+fn placement_add(content_hash: ContentHash, dir_id: &str, _file_name: &str, _content_hash: &ContentHash, pt: u64) -> StateMutation {
+    change(MutationBody::Placement { dir_id: DirId::parse(dir_id).unwrap(), content_hash, present: true }, pt)
 }
 
-fn placement_remove(book_id: BookId, dir_id: &str, _file_name: &str, pt: u64) -> StateMutation {
-    change(MutationBody::Placement { dir_id: DirId::parse(dir_id).unwrap(), book_id, present: false }, pt)
+fn placement_remove(content_hash: ContentHash, dir_id: &str, _file_name: &str, pt: u64) -> StateMutation {
+    change(MutationBody::Placement { dir_id: DirId::parse(dir_id).unwrap(), content_hash, present: false }, pt)
 }
 
-fn reading_position(book_id: BookId, location: impl Into<String>, progress: f32, pt: u64) -> StateMutation {
+fn reading_position(content_hash: ContentHash, location: impl Into<String>, progress: f32, pt: u64) -> StateMutation {
     let location = location.into();
-    change(MutationBody::ReadingPosition { book_id, value: ReadingPositionState { location: sync_common::ReadingPosition::parse(&location).unwrap(), progress } }, pt)
+    change(MutationBody::ReadingPosition { content_hash, value: ReadingPositionState { location: sync_common::ReadingPosition::parse(&location).unwrap(), progress } }, pt)
 }
 
-fn book_present(book_id: BookId, title: impl Into<String>, added_at: u64, pt: u64) -> StateMutation {
+fn book_present(content_hash: ContentHash, title: impl Into<String>, added_at: u64, pt: u64) -> StateMutation {
     change(
-        MutationBody::BookLifecycle { book_id, value: BookLifecycleState::Present { metadata: metadata(title, Vec::new(), ""), added_at: UnixMillis::new(added_at).unwrap(), content_hash: ContentHash::parse(&"a".repeat(64)).unwrap(), format: BookFormat::Epub } },
+        MutationBody::BookLifecycle { content_hash, value: BookLifecycleState::Present { metadata: metadata(title, Vec::new(), ""), added_at, format: BookFormat::Epub } },
         pt,
     )
 }
 
-fn book_deleted(book_id: BookId, pt: u64) -> StateMutation {
-    change(MutationBody::BookLifecycle { book_id, value: BookLifecycleState::Deleted }, pt)
+fn book_deleted(content_hash: ContentHash, pt: u64) -> StateMutation {
+    change(MutationBody::BookLifecycle { content_hash, value: BookLifecycleState::Deleted }, pt)
 }
 
 fn directory_present(dir_id: &str, parent_id: &str, name: &str, pt: u64) -> [StateMutation; 3] {
@@ -353,7 +352,7 @@ fn accept_directory(server: &mut FakeServer, actor: &str, dir_id: &str, parent_i
 #[test]
 fn fake_server_deduplicates_append_retries() {
     let mut server = FakeServer::default();
-    let event = book_present(BookId::new(1), "Book", 1, 1);
+    let event = book_present(ContentHash::from_fixture_u64(1), "Book", 1, 1);
 
     let replica_id = ClientId::parse("device").unwrap();
     server.accept(&replica_id, event.clone());
@@ -364,21 +363,21 @@ fn fake_server_deduplicates_append_retries() {
 
 #[test]
 fn equal_wall_time_singleton_conflict_converges() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     // z wins the server's exact-wall-time replica-id tie.
     let mut a = Device::new("z-device");
     let mut b = Device::new("a-device");
     for device in [&a, &b] {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
-    let a_change = reading_position(book_id, "epubcfi(/6/2)", 20.0, 100);
-    a.set_reading_position(book_id, "epubcfi(/6/2)");
+    let a_change = reading_position(content_hash, "epubcfi(/6/2)", 20.0, 100);
+    a.set_reading_position(content_hash, "epubcfi(/6/2)");
     a.queue(&a_change);
 
-    let b_change = reading_position(book_id, "epubcfi(/6/4)", 40.0, 100);
-    b.set_reading_position(book_id, "epubcfi(/6/4)");
+    let b_change = reading_position(content_hash, "epubcfi(/6/4)", 40.0, 100);
+    b.set_reading_position(content_hash, "epubcfi(/6/4)");
     b.queue(&b_change);
 
     b.push(&mut server);
@@ -387,29 +386,29 @@ fn equal_wall_time_singleton_conflict_converges() {
     a.pull(&server);
     b.pull(&server);
 
-    assert_eq!(a.read_position(book_id), b.read_position(book_id));
+    assert_eq!(a.read_position(content_hash), b.read_position(content_hash));
 }
 
 #[test]
 fn annotation_updates_and_tombstones_converge() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let annotation_id = "46d3716b-a9ea-4942-830b-cbaf95673dd5".to_owned();
     let mut server = FakeServer::default();
     let mut a = Device::new("annotation-a");
     let mut b = Device::new("annotation-b");
     for device in [&a, &b] {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
     let state = |note: &str, modified_at: i64, deleted| AnnotationState {
-        book_id,
+        content_hash,
         anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4,/1:0,/1:4)"),
         exact_text: "Text".to_owned(),
         style: AnnotationStyle::Highlight,
         color: "#f6c945".to_owned(),
         note: note.to_owned(),
-        created_at: UnixMillis::new(1).unwrap(),
-        modified_at: UnixMillis::new(u64::try_from(modified_at).unwrap()).unwrap(),
+        created_at: 1,
+        modified_at: u64::try_from(modified_at).unwrap(),
         deleted,
     };
     server.accept(&ClientId::parse("writer-a").unwrap(), change(MutationBody::Annotation { annotation_id: annotation_id.clone(), value: state("old", 10, false) }, 10));
@@ -435,12 +434,12 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
     const CYCLES: usize = 24;
     const OFFLINE_UPDATES_PER_CYCLE: usize = 7;
 
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     let mut devices = vec![Device::new("partition-a"), Device::new("partition-b"), Device::new("partition-c")];
     let device_count = devices.len();
     for device in &devices {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
     for cycle in 0..CYCLES {
@@ -454,8 +453,8 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
         for update in 0..OFFLINE_UPDATES_PER_CYCLE {
             let pt = base_time + update as u64 + if offline_wins { 50 } else { 0 };
             let cfi = format!("epubcfi(/6/{})", cycle * 100 + update + 2);
-            devices[isolated].set_reading_position(book_id, &cfi);
-            devices[isolated].queue(&reading_position(book_id, cfi, 0.0, pt));
+            devices[isolated].set_reading_position(content_hash, &cfi);
+            devices[isolated].queue(&reading_position(content_hash, cfi, 0.0, pt));
         }
 
         // Connected replicas continue independently while the selected device
@@ -464,8 +463,8 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
             let actor = (isolated + offset) % device_count;
             let pt = base_time + 20 + offset as u64;
             let cfi = format!("epubcfi(/8/{})", cycle * 10 + offset);
-            devices[actor].set_reading_position(book_id, &cfi);
-            devices[actor].queue(&reading_position(book_id, cfi, 0.0, pt));
+            devices[actor].set_reading_position(content_hash, &cfi);
+            devices[actor].queue(&reading_position(content_hash, cfi, 0.0, pt));
             devices[actor].push(&mut server);
         }
         for offset in 1..device_count {
@@ -487,9 +486,9 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
             device.pull(&server);
         }
 
-        let expected = devices[0].read_position(book_id);
+        let expected = devices[0].read_position(content_hash);
         for (index, device) in devices.iter().enumerate().skip(1) {
-            assert_eq!(device.read_position(book_id), expected, "cycle {cycle}: replica {index} diverged after partition healing");
+            assert_eq!(device.read_position(content_hash), expected, "cycle {cycle}: replica {index} diverged after partition healing");
         }
     }
 
@@ -501,76 +500,76 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
 
 #[test]
 fn concurrent_book_add_delete_converges() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     let mut a = Device::new("a-device");
     let mut b = Device::new("b-device");
     for device in [&a, &b] {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
-    a.queue(&book_present(book_id, "seed", 1, 100));
-    b.set_book_deleted(book_id, true);
-    b.queue(&book_deleted(book_id, 101));
+    a.queue(&book_present(content_hash, "seed", 1, 100));
+    b.set_book_deleted(content_hash, true);
+    b.queue(&book_deleted(content_hash, 101));
 
     a.push(&mut server);
     b.push(&mut server);
     a.pull(&server);
     b.pull(&server);
 
-    assert_eq!(a.book_is_live(book_id), b.book_is_live(book_id));
-    assert!(!a.book_is_live(book_id), "the higher-version deletion must win");
+    assert_eq!(a.book_is_live(content_hash), b.book_is_live(content_hash));
+    assert!(!a.book_is_live(content_hash), "the higher-version deletion must win");
 }
 
 #[test]
 fn equal_wall_time_book_add_delete_converges_to_deleted() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     let mut a = Device::new("z-device");
     let mut b = Device::new("a-device");
     for device in [&a, &b] {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
-    a.queue(&book_present(book_id, "seed", 1, 100));
-    b.set_book_deleted(book_id, true);
-    b.queue(&book_deleted(book_id, 100));
+    a.queue(&book_present(content_hash, "seed", 1, 100));
+    b.set_book_deleted(content_hash, true);
+    b.queue(&book_deleted(content_hash, 100));
 
     a.push(&mut server);
     b.push(&mut server);
     a.pull(&server);
     b.pull(&server);
 
-    assert!(!a.book_is_live(book_id));
-    assert!(!b.book_is_live(book_id));
+    assert!(!a.book_is_live(content_hash));
+    assert!(!b.book_is_live(content_hash));
 }
 
 #[test]
 fn equal_wall_clock_placement_adds_converge() {
-    let book_id = BookId::new(1);
-    let a_hash = ContentHash::parse(&"a".repeat(64)).unwrap();
-    let b_hash = ContentHash::parse(&"b".repeat(64)).unwrap();
+    let content_hash = ContentHash::from_fixture_u64(1);
+    let a_hash = ContentHash::new(&"a".repeat(64));
+    let b_hash = ContentHash::new(&"b".repeat(64));
     let mut server = FakeServer::default();
     let mut a = Device::new("a-device");
     let mut b = Device::new("b-device");
     for device in [&a, &b] {
         device.seed_dir("d1", "Shelf");
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
     // A placement records only that this book belongs to this directory, so two
     // devices asserting it at the same wall clock must end up agreeing.
-    a.seed_placement(book_id, "d1", "book.epub", &a_hash, 100);
-    a.queue(&placement_add(book_id, "d1", "book.epub", &a_hash, 100));
-    b.seed_placement(book_id, "d1", "book.epub", &b_hash, 100);
-    b.queue(&placement_add(book_id, "d1", "book.epub", &b_hash, 100));
+    a.seed_placement(content_hash, "d1", "book.epub", 100);
+    a.queue(&placement_add(content_hash, "d1", "book.epub", &a_hash, 100));
+    b.seed_placement(content_hash, "d1", "book.epub", 100);
+    b.queue(&placement_add(content_hash, "d1", "book.epub", &b_hash, 100));
 
     a.push(&mut server);
     b.push(&mut server);
     a.pull(&server);
     b.pull(&server);
 
-    assert!(a.placement_is_live(book_id, "d1"));
+    assert!(a.placement_is_live(content_hash, "d1"));
     assert_eq!(a.live_placements("d1"), b.live_placements("d1"));
 }
 
@@ -578,23 +577,22 @@ fn equal_wall_clock_placement_adds_converge() {
 /// a device that has only ever pulled still learns which bytes the book is.
 #[test]
 fn book_content_identity_arrives_with_the_lifecycle_register() {
-    let book_id = BookId::new(1);
-    let hash = ContentHash::parse(&"a".repeat(64)).unwrap();
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     let mut a = Device::new("a-device");
     let mut b = Device::new("b-device");
     for device in [&a, &b] {
         device.seed_dir("d1", "Shelf");
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
-    a.seed_placement(book_id, "d1", "book.epub", &hash, 100);
-    a.queue(&book_present(book_id, "Book", 10, 100));
-    a.queue(&placement_add(book_id, "d1", "book.epub", &hash, 100));
+    a.seed_placement(content_hash, "d1", "book.epub", 100);
+    a.queue(&book_present(content_hash, "Book", 10, 100));
+    a.queue(&placement_add(content_hash, "d1", "book.epub", &content_hash, 100));
     a.push(&mut server);
     b.pull(&server);
 
-    assert_eq!(b.placement_hash(book_id, "d1"), Some(hash), "the pulled lifecycle carries the book's content identity");
+    assert_eq!(b.placement_hash(content_hash, "d1"), Some(content_hash), "the pulled lifecycle carries the book's content identity");
 }
 
 /// Two different books may occupy one directory at once. The old model made a
@@ -602,10 +600,10 @@ fn book_content_identity_arrives_with_the_lifecycle_register() {
 /// names are local-only now, so both placements stay live on every device.
 #[test]
 fn two_books_placed_in_one_directory_both_stay_live() {
-    let first = BookId::new(1);
-    let second = BookId::new(2);
-    let first_hash = ContentHash::parse(&"a".repeat(64)).unwrap();
-    let second_hash = ContentHash::parse(&"b".repeat(64)).unwrap();
+    let first = ContentHash::from_fixture_u64(1);
+    let second = ContentHash::from_fixture_u64(2);
+    let first_hash = ContentHash::new(&"a".repeat(64));
+    let second_hash = ContentHash::new(&"b".repeat(64));
     let mut server = FakeServer::default();
     let mut a = Device::new("a-device");
     let mut b = Device::new("b-device");
@@ -615,9 +613,9 @@ fn two_books_placed_in_one_directory_both_stay_live() {
         device.seed_book(second);
     }
 
-    a.seed_placement(first, "d1", "book.epub", &first_hash, 100);
+    a.seed_placement(first, "d1", "book.epub", 100);
     a.queue(&placement_add(first, "d1", "book.epub", &first_hash, 100));
-    b.seed_placement(second, "d1", "book.epub", &second_hash, 110);
+    b.seed_placement(second, "d1", "book.epub", 110);
     b.queue(&placement_add(second, "d1", "book.epub", &second_hash, 110));
 
     a.push(&mut server);
@@ -633,54 +631,53 @@ fn two_books_placed_in_one_directory_both_stay_live() {
 /// add restores the placement rather than being suppressed by its tombstone.
 #[test]
 fn placement_removal_and_readd_converge_by_wall_clock() {
-    let book_id = BookId::new(1);
-    let hash = ContentHash::parse(&"a".repeat(64)).unwrap();
+    let content_hash = ContentHash::from_fixture_u64(1);
+    let hash = ContentHash::new(&"a".repeat(64));
     let mut server = FakeServer::default();
     let mut a = Device::new("a-device");
     let mut b = Device::new("b-device");
     for device in [&a, &b] {
         device.seed_dir("d1", "Shelf");
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
-    a.seed_placement(book_id, "d1", "book.epub", &hash, 100);
-    a.queue(&placement_add(book_id, "d1", "book.epub", &hash, 100));
+    a.seed_placement(content_hash, "d1", "book.epub", 100);
+    a.queue(&placement_add(content_hash, "d1", "book.epub", &hash, 100));
     a.push(&mut server);
     b.pull(&server);
-    assert!(b.placement_is_live(book_id, "d1"));
+    assert!(b.placement_is_live(content_hash, "d1"));
 
-    b.set_placement_deleted(book_id, "d1", true, 200);
-    b.queue(&placement_remove(book_id, "d1", "book.epub", 200));
+    b.set_placement_deleted(content_hash, "d1", true, 200);
+    b.queue(&placement_remove(content_hash, "d1", "book.epub", 200));
     b.push(&mut server);
     a.pull(&server);
-    assert!(!a.placement_is_live(book_id, "d1"), "a newer removal wins over the add it follows");
+    assert!(!a.placement_is_live(content_hash, "d1"), "a newer removal wins over the add it follows");
 
-    a.seed_placement(book_id, "d1", "book.epub", &hash, 300);
-    a.queue(&placement_add(book_id, "d1", "book.epub", &hash, 300));
+    a.seed_placement(content_hash, "d1", "book.epub", 300);
+    a.queue(&placement_add(content_hash, "d1", "book.epub", &hash, 300));
     a.push(&mut server);
     b.pull(&server);
-    assert!(b.placement_is_live(book_id, "d1"), "a newer add restores a tombstoned placement");
+    assert!(b.placement_is_live(content_hash, "d1"), "a newer add restores a tombstoned placement");
     assert_eq!(a.live_placements("d1"), b.live_placements("d1"));
 }
 
 #[test]
 fn stale_removal_cannot_collect_winning_add_blob() {
-    let book_id = BookId::new(1);
-    let content_hash = ContentHash::parse(&"d".repeat(64)).unwrap();
+    let content_hash = ContentHash::new(&"d".repeat(64));
     let mut server = FakeServer::default();
 
-    server.accept(&ClientId::parse("newer-device").unwrap(), placement_add(book_id, "d1", "book.epub", &content_hash, 200));
-    server.accept(&ClientId::parse("stale-device").unwrap(), placement_remove(book_id, "d1", "book.epub", 100));
+    server.accept(&ClientId::parse("newer-device").unwrap(), placement_add(content_hash, "d1", "book.epub", &content_hash, 200));
+    server.accept(&ClientId::parse("stale-device").unwrap(), placement_remove(content_hash, "d1", "book.epub", 100));
 
-    assert!(server.live_books_by_version().contains(&book_id), "the live placement must win despite stale removal");
+    assert!(server.live_books_by_version().contains(&content_hash), "the live placement must win despite stale removal");
 }
 
 #[test]
 fn removal_of_a_displaced_book_cannot_collect_the_replacement_blob() {
-    let old_book = BookId::new(1);
-    let new_book = BookId::new(2);
-    let old_hash = ContentHash::parse(&"a".repeat(64)).unwrap();
-    let replacement_hash = ContentHash::parse(&"b".repeat(64)).unwrap();
+    let old_book = ContentHash::from_fixture_u64(1);
+    let new_book = ContentHash::from_fixture_u64(2);
+    let old_hash = ContentHash::new(&"a".repeat(64));
+    let replacement_hash = ContentHash::new(&"b".repeat(64));
     let mut server = FakeServer::default();
 
     server.accept(&ClientId::parse("old-adder").unwrap(), placement_add(old_book, "d1", "book.epub", &old_hash, 10));
@@ -801,48 +798,48 @@ fn renaming_a_same_name_winner_revives_the_suppressed_directory() {
 
 #[test]
 fn equal_wall_clock_adds_keep_only_total_version_winner_blob() {
-    let book_id = BookId::new(1);
-    let winning_hash = ContentHash::parse(&"f".repeat(64)).unwrap();
-    let losing_hash = ContentHash::parse(&"0".repeat(64)).unwrap();
+    let content_hash = ContentHash::from_fixture_u64(1);
+    let winning_hash = ContentHash::new(&"f".repeat(64));
+    let losing_hash = ContentHash::new(&"0".repeat(64));
     let mut server = FakeServer::default();
 
     // The lower actor arrives later; actor identity, not arrival, breaks the
     // otherwise exact add/add tie.
-    server.accept(&ClientId::parse("z-device").unwrap(), placement_add(book_id, "d1", "book.epub", &winning_hash, 100));
-    server.accept(&ClientId::parse("a-device").unwrap(), placement_add(book_id, "d1", "book.epub", &losing_hash, 100));
+    server.accept(&ClientId::parse("z-device").unwrap(), placement_add(content_hash, "d1", "book.epub", &winning_hash, 100));
+    server.accept(&ClientId::parse("a-device").unwrap(), placement_add(content_hash, "d1", "book.epub", &losing_hash, 100));
 
-    assert_eq!(server.live_books_by_version(), HashSet::from([book_id]));
+    assert_eq!(server.live_books_by_version(), HashSet::from([content_hash]));
 }
 
 #[test]
 fn reading_registers_survive_delete_and_readd_regardless_of_origin() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let reader_actor = ClientId::parse("offline-reader").unwrap();
     let mut server = FakeServer::default();
     let mut origin = Device::new(reader_actor.as_str());
     let mut observer = Device::new("observer");
     for device in [&origin, &observer] {
-        device.seed_book(book_id);
+        device.seed_book(content_hash);
     }
 
     // The reader changes its position while offline, before learning that
     // another replica deleted the book. Its own values are already materialized
     // locally, and production pull excludes events from the requesting actor.
-    origin.set_reading_position(book_id, "epubcfi(/6/4)");
+    origin.set_reading_position(content_hash, "epubcfi(/6/4)");
 
     // Commit order at the server is delete -> offline reading position -> re-add.
     // The origin excludes its own singleton row and retains the position
     // through delete/re-add. The observer applies them while the book is
     // deleted, where the current reducer silently updates zero rows.
-    server.accept(&ClientId::parse("deleter").unwrap(), book_deleted(book_id, 20));
-    server.accept(&reader_actor, reading_position(book_id, "epubcfi(/6/4)", 40.0, 30));
-    server.accept(&ClientId::parse("restorer").unwrap(), book_present(book_id, "Restored", 40, 40));
+    server.accept(&ClientId::parse("deleter").unwrap(), book_deleted(content_hash, 20));
+    server.accept(&reader_actor, reading_position(content_hash, "epubcfi(/6/4)", 40.0, 30));
+    server.accept(&ClientId::parse("restorer").unwrap(), book_present(content_hash, "Restored", 40, 40));
 
     origin.pull(&server);
     observer.pull(&server);
 
-    assert!(origin.book_is_live(book_id) && observer.book_is_live(book_id));
-    assert_eq!(origin.read_position(book_id), observer.read_position(book_id), "delivery through a tombstoned book must not discard the reading-position register");
+    assert!(origin.book_is_live(content_hash) && observer.book_is_live(content_hash));
+    assert_eq!(origin.read_position(content_hash), observer.read_position(content_hash), "delivery through a tombstoned book must not discard the reading-position register");
 }
 
 #[test]
@@ -879,8 +876,8 @@ fn cloned_replica_identity_does_not_deduplicate_distinct_changes() {
     let mut server = FakeServer::default();
     let mut first = Device::new("cloned-device");
     let mut second = Device::new("cloned-device");
-    let first_book = BookId::new(1);
-    let second_book = BookId::new(2);
+    let first_book = ContentHash::from_fixture_u64(1);
+    let second_book = ContentHash::from_fixture_u64(2);
     first.seed_book(first_book);
     second.seed_book(second_book);
     first.queue(&book_present(first_book, "First", 1, 10));
@@ -896,12 +893,12 @@ fn cloned_replica_identity_does_not_deduplicate_distinct_changes() {
 
 #[test]
 fn book_metadata_updates_produce_a_synchronizable_mutation() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut device = Device::new("metadata-device");
-    device.seed_book(book_id);
+    device.seed_book(content_hash);
 
     let tx = device.conn.transaction().unwrap();
-    db::update_book_metadata(&tx, book_id, "Changed title", "Changed author").unwrap();
+    db::update_book_metadata(&tx, content_hash, "Changed title", "Changed author").unwrap();
     tx.commit().unwrap();
 
     let outbox = db::get_pending_mutations(&device.conn).unwrap();
@@ -910,24 +907,24 @@ fn book_metadata_updates_produce_a_synchronizable_mutation() {
 
 #[test]
 fn metadata_register_is_not_overwritten_by_lifecycle_readd() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let mut server = FakeServer::default();
     let mut device = Device::new("observer");
-    device.seed_book(book_id);
+    device.seed_book(content_hash);
 
     server.accept(
         &ClientId::parse("metadata-writer").unwrap(),
-        change(MutationBody::Metadata { book_id, value: metadata("Canonical title", vec![Contributor::new("Canonical author", None, MarcRelatorCode(*b"aut")).unwrap()], "Canonical description") }, 20),
+        change(MutationBody::Metadata { content_hash, value: metadata("Canonical title", vec![Contributor::new("Canonical author", None, MarcRelatorCode(*b"aut")).unwrap()], "Canonical description") }, 20),
     );
-    server.accept(&ClientId::parse("deleter").unwrap(), book_deleted(book_id, 30));
-    server.accept(&ClientId::parse("restorer").unwrap(), book_present(book_id, "Stale lifecycle title", 40, 40));
+    server.accept(&ClientId::parse("deleter").unwrap(), book_deleted(content_hash, 30));
+    server.accept(&ClientId::parse("restorer").unwrap(), book_present(content_hash, "Stale lifecycle title", 40, 40));
     device.pull(&server);
 
     let metadata: (String, String, String) = device
         .conn
         .query_row(
-            "SELECT b.title, COALESCE((SELECT group_concat(credit.name, ', ') FROM (SELECT name FROM book_contributor WHERE book_id=b.id AND role=X'617574' ORDER BY position) credit), ''), b.description FROM book b WHERE b.id=?1",
-            [book_id.canonical()],
+            "SELECT b.title, COALESCE((SELECT group_concat(credit.name, ', ') FROM (SELECT name FROM book_contributor WHERE book_row_id=b.row_id AND role=X'617574' ORDER BY position) credit), ''), b.description FROM book b WHERE b.content_hash=?1",
+            [content_hash.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
@@ -936,10 +933,10 @@ fn metadata_register_is_not_overwritten_by_lifecycle_readd() {
 
 #[test]
 fn retry_reads_keep_the_same_persisted_event_identity() {
-    let book_id = BookId::new(1);
+    let content_hash = ContentHash::from_fixture_u64(1);
     let device = Device::new("retry-device");
-    device.seed_book(book_id);
-    device.queue(&book_deleted(book_id, 10));
+    device.seed_book(content_hash);
+    device.queue(&book_deleted(content_hash, 10));
 
     let first = db::get_pending_mutations(&device.conn).unwrap();
     let second = db::get_pending_mutations(&device.conn).unwrap();

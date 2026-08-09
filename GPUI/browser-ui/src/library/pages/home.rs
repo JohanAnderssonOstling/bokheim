@@ -58,8 +58,8 @@ impl HomePage {
                 in_progress.push(book);
             }
         }
-        let recent_ids = in_progress.iter().chain(&finished).map(|book| book.book_id).collect::<HashSet<_>>();
-        data.recently_added.retain(|book| !recent_ids.contains(&book.book_id));
+        let recent_ids = in_progress.iter().chain(&finished).map(|book| book.content_hash.clone()).collect::<HashSet<_>>();
+        data.recently_added.retain(|book| !recent_ids.contains(&book.content_hash));
 
         let groups = [in_progress, finished, data.recently_added];
         for (section, books) in self.sections.iter_mut().zip(groups) {

@@ -127,7 +127,7 @@ impl PostgresAccountService {
         sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='verify_email'").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
         let tokens = issue_token_pair(&mut transaction, &user_id).await?;
         transaction.commit().await.map_err(internal)?;
-        Ok(issued_session(tokens, AuthenticatedUser { user_id, email, is_admin: false }))
+        Ok(issued_session(tokens, AuthenticatedUser { user_id, email }))
     }
 
     pub(super) async fn request_password_reset_impl(&self, email: &str) -> Result<(), AuthError> {

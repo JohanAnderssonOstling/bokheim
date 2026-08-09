@@ -183,7 +183,7 @@ mod tests {
         let library_root = LibraryRoot::open(root.path()).unwrap();
         let source = root.path().join("source.epub");
         fs::write(&source, b"verified book bytes").unwrap();
-        let hash = ContentHash::parse(blake3::hash(b"verified book bytes").to_hex().as_str()).unwrap();
+        let hash = ContentHash::new(&blake3::hash(b"verified book bytes").to_hex().as_str());
         let destination = RelativeBookPath::parse("Destination/book.epub").unwrap();
 
         let installed = library_root.copy_verified_book(&source, &destination, &hash).unwrap();
@@ -197,7 +197,7 @@ mod tests {
         let library_root = LibraryRoot::open(root.path()).unwrap();
         let source = root.path().join("source.epub");
         fs::write(&source, b"wrong bytes").unwrap();
-        let hash = ContentHash::parse(blake3::hash(b"expected bytes").to_hex().as_str()).unwrap();
+        let hash = ContentHash::new(&blake3::hash(b"expected bytes").to_hex().as_str());
         let destination = RelativeBookPath::parse("Destination/book.epub").unwrap();
 
         let error = library_root.copy_verified_book(&source, &destination, &hash).unwrap_err();
@@ -219,7 +219,7 @@ mod tests {
         fs::write(&outside_source, b"book bytes").unwrap();
         let source_link = root.path().join("source.epub");
         symlink(&outside_source, &source_link).unwrap();
-        let hash = ContentHash::parse(blake3::hash(b"book bytes").to_hex().as_str()).unwrap();
+        let hash = ContentHash::new(&blake3::hash(b"book bytes").to_hex().as_str());
 
         let error = library_root.copy_verified_book(&source_link, &RelativeBookPath::parse("Safe/book.epub").unwrap(), &hash).unwrap_err();
 

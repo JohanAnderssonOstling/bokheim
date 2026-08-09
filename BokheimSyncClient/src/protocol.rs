@@ -108,16 +108,16 @@ pub fn coalesce_mutations_for_push(mutations: Vec<StateMutation>) -> Vec<StateMu
 mod tests {
     use super::*;
     use bokheim_domain::{MutationBody, ReadingPositionState};
-    use sync_common::{BookId, ClientId, ReplicaSeq, UnixMillis};
+    use sync_common::{ContentHash, ClientId, ReplicaSeq};
 
     fn mutation(sequence: u64, body: MutationBody) -> StateMutation {
-        StateMutation { mutation_id: MutationId::new(), body, changed_at: UnixMillis::new(sequence).unwrap(), replica_seq: ReplicaSeq::new(sequence).unwrap() }
+        StateMutation { mutation_id: MutationId::new(), body, changed_at: sequence, replica_seq: ReplicaSeq::new(sequence).unwrap() }
     }
 
     #[test]
     fn identity_acknowledgements_do_not_depend_on_sequence_prefixes() {
-        let first = mutation(1, MutationBody::ReadingPosition { book_id: BookId::new(1), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } });
-        let second = mutation(2, MutationBody::ReadingPosition { book_id: BookId::new(2), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } });
+        let first = mutation(1, MutationBody::ReadingPosition { content_hash: ContentHash::from_fixture_u64(1), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } });
+        let second = mutation(2, MutationBody::ReadingPosition { content_hash: ContentHash::from_fixture_u64(2), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } });
         let response = PushMutationsResponse { accepted: vec![second.mutation_id, first.mutation_id], rejected: Vec::new() };
         let validated = validate_push_response(&[first.clone(), second.clone()], &response).unwrap();
         assert_eq!(validated.accepted, vec![second.mutation_id, first.mutation_id]);
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn every_requested_identity_is_partitioned_by_rejection_lifetime() {
-        let position = |book_id| MutationBody::ReadingPosition { book_id: BookId::new(book_id), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } };
+        let position = |content_hash| MutationBody::ReadingPosition { content_hash: ContentHash::from_fixture_u64(content_hash), value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 1.0 } };
         let accepted = mutation(1, position(1));
         let transient = mutation(2, position(2));
         let first_permanent = mutation(3, position(3));
@@ -148,8 +148,8 @@ mod tests {
     #[test]
     fn placement_updates_coalesce_to_the_latest_register_value() {
         let dir_id = sync_common::DirId::parse("shelf").unwrap();
-        let claim = mutation(1, MutationBody::Placement { dir_id: dir_id.clone(), book_id: BookId::new(2), present: true });
-        let stale_release = mutation(2, MutationBody::Placement { dir_id, book_id: BookId::new(2), present: false });
+        let claim = mutation(1, MutationBody::Placement { dir_id: dir_id.clone(), content_hash: ContentHash::from_fixture_u64(2), present: true });
+        let stale_release = mutation(2, MutationBody::Placement { dir_id, content_hash: ContentHash::from_fixture_u64(2), present: false });
         let reduced = coalesce_mutations_for_push(vec![claim.clone(), stale_release]);
         assert_eq!(reduced.len(), 1);
         assert!(matches!(reduced[0].body, MutationBody::Placement { present: false, .. }));

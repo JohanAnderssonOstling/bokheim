@@ -1,5 +1,27 @@
 # Public Internet deployment
 
+## Remote code deployment
+
+After the host has been prepared once with `install-server.sh`, deploy a new
+release from this checkout with:
+
+```sh
+Server/deploy/deploy-remote.sh
+```
+
+The script builds `sync-server` and `bokheim-catalog-server`, transfers the
+release artifacts over SSH, and runs `install-staged.sh` with `sudo` on the
+host. It defaults to `192.168.1.68`; override the SSH account when needed:
+
+```sh
+BOKHEIM_DEPLOY_USER=johan Server/deploy/deploy-remote.sh
+```
+
+The remote account must have SSH access and passwordless `sudo` (or an
+interactive sudo configuration; the installer allocates a TTY for a remote
+sudo password prompt. Do not prefix the local command with `sudo`. The script does not provision a new host or
+modify database, Caddy, or credentials.
+
 This deployment exposes only Caddy to the Internet. The Rust server accepts
 requests through `/run/bokheim/sync.sock`, whose filesystem permissions allow
 access only to the `bokheim` user and members of the `bokheim` group. PostgreSQL
@@ -43,8 +65,8 @@ sudo install -d -o bokheim -g bokheim -m 0750 /var/lib/bokheim/assets/books /var
 ```
 
 The service unit requires this mount and refuses to start if it is absent. Its
-absolute `BOKHEIM_BOOKS_DIR` and `BOKHEIM_THUMBNAILS_DIR` values prevent the
-process working directory from deciding where uploads are stored. Application
+absolute `BOKHEIM_ASSETS_DIR` value prevents the process working directory from
+deciding where uploads are stored. Application
 startup also probes both directories for create, write, sync, and delete access.
 
 Build the release executable and install it without making it writable by the
@@ -56,55 +78,43 @@ sudo install -o root -g root -m 0755 Server/target/release/sync-server /usr/loca
 ```
 
 Create `/etc/bokheim/database-url` containing a PostgreSQL URL that resolves to
-localhost. For the first startup only, create `/etc/bokheim/admin-password`
-containing a unique initial admin password of at least 12 characters and add a
-temporary systemd drop-in which loads it as the `admin_password` credential.
-Protect both files:
+localhost. Protect the file:
 
 ```sh
-sudo chmod 0600 /etc/bokheim/database-url /etc/bokheim/admin-password
-sudo chown root:root /etc/bokheim/database-url /etc/bokheim/admin-password
+sudo chmod 0600 /etc/bokheim/database-url
+sudo chown root:root /etc/bokheim/database-url
 ```
 
-The admin credential is used only if `bokheim-admin` does not already exist.
-After the first successful startup, delete the temporary drop-in and password
-file, then run `systemctl daemon-reload`. The production unit deliberately loads
-only the database credential. The provided `install-server.sh` performs this
-bootstrap cleanup automatically.
+The service loads only this database credential. It does not create a built-in
+administrator account or read an administrator password.
 
-The checked-in unit makes the database pool and upload concurrency explicit:
-32 maximum and 2 warm PostgreSQL connections, at most 2 simultaneous book
-validations, 16 staged books/4 GiB globally, and 4 staged books/2 GiB per
-account. Tune `BOKHEIM_DATABASE_*`, `BOKHEIM_MAX_CONCURRENT_BOOK_VALIDATIONS`,
-and `BOKHEIM_MAX_STAGED_*` in a systemd drop-in only from
-measured production saturation; validation is CPU-heavy and a larger database
-pool also consumes PostgreSQL memory.
+The built-in defaults use 32 maximum and 2 warm PostgreSQL connections,
+16 staged books/4 GiB globally, and 4 staged books/2 GiB per account. Override
+`BOKHEIM_DATABASE_*` or `BOKHEIM_MAX_STAGED_*` in a systemd drop-in only after
+measuring production saturation; a larger database pool consumes more
+PostgreSQL memory.
 
-## Optional public registration
+## Public registration
 
-Keep public registration disabled for an invite-only deployment. To enable it,
-install a local queueing MTA that provides `/usr/sbin/sendmail`. The MTA, rather
-than Bokheim, owns remote SMTP authentication, TLS, delivery retries, and bounce
-handling. Bokheim only invokes the local queue, which is compatible with the
-service's outbound-network sandbox.
+Public registration is always enabled. Configure an external email worker for
+the `account_email_outbox` table. The
+worker owns provider credentials, SMTP authentication, TLS, delivery retries,
+and bounce handling; the Bokheim server only creates and manages queued
+verification/reset messages.
 
-Maintain `/etc/bokheim/disposable-email-domains` as a non-empty list containing
+Before running `install-server.sh`, create
+`/etc/bokheim/disposable-email-domains` as a non-empty list containing
 one lowercase domain per line. Blank lines and lines beginning with `#` are
 ignored. Treat this list as abuse reduction, not proof that a provider is
 permanent; mailbox verification remains authoritative.
 
-Add a systemd drop-in:
-
-```ini
-[Service]
-Environment=BOKHEIM_PUBLIC_REGISTRATION=true
-Environment=BOKHEIM_MAIL_FROM=accounts@bokheim.se
-Environment=BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE=/etc/bokheim/disposable-email-domains
+```sh
+sudo install -d -o root -g root -m 0700 /etc/bokheim
+sudo install -o root -g root -m 0644 disposable-email-domains /etc/bokheim/disposable-email-domains
 ```
 
-If the local MTA exposes a different sendmail-compatible executable, also set
-`BOKHEIM_SENDMAIL_PATH` to its absolute path. The server fails startup when any
-required registration dependency is missing or malformed.
+The checked-in service unit supplies this fixed path through
+`BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE`.
 
 ## Install service configuration
 
@@ -173,17 +183,6 @@ findmnt --mountpoint /var/lib/bokheim/assets
 systemctl status var-lib-bokheim-assets.mount bokheim-sync.service
 ```
 
-Old unreferenced assets and abandoned upload files are collected daily by
-`bokheim-gc.timer`, with a 24-hour safety window. The database advisory lease
-prevents synchronization changes during the live-reference snapshot. A shared
-filesystem lock prevents GC from deleting files while backup or restore tooling
-is reading them:
-
-```sh
-systemctl list-timers bokheim-gc.timer
-journalctl -u bokheim-gc.service --since '7 days ago'
-```
-
 The HTTP edge and Rust service bound request headers, stalled request bodies,
 total request duration, and concurrent in-flight requests. systemd also caps
 memory, tasks, and file descriptors. SIGTERM stops new connections and gives
@@ -197,13 +196,10 @@ sudo systemctl restart bokheim-sync.service
 sudo systemctl reload caddy.service
 ```
 
-## Backup and disaster recovery
+## No backups: the database is disposable
 
-The deployment includes an optional off-host backup system built from
-PostgreSQL `pg_dump` and restic. It takes coordinated database-and-asset
-snapshots, applies retention, reads repository data on a rotating schedule, and
-proves monthly that the database can actually be restored. It is deliberately
-not enabled until a separate repository destination is configured.
-
-See [BACKUP.md](BACKUP.md) for SFTP/NAS setup, timer operation, restore drills,
-and the disaster-recovery procedure.
+This is a development deployment target, not a production one. `install-server.sh`
+drops and recreates the `bokheim` database on every deploy, so there is no
+schema migration history and nothing to back up -- redeploying is the recovery
+procedure. Do not point this at a deployment expected to hold data that must
+survive a redeploy without a design change to persist it first.

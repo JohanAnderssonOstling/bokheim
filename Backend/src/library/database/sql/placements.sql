@@ -13,9 +13,9 @@ WITH RECURSIVE dir_paths(id, parent_id, name, path) AS (
     JOIN dir_paths ON d.parent_id = dir_paths.id AND d.id != dir_paths.id
     WHERE d.deleted_at IS NULL
 )
-SELECT bd.book_id, bd.dir_id, bd.file_name
+SELECT book.content_hash, bd.dir_id, bd.file_name
 FROM book_dir bd
-JOIN book ON book.id = bd.book_id
+JOIN book ON book.row_id = bd.book_row_id
 JOIN dir_paths ON bd.dir_id = dir_paths.id
 WHERE CASE WHEN dir_paths.path = '/' THEN '/' || bd.file_name ELSE dir_paths.path || '/' || bd.file_name END = :file_path
   AND bd.deleted_at IS NULL
@@ -23,7 +23,7 @@ LIMIT 1;
 
 -- name: resolve_removed_book_dir?
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- Resolves a tombstoned placement's file path AND content hash. Returns nothing
 -- unless the placement is currently deleted, so a placement an add resurrected
 -- later in the same pull batch is left alone. The content hash lets the caller
@@ -45,8 +45,8 @@ SELECT
     book.content_hash
 FROM book_dir bd
 JOIN dir_paths ON bd.dir_id = dir_paths.id
-JOIN book ON book.id = bd.book_id
-WHERE bd.dir_id = :dir_id AND bd.book_id = :book_id
+JOIN book ON book.row_id = bd.book_row_id
+WHERE bd.dir_id = :dir_id AND book.content_hash = :content_hash
   AND bd.deleted_at IS NOT NULL
 LIMIT 1;
 
@@ -54,56 +54,56 @@ LIMIT 1;
 -- change_origin is 'remote' during apply, so the book_dir triggers don't fire.
 -- name: apply_remote_book_dir_added!
 -- param: dir_id: &str
--- param: book_id: &str
-INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
+-- param: content_hash: &str
+INSERT INTO book_dir (dir_id, book_row_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
 VALUES (
     :dir_id,
-    :book_id,
-    COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_id=:book_id), :book_id),
+    (SELECT row_id FROM book WHERE content_hash=:content_hash),
+    COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash)), :content_hash),
     '',
     0,
     0,
     NULL
 )
-ON CONFLICT(dir_id, book_id) DO UPDATE SET
+ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
     deleted_at = NULL,
     local_hash = excluded.local_hash,
     is_downloaded = max(book_dir.is_downloaded, excluded.is_downloaded);
 
 -- name: apply_remote_book_dir_removed!
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- Upserts a tombstone (deleted_at set) even if the placement was never seen
 -- locally, so a later older wall-clock version add still loses the LWW comparison.
-INSERT INTO book_dir (dir_id, book_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
+INSERT INTO book_dir (dir_id, book_row_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
 VALUES (
     :dir_id,
-    :book_id,
-    COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_id=:book_id), :book_id),
+    (SELECT row_id FROM book WHERE content_hash=:content_hash),
+    COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash)), :content_hash),
     '',
     0,
     0,
     1
 )
-ON CONFLICT(dir_id, book_id) DO UPDATE SET
+ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
     deleted_at = 1;
 
 -- name: set_book_downloaded!
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: is_downloaded: i32
 UPDATE book_dir
 SET is_downloaded = :is_downloaded
-WHERE dir_id = :dir_id AND book_id = :book_id
+WHERE dir_id = :dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_hash=:content_hash)
   AND deleted_at IS NULL;
 
 -- name: update_book_dir_local_hash!
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: local_hash: &str
 UPDATE book_dir
 SET local_hash = :local_hash
-WHERE dir_id = :dir_id AND book_id = :book_id
+WHERE dir_id = :dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_hash=:content_hash)
   AND deleted_at IS NULL;
 
 -- name: directory_move_closes_cycle?

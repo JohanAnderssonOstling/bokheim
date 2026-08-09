@@ -16,17 +16,18 @@ pub(super) enum AuthorIdPolicy {
     PreserveIncoming,
 }
 
-pub(super) fn prepare_contributors(transaction: &Transaction, contributors: &[Contributor], policy: AuthorIdPolicy, existing_book_id: Option<BookId>) -> Result<Vec<StoredContributor>, rusqlite::Error> {
+pub(super) fn prepare_contributors(transaction: &Transaction, contributors: &[Contributor], policy: AuthorIdPolicy, existing_content_hash: Option<ContentHash>) -> Result<Vec<StoredContributor>, rusqlite::Error> {
     contributors
         .iter()
         .enumerate()
         .map(|(position, contributor)| {
             let Some(name) = parse_author_name(contributor.name())? else { return Ok(None) };
             let existing = if matches!(policy, AuthorIdPolicy::ReuseProvisionalNameCandidate) {
-                existing_book_id
-                    .map(|book_id| {
+                existing_content_hash
+                    .as_ref()
+                    .map(|content_hash| {
                         let mut value = None;
-                        transaction.existing_book_contributor_credit(&book_id.canonical(), i64::try_from(position).unwrap_or(i64::MAX), |row| {
+                        transaction.existing_book_contributor_credit(content_hash.as_str(), i64::try_from(position).unwrap_or(i64::MAX), |row| {
                             value = Some((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?));
                             Ok(())
                         })?;
@@ -72,14 +73,14 @@ pub(super) fn prepare_publication_agents(transaction: &Transaction, metadata: &P
 
 /// Clear+rewrite all `book_contributor` rows for a book in one pass. Contributor
 /// identity resolution mirrors the identity policy already used for publication
-/// agents; the merged list shares one flat `(book_id, position)` sequence across
+/// agents; the merged list shares one flat `(content_hash, position)` sequence across
 /// every role.
-pub(super) fn replace_book_contributors(transaction: &Transaction, book_id: BookId, contributors: &[StoredContributor]) -> Result<(), rusqlite::Error> {
+pub(super) fn replace_book_contributors(transaction: &Transaction, content_hash: ContentHash, contributors: &[StoredContributor]) -> Result<(), rusqlite::Error> {
     for (position, contributor) in contributors.iter().enumerate() {
         let role = contributor.credit.role_code().0;
-        transaction.upsert_book_contributor(&book_id.canonical(), contributor.identity_local_id, i64::try_from(position).unwrap_or(i64::MAX), contributor.credit.name(), contributor.credit.sort_name(), &role)?;
+        transaction.upsert_book_contributor(content_hash.as_str(), contributor.identity_local_id, i64::try_from(position).unwrap_or(i64::MAX), contributor.credit.name(), contributor.credit.sort_name(), &role)?;
     }
-    transaction.trim_book_contributors(&book_id.canonical(), i64::try_from(contributors.len()).unwrap_or(i64::MAX))?;
+    transaction.trim_book_contributors(content_hash.as_str(), i64::try_from(contributors.len()).unwrap_or(i64::MAX))?;
     Ok(())
 }
 

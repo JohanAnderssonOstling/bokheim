@@ -151,7 +151,7 @@ pub struct TransferStatus {
     pub id: String,
     pub kind: TransferJobKind,
     pub content_hash: String,
-    pub book_id: Option<String>,
+    pub book_content_hash: Option<String>,
     pub path: Option<String>,
     pub state: TransferState,
     pub origin: TransferOrigin,

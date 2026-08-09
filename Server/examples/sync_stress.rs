@@ -1,7 +1,7 @@
 //! Bounded, loopback-only stress workload for the production HTTP and
 //! PostgreSQL synchronization path.
 
-use bokheim_account_contract::{AuthResponse, LoginRequest};
+use bokheim_account_contract::{AuthResponse, LoginRequest, OneTimeTokenRequest, PublicRegistrationRequest};
 use reqwest::{Client, Url};
 use std::error::Error;
 use std::io;
@@ -12,12 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::UpsertLibraryRequest;
-use sync_common::{
-    BookId, ClientId, ContentHash, DirId, LibraryId, MutationId,
-    PullStateResponse,
-    ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, UnixMillis, WireMutation,
-    MAX_PUSH_MUTATIONS,
-};
+use sync_common::{ClientId, ContentHash, DirId, LibraryId, MutationId, PullStateResponse, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -96,7 +91,7 @@ fn wire_mutation(kind: &str, entity_key: impl Into<String>, entity_subkey: impl 
         value: Vec::new(),
         conflict_rank: 0,
         blob_reference: None,
-        changed_at: UnixMillis::new(changed_at)?,
+        changed_at,
         replica_seq: ReplicaSeq::new(sequence)?,
     })
 }
@@ -179,11 +174,37 @@ fn profiled_server_io() -> (u64, u64) {
 }
 
 async fn login(client: &Client, base: &Url) -> Result<Identity, AnyError> {
-    let email = std::env::var("BOKHEIM_STRESS_EMAIL").unwrap_or_else(|_| "admin@bokheim.local".to_owned());
+    let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required when BOKHEIM_STRESS_TOKEN is not set"))?;
     let password = std::env::var("BOKHEIM_STRESS_PASSWORD").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_PASSWORD is required"))?;
     let encoded = sync_common::wire::encode(&LoginRequest { email, password })?;
     let response = client
         .post(endpoint(base, "api/auth/login")?)
+        .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
+        .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
+        .header(reqwest::header::ACCEPT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD)
+        .body(encoded)
+        .send()
+        .await?;
+    let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
+    Ok(Identity { token: auth.token.into() })
+}
+
+async fn register(client: &Client, base: &Url) -> Result<(), AnyError> {
+    let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required"))?;
+    let password = std::env::var("BOKHEIM_STRESS_PASSWORD").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_PASSWORD is required"))?;
+    let encoded = sync_common::wire::encode(&PublicRegistrationRequest { email, password })?;
+    let response = client.post(endpoint(base, "api/auth/register")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
+    if !response.status().is_success() {
+        return Err(io::Error::other(format!("registration failed with {}", response.status())).into());
+    }
+    Ok(())
+}
+
+async fn verify_email(client: &Client, base: &Url) -> Result<Identity, AnyError> {
+    let token = std::env::var("BOKHEIM_STRESS_VERIFICATION_TOKEN").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_VERIFICATION_TOKEN is required"))?;
+    let encoded = sync_common::wire::encode(&OneTimeTokenRequest { token })?;
+    let response = client
+        .post(endpoint(base, "api/auth/verify-email")?)
         .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
         .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
         .header(reqwest::header::ACCEPT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD)
@@ -262,11 +283,11 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
         sequence += 1;
     }
     for index in 1..=book_count {
-        let book_id = index.to_string();
+        let content_hash = index.to_string();
         let dir_id = DirId::parse(&format!("ingest-dir-{}", (index - 1) % directory_count + 1))?;
-        mutations.push(wire_mutation("book_lifecycle", book_id.clone(), "", sequence, clock)?);
+        mutations.push(wire_mutation("book_lifecycle", content_hash.clone(), "", sequence, clock)?);
         sequence += 1;
-        mutations.push(wire_mutation("placement", book_id, dir_id.as_str(), sequence, clock)?);
+        mutations.push(wire_mutation("placement", content_hash, dir_id.as_str(), sequence, clock)?);
         sequence += 1;
     }
 
@@ -373,7 +394,7 @@ async fn run_pushes(label: &str, client: &Client, base: &Url, identity: &Identit
 
 /// Models the hot reading path after client-side coalescing: each device sends
 /// one latest reading-position register value per synchronization request.
-async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, book_id_offset: u64) -> Result<(), AnyError> {
+async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, content_hash_offset: u64) -> Result<(), AnyError> {
     let barrier = Arc::new(Barrier::new(workload.workers));
     let started = Instant::now();
     let mut tasks: JoinSet<Result<Vec<Duration>, AnyError>> = JoinSet::new();
@@ -384,19 +405,14 @@ async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity:
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let client_id = ClientId::parse(&format!("position-{book_id_offset}-{worker}"))?;
+            let client_id = ClientId::parse(&format!("position-{content_hash_offset}-{worker}"))?;
             let clock = now_ms();
-            let book_id = BookId::new(book_id_offset + worker as u64 + 1);
+            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
             let mut samples = Vec::with_capacity(workload.requests_per_worker);
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest {
-                    library_id: library_id.clone(),
-                    replica_id: client_id.clone(),
-                    mutations: vec![wire_mutation("reading_position", book_id.to_string(), "", sequence as u64, clock)?],
-                    cursor: None,
-                };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: client_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !response.push.rejected.is_empty() || response.push.accepted.len() != 1 {
@@ -418,7 +434,7 @@ async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity:
 
 /// Measures the user-visible hot path: one exchange publishes a coalesced
 /// position and returns the incremental page from the committed snapshot.
-async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, book_id_offset: u64) -> Result<(), AnyError> {
+async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, content_hash_offset: u64) -> Result<(), AnyError> {
     let barrier = Arc::new(Barrier::new(workload.workers));
     let started = Instant::now();
     let mut tasks: JoinSet<Result<Vec<Duration>, AnyError>> = JoinSet::new();
@@ -429,8 +445,8 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let client_id = ClientId::parse(&format!("position-cycle-{book_id_offset}-{worker}"))?;
-            let book_id = BookId::new(book_id_offset + worker as u64 + 1);
+            let client_id = ClientId::parse(&format!("position-cycle-{content_hash_offset}-{worker}"))?;
+            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
             let mut cursor = None;
             loop {
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), client_id.clone(), cursor).await?;
@@ -445,12 +461,7 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest {
-                    library_id: library_id.clone(),
-                    replica_id: client_id.clone(),
-                    mutations: vec![wire_mutation("reading_position", book_id.to_string(), "", sequence as u64, clock)?],
-                    cursor,
-                };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: client_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor };
                 let cycle_started = Instant::now();
                 let (exchanged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !exchanged.push.rejected.is_empty() || exchanged.push.accepted.len() != 1 {
@@ -479,7 +490,7 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
 /// already-caught-up reader retrieves that remote position from the same
 /// library cursor. Unlike the atomic exchange benchmark, this exercises the
 /// pull router rather than returning the writer's own mutation directly.
-async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, book_id_offset: u64) -> Result<(), AnyError> {
+async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: &Identity, libraries: &[LibraryId], workload: Workload, content_hash_offset: u64) -> Result<(), AnyError> {
     let barrier = Arc::new(Barrier::new(workload.workers));
     let started = Instant::now();
     let mut tasks: JoinSet<Result<Vec<Duration>, AnyError>> = JoinSet::new();
@@ -490,9 +501,9 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let writer_id = ClientId::parse(&format!("position-remote-writer-{book_id_offset}-{worker}"))?;
-            let reader_id = ClientId::parse(&format!("position-remote-reader-{book_id_offset}-{worker}"))?;
-            let book_id = BookId::new(book_id_offset + worker as u64 + 1);
+            let writer_id = ClientId::parse(&format!("position-remote-writer-{content_hash_offset}-{worker}"))?;
+            let reader_id = ClientId::parse(&format!("position-remote-reader-{content_hash_offset}-{worker}"))?;
+            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
             let mut cursor = None;
             loop {
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), reader_id.clone(), cursor).await?;
@@ -507,12 +518,7 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let push = SyncExchangeRequest {
-                    library_id: library_id.clone(),
-                    replica_id: writer_id.clone(),
-                    mutations: vec![wire_mutation("reading_position", book_id.to_string(), "", sequence as u64, clock)?],
-                    cursor: None,
-                };
+                let push = SyncExchangeRequest { library_id: library_id.clone(), replica_id: writer_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
                 let (acknowledged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &push).await?;
                 if acknowledged.push.accepted.len() != 1 || !acknowledged.push.rejected.is_empty() {
                     return Err(io::Error::other("remote position writer was not acknowledged exactly once").into());
@@ -690,7 +696,7 @@ async fn run_blob_manifest_profile(client: &Client, base: &Url, identity: &Ident
         .map(|index| {
             let bytes = test_epub(1, index)?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            Ok::<_, AnyError>((ContentHash::parse(&hash)?, Arc::new(bytes)))
+            Ok::<_, AnyError>((ContentHash::new(&hash), Arc::new(bytes)))
         })
         .collect::<Result<_, _>>()?;
 
@@ -832,8 +838,8 @@ async fn run_upload_pipeline_profile(client: &Client, base: &Url, identity: &Ide
 async fn main() -> Result<(), AnyError> {
     let base = loopback_url()?;
     let mode = std::env::var("BOKHEIM_STRESS_MODE").unwrap_or_else(|_| "full".to_owned());
-    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "assets" | "uploads" | "token") {
-        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, assets, uploads, or token").into());
+    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "assets" | "uploads" | "register" | "verify" | "token") {
+        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, assets, uploads, register, verify, or token").into());
     }
     let workload = Workload {
         workers: bounded_env("BOKHEIM_STRESS_WORKERS", 16, 128)?,
@@ -845,11 +851,16 @@ async fn main() -> Result<(), AnyError> {
     println!("Bokheim sync stress: url={base} mode={mode} workers={} requests/worker={} events/request={} events/scenario={total_events}", workload.workers, workload.requests_per_worker, workload.events_per_request);
 
     let client = Client::builder().pool_max_idle_per_host(workload.workers).timeout(Duration::from_secs(120)).build()?;
+    if mode == "register" {
+        register(&client, &base).await?;
+        return Ok(());
+    }
     let identity = match std::env::var("BOKHEIM_STRESS_TOKEN").ok().filter(|token| !token.is_empty()) {
         Some(token) => Identity { token: token.into() },
+        None if mode == "verify" => verify_email(&client, &base).await?,
         None => login(&client, &base).await?,
     };
-    if mode == "token" {
+    if matches!(mode.as_str(), "verify" | "token") {
         println!("BOKHEIM_STRESS_TOKEN={}", identity.token);
         return Ok(());
     }

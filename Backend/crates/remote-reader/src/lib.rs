@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn fetches_only_requested_range_and_reopens_cached_range_offline() {
         const TOTAL: u64 = 1024 * 1024;
-        let hash = ContentHash::parse(&"a".repeat(64)).unwrap();
+        let hash = ContentHash::new(&"a".repeat(64));
         let etag = format!("\"{}\"", hash.as_str());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

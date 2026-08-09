@@ -2,7 +2,7 @@
 
 use crate::app::BackendError;
 use crate::library::LibraryBackend;
-use crate::BookId;
+use crate::ContentHash;
 pub use bokheim_app_contract::semantic_links::BookLink;
 use rusqlite::Connection;
 
@@ -11,9 +11,9 @@ use include_sqlite_sql::{impl_sql, include_sql};
 include_sql!("src/library/database/sql/book_links.sql");
 
 impl LibraryBackend {
-    pub fn book_links(&self, book_id: BookId) -> Result<Vec<BookLink>, BackendError> {
+    pub fn book_links(&self, content_hash: ContentHash) -> Result<Vec<BookLink>, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
-        load_book_links(&conn, book_id).map_err(BackendError::operation)
+        load_book_links(&conn, content_hash).map_err(BackendError::operation)
     }
 
     pub fn upsert_book_link(&self, link: &BookLink) -> Result<(), BackendError> {
@@ -31,10 +31,10 @@ impl LibraryBackend {
     }
 }
 
-fn load_book_links(conn: &Connection, book_id: BookId) -> Result<Vec<BookLink>, Box<dyn std::error::Error>> {
+fn load_book_links(conn: &Connection, content_hash: ContentHash) -> Result<Vec<BookLink>, Box<dyn std::error::Error>> {
     let mut links = Vec::new();
-    conn.get_book_links(&book_id.canonical(), |row| {
-        links.push(BookLink { id: row.get(0)?, source_book_id: row.get(1)?, target_book_id: row.get(2)?, relation: row.get(3)?, note: row.get(4)?, created_at: row.get(5)?, modified_at: row.get(6)? });
+    conn.get_book_links(content_hash.as_str(), |row| {
+        links.push(BookLink { id: row.get(0)?, source_content_hash: row.get(1)?, target_content_hash: row.get(2)?, relation: row.get(3)?, note: row.get(4)?, created_at: row.get(5)?, modified_at: row.get(6)? });
         Ok(())
     })?;
     Ok(links)
@@ -43,19 +43,19 @@ fn load_book_links(conn: &Connection, book_id: BookId) -> Result<Vec<BookLink>, 
 fn store_book_link(conn: &Connection, value: &BookLink) -> Result<(), Box<dyn std::error::Error>> {
     value.validate(false)?;
     let mut source_exists = false;
-    conn.live_book_exists(&value.source_book_id, |row| {
+    conn.live_book_exists(&value.source_content_hash, |row| {
         source_exists = row.get(0)?;
         Ok(())
     })?;
     let mut target_exists = false;
-    conn.live_book_exists(&value.target_book_id, |row| {
+    conn.live_book_exists(&value.target_content_hash, |row| {
         target_exists = row.get(0)?;
         Ok(())
     })?;
     if !source_exists || !target_exists {
         return Err("both books in a semantic link must exist in the library".into());
     }
-    conn.upsert_book_link(&value.id, &value.source_book_id, &value.target_book_id, &value.relation, &value.note, value.created_at, value.modified_at)?;
+    conn.upsert_book_link(&value.id, &value.source_content_hash, &value.target_content_hash, &value.relation, &value.note, value.created_at, value.modified_at)?;
     Ok(())
 }
 
@@ -70,7 +70,7 @@ fn remove_book_link(conn: &Connection, id: &str, modified_at: i64) -> Result<(),
 fn book_link_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<BookLink>> {
     let mut value = None;
     conn.get_book_link_by_id(id, |row| {
-        value = Some(BookLink { id: row.get(0)?, source_book_id: row.get(1)?, target_book_id: row.get(2)?, relation: row.get(3)?, note: row.get(4)?, created_at: row.get(5)?, modified_at: row.get(6)? });
+        value = Some(BookLink { id: row.get(0)?, source_content_hash: row.get(1)?, target_content_hash: row.get(2)?, relation: row.get(3)?, note: row.get(4)?, created_at: row.get(5)?, modified_at: row.get(6)? });
         Ok(())
     })?;
     Ok(value)
@@ -85,7 +85,10 @@ mod tests {
     fn database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         crate::library::database::init_db(&connection).unwrap();
-        connection.execute("INSERT INTO book(id, title, added_at, format) VALUES('1', 'First', 1, 'epub'),('2', 'Second', 2, 'epub')", []).unwrap();
+        connection.execute(
+            "INSERT INTO book(content_hash, title, added_at, format) VALUES(?1, 'First', 1, 'epub'),(?2, 'Second', 2, 'epub')",
+            [ContentHash::from_fixture_u64(1).as_str(), ContentHash::from_fixture_u64(2).as_str()],
+        ).unwrap();
         connection
     }
 
@@ -94,19 +97,19 @@ mod tests {
         let connection = database();
         let link = BookLink {
             id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(),
-            source_book_id: "1".to_owned(),
-            target_book_id: "2".to_owned(),
+            source_content_hash: ContentHash::from_fixture_u64(1).to_string(),
+            target_content_hash: ContentHash::from_fixture_u64(2).to_string(),
             relation: "builds on".to_owned(),
             note: "Compare chapter three".to_owned(),
             created_at: 10,
             modified_at: 10,
         };
         store_book_link(&connection, &link).unwrap();
-        assert_eq!(load_book_links(&connection, BookId::new(1)).unwrap(), vec![link.clone()]);
-        assert_eq!(load_book_links(&connection, BookId::new(2)).unwrap(), vec![link.clone()]);
+        assert_eq!(load_book_links(&connection, ContentHash::from_fixture_u64(1)).unwrap(), vec![link.clone()]);
+        assert_eq!(load_book_links(&connection, ContentHash::from_fixture_u64(2)).unwrap(), vec![link.clone()]);
 
         remove_book_link(&connection, &link.id, 11).unwrap();
-        assert!(load_book_links(&connection, BookId::new(1)).unwrap().is_empty());
+        assert!(load_book_links(&connection, ContentHash::from_fixture_u64(1)).unwrap().is_empty());
         let matching = crate::library::database::get_pending_mutations(&connection)
             .unwrap()
             .into_iter()
@@ -119,9 +122,9 @@ mod tests {
     fn rejects_self_links_and_missing_books() {
         let connection = database();
         let mut link =
-            BookLink { id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(), source_book_id: "1".to_owned(), target_book_id: "1".to_owned(), relation: "related to".to_owned(), note: String::new(), created_at: 10, modified_at: 10 };
+            BookLink { id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(), source_content_hash: ContentHash::from_fixture_u64(1).to_string(), target_content_hash: ContentHash::from_fixture_u64(1).to_string(), relation: "related to".to_owned(), note: String::new(), created_at: 10, modified_at: 10 };
         assert!(store_book_link(&connection, &link).is_err());
-        link.target_book_id = "3".to_owned();
+        link.target_content_hash = ContentHash::from_fixture_u64(3).to_string();
         assert!(store_book_link(&connection, &link).is_err());
     }
 
@@ -132,16 +135,16 @@ mod tests {
                 body: MutationBody::BookLink {
                     link_id: link.id.clone(),
                     value: BookLinkState {
-                        source_book_id: BookId::parse(&link.source_book_id).unwrap(),
-                        target_book_id: BookId::parse(&link.target_book_id).unwrap(),
+                        source_content_hash: ContentHash::new(&link.source_content_hash.clone()),
+                        target_content_hash: ContentHash::new(&link.target_content_hash.clone()),
                         relation: link.relation.clone(),
                         note: link.note.clone(),
-                        created_at: sync_common::UnixMillis::new(u64::try_from(link.created_at).unwrap()).unwrap(),
-                        modified_at: sync_common::UnixMillis::new(u64::try_from(link.modified_at).unwrap()).unwrap(),
+                        created_at: u64::try_from(link.created_at).unwrap(),
+                        modified_at: u64::try_from(link.modified_at).unwrap(),
                         deleted,
                     },
                 },
-                changed_at: sync_common::UnixMillis::new(physical_time).unwrap(),
+                changed_at: physical_time,
                 replica_seq: ReplicaSeq::new(revision).unwrap(),
             }.to_wire().unwrap(),
             replica_id: ClientId::parse("remote").unwrap(),
@@ -152,13 +155,13 @@ mod tests {
     #[test]
     fn remote_link_tombstone_rejects_an_out_of_order_update() {
         let mut connection = database();
-        let link = BookLink { id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(), source_book_id: "1".to_owned(), target_book_id: "2".to_owned(), relation: "answers".to_owned(), note: String::new(), created_at: 10, modified_at: 20 };
+        let link = BookLink { id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(), source_content_hash: ContentHash::from_fixture_u64(1).to_string(), target_content_hash: ContentHash::from_fixture_u64(2).to_string(), relation: "answers".to_owned(), note: String::new(), created_at: 10, modified_at: 20 };
         let transaction = connection.transaction().unwrap();
         crate::library::database::apply_remote_change_in_tx(&transaction, &remote_link(&link, true, 20, 2)).unwrap();
         crate::library::database::apply_remote_change_in_tx(&transaction, &remote_link(&link, false, 10, 1)).unwrap();
         transaction.commit().unwrap();
 
-        assert!(load_book_links(&connection, BookId::new(1)).unwrap().is_empty());
+        assert!(load_book_links(&connection, ContentHash::from_fixture_u64(1)).unwrap().is_empty());
         let deleted: bool = connection.query_row("SELECT deleted_at IS NOT NULL FROM book_link WHERE id=?1", [&link.id], |row| row.get(0)).unwrap();
         assert!(deleted);
     }

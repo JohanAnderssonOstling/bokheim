@@ -51,13 +51,13 @@ pub enum DownloadState {
 
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct BookDownloadStatus {
-    pub book_id: String,
+    pub content_hash: String,
     pub state: DownloadState,
 }
 
 impl BookDownloadStatus {
-    pub fn new(book_id: impl Into<String>, state: DownloadState) -> Self {
-        Self { book_id: book_id.into(), state }
+    pub fn new(content_hash: impl Into<String>, state: DownloadState) -> Self {
+        Self { content_hash: content_hash.into(), state }
     }
 }
 

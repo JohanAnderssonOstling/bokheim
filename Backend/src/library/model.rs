@@ -1,4 +1,4 @@
-use crate::{BookId, ContentHash};
+use crate::{ContentHash};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
@@ -47,14 +47,12 @@ pub(crate) struct LibraryAccountState {
 }
 
 /// Canonical content identity: full-file BLAKE3 for every asset.
-pub(crate) fn generate_content_hash_blake3(path: &Path, _buf: &mut [u8]) -> std::io::Result<(BookId, ContentHash)> {
+pub(crate) fn generate_content_hash_blake3(path: &Path, _buf: &mut [u8]) -> std::io::Result<ContentHash> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut file, &mut hasher)?;
     let hash = hasher.finalize().to_hex().to_string();
-    let content_hash = ContentHash::parse(&hash).expect("BLAKE3 always produces a valid content hash");
-    let book_id = BookId::from_content_hash(&content_hash);
-    Ok((book_id, content_hash))
+    Ok(ContentHash::new(&hash))
 }
 
 #[cfg(test)]
@@ -64,7 +62,7 @@ mod tests {
     use crate::library::database as db;
     use crate::library::LibraryBackend;
     use crate::LibraryRoot;
-    use crate::{BookId, ContentHash, DownloadState};
+    use crate::{ContentHash, DownloadState};
     use image::{DynamicImage, ImageOutputFormat};
     use lopdf::{dictionary, Document, Object, Stream};
     use std::io::{Cursor, Write};
@@ -96,21 +94,21 @@ mod tests {
         LibraryBackend::open(&app, &context, library_dir.to_str().unwrap(), library_id).unwrap().0
     }
 
-    fn imported_card(library: &LibraryBackend, book_id: BookId) -> db::BookCardRow {
+    fn imported_card(library: &LibraryBackend, content_hash: ContentHash) -> db::BookCardRow {
         let conn = library.db.get().unwrap();
-        db::get_book_cards_in_dir_scoped(&conn, "__root__", false).unwrap().into_iter().find(|card| card.book_id == book_id).unwrap()
+        db::get_book_cards_in_dir_scoped(&conn, "__root__", false).unwrap().into_iter().find(|card| card.content_hash == content_hash).unwrap()
     }
 
     #[test]
-    fn generated_content_hash_round_trips_to_book_id() {
+    fn generated_content_hash_is_the_book_identity() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("book.epub");
         std::fs::write(&path, b"book bytes").unwrap();
         let mut buffer = [0_u8; 16];
 
-        let (book_id, content_hash) = generate_content_hash_blake3(&path, &mut buffer).unwrap();
+        let content_hash = generate_content_hash_blake3(&path, &mut buffer).unwrap();
 
-        assert_eq!(BookId::from_content_hash(&content_hash), book_id);
+        assert_eq!(content_hash, ContentHash::new(&blake3::hash(b"book bytes").to_hex().as_str()));
     }
 
     #[test]
@@ -130,13 +128,13 @@ mod tests {
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "pdf-test");
 
-        let book_id = library.import_book("__root__", &source, "paper.pdf").unwrap();
-        assert_eq!(imported_card(&library, book_id).title, "paper");
-        assert!(library.resolve_book_for_reader(book_id).unwrap().path.ends_with("paper.pdf"));
+        let content_hash = library.import_book("__root__", &source, "paper.pdf").unwrap();
+        assert_eq!(imported_card(&library, content_hash).title, "paper");
+        assert!(library.resolve_book_for_reader(content_hash).unwrap().path.ends_with("paper.pdf"));
         let conn = library.db.get().unwrap();
-        db::update_pdf_reading_page(&conn, book_id, 0).unwrap();
-        assert_eq!(db::get_pdf_reading_page(&conn, book_id).unwrap(), Some(0));
-        assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{book_id}.jpg")).exists());
+        db::update_pdf_reading_page(&conn, content_hash, 0).unwrap();
+        assert_eq!(db::get_pdf_reading_page(&conn, content_hash).unwrap(), Some(0));
+        assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg")).exists());
     }
 
     #[test]
@@ -150,14 +148,14 @@ mod tests {
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "eviction-test");
 
-        let book_id = library.import_book("__root__", &source, "paper.pdf").unwrap();
-        let local_path = library.resolve_book_for_reader(book_id).unwrap().path;
+        let content_hash = library.import_book("__root__", &source, "paper.pdf").unwrap();
+        let local_path = library.resolve_book_for_reader(content_hash).unwrap().path;
         assert!(local_path.exists());
-        assert!(db::is_book_downloaded(&library.db.get().unwrap(), book_id).unwrap());
+        assert!(db::is_book_downloaded(&library.db.get().unwrap(), content_hash).unwrap());
 
-        assert!(matches!(library.remove_local_book_copy(book_id).unwrap(), DownloadState::NotDownloaded));
+        assert!(matches!(library.remove_local_book_copy(content_hash).unwrap(), DownloadState::NotDownloaded));
         assert!(!local_path.exists());
-        assert!(db::get_book_cards_in_dir_scoped(&library.db.get().unwrap(), "__root__", false).unwrap().iter().any(|candidate| candidate.book_id == book_id));
+        assert!(db::get_book_cards_in_dir_scoped(&library.db.get().unwrap(), "__root__", false).unwrap().iter().any(|candidate| candidate.content_hash == content_hash));
     }
 
     #[test]
@@ -176,15 +174,15 @@ mod tests {
         std::fs::write(temp.path().join("unrelated.txt"), b"private sibling").unwrap();
         let library = open_test_library(&app_data, &library_dir, "html-test");
 
-        let book_id = library.import_book("__root__", &source, "essay.html").unwrap();
-        let stored = library.resolve_book_for_reader(book_id).unwrap().path;
+        let content_hash = library.import_book("__root__", &source, "essay.html").unwrap();
+        let stored = library.resolve_book_for_reader(content_hash).unwrap().path;
         assert!(stored.ends_with("essay.webpub"));
         assert_eq!(stored.extension().and_then(|extension| extension.to_str()), Some("webpub"));
         let publication = html_publication::PublicationSource::from_path(stored).unwrap();
         assert_eq!(publication.provider.read_bytes("essay.html").unwrap(), html);
         assert_eq!(publication.provider.read_bytes("assets/book.css").unwrap(), b"body { color: navy }");
         assert!(publication.provider.read_bytes("unrelated.txt").is_err());
-        let card = imported_card(&library, book_id);
+        let card = imported_card(&library, content_hash);
         assert_eq!(card.title, "A better title");
         assert_eq!(card.author, "Ada Lovelace");
     }
@@ -209,22 +207,22 @@ mod tests {
         archive.finish().unwrap();
         let library = open_test_library(&app_data, &library_dir, "cbz-test");
 
-        let book_id = library.import_book("__root__", &source, "comic.cbz").unwrap();
+        let content_hash = library.import_book("__root__", &source, "comic.cbz").unwrap();
 
-        let card = imported_card(&library, book_id);
+        let card = imported_card(&library, content_hash);
         assert_eq!(card.title, "Native Comic");
         assert_eq!(card.author, "Grace Hopper");
-        assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{book_id}.jpg")).exists());
+        assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg")).exists());
     }
 
     #[test]
     fn book_summary_serialization_never_embeds_cover_bytes() {
-        let mut book = Book::try_new(BookId::new(42), "A title".to_string(), "An author".to_string()).unwrap();
+        let mut book = Book::try_new(ContentHash::from_fixture_u64(42), "A title".to_string(), "An author".to_string()).unwrap();
         book.set_cover(Some(vec![0xff, 0xd8, 0xff, 0xd9]));
 
         let serialized = serde_json::to_value(BookSummary::from(book)).unwrap();
 
-        assert_eq!(serialized["id"], "42");
+        assert_eq!(serialized["content_hash"], ContentHash::from_fixture_u64(42).as_str());
         assert!(serialized.get("cover").is_none());
     }
 
@@ -299,11 +297,10 @@ mod tests {
 
         let context = BackendContext::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
         let library_root = LibraryRoot::open(&library_dir).unwrap();
-        let content_hash = ContentHash::parse(blake3::hash(&std::fs::read(&epub_path).unwrap()).to_hex().as_str()).unwrap();
-        let book_id = BookId::from_content_hash(&content_hash);
-        generate_thumbnail_for_sync(&context, &library_root, &epub_path, book_id, &content_hash).unwrap();
+        let content_hash = ContentHash::new(&blake3::hash(&std::fs::read(&epub_path).unwrap()).to_hex().as_str());
+        generate_thumbnail_for_sync(&context, &library_root, &epub_path, &content_hash).unwrap();
 
-        let ui_bytes = std::fs::read(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{book_id}.jpg"))).unwrap();
+        let ui_bytes = std::fs::read(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg"))).unwrap();
         let sync_path = crate::sync::transfer::thumbnail_path_from_content_hash(&library_root, &content_hash);
         let sync_bytes = std::fs::read(&sync_path).unwrap();
         assert_eq!(&ui_bytes[..2], &[0xff, 0xd8]);
@@ -311,7 +308,7 @@ mod tests {
         let dimensions = image::load_from_memory_with_format(&sync_bytes, image::ImageFormat::Jpeg).unwrap().to_rgb8().dimensions();
         assert_eq!(dimensions, (300, 450));
 
-        generate_thumbnail_for_sync(&context, &library_root, &epub_path, book_id, &content_hash).unwrap();
+        generate_thumbnail_for_sync(&context, &library_root, &epub_path, &content_hash).unwrap();
         assert_eq!(std::fs::read(sync_path).unwrap(), sync_bytes);
     }
 }

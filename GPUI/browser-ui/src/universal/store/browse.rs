@@ -64,7 +64,7 @@ impl StorePage {
         self.loading = true;
         self.error = None;
         let source_id = source.id.clone();
-        let operation = self.library.spawn(move |library| async move { library.catalog_page(&source_id, locator.as_deref(), None).await.map_err(|error| error.to_string()) });
+        let operation = self.library.spawn(move |library| async move { library.catalog_page(&source_id, locator.as_deref()).await.map_err(|error| error.to_string()) });
         self.task = Some(cx.spawn(async move |view, cx| {
             let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = view.update(cx, |view, cx| {

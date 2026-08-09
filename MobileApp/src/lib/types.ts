@@ -84,7 +84,7 @@ export type AnnotationAnchor =
 
 export interface ReaderAnnotation {
   id: string;
-  book_id: string;
+  content_hash: string;
   anchor: AnnotationAnchor;
   exact_text: string;
   style: ReaderAnnotationStyle;
@@ -96,7 +96,7 @@ export interface ReaderAnnotation {
 
 export interface ReaderBookmark {
   id: string;
-  book_id: string;
+  content_hash: string;
   cfi: string;
   label: string;
   created_at: number;

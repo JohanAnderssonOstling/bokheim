@@ -1,4 +1,4 @@
-use bokheim_identifiers::BookId;
+use bokheim_identifiers::ContentHash;
 use std::fmt;
 use std::path::Path;
 
@@ -93,13 +93,13 @@ impl fmt::Display for RelativeBookPath {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookPlacement {
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
     pub rel_path: RelativeBookPath,
 }
 
 impl BookPlacement {
-    pub const fn new(book_id: BookId, rel_path: RelativeBookPath) -> Self {
-        Self { book_id, rel_path }
+    pub const fn new(content_hash: ContentHash, rel_path: RelativeBookPath) -> Self {
+        Self { content_hash, rel_path }
     }
 }
 

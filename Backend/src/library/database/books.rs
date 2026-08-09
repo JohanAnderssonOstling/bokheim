@@ -3,17 +3,17 @@
 use super::*;
 
 pub(super) fn read_book_card_row(row: &rusqlite::Row<'_>) -> Result<BookCardRow, rusqlite::Error> {
-    let raw_book_id: String = row.get(0)?;
-    let book_id = BookId::parse(&raw_book_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
+    let raw_content_hash: String = row.get(0)?;
+    let content_hash = ContentHash::new(&raw_content_hash.clone());
     let title: Option<String> = row.get(1).ok();
-    let title = title.unwrap_or_else(|| format!("Untitled ({raw_book_id})"));
+    let title = title.unwrap_or_else(|| format!("Untitled ({raw_content_hash})"));
     let author: Option<String> = row.get(2).ok();
     let description: Option<String> = row.get(3)?;
     let progress: Option<f32> = row.get(4)?;
     let duration_ms: Option<i64> = row.get(8)?;
     let chapter_count: Option<i64> = row.get(9)?;
     Ok(BookCardRow {
-        book_id,
+        content_hash,
         title,
         author: author.unwrap_or_default(),
         description: description.unwrap_or_default(),
@@ -42,7 +42,7 @@ pub(crate) fn get_book_cards_by_author_scoped(conn: &Connection, author_id: Auth
     let mut seen = std::collections::HashSet::new();
     conn.get_book_cards_by_author(&author_id.to_string(), i32::from(downloaded_only), |row| {
         let card = read_book_card_row(row)?;
-        if seen.insert(card.book_id) {
+        if seen.insert(card.content_hash.clone()) {
             cards.push(card);
         }
         Ok(())

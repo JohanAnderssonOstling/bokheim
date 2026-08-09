@@ -16,7 +16,7 @@ bokheim-account-contract = { path = "../../../BokheimAccountContract" }
 bokheim-wire = { path = "../../../BokheimWire" }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
-server-database = { path = "../server-database" }
+server-postgres = { path = "../server-postgres" }
 server-wire-http = { path = "../server-wire-http" }
 sha2 = "0.10"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "chrono"] }

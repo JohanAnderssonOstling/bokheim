@@ -1,10 +1,12 @@
 use bokheim_algorithms::{Contributor, MarcRelatorCode, PublicationMetadata, ReadingPosition};
-use bokheim_identifiers::{BookFormat, ContentHash, UnixMillis};
+use bokheim_identifiers::UnixMillis;
 use serde::{Deserialize, Serialize};
+
+use crate::BookFormat;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum BookLifecycleState { Present { metadata: BookMetadataState, added_at: UnixMillis, content_hash: ContentHash, format: BookFormat }, Deleted }
+pub enum BookLifecycleState { Present { metadata: BookMetadataState, added_at: UnixMillis, format: BookFormat }, Deleted }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReadingPositionState { pub location: ReadingPosition, pub progress: f32 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

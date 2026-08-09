@@ -209,7 +209,7 @@ Add distributed GC only as a later phase. The first correct implementation is:
 
 Network failure must fail closed: retain objects and release the lease without
 claiming a completed sweep. Optimize long maintenance pauses only after this
-correct baseline exists. This plan supersedes the assumption in plan 25 that GC
+correct baseline exists. This plan supersedes the earlier assumption that GC
 always runs in the same server process; coordinate any implementation with plans
 23–25.
 

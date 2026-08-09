@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use bokheim_app_contract::catalog::{CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogPage, CatalogSourceId, CatalogWideSearchResult};
 use bokheim_catalog::{opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator, CatalogCoverCache, CatalogServerSearchRequest};
-use bokheim_opds::{endpoints_from_registry, validate_curated_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointAccess, OpdsEndpointAuthentication};
+use bokheim_opds::{endpoints_from_registry, validate_curated_registry, CatalogRegistry, OpdsClient, OpdsEndpoint};
 use bokheim_wire::{self as wire, ContentEncoding};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -204,7 +204,7 @@ impl CatalogService {
         let endpoint = self.public_endpoint(source_id).await?;
         let locator = locator.unwrap_or(&endpoint.url);
         validate_opds_catalog_locator(&endpoint, locator).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let catalog = if fresh { self.state.opds.fetch_catalog_fresh(locator, None).await } else { self.state.opds.fetch_catalog(locator, None).await }.map_err(|error| CatalogServiceError(error.to_string()))?;
+        let catalog = if fresh { self.state.opds.fetch_catalog_fresh(locator).await } else { self.state.opds.fetch_catalog(locator).await }.map_err(|error| CatalogServiceError(error.to_string()))?;
         let page = opds_page(source_id.clone(), catalog);
         self.state.covers.remember_page(&page).await;
         Ok(page)
@@ -213,7 +213,7 @@ impl CatalogService {
     pub async fn search_catalog(&self, source_id: &CatalogSourceId, request: CatalogServerSearchRequest) -> Result<CatalogPage, CatalogServiceError> {
         let endpoint = self.public_endpoint(source_id).await?;
         let requested_definition = opds_search_definition(&request.search).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let root = self.state.opds.fetch_catalog(&endpoint.url, None).await.map_err(|error| CatalogServiceError(error.to_string()))?;
+        let root = self.state.opds.fetch_catalog(&endpoint.url).await.map_err(|error| CatalogServiceError(error.to_string()))?;
         let definition = root.search.ok_or_else(|| CatalogServiceError("catalog does not advertise search".to_owned()))?;
         if requested_definition != definition {
             return Err(CatalogServiceError("catalog search definition is not the currently advertised definition".to_owned()));
@@ -223,7 +223,7 @@ impl CatalogService {
             bokheim_opds::OpdsSearch::OpenSearchDescription { url } => url,
         };
         validate_opds_catalog_locator(&endpoint, search_origin).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let catalog = self.state.opds.search_definition(&definition, &opds_search_query(request.query), None).await.map_err(|error| CatalogServiceError(error.to_string()))?;
+        let catalog = self.state.opds.search_definition(&definition, &opds_search_query(request.query)).await.map_err(|error| CatalogServiceError(error.to_string()))?;
         let page = opds_page(source_id.clone(), catalog);
         self.state.covers.remember_page(&page).await;
         Ok(page)
@@ -377,9 +377,9 @@ impl CatalogService {
 
     pub async fn refresh_public_catalogs(&self) {
         let endpoints = self.state.endpoints.read().await.clone();
-        stream::iter(endpoints.into_iter().filter(is_public_endpoint))
+        stream::iter(endpoints)
             .for_each_concurrent(REFRESH_CONCURRENCY, |endpoint| async move {
-                match self.state.opds.fetch_catalog_fresh(&endpoint.url, None).await {
+                match self.state.opds.fetch_catalog_fresh(&endpoint.url).await {
                     Ok(_) => tracing::info!(catalog = endpoint.id.as_str(), "refreshed public OPDS cache"),
                     Err(error) => tracing::warn!(catalog = endpoint.id.as_str(), %error, "could not refresh public OPDS cache"),
                 }
@@ -405,7 +405,7 @@ impl CatalogService {
             .read()
             .await
             .iter()
-            .find(|endpoint| is_public_endpoint(endpoint) && opds_catalog_source_id(&endpoint.id) == *source_id)
+            .find(|endpoint| opds_catalog_source_id(&endpoint.id) == *source_id)
             .cloned()
             .ok_or_else(|| CatalogServiceError("catalog source is not a registered public OPDS endpoint".to_owned()))
     }
@@ -455,10 +455,6 @@ impl CatalogService {
             }),
         })
     }
-}
-
-fn is_public_endpoint(endpoint: &OpdsEndpoint) -> bool {
-    endpoint.access == OpdsEndpointAccess::Open && endpoint.authentication == OpdsEndpointAuthentication::None
 }
 
 fn default_cover_cache_directory() -> PathBuf {
@@ -688,8 +684,6 @@ mod tests {
             description: "Test catalog".to_owned(),
             languages: vec!["English".to_owned()],
             url,
-            access: OpdsEndpointAccess::Open,
-            authentication: OpdsEndpointAuthentication::None,
         }
     }
 
@@ -722,7 +716,7 @@ mod tests {
         assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), CACHE_CONTROL);
         let etag = response.headers().get(header::ETAG).unwrap().clone();
         let registry: CatalogRegistry = decode_wire_response(response).await;
-        assert_eq!(registry.catalogs.len(), 25);
+        assert_eq!(registry.catalogs.len(), 23);
         let first_prepared = service.prepared_registry(registry.clone()).await.unwrap();
         let second_prepared = service.prepared_registry(registry).await.unwrap();
         assert_eq!(first_prepared.wire_bytes.as_ptr(), second_prepared.wire_bytes.as_ptr(), "registry cache hits must reuse the same compressed allocation");

@@ -1,6 +1,6 @@
 pub use bokheim_domain::{AnnotationAnchor, PdfAnnotationAnchor, PdfAnnotationRect};
 use bokheim_domain::{AnnotationState, AnnotationStyle as SyncAnnotationStyle, BookmarkState};
-use sync_common::{BookId, UnixMillis};
+use sync_common::ContentHash;
 
 #[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +44,7 @@ impl AnnotationStyle {
 #[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 pub struct ReaderAnnotation {
     pub id: String,
-    pub book_id: String,
+    pub content_hash: String,
     pub anchor: AnnotationAnchor,
     pub exact_text: String,
     pub style: AnnotationStyle,
@@ -59,7 +59,7 @@ pub struct ReaderAnnotation {
 #[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 pub struct ReaderBookmark {
     pub id: String,
-    pub book_id: String,
+    pub content_hash: String,
     pub cfi: String,
     pub label: String,
     #[specta(type = specta_typescript::Number)]
@@ -79,14 +79,14 @@ impl ReaderAnnotation {
 
     pub fn to_sync_state(&self, deleted: bool) -> Result<AnnotationState, Box<dyn std::error::Error>> {
         Ok(AnnotationState {
-            book_id: BookId::parse(&self.book_id)?,
+            content_hash: ContentHash::new(&self.content_hash.clone()),
             anchor: self.anchor.clone(),
             exact_text: self.exact_text.clone(),
             style: self.style.sync(),
             color: self.color.clone(),
             note: self.note.clone(),
-            created_at: UnixMillis::new(u64::try_from(self.created_at)?)?,
-            modified_at: UnixMillis::new(u64::try_from(self.modified_at)?)?,
+            created_at: u64::try_from(self.created_at)?,
+            modified_at: u64::try_from(self.modified_at)?,
             deleted,
         })
     }
@@ -95,11 +95,11 @@ impl ReaderAnnotation {
 impl ReaderBookmark {
     pub fn validate(&self, deleted: bool) -> Result<(), Box<dyn std::error::Error>> {
         let _ = BookmarkState {
-            book_id: BookId::parse(&self.book_id)?,
+            content_hash: ContentHash::new(&self.content_hash.clone()),
             cfi: self.cfi.clone(),
             label: self.label.clone(),
-            created_at: UnixMillis::new(u64::try_from(self.created_at)?)?,
-            modified_at: UnixMillis::new(u64::try_from(self.modified_at)?)?,
+            created_at: u64::try_from(self.created_at)?,
+            modified_at: u64::try_from(self.modified_at)?,
             deleted,
         };
         Ok(())

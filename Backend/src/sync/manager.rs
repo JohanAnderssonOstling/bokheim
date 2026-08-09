@@ -3,7 +3,7 @@
 use super::transfer::{TransferJob, TransferOrigin, TransferQueue, TransferRuntime, TransferWorker};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
-use crate::{BlobKind, BookId, BookPlacement, ContentHash, RelativeBookPath, ServerUrl};
+use crate::{BlobKind, ContentHash, BookPlacement, RelativeBookPath, ServerUrl};
 use crate::{LibraryRoot, RelativeDirPath};
 use crossbeam_channel::Sender;
 use r2d2::Pool;
@@ -55,16 +55,16 @@ fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce:
         return Ok((mutations, None));
     };
     let now_millis = u64::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
-    if latest_reading_change.get() > now_millis.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
+    if latest_reading_change > now_millis.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "local reading-position timestamp is pathologically far in the future").into());
     }
     let debounce_millis = u64::try_from(reading_debounce.as_millis())?;
     let ready_at = latest_reading_change.saturating_add(debounce_millis);
-    if ready_at.get() <= now_millis {
+    if ready_at <= now_millis {
         return Ok((mutations, None));
     }
     mutations.retain(|mutation| !matches!(mutation.body, MutationBody::ReadingPosition { .. }));
-    Ok((mutations, Some(Duration::from_millis(ready_at.get() - now_millis))))
+    Ok((mutations, Some(Duration::from_millis(ready_at - now_millis))))
 }
 
 fn take_push_page(mutations: &mut VecDeque<StateMutation>) -> Result<Vec<StateMutation>, sync_common::wire::WireError> {
@@ -308,18 +308,18 @@ impl SyncManager {
                         log::warn!("Verified local book path is not valid UTF-8: {}", installed_path.display());
                         continue;
                     };
-                    if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, &asset.rel_path, asset.book_id, &installed_path) {
+                    if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, &asset.rel_path, asset.content_hash.clone(), &installed_path) {
                         log::warn!("Failed to stamp local fingerprint for {}: {}", local_path, err);
                     }
                     db::upsert_blob_local_ref(&conn, BlobKind::Book, &asset.content_hash, installed_path_text, true)?;
                     db::complete_asset_request(&conn, BlobKind::Book, &asset.content_hash)?;
-                    db::set_book_downloaded(&conn, &asset.rel_path, asset.book_id, true)?;
+                    db::set_book_downloaded(&conn, &asset.rel_path, asset.content_hash.clone(), true)?;
                     log::info!("Materialized {local_path} from local copy {src} (content already present)");
                 }
                 Err(error) => {
                     if error.invalidates_source() {
                         db::upsert_blob_local_ref(&conn, BlobKind::Book, &asset.content_hash, &src, false)?;
-                        db::set_book_downloaded(&conn, &asset.rel_path, asset.book_id, false)?;
+                        db::set_book_downloaded(&conn, &asset.rel_path, asset.content_hash.clone(), false)?;
                         db::add_asset_request(&conn, BlobKind::Book, &asset.content_hash, TransferOrigin::Background)?;
                     }
                     log::warn!("Failed to materialize {local_path} from {src}: {error}");
@@ -377,7 +377,7 @@ impl SyncManager {
             let Some(thumbnail_path) = db::get_blob_local_path(&conn, BlobKind::Thumbnail, &content_hash)? else {
                 continue;
             };
-            jobs.push(TransferJob::UploadThumbnail { content_hash, thumbnail_path, book_id: None, origin: upload_origin });
+            jobs.push(TransferJob::UploadThumbnail { thumbnail_hash: content_hash, thumbnail_path, book_content_hash: None, origin: upload_origin });
         }
 
         // A requested download is itself the authoritative presence check: a
@@ -426,7 +426,7 @@ impl SyncManager {
             let Some(book_path) = db::get_book_paths_by_content_hash(&conn, &content_hash)?.into_iter().next() else {
                 continue;
             };
-            jobs.push(TransferJob::DownloadThumbnail { content_hash, book_id: book_path.book_id, origin: upload_origin });
+            jobs.push(TransferJob::DownloadThumbnail { thumbnail_hash: content_hash, book_content_hash: book_path.content_hash, origin: upload_origin });
         }
 
         TransferWorker::new(
@@ -450,8 +450,8 @@ impl SyncManager {
         self.transfer_queue.statuses()
     }
 
-    pub fn request_download(&self, book_id: BookId) -> Result<(), Box<dyn std::error::Error>> {
-        self.request_downloads(std::slice::from_ref(&book_id))
+    pub fn request_download(&self, content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+        self.request_downloads(std::slice::from_ref(&content_hash))
     }
 
     async fn remote_blob_size(&self, content_hash: &ContentHash) -> Result<Option<u64>, Box<dyn std::error::Error>> {
@@ -465,13 +465,13 @@ impl SyncManager {
         Ok(response.content_length())
     }
 
-    pub fn request_downloads(&self, book_ids: &[BookId]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.db_pool.get()?;
         let transaction = conn.transaction()?;
-        for book_id in book_ids {
-            let hashes = db::get_book_hashes(&transaction, *book_id)?;
+        for content_hash in content_hashes {
+            let hashes = db::get_book_hashes(&transaction, content_hash.clone())?;
             if hashes.is_empty() {
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("book {book_id} has no live placement")).into());
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("book {content_hash} has no live placement")).into());
             }
             for hash in hashes {
                 db::add_asset_request(&transaction, BlobKind::Book, &hash, TransferOrigin::UserInitiated)?;
@@ -480,8 +480,8 @@ impl SyncManager {
         transaction.commit()?;
         drop(conn);
         if let Some(tx) = &self.event_tx {
-            for book_id in book_ids {
-                let _ = tx.send(LibraryEvent::DownloadStatusChanged { book_id: *book_id, state: crate::DownloadState::Queued });
+            for content_hash in content_hashes {
+                let _ = tx.send(LibraryEvent::DownloadStatusChanged { content_hash: content_hash.clone(), state: crate::DownloadState::Queued });
             }
         }
         Ok(())
@@ -500,10 +500,10 @@ impl SyncManager {
         let Some(chosen) = book_paths.iter().find(|path| !Path::new(&self.resolve_book_path(&path.rel_path)).exists()).or_else(|| book_paths.first()) else {
             return Ok(None);
         };
-        let materialized_path = db::materialize_download_path(conn, &self.library_root, &BookPlacement::new(chosen.book_id, chosen.rel_path.clone()))?;
+        let materialized_path = db::materialize_download_path(conn, &self.library_root, &BookPlacement::new(chosen.content_hash.clone(), chosen.rel_path.clone()))?;
         let local_path = self.resolve_book_path(&materialized_path);
         db::upsert_blob_local_ref(conn, BlobKind::Book, content_hash, &local_path, Path::new(&local_path).exists())?;
-        Ok(Some(TransferJob::DownloadBlob { content_hash: content_hash.clone(), placement: BookPlacement::new(chosen.book_id, materialized_path), origin }))
+        Ok(Some(TransferJob::DownloadBlob { content_hash: content_hash.clone(), placement: BookPlacement::new(chosen.content_hash.clone(), materialized_path), origin }))
     }
 
     async fn negotiate_upload_blobs(&self, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, Box<dyn std::error::Error>> {
@@ -736,7 +736,7 @@ impl SyncManager {
         for placement in removed {
             // Only act if still tombstoned in the committed state; a later add in
             // the same batch may have resurrected this exact placement.
-            let Some((rel_path, content_hash)) = db::resolve_removed_book_dir(&conn, placement.dir_id.as_str(), placement.book_id)? else {
+            let Some((rel_path, content_hash)) = db::resolve_removed_book_dir(&conn, placement.dir_id.as_str(), placement.content_hash.clone())? else {
                 continue;
             };
             let abs_old = self.resolve_book_path(&rel_path);
@@ -760,12 +760,12 @@ impl SyncManager {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     if std::fs::rename(&abs_old, &abs_new).is_ok() {
-                        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, &target_rel, target.book_id, Path::new(&abs_new)) {
+                        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, &target_rel, target.content_hash.clone(), Path::new(&abs_new)) {
                             log::warn!("Failed to stamp relocated fingerprint for {}: {}", abs_new, err);
                         }
                         db::upsert_blob_local_ref(&conn, BlobKind::Book, &content_hash, &abs_new, true)?;
                         db::complete_asset_request(&conn, BlobKind::Book, &content_hash)?;
-                        db::set_book_downloaded(&conn, &target_rel, target.book_id, true)?;
+                        db::set_book_downloaded(&conn, &target_rel, target.content_hash, true)?;
                         log::info!("Relocated {abs_old} -> {abs_new} (book moved)");
                         continue;
                     }
@@ -826,7 +826,7 @@ mod tests {
     const TEST_AUTH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn test_content_hash() -> ContentHash {
-        ContentHash::parse(TEST_CONTENT_HASH).unwrap()
+        ContentHash::new(&TEST_CONTENT_HASH)
     }
 
     fn test_epub(payload: &[u8]) -> Vec<u8> {
@@ -853,7 +853,7 @@ mod tests {
     }
 
     fn millis(value: u64) -> sync_common::UnixMillis {
-        sync_common::UnixMillis::new(value).unwrap()
+        value
     }
 
     fn pulled_change(server_sequence: u64, body: MutationBody) -> ServerMutation {
@@ -864,17 +864,16 @@ mod tests {
         }
     }
 
-    fn deleted(book_id: u64) -> MutationBody {
-        MutationBody::BookLifecycle { book_id: BookId::new(book_id), value: BookLifecycleState::Deleted }
+    fn deleted(content_hash: u64) -> MutationBody {
+        MutationBody::BookLifecycle { content_hash: ContentHash::from_fixture_u64(content_hash), value: BookLifecycleState::Deleted }
     }
 
-    fn added(book_id: u64, title: &str, added_at: u64) -> MutationBody {
+    fn added(content_hash: u64, title: &str, added_at: u64) -> MutationBody {
         MutationBody::BookLifecycle {
-            book_id: BookId::new(book_id),
+            content_hash: ContentHash::from_fixture_u64(content_hash),
             value: BookLifecycleState::Present {
                 metadata: BookMetadataState { title: title.to_owned(), contributors: Vec::new(), description: String::new(), publication: Default::default() },
                 added_at: millis(added_at),
-                content_hash: test_content_hash(),
                 format: BookFormat::Epub,
             },
         }
@@ -904,16 +903,13 @@ mod tests {
         sync_common::wire::decode_transport(body, encoding, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap()
     }
 
-    /// Domain validity is a property of the wire types, not of a batch-level
-    /// check: a mutation carrying an invalid position or timestamp cannot be
-    /// constructed, so it can never reach application. `validate_pull_batch`
-    /// is left to police revision ordering alone (see the test below).
+    /// Reading-position validity is a property of the wire type, not of a
+    /// batch-level check. `validate_pull_batch` polices revision ordering.
     #[test]
-    fn invalid_domain_values_cannot_be_represented_on_the_wire() {
+    fn invalid_reading_positions_cannot_be_represented_on_the_wire() {
         assert!(sync_common::ReadingPosition::parse("not-a-cfi").is_err());
         assert!(sync_common::ReadingPosition::parse("epubcfi(/6/2)").is_ok());
         assert!(sync_common::ReadingPosition::parse("pdfpage(3)").is_ok());
-        assert!(sync_common::UnixMillis::new(i64::MAX as u64 + 1).is_err());
     }
 
     #[test]
@@ -1112,7 +1108,7 @@ mod tests {
                 let mutation = reading_change(sequence, sequence, "epubcfi(/6/2)", sequence);
                 tx.execute(
                     "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position',?3,?4,?5)",
-                    rusqlite::params![sequence as i64, mutation.mutation_id.to_string(), sequence.to_string(), sync_common::wire::encode(&mutation.body).unwrap(), mutation.changed_at.storage_i64()],
+                    rusqlite::params![sequence as i64, mutation.mutation_id.to_string(), ContentHash::from_fixture_u64(sequence).as_str(), sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()],
                 )
                 .unwrap();
             }
@@ -1130,10 +1126,10 @@ mod tests {
         server.abort();
     }
 
-    fn reading_change(sequence: u64, book_id: u64, cfi: &str, changed_at: u64) -> StateMutation {
+    fn reading_change(sequence: u64, content_hash: u64, cfi: &str, changed_at: u64) -> StateMutation {
         StateMutation {
             mutation_id: sync_common::MutationId::new(),
-            body: MutationBody::ReadingPosition { book_id: BookId::new(book_id), value: ReadingPositionState { location: sync_common::ReadingPosition::parse(cfi).unwrap(), progress: 0.0 } },
+            body: MutationBody::ReadingPosition { content_hash: ContentHash::from_fixture_u64(content_hash), value: ReadingPositionState { location: sync_common::ReadingPosition::parse(cfi).unwrap(), progress: 0.0 } },
             changed_at: millis(changed_at),
             replica_seq: local_seq(sequence),
         }
@@ -1161,7 +1157,7 @@ mod tests {
                 body: MutationBody::Annotation {
                     annotation_id: uuid::Uuid::new_v4().to_string(),
                     value: AnnotationState {
-                        book_id: BookId::new(sequence),
+                        content_hash: ContentHash::from_fixture_u64(sequence),
                         anchor: AnnotationAnchor::EpubCfi { cfi: "epubcfi(/6/2)".to_owned() },
                         exact_text: large_text.clone(),
                         style: AnnotationStyle::Highlight,
@@ -1307,7 +1303,7 @@ mod tests {
             let conn = manager.db_pool.get().unwrap();
             conn.execute(
                 "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position','1',?3,?4)",
-                rusqlite::params![requested.replica_seq.get() as i64, requested.mutation_id.to_string(), sync_common::wire::encode(&requested.body).unwrap(), requested.changed_at.storage_i64()],
+                rusqlite::params![requested.replica_seq.get() as i64, requested.mutation_id.to_string(), sync_common::wire::encode(&requested.body).unwrap(), i64::try_from(requested.changed_at).unwrap()],
             )
             .unwrap();
         }
@@ -1483,10 +1479,10 @@ mod tests {
             .map(|index| StateMutation {
                 mutation_id: sync_common::MutationId::new(),
                 body: MutationBody::ReadingPosition {
-                    book_id: BookId::new(index),
+                    content_hash: ContentHash::from_fixture_u64(index),
                     value: ReadingPositionState { location: sync_common::ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 0.5 },
                 },
-                changed_at: sync_common::UnixMillis::new(now).unwrap(),
+                changed_at: now,
                 replica_seq: ReplicaSeq::new(index).unwrap(),
             })
             .collect::<Vec<_>>();
@@ -1545,7 +1541,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let book_bytes = test_epub(b"real server asset endpoint coverage");
-        let book_hash = ContentHash::parse(&blake3::hash(&book_bytes).to_hex().to_string()).unwrap();
+        let book_hash = ContentHash::new(&blake3::hash(&book_bytes).to_hex().to_string());
         let manifest = bokheim_sync_client::negotiate_blobs(
             &client,
             &publisher_session,
@@ -1593,7 +1589,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invalid_range.status(), reqwest::StatusCode::RANGE_NOT_SATISFIABLE);
-        let wrong_hash = ContentHash::parse(&"f".repeat(64)).unwrap();
+        let wrong_hash = ContentHash::new(&"f".repeat(64));
         let missing_length = client.put(publisher_session.server_url().endpoint(&format!("api/libraries/{}/blobs/{}", library_id.as_str(), wrong_hash.as_str())))
             .bearer_auth(publisher_session.token())
             .body(reqwest::Body::wrap_stream(futures_util::stream::iter(vec![Ok::<_, std::io::Error>(axum::body::Bytes::from(book_bytes.clone()))])))
@@ -1612,7 +1608,7 @@ mod tests {
         let database_url = std::env::var("SYNC_E2E_DATABASE_URL").expect("SYNC_E2E_DATABASE_URL");
         let database = sqlx::PgPool::connect(&database_url).await.unwrap();
         sqlx::query("UPDATE user_storage_account SET quota_bytes = 0 WHERE user_id = $1").bind(publisher_session.user_id()).execute(&database).await.unwrap();
-        let quota_hash = ContentHash::parse(&"e".repeat(64)).unwrap();
+        let quota_hash = ContentHash::new(&"e".repeat(64));
         let quota = bokheim_sync_client::negotiate_blobs(
             &client,
             &publisher_session,
@@ -1726,21 +1722,21 @@ mod tests {
     }
 
     #[test]
-    fn state_driven_download_job_keeps_book_id_hash_and_path_distinct() {
+    fn state_driven_download_job_uses_content_hash_identity() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
         let conn = manager.db_pool.get().unwrap();
         conn.execute("INSERT INTO dir(id, parent_id, name) VALUES ('d1', '__root__', 'Shelf')", []).unwrap();
-        conn.execute("INSERT INTO book(id, added_at, content_hash, format) VALUES ('7', 1, ?1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
-        conn.execute("INSERT INTO book_dir(dir_id, book_id, file_name, local_hash, is_downloaded) VALUES ('d1', '7', 'book.epub', 'fp', 0)", []).unwrap();
+        conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
+        conn.execute("INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES ('d1', (SELECT row_id FROM book WHERE content_hash=?1), 'book.epub', 'fp', 0)", [TEST_CONTENT_HASH]).unwrap();
 
         let job = manager.download_job(&conn, &test_content_hash(), TransferOrigin::UserInitiated).unwrap().expect("live placement should produce a download job");
         match job {
             TransferJob::DownloadBlob { content_hash, placement, origin } => {
                 assert_eq!(content_hash, test_content_hash());
-                assert_eq!(placement.book_id, BookId::new(7));
-                assert_eq!(placement.rel_path.as_str(), "/Shelf/7.epub");
+                assert_eq!(placement.content_hash, test_content_hash());
+                assert_eq!(placement.rel_path.as_str(), "/Shelf/aaaaaaaaaaaa.epub");
                 assert_eq!(origin, TransferOrigin::UserInitiated);
             }
             _ => panic!("expected blob download"),
@@ -1754,17 +1750,16 @@ mod tests {
         let manager = test_manager(temp.path());
         {
             let conn = manager.db_pool.get().unwrap();
-            conn.execute("INSERT INTO book(id, added_at, format) VALUES ('7', 1, 'epub')", []).unwrap();
+            conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
         }
 
-        assert!(manager.request_download(BookId::new(7)).is_err());
+        assert!(manager.request_download(test_content_hash()).is_err());
 
         {
             let conn = manager.db_pool.get().unwrap();
-            conn.execute("UPDATE book SET content_hash=?1 WHERE id='7'", [TEST_CONTENT_HASH]).unwrap();
-            conn.execute("INSERT INTO book_dir(dir_id, book_id, file_name, local_hash, is_downloaded) VALUES ('__root__', '7', 'book.epub', 'fp', 0)", []).unwrap();
+            conn.execute("INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES ('__root__', (SELECT row_id FROM book WHERE content_hash=?1), 'book.epub', 'fp', 0)", [TEST_CONTENT_HASH]).unwrap();
         }
-        manager.request_download(BookId::new(7)).unwrap();
+        manager.request_download(test_content_hash()).unwrap();
 
         let conn = manager.db_pool.get().unwrap();
         assert_eq!(db::get_asset_requests(&conn, BlobKind::Book).unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);

@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::fmt;
 use std::io::Read;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+bincode; version=7";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+bincode; version=9";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+bincode";
 pub const CONTENT_ENCODING_ZSTD: &str = "zstd";
 pub const COMPRESSION_THRESHOLD_BYTES: usize = 1024;
@@ -11,7 +11,7 @@ pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAGIC: &[u8; 4] = b"BKHM";
-const VERSION: u8 = 7;
+const VERSION: u8 = 9;
 const HEADER_BYTES: usize = MAGIC.len() + 1;
 
 /// The magic+version header bytes prefixing every encoded value, exposed so
@@ -167,14 +167,14 @@ mod tests {
     #[test]
     fn bincode_round_trip_uses_the_versioned_bokheim_header() {
         let encoded = encode(&example(8)).unwrap();
-        let golden = b"BKHM\x07\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07";
+        let golden = b"BKHM\x09\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07";
         assert_eq!(encoded, golden);
         assert_eq!(&encoded[..MAGIC.len()], MAGIC);
         assert_eq!(encoded[MAGIC.len()], VERSION);
         assert_eq!(decode::<Example>(&encoded, MAX_DECODED_REQUEST_BYTES).unwrap(), example(8));
 
-        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x07\x01\x2a");
-        assert_eq!(decode::<NumericVariant>(b"BKHM\x07\x01\x2a", 64).unwrap(), NumericVariant::Second(42));
+        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x09\x01\x2a");
+        assert_eq!(decode::<NumericVariant>(b"BKHM\x09\x01\x2a", 64).unwrap(), NumericVariant::Second(42));
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn media_type_requires_the_current_version() {
         assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Bincode; charset=binary; version=7"));
+        assert!(is_current_media_type("Application/Vnd.Bokheim+Bincode; charset=binary; version=9"));
         assert!(!is_current_media_type(MEDIA_TYPE_BASE));
         assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=1"));
         assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=2"));

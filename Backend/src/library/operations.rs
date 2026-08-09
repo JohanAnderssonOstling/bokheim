@@ -6,7 +6,7 @@ use super::model::{generate_content_hash_blake3, Dir, LibraryAccountState, Reade
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
 use crate::sync::{SyncOutcome, SyncPolicy};
-use crate::{BlobKind, BookId, ContentHash, DownloadState};
+use crate::{BlobKind, ContentHash, DownloadState};
 use bokheim_domain::BookFormat;
 use std::fs;
 use std::fs::File;
@@ -14,21 +14,21 @@ use std::path::{Path, PathBuf};
 use sync_common::DirId;
 
 impl LibraryBackend {
-    fn persistent_download_state(conn: &rusqlite::Connection, book_id: BookId) -> Result<DownloadState, rusqlite::Error> {
-        if db::is_book_downloaded(conn, book_id)? {
+    fn persistent_download_state(conn: &rusqlite::Connection, content_hash: ContentHash) -> Result<DownloadState, rusqlite::Error> {
+        if db::is_book_downloaded(conn, content_hash.clone())? {
             Ok(DownloadState::Downloaded)
-        } else if db::is_book_download_requested(conn, book_id)? {
+        } else if db::is_book_download_requested(conn, content_hash)? {
             Ok(DownloadState::Queued)
         } else {
             Ok(DownloadState::NotDownloaded)
         }
     }
 
-    pub(super) fn load_thumbnail_bytes(&self, book_id: BookId) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
-        let mut bytes = self.context.try_get_thumbnail(book_id)?;
+    pub(super) fn load_thumbnail_bytes(&self, content_hash: ContentHash) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let mut bytes = self.context.try_get_thumbnail(content_hash.clone())?;
         if bytes.is_none() {
             let conn = self.db.get()?;
-            for content_hash in db::get_book_hashes(&conn, book_id)? {
+            for content_hash in db::get_book_hashes(&conn, content_hash)? {
                 let path = crate::sync::transfer::thumbnail_path_from_content_hash(&self.library_root, &content_hash);
                 match fs::read(path) {
                     Ok(found) => {
@@ -43,16 +43,16 @@ impl LibraryBackend {
         Ok(bytes)
     }
 
-    fn resolved_book_path(&self, book_id: BookId) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    fn resolved_book_path(&self, content_hash: ContentHash) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let Some(relative_path) = db::get_book_file_path(&conn, book_id)? else {
+        let Some(relative_path) = db::get_book_file_path(&conn, content_hash)? else {
             return Ok(None);
         };
         Ok(Some(self.library_root.resolve_book(&relative_path)))
     }
 
-    pub(super) fn resolve_book(&self, book_id: BookId) -> Result<ResolvedBook, Box<dyn std::error::Error>> {
-        let path = self.resolved_book_path(book_id)?.ok_or_else(|| format!("book placement not found: {book_id}"))?;
+    pub(super) fn resolve_book(&self, content_hash: ContentHash) -> Result<ResolvedBook, Box<dyn std::error::Error>> {
+        let path = self.resolved_book_path(content_hash.clone())?.ok_or_else(|| format!("book placement not found: {content_hash}"))?;
         let format = ReaderFormat::from_path(&path);
         match File::open(&path) {
             Ok(reader) => return Ok(ResolvedBook { path, format, reader: Box::new(reader) }),
@@ -62,13 +62,13 @@ impl LibraryBackend {
         {
             let content_hash = {
                 let conn = self.db.get()?;
-                db::get_book_hashes(&conn, book_id)?.into_iter().next().ok_or_else(|| format!("book content is unavailable: {book_id}"))?
+                db::get_book_hashes(&conn, content_hash.clone())?.into_iter().next().ok_or_else(|| format!("book content is unavailable: {content_hash}"))?
             };
             let session = self.sync_manager.current_session().ok_or("authentication is required to open an uncached server book")?;
-            let reader = remote_reader::RemoteAssetReader::open(&self.context.app_data_dir().join("remote-book-cache"), session.user_id(), &self.id, content_hash, self.sync_manager.server_url(), session.token().to_owned())?;
+            let reader = remote_reader::RemoteAssetReader::open(&self.context.app_data_dir().join("remote-book-cache"), session.user_id(), &self.id, content_hash.clone(), self.sync_manager.server_url(), session.token().to_owned())?;
             let preferences = self.context.load_transfer_preferences()?;
             if preferences.auto_download_limit_mb().is_some_and(|limit| reader.len() <= u64::from(limit) * 1024 * 1024) {
-                self.request_book_download(book_id)?;
+                self.request_book_download(content_hash)?;
             }
             return Ok(ResolvedBook { path, format, reader: Box::new(reader) });
         }
@@ -76,9 +76,9 @@ impl LibraryBackend {
 
     /// Evicts downloaded publication files without deleting the catalogue book,
     /// its placements, reading state, or relationships.
-    pub(super) fn evict_local_book_copy(&self, book_id: BookId) -> Result<DownloadState, Box<dyn std::error::Error>> {
+    pub(super) fn evict_local_book_copy(&self, content_hash: ContentHash) -> Result<DownloadState, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        for asset in db::get_book_assets(&conn)?.into_iter().filter(|asset| asset.book_id == book_id && asset.downloaded) {
+        for asset in db::get_book_assets(&conn)?.into_iter().filter(|asset| asset.content_hash == content_hash && asset.downloaded) {
             db::complete_asset_request(&conn, BlobKind::Book, &asset.content_hash)?;
             let path = self.library_root.resolve_book(&asset.rel_path);
             match fs::symlink_metadata(&path) {
@@ -89,27 +89,27 @@ impl LibraryBackend {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            db::set_book_downloaded(&conn, &asset.rel_path, book_id, false)?;
+            db::set_book_downloaded(&conn, &asset.rel_path, content_hash.clone(), false)?;
             if let Some(path) = path.to_str() {
                 db::upsert_blob_local_ref(&conn, BlobKind::Book, &asset.content_hash, path, false)?;
             }
         }
-        Ok(Self::persistent_download_state(&conn, book_id)?)
+        Ok(Self::persistent_download_state(&conn, content_hash)?)
     }
 
     pub(crate) fn request_folder_download(&self, dir_id: &DirId) -> Result<usize, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let book_ids = db::get_descendant_book_ids(&conn, dir_id.as_str())?
+        let content_hashes = db::get_descendant_content_hashes(&conn, dir_id.as_str())?
             .into_iter()
-            .filter_map(|book_id| match db::is_book_downloaded(&conn, book_id) {
-                Ok(false) => Some(Ok(book_id)),
+            .filter_map(|content_hash| match db::is_book_downloaded(&conn, content_hash.clone()) {
+                Ok(false) => Some(Ok(content_hash)),
                 Ok(true) => None,
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>, _>>()?;
         drop(conn);
-        self.sync_manager.request_downloads(&book_ids)?;
-        Ok(book_ids.len())
+        self.sync_manager.request_downloads(&content_hashes)?;
+        Ok(content_hashes.len())
     }
 
     pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> Result<SyncOutcome, Box<dyn std::error::Error>> {
@@ -120,8 +120,8 @@ impl LibraryBackend {
         self.sync_manager.resume_transfers().await
     }
 
-    pub(crate) fn request_book_download(&self, book_id: BookId) -> Result<(), Box<dyn std::error::Error>> {
-        self.sync_manager.request_download(book_id)
+    pub(crate) fn request_book_download(&self, content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+        self.sync_manager.request_download(content_hash)
     }
 
     pub(crate) fn account_state(&self) -> Result<LibraryAccountState, String> {
@@ -149,11 +149,11 @@ impl LibraryBackend {
 
     /// Copies and indexes a supported book in one operation. Mobile builds do not run a
     /// filesystem watcher, so importing must not depend on a later scan.
-    pub(super) fn import_local_book(&self, parent_id: &str, source_path: &Path, file_name: &str) -> Result<BookId, Box<dyn std::error::Error>> {
+    pub(super) fn import_local_book(&self, parent_id: &str, source_path: &Path, file_name: &str) -> Result<ContentHash, Box<dyn std::error::Error>> {
         self.import_book_file(parent_id, source_path, file_name)
     }
 
-    fn import_book_file(&self, parent_id: &str, source_path: &Path, file_name: &str) -> Result<BookId, Box<dyn std::error::Error>> {
+    fn import_book_file(&self, parent_id: &str, source_path: &Path, file_name: &str) -> Result<ContentHash, Box<dyn std::error::Error>> {
         let parent_id = DirId::parse(parent_id)?;
         let mut file_name = sync_common::FileName::parse(file_name.trim())?;
         let extension = Path::new(file_name.as_str()).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
@@ -215,18 +215,18 @@ impl LibraryBackend {
             return Err(error.into());
         }
 
-        let indexed = (|| -> Result<(BookId, ContentHash), Box<dyn std::error::Error>> {
+        let indexed = (|| -> Result<ContentHash, Box<dyn std::error::Error>> {
             let mut hash_buffer = vec![0_u8; 1024 * 1024];
-            let (book_id, content_hash) = generate_content_hash_blake3(&destination, &mut hash_buffer)?;
+            let content_hash = generate_content_hash_blake3(&destination, &mut hash_buffer)?;
             let local_hash = db::local_file_fingerprint(&destination)?;
             let scan_id = db::next_scan_id(&conn)?;
             let transaction = conn.transaction()?;
-            db::insert_scanned_book_metadata(&transaction, book_id, &metadata, stored_format)?;
-            db::insert_local_book_dir(&transaction, &parent_id, book_id, &file_name, local_hash, &content_hash, scan_id)?;
+            db::insert_scanned_book_metadata(&transaction, content_hash.clone(), &metadata, stored_format)?;
+            db::insert_local_book_dir(&transaction, &parent_id, content_hash.clone(), &file_name, local_hash, scan_id)?;
             transaction.commit()?;
-            Ok((book_id, content_hash))
+            Ok(content_hash)
         })();
-        let (book_id, content_hash) = match indexed {
+        let content_hash = match indexed {
             Ok(identity) => identity,
             Err(error) => {
                 let _ = fs::remove_file(&destination);
@@ -240,9 +240,9 @@ impl LibraryBackend {
             db::upsert_audiobook_metadata(&conn, &content_hash, &audiobook)?;
         }
 
-        let _ = generate_thumbnail_for_sync(&self.context, &self.library_root, &destination, book_id, &content_hash);
+        let _ = generate_thumbnail_for_sync(&self.context, &self.library_root, &destination, &content_hash);
         let relative_path = destination.strip_prefix(self.library_root.as_path()).unwrap_or(&destination).to_string_lossy().into_owned();
-        let _ = self.event_tx.send(LibraryEvent::BookAdded { book_id, path: relative_path });
-        Ok(book_id)
+        let _ = self.event_tx.send(LibraryEvent::BookAdded { content_hash: content_hash.clone(), path: relative_path });
+        Ok(content_hash)
     }
 }

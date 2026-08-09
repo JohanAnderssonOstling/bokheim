@@ -68,9 +68,6 @@ install -m 0644 "${repository_root}/Catalogs/opds.json" "${stage}/opds.json"
 install -m 0644 "${repository_root}/Server/deploy/install-staged.sh" "${stage}/install-staged.sh"
 install -m 0644 "${repository_root}/Server/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
 install -m 0644 "${repository_root}/Catalogs/deploy/bokheim-catalogs.service" "${stage}/bokheim-catalogs.service"
-install -m 0644 "${repository_root}/Server/deploy/bokheim-gc.service" "${stage}/bokheim-gc.service"
-install -m 0644 "${repository_root}/Server/deploy/bokheim-gc.timer" "${stage}/bokheim-gc.timer"
-install -m 0644 "${repository_root}/Server/deploy/bokheim-tmpfiles.conf" "${stage}/bokheim-tmpfiles.conf"
 
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")

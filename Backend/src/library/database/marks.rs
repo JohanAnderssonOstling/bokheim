@@ -2,7 +2,7 @@
 
 use crate::app::BackendError;
 use crate::library::LibraryBackend;
-use crate::BookId;
+use crate::ContentHash;
 pub use bokheim_app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use include_sqlite_sql::{impl_sql, include_sql};
 use rusqlite::{types::Type, Connection, Row};
@@ -11,9 +11,9 @@ include_sql!("src/library/database/sql/annotations.sql");
 include_sql!("src/library/database/sql/bookmarks.sql");
 
 impl LibraryBackend {
-    pub fn annotations(&self, book_id: BookId) -> Result<Vec<ReaderAnnotation>, BackendError> {
+    pub fn annotations(&self, content_hash: ContentHash) -> Result<Vec<ReaderAnnotation>, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
-        load_annotations(&conn, book_id).map_err(BackendError::operation)
+        load_annotations(&conn, content_hash).map_err(BackendError::operation)
     }
 
     pub fn upsert_annotation(&self, annotation: &ReaderAnnotation) -> Result<(), BackendError> {
@@ -30,9 +30,9 @@ impl LibraryBackend {
         Ok(())
     }
 
-    pub fn bookmarks(&self, book_id: BookId) -> Result<Vec<ReaderBookmark>, BackendError> {
+    pub fn bookmarks(&self, content_hash: ContentHash) -> Result<Vec<ReaderBookmark>, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
-        load_bookmarks(&conn, book_id).map_err(BackendError::operation)
+        load_bookmarks(&conn, content_hash).map_err(BackendError::operation)
     }
 
     pub fn create_bookmark(&self, bookmark: &ReaderBookmark) -> Result<(), BackendError> {
@@ -50,12 +50,12 @@ impl LibraryBackend {
     }
 }
 
-fn load_annotations(conn: &Connection, book_id: BookId) -> Result<Vec<ReaderAnnotation>, Box<dyn std::error::Error>> {
+fn load_annotations(conn: &Connection, content_hash: ContentHash) -> Result<Vec<ReaderAnnotation>, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
-    conn.get_annotations(&book_id.canonical(), |row| {
+    conn.get_annotations(content_hash.as_str(), |row| {
         values.push(ReaderAnnotation {
             id: row.get(0)?,
-            book_id: row.get(1)?,
+            content_hash: row.get(1)?,
             anchor: annotation_anchor(row, 2)?,
             exact_text: row.get(7)?,
             style: AnnotationStyle::parse_storage(&row.get::<_, String>(8)?).ok_or(rusqlite::Error::InvalidQuery)?,
@@ -74,7 +74,7 @@ fn store_annotation(conn: &Connection, value: &ReaderAnnotation) -> Result<(), B
     let anchor = store_annotation_anchor(&value.anchor)?;
     conn.upsert_annotation(
         &value.id,
-        &value.book_id,
+        &value.content_hash,
         anchor.kind,
         anchor.cfi.as_deref(),
         anchor.page,
@@ -98,10 +98,10 @@ fn remove_annotation(conn: &Connection, id: &str, modified_at: i64) -> Result<()
     Ok(())
 }
 
-fn load_bookmarks(conn: &Connection, book_id: BookId) -> Result<Vec<ReaderBookmark>, Box<dyn std::error::Error>> {
+fn load_bookmarks(conn: &Connection, content_hash: ContentHash) -> Result<Vec<ReaderBookmark>, Box<dyn std::error::Error>> {
     let mut bookmarks = Vec::new();
-    conn.get_bookmarks(&book_id.canonical(), |row| {
-        bookmarks.push(ReaderBookmark { id: row.get(0)?, book_id: row.get(1)?, cfi: row.get(2)?, label: row.get(3)?, created_at: row.get(4)?, modified_at: row.get(5)? });
+    conn.get_bookmarks(content_hash.as_str(), |row| {
+        bookmarks.push(ReaderBookmark { id: row.get(0)?, content_hash: row.get(1)?, cfi: row.get(2)?, label: row.get(3)?, created_at: row.get(4)?, modified_at: row.get(5)? });
         Ok(())
     })?;
     Ok(bookmarks)
@@ -112,7 +112,7 @@ fn insert_bookmark(conn: &Connection, value: &ReaderBookmark) -> Result<(), Box<
     if value.modified_at != value.created_at {
         return Err("a new bookmark's modified_at must equal created_at".into());
     }
-    conn.create_bookmark(&value.id, &value.book_id, &value.cfi, &value.label, value.created_at)?;
+    conn.create_bookmark(&value.id, &value.content_hash, &value.cfi, &value.label, value.created_at)?;
     Ok(())
 }
 
@@ -123,7 +123,7 @@ fn remove_bookmark(conn: &Connection, id: &str, deleted_at: i64) -> Result<(), B
         Ok(())
     })?;
     let existing = existing.ok_or("bookmark not found")?;
-    ReaderBookmark { id: id.to_owned(), book_id: existing.0, cfi: existing.1, label: existing.2, created_at: existing.3, modified_at: deleted_at }.validate(true)?;
+    ReaderBookmark { id: id.to_owned(), content_hash: existing.0, cfi: existing.1, label: existing.2, created_at: existing.3, modified_at: deleted_at }.validate(true)?;
     conn.delete_bookmark(id, deleted_at)?;
     Ok(())
 }
@@ -164,7 +164,7 @@ fn annotation_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Read
     conn.get_annotation_by_id(id, |row| {
         value = Some(ReaderAnnotation {
             id: row.get(0)?,
-            book_id: row.get(1)?,
+            content_hash: row.get(1)?,
             anchor: annotation_anchor(row, 2)?,
             exact_text: row.get(7)?,
             style: AnnotationStyle::parse_storage(&row.get::<_, String>(8)?).ok_or(rusqlite::Error::InvalidQuery)?,
@@ -185,7 +185,7 @@ mod tests {
     fn database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         crate::library::database::init_db(&connection).unwrap();
-        connection.execute("INSERT INTO book(id, title, added_at, format) VALUES('1', 'Reader state', 1, 'epub')", []).unwrap();
+        connection.execute("INSERT INTO book(content_hash, title, added_at, format) VALUES(?1, 'Reader state', 1, 'epub')", [ContentHash::from_fixture_u64(1).as_str()]).unwrap();
         connection
     }
 
@@ -194,7 +194,7 @@ mod tests {
         let connection = database();
         let annotation = ReaderAnnotation {
             id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(),
-            book_id: "1".to_owned(),
+            content_hash: ContentHash::from_fixture_u64(1).to_string(),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4,/1:0,/1:4)"),
             exact_text: "Text".to_owned(),
             style: AnnotationStyle::Highlight,
@@ -204,15 +204,15 @@ mod tests {
             modified_at: 10,
         };
         store_annotation(&connection, &annotation).unwrap();
-        assert_eq!(load_annotations(&connection, BookId::new(1)).unwrap().len(), 1);
+        assert_eq!(load_annotations(&connection, ContentHash::from_fixture_u64(1)).unwrap().len(), 1);
         let body: Vec<u8> = connection.query_row("SELECT body FROM sync_outbox WHERE state_kind='annotation' AND state_key=?1", [&annotation.id], |row| row.get(0)).unwrap();
         let synced: bokheim_domain::MutationBody = sync_common::wire::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
         let bokheim_domain::MutationBody::Annotation { value: synced, .. } = synced else { panic!("expected annotation mutation") };
         assert_eq!(synced.anchor, annotation.anchor);
         remove_annotation(&connection, &annotation.id, 11).unwrap();
-        assert!(load_annotations(&connection, BookId::new(1)).unwrap().is_empty());
+        assert!(load_annotations(&connection, ContentHash::from_fixture_u64(1)).unwrap().is_empty());
 
-        let bookmark = ReaderBookmark { id: "91b27f15-50c5-47b6-af88-88136253f9aa".to_owned(), book_id: "1".to_owned(), cfi: "epubcfi(/6/2!/4/1:0)".to_owned(), label: "Start".to_owned(), created_at: 12, modified_at: 12 };
+        let bookmark = ReaderBookmark { id: "91b27f15-50c5-47b6-af88-88136253f9aa".to_owned(), content_hash: ContentHash::from_fixture_u64(1).to_string(), cfi: "epubcfi(/6/2!/4/1:0)".to_owned(), label: "Start".to_owned(), created_at: 12, modified_at: 12 };
         insert_bookmark(&connection, &bookmark).unwrap();
         remove_bookmark(&connection, &bookmark.id, 13).unwrap();
 
@@ -228,7 +228,7 @@ mod tests {
         let connection = database();
         let epub = ReaderAnnotation {
             id: "6fc87cb1-8030-41b1-8313-3b9e654f403a".to_owned(),
-            book_id: "1".to_owned(),
+            content_hash: ContentHash::from_fixture_u64(1).to_string(),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4,/1:0,/1:4)"),
             exact_text: "EPUB text".to_owned(),
             style: AnnotationStyle::Highlight,
@@ -242,7 +242,7 @@ mod tests {
         let pdf_anchor = PdfAnnotationAnchor::new(2, vec![PdfAnnotationRect::new(0.1, 0.2, 0.3, 0.04)], None);
         let pdf = ReaderAnnotation {
             id: "8c1fe446-709c-4fdf-9065-d3a0938291df".to_owned(),
-            book_id: "1".to_owned(),
+            content_hash: ContentHash::from_fixture_u64(1).to_string(),
             anchor: AnnotationAnchor::pdf(pdf_anchor.clone()),
             exact_text: "PDF text".to_owned(),
             style: AnnotationStyle::Underline,
@@ -252,7 +252,7 @@ mod tests {
             modified_at: 2,
         };
         store_annotation(&connection, &pdf).unwrap();
-        let loaded = load_annotations(&connection, BookId::new(1)).unwrap();
+        let loaded = load_annotations(&connection, ContentHash::from_fixture_u64(1)).unwrap();
         assert_eq!(loaded.iter().find(|item| item.id == epub.id).unwrap().anchor, epub.anchor);
         assert_eq!(loaded.iter().find(|item| item.id == pdf.id).unwrap().pdf_anchor(), Some(pdf_anchor));
     }

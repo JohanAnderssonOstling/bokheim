@@ -1,11 +1,8 @@
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
-use epub_svelte_lib::app::{AccountSessionSummary, AccountStatus, AppBackend, AppEvent, LibraryCatalogueState, LibrarySyncStatus};
+use epub_svelte_lib::app::{AccountSessionSummary, AccountStatus, AppBackend, AppEvent, CatalogPageView, CatalogWideSearchView, LibraryCatalogueState, LibrarySyncStatus};
 use epub_svelte_lib::app::{AppDataLocation, LibraryEntry};
-use epub_svelte_lib::catalog::opds::{OpdsCredentials, OpdsEndpoint};
-use epub_svelte_lib::catalog::{
-    opds_endpoint_id, opds_source, CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationOwnership, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId,
-    CatalogWideSearchResult,
-};
+use epub_svelte_lib::catalog::opds::OpdsEndpoint;
+use epub_svelte_lib::catalog::{opds_endpoint_id, opds_source, CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId};
 use epub_svelte_lib::library::links::BookLink;
 use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
 use epub_svelte_lib::library::LibraryBackend;
@@ -49,24 +46,12 @@ where
     result
 }
 
-fn opds_credentials(endpoint: &OpdsEndpoint, username: Option<String>, password: Option<String>) -> Result<Option<OpdsCredentials>, String> {
-    let Some(username) = username.map(|username| username.trim().to_owned()).filter(|username| !username.is_empty()) else { return Ok(None) };
-    OpdsCredentials::for_endpoint(endpoint, username, password.unwrap_or_default()).map(Some).map_err(|error| error.to_string())
-}
-
-fn catalog_credentials(core: &AppBackend, source_id: &CatalogSourceId, username: Option<String>, password: Option<String>) -> Result<Option<OpdsCredentials>, String> {
-    match core.opds_endpoint_for_catalog_source(source_id).map_err(|error| error.to_string())? {
-        Some(endpoint) => opds_credentials(&endpoint, username, password),
-        None => Ok(None),
-    }
-}
-
 fn library(core: &AppBackend, library_id: &str) -> Result<LibraryBackend, String> {
     core.library(library_id).map_err(|error| error.to_string())
 }
 
-fn parse_book_id(value: &str) -> Result<epub_svelte_lib::BookId, String> {
-    epub_svelte_lib::BookId::parse(value).map_err(|error| error.to_string())
+fn parse_content_hash(value: &str) -> Result<epub_svelte_lib::ContentHash, String> {
+    Ok(epub_svelte_lib::ContentHash::new(&value))
 }
 
 fn library_event_name(event: &LibraryEvent) -> &'static str {
@@ -347,9 +332,9 @@ fn get_custom_catalog_sources(state: State<'_, AppState>) -> Result<Vec<CatalogS
 
 #[tauri::command]
 #[specta::specta]
-async fn add_custom_catalog(state: State<'_, AppState>, title: String, url: String, username_label: Option<String>, password_required: bool) -> Result<CatalogSource, String> {
+async fn add_custom_catalog(state: State<'_, AppState>, title: String, url: String) -> Result<CatalogSource, String> {
     let core = state.core.clone();
-    run_blocking("add_custom_catalog", move || core.add_custom_opds_endpoint(&title, &url, username_label.as_deref(), password_required).map(opds_source).map_err(|error| error.to_string())).await
+    run_blocking("add_custom_catalog", move || core.add_custom_opds_endpoint(&title, &url).map(opds_source).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -362,22 +347,20 @@ async fn remove_custom_catalog(state: State<'_, AppState>, source_id: CatalogSou
 
 #[tauri::command]
 #[specta::specta]
-async fn search_catalogs(state: State<'_, AppState>, query: String) -> Result<CatalogWideSearchResult, String> {
-    state.core.search_catalogs(&query).await.map_err(|error| error.to_string())
+async fn search_catalogs(state: State<'_, AppState>, library_id: String, query: String) -> Result<CatalogWideSearchView, String> {
+    library(&state.core, &library_id)?.search_catalogs(&query).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn get_catalog_page(state: State<'_, AppState>, source_id: CatalogSourceId, locator: Option<String>, username: Option<String>, password: Option<String>) -> Result<CatalogPage, String> {
-    let credentials = catalog_credentials(&state.core, &source_id, username, password)?;
-    state.core.catalog_page(&source_id, locator.as_deref(), credentials.as_ref()).await.map_err(|error| error.to_string())
+async fn get_catalog_page(state: State<'_, AppState>, library_id: String, source_id: CatalogSourceId, locator: Option<String>) -> Result<CatalogPageView, String> {
+    library(&state.core, &library_id)?.catalog_page(&source_id, locator.as_deref()).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn search_catalog(state: State<'_, AppState>, source_id: CatalogSourceId, search: CatalogSearch, query: CatalogSearchQuery, username: Option<String>, password: Option<String>) -> Result<CatalogPage, String> {
-    let credentials = catalog_credentials(&state.core, &source_id, username, password)?;
-    state.core.search_catalog(&source_id, &search, query, credentials.as_ref()).await.map_err(|error| error.to_string())
+async fn search_catalog(state: State<'_, AppState>, library_id: String, source_id: CatalogSourceId, search: CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPageView, String> {
+    library(&state.core, &library_id)?.search_catalog(&source_id, &search, query).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -388,17 +371,9 @@ async fn get_catalog_cover(state: State<'_, AppState>, source_id: CatalogSourceI
 
 #[tauri::command]
 #[specta::specta]
-async fn get_catalog_ownership(state: State<'_, AppState>, library_id: String, source_id: CatalogSourceId, publications: Vec<CatalogPublicationIdentity>) -> Result<Vec<CatalogPublicationOwnership>, String> {
-    let library = library(&state.core, &library_id)?;
-    run_blocking("get_catalog_ownership", move || library.catalog_ownership(&source_id, &publications).map_err(|error| error.to_string())).await
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn import_catalog_book(state: State<'_, AppState>, destination: BookImportDestination, request: CatalogImportRequest, username: Option<String>, password: Option<String>) -> Result<(), String> {
-    let credentials = catalog_credentials(&state.core, &request.source_id, username, password)?;
+async fn import_catalog_book(state: State<'_, AppState>, destination: BookImportDestination, request: CatalogImportRequest) -> Result<(), String> {
     let library = library(&state.core, destination.library_id().as_str())?;
-    library.import_catalog_book(destination.directory_id().as_str(), &request, credentials.as_ref()).await.map(|_| ()).map_err(|error| error.to_string())
+    library.import_catalog_book(destination.directory_id().as_str(), &request).await.map(|_| ()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -433,52 +408,52 @@ async fn discover_catalog_author_books(state: State<'_, AppState>, library_id: S
 
 #[tauri::command]
 #[specta::specta]
-async fn get_book_thumbnail(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<BinaryBytes, String> {
+async fn get_book_thumbnail(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<BinaryBytes, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    let bytes = run_blocking("get_book_thumbnail", move || library.thumbnail(book_id).map(|bytes| bytes.unwrap_or_default()).map_err(|error| error.to_string())).await?;
+    let content_hash = parse_content_hash(&content_hash)?;
+    let bytes = run_blocking("get_book_thumbnail", move || library.thumbnail(content_hash).map(|bytes| bytes.unwrap_or_default()).map_err(|error| error.to_string())).await?;
     Ok(BinaryBytes(bytes))
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn open_book(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<BinaryBytes, String> {
+async fn open_book(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<BinaryBytes, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    let bytes = run_blocking("open_book", move || library.read_book_bytes(book_id).map_err(|error| error.to_string())).await?;
+    let content_hash = parse_content_hash(&content_hash)?;
+    let bytes = run_blocking("open_book", move || library.read_book_bytes(content_hash).map_err(|error| error.to_string())).await?;
     Ok(BinaryBytes(bytes))
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn get_book_file_name(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<String, String> {
+async fn get_book_file_name(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<String, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("get_book_file_name", move || library.book_file_name(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("get_book_file_name", move || library.book_file_name(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn get_book_reading_position(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<Option<String>, String> {
+async fn get_book_reading_position(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Option<String>, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("get_book_reading_position", move || library.reading_position(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("get_book_reading_position", move || library.reading_position(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn update_reading_position(state: State<'_, AppState>, library_id: String, book_id: String, cfi: String, progress: f32) -> Result<(), String> {
+async fn update_reading_position(state: State<'_, AppState>, library_id: String, content_hash: String, cfi: String, progress: f32) -> Result<(), String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("update_reading_position", move || library.update_reading_position(book_id, &cfi, progress).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("update_reading_position", move || library.update_reading_position(content_hash, &cfi, progress).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn get_annotations(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<Vec<ReaderAnnotation>, String> {
+async fn get_annotations(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Vec<ReaderAnnotation>, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("get_annotations", move || library.annotations(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("get_annotations", move || library.annotations(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -501,10 +476,10 @@ async fn delete_annotation(state: State<'_, AppState>, library_id: String, annot
 
 #[tauri::command]
 #[specta::specta]
-async fn get_bookmarks(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<Vec<ReaderBookmark>, String> {
+async fn get_bookmarks(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Vec<ReaderBookmark>, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("get_bookmarks", move || library.bookmarks(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("get_bookmarks", move || library.bookmarks(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -527,10 +502,10 @@ async fn delete_bookmark(state: State<'_, AppState>, library_id: String, bookmar
 
 #[tauri::command]
 #[specta::specta]
-async fn get_book_links(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<Vec<BookLink>, String> {
+async fn get_book_links(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Vec<BookLink>, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("get_book_links", move || library.book_links(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("get_book_links", move || library.book_links(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -552,17 +527,17 @@ async fn delete_book_link(state: State<'_, AppState>, library_id: String, link_i
 
 #[tauri::command]
 #[specta::specta]
-async fn download_book(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<DownloadState, String> {
+async fn download_book(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<DownloadState, String> {
     let library = library(&state.core, &library_id)?;
-    library.download_book(parse_book_id(&book_id)?).await.map_err(|error| error.to_string())
+    library.download_book(parse_content_hash(&content_hash)?).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn remove_local_book_copy(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<DownloadState, String> {
+async fn remove_local_book_copy(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<DownloadState, String> {
     let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("remove_local_book_copy", move || library.remove_local_book_copy(book_id).map_err(|error| error.to_string())).await
+    let content_hash = parse_content_hash(&content_hash)?;
+    run_blocking("remove_local_book_copy", move || library.remove_local_book_copy(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -576,8 +551,8 @@ async fn download_folder(state: State<'_, AppState>, library_id: String, dir_id:
 #[tauri::command]
 #[specta::specta]
 fn backend_link_status() -> String {
-    let sample_book_id = epub_svelte_lib::BookId::new(0);
-    log::info!("backend_link_status invoked; backend crate linked with sample book id {}", sample_book_id);
+    let sample_content_hash = epub_svelte_lib::ContentHash::from_fixture_u64(0);
+    log::info!("backend_link_status invoked; backend crate linked with sample content hash {}", sample_content_hash);
     "Backend crate linked and Rust logging is active.".to_string()
 }
 
@@ -629,7 +604,6 @@ fn command_builder() -> Builder<tauri::Wry> {
             get_catalog_page,
             search_catalog,
             get_catalog_cover,
-            get_catalog_ownership,
             import_catalog_book,
             get_library_home,
             search_library,

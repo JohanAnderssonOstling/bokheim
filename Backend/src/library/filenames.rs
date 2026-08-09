@@ -3,15 +3,17 @@
 //! Scans preserve names chosen by the user. Downloads use this deterministic,
 //! collision-aware ladder and never synchronize a filename register.
 
-use sync_common::{BookId, FileName};
+use sync_common::{ContentHash, FileName};
 use bokheim_domain::{BookFormat, BookMetadataState};
 
 const MAX_FILE_NAME_BYTES: usize = 240;
+const COMPACT_HASH_HEX_LEN: usize = 12;
 
-pub fn materialize(book_id: BookId, metadata: &BookMetadataState, format: BookFormat, mut occupied: impl FnMut(&FileName) -> bool) -> FileName {
+pub fn materialize(content_hash: ContentHash, metadata: &BookMetadataState, format: BookFormat, mut occupied: impl FnMut(&FileName) -> bool) -> FileName {
     let extension = format.canonical_extension();
+    let compact_hash = &content_hash.as_str()[..COMPACT_HASH_HEX_LEN];
     let title = sanitize_stem(&metadata.title);
-    let title = (!title.is_empty()).then_some(title).unwrap_or_else(|| book_id.canonical());
+    let title = (!title.is_empty()).then_some(title).unwrap_or_else(|| compact_hash.to_owned());
     let author = metadata.authors().next().map(|author| sanitize_stem(author.name())).filter(|author| !author.is_empty());
     let year = metadata.publication.dates.iter().find_map(|date| date.value().get(..4).filter(|year| year.bytes().all(|byte| byte.is_ascii_digit()))).map(str::to_owned);
 
@@ -25,17 +27,24 @@ pub fn materialize(book_id: BookId, metadata: &BookMetadataState, format: BookFo
             candidates.push(detailed.clone());
         }
     }
-    candidates.push(format!("{detailed} [{book_id}]"));
+    candidates.push(format!("{detailed} [{compact_hash}]"));
+    candidates.push(format!("{detailed} [{content_hash}]"));
 
     let final_rung = candidates.len() - 1;
     for (index, stem) in candidates.into_iter().enumerate() {
-        let stem = if index == final_rung { cap_with_suffix(&stem, &format!(" [{book_id}]"), &extension) } else { cap(&stem, &extension) };
+        let stem = if index == final_rung {
+            cap_with_suffix(&stem, &format!(" [{content_hash}]"), &extension)
+        } else if stem.ends_with(&format!(" [{compact_hash}]")) {
+            cap_with_suffix(&stem, &format!(" [{compact_hash}]"), &extension)
+        } else {
+            cap(&stem, &extension)
+        };
         let candidate = FileName::parse(&format!("{stem}.{extension}")).expect("sanitized materialized filename");
         if !occupied(&candidate) {
             return candidate;
         }
     }
-    unreachable!("book id makes the final filename rung unique")
+    unreachable!("the full content hash makes the final filename rung unique")
 }
 
 fn sanitize_stem(value: &str) -> String {
@@ -91,22 +100,38 @@ mod tests {
     fn metadata(title: &str) -> BookMetadataState {
         BookMetadataState { title: title.to_owned(), contributors: vec![], description: String::new(), publication: PublicationMetadata::default() }
     }
-    #[test]
-    fn uses_shortest_free_sanitized_name() {
-        assert_eq!(materialize(BookId::new(7), &metadata(" Dune: "), BookFormat::Epub, |_| false).as_str(), "Dune.epub");
+    fn hash(value: u64) -> ContentHash {
+        ContentHash::new(&format!("{value:012x}{}", "0".repeat(64 - COMPACT_HASH_HEX_LEN)))
     }
     #[test]
-    fn fallback_keeps_book_id_when_title_is_illegal() {
-        assert_eq!(materialize(BookId::new(7), &metadata("CON"), BookFormat::Epub, |_| false).as_str(), "7.epub");
+    fn uses_shortest_free_sanitized_name() {
+        assert_eq!(materialize(hash(7), &metadata(" Dune: "), BookFormat::Epub, |_| false).as_str(), "Dune.epub");
+    }
+    #[test]
+    fn fallback_keeps_content_hash_when_title_is_illegal() {
+        assert_eq!(materialize(hash(7), &metadata("CON"), BookFormat::Epub, |_| false).as_str(), "000000000007.epub");
     }
 
     #[test]
-    fn collision_reaches_the_book_id_rung() {
+    fn collision_reaches_the_content_hash_rung() {
         let metadata = metadata("Dune");
-        let first = materialize(BookId::new(1), &metadata, BookFormat::Epub, |_| false);
-        let second = materialize(BookId::new(2), &metadata, BookFormat::Epub, |candidate| candidate == &first);
+        let first = materialize(hash(1), &metadata, BookFormat::Epub, |_| false);
+        let second = materialize(hash(2), &metadata, BookFormat::Epub, |candidate| candidate == &first);
         assert_eq!(first.as_str(), "Dune.epub");
-        assert_eq!(second.as_str(), "Dune [2].epub");
+        assert_eq!(second.as_str(), "Dune [000000000002].epub");
+    }
+
+    #[test]
+    fn compact_hash_collision_escalates_to_the_full_hash() {
+        let first_hash = ContentHash::new(&"abcdef1234560000000000000000000000000000000000000000000000000001");
+        let second_hash = ContentHash::new(&"abcdef1234560000000000000000000000000000000000000000000000000002");
+        let metadata = metadata("Dune");
+        let occupied = ["Dune.epub", "Dune [abcdef123456].epub"];
+
+        let name = materialize(second_hash, &metadata, BookFormat::Epub, |candidate| occupied.contains(&candidate.as_str()));
+
+        assert_eq!(name.as_str(), format!("Dune [{second_hash}].epub"));
+        assert_ne!(first_hash, second_hash);
     }
 
     #[test]
@@ -115,7 +140,7 @@ mod tests {
         metadata.contributors = vec![Contributor::new("Frank Herbert", None, MarcRelatorCode(*b"aut")).unwrap()];
         metadata.publication.dates = vec![PublicationDate::new(None, "1965-08-01", Some("publication".to_owned())).unwrap()];
         let occupied = ["Dune.epub", "Dune - Frank Herbert.epub", "Dune - Frank Herbert (1965).epub"];
-        assert_eq!(materialize(BookId::new(2), &metadata, BookFormat::Epub, |candidate| occupied.contains(&candidate.as_str())).as_str(), "Dune - Frank Herbert (1965) [2].epub");
+        assert_eq!(materialize(hash(2), &metadata, BookFormat::Epub, |candidate| occupied.contains(&candidate.as_str())).as_str(), "Dune - Frank Herbert (1965) [000000000002].epub");
     }
 
     /// An incumbent is never renamed: the newcomer escalates and the file that
@@ -123,18 +148,18 @@ mod tests {
     #[test]
     fn escalation_is_not_retroactive() {
         let metadata = metadata("Dune");
-        let placed = materialize(BookId::new(1), &metadata, BookFormat::Epub, |_| false);
+        let placed = materialize(hash(1), &metadata, BookFormat::Epub, |_| false);
         assert_eq!(placed.as_str(), "Dune.epub");
         let mut occupied = vec![placed.as_str().to_owned()];
-        let newcomer = materialize(BookId::new(2), &metadata, BookFormat::Epub, |candidate| occupied.iter().any(|taken| taken == candidate.as_str()));
-        assert_eq!(newcomer.as_str(), "Dune [2].epub");
+        let newcomer = materialize(hash(2), &metadata, BookFormat::Epub, |candidate| occupied.iter().any(|taken| taken == candidate.as_str()));
+        assert_eq!(newcomer.as_str(), "Dune [000000000002].epub");
         occupied.push(newcomer.as_str().to_owned());
         // Re-running the whole sequence returns each book to its own name.
-        assert_eq!(materialize(BookId::new(1), &metadata, BookFormat::Epub, |candidate| candidate.as_str() != placed.as_str() && occupied.iter().any(|taken| taken == candidate.as_str())).as_str(), placed.as_str());
-        assert_eq!(materialize(BookId::new(2), &metadata, BookFormat::Epub, |candidate| candidate.as_str() != newcomer.as_str() && occupied.iter().any(|taken| taken == candidate.as_str())).as_str(), newcomer.as_str());
+        assert_eq!(materialize(hash(1), &metadata, BookFormat::Epub, |candidate| candidate.as_str() != placed.as_str() && occupied.iter().any(|taken| taken == candidate.as_str())).as_str(), placed.as_str());
+        assert_eq!(materialize(hash(2), &metadata, BookFormat::Epub, |candidate| candidate.as_str() != newcomer.as_str() && occupied.iter().any(|taken| taken == candidate.as_str())).as_str(), newcomer.as_str());
     }
 
-    /// Rung 4 always terminates: `book_id` is unique, so identical metadata can
+    /// Rung 4 always terminates: `content_hash` is unique, so identical metadata can
     /// never exhaust the ladder however many books share it.
     #[test]
     fn identical_metadata_always_terminates() {
@@ -145,35 +170,35 @@ mod tests {
         // Four books exhaust the three metadata rungs; every book after them can
         // only be distinguished by its identity, and that rung cannot fail.
         for id in 1..=5_u64 {
-            let name = materialize(BookId::new(id), &metadata, BookFormat::Epub, |candidate| occupied.iter().any(|taken| taken == candidate.as_str()));
+            let name = materialize(hash(id), &metadata, BookFormat::Epub, |candidate| occupied.iter().any(|taken| taken == candidate.as_str()));
             assert!(!occupied.contains(&name.as_str().to_owned()), "rung ladder produced a duplicate name: {name}");
             occupied.push(name.as_str().to_owned());
         }
         assert_eq!(occupied[0], "Dune.epub");
         assert_eq!(occupied[1], "Dune - Frank Herbert.epub");
         assert_eq!(occupied[2], "Dune - Frank Herbert (1965).epub");
-        assert_eq!(occupied[3], "Dune - Frank Herbert (1965) [4].epub");
-        assert_eq!(occupied[4], "Dune - Frank Herbert (1965) [5].epub");
+        assert_eq!(occupied[3], "Dune - Frank Herbert (1965) [000000000004].epub");
+        assert_eq!(occupied[4], "Dune - Frank Herbert (1965) [000000000005].epub");
     }
 
     /// Rungs whose components are absent are skipped rather than rendered with
     /// empty separators, so each missing-metadata case stays deterministic.
     #[test]
     fn absent_components_skip_their_rungs() {
-        let untitled = materialize(BookId::new(9), &metadata("   ..  "), BookFormat::Pdf, |_| false);
-        assert_eq!(untitled.as_str(), "9.pdf");
+        let untitled = materialize(hash(9), &metadata("   ..  "), BookFormat::Pdf, |_| false);
+        assert_eq!(untitled.as_str(), "000000000009.pdf");
 
         // No author: rung 2 and 3 cannot be rendered, so a collision goes
         // straight to the identity rung.
-        let no_author = materialize(BookId::new(9), &metadata("Dune"), BookFormat::Epub, |candidate| candidate.as_str() == "Dune.epub");
-        assert_eq!(no_author.as_str(), "Dune [9].epub");
+        let no_author = materialize(hash(9), &metadata("Dune"), BookFormat::Epub, |candidate| candidate.as_str() == "Dune.epub");
+        assert_eq!(no_author.as_str(), "Dune [000000000009].epub");
 
         // Author but no year: rung 3 is skipped, rung 2 is still available.
         let mut author_only = metadata("Dune");
         author_only.contributors = vec![Contributor::new("Frank Herbert", None, MarcRelatorCode(*b"aut")).unwrap()];
-        assert_eq!(materialize(BookId::new(9), &author_only, BookFormat::Epub, |candidate| candidate.as_str() == "Dune.epub").as_str(), "Dune - Frank Herbert.epub");
+        assert_eq!(materialize(hash(9), &author_only, BookFormat::Epub, |candidate| candidate.as_str() == "Dune.epub").as_str(), "Dune - Frank Herbert.epub");
         let occupied = ["Dune.epub", "Dune - Frank Herbert.epub"];
-        assert_eq!(materialize(BookId::new(9), &author_only, BookFormat::Epub, |candidate| occupied.contains(&candidate.as_str())).as_str(), "Dune - Frank Herbert [9].epub");
+        assert_eq!(materialize(hash(9), &author_only, BookFormat::Epub, |candidate| occupied.contains(&candidate.as_str())).as_str(), "Dune - Frank Herbert [000000000009].epub");
     }
 
     /// Every rendered stem must be legal on FAT/exFAT/NTFS as well as ext4.
@@ -184,11 +209,11 @@ mod tests {
             ("Tab\there\nand\rthere", "Tab here and there.epub"),
             ("  leading and trailing  ", "leading and trailing.epub"),
             ("Trailing dot...", "Trailing dot.epub"),
-            ("CON", "5.epub"),
-            ("com1", "5.epub"),
-            ("LPT9", "5.epub"),
+            ("CON", "000000000005.epub"),
+            ("com1", "000000000005.epub"),
+            ("LPT9", "000000000005.epub"),
         ] {
-            let name = materialize(BookId::new(5), &metadata(title), BookFormat::Epub, |_| false);
+            let name = materialize(hash(5), &metadata(title), BookFormat::Epub, |_| false);
             assert_eq!(name.as_str(), expected, "title {title:?}");
             assert!(!name.as_str().chars().any(|character| character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')), "illegal character survived in {name}");
             let stem = name.as_str().rsplit_once('.').expect("materialized names carry an extension").0;
@@ -199,8 +224,8 @@ mod tests {
     #[test]
     fn truncation_preserves_extension_and_identity_suffix() {
         let metadata = metadata(&"é".repeat(300));
-        let name = materialize(BookId::new(42), &metadata, BookFormat::Epub, |candidate| !candidate.as_str().contains("[42]"));
-        assert!(name.as_str().ends_with("[42].epub"));
+        let name = materialize(hash(42), &metadata, BookFormat::Epub, |candidate| !candidate.as_str().contains("[00000000002a]"));
+        assert!(name.as_str().ends_with("[00000000002a].epub"));
         assert!(name.as_str().len() <= MAX_FILE_NAME_BYTES);
     }
 }

@@ -29,8 +29,8 @@
 
 {#if books.length}
   <div class={detailed ? "book-grid detailed" : "book-grid"}>
-    {#each books as book (book.book_id)}
-    <BookCard {book} {libraryId} detailed={detailed} opening={openingBookId === book.book_id} downloadState={downloadStates[book.book_id]} {onopen} {ondownload} {onremove} />
+    {#each books as book (book.content_hash)}
+    <BookCard {book} {libraryId} detailed={detailed} opening={openingBookId === book.content_hash} downloadState={downloadStates[book.content_hash]} {onopen} {ondownload} {onremove} />
     {/each}
   </div>
 {:else if emptyMessage}

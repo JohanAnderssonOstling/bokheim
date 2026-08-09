@@ -16,7 +16,7 @@ use tokio_util::io::ReaderStream;
 use urlencoding::encode;
 
 use crate::library::database as db;
-use crate::{BlobKind, BookId, BookPlacement, ContentHash, DownloadProgress, ServerUrl, TransferJobKind};
+use crate::{BlobKind, ContentHash, BookPlacement, DownloadProgress, ServerUrl, TransferJobKind};
 use sync_common::LibraryId;
 
 pub use bokheim_app_contract::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
@@ -134,9 +134,9 @@ fn classify_failure(error: &(dyn Error + 'static)) -> TransferFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TransferJob {
     UploadBlob { content_hash: ContentHash, local_path: String, placement: Option<BookPlacement>, origin: TransferOrigin },
-    UploadThumbnail { content_hash: ContentHash, thumbnail_path: String, book_id: Option<BookId>, origin: TransferOrigin },
+    UploadThumbnail { thumbnail_hash: ContentHash, thumbnail_path: String, book_content_hash: Option<ContentHash>, origin: TransferOrigin },
     DownloadBlob { content_hash: ContentHash, placement: BookPlacement, origin: TransferOrigin },
-    DownloadThumbnail { content_hash: ContentHash, book_id: BookId, origin: TransferOrigin },
+    DownloadThumbnail { thumbnail_hash: ContentHash, book_content_hash: ContentHash, origin: TransferOrigin },
 }
 
 impl TransferJob {
@@ -151,11 +151,11 @@ impl TransferJob {
             (Self::UploadBlob { content_hash: left_hash, local_path: left_path, placement: left_placement, .. }, Self::UploadBlob { content_hash: right_hash, local_path: right_path, placement: right_placement, .. }) => {
                 left_hash == right_hash && left_path == right_path && left_placement == right_placement
             }
-            (Self::UploadThumbnail { content_hash: left_hash, thumbnail_path: left_path, book_id: left_book, .. }, Self::UploadThumbnail { content_hash: right_hash, thumbnail_path: right_path, book_id: right_book, .. }) => {
+            (Self::UploadThumbnail { thumbnail_hash: left_hash, thumbnail_path: left_path, book_content_hash: left_book, .. }, Self::UploadThumbnail { thumbnail_hash: right_hash, thumbnail_path: right_path, book_content_hash: right_book, .. }) => {
                 left_hash == right_hash && left_path == right_path && left_book == right_book
             }
             (Self::DownloadBlob { content_hash: left_hash, placement: left_placement, .. }, Self::DownloadBlob { content_hash: right_hash, placement: right_placement, .. }) => left_hash == right_hash && left_placement == right_placement,
-            (Self::DownloadThumbnail { content_hash: left_hash, book_id: left_book, .. }, Self::DownloadThumbnail { content_hash: right_hash, book_id: right_book, .. }) => left_hash == right_hash && left_book == right_book,
+            (Self::DownloadThumbnail { thumbnail_hash: left_hash, book_content_hash: left_book, .. }, Self::DownloadThumbnail { thumbnail_hash: right_hash, book_content_hash: right_book, .. }) => left_hash == right_hash && left_book == right_book,
             _ => false,
         }
     }
@@ -163,22 +163,22 @@ impl TransferJob {
     fn with_origin(&self, origin: TransferOrigin) -> Self {
         match self {
             Self::UploadBlob { content_hash, local_path, placement, .. } => Self::UploadBlob { content_hash: content_hash.clone(), local_path: local_path.clone(), placement: placement.clone(), origin },
-            Self::UploadThumbnail { content_hash, thumbnail_path, book_id, .. } => Self::UploadThumbnail { content_hash: content_hash.clone(), thumbnail_path: thumbnail_path.clone(), book_id: *book_id, origin },
+            Self::UploadThumbnail { thumbnail_hash, thumbnail_path, book_content_hash, .. } => Self::UploadThumbnail { thumbnail_hash: thumbnail_hash.clone(), thumbnail_path: thumbnail_path.clone(), book_content_hash: book_content_hash.clone(), origin },
             Self::DownloadBlob { content_hash, placement, .. } => Self::DownloadBlob { content_hash: content_hash.clone(), placement: placement.clone(), origin },
-            Self::DownloadThumbnail { content_hash, book_id, .. } => Self::DownloadThumbnail { content_hash: content_hash.clone(), book_id: *book_id, origin },
+            Self::DownloadThumbnail { thumbnail_hash, book_content_hash, .. } => Self::DownloadThumbnail { thumbnail_hash: thumbnail_hash.clone(), book_content_hash: book_content_hash.clone(), origin },
         }
     }
 
     fn status_fields(&self) -> (TransferJobKind, &ContentHash, Option<String>, Option<String>) {
         match self {
             Self::UploadBlob { content_hash, local_path, placement, .. } => {
-                (TransferJobKind::UploadBook, content_hash, placement.as_ref().map(|value| value.book_id.canonical()), Path::new(local_path).file_name().and_then(|name| name.to_str()).map(str::to_owned))
+                (TransferJobKind::UploadBook, content_hash, placement.as_ref().map(|value| value.content_hash.to_string()), Path::new(local_path).file_name().and_then(|name| name.to_str()).map(str::to_owned))
             }
-            Self::UploadThumbnail { content_hash, thumbnail_path, book_id, .. } => {
-                (TransferJobKind::UploadThumbnail, content_hash, book_id.map(BookId::canonical), Path::new(thumbnail_path).file_name().and_then(|name| name.to_str()).map(str::to_owned))
+            Self::UploadThumbnail { thumbnail_hash, thumbnail_path, book_content_hash, .. } => {
+                (TransferJobKind::UploadThumbnail, thumbnail_hash, book_content_hash.as_ref().map(ToString::to_string), Path::new(thumbnail_path).file_name().and_then(|name| name.to_str()).map(str::to_owned))
             }
-            Self::DownloadBlob { content_hash, placement, .. } => (TransferJobKind::DownloadBook, content_hash, Some(placement.book_id.canonical()), Some(placement.rel_path.as_str().to_owned())),
-            Self::DownloadThumbnail { content_hash, book_id, .. } => (TransferJobKind::DownloadThumbnail, content_hash, Some(book_id.canonical()), None),
+            Self::DownloadBlob { content_hash, placement, .. } => (TransferJobKind::DownloadBook, content_hash, Some(placement.content_hash.to_string()), Some(placement.rel_path.as_str().to_owned())),
+            Self::DownloadThumbnail { thumbnail_hash, book_content_hash, .. } => (TransferJobKind::DownloadThumbnail, thumbnail_hash, Some(book_content_hash.to_string()), None),
         }
     }
 
@@ -302,12 +302,12 @@ impl TransferQueue {
         jobs.sort_by_key(|queued| (queued.created_at, queued.id));
         jobs.into_iter()
             .map(|queued| {
-                let (kind, content_hash, book_id, path) = queued.job.status_fields();
+                let (kind, content_hash, book_content_hash, path) = queued.job.status_fields();
                 TransferStatus {
                     id: queued.id.to_string(),
                     kind,
                     content_hash: content_hash.as_str().to_owned(),
-                    book_id,
+                    book_content_hash,
                     path,
                     state: match queued.state {
                         QueueJobState::Queued => TransferState::Queued,
@@ -463,18 +463,18 @@ impl TransferWorker {
                 let _permit = self.budget.clone().acquire_many_owned(permits).await?;
                 self.upload_blob(&content_hash, &local_path, placement.as_ref()).await?;
             }
-            TransferJob::UploadThumbnail { content_hash, thumbnail_path, book_id: _, origin: _ } => {
+            TransferJob::UploadThumbnail { thumbnail_hash, thumbnail_path, book_content_hash: _, origin: _ } => {
                 let permits = mb_permits_for_path(&thumbnail_path, self.budget.available_permits()).await;
                 let _permit = self.budget.clone().acquire_many_owned(permits).await?;
-                self.upload_thumbnail(&content_hash, &thumbnail_path).await?;
+                self.upload_thumbnail(&thumbnail_hash, &thumbnail_path).await?;
             }
             TransferJob::DownloadBlob { content_hash, placement, origin: _ } => {
                 let _permit = self.budget.clone().acquire_owned().await?;
                 self.download_blob(&content_hash, &placement).await?;
             }
-            TransferJob::DownloadThumbnail { content_hash, book_id, origin: _ } => {
+            TransferJob::DownloadThumbnail { thumbnail_hash, book_content_hash, origin: _ } => {
                 let _permit = self.budget.clone().acquire_owned().await?;
-                self.download_thumbnail(&content_hash, book_id).await?;
+                self.download_thumbnail(&thumbnail_hash, book_content_hash).await?;
             }
         }
         Ok(())
@@ -512,7 +512,7 @@ impl TransferWorker {
             let conn = self.db_pool.get()?;
             db::upsert_blob_local_ref(&conn, BlobKind::Book, content_hash, local_path_text, false)?;
             if let Some(placement) = placement {
-                db::set_book_downloaded(&conn, &placement.rel_path, placement.book_id, false)?;
+                db::set_book_downloaded(&conn, &placement.rel_path, placement.content_hash.clone(), false)?;
             }
             return Err(permanent(format!("upload hash mismatch expected={content_hash} got={actual_hash}")));
         }
@@ -522,7 +522,7 @@ impl TransferWorker {
         db::upsert_blob_local_ref(&conn, BlobKind::Book, content_hash, local_path_text, true)?;
         db::record_remote_asset(&conn, BlobKind::Book, content_hash)?;
         if let Some(placement) = placement {
-            db::set_book_downloaded(&conn, &placement.rel_path, placement.book_id, true)?;
+            db::set_book_downloaded(&conn, &placement.rel_path, placement.content_hash.clone(), true)?;
         }
         Ok(())
     }
@@ -551,11 +551,10 @@ impl TransferWorker {
 
     async fn download_blob(&self, content_hash: &ContentHash, placement: &BookPlacement) -> Result<(), Box<dyn std::error::Error>> {
         let token = self.bearer_token()?;
-        let book_id = placement.book_id;
         let rel_path = &placement.rel_path;
         let local_path = self.library_root.resolve_book(rel_path);
         let local_path_text = local_path.to_str().ok_or("book path is not valid UTF-8")?;
-        self.send_download_status(book_id, DownloadState::Downloading(DownloadProgress::ZERO));
+        self.send_download_status(content_hash.clone(), DownloadState::Downloading(DownloadProgress::ZERO));
 
         let partial_path = partial_book_path(&self.library_root, content_hash);
         if let Some(parent) = partial_path.parent() {
@@ -592,7 +591,7 @@ impl TransferWorker {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 let conn = self.db_pool.get()?;
                 db::forget_remote_asset(&conn, BlobKind::Book, content_hash)?;
-                self.send_download_status(book_id, DownloadState::NotDownloaded);
+                self.send_download_status(content_hash.clone(), DownloadState::NotDownloaded);
                 return Ok(());
             }
             if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && downloaded > 0 {
@@ -644,7 +643,7 @@ impl TransferWorker {
                 downloaded += chunk.len() as u64;
                 let progress = DownloadProgress::from_ratio(downloaded, total_size);
                 if (progress.value() - last_progress).abs() >= 0.02 || progress.value() >= 0.99 {
-                    self.send_download_status(book_id, DownloadState::Downloading(progress));
+                    self.send_download_status(content_hash.clone(), DownloadState::Downloading(progress));
                     last_progress = progress.value();
                 }
             }
@@ -656,14 +655,14 @@ impl TransferWorker {
         let got_hash = hasher.finalize().to_hex().to_string();
         if got_hash != content_hash.as_str() {
             let _ = tokio::fs::remove_file(&partial_path).await;
-            self.send_download_status(book_id, DownloadState::NotDownloaded);
+            self.send_download_status(content_hash.clone(), DownloadState::NotDownloaded);
             return Err(permanent(format!("download hash mismatch expected={} got={}", content_hash, got_hash)));
         }
 
         {
             let conn = self.db_pool.get()?;
             if !db::book_placement_expects_hash(&conn, placement, content_hash)? {
-                self.send_download_status(book_id, DownloadState::NotDownloaded);
+                self.send_download_status(content_hash.clone(), DownloadState::NotDownloaded);
                 return Ok(());
             }
             if let Some((_, dir_id, _)) = db::get_book_dir_entry_by_path(&conn, rel_path)? {
@@ -689,25 +688,25 @@ impl TransferWorker {
         sync_parent_directory(&local_path)?;
 
         let conn = self.db_pool.get()?;
-        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, rel_path, book_id, &local_path) {
+        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, rel_path, content_hash.clone(), &local_path) {
             log::warn!("Failed to stamp local fingerprint for downloaded {}: {}", local_path.display(), err);
         }
         db::upsert_blob_local_ref(&conn, BlobKind::Book, content_hash, local_path_text, true)?;
         db::record_remote_asset(&conn, BlobKind::Book, content_hash)?;
         db::complete_asset_request(&conn, BlobKind::Book, content_hash)?;
-        db::set_book_downloaded(&conn, rel_path, book_id, true)?;
-        self.send_download_status(book_id, DownloadState::Downloaded);
+        db::set_book_downloaded(&conn, rel_path, content_hash.clone(), true)?;
+        self.send_download_status(content_hash.clone(), DownloadState::Downloaded);
         Ok(())
     }
 
-    fn send_download_status(&self, book_id: BookId, state: DownloadState) {
+    fn send_download_status(&self, content_hash: ContentHash, state: DownloadState) {
         if let Some(tx) = &self.event_tx {
             let refresh_folders = matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded);
-            let _ = tx.send(LibraryEvent::DownloadStatusChanged { book_id, state });
+            let _ = tx.send(LibraryEvent::DownloadStatusChanged { content_hash: content_hash.clone(), state });
             if refresh_folders {
                 let folder_statuses = (|| -> Result<Vec<_>, Box<dyn std::error::Error>> {
                     let conn = self.db_pool.get()?;
-                    let dir_ids = db::get_book_ancestor_dir_ids(&conn, book_id)?;
+                    let dir_ids = db::get_book_ancestor_dir_ids(&conn, content_hash)?;
                     dir_ids.into_iter().map(|dir_id| db::get_folder_download_counts(&conn, dir_id.as_str()).map(|(downloaded_books, total_books)| (dir_id, downloaded_books, total_books)).map_err(Into::into)).collect()
                 })();
                 match folder_statuses {
@@ -722,20 +721,20 @@ impl TransferWorker {
         }
     }
 
-    async fn download_thumbnail(&self, content_hash: &ContentHash, book_id: BookId) -> Result<(), Box<dyn std::error::Error>> {
-        let thumb_path = thumbnail_path_from_content_hash(&self.library_root, content_hash);
+    async fn download_thumbnail(&self, thumbnail_hash: &ContentHash, book_content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+        let thumb_path = thumbnail_path_from_content_hash(&self.library_root, thumbnail_hash);
         if thumb_path.exists() {
             if let Some(tx) = &self.event_tx {
-                let _ = tx.send(LibraryEvent::ThumbnailGenerated { book_id });
+                let _ = tx.send(LibraryEvent::ThumbnailGenerated { content_hash: book_content_hash });
             }
             return Ok(());
         }
 
         let token = self.bearer_token()?;
-        let response = self.http_client.get(self.asset_endpoint("thumbnails", content_hash)).bearer_auth(&token).send().await?;
+        let response = self.http_client.get(self.asset_endpoint("thumbnails", thumbnail_hash)).bearer_auth(&token).send().await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             let conn = self.db_pool.get()?;
-            db::forget_remote_asset(&conn, BlobKind::Thumbnail, content_hash)?;
+            db::forget_remote_asset(&conn, BlobKind::Thumbnail, thumbnail_hash)?;
             return Ok(());
         }
         let response = self.authenticated_response(response)?;
@@ -772,10 +771,10 @@ impl TransferWorker {
         sync_parent_directory(&thumb_path)?;
         let thumb_path_text = thumb_path.to_str().ok_or("thumbnail path is not valid UTF-8")?;
         let conn = self.db_pool.get()?;
-        db::upsert_blob_local_ref(&conn, BlobKind::Thumbnail, content_hash, thumb_path_text, true)?;
-        db::record_remote_asset(&conn, BlobKind::Thumbnail, content_hash)?;
+        db::upsert_blob_local_ref(&conn, BlobKind::Thumbnail, thumbnail_hash, thumb_path_text, true)?;
+        db::record_remote_asset(&conn, BlobKind::Thumbnail, thumbnail_hash)?;
         if let Some(tx) = &self.event_tx {
-            let _ = tx.send(LibraryEvent::ThumbnailGenerated { book_id });
+            let _ = tx.send(LibraryEvent::ThumbnailGenerated { content_hash: book_content_hash });
         }
         Ok(())
     }
@@ -866,7 +865,7 @@ mod tests {
     }
 
     fn queued_upload(hash: &str, origin: TransferOrigin) -> TransferJob {
-        TransferJob::UploadBlob { content_hash: ContentHash::parse(hash).unwrap(), local_path: "/tmp/book.epub".to_owned(), placement: None, origin }
+        TransferJob::UploadBlob { content_hash: ContentHash::new(&hash), local_path: "/tmp/book.epub".to_owned(), placement: None, origin }
     }
 
     #[test]
@@ -919,7 +918,7 @@ mod tests {
     fn thumbnail_paths_are_derived_from_the_validated_library_root() {
         let root = tempfile::tempdir().unwrap();
         let library_root = LibraryRoot::open(root.path()).unwrap();
-        let content_hash = ContentHash::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let content_hash = ContentHash::new(&"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(
             thumbnail_path_from_content_hash(&library_root, &content_hash),
             root.path().canonicalize().unwrap().join(format!("{}/thumbnails/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg", crate::APP_HIDDEN_DIR))
@@ -951,7 +950,7 @@ mod tests {
             TransferRuntime::default(),
             Arc::new(TransferQueue::default()),
         );
-        let expected = ContentHash::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let expected = ContentHash::new(&"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
         let error = worker.upload_blob(&expected, book_path.to_str().unwrap(), None).await.unwrap_err();
 
@@ -968,8 +967,8 @@ mod tests {
         let conn = pool.get().unwrap();
         db::init_db(&conn).unwrap();
         conn.execute("INSERT INTO dir(id, parent_id, name) VALUES ('d1', '__root__', 'Shelf')", []).unwrap();
-        conn.execute("INSERT INTO book(id, added_at, content_hash, format) VALUES ('7', 1, ?1, 'epub')", [content_hash.as_str()]).unwrap();
-        conn.execute("INSERT INTO book_dir(dir_id, book_id, file_name, local_hash, is_downloaded) VALUES ('d1', '7', 'book.epub', '', 0)", []).unwrap();
+        conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [content_hash.as_str()]).unwrap();
+        conn.execute("INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES ('d1', (SELECT row_id FROM book WHERE content_hash=?1), 'book.epub', '', 0)", [content_hash.as_str()]).unwrap();
         drop(conn);
         let worker = TransferWorker::new(
             Client::new(),
@@ -989,7 +988,7 @@ mod tests {
     #[tokio::test]
     async fn interrupted_download_resumes_from_saved_prefix_and_publishes_verified_bytes() {
         let bytes = b"a complete epub payload used to prove ranged resume".to_vec();
-        let content_hash = ContentHash::parse(blake3::hash(&bytes).to_hex().as_str()).unwrap();
+        let content_hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
         let prefix_len = 17_usize;
         let saw_range = Arc::new(AtomicBool::new(false));
         let route_bytes = Arc::new(bytes.clone());
@@ -1026,7 +1025,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join(format!("{}/partials", crate::APP_HIDDEN_DIR))).unwrap();
         std::fs::write(partial_book_path(&LibraryRoot::open(root.path()).unwrap(), &content_hash), &bytes[..prefix_len]).unwrap();
         let (worker, _) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
-        let placement = BookPlacement::new(BookId::new(7), RelativeBookPath::parse("/Shelf/book.epub").unwrap());
+        let placement = BookPlacement::new(content_hash, RelativeBookPath::parse("/Shelf/book.epub").unwrap());
 
         worker.download_blob(&content_hash, &placement).await.unwrap();
 
@@ -1044,10 +1043,10 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
-        let content_hash = ContentHash::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let content_hash = ContentHash::new(&"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let (worker, _) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
 
-        let error = worker.download_thumbnail(&content_hash, BookId::new(7)).await.unwrap_err();
+        let error = worker.download_thumbnail(&content_hash, ContentHash::from_fixture_u64(7)).await.unwrap_err();
 
         assert!(matches!(classify_failure(error.as_ref()), TransferFailure::Retryable(_)));
         assert!(worker.session.read().unwrap().is_some(), "the account layer must retain the refresh token so it can renew access before retrying");
@@ -1057,7 +1056,7 @@ mod tests {
     #[tokio::test]
     async fn completed_download_is_not_published_after_placement_becomes_stale() {
         let bytes = b"verified but stale bytes".to_vec();
-        let content_hash = ContentHash::parse(blake3::hash(&bytes).to_hex().as_str()).unwrap();
+        let content_hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(format!("{}/partials", crate::APP_HIDDEN_DIR))).unwrap();
         let library_root = LibraryRoot::open(root.path()).unwrap();
@@ -1065,7 +1064,7 @@ mod tests {
         std::fs::write(&partial, &bytes).unwrap();
         let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse("http://127.0.0.1:9").unwrap(), &content_hash);
         pool.get().unwrap().execute("UPDATE book_dir SET deleted_at=1", []).unwrap();
-        let placement = BookPlacement::new(BookId::new(7), RelativeBookPath::parse("/Shelf/book.epub").unwrap());
+        let placement = BookPlacement::new(ContentHash::from_fixture_u64(7), RelativeBookPath::parse("/Shelf/book.epub").unwrap());
 
         worker.download_blob(&content_hash, &placement).await.unwrap();
 

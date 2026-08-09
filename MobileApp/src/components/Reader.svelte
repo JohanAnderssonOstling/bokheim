@@ -580,7 +580,7 @@
     const existing = annotations.find((item) => JSON.stringify(item.anchor) === JSON.stringify(anchor) || annotationCfi(item) === selection?.cfi);
     const now = Date.now();
     const annotation: ReaderAnnotation = {
-      id: existing?.id || crypto.randomUUID(), book_id: book.bookId, anchor,
+      id: existing?.id || crypto.randomUUID(), content_hash: book.bookId, anchor,
       exact_text: selection.text,
       style: existing?.style || style, color: existing?.color || "#f6c945", note: selectionNote,
       created_at: existing?.created_at || now, modified_at: now,
@@ -634,7 +634,7 @@
   async function addBookmark() {
     if (!lastCfi || !book.bookId || !book.createBookmark) return;
     const now = Date.now();
-    const bookmark: ReaderBookmark = { id: crypto.randomUUID(), book_id: book.bookId, cfi: lastCfi, label: tocItems.find((item) => item.href === activeTocHref)?.label || `Location ${currentLocation + 1}`, created_at: now, modified_at: now };
+    const bookmark: ReaderBookmark = { id: crypto.randomUUID(), content_hash: book.bookId, cfi: lastCfi, label: tocItems.find((item) => item.href === activeTocHref)?.label || `Location ${currentLocation + 1}`, created_at: now, modified_at: now };
     await book.createBookmark(bookmark);
     bookmarks = [bookmark, ...bookmarks];
   }

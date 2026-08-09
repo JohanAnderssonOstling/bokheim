@@ -5,7 +5,7 @@
 //! tests can run against the same `SYNC_E2E_DATABASE_URL` without colliding
 //! on tables an earlier test already created.
 
-use server_database::PostgresDatabase;
+use crate::PostgresDatabase;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -26,6 +26,6 @@ pub(crate) async fn isolated_schema_url(prefix: &str) -> Option<String> {
 pub(crate) async fn isolated_pool(prefix: &str, max_connections: u32) -> Option<PgPool> {
     let scoped_url = isolated_schema_url(prefix).await?;
     let pool = PgPoolOptions::new().max_connections(max_connections).connect(&scoped_url).await.unwrap();
-    server_database::migrate(&PostgresDatabase::from_pool(pool.clone())).await.unwrap();
+    crate::migrate(&PostgresDatabase::from_pool(pool.clone())).await.unwrap();
     Some(pool)
 }

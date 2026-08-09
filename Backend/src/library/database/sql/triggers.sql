@@ -9,7 +9,6 @@ DROP TRIGGER IF EXISTS trig_dir_parent_update;
 DROP TRIGGER IF EXISTS trig_dir_lifecycle_update;
 DROP TRIGGER IF EXISTS trig_book_added;
 DROP TRIGGER IF EXISTS trig_book_added_reactivate;
-DROP TRIGGER IF EXISTS trig_book_content_hash;
 DROP TRIGGER IF EXISTS trig_book_deleted;
 DROP TRIGGER IF EXISTS trig_book_dir_added_insert;
 DROP TRIGGER IF EXISTS trig_book_dir_added_reactivate;
@@ -115,8 +114,8 @@ WHEN NEW.deleted_at IS NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
-        'book_lifecycle', NEW.id,
-        bokheim_mutation('book_lifecycle', NEW.id, 0, COALESCE(NEW.title, NEW.id), contributors_for_book(NEW.id), COALESCE(NEW.description, ''), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.content_hash, NEW.format),
+        'book_lifecycle', NEW.content_hash,
+        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), COALESCE(NEW.description, ''), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.format),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -131,26 +130,11 @@ WHEN NEW.deleted_at IS NULL AND OLD.deleted_at IS NOT NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
-        'book_lifecycle', NEW.id,
-        bokheim_mutation('book_lifecycle', NEW.id, 0, COALESCE(NEW.title, NEW.id), contributors_for_book(NEW.id), COALESCE(NEW.description, ''), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.content_hash, NEW.format),
+        'book_lifecycle', NEW.content_hash,
+        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), COALESCE(NEW.description, ''), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.format),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
-        replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
-        body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
-END;
-
-CREATE TRIGGER trig_book_content_hash
-AFTER UPDATE OF content_hash ON book
-WHEN NEW.deleted_at IS NULL AND NEW.content_hash != OLD.content_hash
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-BEGIN
-    INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
-    VALUES (
-        'book_lifecycle', NEW.id,
-        bokheim_mutation('book_lifecycle', NEW.id, 0, COALESCE(NEW.title, NEW.id), contributors_for_book(NEW.id), COALESCE(NEW.description, ''), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.content_hash, NEW.format),
-        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    ) ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
         body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
 END;
@@ -162,8 +146,8 @@ WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
-        'book_lifecycle', NEW.id,
-        bokheim_mutation('book_lifecycle', NEW.id, 1, '', X'', '', X'', '', 0),
+        'book_lifecycle', NEW.content_hash,
+        bokheim_mutation('book_lifecycle', NEW.content_hash, 1, '', X'', '', X'', 0, ''),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 1
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -178,8 +162,8 @@ WHEN (OLD.title IS NOT NEW.title OR OLD.description IS NOT NEW.description OR OL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
-        'metadata', NEW.id,
-        bokheim_mutation('metadata', NEW.id, COALESCE(NEW.title, ''), contributors_for_book(NEW.id), COALESCE(NEW.description, ''), NEW.publication_metadata),
+        'metadata', NEW.content_hash,
+        bokheim_mutation('metadata', NEW.content_hash, COALESCE(NEW.title, ''), contributors_for_book(NEW.row_id), COALESCE(NEW.description, ''), NEW.publication_metadata),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -192,17 +176,17 @@ END;
 -- that refresh the `metadata` mutation for the affected book. The ON CONFLICT
 -- coalescing (shared with trig_book_metadata above) collapses every row-level
 -- firing from one contributor-list rewrite into a single outbox mutation per
--- (book_id, kind).
+-- (book_row_id, kind).
 CREATE TRIGGER trig_book_contributor_insert
 AFTER INSERT ON book_contributor
 WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     SELECT
-        'metadata', book.id,
-        bokheim_mutation('metadata', book.id, COALESCE(book.title, ''), contributors_for_book(book.id), COALESCE(book.description, ''), book.publication_metadata),
+        'metadata', book.content_hash,
+        bokheim_mutation('metadata', book.content_hash, COALESCE(book.title, ''), contributors_for_book(book.row_id), COALESCE(book.description, ''), book.publication_metadata),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    FROM book WHERE book.id = NEW.book_id
+    FROM book WHERE book.row_id = NEW.book_row_id
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
         body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
@@ -214,10 +198,10 @@ WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'lo
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     SELECT
-        'metadata', book.id,
-        bokheim_mutation('metadata', book.id, COALESCE(book.title, ''), contributors_for_book(book.id), COALESCE(book.description, ''), book.publication_metadata),
+        'metadata', book.content_hash,
+        bokheim_mutation('metadata', book.content_hash, COALESCE(book.title, ''), contributors_for_book(book.row_id), COALESCE(book.description, ''), book.publication_metadata),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    FROM book WHERE book.id = NEW.book_id
+    FROM book WHERE book.row_id = NEW.book_row_id
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
         body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
@@ -226,14 +210,14 @@ END;
 CREATE TRIGGER trig_book_contributor_delete
 AFTER DELETE ON book_contributor
 WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-  AND EXISTS (SELECT 1 FROM book WHERE book.id = OLD.book_id)
+  AND EXISTS (SELECT 1 FROM book WHERE book.row_id = OLD.book_row_id)
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     SELECT
-        'metadata', book.id,
-        bokheim_mutation('metadata', book.id, COALESCE(book.title, ''), contributors_for_book(book.id), COALESCE(book.description, ''), book.publication_metadata),
+        'metadata', book.content_hash,
+        bokheim_mutation('metadata', book.content_hash, COALESCE(book.title, ''), contributors_for_book(book.row_id), COALESCE(book.description, ''), book.publication_metadata),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    FROM book WHERE book.id = OLD.book_id
+    FROM book WHERE book.row_id = OLD.book_row_id
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
         body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
@@ -246,8 +230,8 @@ WHEN NEW.deleted_at IS NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
-        'placement', NEW.book_id, NEW.dir_id,
-        bokheim_mutation('placement', NEW.dir_id, NEW.book_id, 1),
+        'placement', (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.dir_id,
+        bokheim_mutation('placement', NEW.dir_id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), 1),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     ) ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
@@ -255,15 +239,15 @@ BEGIN
 END;
 
 CREATE TRIGGER trig_book_dir_added_reactivate
-AFTER UPDATE OF deleted_at, dir_id, book_id ON book_dir
+AFTER UPDATE OF deleted_at, dir_id, book_row_id ON book_dir
 WHEN NEW.deleted_at IS NULL
-  AND (OLD.deleted_at IS NOT NULL OR OLD.dir_id IS NOT NEW.dir_id OR OLD.book_id IS NOT NEW.book_id)
+  AND (OLD.deleted_at IS NOT NULL OR OLD.dir_id IS NOT NEW.dir_id OR OLD.book_row_id IS NOT NEW.book_row_id)
   AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
-        'placement', NEW.book_id, NEW.dir_id,
-        bokheim_mutation('placement', NEW.dir_id, NEW.book_id, 1),
+        'placement', (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.dir_id,
+        bokheim_mutation('placement', NEW.dir_id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), 1),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     ) ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
@@ -277,8 +261,8 @@ WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
-        'placement', OLD.book_id, OLD.dir_id,
-        bokheim_mutation('placement', OLD.dir_id, OLD.book_id, 0),
+        'placement', (SELECT content_hash FROM book WHERE row_id=OLD.book_row_id), OLD.dir_id,
+        bokheim_mutation('placement', OLD.dir_id, (SELECT content_hash FROM book WHERE row_id=OLD.book_row_id), 0),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 1
     ) ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
         replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
@@ -293,8 +277,8 @@ WHEN NEW.read_pos IS NOT NULL
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
-        'reading_position', NEW.id,
-        bokheim_mutation('reading_position', NEW.id, NEW.read_pos, COALESCE(NEW.read_progress, 0)),
+        'reading_position', NEW.content_hash,
+        bokheim_mutation('reading_position', NEW.content_hash, NEW.read_pos, COALESCE(NEW.read_progress, 0)),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -309,7 +293,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'annotation', NEW.id,
-        bokheim_mutation('annotation', NEW.id, NEW.book_id, NEW.anchor_kind, NEW.anchor_cfi, NEW.anchor_page, NEW.anchor_rects, NEW.anchor_fallback_cfi,
+        bokheim_mutation('annotation', NEW.id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.anchor_kind, NEW.anchor_cfi, NEW.anchor_page, NEW.anchor_rects, NEW.anchor_fallback_cfi,
             NEW.exact_text, NEW.style, NEW.color, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
@@ -325,7 +309,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'annotation', NEW.id,
-        bokheim_mutation('annotation', NEW.id, NEW.book_id, NEW.anchor_kind, NEW.anchor_cfi, NEW.anchor_page, NEW.anchor_rects, NEW.anchor_fallback_cfi,
+        bokheim_mutation('annotation', NEW.id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.anchor_kind, NEW.anchor_cfi, NEW.anchor_page, NEW.anchor_rects, NEW.anchor_fallback_cfi,
             NEW.exact_text, NEW.style, NEW.color, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
@@ -341,7 +325,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'bookmark', NEW.id,
-        bokheim_mutation('bookmark', NEW.id, NEW.book_id, NEW.cfi, NEW.label, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
+        bokheim_mutation('bookmark', NEW.id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.cfi, NEW.label, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -357,7 +341,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'bookmark', NEW.id,
-        bokheim_mutation('bookmark', NEW.id, NEW.book_id, NEW.cfi, NEW.label, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
+        bokheim_mutation('bookmark', NEW.id, (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id), NEW.cfi, NEW.label, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -372,7 +356,10 @@ BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'book_link', NEW.id,
-        bokheim_mutation('book_link', NEW.id, NEW.source_book_id, NEW.target_book_id, NEW.relation, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
+        bokheim_mutation('book_link', NEW.id,
+            (SELECT content_hash FROM book WHERE row_id=NEW.source_book_row_id),
+            (SELECT content_hash FROM book WHERE row_id=NEW.target_book_row_id),
+            NEW.relation, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -381,13 +368,16 @@ BEGIN
 END;
 
 CREATE TRIGGER trig_book_link_state_update
-AFTER UPDATE OF source_book_id, target_book_id, relation, note, modified_at, deleted_at ON book_link
+AFTER UPDATE OF source_book_row_id, target_book_row_id, relation, note, modified_at, deleted_at ON book_link
 WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'book_link', NEW.id,
-        bokheim_mutation('book_link', NEW.id, NEW.source_book_id, NEW.target_book_id, NEW.relation, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
+        bokheim_mutation('book_link', NEW.id,
+            (SELECT content_hash FROM book WHERE row_id=NEW.source_book_row_id),
+            (SELECT content_hash FROM book WHERE row_id=NEW.target_book_row_id),
+            NEW.relation, NEW.note, NEW.created_at, NEW.modified_at, NEW.deleted_at IS NOT NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), NEW.deleted_at IS NOT NULL
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET

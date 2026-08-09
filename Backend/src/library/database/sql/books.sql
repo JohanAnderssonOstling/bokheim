@@ -5,9 +5,9 @@
 -- param: title: &str
 -- param: timestamp: i64
 -- param: format: &str
-INSERT INTO book    (id, title, read_pos, read_progress, added_at, format, deleted_at)
+INSERT INTO book    (content_hash, title, read_pos, read_progress, added_at, format, deleted_at)
 VALUES              (:id,:title, NULL, 0, :timestamp, :format, NULL)
-ON CONFLICT(id) DO UPDATE SET
+ON CONFLICT(content_hash) DO UPDATE SET
     title = COALESCE(book.title, excluded.title),
     added_at = excluded.added_at,
     deleted_at = NULL;
@@ -16,12 +16,11 @@ ON CONFLICT(id) DO UPDATE SET
 -- param: id: &str
 -- param: title: &str
 -- param: timestamp: i64
-INSERT INTO book (id, title, read_pos, read_progress, added_at, content_hash, format, deleted_at)
-VALUES (:id, :title, NULL, 0, :timestamp, :content_hash, :format, NULL)
-ON CONFLICT(id) DO UPDATE SET
+INSERT INTO book (content_hash, title, read_pos, read_progress, added_at, format, deleted_at)
+VALUES (:id, :title, NULL, 0, :timestamp, :format, NULL)
+ON CONFLICT(content_hash) DO UPDATE SET
     title = COALESCE(book.title, excluded.title),
     added_at = excluded.added_at,
-    content_hash = excluded.content_hash,
     format = excluded.format,
     deleted_at = NULL;
 
@@ -30,9 +29,9 @@ ON CONFLICT(id) DO UPDATE SET
 -- param: timestamp: i64
 -- Upsert a materialized tombstone even when this device has never observed the
 -- book. Its winning version is retained independently in sync_state_version.
-INSERT INTO book (id, added_at, deleted_at)
+INSERT INTO book (content_hash, added_at, deleted_at)
 VALUES (:id, :timestamp, :timestamp)
-ON CONFLICT(id) DO UPDATE SET
+ON CONFLICT(content_hash) DO UPDATE SET
     deleted_at = excluded.deleted_at;
 
 -- name: first_book_insert!
@@ -42,7 +41,7 @@ ON CONFLICT(id) DO UPDATE SET
 -- reader-state mutation naming it). Format stays empty until a lifecycle
 -- mutation or a local scan observes the actual file; every caller applies remote
 -- state, so the empty value never reaches a local outbox trigger.
-INSERT OR IGNORE INTO book    (id, added_at)
+INSERT OR IGNORE INTO book    (content_hash, added_at)
 VALUES              (:id, :timestamp);
 
 -- name: insert_scanned_book!
@@ -52,9 +51,9 @@ VALUES              (:id, :timestamp);
 -- A book observed on this device's disk but carrying no readable metadata. The
 -- format comes from the file itself, so unlike first_book_insert this row is
 -- complete enough for the lifecycle trigger to encode.
-INSERT INTO book    (id, added_at, format)
+INSERT INTO book    (content_hash, added_at, format)
 VALUES              (:id, :timestamp, :format)
-ON CONFLICT(id) DO UPDATE SET
+ON CONFLICT(content_hash) DO UPDATE SET
     format = excluded.format;
 
 -- name: upsert_dir!
@@ -90,37 +89,34 @@ ORDER BY level DESC;
 
 
 -- name: get_local_fingerprint_book_dirs?
-SELECT placement.local_hash, placement.book_id, placement.dir_id, placement.file_name, book.content_hash,
+SELECT placement.local_hash, book.content_hash, placement.dir_id, placement.file_name, book.content_hash,
        book.description_scanned = 0 AS description_missing
 FROM book_dir placement
-JOIN book ON book.id = placement.book_id
+JOIN book ON book.row_id = placement.book_row_id
 WHERE placement.deleted_at IS NULL AND placement.local_hash != '' AND book.content_hash != '';
 
 -- name: get_book_hashes?
--- param: book_id: &str
-SELECT content_hash FROM book
-WHERE id = :book_id AND deleted_at IS NULL AND content_hash != '';
+-- param: content_hash: &str
+SELECT book.content_hash FROM book
+JOIN book_dir ON book_dir.book_row_id = book.row_id
+WHERE book.content_hash = :content_hash
+  AND book.deleted_at IS NULL
+  AND book_dir.deleted_at IS NULL
+LIMIT 1;
 
 -- name: insert_book_dir!
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: file_name: &str
 -- param: local_hash: &str
 -- param: last_scan: i64
 -- param: is_downloaded: i32
-INSERT INTO book_dir    (dir_id, book_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
-VALUES                  (:dir_id,:book_id,:file_name,:local_hash,:last_scan,:is_downloaded,NULL)
-ON CONFLICT(dir_id, book_id) DO UPDATE SET
+INSERT INTO book_dir    (dir_id, book_row_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
+VALUES                  (:dir_id,(SELECT row_id FROM book WHERE content_hash=:content_hash),:file_name,:local_hash,:last_scan,:is_downloaded,NULL)
+ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
     deleted_at = NULL,
     -- max() so a remote apply (last_scan 0) can't lower a live scan stamp and
     -- make the next sweep delete a present file.
     last_scan = max(book_dir.last_scan, excluded.last_scan),
     is_downloaded = max(book_dir.is_downloaded, excluded.is_downloaded),
     local_hash = excluded.local_hash;
-
--- name: set_book_content_hash!
--- param: content_hash: &str
--- param: book_id: &str
-UPDATE book
-SET content_hash = :content_hash
-WHERE id = :book_id;

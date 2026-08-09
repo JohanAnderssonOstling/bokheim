@@ -46,31 +46,20 @@ struct AccountState {
 }
 
 pub fn router(accounts: Arc<PostgresAccountService>, client_address_source: ClientAddressSource) -> Router {
-    router_with_public_registration(accounts, client_address_source, true)
-}
-
-pub fn router_with_public_registration(accounts: Arc<PostgresAccountService>, client_address_source: ClientAddressSource, public_registration: bool) -> Router {
     let state = AccountState { accounts, client_address_source };
-    let router = Router::new()
+    Router::new()
         .route("/api/auth/login", post(post_login).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
         .route("/api/auth/refresh", post(post_refresh).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
         .route("/api/auth/logout", post(post_logout))
         .route("/api/auth/me", get(get_me))
         .route("/api/auth/sessions", get(get_sessions).delete(delete_other_sessions))
-        .route("/api/auth/sessions/:session_id", axum::routing::delete(delete_session));
-
-    let router = if public_registration {
-        router
-            .route("/api/auth/register", post(post_public_registration).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
-            .route("/api/auth/resend-verification", post(post_resend_verification).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
-            .route("/api/auth/verify-email", post(post_verify_email).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
-            .route("/api/auth/request-password-reset", post(post_request_password_reset).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
-            .route("/api/auth/reset-password", post(post_reset_password).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
-    } else {
-        router
-    };
-
-    router.with_state(state)
+        .route("/api/auth/sessions/:session_id", axum::routing::delete(delete_session))
+        .route("/api/auth/register", post(post_public_registration).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .route("/api/auth/resend-verification", post(post_resend_verification).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .route("/api/auth/verify-email", post(post_verify_email).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .route("/api/auth/request-password-reset", post(post_request_password_reset).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .route("/api/auth/reset-password", post(post_reset_password).layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES)))
+        .with_state(state)
 }
 
 struct AccountUser {

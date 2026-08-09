@@ -112,7 +112,6 @@ impl Render for StorePage {
                             }
                             group_view.child(results.child(external_links))
                         }
-                        WideSearchOutcome::AuthenticationRequired => group_view.child(components::cloud_message("This catalogue requires sign-in, which is not supported.", theme)),
                         WideSearchOutcome::Unsupported => group_view.child(components::cloud_message("This catalog does not support search.", theme)),
                         WideSearchOutcome::TimedOut => group_view.child(components::cloud_message("This catalog did not respond in time.", theme)),
                         WideSearchOutcome::Failed(message) => group_view.child(components::cloud_error(message.clone(), theme)),
