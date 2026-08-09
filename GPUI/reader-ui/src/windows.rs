@@ -127,9 +127,6 @@ pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryB
                 PreparedBook::Publication { publication: Arc::new(publication), nav_state }
             }
         };
-        let phase_started = Instant::now();
-        library.mark_book_opened(prepare_locator.book_id()).map_err(|error| format!("stage=mark_opened: {error}"))?;
-        startup_phase!("phase=last_opened_updated book_id={} elapsed_ms={} phase_ms={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
         startup_phase!("phase=prepare_worker_complete book_id={} elapsed_ms={} worker_ms={}", prepare_locator.book_id(), startup_started.elapsed().as_millis(), worker_started.elapsed().as_millis(),);
         Ok::<_, String>((library, prepared))
     });

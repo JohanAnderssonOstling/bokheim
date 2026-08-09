@@ -6,12 +6,11 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use futures_util::{StreamExt, TryStreamExt};
 use server_core::AssetKind;
-use sync_common::api::assets::{BlobManifestRequest, BlobsExistsRequest, ExistsResponse, ThumbnailsExistsRequest, MAX_BLOB_MANIFEST_ENTRIES};
+use sync_common::api::assets::{BlobManifestRequest, MAX_BLOB_MANIFEST_ENTRIES};
 use sync_common::{ContentHash, LibraryId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
-const MAX_EXISTS_HASHES: usize = 4096;
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 async fn head(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, raw_hash: &str) -> Result<Response, StatusCode> {
@@ -157,16 +156,6 @@ pub(super) async fn put_blob(State(state): State<AppState>, user: AuthUser, Path
     put(&state, &user.user_id, &library_id, AssetKind::Book, &hash, &headers, body).await
 }
 
-pub(super) async fn post_blobs_exists(State(state): State<AppState>, user: AuthUser, Path(raw_library_id): Path<String>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
-    let request: BlobsExistsRequest = crate::api_wire::decode_request(&headers, &body)?;
-    let library_id = LibraryId::parse(&raw_library_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if request.hashes.len() > MAX_EXISTS_HASHES {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    let present = state.assets.existing(&user.user_id, &library_id, AssetKind::Book, request.hashes).await.map_err(asset_error)?;
-    crate::api_wire::response(&headers, ExistsResponse { present })
-}
-
 pub(super) async fn post_blob_manifest(State(state): State<AppState>, user: AuthUser, Path(raw_library_id): Path<String>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
     let request: BlobManifestRequest = crate::api_wire::decode_request(&headers, &body)?;
     let library_id = LibraryId::parse(&raw_library_id).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -190,16 +179,6 @@ pub(super) async fn get_thumbnail(State(state): State<AppState>, user: AuthUser,
 pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser, Path((raw_library_id, hash)): Path<(String, String)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     let library_id = LibraryId::parse(&raw_library_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     put(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash, &headers, body).await
-}
-
-pub(super) async fn post_thumbnails_exists(State(state): State<AppState>, user: AuthUser, Path(raw_library_id): Path<String>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
-    let request: ThumbnailsExistsRequest = crate::api_wire::decode_request(&headers, &body)?;
-    let library_id = LibraryId::parse(&raw_library_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if request.content_hashes.len() > MAX_EXISTS_HASHES {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-    let present = state.assets.existing(&user.user_id, &library_id, AssetKind::Thumbnail, request.content_hashes).await.map_err(asset_error)?;
-    crate::api_wire::response(&headers, ExistsResponse { present })
 }
 
 #[cfg(test)]

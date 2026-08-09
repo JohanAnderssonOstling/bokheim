@@ -37,7 +37,7 @@ pub fn library_section_content() -> Div {
 }
 
 pub fn library_switcher_group() -> Div {
-    div().w_full().h(px(72.0)).flex_none().flex().items_center().gap(px(9.0))
+    div().relative().w_full().h(px(72.0)).flex_none().flex().items_center().gap(px(9.0))
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
@@ -90,7 +90,7 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>) -> Button {
 }
 
 pub fn library_switcher_overlay() -> Div {
-    div().absolute().inset_0().size_full().flex().items_center().justify_center().p(px(22.0))
+    div().absolute().inset_0().size_full()
 }
 
 pub fn library_switcher_scrim(theme: BrowserTheme) -> Stateful<Div> {
@@ -98,7 +98,7 @@ pub fn library_switcher_scrim(theme: BrowserTheme) -> Stateful<Div> {
 }
 
 pub fn library_switcher_dialog(theme: BrowserTheme) -> Scrollable<Div> {
-    div().relative().w(px(304.0)).max_w_full().max_h_full().occlude().overflow_y_scrollbar().p(px(12.0)).rounded(px(12.0)).border_1().border_color(theme.border).bg(theme.card_bg).shadow(vec![gpui_component::box_shadow(
+    div().w(px(304.0)).max_h(px(520.0)).occlude().overflow_y_scrollbar().p(px(12.0)).rounded(px(12.0)).border_1().border_color(theme.border).bg(theme.card_bg).shadow(vec![gpui_component::box_shadow(
         px(0.0),
         px(14.0),
         px(34.0),

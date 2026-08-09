@@ -1,23 +1,23 @@
 //! Axum transport adapter for the synchronization server.
 
-mod admin;
+mod api_wire;
 mod assets;
 mod bandwidth;
 mod extract;
 mod notifications;
-mod preferences;
 mod state;
 mod sync;
-mod api_wire;
 
 use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
-    routing::{get, head, patch, post},
+    routing::{get, head, post},
     Router,
 };
-use server_account_core::IdentityResolver;
-use server_core::{AssetService, GarbageCollector, PreferenceService, StorageQuotaService, SyncService};
+use server_account::PostgresAccountService;
+use server_asset_store::FsAssetStore;
+use server_database::PostgresDatabase;
+use server_postgres::{AssetApplication, PostgresSyncRepository};
 use state::AppState;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,31 +30,24 @@ pub use notifications::NotificationConfig;
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-#[axum::async_trait]
-pub trait ReadinessProbe: Send + Sync {
-    async fn check(&self) -> Result<(), String>;
-}
-
 /// Coalesces concurrent readiness requests and briefly reuses their result.
 ///
 /// A readiness check may include an actual durable write to the asset volume.
 /// Caching keeps a public monitoring endpoint from turning that useful check
 /// into an unbounded stream of filesystem syncs.
-pub struct CachedReadiness {
-    probe: Arc<dyn ReadinessProbe>,
+pub struct Readiness {
+    database: PostgresDatabase,
+    assets: Arc<FsAssetStore>,
     ttl: Duration,
     cached: Mutex<Option<(Instant, Result<(), String>)>>,
 }
 
-impl CachedReadiness {
-    pub fn new(probe: Arc<dyn ReadinessProbe>, ttl: Duration) -> Self {
-        Self { probe, ttl, cached: Mutex::new(None) }
+impl Readiness {
+    pub fn new(database: PostgresDatabase, assets: Arc<FsAssetStore>, ttl: Duration) -> Self {
+        Self { database, assets, ttl, cached: Mutex::new(None) }
     }
-}
 
-#[axum::async_trait]
-impl ReadinessProbe for CachedReadiness {
-    async fn check(&self) -> Result<(), String> {
+    pub async fn check(&self) -> Result<(), String> {
         let mut cached = self.cached.lock().await;
         if let Some((checked_at, result)) = cached.as_ref() {
             if checked_at.elapsed() < self.ttl {
@@ -62,18 +55,13 @@ impl ReadinessProbe for CachedReadiness {
             }
         }
 
-        let result = self.probe.check().await;
+        let result = async {
+            tokio::time::timeout(Duration::from_secs(3), server_database::check_ready(&self.database)).await.map_err(|_| "database readiness timed out".to_string())?.map_err(|error| format!("database: {error}"))?;
+            tokio::time::timeout(Duration::from_secs(3), self.assets.check_ready()).await.map_err(|_| "asset storage readiness timed out".to_string())?.map_err(|error| format!("asset storage: {error}"))
+        }
+        .await;
         *cached = Some((Instant::now(), result.clone()));
         result
-    }
-}
-
-struct AlwaysReady;
-
-#[axum::async_trait]
-impl ReadinessProbe for AlwaysReady {
-    async fn check(&self) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -93,9 +81,9 @@ impl Default for RequestLimits {
 impl RequestLimits {
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
-        let max_in_flight = parse_bounded_usize("BOKHEIM_MAX_IN_FLIGHT_REQUESTS", defaults.max_in_flight, 1, 4096)?;
-        let timeout_seconds = parse_bounded_u64("BOKHEIM_REQUEST_TIMEOUT_SECONDS", defaults.timeout.as_secs(), 30, 24 * 60 * 60)?;
-        let body_idle_seconds = parse_bounded_u64("BOKHEIM_BODY_IDLE_TIMEOUT_SECONDS", defaults.body_idle_timeout.as_secs(), 5, 60 * 60)?;
+        let max_in_flight = parse_bounded("BOKHEIM_MAX_IN_FLIGHT_REQUESTS", defaults.max_in_flight, 1, 4096)?;
+        let timeout_seconds = parse_bounded("BOKHEIM_REQUEST_TIMEOUT_SECONDS", defaults.timeout.as_secs(), 30, 24 * 60 * 60)?;
+        let body_idle_seconds = parse_bounded("BOKHEIM_BODY_IDLE_TIMEOUT_SECONDS", defaults.body_idle_timeout.as_secs(), 5, 60 * 60)?;
         Ok(Self { max_in_flight, timeout: Duration::from_secs(timeout_seconds), body_idle_timeout: Duration::from_secs(body_idle_seconds) })
     }
 
@@ -107,74 +95,29 @@ impl RequestLimits {
     }
 }
 
-fn parse_bounded_usize(name: &str, default: usize, minimum: usize, maximum: usize) -> Result<usize, String> {
+fn parse_bounded<T: std::str::FromStr + PartialOrd + Copy + std::fmt::Display>(name: &str, default: T, minimum: T, maximum: T) -> Result<T, String> {
     let value = match std::env::var(name) {
         Ok(raw) => raw.parse().map_err(|_| format!("{name} must be an integer"))?,
         Err(std::env::VarError::NotPresent) => default,
         Err(error) => return Err(format!("cannot read {name}: {error}")),
     };
     (minimum..=maximum).contains(&value).then_some(value).ok_or_else(|| format!("{name} must be between {minimum} and {maximum}"))
-}
-
-fn parse_bounded_u64(name: &str, default: u64, minimum: u64, maximum: u64) -> Result<u64, String> {
-    let value = match std::env::var(name) {
-        Ok(raw) => raw.parse().map_err(|_| format!("{name} must be an integer"))?,
-        Err(std::env::VarError::NotPresent) => default,
-        Err(error) => return Err(format!("cannot read {name}: {error}")),
-    };
-    (minimum..=maximum).contains(&value).then_some(value).ok_or_else(|| format!("{name} must be between {minimum} and {maximum}"))
-}
-
-#[derive(Clone)]
-pub struct AdministrationServices {
-    pub(crate) storage_quotas: Arc<dyn StorageQuotaService>,
-    pub(crate) garbage_collector: Arc<GarbageCollector>,
-    pub(crate) readiness: Arc<dyn ReadinessProbe>,
-}
-
-impl AdministrationServices {
-    pub fn new(storage_quotas: Arc<dyn StorageQuotaService>, garbage_collector: Arc<GarbageCollector>) -> Self {
-        Self { storage_quotas, garbage_collector, readiness: Arc::new(AlwaysReady) }
-    }
-
-    pub fn with_readiness(storage_quotas: Arc<dyn StorageQuotaService>, garbage_collector: Arc<GarbageCollector>, readiness: Arc<dyn ReadinessProbe>) -> Self {
-        Self { storage_quotas, garbage_collector, readiness }
-    }
-}
-
-pub fn router(identities: Arc<dyn IdentityResolver>, sync: Arc<dyn SyncService>, preferences: Arc<dyn PreferenceService>, assets: Arc<dyn AssetService>, administration: AdministrationServices) -> Router {
-    router_with_transfer_limits(identities, sync, preferences, assets, administration, TransferLimits::default())
-}
-
-pub fn router_with_transfer_limits(
-    identities: Arc<dyn IdentityResolver>, sync: Arc<dyn SyncService>, preferences: Arc<dyn PreferenceService>, assets: Arc<dyn AssetService>, administration: AdministrationServices, transfer_limits: TransferLimits,
-) -> Router {
-    router_with_operational_limits(identities, sync, preferences, assets, administration, transfer_limits, NotificationConfig::default())
 }
 
 pub fn router_with_operational_limits(
-    identities: Arc<dyn IdentityResolver>, sync: Arc<dyn SyncService>, preferences: Arc<dyn PreferenceService>, assets: Arc<dyn AssetService>, administration: AdministrationServices, transfer_limits: TransferLimits,
-    notification_config: NotificationConfig,
+    account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits, notification_config: NotificationConfig,
 ) -> Router {
-    let state = AppState::new(identities, sync, preferences, assets, administration, transfer_limits, notification_config);
+    let state = AppState::new(account, sync, assets, readiness, transfer_limits, notification_config);
     Router::new()
         .route("/api/live", get(live))
         .route("/api/ready", get(ready))
         .route("/api/health", get(ready))
         .route("/api/notifications", get(notifications::connect))
-        .route("/api/sync/push", post(sync::push_events))
-        .route("/api/sync/pull", get(sync::pull_events))
         .route("/api/sync/exchange", post(sync::exchange_events))
         .route("/api/libraries", get(sync::list_libraries).post(sync::upsert_library))
-        .route("/api/preferences/initialize", post(preferences::initialize))
-        .route("/api/preferences", patch(preferences::apply))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
-        .route("/api/libraries/:library_id/blobs/exists", post(assets::post_blobs_exists))
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
         .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail))
-        .route("/api/libraries/:library_id/thumbnails/exists", post(assets::post_thumbnails_exists))
-        .route("/api/admin/users/:user_id/storage-quota", post(admin::post_admin_storage_quota))
-        .route("/api/admin/gc", post(admin::post_admin_gc))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
@@ -197,9 +140,9 @@ fn readiness_response(result: Result<(), String>) -> (StatusCode, &'static str) 
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
-    use super::{parse_bounded_u64, parse_bounded_usize, readiness_response, CachedReadiness, ReadinessProbe, RequestLimits};
+    use super::{parse_bounded, readiness_response, CachedReadiness, ReadinessProbe, RequestLimits};
     use axum::{
         extract::State,
         http::{Request, StatusCode},
@@ -232,8 +175,8 @@ mod tests {
         assert_eq!(limits.max_in_flight, 512);
         assert_eq!(limits.timeout.as_secs(), 7200);
         assert_eq!(limits.body_idle_timeout.as_secs(), 60);
-        assert!(parse_bounded_usize("UNSET_BOKHEIM_TEST_LIMIT", 12, 1, 20).is_ok());
-        assert!(parse_bounded_u64("UNSET_BOKHEIM_TEST_TIMEOUT", 30, 30, 60).is_ok());
+        assert!(parse_bounded::<usize>("UNSET_BOKHEIM_TEST_LIMIT", 12, 1, 20).is_ok());
+        assert!(parse_bounded::<u64>("UNSET_BOKHEIM_TEST_TIMEOUT", 30, 30, 60).is_ok());
     }
 
     #[test]

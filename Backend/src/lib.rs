@@ -2,11 +2,11 @@ extern crate core;
 
 pub mod app;
 pub(crate) use app::account as auth;
+pub(crate) use app::data as home;
 pub mod catalog;
 pub mod library;
-mod paths;
+pub(crate) use library::database as db;
 pub mod platform;
-mod storage;
 mod sync;
 
 #[cfg(test)]
@@ -18,9 +18,9 @@ pub use app::{AppBackend, AppDataLocation, BackendContext, BackendError, Library
 pub use app::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_HIDDEN_SESSION_PATH, APP_HIDDEN_THUMBNAILS_PATH, APP_NAME, APP_NAME_LOWER};
 pub use bokheim_app_contract::download::{BookDownloadStatus, DownloadProgress, DownloadState, FolderDownloadStatus};
 pub use bokheim_app_contract::frontend::*;
-pub use bokheim_domain::{BookLocator, EpubCfi, ReadProgress};
+pub use bokheim_domain::{BookLocator, BookPlacement, EpubCfi, ReadProgress, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
+pub(crate) use bokheim_library_files::LibraryRoot;
 pub use library::LibraryBackend;
-pub use paths::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 pub use sync::blob::{BlobKey, BlobKind, TransferJobKind};
 pub use sync::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
 pub use sync_common::{AuthorId, BookId, ContentHash, DirId, LibraryId};
@@ -61,11 +61,5 @@ mod domain_tests {
     fn book_id_rejects_synthetic_and_malformed_content_keys() {
         assert!(ContentHash::parse("remote:d1:b1:f.epub").is_err());
         assert!(ContentHash::parse(&"z".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn library_event_keeps_its_existing_string_id_wire_format() {
-        let value = serde_json::to_value(crate::platform::scanner::LibraryEvent::BookOpened { book_id: BookId::new(42) }).unwrap();
-        assert_eq!(value["BookOpened"]["book_id"], serde_json::json!("42"));
     }
 }

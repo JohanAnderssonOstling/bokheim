@@ -6,13 +6,10 @@ edition = "2021"
 [dependencies]
 bokheim-algorithms = { path = "../BokheimAlgorithms" }
 bokheim-account-contract = { path = "../BokheimAccountContract" }
+bokheim-identifiers = { path = "../BokheimIdentifiers" }
 bokheim-wire = { path = "../BokheimWire" }
 serde = { version = "1", features = ["derive"] }
-serde_repr = "0.1"
-specta = { version = "=2.0.0-rc.25", features = ["derive"] }
-specta-typescript = "0.0.12"
 uuid = { version = "1", features = ["v4", "v5"] }
-unicode-normalization = "0.1"
 
 [dev-dependencies]
 serde_json = "1"

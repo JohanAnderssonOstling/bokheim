@@ -1,13 +1,8 @@
-use server_account_core::{AccountEmailOutbox, AccountEmailSender, AccountService};
-use server_account_mail::SendmailEmailSender;
-use server_account_postgres::{AccountPolicy, PostgresAccountService};
-use server_asset_store::FsAssetStore;
-use server_core::{AssetStore, GarbageCollector, MaintenanceCoordinator};
-use server_postgres::PostgresSyncRepository;
+use server_account::{AccountPolicy, PostgresAccountService};
+use server_postgres::{GarbageCollector, PostgresSyncRepository};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sync_server::transport::ServerConfig;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -62,8 +57,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match arguments.next() {
         None => run_server().await,
         Some(command) if command == "gc" && arguments.next().is_none() => run_gc().await,
-        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command or 'gc'", command.to_string_lossy())).into()),
+        Some(command) if command == "migrate" && arguments.next().is_none() => run_migrate().await,
+        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'gc', or 'migrate'", command.to_string_lossy())).into()),
     }
+}
+
+/// Applies the schema to an empty database. There is no migration history:
+/// deploys drop and recreate the database, then run this once before
+/// starting the server, which never applies schema itself -- restarting an
+/// already-schema'd server must not attempt to recreate its own tables.
+async fn run_migrate() -> Result<(), Box<dyn std::error::Error>> {
+    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
+    let database = server_database::connect(&database_url).await?;
+    server_database::migrate(&database).await?;
+    Ok(())
 }
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,7 +78,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database_pool = server_database::DatabasePoolConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let pool = server_database::connect_configured(&database_url, database_pool).await?;
-    server_database::migrate(&pool).await?;
 
     let public_registration = enabled("BOKHEIM_PUBLIC_REGISTRATION")?;
     let policy = if public_registration { AccountPolicy::with_blocked_email_domains(blocked_email_domains()?).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))? } else { AccountPolicy::default() };
@@ -79,41 +85,26 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let admin_password = secret_from_environment_or_systemd_credential("BOKHEIM_ADMIN_PASSWORD", "admin_password")?;
     auth.bootstrap_admin(admin_password.as_deref()).await?;
 
-    if public_registration {
-        let from = std::env::var("BOKHEIM_MAIL_FROM").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_MAIL_FROM is required when public registration is enabled"))?;
-        let sendmail_path = PathBuf::from(std::env::var_os("BOKHEIM_SENDMAIL_PATH").unwrap_or_else(|| "/usr/sbin/sendmail".into()));
-        if !std::fs::metadata(&sendmail_path).is_ok_and(|metadata| metadata.is_file()) {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("local sendmail executable not found at {}", sendmail_path.display())).into());
-        }
-        let sender: Arc<dyn AccountEmailSender> = Arc::new(SendmailEmailSender::new(sendmail_path, from).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?);
-        let outbox: Arc<dyn AccountEmailOutbox> = auth.clone();
-        tokio::spawn(server_account_mail::run_dispatcher(outbox, sender, uuid::Uuid::new_v4().to_string()));
-    }
-
     let server = ServerConfig::from_env()?;
     let transfer_limits = server_http::TransferLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let request_limits = server_http::RequestLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let notification_config = server_http::NotificationConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let validation_limits = server_asset_store::ValidationLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let upload_limits = server_asset_store::UploadLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let (books, thumbnails) = storage.into_parts();
-    let app = sync_server::app_with_all_operational_limits(pool, auth, public_registration, books, thumbnails, server.client_address_source(), transfer_limits, request_limits, validation_limits, notification_config).await?;
+    let app =
+        sync_server::app(pool, auth, sync_server::AppConfig { public_registration, books, thumbnails, client_address_source: server.client_address_source(), transfer_limits, request_limits, upload_limits, notification_config }).await?;
     sync_server::transport::serve(server, app).await?;
     Ok(())
 }
 
 async fn run_gc() -> Result<(), Box<dyn std::error::Error>> {
-    let storage = sync_server::storage_config::StoragePaths::from_env()?;
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_database::connect(&database_url).await?;
     server_database::check_ready(&database).await?;
-    let (books, thumbnails) = storage.into_parts();
-    let assets: Arc<dyn AssetStore> = Arc::new(FsAssetStore::new(books, thumbnails));
-    assets.initialize().await?;
-    let coordinator: Arc<dyn MaintenanceCoordinator> = Arc::new(PostgresSyncRepository::new(database));
-    let collector = GarbageCollector::new(coordinator, assets);
+    let coordinator = Arc::new(PostgresSyncRepository::new(database));
+    let collector = GarbageCollector::new(coordinator);
     let grace_hours = bounded_gc_grace_hours(std::env::var("BOKHEIM_GC_GRACE_HOURS").ok().as_deref())?;
-    let cutoff = SystemTime::now().checked_sub(Duration::from_secs(grace_hours * 3600)).unwrap_or(UNIX_EPOCH);
-    let report = collector.collect(cutoff).await?;
+    let report = collector.collect().await?;
     tracing::info!(
         grace_hours,
         blobs_scanned = report.blobs_scanned,

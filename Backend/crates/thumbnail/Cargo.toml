@@ -1,0 +1,20 @@
+[package]
+name = "thumbnail"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+pdf = ["dep:pdf-reader-core"]
+
+[dependencies]
+epub_provider = { path = "../../../HtmlRenderer/epub_provider" }
+fast_image_resize = { version = "5.2.0", features = ["image"] }
+html-publication = { path = "../../../HtmlRenderer/crates/html-publication" }
+image = { version = "0.24.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+mp4ameta = "0.13.0"
+pdf-reader-core = { path = "../../../PdfRenderer", optional = true }
+
+[lints]
+workspace = true

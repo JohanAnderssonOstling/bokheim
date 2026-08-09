@@ -8,10 +8,7 @@ publish = false
 resolver = "2"
 members = [
     ".",
-    "crates/server-account-core",
-    "crates/server-account-http",
-    "crates/server-account-mail",
-    "crates/server-account-postgres",
+    "crates/server-account",
     "crates/server-core",
     "crates/server-database",
     "crates/server-postgres",
@@ -39,10 +36,7 @@ server-core = { path = "crates/server-core" }
 server-postgres = { path = "crates/server-postgres" }
 server-asset-store = { path = "crates/server-asset-store" }
 server-http = { path = "crates/server-http" }
-server-account-core = { path = "crates/server-account-core" }
-server-account-http = { path = "crates/server-account-http" }
-server-account-mail = { path = "crates/server-account-mail" }
-server-account-postgres = { path = "crates/server-account-postgres" }
+server-account = { path = "crates/server-account" }
 server-database = { path = "crates/server-database" }
 
 [dev-dependencies]
