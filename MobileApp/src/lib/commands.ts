@@ -1,11 +1,9 @@
 import { commands as nativeCommands } from "./bindings";
 import { isNativeApp } from "./platform";
-import { webDemoCommands } from "./web-demo-commands";
 import { webHttpCommands } from "./web-http-commands";
 
 function activeCommands(): typeof nativeCommands {
   if (isNativeApp) return nativeCommands;
-  if (import.meta.env.VITE_BOKHEIM_BACKEND !== "http") return webDemoCommands as typeof nativeCommands;
   return webHttpCommands;
 }
 

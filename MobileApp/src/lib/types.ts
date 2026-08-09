@@ -65,8 +65,8 @@ export interface ReaderBook {
   upsertAnnotation?: (annotation: ReaderAnnotation) => Promise<void>;
   deleteAnnotation?: (annotationId: string, modifiedAt: number) => Promise<void>;
   loadBookmarks?: () => Promise<ReaderBookmark[]>;
-  upsertBookmark?: (bookmark: ReaderBookmark) => Promise<void>;
-  deleteBookmark?: (bookmarkId: string, modifiedAt: number) => Promise<void>;
+  createBookmark?: (bookmark: ReaderBookmark) => Promise<void>;
+  deleteBookmark?: (bookmarkId: string, deletedAt: number) => Promise<void>;
 }
 
 export type ReaderAnnotationStyle = "highlight" | "underline" | "squiggly" | "strikethrough";
@@ -87,8 +87,6 @@ export interface ReaderAnnotation {
   book_id: string;
   anchor: AnnotationAnchor;
   exact_text: string;
-  prefix: string | null;
-  suffix: string | null;
   style: ReaderAnnotationStyle;
   color: string;
   note: string;
