@@ -7,25 +7,25 @@ fn require_directory_marker(directory: &Path, dir_id: &DirId) -> std::io::Result
     }
     Ok(())
 }
-pub fn get_book_file_path(conn: &Connection, book_id: BookId) -> Result<Option<RelativeBookPath>, rusqlite::Error> {
+pub fn get_book_file_path(conn: &Connection, content_hash: ContentHash) -> Result<Option<RelativeBookPath>, rusqlite::Error> {
     let mut file_path: Option<String> = None;
-    conn.get_book_file_path(&book_id.canonical(), |row| {
+    conn.get_book_file_path(content_hash.as_str(), |row| {
         file_path = Some(row.get(0)?);
         Ok(())
     })?;
     file_path.map(|path| RelativeBookPath::parse(&path).map_err(|error| invalid_text_column(0, error.to_string()))).transpose()
 }
-pub fn is_book_downloaded(conn: &Connection, book_id: BookId) -> Result<bool, rusqlite::Error> {
+pub fn is_book_downloaded(conn: &Connection, content_hash: ContentHash) -> Result<bool, rusqlite::Error> {
     let mut downloaded = false;
-    conn.is_book_downloaded(&book_id.canonical(), |row| {
+    conn.is_book_downloaded(content_hash.as_str(), |row| {
         downloaded = row.get::<_, bool>(0)?;
         Ok(())
     })?;
     Ok(downloaded)
 }
-pub fn is_book_download_requested(conn: &Connection, book_id: BookId) -> Result<bool, rusqlite::Error> {
+pub fn is_book_download_requested(conn: &Connection, content_hash: ContentHash) -> Result<bool, rusqlite::Error> {
     let mut requested = false;
-    conn.is_book_download_requested(&book_id.canonical(), |row| {
+    conn.is_book_download_requested(content_hash.as_str(), |row| {
         requested = row.get::<_, bool>(0)?;
         Ok(())
     })?;
@@ -33,26 +33,22 @@ pub fn is_book_download_requested(conn: &Connection, book_id: BookId) -> Result<
 }
 #[derive(Debug, Clone)]
 pub struct BookAsset {
-    pub book_id: BookId,
-    /// Content-addressed blob key (full-file blake3 hex).
     pub content_hash: ContentHash,
     pub rel_path: RelativeBookPath,
     pub downloaded: bool,
 }
-fn parse_content_hash_column(raw: &str, column: usize) -> Result<ContentHash, rusqlite::Error> {
-    ContentHash::parse(raw).map_err(|error| invalid_text_column(column, error.to_string()))
+fn parse_content_hash_column(raw: &str, _column: usize) -> Result<ContentHash, rusqlite::Error> {
+    Ok(ContentHash::new(&raw))
 }
 pub fn get_book_assets(conn: &Connection) -> Result<Vec<BookAsset>, rusqlite::Error> {
     let mut assets = Vec::new();
     conn.get_book_assets(|row| {
-        let raw_book_id: String = row.get(0)?;
-        let book_id = BookId::parse(&raw_book_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
-        let raw_content_hash: String = row.get(1)?;
-        let content_hash = parse_content_hash_column(&raw_content_hash, 1)?;
-        let raw_rel_path: String = row.get(2)?;
-        let rel_path = RelativeBookPath::parse(&raw_rel_path).map_err(|error| invalid_text_column(2, error.to_string()))?;
-        let downloaded: bool = row.get(3)?;
-        assets.push(BookAsset { book_id, content_hash, rel_path, downloaded });
+        let raw_content_hash: String = row.get(0)?;
+        let content_hash = parse_content_hash_column(&raw_content_hash, 0)?;
+        let raw_rel_path: String = row.get(1)?;
+        let rel_path = RelativeBookPath::parse(&raw_rel_path).map_err(|error| invalid_text_column(1, error.to_string()))?;
+        let downloaded: bool = row.get(2)?;
+        assets.push(BookAsset { content_hash, rel_path, downloaded });
         Ok(())
     })?;
     Ok(assets)
@@ -87,9 +83,9 @@ pub fn get_blob_local_path(conn: &Connection, kind: BlobKind, content_hash: &Con
 /// or None if it is no longer tombstoned (an add resurrected it later in the same
 /// pull batch, so its file must not be touched). The content hash lets the caller
 /// relocate the file to a live placement of the same content (a move).
-pub fn resolve_removed_book_dir(conn: &Connection, dir_id: &str, book_id: BookId) -> Result<Option<(RelativeBookPath, Option<ContentHash>)>, rusqlite::Error> {
+pub fn resolve_removed_book_dir(conn: &Connection, dir_id: &str, content_hash: ContentHash) -> Result<Option<(RelativeBookPath, Option<ContentHash>)>, rusqlite::Error> {
     let mut result = None;
-    conn.resolve_removed_book_dir(dir_id, &book_id.canonical(), |row| {
+    conn.resolve_removed_book_dir(dir_id, content_hash.as_str(), |row| {
         let raw_rel_path: String = row.get(0)?;
         let rel_path = RelativeBookPath::parse(&raw_rel_path).map_err(|error| invalid_text_column(0, error.to_string()))?;
         let raw_content_hash: String = row.get(1)?;
@@ -101,7 +97,7 @@ pub fn resolve_removed_book_dir(conn: &Connection, dir_id: &str, book_id: BookId
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookPath {
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
     pub rel_path: RelativeBookPath,
 }
 
@@ -114,10 +110,10 @@ pub fn materialize_download_path(
     library_root: &LibraryRoot,
     placement: &BookPlacement,
 ) -> Result<RelativeBookPath, rusqlite::Error> {
-    let Some((book_id, dir_id, current_name)) = get_book_dir_entry_by_path(conn, &placement.rel_path)? else {
+    let Some((content_hash, dir_id, current_name)) = get_book_dir_entry_by_path(conn, &placement.rel_path)? else {
         return Err(invalid_text_column(0, "download placement no longer exists"));
     };
-    if book_id != placement.book_id {
+    if content_hash != placement.content_hash {
         return Err(invalid_text_column(0, "download placement identity mismatch"));
     }
     let components = get_dir_path_components(conn, dir_id.as_str())?;
@@ -142,7 +138,7 @@ pub fn materialize_download_path(
     }
 
     let mut materialization_metadata = None;
-    conn.get_book_materialization_metadata(&book_id.canonical(), |row| {
+    conn.get_book_materialization_metadata(content_hash.as_str(), |row| {
         materialization_metadata = Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
         Ok(())
     })?;
@@ -150,7 +146,7 @@ pub fn materialize_download_path(
     // The format is a property of the bytes, synchronized with the lifecycle. A
     // download must not guess it from the placeholder name the placement was
     // seeded with: that produced a name no reader (and no later scan) accepts.
-    let format = BookFormat::from_extension(&format).ok_or_else(|| invalid_text_column(3, format!("book {book_id} has no known format")))?;
+    let format = BookFormat::from_extension(&format).ok_or_else(|| invalid_text_column(3, format!("book {content_hash} has no known format")))?;
     let publication = if publication.is_empty() {
         PublicationMetadata::default()
     } else {
@@ -164,7 +160,7 @@ pub fn materialize_download_path(
             .map_err(|error| invalid_text_column(2, error.to_string()))?
     };
     let metadata = BookMetadataState { title, contributors, description: String::new(), publication };
-    let file_name = crate::library::filenames::materialize(book_id, &metadata, format, |candidate| {
+    let file_name = crate::library::filenames::materialize(content_hash.clone(), &metadata, format, |candidate| {
         // The name this placement already holds belongs to this book, so it is
         // free for it: the database half of the probe excludes the book's own
         // row, and the filesystem half must agree.
@@ -172,23 +168,23 @@ pub fn materialize_download_path(
             return false;
         }
         let mut claimed = true;
-        let _ = conn.book_dir_file_name_claimed(dir_id.as_str(), candidate.as_str(), &book_id.canonical(), |row| {
+        let _ = conn.book_dir_file_name_claimed(dir_id.as_str(), candidate.as_str(), content_hash.as_str(), |row| {
             claimed = row.get(0)?;
             Ok(())
         });
         claimed || absolute_dir.join(candidate.as_str()).exists()
     });
-    conn.set_book_dir_file_name(file_name.as_str(), dir_id.as_str(), &book_id.canonical())?;
+    conn.set_book_dir_file_name(file_name.as_str(), dir_id.as_str(), content_hash.as_str())?;
     relative_path(&file_name)
 }
 pub fn get_book_paths_by_content_hash(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<BookPath>, rusqlite::Error> {
     let mut paths = Vec::new();
     conn.get_book_paths_by_content_hash(content_hash.as_str(), |row| {
-        let raw_book_id: String = row.get(0)?;
-        let book_id = BookId::parse(&raw_book_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
+        let raw_content_hash: String = row.get(0)?;
+        let content_hash = ContentHash::new(&raw_content_hash);
         let raw_rel_path: String = row.get(1)?;
         let rel_path = RelativeBookPath::parse(&raw_rel_path).map_err(|error| invalid_text_column(1, error.to_string()))?;
-        paths.push(BookPath { book_id, rel_path });
+        paths.push(BookPath { content_hash, rel_path });
         Ok(())
     })?;
     Ok(paths)
@@ -273,29 +269,29 @@ pub(super) fn materialize_dir_components_with_markers(library_root: &LibraryRoot
     }
     Ok(Some(path))
 }
-pub fn get_book_dir_entry_by_path(conn: &Connection, rel_path: &RelativeBookPath) -> Result<Option<(BookId, DirId, FileName)>, rusqlite::Error> {
+pub fn get_book_dir_entry_by_path(conn: &Connection, rel_path: &RelativeBookPath) -> Result<Option<(ContentHash, DirId, FileName)>, rusqlite::Error> {
     let mut entry = None;
     conn.get_book_dir_entry_by_path(rel_path.as_str(), |row| {
-        let raw_book_id: String = row.get(0)?;
+        let raw_content_hash: String = row.get(0)?;
         let raw_dir_id: String = row.get(1)?;
         let raw_file_name: String = row.get(2)?;
-        let book_id = BookId::parse(&raw_book_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
+        let content_hash = ContentHash::new(&raw_content_hash);
         let dir_id = DirId::parse(&raw_dir_id).map_err(|error| invalid_text_column(1, error.to_string()))?;
         let file_name = FileName::parse(&raw_file_name).map_err(|error| invalid_text_column(2, error.to_string()))?;
-        entry = Some((book_id, dir_id, file_name));
+        entry = Some((content_hash, dir_id, file_name));
         Ok(())
     })?;
     Ok(entry)
 }
 pub fn book_placement_expects_hash(conn: &Connection, placement: &BookPlacement, content_hash: &ContentHash) -> Result<bool, rusqlite::Error> {
-    let Some((book_id, dir_id, file_name)) = get_book_dir_entry_by_path(conn, &placement.rel_path)? else {
+    let Some((stored_hash, dir_id, file_name)) = get_book_dir_entry_by_path(conn, &placement.rel_path)? else {
         return Ok(false);
     };
-    if book_id != placement.book_id {
+    if stored_hash != placement.content_hash || stored_hash != content_hash.clone() {
         return Ok(false);
     }
     let mut matches = false;
-    conn.book_placement_expects_hash(dir_id.as_str(), &book_id.canonical(), file_name.as_str(), content_hash.as_str(), |row| {
+    conn.book_placement_expects_hash(dir_id.as_str(), content_hash.as_str(), file_name.as_str(), |row| {
         matches = row.get(0)?;
         Ok(())
     })?;
@@ -304,30 +300,30 @@ pub fn book_placement_expects_hash(conn: &Connection, placement: &BookPlacement,
 pub fn local_file_fingerprint(path: &Path) -> std::io::Result<u64> {
     let mut hasher = Xxh3::new();
     let metadata = fs::metadata(path)?;
-    let modified_time = metadata.modified()?.duration_since(UNIX_EPOCH).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?.as_secs();
-    hasher.write_u64(modified_time);
+    let modified_time = metadata.modified()?.duration_since(UNIX_EPOCH).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    hasher.write_u128(modified_time.as_nanos());
     hasher.write_u64(metadata.size());
     hasher.write_u64(metadata.ino());
     hasher.write_u64(metadata.dev());
     Ok(hasher.digest())
 }
-pub fn stamp_book_dir_local_hash(conn: &Connection, dir_id: &str, book_id: BookId, _file_name: &str, path: &Path) -> std::io::Result<()> {
+pub fn stamp_book_dir_local_hash(conn: &Connection, dir_id: &str, content_hash: ContentHash, _file_name: &str, path: &Path) -> std::io::Result<()> {
     let local_hash = local_file_fingerprint(path)?.to_string();
-    conn.update_book_dir_local_hash(dir_id, &book_id.canonical(), &local_hash).map_err(std::io::Error::other)?;
+    conn.update_book_dir_local_hash(dir_id, content_hash.as_str(), &local_hash).map_err(std::io::Error::other)?;
     Ok(())
 }
-pub fn stamp_book_dir_local_hash_by_rel_path(conn: &Connection, rel_path: &RelativeBookPath, book_id: BookId, abs_path: &Path) -> std::io::Result<()> {
-    let Some((found_book_id, dir_id, file_name)) = get_book_dir_entry_by_path(conn, rel_path).map_err(std::io::Error::other)? else {
+pub fn stamp_book_dir_local_hash_by_rel_path(conn: &Connection, rel_path: &RelativeBookPath, content_hash: ContentHash, abs_path: &Path) -> std::io::Result<()> {
+    let Some((found_content_hash, dir_id, file_name)) = get_book_dir_entry_by_path(conn, rel_path).map_err(std::io::Error::other)? else {
         return Ok(());
     };
-    if found_book_id != book_id {
+    if found_content_hash != content_hash {
         return Ok(());
     }
-    stamp_book_dir_local_hash(conn, dir_id.as_str(), book_id, file_name.as_str(), abs_path)
+    stamp_book_dir_local_hash(conn, dir_id.as_str(), content_hash, file_name.as_str(), abs_path)
 }
-pub fn get_book_hashes(conn: &Connection, book_id: BookId) -> Result<Vec<ContentHash>, rusqlite::Error> {
+pub fn get_book_hashes(conn: &Connection, content_hash: ContentHash) -> Result<Vec<ContentHash>, rusqlite::Error> {
     let mut hashes = Vec::new();
-    conn.get_book_hashes(&book_id.canonical(), |row| {
+    conn.get_book_hashes(content_hash.as_str(), |row| {
         let raw_content_hash: String = row.get(0)?;
         hashes.push(parse_content_hash_column(&raw_content_hash, 0)?);
         Ok(())

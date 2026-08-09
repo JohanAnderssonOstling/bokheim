@@ -1,6 +1,6 @@
 # Plan 15: Fix orphaned-chain path truncation (bug, from plan 1–5 review)
 
-Do before plan 13. Atomic fix in `Backend/src/database/library.sql` + `Backend/src/db.rs`.
+Atomic fix in the current database path-resolution and materialization code.
 
 ## Bug
 
@@ -17,7 +17,7 @@ Return None for orphans: also select `parent_id` per component and, in
 `collect_dir_path_components`/`dir_path_from_components`, verify the **topmost** collected
 component's `parent_id == '__root__'`; otherwise treat the path as unresolvable (None).
 Audit the same pattern in `get_book_file_path_components` and apply the same guard if it is
-still in use (see plan 26 — it may be dead).
+still in use.
 
 ## Tests
 

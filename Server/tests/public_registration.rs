@@ -33,15 +33,15 @@ fn accepted(request: axum::http::request::Builder) -> axum::http::request::Build
 #[ignore = "requires SYNC_E2E_DATABASE_URL"]
 async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let database_url = std::env::var("SYNC_E2E_DATABASE_URL").expect("run through Backend/tests/run_sync_e2e.sh");
-    let database = server_database::connect(&database_url).await.unwrap();
-    server_database::migrate(&database).await.unwrap();
+    let database = server_postgres::connect(&database_url).await.unwrap();
+    server_postgres::migrate(&database).await.unwrap();
     let policy = AccountPolicy::with_blocked_email_domains(["disposable.example".to_string()]).unwrap();
     let accounts = Arc::new(PostgresAccountService::with_policy(database.clone(), policy));
     let disk = tempfile::tempdir().unwrap();
     let app = sync_server::app(
         database,
         accounts.clone(),
-        sync_server::AppConfig { public_registration: true, books: disk.path().join("books"), thumbnails: disk.path().join("thumbnails"), client_address_source: ClientAddressSource::TrustedForwardedFor, ..Default::default() },
+        sync_server::AppConfig { books: disk.path().join("books"), thumbnails: disk.path().join("thumbnails"), client_address_source: ClientAddressSource::TrustedForwardedFor, ..Default::default() },
     )
     .await
     .unwrap();

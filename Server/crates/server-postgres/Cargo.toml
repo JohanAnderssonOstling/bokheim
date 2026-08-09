@@ -8,12 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-server-core = { path = "../server-core" }
 server-asset-store = { path = "../server-asset-store" }
-server-database = { path = "../server-database" }
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "migrate"] }
-serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid", "migrate"] }
 sync-common = { path = "../../../SyncCommon" }
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }

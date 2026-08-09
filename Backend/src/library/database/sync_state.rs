@@ -40,7 +40,7 @@ pub(crate) fn decode_outbox_row(row: OutboxRow) -> Result<StateMutation, OutboxR
     if row.state_kind != expected_kind || !key_matches {
         return Err(corrupt("stored coalescing identity does not match the mutation body"));
     }
-    let changed_at = UnixMillis::new(u64::try_from(row.changed_at).map_err(|_| corrupt("negative timestamp"))?).map_err(|_| corrupt("timestamp exceeds the protocol range"))?;
+    let changed_at = u64::try_from(row.changed_at).map_err(|_| corrupt("negative timestamp"))?;
     let replica_seq = u64::try_from(row.replica_seq).map_err(|_| corrupt("negative replica sequence"))?;
     let replica_seq = ReplicaSeq::new(replica_seq).map_err(|_| corrupt("replica sequence must be positive"))?;
     Ok(StateMutation { mutation_id, body, changed_at, replica_seq })
@@ -50,13 +50,13 @@ fn canonical_outbox_key(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::DirectoryName { dir_id, .. } => ("directory_name", dir_id.as_str().to_owned(), String::new()),
         MutationBody::DirectoryParent { dir_id, .. } => ("directory_parent", dir_id.as_str().to_owned(), String::new()),
         MutationBody::DirectoryLifecycle { dir_id, .. } => ("directory_lifecycle", dir_id.as_str().to_owned(), String::new()),
-        MutationBody::BookLifecycle { book_id, .. } => ("book_lifecycle", book_id.canonical(), String::new()),
-        MutationBody::Placement { dir_id, book_id, .. } => ("placement", book_id.canonical(), dir_id.as_str().to_owned()),
-        MutationBody::ReadingPosition { book_id, .. } => ("reading_position", book_id.canonical(), String::new()),
+        MutationBody::BookLifecycle { content_hash, .. } => ("book_lifecycle", content_hash.to_string(), String::new()),
+        MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.as_str().to_owned()),
+        MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
         MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone(), String::new()),
         MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone(), String::new()),
-        MutationBody::Metadata { book_id, .. } => ("metadata", book_id.canonical(), String::new()),
+        MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
     }
 }
 pub fn get_pending_mutations(conn: &Connection) -> Result<Vec<StateMutation>, OutboxReadError> {
@@ -141,5 +141,5 @@ pub fn set_sync_metadata(conn: &Connection, key: &str, value: &str) -> Result<()
 #[derive(Debug, Clone)]
 pub struct RemovedBookDir {
     pub dir_id: DirId,
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
 }

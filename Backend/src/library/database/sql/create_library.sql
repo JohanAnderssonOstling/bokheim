@@ -29,16 +29,16 @@ create table if not exists author_external_identifier(
 
 -- name: create_book_table!
 create table if not exists book(
-    id              TEXT primary key,
+    row_id          INTEGER primary key,
+    -- Portable identity used by sync and asset APIs. Local relationships use
+    -- row_id so their indexes remain compact and integer joins stay cheap.
+    content_hash    TEXT not null unique,
     title           TEXT,
     description     TEXT not null default '',
     description_scanned INTEGER not null default 0,
     -- Canonical synchronized bibliographic metadata. Dedicated tables below
     -- are disposable query projections rebuilt from this value.
     publication_metadata BLOB not null default X'',
-    -- The lifecycle owns portable content identity; a placement only records
-    -- membership in a directory on this device.
-    content_hash    TEXT not null default '',
     -- Canonical extension of the book's format ('epub', 'pdf', ...). Fixed for
     -- the life of the row: identity is derived from the bytes, so the format
     -- cannot change without becoming a different book. Empty only on a row that
@@ -59,83 +59,83 @@ create table if not exists publisher(
     normalized_name TEXT not null unique
 );
 create table if not exists book_publisher(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     publisher_id    INTEGER not null references publisher(id) on delete cascade,
     agent_identity_id INTEGER not null references author_identity(id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     credited_name   TEXT not null,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
-create index if not exists idx_book_publisher_publisher on book_publisher(publisher_id, book_id);
-create index if not exists idx_book_publisher_agent on book_publisher(agent_identity_id, book_id);
+create index if not exists idx_book_publisher_publisher on book_publisher(publisher_id, book_row_id);
+create index if not exists idx_book_publisher_agent on book_publisher(agent_identity_id, book_row_id);
 create table if not exists book_identifier(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     scheme          TEXT not null,
     value           TEXT not null,
     canonical_value TEXT,
     type_evidence   BLOB not null,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
-create index if not exists idx_book_identifier_lookup on book_identifier(scheme, value, book_id);
+create index if not exists idx_book_identifier_lookup on book_identifier(scheme, value, book_row_id);
 create table if not exists book_language(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     language_tag    TEXT not null,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
-create index if not exists idx_book_language_tag on book_language(language_tag, book_id);
+create index if not exists idx_book_language_tag on book_language(language_tag, book_row_id);
 -- Merged relational contributor register. Every role (including "aut" =
 -- author) shares one flat per-book position sequence. This replaces the
 -- former separate book_author table; author_credit (see views.sql) exposes
 -- the author-only subset for call sites that only care about authorship.
 create table if not exists book_contributor(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     author_identity_id INTEGER not null references author_identity(id) on delete cascade,
     name            TEXT not null,
     sort_name       TEXT,
     role            BLOB not null check(typeof(role) = 'blob' and length(role) = 3),
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
-create index if not exists idx_book_contributor_identity on book_contributor(author_identity_id, book_id);
+create index if not exists idx_book_contributor_identity on book_contributor(author_identity_id, book_row_id);
 create table if not exists book_subject(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     name            TEXT not null,
     authority       TEXT,
     code            TEXT,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
-create index if not exists idx_book_subject_name on book_subject(name, book_id);
+create index if not exists idx_book_subject_name on book_subject(name, book_row_id);
 create table if not exists book_collection(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     name            TEXT not null,
     collection_type TEXT,
     group_position  TEXT,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
 create table if not exists book_publication_date(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     value           TEXT not null,
     normalized_year INTEGER,
     normalized_month INTEGER,
     normalized_day INTEGER,
     event           TEXT,
-    primary key(book_id, position)
+    primary key(book_row_id, position)
 );
 create table if not exists book_publication_value(
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     kind            TEXT not null,
     position        INTEGER not null check(position >= 0),
     value           TEXT not null,
     qualifier       TEXT,
     secondary_value TEXT,
-    primary key(book_id, kind, position)
+    primary key(book_row_id, kind, position)
 );
-create index if not exists idx_book_publication_value_lookup on book_publication_value(kind, value, book_id);
+create index if not exists idx_book_publication_value_lookup on book_publication_value(kind, value, book_row_id);
 
 -- name: drop_catalog_import_table!
 -- Provider provenance is deliberately not part of a library database.
@@ -168,9 +168,9 @@ on conflict(id) do update set parent_id = excluded.parent_id, name = excluded.na
 -- name: create_book_dir_table!
 create table if not exists book_dir(
     dir_id          TEXT not null references dir(id) on delete cascade,
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     file_name       TEXT not null,
-    -- Per-machine filesystem fingerprint (mtime/size/inode/dev). Cheap to
+    -- Per-machine filesystem fingerprint (nanosecond mtime/size/inode/dev). Cheap to
     -- compute on every scan so unchanged files can be skipped without re-reading
     -- their contents (see get_book_dir_by_hash). Not unique and not portable
     -- across devices, so it is an attribute, not the key.
@@ -185,13 +185,19 @@ create table if not exists book_dir(
     -- A row is a file *placement*: one book in one directory.
     -- Same-path collisions remain local filesystem invariants enforced by
     -- idx_book_dir_live_path.
-    PRIMARY KEY     (dir_id, book_id)
+    PRIMARY KEY     (dir_id, book_row_id)
 );
 
 -- name: create_book_dir_local_hash_index!
 -- local_hash lost its implicit PK index when it stopped being the key; the
 -- scan-skip lookup queries by it on every file, so index it explicitly.
 CREATE INDEX IF NOT EXISTS idx_book_dir_local_hash ON book_dir(local_hash);
+
+-- name: create_book_dir_book_index!
+-- The composite primary key starts with dir_id and cannot efficiently answer
+-- the common "all placements for this book" lookup by itself.
+CREATE INDEX IF NOT EXISTS idx_book_dir_book
+ON book_dir(book_row_id, deleted_at, is_downloaded);
 
 -- name: create_live_book_path_index!
 CREATE UNIQUE INDEX IF NOT EXISTS idx_book_dir_live_path
@@ -241,7 +247,7 @@ create table if not exists sync_state_version(
 -- name: create_annotation_table!
 create table if not exists annotation(
     id              TEXT primary key,
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     anchor_kind     TEXT not null check(anchor_kind in ('epub_cfi', 'pdf')),
     anchor_cfi      TEXT,
     anchor_page     INTEGER,
@@ -262,12 +268,12 @@ create table if not exists annotation(
 );
 
 -- name: create_annotation_book_index!
-create index if not exists idx_annotation_book on annotation(book_id, deleted_at, modified_at);
+create index if not exists idx_annotation_book on annotation(book_row_id, deleted_at, modified_at);
 
 -- name: create_bookmark_table!
 create table if not exists bookmark(
     id              TEXT primary key,
-    book_id         TEXT not null references book(id) on delete cascade,
+    book_row_id         INTEGER not null references book(row_id) on delete cascade,
     cfi             TEXT not null,
     label           TEXT not null default '',
     created_at      INTEGER not null,
@@ -276,28 +282,28 @@ create table if not exists bookmark(
 );
 
 -- name: create_bookmark_book_index!
-create index if not exists idx_bookmark_book on bookmark(book_id, deleted_at, created_at);
+create index if not exists idx_bookmark_book on bookmark(book_row_id, deleted_at, created_at);
 
 -- User-authored semantic graph edges. Rows are retained after deletion so the
 -- tombstone and its LWW version can synchronize to every replica.
 -- name: create_book_link_table!
 create table if not exists book_link(
     id              TEXT primary key,
-    source_book_id  TEXT not null references book(id) on delete cascade,
-    target_book_id  TEXT not null references book(id) on delete cascade,
+    source_book_row_id         INTEGER not null references book(row_id) on delete cascade,
+    target_book_row_id         INTEGER not null references book(row_id) on delete cascade,
     relation        TEXT not null,
     note            TEXT not null default '',
     created_at      INTEGER not null,
     modified_at     INTEGER not null,
     deleted_at      INTEGER,
-    check(source_book_id != target_book_id)
+    check(source_book_row_id != target_book_row_id)
 );
 
 -- name: create_book_link_source_index!
-create index if not exists idx_book_link_source on book_link(source_book_id, deleted_at, modified_at);
+create index if not exists idx_book_link_source on book_link(source_book_row_id, deleted_at, modified_at);
 
 -- name: create_book_link_target_index!
-create index if not exists idx_book_link_target on book_link(target_book_id, deleted_at, modified_at);
+create index if not exists idx_book_link_target on book_link(target_book_row_id, deleted_at, modified_at);
 
 -- name: create_sync_metadata_table!
 create table if not exists sync_metadata(
@@ -309,14 +315,14 @@ create table if not exists sync_metadata(
 -- name: create_remote_asset_table!
 create table if not exists remote_asset(
     kind    TEXT not null check(kind in ('book', 'thumbnail')),
-    hash    TEXT not null check(length(hash) = 64 and hash not glob '*[^0-9a-f]*'),
+    hash    TEXT not null,
     primary key (kind, hash)
 );
 
 -- name: create_blob_local_ref_table!
 create table if not exists blob_local_ref(
     kind            TEXT not null check(kind in ('book', 'thumbnail')),
-    hash            TEXT not null check(length(hash) = 64 and hash not glob '*[^0-9a-f]*'),
+    hash            TEXT not null,
     path            TEXT not null,
     exists_flag     INTEGER not null default 0 check(exists_flag in (0, 1)),
     last_seen       INTEGER not null default 0,
@@ -330,13 +336,12 @@ create table if not exists download_requests(
     target_key      TEXT not null,
     origin          TEXT not null default 'background' check(origin in ('background', 'user_initiated')),
     created_at      INTEGER not null,
-    primary key (target_kind, target_key),
-    check(length(target_key) = 64 and target_key not glob '*[^0-9a-f]*')
+    primary key (target_kind, target_key)
 );
 
 -- name: create_audiobook_metadata_table!
 create table if not exists audiobook_metadata(
-    content_hash    TEXT primary key not null check(length(content_hash) = 64),
+    content_hash    TEXT primary key not null,
     duration_ms     INTEGER not null check(duration_ms >= 0),
     chapter_count   INTEGER not null check(chapter_count >= 0),
     chapter_source  TEXT not null check(chapter_source in ('embedded_m4b', 'audnexus', 'full_audiobook_fallback')),

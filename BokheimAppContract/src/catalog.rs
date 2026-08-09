@@ -71,18 +71,10 @@ pub enum CatalogCapability {
     Loans,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogPasswordRequirement {
-    Required,
-    Empty,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Type)]
 #[specta(type = CatalogAuthenticationFrontend)]
 pub enum CatalogAuthentication {
     None,
-    Basic { username_label: String, password: CatalogPasswordRequirement },
     External { action_label: String, url: String },
 }
 
@@ -91,7 +83,6 @@ pub enum CatalogAuthentication {
 #[specta(inline, collect = false)]
 enum CatalogAuthenticationFrontend {
     None,
-    Basic { username_label: String, password: CatalogPasswordRequirement },
     External { action_label: String, url: String },
 }
 
@@ -99,7 +90,6 @@ impl From<&CatalogAuthentication> for CatalogAuthenticationFrontend {
     fn from(value: &CatalogAuthentication) -> Self {
         match value {
             CatalogAuthentication::None => Self::None,
-            CatalogAuthentication::Basic { username_label, password } => Self::Basic { username_label: username_label.clone(), password: *password },
             CatalogAuthentication::External { action_label, url } => Self::External { action_label: action_label.clone(), url: url.clone() },
         }
     }
@@ -109,7 +99,6 @@ impl From<&CatalogAuthentication> for CatalogAuthenticationFrontend {
 #[serde(remote = "CatalogAuthentication", tag = "kind", rename_all = "snake_case")]
 enum CatalogAuthenticationHuman {
     None,
-    Basic { username_label: String, password: CatalogPasswordRequirement },
     External { action_label: String, url: String },
 }
 
@@ -117,7 +106,6 @@ enum CatalogAuthenticationHuman {
 #[serde(remote = "CatalogAuthentication")]
 enum CatalogAuthenticationBinary {
     None,
-    Basic { username_label: String, password: CatalogPasswordRequirement },
     External { action_label: String, url: String },
 }
 
@@ -315,7 +303,6 @@ pub struct CatalogAuthorDiscoveryRequest {
 #[specta(type = CatalogWideSearchOutcomeFrontend)]
 pub enum CatalogWideSearchOutcome {
     Results { page: CatalogPage },
-    AuthenticationRequired,
     Unsupported,
     TimedOut,
     Failed { message: String },
@@ -326,7 +313,6 @@ pub enum CatalogWideSearchOutcome {
 #[specta(inline, collect = false)]
 enum CatalogWideSearchOutcomeFrontend {
     Results { page: CatalogPage },
-    AuthenticationRequired,
     Unsupported,
     TimedOut,
     Failed { message: String },
@@ -336,7 +322,6 @@ impl From<&CatalogWideSearchOutcome> for CatalogWideSearchOutcomeFrontend {
     fn from(value: &CatalogWideSearchOutcome) -> Self {
         match value {
             CatalogWideSearchOutcome::Results { page } => Self::Results { page: page.clone() },
-            CatalogWideSearchOutcome::AuthenticationRequired => Self::AuthenticationRequired,
             CatalogWideSearchOutcome::Unsupported => Self::Unsupported,
             CatalogWideSearchOutcome::TimedOut => Self::TimedOut,
             CatalogWideSearchOutcome::Failed { message } => Self::Failed { message: message.clone() },
@@ -348,7 +333,6 @@ impl From<&CatalogWideSearchOutcome> for CatalogWideSearchOutcomeFrontend {
 #[serde(remote = "CatalogWideSearchOutcome", tag = "kind", rename_all = "snake_case")]
 enum CatalogWideSearchOutcomeHuman {
     Results { page: CatalogPage },
-    AuthenticationRequired,
     Unsupported,
     TimedOut,
     Failed { message: String },
@@ -358,7 +342,6 @@ enum CatalogWideSearchOutcomeHuman {
 #[serde(remote = "CatalogWideSearchOutcome")]
 enum CatalogWideSearchOutcomeBinary {
     Results { page: CatalogPage },
-    AuthenticationRequired,
     Unsupported,
     TimedOut,
     Failed { message: String },
@@ -639,7 +622,7 @@ mod tests {
 
     #[test]
     fn generated_frontend_catalog_shapes_match_runtime_json() {
-        let authentication = CatalogAuthentication::Basic { username_label: "Email".to_owned(), password: CatalogPasswordRequirement::Required };
+        let authentication = CatalogAuthentication::External { action_label: "Open provider".to_owned(), url: "https://provider.example".to_owned() };
         assert_frontend_shape(&authentication, CatalogAuthenticationFrontend::from(&authentication));
 
         let link = CatalogLinkTarget::Page { locator: "new".to_owned() };

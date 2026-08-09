@@ -1,5 +1,5 @@
 use crate::app::BackendContext;
-use crate::BookId;
+use crate::ContentHash;
 use crate::LibraryRoot;
 use crossbeam_channel::Sender;
 use r2d2::Pool;
@@ -10,13 +10,12 @@ pub use crate::DownloadState;
 
 #[derive(Debug, Clone, Serialize)]
 pub enum LibraryEvent {
-    BookAdded { book_id: BookId, path: String },
-    BookRemoved { book_id: BookId, path: String },
-    DuplicateBookIgnored { book_id: BookId, path: String },
+    BookAdded { content_hash: ContentHash, path: String },
+    BookRemoved { content_hash: ContentHash, path: String },
     DirectoryAdded { path: String },
     DirectoryRemoved { path: String },
-    ThumbnailGenerated { book_id: BookId },
-    DownloadStatusChanged { book_id: BookId, state: DownloadState },
+    ThumbnailGenerated { content_hash: ContentHash },
+    DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
     FolderDownloadStatusChanged { dir_id: crate::DirId, downloaded_books: usize, total_books: usize },
     TransferStatusChanged,
     ScanComplete,

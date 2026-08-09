@@ -14,7 +14,7 @@ fi
 sync_binary=${source_root}/deploy-target/release/sync-server
 catalog_binary=${source_root}/deploy-target/release/bokheim-catalog-server
 catalog_file=${source_root}/Catalogs/opds.json
-for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/Server/deploy/bokheim-sync.service" "${source_root}/Server/deploy/bokheim-gc.service" "${source_root}/Server/deploy/bokheim-gc.timer" "${source_root}/Server/deploy/bokheim-tmpfiles.conf" "${source_root}/Catalogs/deploy/bokheim-catalogs.service" "${source_root}/Server/deploy/Caddyfile"; do
+for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/Server/deploy/bokheim-sync.service" "${source_root}/Catalogs/deploy/bokheim-catalogs.service" "${source_root}/Server/deploy/Caddyfile"; do
     if [[ ! -f ${required} ]]; then
         echo "missing staged deployment file: ${required}" >&2
         exit 1
@@ -25,10 +25,6 @@ if [[ ! -x ${sync_binary} || ! -x ${catalog_binary} ]]; then
     exit 1
 fi
 "${catalog_binary}" --check-catalog "${catalog_file}"
-
-bootstrap_password_file=/etc/bokheim/admin-password
-bootstrap_drop_in=/etc/systemd/system/bokheim-sync.service.d/bootstrap-admin.conf
-admin_password=
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -78,6 +74,13 @@ install -d -o bokheim -g bokheim -m 0750 /var/lib/bokheim/assets/books /var/lib/
 
 systemctl enable --now postgresql.service
 install -d -o root -g root -m 0700 /etc/bokheim
+disposable_domains_file=/etc/bokheim/disposable-email-domains
+if [[ ! -f ${disposable_domains_file} ]] || ! grep -Eq '^[[:space:]]*[^#[:space:]]' "${disposable_domains_file}"; then
+    echo "create ${disposable_domains_file} with at least one disposable email domain before installing" >&2
+    exit 2
+fi
+chmod 0644 "${disposable_domains_file}"
+chown root:root "${disposable_domains_file}"
 database_credential=/etc/bokheim/database-url
 if [[ -f ${database_credential} ]]; then
     database_url=$(<"${database_credential}")
@@ -120,70 +123,31 @@ SQL
 DATABASE_URL="${database_url}" "${sync_binary}" migrate
 unset database_url
 
-if [[ ! -f ${bootstrap_password_file} ]]; then
-    if [[ ! -t 0 ]]; then
-        echo "first installation requires an interactive terminal for the initial admin password" >&2
-        exit 2
-    fi
-    while true; do
-        IFS= read -r -s -p "Initial admin@bokheim.local password (at least 12 characters): " admin_password
-        echo
-        IFS= read -r -s -p "Confirm initial admin@bokheim.local password: " confirmation
-        echo
-        if [[ ${#admin_password} -lt 12 ]]; then
-            echo "password is shorter than 12 characters" >&2
-        elif [[ ${#admin_password} -gt 1024 ]]; then
-            echo "password is longer than 1024 bytes" >&2
-        elif [[ ${admin_password} != "${confirmation}" ]]; then
-            echo "passwords do not match" >&2
-        else
-            unset confirmation
-            break
-        fi
-    done
-fi
-
 install -o root -g root -m 0755 "${sync_binary}" /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${catalog_binary}" /usr/local/bin/bokheim-catalog-server
 install -d -o root -g root -m 0755 /usr/local/share/bokheim-catalogs
 install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/bokheim-catalogs/opds.json
 
 install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-gc.service" /etc/systemd/system/bokheim-gc.service
-install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-gc.timer" /etc/systemd/system/bokheim-gc.timer
-install -d -o root -g root -m 0755 /etc/tmpfiles.d
-install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-tmpfiles.conf" /etc/tmpfiles.d/bokheim.conf
-systemd-tmpfiles --create /etc/tmpfiles.d/bokheim.conf
 install -o root -g root -m 0644 "${source_root}/Catalogs/deploy/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service
-install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d /etc/systemd/system/bokheim-sync.service.d
+install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "${source_root}/Server/deploy/caddy-bokheim.conf" /etc/systemd/system/caddy.service.d/bokheim.conf
 install -o root -g root -m 0644 "${source_root}/Server/deploy/Caddyfile" /etc/caddy/Caddyfile
 install -o root -g root -m 0600 "${source_root}/Server/deploy/caddy.env.example" /etc/bokheim/caddy.env
 install -o root -g root -m 0755 "${source_root}/Server/deploy/verify-public.sh" /usr/local/sbin/bokheim-verify-public
 
-if [[ -n ${admin_password} ]]; then
-    umask 077
-    printf '%s' "${admin_password}" >"${bootstrap_password_file}"
-    unset admin_password
-fi
-# The database is wiped on every deploy, so the admin account never survives
-# a redeploy either -- the server re-bootstraps it from this credential on
-# every start (see PostgresAccountService::bootstrap_admin), so both the
-# credential file and this drop-in must persist rather than being cleaned up
-# after a successful first install.
-cat >"${bootstrap_drop_in}" <<'EOF'
-[Service]
-LoadCredential=admin_password:/etc/bokheim/admin-password
-EOF
-chmod 0644 "${bootstrap_drop_in}"
+# Remove bootstrap artifacts left by deployments that created the former
+# built-in administrator account.
+rm -f -- /etc/bokheim/admin-password /etc/systemd/system/bokheim-sync.service.d/bootstrap-admin.conf
+systemctl disable --now bokheim-gc.timer >/dev/null 2>&1 || true
+rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.timer /etc/tmpfiles.d/bokheim.conf
 
 systemctl daemon-reload
 caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
-systemctl enable bokheim-sync.service bokheim-catalogs.service bokheim-gc.timer caddy.service
+systemctl enable bokheim-sync.service bokheim-catalogs.service caddy.service
 systemctl restart bokheim-sync.service
 systemctl restart bokheim-catalogs.service
 systemctl restart caddy.service
-systemctl start bokheim-gc.timer
 
 for _ in $(seq 1 20); do
     if curl --fail --silent --show-error --unix-socket /run/bokheim/sync.sock http://localhost/api/ready | grep -Fqx ok; then
@@ -193,7 +157,7 @@ for _ in $(seq 1 20); do
     sleep 1
 done
 if [[ ${sync_ready:-false} != true ]]; then
-    echo "sync server did not become healthy; bootstrap credential was preserved for retry" >&2
+    echo "sync server did not become healthy" >&2
     systemctl --no-pager --full status bokheim-sync.service >&2 || true
     exit 1
 fi

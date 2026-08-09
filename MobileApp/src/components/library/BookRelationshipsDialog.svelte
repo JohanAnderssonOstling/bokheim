@@ -21,7 +21,7 @@
     busy = true;
     error = "";
     try {
-      links = await commands.getBookLinks(libraryId, book.book_id);
+      links = await commands.getBookLinks(libraryId, book.content_hash);
     } catch (reason) {
       error = reason instanceof Error ? reason.message : String(reason);
     } finally {
@@ -37,8 +37,8 @@
     }
     busy = true;
     try {
-      targetResults = (await commands.searchLibrary(libraryId, targetQuery.trim(), 20)).filter((candidate) => candidate.book_id !== book.book_id);
-      if (targetResults.length === 1) targetBookId = targetResults[0].book_id;
+      targetResults = (await commands.searchLibrary(libraryId, targetQuery.trim(), 20)).filter((candidate) => candidate.content_hash !== book.content_hash);
+      if (targetResults.length === 1) targetBookId = targetResults[0].content_hash;
     } catch (reason) {
       error = reason instanceof Error ? reason.message : String(reason);
     } finally {
@@ -55,7 +55,7 @@
     busy = true;
     error = "";
     try {
-      await commands.upsertBookLink(libraryId, createBookLink(book.book_id, targetBookId, relation, note));
+      await commands.upsertBookLink(libraryId, createBookLink(book.content_hash, targetBookId, relation, note));
       targetQuery = "";
       targetResults = [];
       targetBookId = "";
@@ -96,7 +96,7 @@
         <div class="relationship-list">
           {#each links as link (link.id)}
             <div class="relationship-row">
-              <span><strong>{link.relation}</strong><small>{link.source_book_id === book.book_id ? `To book ${link.target_book_id}` : `From book ${link.source_book_id}`}{#if link.note} · {link.note}{/if}</small></span>
+              <span><strong>{link.relation}</strong><small>{link.source_content_hash === book.content_hash ? `To book ${link.target_content_hash}` : `From book ${link.source_content_hash}`}{#if link.note} · {link.note}{/if}</small></span>
               <button type="button" disabled={busy} onclick={() => void removeRelationship(link)}>Remove</button>
             </div>
           {/each}
@@ -118,7 +118,7 @@
         {#if targetResults.length}
           <select bind:value={targetBookId} aria-label="Target book" required>
             <option value="">Choose a target book</option>
-            {#each targetResults as candidate (candidate.book_id)}<option value={candidate.book_id}>{candidate.title || "Untitled"} · {candidate.author || "Unknown author"}</option>{/each}
+            {#each targetResults as candidate (candidate.content_hash)}<option value={candidate.content_hash}>{candidate.title || "Untitled"} · {candidate.author || "Unknown author"}</option>{/each}
           </select>
         {/if}
         <select bind:value={relation} aria-label="Relationship">

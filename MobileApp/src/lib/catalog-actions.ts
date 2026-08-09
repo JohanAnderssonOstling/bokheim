@@ -1,4 +1,6 @@
-import type { CatalogOwnershipStatus, CatalogPublicationAction } from "./bindings";
+import type { CatalogPublicationAction } from "./bindings";
+
+type CatalogOwnershipStatus = "not_owned" | "exact_edition_owned" | "other_edition_owned";
 
 const formatLabel = (format: "epub" | "pdf") => format.toUpperCase();
 

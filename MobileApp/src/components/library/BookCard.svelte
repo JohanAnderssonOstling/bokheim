@@ -47,7 +47,7 @@
   async function loadThumbnail() {
     if (thumbnailStarted) return;
     thumbnailStarted = true;
-    const url = await getThumbnailUrl(libraryId, book.book_id);
+    const url = await getThumbnailUrl(libraryId, book.content_hash);
     if (url) coverUrl = url;
   }
 

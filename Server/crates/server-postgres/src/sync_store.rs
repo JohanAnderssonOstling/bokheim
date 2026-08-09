@@ -1,4 +1,4 @@
-use server_core::LibraryUpsertOutcome;
+use crate::sync::LibraryUpsertOutcome;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
@@ -43,7 +43,7 @@ pub(super) fn server_now_ms() -> u64 {
 }
 
 pub(super) fn storage_rejection(change: &WireMutation, server_now_ms: u64) -> Option<MutationRejectionReason> {
-    (change.changed_at.get() > server_now_ms.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS)).then_some(MutationRejectionReason::TimestampTooFarFuture)
+    (change.changed_at > server_now_ms.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS)).then_some(MutationRejectionReason::TimestampTooFarFuture)
 }
 
 pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
@@ -58,11 +58,11 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
     let rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
 
     // The server reads only declared lifecycle facts. It never decodes the
-    // opaque value to maintain quota/GC references.
+    // opaque value to maintain quota references.
     let mut lifecycle_deltas = Vec::new();
     for change in accepted.iter().copied().filter(|change| change.kind == "book_lifecycle") {
         let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql")).bind(library_id.as_str()).bind(&change.entity_key).fetch_optional(&mut **tx).await?;
-        let incoming = (change.changed_at.storage_i64(), change.conflict_rank as i16, client_id.as_str().to_owned(), change.replica_seq.get() as i64, change.mutation_id.to_string());
+        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, client_id.as_str().to_owned(), change.replica_seq.get() as i64, change.mutation_id.to_string());
         let wins = existing.as_ref().is_none_or(|row| {
             incoming
                 > (
@@ -77,8 +77,8 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
             continue;
         }
         if existing.as_ref().is_some_and(|row| row.try_get::<bool, _>("present").unwrap_or(false)) {
-            if let Some(hash) = existing.as_ref().and_then(|row| row.try_get::<Option<String>, _>("content_hash").ok().flatten()).and_then(|hash| ContentHash::parse(&hash).ok()) {
-                lifecycle_deltas.push((hash, -1));
+            if let Some(hash) = existing.as_ref().and_then(|row| row.try_get::<Option<String>, _>("content_hash").ok().flatten()) {
+                lifecycle_deltas.push((ContentHash::new(&hash), -1));
             }
         }
         if let Some(hash) = change.blob_reference.as_ref().filter(|reference| reference.present).and_then(|reference| reference.content_hash.clone()) {
@@ -100,7 +100,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
         let values = rows.iter().map(|change| change.value.clone()).collect::<Vec<_>>();
         let present = rows.iter().map(|change| change.blob_reference.as_ref().map(|reference| reference.present)).collect::<Vec<_>>();
         let hashes = rows.iter().map(|change| change.blob_reference.as_ref().and_then(|reference| reference.content_hash.as_ref()).map(|hash| hash.as_str().to_owned())).collect::<Vec<_>>();
-        let changed = rows.iter().map(|change| change.changed_at.storage_i64()).collect::<Vec<_>>();
+        let changed = rows.iter().map(|change| i64::try_from(change.changed_at)).collect::<Result<Vec<_>, _>>().map_err(decode_err)?;
         let sequences = rows.iter().map(|change| change.replica_seq.get() as i64).collect::<Vec<_>>();
         let ranks = rows.iter().map(|change| change.conflict_rank as i16).collect::<Vec<_>>();
         let events = rows.iter().map(|change| change.mutation_id.to_string()).collect::<Vec<_>>();
@@ -147,8 +147,7 @@ fn decode_err<E: std::error::Error + Send + Sync + 'static>(error: E) -> sqlx::E
 }
 
 fn millis(value: i64) -> Result<UnixMillis, sqlx::Error> {
-    let value = u64::try_from(value).map_err(|_| sqlx::Error::Decode("negative Unix-millisecond timestamp".into()))?;
-    UnixMillis::new(value).map_err(decode_err)
+    u64::try_from(value).map_err(|_| sqlx::Error::Decode("negative Unix-millisecond timestamp".into()))
 }
 
 fn cursor(value: Option<LibraryRevision>) -> i64 {
@@ -172,7 +171,7 @@ async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(ex
         let present: Option<bool> = row.try_get("present")?;
         let content_hash: Option<String> = row.try_get("content_hash")?;
         let blob_reference = match (present, content_hash) {
-            (Some(present), content_hash) => Some(sync_common::DeclaredBlobReference { present, content_hash: content_hash.map(|hash| ContentHash::parse(&hash)).transpose().map_err(|_| corrupt("invalid content hash"))? }),
+            (Some(present), content_hash) => Some(sync_common::DeclaredBlobReference { present, content_hash: content_hash.map(|hash| ContentHash::new(&hash)) }),
             (None, None) => None,
             (None, Some(_)) => return Err(corrupt("hash declaration without presence")),
         };
@@ -270,7 +269,7 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
         .bind(&change.value)
         .bind(change.blob_reference.as_ref().map(|reference| reference.present))
         .bind(change.blob_reference.as_ref().and_then(|reference| reference.content_hash.as_ref()).map(|hash| hash.as_str()))
-        .bind(change.changed_at.storage_i64())
+        .bind(i64::try_from(change.changed_at).map_err(decode_err)?)
         .bind(client.as_str())
         .bind(change.replica_seq.get() as i64)
         .bind(change.conflict_rank as i16)
@@ -313,7 +312,7 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
 #[cfg(test)]
 mod tests {
     use super::{cursor_is_ahead, pull_route, storage_rejection, PullRoute};
-    use sync_common::{ClientId, LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, UnixMillis, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
+    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
 
     fn reading_mutation(changed_at: u64) -> WireMutation {
         WireMutation {
@@ -324,7 +323,7 @@ mod tests {
             value: vec![1, 2, 3],
             conflict_rank: 0,
             blob_reference: None,
-            changed_at: UnixMillis::new(changed_at).unwrap(),
+            changed_at,
             replica_seq: ReplicaSeq::new(1).unwrap(),
         }
     }
@@ -356,7 +355,7 @@ mod tests {
 
     #[test]
     fn postgres_winner_order_begins_with_wall_clock_time() {
-        const LWW_TRIGGER_SQL: &str = include_str!("../../server-database/schema/03_sync.sql");
+        const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
         let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
         assert!(comparison.trim_start().starts_with("NEW.changed_at,"));
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));

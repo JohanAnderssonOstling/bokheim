@@ -6,25 +6,21 @@ Date: 2026-08-01
 
 Store is a fifth navigation destination in both the desktop and mobile clients. An OPDS catalog is presented as a read-only remote library: users choose a source, navigate folders with breadcrumbs, search when the source advertises search support, page through results, and add free EPUBs to the active local library.
 
-The first version imports books into the library root. Choosing an import folder, custom catalogs, loans, DRM, purchases, and credential persistence are intentionally deferred.
+The first version imports books into the library root. Choosing an import folder, loans, DRM, and purchases are intentionally deferred. OPDS catalogs are anonymous; authenticated feeds are not part of the product model.
 
 ## Built-in sources
 
-The catalog registry lives in `Backend/src/opds.rs`; clients do not duplicate URLs or source metadata.
+The catalog registry, cache persistence, revision policy, and device-local custom endpoint store live in `BokheimOpds`; clients do not duplicate URLs or source metadata. `Backend` only composes that store with catalog-server fallback and local-library import.
 
-| Source | Endpoint | Languages | Access |
-| --- | --- | --- | --- |
-| Project Gutenberg | `https://www.gutenberg.org/ebooks/search.opds/` | Multilingual | Open |
-| Standard Ebooks | `https://standardebooks.org/feeds/opds` | English | Eligible member account |
-| Standard Ebooks — New Releases | `https://standardebooks.org/feeds/opds/new-releases` | English | Eligible member account |
-| Feedbooks Public Domain | `https://catalog.feedbooks.com/catalog/index.json` | Multilingual | Open |
-| Unglue.it | `https://unglue.it/api/opds/` | Multilingual | Open |
-| textos.info | `https://www.textos.info/catalogo.atom` | Spanish | Open |
-| Ebooks Gratuits | `https://www.ebooksgratuits.com/opds/index.php` | French | Open |
-| Office of the Historian | `https://history.state.gov/api/v1/catalog` | English | Open |
-| Gallica | `https://gallica.bnf.fr/opds` | French | Open |
-
-Standard Ebooks documents HTTP Basic authentication with the Patrons Circle email address as the username and an empty password. Those credentials are held only in UI memory for the current source session; they are not persisted or logged. Rust binds them to the selected endpoint's exact origin and will not attach them to a link on another origin. The two Standard Ebooks feeds are separate source choices because the general feed and focused new-releases feed are useful entry points with independent navigation histories.
+| Source | Endpoint | Languages |
+| --- | --- | --- |
+| Project Gutenberg | `https://www.gutenberg.org/ebooks/search.opds/` | Multilingual |
+| Open Library | `https://openlibrary.org/opds/` | Multilingual |
+| Unglue.it | `https://unglue.it/api/opds/` | Multilingual |
+| textos.info | `https://www.textos.info/catalogo.atom` | Spanish |
+| Ebooks Gratuits | `https://www.ebooksgratuits.com/opds/index.php` | French |
+| Office of the Historian | `https://history.state.gov/api/v1/catalog` | English |
+| Gallica | `https://gallica.bnf.fr/opds` | French |
 
 ## Shared contract and correctness boundary
 
@@ -46,10 +42,9 @@ Downloads go to an application-owned temporary directory, are size-limited, and 
 ## Source references
 
 - Project Gutenberg offline catalog documentation: <https://www.gutenberg.org/ebooks/offline_catalogs.html>
-- Standard Ebooks feed documentation: <https://standardebooks.org/feeds>
 - OPDS 2.0 specification: <https://specs.opds.io/opds-2.0>
 - Office of the Historian catalog API: <https://history.state.gov/developer/catalog>
 - Gallica API documentation: <https://api.bnf.fr/fr/node/2640>
 - Unglue.it API help: <https://unglue.it/api/help>
 
-The seven open endpoints were live-fetched and parsed by the ignored integration test `open_built_in_catalogs_are_live_and_parseable` on 2026-08-01. The two Standard Ebooks endpoints cannot be exercised anonymously and are covered by endpoint/authentication contract tests instead.
+The seven built-in endpoints were live-fetched and parsed by the ignored integration test `open_built_in_catalogs_are_live_and_parseable` on 2026-08-01.

@@ -1,11 +1,11 @@
 import type { Destination } from "./navigation";
 
-const STORAGE_KEY = "bokheim-ui-session-v1";
-const SCHEMA_VERSION = 1;
+const STORAGE_KEY = "bokheim-ui-session-v2";
+const SCHEMA_VERSION = 2;
 
 export type ReaderUiSession = {
   kind: "reader";
-  book_id: string;
+  content_hash: string;
   library_id?: string;
 };
 
@@ -27,8 +27,8 @@ function hasLocalStorage(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-function normalizeBookId(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
+function normalizeContentHash(value: unknown): string | null {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
 }
 
 function normalizeDestination(value: unknown): value is Destination {
@@ -57,10 +57,10 @@ export function readUiSession(): AppUiSession | null {
   if (container.v !== SCHEMA_VERSION || typeof container.session !== "object" || container.session === null) return null;
   const session = container.session;
 
-  if (session.kind === "reader" && normalizeBookId(session.book_id)) {
+  if (session.kind === "reader" && normalizeContentHash(session.content_hash)) {
     return {
       kind: "reader",
-      book_id: normalizeBookId(session.book_id)!,
+      content_hash: normalizeContentHash(session.content_hash)!,
       library_id: normalizeId((session as { library_id?: unknown }).library_id),
     };
   }
@@ -87,4 +87,3 @@ export function writeUiSession(session: AppUiSession | null): void {
   }
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: SCHEMA_VERSION, session }));
 }
-

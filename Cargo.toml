@@ -19,7 +19,6 @@ members = [
     "Catalogs",
     "AudiobookLibrary",
     "BokheimAlgorithms",
-    "BokheimWebAlgorithms",
     "BokheimWire",
     "MobileApp/src-tauri",
     "SyncCommon",

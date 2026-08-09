@@ -3,7 +3,7 @@
 
 -- name: upsert_remote_annotation!
 -- param: id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: anchor_kind: &str
 -- param: anchor_cfi: Option<&str>
 -- param: anchor_page: Option<i64>
@@ -16,10 +16,10 @@
 -- param: created_at: i64
 -- param: modified_at: i64
 -- param: deleted_at: Option<i64>
-INSERT INTO annotation(id,book_id,anchor_kind,anchor_cfi,anchor_page,anchor_rects,anchor_fallback_cfi,exact_text,style,color,note,created_at,modified_at,deleted_at)
-VALUES(:id,:book_id,:anchor_kind,:anchor_cfi,:anchor_page,:anchor_rects,:anchor_fallback_cfi,:exact_text,:style,:color,:note,:created_at,:modified_at,:deleted_at)
+INSERT INTO annotation(id,book_row_id,anchor_kind,anchor_cfi,anchor_page,anchor_rects,anchor_fallback_cfi,exact_text,style,color,note,created_at,modified_at,deleted_at)
+VALUES(:id,(SELECT row_id FROM book WHERE content_hash=:content_hash),:anchor_kind,:anchor_cfi,:anchor_page,:anchor_rects,:anchor_fallback_cfi,:exact_text,:style,:color,:note,:created_at,:modified_at,:deleted_at)
 ON CONFLICT(id) DO UPDATE SET
-    book_id=excluded.book_id,anchor_kind=excluded.anchor_kind,anchor_cfi=excluded.anchor_cfi,
+    book_row_id=excluded.book_row_id,anchor_kind=excluded.anchor_kind,anchor_cfi=excluded.anchor_cfi,
     anchor_page=excluded.anchor_page,anchor_rects=excluded.anchor_rects,
     anchor_fallback_cfi=excluded.anchor_fallback_cfi,exact_text=excluded.exact_text,
     style=excluded.style,color=excluded.color,
@@ -28,30 +28,30 @@ ON CONFLICT(id) DO UPDATE SET
 
 -- name: upsert_remote_bookmark!
 -- param: id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: cfi: &str
 -- param: label: &str
 -- param: created_at: i64
 -- param: modified_at: i64
 -- param: deleted_at: Option<i64>
-INSERT INTO bookmark(id,book_id,cfi,label,created_at,modified_at,deleted_at)
-VALUES(:id,:book_id,:cfi,:label,:created_at,:modified_at,:deleted_at)
+INSERT INTO bookmark(id,book_row_id,cfi,label,created_at,modified_at,deleted_at)
+VALUES(:id,(SELECT row_id FROM book WHERE content_hash=:content_hash),:cfi,:label,:created_at,:modified_at,:deleted_at)
 ON CONFLICT(id) DO UPDATE SET
     modified_at=excluded.modified_at,deleted_at=excluded.deleted_at;
 
 -- name: upsert_remote_book_link!
 -- param: id: &str
--- param: source_book_id: &str
--- param: target_book_id: &str
+-- param: source_content_hash: &str
+-- param: target_content_hash: &str
 -- param: relation: &str
 -- param: note: &str
 -- param: created_at: i64
 -- param: modified_at: i64
 -- param: deleted_at: Option<i64>
-INSERT INTO book_link(id,source_book_id,target_book_id,relation,note,created_at,modified_at,deleted_at)
-VALUES(:id,:source_book_id,:target_book_id,:relation,:note,:created_at,:modified_at,:deleted_at)
+INSERT INTO book_link(id,source_book_row_id,target_book_row_id,relation,note,created_at,modified_at,deleted_at)
+VALUES(:id,(SELECT row_id FROM book WHERE content_hash=:source_content_hash),(SELECT row_id FROM book WHERE content_hash=:target_content_hash),:relation,:note,:created_at,:modified_at,:deleted_at)
 ON CONFLICT(id) DO UPDATE SET
-    source_book_id=excluded.source_book_id,target_book_id=excluded.target_book_id,
+    source_book_row_id=excluded.source_book_row_id,target_book_row_id=excluded.target_book_row_id,
     relation=excluded.relation,note=excluded.note,created_at=excluded.created_at,
     modified_at=excluded.modified_at,deleted_at=excluded.deleted_at;
 
@@ -95,5 +95,5 @@ UPDATE dir SET parent_id=:parent_id, name=:name WHERE id=:dir_id;
 UPDATE dir SET deleted_at=NULL WHERE id=:dir_id;
 
 -- name: remote_book_has_metadata?
--- param: book_id: &str
-SELECT EXISTS(SELECT 1 FROM book WHERE id=:book_id AND title IS NOT NULL);
+-- param: content_hash: &str
+SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash AND title IS NOT NULL);

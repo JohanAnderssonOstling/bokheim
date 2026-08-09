@@ -21,33 +21,33 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-pub(crate) fn sync_error(error: server_core::SyncError) -> StatusCode {
+pub(crate) fn sync_error(error: server_postgres::SyncError) -> StatusCode {
     match error {
-        server_core::SyncError::Forbidden => StatusCode::FORBIDDEN,
-        server_core::SyncError::LibraryOwnershipConflict => StatusCode::CONFLICT,
-        server_core::SyncError::CursorAhead => StatusCode::CONFLICT,
-        server_core::SyncError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
-        server_core::SyncError::InvalidLibraryName => StatusCode::BAD_REQUEST,
-        server_core::SyncError::AmbiguousMutationIdentity => StatusCode::BAD_REQUEST,
-        server_core::SyncError::TooManyMutations => StatusCode::PAYLOAD_TOO_LARGE,
-        server_core::SyncError::Internal(reason) => {
+        server_postgres::SyncError::Forbidden => StatusCode::FORBIDDEN,
+        server_postgres::SyncError::LibraryOwnershipConflict => StatusCode::CONFLICT,
+        server_postgres::SyncError::CursorAhead => StatusCode::CONFLICT,
+        server_postgres::SyncError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
+        server_postgres::SyncError::InvalidLibraryName => StatusCode::BAD_REQUEST,
+        server_postgres::SyncError::AmbiguousMutationIdentity => StatusCode::BAD_REQUEST,
+        server_postgres::SyncError::TooManyMutations => StatusCode::PAYLOAD_TOO_LARGE,
+        server_postgres::SyncError::Internal(reason) => {
             tracing_fallback("synchronization", &reason);
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
 
-pub(crate) fn asset_error(error: server_core::AssetError) -> StatusCode {
+pub(crate) fn asset_error(error: server_asset_store::AssetError) -> StatusCode {
     match error {
-        server_core::AssetError::Forbidden => StatusCode::FORBIDDEN,
-        server_core::AssetError::InvalidInput(_) | server_core::AssetError::HashMismatch | server_core::AssetError::LengthMismatch { .. } => StatusCode::BAD_REQUEST,
-        server_core::AssetError::LengthRequired => StatusCode::LENGTH_REQUIRED,
-        server_core::AssetError::UploadInProgress => StatusCode::CONFLICT,
-        server_core::AssetError::Busy => StatusCode::TOO_MANY_REQUESTS,
-        server_core::AssetError::QuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
-        server_core::AssetError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-        server_core::AssetError::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
-        server_core::AssetError::Storage(reason) => {
+        server_asset_store::AssetError::Forbidden => StatusCode::FORBIDDEN,
+        server_asset_store::AssetError::InvalidInput(_) | server_asset_store::AssetError::HashMismatch | server_asset_store::AssetError::LengthMismatch { .. } => StatusCode::BAD_REQUEST,
+        server_asset_store::AssetError::LengthRequired => StatusCode::LENGTH_REQUIRED,
+        server_asset_store::AssetError::UploadInProgress => StatusCode::CONFLICT,
+        server_asset_store::AssetError::Busy => StatusCode::TOO_MANY_REQUESTS,
+        server_asset_store::AssetError::QuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
+        server_asset_store::AssetError::TooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        server_asset_store::AssetError::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
+        server_asset_store::AssetError::Storage(reason) => {
             tracing_fallback("asset storage", &reason);
             StatusCode::INTERNAL_SERVER_ERROR
         }

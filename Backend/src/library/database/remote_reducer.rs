@@ -46,26 +46,26 @@ pub fn apply_remote_change_in_tx(tx: &Transaction, change: &ServerMutation) -> R
             apply_remote_directory_lifecycle(tx, dir_id, *deleted)?;
             true
         }
-        MutationBody::BookLifecycle { book_id, value: bokheim_domain::BookLifecycleState::Present { metadata, added_at, content_hash, format } } => {
-            apply_remote_book_added(tx, *book_id, metadata, *added_at, content_hash, *format)?;
+        MutationBody::BookLifecycle { content_hash, value: bokheim_domain::BookLifecycleState::Present { metadata, added_at, format } } => {
+            apply_remote_book_added(tx, content_hash.clone(), metadata, *added_at, *format)?;
             true
         }
-        MutationBody::BookLifecycle { book_id, value: bokheim_domain::BookLifecycleState::Deleted } => {
-            apply_remote_book_deleted(tx, *book_id, change.mutation.changed_at)?;
+        MutationBody::BookLifecycle { content_hash, value: bokheim_domain::BookLifecycleState::Deleted } => {
+            apply_remote_book_deleted(tx, content_hash.clone(), change.mutation.changed_at)?;
             true
         }
-        MutationBody::Placement { dir_id, book_id, present } => {
-            apply_remote_book_dir(tx, change.mutation.changed_at, *book_id, dir_id, *present)?;
+        MutationBody::Placement { dir_id, content_hash, present } => {
+            apply_remote_book_dir(tx, change.mutation.changed_at, content_hash.clone(), dir_id, *present)?;
             if !*present {
-                removed = Some(RemovedBookDir { dir_id: dir_id.clone(), book_id: *book_id });
+                removed = Some(RemovedBookDir { dir_id: dir_id.clone(), content_hash: content_hash.clone() });
             }
             true
         }
-        MutationBody::ReadingPosition { book_id, value } => {
+        MutationBody::ReadingPosition { content_hash, value } => {
             crate::ReadProgress::new(value.progress).map_err(|error| error.to_string())?;
-            tx.first_book_insert(&book_id.canonical(), change.mutation.changed_at.storage_i64())?;
+            tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
             let location = value.location.as_str();
-            tx.update_reading_position(&book_id.canonical(), &location, value.progress)?;
+            tx.update_reading_position(content_hash.as_str(), &location, value.progress)?;
             true
         }
         MutationBody::Annotation { annotation_id, value } => {
@@ -80,9 +80,9 @@ pub fn apply_remote_change_in_tx(tx: &Transaction, change: &ServerMutation) -> R
             apply_remote_book_link(tx, change, link_id, value)?;
             true
         }
-        MutationBody::Metadata { book_id, value } => {
-            tx.first_book_insert(&book_id.canonical(), change.mutation.changed_at.storage_i64())?;
-            super::metadata::update_book_metadata_state_preserving_ids(tx, *book_id, value)?;
+        MutationBody::Metadata { content_hash, value } => {
+            tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
+            super::metadata::update_book_metadata_state_preserving_ids(tx, content_hash.clone(), value)?;
             true
         }
     };
@@ -96,7 +96,7 @@ pub fn apply_remote_change_in_tx(tx: &Transaction, change: &ServerMutation) -> R
 }
 
 fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, value: &bokheim_domain::AnnotationState) -> Result<(), Box<dyn std::error::Error>> {
-    tx.first_book_insert(&value.book_id.canonical(), change.mutation.changed_at.storage_i64())?;
+    tx.first_book_insert(value.content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
     let style = match value.style {
         bokheim_domain::AnnotationStyle::Highlight => "highlight",
         bokheim_domain::AnnotationStyle::Underline => "underline",
@@ -104,9 +104,11 @@ fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, 
         bokheim_domain::AnnotationStyle::Strikethrough => "strikethrough",
     };
     let anchor = super::marks::store_annotation_anchor(&value.anchor)?;
+    let created_at = storage_i64(value.created_at, "annotation creation timestamp")?;
+    let modified_at = storage_i64(value.modified_at, "annotation modification timestamp")?;
     tx.upsert_remote_annotation(
         id,
-        &value.book_id.canonical(),
+        value.content_hash.as_str(),
         anchor.kind,
         anchor.cfi.as_deref(),
         anchor.page,
@@ -116,32 +118,36 @@ fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, 
         style,
         &value.color,
         &value.note,
-        value.created_at.storage_i64(),
-        value.modified_at.storage_i64(),
-        value.deleted.then_some(value.modified_at.storage_i64()),
+        created_at,
+        modified_at,
+        value.deleted.then_some(modified_at),
     )?;
     Ok(())
 }
 
 fn apply_remote_bookmark(tx: &Transaction, change: &ServerMutation, id: &str, value: &bokheim_domain::BookmarkState) -> Result<(), Box<dyn std::error::Error>> {
-    tx.first_book_insert(&value.book_id.canonical(), change.mutation.changed_at.storage_i64())?;
-    tx.upsert_remote_bookmark(id, &value.book_id.canonical(), &value.cfi, &value.label, value.created_at.storage_i64(), value.modified_at.storage_i64(), value.deleted.then_some(value.modified_at.storage_i64()))?;
+    tx.first_book_insert(value.content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
+    let created_at = storage_i64(value.created_at, "bookmark creation timestamp")?;
+    let modified_at = storage_i64(value.modified_at, "bookmark modification timestamp")?;
+    tx.upsert_remote_bookmark(id, value.content_hash.as_str(), &value.cfi, &value.label, created_at, modified_at, value.deleted.then_some(modified_at))?;
     Ok(())
 }
 
 fn apply_remote_book_link(tx: &Transaction, change: &ServerMutation, id: &str, value: &bokheim_domain::BookLinkState) -> Result<(), Box<dyn std::error::Error>> {
-    let changed_at = change.mutation.changed_at.storage_i64();
-    tx.first_book_insert(&value.source_book_id.canonical(), changed_at)?;
-    tx.first_book_insert(&value.target_book_id.canonical(), changed_at)?;
+    let changed_at = storage_i64(change.mutation.changed_at, "change timestamp")?;
+    tx.first_book_insert(value.source_content_hash.as_str(), changed_at)?;
+    tx.first_book_insert(value.target_content_hash.as_str(), changed_at)?;
+    let created_at = storage_i64(value.created_at, "book-link creation timestamp")?;
+    let modified_at = storage_i64(value.modified_at, "book-link modification timestamp")?;
     tx.upsert_remote_book_link(
         id,
-        &value.source_book_id.canonical(),
-        &value.target_book_id.canonical(),
+        value.source_content_hash.as_str(),
+        value.target_content_hash.as_str(),
         &value.relation,
         &value.note,
-        value.created_at.storage_i64(),
-        value.modified_at.storage_i64(),
-        value.deleted.then_some(value.modified_at.storage_i64()),
+        created_at,
+        modified_at,
+        value.deleted.then_some(modified_at),
     )?;
     Ok(())
 }
@@ -151,13 +157,13 @@ fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::DirectoryName { dir_id, .. } => ("directory_name", dir_id.as_str().to_owned(), String::new()),
         MutationBody::DirectoryParent { dir_id, .. } => ("directory_parent", dir_id.as_str().to_owned(), String::new()),
         MutationBody::DirectoryLifecycle { dir_id, .. } => ("directory_lifecycle", dir_id.as_str().to_owned(), String::new()),
-        MutationBody::BookLifecycle { book_id, .. } => ("book_lifecycle", book_id.canonical(), String::new()),
-        MutationBody::Placement { dir_id, book_id, .. } => ("placement", book_id.canonical(), dir_id.as_str().to_owned()),
-        MutationBody::ReadingPosition { book_id, .. } => ("reading_position", book_id.canonical(), String::new()),
+        MutationBody::BookLifecycle { content_hash, .. } => ("book_lifecycle", content_hash.to_string(), String::new()),
+        MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.as_str().to_owned()),
+        MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
         MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone(), String::new()),
         MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone(), String::new()),
-        MutationBody::Metadata { book_id, .. } => ("metadata", book_id.canonical(), String::new()),
+        MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
     }
 }
 
@@ -171,7 +177,7 @@ fn record_sync_state_version(tx: &Transaction, change: &ServerMutation, kind: &s
         kind,
         key,
         subkey,
-        change.mutation.changed_at.storage_i64(),
+        storage_i64(change.mutation.changed_at, "change timestamp")?,
         i64::from(change.mutation.conflict_rank),
         change.replica_id.as_str(),
         storage_i64(change.mutation.replica_seq.get(), "actor sequence")?,
@@ -259,35 +265,35 @@ fn read_sync_state_version(tx: &Transaction, kind: &str, key: &str, subkey: &str
     Ok(version)
 }
 
-fn apply_remote_book_added(tx: &Transaction, book_id: BookId, metadata: &bokheim_domain::BookMetadataState, added_at: sync_common::UnixMillis, content_hash: &ContentHash, format: BookFormat) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_remote_book_added(tx: &Transaction, content_hash: ContentHash, metadata: &bokheim_domain::BookMetadataState, added_at: sync_common::UnixMillis, format: BookFormat) -> Result<(), Box<dyn std::error::Error>> {
     // Lifecycle metadata seeds a new row (including placeholders created by a
     // placement or reader-state mutation), but it is not a second metadata
     // register. Preserve any title/author already owned by metadata state.
     let mut has_metadata = false;
-    tx.remote_book_has_metadata(&book_id.canonical(), |row| {
+    tx.remote_book_has_metadata(content_hash.as_str(), |row| {
         has_metadata = row.get(0)?;
         Ok(())
     })?;
-    tx.apply_remote_book_added(&book_id.canonical(), &metadata.title, added_at.storage_i64(), content_hash.as_str(), format.canonical_extension())?;
+    tx.apply_remote_book_added(content_hash.as_str(), &metadata.title, storage_i64(added_at, "book addition timestamp")?, format.canonical_extension())?;
     if !has_metadata {
-        super::metadata::update_book_metadata_state_preserving_ids(tx, book_id, metadata)?;
+        super::metadata::update_book_metadata_state_preserving_ids(tx, content_hash, metadata)?;
     }
     Ok(())
 }
 
-fn apply_remote_book_deleted(tx: &Transaction, book_id: BookId, changed_at: sync_common::UnixMillis) -> Result<(), Box<dyn std::error::Error>> {
-    tx.apply_remote_book_deleted(&book_id.canonical(), changed_at.storage_i64())?;
+fn apply_remote_book_deleted(tx: &Transaction, content_hash: ContentHash, changed_at: sync_common::UnixMillis) -> Result<(), Box<dyn std::error::Error>> {
+    tx.apply_remote_book_deleted(content_hash.as_str(), storage_i64(changed_at, "book deletion timestamp")?)?;
     Ok(())
 }
 
-pub(super) fn apply_remote_book_dir(tx: &Transaction, changed_at: sync_common::UnixMillis, book_id: BookId, dir_id: &DirId, present: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let stored_book_id = book_id.canonical();
+pub(super) fn apply_remote_book_dir(tx: &Transaction, changed_at: sync_common::UnixMillis, content_hash: ContentHash, dir_id: &DirId, present: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let stored_content_hash = content_hash.to_string();
     ensure_directory_placeholder(tx, dir_id)?;
-    tx.first_book_insert(&stored_book_id, changed_at.storage_i64())?;
+    tx.first_book_insert(&stored_content_hash, storage_i64(changed_at, "placement timestamp")?)?;
     if present {
-        tx.apply_remote_book_dir_added(dir_id.as_str(), &stored_book_id)?;
+        tx.apply_remote_book_dir_added(dir_id.as_str(), &stored_content_hash)?;
     } else {
-        tx.apply_remote_book_dir_removed(dir_id.as_str(), &stored_book_id)?;
+        tx.apply_remote_book_dir_removed(dir_id.as_str(), &stored_content_hash)?;
     }
     Ok(())
 }

@@ -21,8 +21,8 @@ pub(crate) struct BookCardView {
 }
 
 impl BookCardView {
-    pub(crate) fn book_id(&self) -> epub_svelte_lib::BookId {
-        self.book.book_id
+    pub(crate) fn content_hash(&self) -> epub_svelte_lib::ContentHash {
+        self.book.content_hash.clone()
     }
 
     pub(crate) fn new(row: BookCardRow, ui: LibraryContext, show_progress: bool, _cx: &mut Context<Self>) -> Self {
@@ -33,7 +33,7 @@ impl BookCardView {
         if self.book == row && self.show_progress == show_progress {
             return;
         }
-        if self.book.book_id != row.book_id {
+        if self.book.content_hash != row.content_hash {
             self.cover = None;
             self.cover_task.take();
         }
@@ -43,13 +43,13 @@ impl BookCardView {
     }
 
     fn load_cover(&mut self, cx: &mut Context<Self>) {
-        let book_id = self.book.book_id;
-        let load = self.ui.load_cover(book_id);
+        let content_hash = self.book.content_hash.clone();
+        let load = self.ui.load_cover(content_hash.clone());
         self.cover_task = Some(cx.spawn(async move |view, cx| {
             let result = load.await;
             let _ = view.update(cx, |view, cx| {
                 view.cover_task.take();
-                if view.book.book_id != book_id {
+                if view.book.content_hash != content_hash {
                     return;
                 }
                 match result {
@@ -57,9 +57,9 @@ impl BookCardView {
                         view.cover = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
                         cx.notify();
                     }
-                    Ok(Some(_)) => log::error!("thumbnail for book {book_id} is not JPEG"),
+                    Ok(Some(_)) => log::error!("thumbnail for book {content_hash} is not JPEG"),
                     Ok(None) => {}
-                    Err(error) => log::error!("failed to load thumbnail for book {book_id}: {error}"),
+                    Err(error) => log::error!("failed to load thumbnail for book {content_hash}: {error}"),
                 }
             });
         }));
@@ -74,14 +74,14 @@ impl Render for BookCardView {
         let theme = components::browser_theme(cx);
         let book = self.book.clone();
         let cover = self.cover.clone();
-        let element_id = format!("book-card-{}", book.book_id);
+        let element_id = format!("book-card-{}", book.content_hash);
 
         let open = {
-            let book_id = book.book_id;
+            let content_hash = book.content_hash.clone();
             let title = book.title.clone();
             let ui = self.ui.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
-                ui.open_reader(book_id, title.clone(), cx);
+                ui.open_reader(content_hash.clone(), title.clone(), cx);
             }
         };
 

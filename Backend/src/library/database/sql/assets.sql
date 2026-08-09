@@ -1,31 +1,31 @@
 -- Independent remote presence, local references, and durable transfer intent.
 -- name: get_book_materialization_metadata?
--- param: book_id: &str
-SELECT COALESCE(title, ''), publication_metadata, contributors_for_book(id), format
+-- param: content_hash: &str
+SELECT COALESCE(title, ''), publication_metadata, contributors_for_book(row_id), format
 FROM book
-WHERE id = :book_id;
+WHERE content_hash = :content_hash;
 
 -- name: book_dir_file_name_claimed?
 -- param: dir_id: &str
 -- param: file_name: &str
--- param: book_id: &str
+-- param: content_hash: &str
 SELECT EXISTS(
     SELECT 1
     FROM book_dir
     WHERE dir_id = :dir_id
       AND file_name = :file_name
       AND deleted_at IS NULL
-      AND book_id <> :book_id
+      AND book_row_id <> (SELECT row_id FROM book WHERE content_hash=:content_hash)
 );
 
 -- name: set_book_dir_file_name!
 -- param: file_name: &str
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 UPDATE book_dir
 SET file_name = :file_name
 WHERE dir_id = :dir_id
-  AND book_id = :book_id
+  AND book_row_id = (SELECT row_id FROM book WHERE content_hash=:content_hash)
   AND deleted_at IS NULL;
 
 -- name: upsert_blob_local_ref!
@@ -131,10 +131,10 @@ WITH RECURSIVE dir_paths(id, parent_id, name, path) AS (
     WHERE d.deleted_at IS NULL
 )
 SELECT
-    bd.book_id,
+    book.content_hash,
     CASE WHEN dir_paths.path = '/' THEN '/' || bd.file_name ELSE dir_paths.path || '/' || bd.file_name END AS file_path
 FROM book_dir bd
-JOIN book ON book.id = bd.book_id
+JOIN book ON book.row_id = bd.book_row_id
 JOIN dir_paths ON bd.dir_id = dir_paths.id
 WHERE book.content_hash = :content_hash
   AND bd.deleted_at IS NULL
@@ -152,12 +152,12 @@ SELECT id, path FROM paths WHERE id!='__root__';
 
 -- name: book_placement_expects_hash?
 -- param: dir_id: &str
--- param: book_id: &str
+-- param: content_hash: &str
 -- param: file_name: &str
 -- param: content_hash: &str
 SELECT EXISTS(
     SELECT 1 FROM book_dir
-    JOIN book ON book.id = book_dir.book_id
-    WHERE book_dir.dir_id=:dir_id AND book_dir.book_id=:book_id AND book_dir.file_name=:file_name
+    JOIN book ON book.row_id = book_dir.book_row_id
+    WHERE book_dir.dir_id=:dir_id AND book.content_hash=:content_hash AND book_dir.file_name=:file_name
       AND book.content_hash=:content_hash AND book_dir.deleted_at IS NULL
 );

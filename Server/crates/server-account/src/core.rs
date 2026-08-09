@@ -10,7 +10,6 @@ use chrono::{DateTime, Utc};
 pub struct AuthenticatedUser {
     pub user_id: String,
     pub email: String,
-    pub is_admin: bool,
 }
 
 /// A newly issued opaque server-side session. The raw token crosses the

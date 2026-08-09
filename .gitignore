@@ -91,3 +91,7 @@ venv/
 /reference/plato/
 /data-analysis/
 /MobileApp/src/vendor/foliate-js/html.js
+
+# Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
+# live outside this directory.
+/HtmlRenderer/testdata/wpt/

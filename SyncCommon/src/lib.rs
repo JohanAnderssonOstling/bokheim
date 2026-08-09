@@ -8,9 +8,9 @@ pub mod mutation_ids;
 pub use mutation_ids::{MutationId, MutationIdError};
 
 pub use bokheim_identifiers::{
-    AgentId, AgentIdError, AuthorId, AuthorIdError, BookId, ClientId, ContentHash,
-    ContentHashParseError, ContributorId, DirId, DomainTextError, FileName, LibraryId,
-    PublisherId, TimestampError, UnixMillis,
+    AgentId, AgentIdError, AuthorId, AuthorIdError, ClientId, ContentHash,
+    ContributorId, DirId, DomainTextError, FileName, LibraryId,
+    PublisherId, UnixMillis,
 };
 pub use bokheim_algorithms::{
     audiobook_position_millis, audiobook_reading_position, pdf_page_from_reading_position,
@@ -183,6 +183,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identifiers_use_their_canonical_strings_in_json_and_bincode() {
+        let content_hash = ContentHash::new(&"a".repeat(64));
+        let agent_id = AgentId::from_migration_seed(b"canonical-wire-shape");
+        let mutation_id = MutationId::parse("12345678-1234-5678-9234-567812345678").unwrap();
+
+        assert_eq!(serde_json::to_value(&content_hash).unwrap(), serde_json::json!(content_hash.as_str()));
+        assert_eq!(serde_json::to_value(&content_hash).unwrap(), serde_json::json!(content_hash.as_str()));
+        assert_eq!(serde_json::to_value(agent_id).unwrap(), serde_json::json!(agent_id.to_string()));
+        assert_eq!(serde_json::to_value(mutation_id).unwrap(), serde_json::json!(mutation_id.to_string()));
+
+        assert_eq!(wire::encode(&content_hash).unwrap(), wire::encode(&content_hash.as_str()).unwrap());
+        assert_eq!(wire::encode(&agent_id).unwrap(), wire::encode(&agent_id.to_string()).unwrap());
+        assert_eq!(wire::encode(&mutation_id).unwrap(), wire::encode(&mutation_id.to_string()).unwrap());
+    }
+
+    #[test]
     fn wire_mutation_preserves_an_absent_blob_reference_in_binary_encoding() {
         let mutation = WireMutation {
             mutation_id: MutationId::new(),
@@ -192,7 +208,7 @@ mod tests {
             value: Vec::new(),
             conflict_rank: 0,
             blob_reference: None,
-            changed_at: UnixMillis::new(1).unwrap(),
+            changed_at: 1,
             replica_seq: ReplicaSeq::new(1).unwrap(),
         };
         let encoded = wire::encode(&mutation).unwrap();

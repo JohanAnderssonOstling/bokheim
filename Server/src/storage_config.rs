@@ -3,8 +3,7 @@ use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::path::{Component, Path, PathBuf};
 
-const BOOKS_DIRECTORY: &str = "BOKHEIM_BOOKS_DIR";
-const THUMBNAILS_DIRECTORY: &str = "BOKHEIM_THUMBNAILS_DIR";
+const ASSETS_DIRECTORY: &str = "BOKHEIM_ASSETS_DIR";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoragePaths {
@@ -39,21 +38,12 @@ impl StoragePaths {
     }
 
     fn from_values(mut value: impl FnMut(&str) -> Option<OsString>) -> Result<Self, StorageConfigError> {
-        match (value(BOOKS_DIRECTORY), value(THUMBNAILS_DIRECTORY)) {
-            (None, None) => Ok(Self { books: PathBuf::from("./books"), thumbnails: PathBuf::from("./thumbnails") }),
-            (Some(_), None) => Err(StorageConfigError::new(format!("{THUMBNAILS_DIRECTORY} is required when {BOOKS_DIRECTORY} is configured"))),
-            (None, Some(_)) => Err(StorageConfigError::new(format!("{BOOKS_DIRECTORY} is required when {THUMBNAILS_DIRECTORY} is configured"))),
-            (Some(books), Some(thumbnails)) => Self::production(PathBuf::from(books), PathBuf::from(thumbnails)),
-        }
-    }
-
-    fn production(books: PathBuf, thumbnails: PathBuf) -> Result<Self, StorageConfigError> {
-        validate_production_path(BOOKS_DIRECTORY, &books)?;
-        validate_production_path(THUMBNAILS_DIRECTORY, &thumbnails)?;
-        if books.starts_with(&thumbnails) || thumbnails.starts_with(&books) {
-            return Err(StorageConfigError::new(format!("{BOOKS_DIRECTORY} and {THUMBNAILS_DIRECTORY} must be separate, non-nested directories")));
-        }
-        Ok(Self { books, thumbnails })
+        let Some(root) = value(ASSETS_DIRECTORY) else {
+            return Ok(Self { books: PathBuf::from("./books"), thumbnails: PathBuf::from("./thumbnails") });
+        };
+        let root = PathBuf::from(root);
+        validate_production_path(ASSETS_DIRECTORY, &root)?;
+        Ok(Self { books: root.join("books"), thumbnails: root.join("thumbnails") })
     }
 }
 
@@ -83,25 +73,14 @@ mod tests {
     }
 
     #[test]
-    fn production_paths_are_an_atomic_pair() {
-        let error = paths(&[(BOOKS_DIRECTORY, "/srv/bokheim/books")]).unwrap_err();
-        assert!(error.to_string().contains(THUMBNAILS_DIRECTORY));
+    fn production_root_must_be_absolute_and_normalized() {
+        assert!(paths(&[(ASSETS_DIRECTORY, "assets")]).is_err());
+        assert!(paths(&[(ASSETS_DIRECTORY, "/srv/bokheim/../assets")]).is_err());
     }
 
     #[test]
-    fn production_paths_must_be_absolute_normalized_and_separate() {
-        for values in [
-            [(BOOKS_DIRECTORY, "books"), (THUMBNAILS_DIRECTORY, "/srv/bokheim/thumbnails")],
-            [(BOOKS_DIRECTORY, "/srv/bokheim/../books"), (THUMBNAILS_DIRECTORY, "/srv/bokheim/thumbnails")],
-            [(BOOKS_DIRECTORY, "/srv/bokheim/assets"), (THUMBNAILS_DIRECTORY, "/srv/bokheim/assets/thumbnails")],
-        ] {
-            assert!(paths(&values).is_err());
-        }
-    }
-
-    #[test]
-    fn accepts_distinct_absolute_production_paths() {
-        let configured = paths(&[(BOOKS_DIRECTORY, "/var/lib/bokheim/assets/books"), (THUMBNAILS_DIRECTORY, "/var/lib/bokheim/assets/thumbnails")]).unwrap();
+    fn derives_storage_directories_from_the_production_root() {
+        let configured = paths(&[(ASSETS_DIRECTORY, "/var/lib/bokheim/assets")]).unwrap();
         assert_eq!(configured.into_parts(), (PathBuf::from("/var/lib/bokheim/assets/books"), PathBuf::from("/var/lib/bokheim/assets/thumbnails")));
     }
 }

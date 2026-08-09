@@ -3,20 +3,20 @@ use sync_common::{ClientId, DeclaredBlobReference, DirId, FileName, MutationId, 
 use sync_common::wire;
 use serde::{Deserialize, Serialize};
 use crate::{AnnotationState, BookmarkState, BookLifecycleState, BookLinkState, BookMetadataState, ReadingPositionState};
-use bokheim_identifiers::BookId;
+use bokheim_identifiers::ContentHash;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StateKey {
     DirectoryName(DirId),
     DirectoryParent(DirId),
     DirectoryLifecycle(DirId),
-    BookLifecycle(BookId),
-    Placement { book_id: BookId, dir_id: DirId },
-    ReadingPosition(BookId),
+    BookLifecycle(ContentHash),
+    Placement { content_hash: ContentHash, dir_id: DirId },
+    ReadingPosition(ContentHash),
     Annotation(String),
     Bookmark(String),
     BookLink(String),
-    Metadata(BookId),
+    Metadata(ContentHash),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,13 +25,13 @@ pub enum MutationBody {
     DirectoryName { dir_id: DirId, name: FileName },
     DirectoryParent { dir_id: DirId, parent_id: DirId },
     DirectoryLifecycle { dir_id: DirId, deleted: bool },
-    BookLifecycle { book_id: BookId, value: BookLifecycleState },
-    Placement { dir_id: DirId, book_id: BookId, present: bool },
-    ReadingPosition { book_id: BookId, value: ReadingPositionState },
+    BookLifecycle { content_hash: ContentHash, value: BookLifecycleState },
+    Placement { dir_id: DirId, content_hash: ContentHash, present: bool },
+    ReadingPosition { content_hash: ContentHash, value: ReadingPositionState },
     Annotation { annotation_id: String, value: AnnotationState },
     Bookmark { bookmark_id: String, value: BookmarkState },
     BookLink { link_id: String, value: BookLinkState },
-    Metadata { book_id: BookId, value: BookMetadataState },
+    Metadata { content_hash: ContentHash, value: BookMetadataState },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,19 +115,19 @@ impl MutationBody {
             Self::DirectoryName { dir_id, name } => (dir_id.as_str().to_owned(), String::new(), wire::encode(name)?, None),
             Self::DirectoryParent { dir_id, parent_id } => (dir_id.as_str().to_owned(), String::new(), wire::encode(parent_id)?, None),
             Self::DirectoryLifecycle { dir_id, deleted } => (dir_id.as_str().to_owned(), String::new(), wire::encode(deleted)?, None),
-            Self::BookLifecycle { book_id, value } => {
+            Self::BookLifecycle { content_hash, value } => {
                 let blob_reference = match value {
-                    BookLifecycleState::Present { content_hash, .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
+                    BookLifecycleState::Present { .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
                     BookLifecycleState::Deleted => DeclaredBlobReference { present: false, content_hash: None },
                 };
-                (book_id.canonical(), String::new(), wire::encode(value)?, Some(blob_reference))
+                (content_hash.to_string(), String::new(), wire::encode(value)?, Some(blob_reference))
             }
-            Self::Placement { dir_id, book_id, present } => (book_id.canonical(), dir_id.as_str().to_owned(), wire::encode(present)?, None),
-            Self::ReadingPosition { book_id, value } => (book_id.canonical(), String::new(), wire::encode(value)?, None),
+            Self::Placement { dir_id, content_hash, present } => (content_hash.to_string(), dir_id.as_str().to_owned(), wire::encode(present)?, None),
+            Self::ReadingPosition { content_hash, value } => (content_hash.to_string(), String::new(), wire::encode(value)?, None),
             Self::Annotation { annotation_id, value } => (annotation_id.clone(), String::new(), wire::encode(value)?, None),
             Self::Bookmark { bookmark_id, value } => (bookmark_id.clone(), String::new(), wire::encode(value)?, None),
             Self::BookLink { link_id, value } => (link_id.clone(), String::new(), wire::encode(value)?, None),
-            Self::Metadata { book_id, value } => (book_id.canonical(), String::new(), wire::encode(value)?, None),
+            Self::Metadata { content_hash, value } => (content_hash.to_string(), String::new(), wire::encode(value)?, None),
         };
         Ok(WireMutation { mutation_id, kind: self.kind().to_owned(), entity_key, entity_subkey, value, conflict_rank: self.conflict_rank(), blob_reference, changed_at, replica_seq })
     }
@@ -141,13 +141,13 @@ impl MutationBody {
             "directory_name" => Self::DirectoryName { dir_id: DirId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, name: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             "directory_parent" => Self::DirectoryParent { dir_id: DirId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, parent_id: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             "directory_lifecycle" => Self::DirectoryLifecycle { dir_id: DirId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, deleted: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            "book_lifecycle" => Self::BookLifecycle { book_id: BookId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            "placement" => Self::Placement { book_id: BookId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, dir_id: DirId::parse(&wire_mutation.entity_subkey).map_err(|error| wire::WireError::Decode(error.to_string()))?, present: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            "reading_position" => Self::ReadingPosition { book_id: BookId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
+            "book_lifecycle" => Self::BookLifecycle { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
+            "placement" => Self::Placement { content_hash: ContentHash::new(&key.as_str()), dir_id: DirId::parse(&wire_mutation.entity_subkey).map_err(|error| wire::WireError::Decode(error.to_string()))?, present: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
+            "reading_position" => Self::ReadingPosition { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             "annotation" => Self::Annotation { annotation_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             "bookmark" => Self::Bookmark { bookmark_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             "book_link" => Self::BookLink { link_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            "metadata" => Self::Metadata { book_id: BookId::parse(key).map_err(|error| wire::WireError::Decode(error.to_string()))?, value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
+            "metadata" => Self::Metadata { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
             _ => return Ok(None),
         };
         Ok(Some(body))
@@ -161,13 +161,13 @@ impl MutationBody {
             Self::DirectoryName { dir_id, name: _ } => StateKey::DirectoryName(dir_id.clone()),
         Self::DirectoryParent { dir_id, parent_id: _ } => StateKey::DirectoryParent(dir_id.clone()),
         Self::DirectoryLifecycle { dir_id, deleted: _ } => StateKey::DirectoryLifecycle(dir_id.clone()),
-        Self::BookLifecycle { book_id, value: _ } => StateKey::BookLifecycle(*book_id),
-        Self::Placement { dir_id, book_id, present: _ } => StateKey::Placement { book_id: *book_id, dir_id: dir_id.clone() },
-        Self::ReadingPosition { book_id, value: _ } => StateKey::ReadingPosition(*book_id),
+        Self::BookLifecycle { content_hash, value: _ } => StateKey::BookLifecycle(content_hash.clone()),
+        Self::Placement { dir_id, content_hash, present: _ } => StateKey::Placement { content_hash: content_hash.clone(), dir_id: dir_id.clone() },
+        Self::ReadingPosition { content_hash, value: _ } => StateKey::ReadingPosition(content_hash.clone()),
             Self::Annotation { annotation_id, value: _ } => StateKey::Annotation(annotation_id.clone()),
             Self::Bookmark { bookmark_id, value: _ } => StateKey::Bookmark(bookmark_id.clone()),
             Self::BookLink { link_id, value: _ } => StateKey::BookLink(link_id.clone()),
-            Self::Metadata { book_id, value: _ } => StateKey::Metadata(*book_id),
+            Self::Metadata { content_hash, value: _ } => StateKey::Metadata(content_hash.clone()),
         }
     }
 

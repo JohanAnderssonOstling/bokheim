@@ -23,7 +23,7 @@ pub(crate) use bokheim_library_files::LibraryRoot;
 pub use library::LibraryBackend;
 pub use sync::blob::{BlobKey, BlobKind, TransferJobKind};
 pub use sync::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
-pub use sync_common::{AuthorId, BookId, ContentHash, DirId, LibraryId};
+pub use sync_common::{AuthorId, ContentHash, DirId, LibraryId};
 
 /// Initialize the logging system. Call this once at the start of your application.
 ///
@@ -45,21 +45,12 @@ pub fn init_logging() {
 
 #[cfg(test)]
 mod domain_tests {
-    use super::{BookId, ContentHash};
+    use super::{ContentHash};
 
     #[test]
-    fn book_id_derives_from_the_first_eight_blake3_bytes() {
+    fn full_content_hash_is_the_book_identity() {
         let digest = blake3::hash(b"typed identity regression");
-        let content_hash = ContentHash::parse(digest.to_hex().as_ref()).unwrap();
-        let mut expected_bytes = [0_u8; 8];
-        expected_bytes.copy_from_slice(&digest.as_bytes()[..8]);
-
-        assert_eq!(BookId::from_content_hash(&content_hash), BookId::new(u64::from_le_bytes(expected_bytes)));
-    }
-
-    #[test]
-    fn book_id_rejects_synthetic_and_malformed_content_keys() {
-        assert!(ContentHash::parse("remote:d1:b1:f.epub").is_err());
-        assert!(ContentHash::parse(&"z".repeat(64)).is_err());
+        let content_hash = ContentHash::new(&digest.to_hex().as_str());
+        assert_eq!(content_hash.as_str(), digest.to_hex().as_str());
     }
 }

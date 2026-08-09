@@ -177,7 +177,7 @@ impl Render for SyncPage {
                         Some(error) => format!("{} · {} · attempt {} · {}", group.library_name, transfer.kind.label(), transfer.attempts, error),
                         None => format!("{} · {} · {}", group.library_name, transfer.kind.label(), path),
                     };
-                    list = list.child(components::cloud_row(theme).child(components::cloud_row_identity(transfer.book_id.as_deref().unwrap_or("Library asset"), detail, theme)).child(components::cloud_badge(
+                    list = list.child(components::cloud_row(theme).child(components::cloud_row_identity(transfer.book_content_hash.as_deref().unwrap_or("Library asset"), detail, theme)).child(components::cloud_badge(
                         transfer.state.label(),
                         matches!(transfer.state, epub_svelte_lib::TransferState::Running),
                         theme,

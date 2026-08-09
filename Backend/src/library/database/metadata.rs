@@ -1,5 +1,7 @@
 use super::authors::{prepare_contributors, prepare_publication_agents, replace_book_contributors, AuthorIdPolicy};
 use super::*;
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use sync_common::Contributor;
 #[cfg(test)]
 use sync_common::MarcRelatorCode;
@@ -7,32 +9,43 @@ use sync_common::MarcRelatorCode;
 /// The book lifecycle trigger can therefore publish title and ordered contributors without a
 /// second metadata mutation. A later rescan remains a normal metadata update.
 #[cfg(test)]
-pub fn insert_scanned_book(transaction: &Transaction, book_id: BookId, title: &str, author: &str) -> Result<(), rusqlite::Error> {
+pub fn insert_scanned_book(transaction: &Transaction, content_hash: ContentHash, title: &str, author: &str) -> Result<(), rusqlite::Error> {
     let contributors = if author.trim().is_empty() { Vec::new() } else { vec![Contributor::new(author, None, MarcRelatorCode(*b"aut")).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?] };
-    insert_scanned_book_contributors(transaction, book_id, title, &contributors)
+    insert_scanned_book_contributors(transaction, content_hash, title, &contributors)
 }
 #[cfg(test)]
-pub fn insert_scanned_book_contributors(transaction: &Transaction, book_id: BookId, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
-    insert_scanned_book_metadata(transaction, book_id, &BookMetadataState { title: title.to_owned(), contributors: contributors.to_vec(), description: String::new(), publication: PublicationMetadata::default() }, BookFormat::Epub)
+pub fn insert_scanned_book_contributors(transaction: &Transaction, content_hash: ContentHash, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
+    insert_scanned_book_metadata(transaction, content_hash, &BookMetadataState { title: title.to_owned(), contributors: contributors.to_vec(), description: String::new(), publication: PublicationMetadata::default() }, BookFormat::Epub)
 }
-pub fn insert_scanned_book_metadata(transaction: &Transaction, book_id: BookId, metadata: &BookMetadataState, format: BookFormat) -> Result<(), rusqlite::Error> {
+pub fn insert_scanned_book_metadata(transaction: &Transaction, content_hash: ContentHash, metadata: &BookMetadataState, format: BookFormat) -> Result<(), rusqlite::Error> {
+    let existed: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [content_hash.as_str()], |row| row.get(0))?;
     let title = &metadata.title;
-    let stored_contributors = prepare_contributors(transaction, &metadata.contributors, AuthorIdPolicy::ReuseProvisionalNameCandidate, Some(book_id))?;
+    let stored_contributors = prepare_contributors(transaction, &metadata.contributors, AuthorIdPolicy::ReuseProvisionalNameCandidate, Some(content_hash.clone()))?;
     let publication = prepare_publication_agents(transaction, &metadata.publication, AuthorIdPolicy::ReuseProvisionalNameCandidate)?;
     let encoded_publication = sync_common::wire::encode(&publication).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let description = normalized_description(&metadata.description);
     let added_at = unix_millis()?;
-    // Write book_contributor rows before the book row itself (deferring FK
-    // enforcement to commit) so that trig_book_added's contributors_for_book(..)
-    // call already sees the full contributor list on a brand-new book. Doing
-    // it in the other order would make the initial book_lifecycle mutation
-    // carry an empty contributor list, and the book_contributor insert
-    // triggers firing afterward would then enqueue a spurious extra
-    // `metadata` mutation alongside `book_lifecycle` for a fresh scan.
-    transaction.pragma_update(None, "defer_foreign_keys", "1")?;
-    replace_book_contributors(transaction, book_id, &stored_contributors)?;
-    transaction.upsert_scanned_book_metadata(&book_id.canonical(), title, &description, &encoded_publication, added_at, format.canonical_extension())?;
-    replace_publication_metadata_projections(transaction, book_id, &publication)?;
+    // The local relationship rows reference SQLite's integer key, so establish
+    // the content-hash boundary row before projecting contributors into it.
+    transaction.upsert_scanned_book_metadata(content_hash.as_str(), title, &description, &encoded_publication, added_at, format.canonical_extension())?;
+    replace_book_contributors(transaction, content_hash.clone(), &stored_contributors)?;
+    replace_publication_metadata_projections(transaction, content_hash, &publication)?;
+    if !existed {
+        // The insert trigger runs before contributor projections exist. Fold
+        // those projections into the initial lifecycle body and remove the
+        // redundant metadata cell produced while building the new row.
+        transaction.execute("DELETE FROM sync_outbox WHERE state_kind='metadata' AND state_key=?1", [content_hash.as_str()])?;
+        transaction.execute(
+            "UPDATE sync_outbox
+             SET body=(SELECT bokheim_mutation('book_lifecycle', book.content_hash, 0,
+                         COALESCE(book.title, book.content_hash), contributors_for_book(book.row_id),
+                         COALESCE(book.description, ''), book.publication_metadata,
+                         COALESCE(book.added_at, 0), book.format)
+                       FROM book WHERE book.content_hash=?1)
+             WHERE state_kind='book_lifecycle' AND state_key=?1",
+            [content_hash.as_str()],
+        )?;
+    }
     Ok(())
 }
 fn identifier_scheme_label(scheme: &PublicationIdentifierScheme) -> String {
@@ -52,8 +65,8 @@ fn identifier_scheme_label(scheme: &PublicationIdentifierScheme) -> String {
         PublicationIdentifierScheme::Other(value) => format!("other:{value}"),
     }
 }
-fn replace_publication_metadata_projections(transaction: &Transaction, book_id: BookId, metadata: &PublicationMetadata) -> Result<(), rusqlite::Error> {
-    let id = book_id.canonical();
+fn replace_publication_metadata_projections(transaction: &Transaction, content_hash: ContentHash, metadata: &PublicationMetadata) -> Result<(), rusqlite::Error> {
+    let id = content_hash.to_string();
     transaction.clear_book_publishers(&id)?;
     transaction.clear_book_identifiers(&id)?;
     transaction.clear_book_languages(&id)?;
@@ -121,8 +134,8 @@ pub struct AuthorCreditIdentity {
 /// scoped to authors, matching the existing product behavior: the reidentify
 /// UI does not yet operate on translators/editors/etc.
 #[cfg(test)]
-fn reidentify_book_credit(transaction: &Transaction, book_id: BookId, position: usize, identity_local_id: i64, _author_id: AuthorId) -> Result<(), rusqlite::Error> {
-    transaction.execute("UPDATE book_contributor SET author_identity_id=?1 WHERE book_id=?2 AND position=?3 AND role=X'617574'", rusqlite::params![identity_local_id, book_id.canonical(), i64::try_from(position).unwrap_or(i64::MAX)])?;
+fn reidentify_book_credit(transaction: &Transaction, content_hash: ContentHash, position: usize, identity_local_id: i64, _author_id: AuthorId) -> Result<(), rusqlite::Error> {
+        transaction.execute("UPDATE book_contributor SET author_identity_id=?1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2) AND position=?3 AND role=X'617574'", rusqlite::params![identity_local_id, content_hash.as_str(), i64::try_from(position).unwrap_or(i64::MAX)])?;
     Ok(())
 }
 /// Splits one credited occurrence away from an author that turned out to be a
@@ -130,9 +143,9 @@ fn reidentify_book_credit(transaction: &Transaction, book_id: BookId, position: 
 /// only the stable identity referenced by this book position changes. Scoped
 /// to author-role (`"aut"`) rows.
 #[cfg(test)]
-pub fn split_book_author(transaction: &Transaction, book_id: BookId, position: usize) -> Result<AuthorId, rusqlite::Error> {
+pub fn split_book_author(transaction: &Transaction, content_hash: ContentHash, position: usize) -> Result<AuthorId, rusqlite::Error> {
     let credited_name: String =
-        transaction.query_row("SELECT name FROM book_contributor WHERE book_id=?1 AND position=?2 AND role=X'617574'", rusqlite::params![book_id.canonical(), i64::try_from(position).unwrap_or(i64::MAX)], |row| row.get(0))?;
+        transaction.query_row("SELECT name FROM book_contributor WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND position=?2 AND role=X'617574'", rusqlite::params![content_hash.as_str(), i64::try_from(position).unwrap_or(i64::MAX)], |row| row.get(0))?;
     let preferred_name = AuthorName::parse(&credited_name).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let author_id = AuthorId::new();
     transaction.execute(
@@ -140,7 +153,7 @@ pub fn split_book_author(transaction: &Transaction, book_id: BookId, position: u
         rusqlite::params![author_id.to_string(), preferred_name.as_str(), preferred_name.match_key().as_str(), unix_millis()?],
     )?;
     let identity_local_id = transaction.last_insert_rowid();
-    reidentify_book_credit(transaction, book_id, position, identity_local_id, author_id)?;
+    reidentify_book_credit(transaction, content_hash, position, identity_local_id, author_id)?;
     Ok(author_id)
 }
 /// Resolves one exact book credit using an authority identifier. A normalized
@@ -149,14 +162,14 @@ pub fn split_book_author(transaction: &Transaction, book_id: BookId, position: u
 /// the same authority id converge on one identity. Scoped to author-role
 /// (`"aut"`) rows.
 #[cfg(test)]
-pub fn resolve_book_author_identity(transaction: &Transaction, book_id: BookId, position: usize, preferred_name: &str, external_id: &ExternalAuthorId) -> Result<AuthorId, rusqlite::Error> {
+pub fn resolve_book_author_identity(transaction: &Transaction, content_hash: ContentHash, position: usize, preferred_name: &str, external_id: &ExternalAuthorId) -> Result<AuthorId, rusqlite::Error> {
     let preferred_name = AuthorName::parse(preferred_name).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let position = i64::try_from(position).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let (current_local_id, current_stable_id, current_is_provisional): (i64, String, bool) = transaction.query_row(
         "SELECT author_identity.id, author_identity.stable_id, author_identity.is_provisional
          FROM book_contributor JOIN author_identity ON author_identity.id=book_contributor.author_identity_id
-         WHERE book_contributor.book_id=?1 AND book_contributor.position=?2 AND book_contributor.role=X'617574'",
-        rusqlite::params![book_id.canonical(), position],
+         WHERE book_contributor.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND book_contributor.position=?2 AND book_contributor.role=X'617574'",
+        rusqlite::params![content_hash.as_str(), position],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let existing: Option<(i64, String)> = transaction
@@ -187,7 +200,7 @@ pub fn resolve_book_author_identity(transaction: &Transaction, book_id: BookId, 
         rusqlite::params![target_local_id, external_id.authority().as_str(), external_id.value(), unix_millis()?],
     )?;
     if target_local_id != current_local_id {
-        reidentify_book_credit(transaction, book_id, usize::try_from(position).map_err(|_| invalid_integer_column(0, "author position must not be negative"))?, target_local_id, target_author_id)?;
+        reidentify_book_credit(transaction, content_hash, usize::try_from(position).map_err(|_| invalid_integer_column(0, "author position must not be negative"))?, target_local_id, target_author_id)?;
         transaction.execute(
             "DELETE FROM author_identity
              WHERE id=?1 AND is_provisional=1
@@ -213,17 +226,17 @@ pub fn attach_external_author_id(transaction: &Transaction, author_id: AuthorId,
     Ok(())
 }
 #[cfg(test)]
-pub fn get_book_author_identities(conn: &Connection, book_id: BookId) -> Result<Vec<AuthorCreditIdentity>, rusqlite::Error> {
+pub fn get_book_author_identities(conn: &Connection, content_hash: ContentHash) -> Result<Vec<AuthorCreditIdentity>, rusqlite::Error> {
     let mut statement = conn.prepare(
         "SELECT book_contributor.position, book_contributor.name, author_identity.stable_id, author_identity.preferred_name,
                 author_external_identifier.authority, author_external_identifier.external_id
          FROM book_contributor
          LEFT JOIN author_identity ON author_identity.id=book_contributor.author_identity_id
          LEFT JOIN author_external_identifier ON author_external_identifier.author_identity_id=author_identity.id
-         WHERE book_contributor.book_id=?1 AND book_contributor.role=X'617574'
+         WHERE book_contributor.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND book_contributor.role=X'617574'
          ORDER BY book_contributor.position, author_external_identifier.authority, author_external_identifier.external_id",
     )?;
-    let mut rows = statement.query([book_id.canonical()])?;
+    let mut rows = statement.query([content_hash.as_str()])?;
     let mut credits = Vec::<AuthorCreditIdentity>::new();
     while let Some(row) = rows.next()? {
         let raw_position: i64 = row.get(0)?;
@@ -244,26 +257,26 @@ pub fn get_book_author_identities(conn: &Connection, book_id: BookId) -> Result<
     Ok(credits)
 }
 #[cfg(test)]
-pub fn update_book_metadata(transaction: &Transaction, book_id: BookId, title: &str, author: &str) -> Result<(), rusqlite::Error> {
+pub fn update_book_metadata(transaction: &Transaction, content_hash: ContentHash, title: &str, author: &str) -> Result<(), rusqlite::Error> {
     let contributors = if author.trim().is_empty() { Vec::new() } else { vec![Contributor::new(author, None, MarcRelatorCode(*b"aut")).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?] };
-    update_book_metadata_contributors(transaction, book_id, title, &contributors)
+    update_book_metadata_contributors(transaction, content_hash, title, &contributors)
 }
 #[cfg(test)]
-pub fn update_book_metadata_contributors(transaction: &Transaction, book_id: BookId, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
-    update_book_metadata_contributors_with_policy(transaction, book_id, title, contributors, AuthorIdPolicy::ReuseProvisionalNameCandidate)
+pub fn update_book_metadata_contributors(transaction: &Transaction, content_hash: ContentHash, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
+    update_book_metadata_contributors_with_policy(transaction, content_hash, title, contributors, AuthorIdPolicy::ReuseProvisionalNameCandidate)
 }
-pub(crate) fn update_book_metadata_contributors_preserving_ids(transaction: &Transaction, book_id: BookId, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
-    update_book_metadata_contributors_with_policy(transaction, book_id, title, contributors, AuthorIdPolicy::PreserveIncoming)
+pub(crate) fn update_book_metadata_contributors_preserving_ids(transaction: &Transaction, content_hash: ContentHash, title: &str, contributors: &[Contributor]) -> Result<(), rusqlite::Error> {
+    update_book_metadata_contributors_with_policy(transaction, content_hash, title, contributors, AuthorIdPolicy::PreserveIncoming)
 }
-fn update_book_metadata_contributors_with_policy(transaction: &Transaction, book_id: BookId, title: &str, contributors: &[Contributor], policy: AuthorIdPolicy) -> Result<(), rusqlite::Error> {
-    let stored_contributors = prepare_contributors(transaction, contributors, policy, Some(book_id))?;
-    transaction.update_book_title(title, &book_id.canonical())?;
-    replace_book_contributors(transaction, book_id, &stored_contributors)?;
+fn update_book_metadata_contributors_with_policy(transaction: &Transaction, content_hash: ContentHash, title: &str, contributors: &[Contributor], policy: AuthorIdPolicy) -> Result<(), rusqlite::Error> {
+    let stored_contributors = prepare_contributors(transaction, contributors, policy, Some(content_hash.clone()))?;
+    transaction.update_book_title(title, content_hash.as_str())?;
+    replace_book_contributors(transaction, content_hash, &stored_contributors)?;
     Ok(())
 }
-pub fn update_book_description(transaction: &Transaction, book_id: BookId, description: &str) -> Result<(), rusqlite::Error> {
+pub fn update_book_description(transaction: &Transaction, content_hash: ContentHash, description: &str) -> Result<(), rusqlite::Error> {
     let normalized = normalized_description(description);
-    transaction.update_book_description(&normalized, &book_id.canonical())?;
+    transaction.update_book_description(&normalized, content_hash.as_str())?;
     Ok(())
 }
 fn normalized_description(description: &str) -> String {
@@ -276,15 +289,15 @@ fn normalized_description(description: &str) -> String {
     }
     normalized
 }
-fn update_book_publication_metadata(transaction: &Transaction, book_id: BookId, metadata: &PublicationMetadata, policy: AuthorIdPolicy) -> Result<(), rusqlite::Error> {
+fn update_book_publication_metadata(transaction: &Transaction, content_hash: ContentHash, metadata: &PublicationMetadata, policy: AuthorIdPolicy) -> Result<(), rusqlite::Error> {
     let metadata = prepare_publication_agents(transaction, metadata, policy)?;
     let encoded = sync_common::wire::encode(&metadata).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    transaction.update_book_publication_metadata(&encoded, &book_id.canonical())?;
-    replace_publication_metadata_projections(transaction, book_id, &metadata)?;
+    transaction.update_book_publication_metadata(&encoded, content_hash.as_str())?;
+    replace_publication_metadata_projections(transaction, content_hash, &metadata)?;
     Ok(())
 }
-pub(super) fn update_book_metadata_state_preserving_ids(transaction: &Transaction, book_id: BookId, metadata: &BookMetadataState) -> Result<(), rusqlite::Error> {
-    update_book_metadata_contributors_preserving_ids(transaction, book_id, &metadata.title, &metadata.contributors)?;
-    update_book_description(transaction, book_id, &metadata.description)?;
-    update_book_publication_metadata(transaction, book_id, &metadata.publication, AuthorIdPolicy::PreserveIncoming)
+pub(super) fn update_book_metadata_state_preserving_ids(transaction: &Transaction, content_hash: ContentHash, metadata: &BookMetadataState) -> Result<(), rusqlite::Error> {
+    update_book_metadata_contributors_preserving_ids(transaction, content_hash.clone(), &metadata.title, &metadata.contributors)?;
+    update_book_description(transaction, content_hash.clone(), &metadata.description)?;
+    update_book_publication_metadata(transaction, content_hash, &metadata.publication, AuthorIdPolicy::PreserveIncoming)
 }

@@ -6,7 +6,7 @@ use crate::library::generate_thumbnail_for_sync;
 use crate::LibraryRoot;
 #[cfg(test)]
 use crate::APP_HIDDEN_LIBRARY_DB_PATH;
-use crate::{BookId, ContentHash, APP_HIDDEN_DIR};
+use crate::{ContentHash, APP_HIDDEN_DIR};
 use bokheim_domain::BookFormat;
 #[cfg(feature = "watcher")]
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
@@ -36,12 +36,12 @@ pub use crate::DownloadState;
 
 #[derive(Debug, Clone, Serialize)]
 pub enum LibraryEvent {
-    BookAdded { book_id: BookId, path: String },
-    BookRemoved { book_id: BookId, path: String },
+    BookAdded { content_hash: ContentHash, path: String },
+    BookRemoved { content_hash: ContentHash, path: String },
     DirectoryAdded { path: String },
     DirectoryRemoved { path: String },
-    ThumbnailGenerated { book_id: BookId },
-    DownloadStatusChanged { book_id: BookId, state: DownloadState },
+    ThumbnailGenerated { content_hash: ContentHash },
+    DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
     FolderDownloadStatusChanged { dir_id: crate::DirId, downloaded_books: usize, total_books: usize },
     TransferStatusChanged,
     ScanComplete,
@@ -76,7 +76,6 @@ struct ScannerState {
 }
 
 struct ThumbnailTask {
-    book_id: BookId,
     content_hash: ContentHash,
     book_path: PathBuf,
 }
@@ -99,7 +98,7 @@ struct HashTask {
 type BookMetadata = bokheim_domain::BookMetadataState;
 
 enum HashResult {
-    Ready { task: HashTask, book_id: BookId, content_hash: ContentHash, format: BookFormat, metadata: Option<BookMetadata>, audiobook: Option<book_metadata::AudiobookMetadata> },
+    Ready { task: HashTask, content_hash: ContentHash, format: BookFormat, metadata: Option<BookMetadata>, audiobook: Option<book_metadata::AudiobookMetadata> },
     Failed { task: HashTask, error: String },
 }
 
@@ -525,7 +524,7 @@ impl Drop for LibraryScanner {
 
 impl LibraryScanner {
     fn hash_worker_loop(state: Arc<ScannerState>, hash_rx: crossbeam_channel::Receiver<HashTask>) {
-        let mut book_id_hash_buf = vec![0_u8; 1024 * 1024];
+        let mut hash_buffer = vec![0_u8; 1024 * 1024];
         loop {
             if state.should_finish.load(Ordering::Acquire) {
                 break;
@@ -545,7 +544,7 @@ impl LibraryScanner {
                 // Keep strict validation at import/upload/open boundaries and
                 // let the scanner index every supported local file extension.
                 let format = Self::book_format_from_path(&task.book_path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported book extension"))?;
-                let (book_id, content_hash) = generate_content_hash_blake3(&task.book_path, &mut book_id_hash_buf)?;
+                let content_hash = generate_content_hash_blake3(&task.book_path, &mut hash_buffer)?;
                 let (metadata, audiobook) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| book_metadata::inspect_book(&task.book_path, format))) {
                     Ok(Ok(inspection)) => (Some(inspection.metadata), inspection.audiobook),
                     Ok(Err(error)) => {
@@ -557,9 +556,9 @@ impl LibraryScanner {
                         (None, None)
                     }
                 };
-                Ok::<_, std::io::Error>((book_id, content_hash, format, metadata, audiobook))
+                Ok::<_, std::io::Error>((content_hash, format, metadata, audiobook))
             })) {
-                Ok(Ok((book_id, content_hash, format, metadata, audiobook))) => HashResult::Ready { task, book_id, content_hash, format, metadata, audiobook },
+                Ok(Ok((content_hash, format, metadata, audiobook))) => HashResult::Ready { task, content_hash, format, metadata, audiobook },
                 Ok(Err(error)) => HashResult::Failed { task, error: error.to_string() },
                 Err(error) => {
                     let message = error.downcast_ref::<&str>().copied().or_else(|| error.downcast_ref::<String>().map(String::as_str)).unwrap_or("unknown panic");
@@ -644,7 +643,7 @@ impl LibraryScanner {
             }
         };
         for item in batch {
-            let HashResult::Ready { task, book_id, content_hash, format, metadata, audiobook } = item else { continue };
+            let HashResult::Ready { task, content_hash, format, metadata, audiobook } = item else { continue };
             match db::is_book_file_tombstoned(&tx, &task.key.dir_id, &task.key.file_name) {
                 Ok(true) => continue,
                 Ok(false) => match db::get_known_directory_scan_state(&tx, &task.key.dir_id) {
@@ -660,7 +659,7 @@ impl LibraryScanner {
                     return false;
                 }
             }
-            let already_indexed = match db::book_has_live_placement(&tx, &task.key.dir_id, *book_id) {
+            let already_indexed = match db::book_has_live_placement(&tx, &task.key.dir_id, content_hash.clone()) {
                 Ok(value) => value,
                 Err(error) => {
                     log::error!("Scanner inserter: failed to check duplicate placement: {error}");
@@ -671,10 +670,10 @@ impl LibraryScanner {
                 continue;
             }
             let insert_result = match metadata {
-                Some(metadata) => db::insert_scanned_book_metadata(&tx, *book_id, metadata, *format),
-                None => insert_book(&tx, *book_id, *format),
+                Some(metadata) => db::insert_scanned_book_metadata(&tx, content_hash.clone(), metadata, *format),
+                None => insert_book(&tx, content_hash.clone(), *format),
             };
-            if let Err(error) = insert_result.and_then(|_| insert_local_book_dir(&tx, &task.key.dir_id, *book_id, &task.key.file_name, task.key.fingerprint, content_hash, task.scan_id)) {
+            if let Err(error) = insert_result.and_then(|_| insert_local_book_dir(&tx, &task.key.dir_id, content_hash.clone(), &task.key.file_name, task.key.fingerprint, task.scan_id)) {
                 log::error!("Scanner inserter: database batch failed: {error}");
                 return false;
             }
@@ -684,7 +683,7 @@ impl LibraryScanner {
                     return false;
                 }
             }
-            thumbnails.push(ThumbnailTask { book_id: *book_id, content_hash: content_hash.clone(), book_path: task.book_path.clone() });
+            thumbnails.push(ThumbnailTask { content_hash: content_hash.clone(), book_path: task.book_path.clone() });
         }
         if let Err(error) = tx.commit() {
             log::error!("Scanner inserter: failed to commit transaction: {error}");
@@ -726,10 +725,10 @@ impl LibraryScanner {
         loop {
             match thumbnail_rx.recv_timeout(FLUSH_INTERVAL) {
                 Ok(task) => {
-                    let generated_ok = generate_thumbnail_for_sync(&state.context, &state.library_root, &task.book_path, task.book_id, &task.content_hash).is_ok();
+                    let generated_ok = generate_thumbnail_for_sync(&state.context, &state.library_root, &task.book_path, &task.content_hash).is_ok();
 
                     if generated_ok {
-                        let _ = event_tx.send(LibraryEvent::ThumbnailGenerated { book_id: task.book_id });
+                        let _ = event_tx.send(LibraryEvent::ThumbnailGenerated { content_hash: task.content_hash });
                     }
 
                     if state.thumbnail_inflight.fetch_sub(1, Ordering::AcqRel) == 1 && state.scan_completion_pending.swap(false, Ordering::AcqRel) {

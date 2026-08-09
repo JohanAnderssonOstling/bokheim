@@ -3,7 +3,7 @@ use bokheim_domain::{AuthorName, BookTitle, FolderPath, LibraryValueError, NonNe
 use serde::{Deserialize, Serialize, Serializer};
 use specta::Type;
 use std::cmp::Reverse;
-use sync_common::{AuthorId, BookId, DirId, LibraryId};
+use sync_common::{AuthorId, ContentHash, DirId, LibraryId};
 
 /// The complete, stable destination for a book import.
 /// Frontends must choose both identities before starting an asynchronous
@@ -39,7 +39,7 @@ impl BookImportDestination {
 #[derive(Clone, Serialize, Type)]
 pub struct Book {
     #[specta(type = String)]
-    pub id: BookId,
+    pub content_hash: ContentHash,
     #[specta(type = String)]
     pub title: BookTitle,
     #[serde(serialize_with = "serialize_author")]
@@ -62,7 +62,7 @@ pub struct Book {
 #[derive(Clone, Serialize, Type)]
 pub struct BookSummary {
     #[specta(type = String)]
-    pub id: BookId,
+    pub content_hash: ContentHash,
     #[specta(type = String)]
     pub title: BookTitle,
     #[serde(serialize_with = "serialize_author")]
@@ -116,7 +116,7 @@ pub struct AuthorSummary {
 #[derive(Clone, Debug, PartialEq, Serialize, Type)]
 pub struct BookCardRow {
     #[specta(type = String)]
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
     pub title: String,
     pub author: String,
     pub description: String,
@@ -169,14 +169,14 @@ pub struct AuthorFolderBookSummaries {
 }
 
 impl Book {
-    pub fn try_new(id: BookId, title: String, author: String) -> Result<Self, LibraryValueError> {
+    pub fn try_new(content_hash: ContentHash, title: String, author: String) -> Result<Self, LibraryValueError> {
         let title = BookTitle::parse(&title)?;
         let author = if author.trim().is_empty() { None } else { Some(AuthorName::parse(&author)?) };
-        Ok(Self { id, title, author, description: String::new(), cover: None, read_progress: ReadProgress::ZERO, added_at: NonNegativeTimestamp::ZERO })
+        Ok(Self { content_hash, title, author, description: String::new(), cover: None, read_progress: ReadProgress::ZERO, added_at: NonNegativeTimestamp::ZERO })
     }
 
-    pub fn id(&self) -> BookId {
-        self.id
+    pub fn content_hash(&self) -> ContentHash {
+        self.content_hash.clone()
     }
     pub fn title(&self) -> &BookTitle {
         &self.title
@@ -212,13 +212,13 @@ impl Book {
 
 impl From<Book> for BookSummary {
     fn from(book: Book) -> Self {
-        Self { id: book.id, title: book.title, author: book.author, read_progress: book.read_progress, added_at: book.added_at, download_state: DownloadState::NotDownloaded }
+        Self { content_hash: book.content_hash, title: book.title, author: book.author, read_progress: book.read_progress, added_at: book.added_at, download_state: DownloadState::NotDownloaded }
     }
 }
 
 impl BookSummary {
-    pub fn id(&self) -> BookId {
-        self.id
+    pub fn content_hash(&self) -> ContentHash {
+        self.content_hash.clone()
     }
     pub fn download_state(&self) -> &DownloadState {
         &self.download_state

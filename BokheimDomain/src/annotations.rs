@@ -1,4 +1,4 @@
-use bokheim_identifiers::{BookId, UnixMillis};
+use bokheim_identifiers::{ContentHash, UnixMillis};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl AnnotationAnchor {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnnotationState {
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
     #[serde(with = "annotation_anchor_binary")] pub anchor: AnnotationAnchor,
     pub exact_text: String,
     pub style: AnnotationStyle,

@@ -888,7 +888,6 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
- "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -1222,6 +1221,13 @@ dependencies = [
 [[package]]
 name = "bokheim-algorithms"
 version = "0.1.0"
+dependencies = [
+ "bokheim-identifiers",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+ "uuid",
+]
 
 [[package]]
 name = "bokheim-app-contract"
@@ -1305,9 +1311,33 @@ dependencies = [
 name = "bokheim-domain"
 version = "0.1.0"
 dependencies = [
+ "bokheim-algorithms",
+ "bokheim-identifiers",
+ "bokheim-wire",
  "serde",
+ "specta",
+ "specta-typescript",
  "sync-common",
  "unicode-normalization",
+]
+
+[[package]]
+name = "bokheim-identifiers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
+
+[[package]]
+name = "bokheim-library-files"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bokheim-domain",
+ "bokheim-identifiers",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1318,7 +1348,6 @@ dependencies = [
  "atom_syndication",
  "axum",
  "blake3",
- "book-format",
  "futures-util",
  "html-engine",
  "log",
@@ -1327,28 +1356,12 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
+ "sync-common",
  "tempfile",
  "tokio",
  "uri-template",
  "urlencoding",
  "uuid",
-]
-
-[[package]]
-name = "bokheim-projection"
-version = "0.1.0"
-dependencies = [
- "sync-common",
-]
-
-[[package]]
-name = "bokheim-storage-sqlite"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -1358,8 +1371,8 @@ dependencies = [
  "axum",
  "blake3",
  "bokheim-account-contract",
+ "bokheim-domain",
  "bokheim-wire",
- "book-format",
  "futures-util",
  "reqwest 0.11.27",
  "serde",
@@ -1389,45 +1402,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-web-algorithms"
-version = "0.1.0"
-dependencies = [
- "bokheim-algorithms",
-]
-
-[[package]]
-name = "bokheim-web-server"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.22.1",
- "blake3",
- "bokheim-app-contract",
- "bokheim-catalog",
- "bokheim-domain",
- "bokheim-opds",
- "bokheim-projection",
- "bokheim-storage-sqlite",
- "bokheim-sync-client",
- "book-format",
- "http 1.4.0",
- "reqwest 0.11.27",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sync-common",
- "tempfile",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "bokheim-wire"
 version = "0.1.0"
 dependencies = [
@@ -1437,19 +1411,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "book-format"
+name = "book-metadata"
 version = "0.1.0"
 dependencies = [
- "blake3",
- "image 0.24.9",
- "lopdf",
+ "audiobook-library",
+ "bokheim-domain",
+ "epub_provider",
+ "html-publication",
  "mp4ameta",
- "percent-encoding",
- "quick-xml 0.31.0",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "zip",
+ "serde",
+ "sync-common",
 ]
 
 [[package]]
@@ -3459,36 +3430,32 @@ dependencies = [
 name = "epub-svelte"
 version = "0.1.0"
 dependencies = [
- "atom_syndication",
- "audiobook-library",
  "axum",
  "blake3",
  "bokheim-app-contract",
  "bokheim-catalog",
  "bokheim-domain",
+ "bokheim-library-files",
  "bokheim-opds",
- "bokheim-projection",
- "bokheim-storage-sqlite",
  "bokheim-sync-client",
- "book-format",
+ "book-metadata",
  "crossbeam-channel",
- "csv",
  "dirs",
  "env_logger",
  "epub_provider",
- "fast_image_resize",
  "futures-util",
  "html-publication",
  "image 0.24.9",
  "include-sqlite-sql",
+ "library-registry",
  "log",
  "lopdf",
- "mp4ameta",
  "notify 6.1.1",
  "pdf-reader-core",
- "quick-xml 0.41.0",
+ "projection",
  "r2d2",
  "r2d2_sqlite",
+ "remote-reader",
  "reqwest 0.11.27",
  "rusqlite",
  "serde",
@@ -3496,11 +3463,12 @@ dependencies = [
  "specta",
  "specta-typescript",
  "sqlx",
+ "storage-sqlite",
  "sync-common",
  "tempfile",
+ "thumbnail",
  "tokio",
  "tokio-util",
- "uri-template",
  "urlencoding",
  "uuid",
  "walkdir",
@@ -5748,12 +5716,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-range-header"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
-
-[[package]]
 name = "http_client"
 version = "0.1.0"
 dependencies = [
@@ -6129,6 +6091,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "color_quant",
+ "gif 0.13.3",
  "jpeg-decoder",
  "num-traits",
  "png 0.17.16",
@@ -6837,6 +6800,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "library-registry"
+version = "0.1.0"
+dependencies = [
+ "bokheim-identifiers",
+ "bokheim-library-files",
+ "csv",
+ "serde",
+ "serde_json",
+ "specta",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7459,23 +7436,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "multer"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
-dependencies = [
- "bytes",
- "encoding_rs",
- "futures-util",
- "http 1.4.0",
- "httparse",
- "memchr",
- "mime",
- "spin 0.9.9",
- "version_check",
 ]
 
 [[package]]
@@ -9164,6 +9124,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "projection"
+version = "0.1.0"
+dependencies = [
+ "bokheim-domain",
+ "sync-common",
+]
+
+[[package]]
 name = "proptest"
 version = "1.10.0"
 source = "git+https://github.com/proptest-rs/proptest?rev=3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b#3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b"
@@ -9816,6 +9784,19 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "remote-reader"
+version = "0.1.0"
+dependencies = [
+ "bokheim-identifiers",
+ "bokheim-sync-client",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "urlencoding",
+]
 
 [[package]]
 name = "rend"
@@ -11724,6 +11705,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "storage-sqlite"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "str_indices"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12259,13 +12250,10 @@ version = "0.1.0"
 dependencies = [
  "bokheim-account-contract",
  "bokheim-algorithms",
+ "bokheim-identifiers",
  "bokheim-wire",
  "serde",
  "serde_json",
- "serde_repr",
- "specta",
- "specta-typescript",
- "unicode-normalization",
  "uuid",
 ]
 
@@ -12939,6 +12927,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "thumbnail"
+version = "0.1.0"
+dependencies = [
+ "epub_provider",
+ "fast_image_resize",
+ "html-publication",
+ "image 0.24.9",
+ "mp4ameta",
+ "pdf-reader-core",
+]
+
+[[package]]
 name = "tiff"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13329,24 +13329,14 @@ checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
- "futures-core",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
- "http-body-util",
- "http-range-header",
- "httpdate",
  "iri-string",
- "mime",
- "mime_guess",
- "percent-encoding",
  "pin-project-lite",
- "tokio",
- "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]

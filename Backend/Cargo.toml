@@ -67,9 +67,6 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 blake3 = "1"
 pdf-reader-core = { path = "../PdfRenderer", optional = true }
 dirs = "6"
-atom_syndication = { version = "0.12.10", default-features = false }
-quick-xml = "0.41"
-uri-template = "0.1.0"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 specta-typescript = "0.0.12"
 [dev-dependencies]

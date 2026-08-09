@@ -1,23 +1,24 @@
-use server_asset_store::FsAssetStore;
-use server_core::{AssetError, AssetKind, AssetReader, BookUploadAdmission, StoredAsset};
+use crate::assets::{self, BookUploadAdmission};
+use crate::{sync_store, PostgresDatabase};
+use server_asset_store::{AssetError, AssetKind, AssetReader, FsAssetStore, StoredAsset};
+use sqlx::PgPool;
 use std::sync::Arc;
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
 use sync_common::ContentHash;
 
-use crate::PostgresSyncRepository;
-
 pub struct AssetApplication {
-    repository: Arc<PostgresSyncRepository>,
+    pool: PgPool,
     store: Arc<FsAssetStore>,
 }
 
 impl AssetApplication {
-    pub fn new(repository: Arc<PostgresSyncRepository>, store: Arc<FsAssetStore>) -> Self {
-        Self { repository, store }
+    pub fn new(database: PostgresDatabase, store: Arc<FsAssetStore>) -> Self {
+        Self { pool: database.pool().clone(), store }
     }
 
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
-        if self.repository.owns_library(user_id, library_id).await? {
+        let owned = sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        if owned {
             Ok(())
         } else {
             Err(AssetError::Forbidden)
@@ -28,13 +29,12 @@ impl AssetApplication {
         let Some(size) = self.store.size(user_id, AssetKind::Book, hash).await? else {
             return Ok(None);
         };
-        self.repository.claim_existing_book(user_id, library_id, hash, size).await?;
+        assets::claim_existing_book(&self.pool, user_id, library_id, hash, size).await?;
         Ok(Some(size))
     }
 
     pub async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
-        self.require_library(user_id, library_id).await?;
-        self.repository.negotiate_books(user_id, library_id, &blobs).await
+        assets::negotiate_books(&self.pool, user_id, library_id, &blobs).await
     }
 
     pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
@@ -58,14 +58,14 @@ impl AssetApplication {
         if self.claim_existing_book(user_id, library_id, hash).await?.is_some() {
             return Ok(());
         }
-        let reservation = match self.repository.reserve_book_upload(user_id, library_id, hash, expected_len).await? {
+        let reservation = match assets::reserve_book_upload(&self.pool, user_id, library_id, hash, expected_len).await? {
             BookUploadAdmission::AlreadyOwned => return Ok(()),
             BookUploadAdmission::Reserved(reservation) => reservation,
         };
         match self.store.put(user_id, kind, hash, Some(expected_len), reader).await {
-            Ok(actual_size) => self.repository.finish_book_upload(&reservation, actual_size).await,
+            Ok(actual_size) => assets::finish_book_upload(&self.pool, &reservation, actual_size).await,
             Err(error) => {
-                if let Err(abort_error) = self.repository.abort_book_upload(&reservation).await {
+                if let Err(abort_error) = assets::abort_book_upload(&self.pool, &reservation).await {
                     return Err(AssetError::Storage(format!("{error}; additionally failed to release quota reservation: {abort_error}")));
                 }
                 Err(error)

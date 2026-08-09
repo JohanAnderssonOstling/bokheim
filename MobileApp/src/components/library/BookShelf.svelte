@@ -57,8 +57,8 @@
 
   {#if visibleBooks.length}
     <div class="track" {id} role="region" aria-label={`${title}, scrollable books`}>
-      {#each visibleBooks as book (book.book_id)}
-        <div class="slide"><BookCard {book} {libraryId} opening={openingBookId === book.book_id} downloadState={downloadStates[book.book_id]} {onopen} {ondownload} {onremove} /></div>
+      {#each visibleBooks as book (book.content_hash)}
+        <div class="slide"><BookCard {book} {libraryId} opening={openingBookId === book.content_hash} downloadState={downloadStates[book.content_hash]} {onopen} {ondownload} {onremove} /></div>
       {/each}
     </div>
   {:else}

@@ -196,24 +196,25 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         let library = match reader_backend.library(locator.library_id().as_str()) {
             Ok(library) => library,
             Err(error) => {
-                log::error!("cannot open book {}: library {} is unavailable: {error}", locator.book_id(), locator.library_id());
+                log::error!("cannot open book {}: library {} is unavailable: {error}", locator.content_hash(), locator.library_id());
                 return;
             }
         };
         #[cfg(not(feature = "audiobooks"))]
-        if library.is_audiobook(locator.book_id()).unwrap_or(false) {
-            log::error!("cannot open audiobook {}: audiobook support is disabled in this build", locator.book_id());
+        if library.is_audiobook(locator.content_hash()).unwrap_or(false) {
+            log::error!("cannot open audiobook {}: audiobook support is disabled in this build", locator.content_hash());
             return;
         }
         #[cfg(feature = "audiobooks")]
-        if library.is_audiobook(locator.book_id()).unwrap_or(false) {
-            let book_id = locator.book_id();
+        if library.is_audiobook(locator.content_hash()).unwrap_or(false) {
+            let content_hash = locator.content_hash();
             let prepare_library = library.clone();
             let persistence_library = library;
             let persistence_worker = audiobook_worker.clone();
+            let prepare_content_hash = content_hash.clone();
             let prepare = audiobook_worker.dispatch(move || {
-                let source = prepare_library.resolve_book_for_reader(book_id).map_err(|error| error.to_string())?;
-                let initial_position = prepare_library.audiobook_reading_position(book_id).map_err(|error| error.to_string())?.unwrap_or(0);
+                let source = prepare_library.resolve_book_for_reader(prepare_content_hash.clone()).map_err(|error| error.to_string())?;
+                let initial_position = prepare_library.audiobook_reading_position(prepare_content_hash).map_err(|error| error.to_string())?.unwrap_or(0);
                 let source = audiobook_player::AudiobookSource::new(source.reader, source.path);
                 Ok::<_, String>((source, Duration::from_millis(initial_position)))
             });
@@ -221,6 +222,8 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                 let Ok(result) = prepare.recv().await else { return };
                 cx.update(|cx| match result {
                     Ok((source, initial_position)) => {
+                        let persistence_content_hash = content_hash.clone();
+                        let save_content_hash = content_hash.clone();
                         let (position_tx, position_rx) = async_channel::unbounded::<(Duration, f32)>();
                         let debounce_timer = cx.background_executor().clone();
                         cx.background_executor()
@@ -232,10 +235,11 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                                         progress = newer_progress;
                                     }
                                     let library = persistence_library.clone();
-                                    let result = persistence_worker.dispatch(move || library.update_audiobook_reading_position(book_id, position.as_millis() as u64, progress).map_err(|error| error.to_string())).recv().await;
+                                    let update_content_hash = persistence_content_hash.clone();
+                                    let result = persistence_worker.dispatch(move || library.update_audiobook_reading_position(update_content_hash, position.as_millis() as u64, progress).map_err(|error| error.to_string())).recv().await;
                                     match result {
                                         Ok(Ok(())) => {}
-                                        Ok(Err(error)) => log::warn!("failed to persist audiobook position for book {book_id}: {error}"),
+                                        Ok(Err(error)) => log::warn!("failed to persist audiobook position for book {persistence_content_hash}: {error}"),
                                         Err(_) => break,
                                     }
                                 }
@@ -243,7 +247,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                             .detach();
                         let save_position: audiobook_player::SavePlaybackPosition = Rc::new(move |position, progress| {
                             if position_tx.try_send((position, progress)).is_err() {
-                                log::warn!("audiobook position worker stopped for book {book_id}");
+                                log::warn!("audiobook position worker stopped for book {save_content_hash}");
                             }
                         });
                         let bounds = Bounds::centered(None, gpui::size(px(1080.0), px(760.0)), cx);
@@ -257,7 +261,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                             log::error!("failed to open audiobook window: {error}");
                         }
                     }
-                    Err(error) => log::error!("cannot prepare audiobook {book_id}: {error}"),
+                    Err(error) => log::error!("cannot prepare audiobook {content_hash}: {error}"),
                 });
             })
             .detach();
@@ -334,8 +338,8 @@ fn forward_library_events(browser: WeakEntity<BrowserRoot>, events: async_channe
     cx.spawn(async move |cx| {
         while let Ok((library_id, event)) = events.recv().await {
             cx.update(|cx| {
-                if let LibraryEvent::BookRemoved { book_id, .. } = &event {
-                    reader_ui::handle_book_removed(&library_id, *book_id, cx);
+                if let LibraryEvent::BookRemoved { content_hash, .. } = &event {
+                    reader_ui::handle_book_removed(&library_id, content_hash.clone(), cx);
                 }
                 let _ = browser.update(cx, |browser, cx| {
                     browser.handle_library_event(&library_id, &event, cx);

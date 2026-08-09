@@ -1,11 +1,33 @@
-use crate::{assets, sync_store, PostgresDatabase};
-use server_core::{AssetError, BookUploadAdmission, BookUploadReservation, GcReport, LibraryUpsertOutcome, SyncError};
+use crate::{sync_store, PostgresDatabase};
 use sqlx::{PgPool, Postgres, Transaction};
-use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
-#[cfg(test)]
-use sync_common::PushMutationsRequest;
-use sync_common::{ContentHash, PullStateQuery, PullStateResponse, PushMutationsResponse, SyncExchangeRequest, SyncExchangeResponse};
+use sync_common::{PullStateQuery, PullStateResponse, PushMutationsResponse, SyncExchangeRequest, SyncExchangeResponse};
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("authenticated user does not match the request")]
+    Forbidden,
+    #[error("library belongs to a different user")]
+    LibraryOwnershipConflict,
+    #[error("invalid library name")]
+    InvalidLibraryName,
+    #[error("synchronization request contains too many mutations")]
+    TooManyMutations,
+    #[error("synchronization request contains an ambiguous mutation identity")]
+    AmbiguousMutationIdentity,
+    #[error("stored synchronization data requires a newer client")]
+    UpgradeRequired,
+    #[error("client synchronization cursor is ahead of server state")]
+    CursorAhead,
+    #[error("synchronization persistence failed: {0}")]
+    Internal(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryUpsertOutcome {
+    pub library: LibrarySummary,
+    pub changed: bool,
+}
 
 #[derive(Clone)]
 pub struct PostgresSyncRepository {
@@ -68,36 +90,6 @@ fn is_fetch_serialization_failure(error: &sync_store::FetchChangesError) -> bool
     matches!(error, sync_store::FetchChangesError::Database(database) if is_serialization_failure(database))
 }
 
-fn asset_internal(error: impl std::fmt::Display) -> AssetError {
-    AssetError::Storage(error.to_string())
-}
-
-impl PostgresSyncRepository {
-    pub(crate) async fn owns_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, AssetError> {
-        sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(asset_internal)
-    }
-
-    pub(crate) async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError> {
-        assets::negotiate_books(&self.pool, user_id, library_id, blobs).await
-    }
-
-    pub(crate) async fn claim_existing_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
-        assets::claim_existing_book(&self.pool, user_id, library_id, hash, size_bytes).await
-    }
-
-    pub(crate) async fn reserve_book_upload(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<BookUploadAdmission, AssetError> {
-        assets::reserve_book_upload(&self.pool, user_id, library_id, hash, size_bytes).await
-    }
-
-    pub(crate) async fn finish_book_upload(&self, reservation: &BookUploadReservation, actual_size_bytes: u64) -> Result<(), AssetError> {
-        assets::finish_book_upload(&self.pool, reservation, actual_size_bytes).await
-    }
-
-    pub(crate) async fn abort_book_upload(&self, reservation: &BookUploadReservation) -> Result<(), AssetError> {
-        assets::abort_book_upload(&self.pool, reservation).await
-    }
-}
-
 impl PostgresSyncRepository {
     pub async fn list_libraries(&self, user_id: &str) -> Result<Vec<LibrarySummary>, SyncError> {
         sync_store::list_libraries(&self.pool, user_id).await.map_err(internal)
@@ -109,12 +101,6 @@ impl PostgresSyncRepository {
             return Err(SyncError::InvalidLibraryName);
         }
         sync_store::upsert_library(&self.pool, user_id, &UpsertLibraryRequest { library_name: name.to_owned(), ..request.clone() }).await.map_err(internal)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn store_changes(&self, user_id: &str, request: &PushMutationsRequest) -> Result<PushMutationsResponse, SyncError> {
-        let exchange_request = SyncExchangeRequest { library_id: request.library_id.clone(), replica_id: request.replica_id.clone(), mutations: request.mutations.clone(), cursor: None };
-        self.exchange(user_id, &exchange_request).await.map(|response| response.push)
     }
 
     pub(crate) async fn load_changes(&self, user_id: &str, query: &PullStateQuery) -> Result<PullStateResponse, SyncError> {
@@ -186,26 +172,9 @@ impl PostgresSyncRepository {
     }
 }
 
-pub struct GarbageCollector {
-    _repository: std::sync::Arc<PostgresSyncRepository>,
-}
-
-impl GarbageCollector {
-    pub fn new(repository: std::sync::Arc<PostgresSyncRepository>) -> Self {
-        Self { _repository: repository }
-    }
-
-    /// Destructive sweeping stays disabled until it has a persisted
-    /// pending-deletion/recheck protocol. Sync and quota accounting do not
-    /// depend on collection.
-    pub async fn collect(&self) -> Result<GcReport, SyncError> {
-        Ok(GcReport { blobs_scanned: 0, blobs_deleted: 0, thumbnails_scanned: 0, thumbnails_deleted: 0, bytes_reclaimed: 0 })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use sync_common::{MutationId, ReplicaSeq, UnixMillis, WireMutation};
+    use sync_common::{MutationId, ReplicaSeq, WireMutation};
 
     #[test]
     fn opaque_wire_fixture_has_no_domain_payload() {
@@ -217,7 +186,7 @@ mod tests {
             value: vec![0xde, 0xad, 0xbe, 0xef],
             conflict_rank: 0,
             blob_reference: None,
-            changed_at: UnixMillis::new(1).unwrap(),
+            changed_at: 1,
             replica_seq: ReplicaSeq::new(1).unwrap(),
         };
         assert_eq!(mutation.value, [0xde, 0xad, 0xbe, 0xef]);

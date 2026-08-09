@@ -4,77 +4,62 @@ The server is a composition binary over separately enforced account,
 synchronization, storage, transport, and database boundaries:
 
 ```text
-                         sync-server
-                      composition + config
-                     /       |          \
-                    v        v           v
- server-account-http server-account-mail server-http server-asset-store
-                    |        /      \           |
-                    v       v        v          v
-          server-account-core       server-core
-                    ^                   ^
-                    |                   |
-     server-account-postgres     server-postgres
-                    \                 /
-                     v               v
-                       server-database
-                  connection + migrations
+sync-server
+├── server-account ───────────────────────> server-postgres
+├── server-http
+│   ├── server-account
+│   ├── server-postgres ─────────────────> server-asset-store
+│   ├── server-asset-store
+│   └── server-wire-http
+├── server-postgres
+└── server-asset-store
 ```
 
-- `server-account-core` owns authenticated identity and account lifecycle
-  contracts. Synchronization receives only its `IdentityResolver` capability.
-- `server-account-postgres` exclusively owns password hashing, invitations,
-  bearer-token persistence, public registration, durable authentication rate
-  limits, the account-email outbox, and account queries.
-- `server-account-http` exclusively owns signup, login, atomic bearer-session
-  refresh, logout, current-account, verification, password-reset, and invitation
-  HTTP routes.
-- `server-account-mail` delivers queued account mail through a local
-  sendmail-compatible relay. It cannot access PostgreSQL or synchronization
-  services.
-- `server-core` owns application ports, synchronization authorization and
-  orchestration, garbage-collection orchestration, and shared errors. It has no
-  HTTP, SQL, or filesystem dependencies.
-- `server-postgres` implements synchronization and quota persistence, atomic
-  library-ownership authorization, and PostgreSQL advisory-lock coordination.
-  It cannot access credential tables.
-- `server-database` owns the shared PostgreSQL capability and ordered schema
-  migrations used by the independently owned persistence adapters.
-- `server-asset-store` implements content-addressed book and thumbnail storage.
-- `server-http` translates synchronization and blob requests to core service
-  ports. It receives identity resolution but no credential-management service.
-- `sync-server` reads configuration and wires concrete adapters into the core and
+- `server-account` owns the account boundary in internal `core`, `http`, and
+  `postgres` modules. Synchronization receives only its `IdentityResolver`
+  capability; account persistence owns password hashing, sessions, signup,
+  rate limits, and the account-email outbox.
+- Email delivery is external. `server-account` exposes the outbox and sender
+  traits, but contains no SMTP, sendmail, or provider-specific implementation.
+- `server-postgres` owns the shared PostgreSQL pool, readiness probe, ordered
+  schema application, synchronization and quota persistence, atomic
+  library-ownership authorization, asset upload orchestration, and PostgreSQL
+  advisory-lock coordination. Its synchronization errors and database upload
+  reservation types stay local to this crate. Account SQL remains inside
+  `server-account`.
+- `server-asset-store` implements content-addressed book and thumbnail storage
+  and owns the asset kinds, stream types, and storage errors used at that
+  boundary.
+- `server-http` translates synchronization and blob requests to the concrete
+  server services. It receives identity resolution but no
+  credential-management service.
+- `sync-server` reads configuration and wires the concrete services into the
   HTTP router. It is the only crate allowed to depend on all adapters.
 
-Core crates never depend on adapters. Account and synchronization PostgreSQL
-adapters are peers over `server-database`, never dependencies of one another.
+Account and synchronization PostgreSQL code remain separate modules over the
+shared `server-postgres::PostgresDatabase` capability and do not share
+credential or synchronization persistence.
 
 ## Boundary enforcement
 
 - Every server package is `publish = false` and inherits workspace lints that
   forbid unsafe code, unreachable public items, and mismatched public interfaces.
-- Account and synchronization HTTP crates expose only router constructors. Their
-  Axum states, handlers, extractors, and wire DTOs remain crate-internal.
-- Architecture tests reject credential SQL in `server-postgres` and reject sync
-  or blob SQL in `server-account-postgres`.
-- `tests/architecture.rs` checks the Cargo dependency graph, rejects adapter-to-
-  adapter dependencies and technology leakage, checks publication policy, and
-  scans all `server-core` Rust sources for adapter APIs.
+- Account and synchronization HTTP modules expose only router constructors. Their
+  Axum states, handlers, extractors, and wire DTOs remain module-internal.
 
 Run `cargo test --manifest-path Server/Cargo.toml --workspace` to execute the
-architecture checks together with the server tests.
+server tests.
 
 ## Public registration
 
-Invitation signup remains available independently. Public signup is disabled by
-default and is exposed only when `BOKHEIM_PUBLIC_REGISTRATION=true`. Enabling it
-also requires:
+Public signup is always exposed. Server startup requires:
 
-- `BOKHEIM_MAIL_FROM`, a plain sender mailbox;
 - `BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE`, an actively maintained, non-empty,
   one-domain-per-line denylist no larger than 4 MiB;
-- a sendmail-compatible local queue at `/usr/sbin/sendmail`, or an alternate
-  absolute path in `BOKHEIM_SENDMAIL_PATH`.
+
+An external email worker must consume `account_email_outbox`, claim rows with
+the account outbox contract, and deliver verification/reset messages through
+the configured provider.
 
 Registration reserves the canonical email and username for 24 hours and stores
 only an Argon2 password hash plus a hash of the verification token. Verification
@@ -113,36 +98,28 @@ server processes, add shared invalidation delivery (for example PostgreSQL
 Book blobs use a PostgreSQL quota ledger. Physical files remain globally
 deduplicated by content hash, while each user is charged once for every unique
 book hash referenced anywhere in that user's libraries. Metadata and thumbnails
-do not consume book quota. New accounts receive a 5 GiB quota lazily; a plan or
-administrative operation changes `user_storage_account.quota_bytes` for the
-specific user. Quota changes go through the audited server operation:
-
-The administrative quota endpoint is
-`POST /api/admin/users/{user_id}/storage-quota`. Like every typed Bokheim API
-endpoint, its request and response use the versioned
-`application/vnd.bokheim+bincode; version=5` wire format rather than JSON. Its
-request contains `change_id`, `quota_bytes`, and `reason`; invoke it through a
-Bokheim administrative client so framing and version negotiation cannot be
-omitted accidentally.
-
-`change_id` is an idempotency key: retrying the identical change is safe, while
-reusing it for different values returns `409 Conflict`. Every successful change
-records the actor, previous and new limits, reason, and timestamp. Downgrading
-below current usage is allowed; existing books remain available and new uploads
-are rejected until usage returns below the new limit.
+do not consume book quota. New accounts receive a 5 GiB quota lazily.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed book, then atomically converts the
 reservation into used bytes. Failed and abandoned reservations are released;
 removing the user's final synchronized reference refunds the charge.
-Synchronized values are canonical typed PostgreSQL state, not a JSONB event
-archive. Each domain table owns its complete value and synchronization metadata:
-the total `VersionKey`, actor identity, and a globally ordered `server_seq`.
-Pulls merge the indexed directory, book-lifecycle, physical-placement, reading-
-position, annotation, bookmark, semantic-link, last-opened, and metadata tables.
-Winning LWW updates redraw the global sequence so offline clients receive the
-new value, while retries and losing versions do not grow storage or redraw the
-cursor. A push therefore needs only one row write, with no shared envelope join.
+Synchronized values are canonical PostgreSQL state, not a JSONB event archive.
+Each domain table owns its complete value and synchronization metadata: the
+total `VersionKey`, actor identity, and a globally ordered `server_seq`. The
+server stores and relays that state; it does not interpret it. Directories
+and physical placements keep a handful of typed columns because the server
+itself needs them (referential existence checks, and content-hash deltas
+computed transactionally for blob quota accounting); every other domain's
+payload -- book lifecycle, metadata, annotations, bookmarks, and semantic
+links -- is an opaque wire-encoded `value` column the server never reads
+inside of. Adding or changing a synchronized field on those domains never
+touches this schema; only the client interprets what is inside. Pulls merge
+the indexed directory, book-lifecycle, physical-placement, reading-position,
+annotation, bookmark, semantic-link, and metadata tables. Winning LWW updates
+redraw the global sequence so offline clients receive the new value, while
+retries and losing versions do not grow storage or redraw the cursor. A push
+therefore needs only one row write, with no shared envelope join.
 Every synchronized wall-clock field uses the `UnixMillis` protocol type. It is
 encoded as a plain integer but is explicitly measured in Unix milliseconds and
 bounded to the signed 64-bit range shared by PostgreSQL and SQLite. The server
@@ -166,7 +143,7 @@ upsert returns its winning old/new content hashes directly, so per-user blob
 reference counts are updated without a second path projection. Ordinary state
 updates such as reading positions do not touch placement or blob references.
 
-Every typed account, library, preference, asset-manifest, administration, and
+Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
 `application/vnd.bokheim+bincode; version=5` representation. The wire body
 starts with a Bokheim magic/version header and uses positional bincode fields
@@ -202,17 +179,16 @@ BOKHEIM_TRANSFER_BURST_BYTES=1048576
 A direction set to `0` is deliberately unlimited. Defaults are 100 MiB/s in
 each direction with a 1 MiB burst.
 
-## Operational concurrency
+## Operational limits
 
-The PostgreSQL pool and CPU-heavy book validation have separate bounded
-controls:
+The PostgreSQL pool, requests, notifications, transfers, and staged uploads
+have bounded defaults with optional environment overrides:
 
 ```text
 BOKHEIM_DATABASE_MAX_CONNECTIONS=32
 BOKHEIM_DATABASE_MIN_CONNECTIONS=2
 BOKHEIM_DATABASE_ACQUIRE_TIMEOUT_SECONDS=5
 BOKHEIM_DATABASE_IDLE_TIMEOUT_SECONDS=600
-BOKHEIM_MAX_CONCURRENT_BOOK_VALIDATIONS=2
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS=16
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT=4
 BOKHEIM_MAX_STAGED_BOOK_BYTES=4294967296
@@ -225,8 +201,8 @@ BOKHEIM_MAX_NOTIFICATION_CONNECTIONS_PER_ACCOUNT=16
 ```
 
 Database maximum/minimum connections accept `2..=256` and `0..=max`
-respectively. Acquire timeout accepts 1–60 seconds, idle timeout accepts 30
-seconds–24 hours, and concurrent validation accepts 1–32. Staged uploads are
+respectively. Acquire timeout accepts 1–60 seconds and idle timeout accepts 30
+seconds–24 hours. Staged uploads are
 bounded both by count and declared bytes before temporary files are created;
 the defaults allow 16 files/4 GiB globally and 4 files/2 GiB per account.
 Capacity exhaustion returns HTTP 429 before the asset store reads the body.
@@ -241,25 +217,23 @@ steady-state database throughput.
 ## Asset storage configuration
 
 Local development stores assets in `./books` and `./thumbnails`. Production
-deployments must configure both storage roots together as distinct,
-non-nested absolute paths:
+deployments configure their common parent as an absolute, normalized path:
 
 ```text
-BOKHEIM_BOOKS_DIR=/var/lib/bokheim/assets/books
-BOKHEIM_THUMBNAILS_DIR=/var/lib/bokheim/assets/thumbnails
+BOKHEIM_ASSETS_DIR=/var/lib/bokheim/assets
 ```
 
-Configuring only one path, using a relative or non-normalized path, or nesting
-one root under the other is a startup error. Before accepting traffic, the
-server creates both roots and verifies that each supports create, write, sync,
-and delete operations. See [`deploy/README.md`](deploy/README.md) for the bind
+The server derives `books/` and `thumbnails/` beneath that root. A relative or
+non-normalized production root is a startup error. Before accepting traffic,
+the server creates both directories and verifies that each supports create,
+write, sync, and delete operations. See [`deploy/README.md`](deploy/README.md) for the bind
 mount that safely exposes `/home/johan/data/bokheim` through the systemd home
 sandbox.
 
 Clients upload covers separately so a device can browse books without first
 downloading them. Covers are private account data rather than globally shared
-blobs: storage paths and garbage-collection liveness include the authenticated
-user. The server streams the client's original bytes without image decoding or
+blobs: storage paths include the authenticated user. The server streams the
+client's original bytes without image decoding or
 re-encoding or format inspection, while enforcing a 4 MiB transfer limit.
 Responses use `image/png`, `X-Content-Type-Options: nosniff`, and private
 immutable caching. Clients validate and decode within bounded image limits

@@ -36,7 +36,6 @@ impl StorePage {
                                         let external_links = page.navigation.into_iter().filter(|link| matches!(link.target, CatalogLinkTarget::External { .. })).collect();
                                         super::WideSearchOutcome::Results { cards, external_links }
                                     }
-                                    CatalogWideSearchOutcome::AuthenticationRequired => super::WideSearchOutcome::AuthenticationRequired,
                                     CatalogWideSearchOutcome::Unsupported => super::WideSearchOutcome::Unsupported,
                                     CatalogWideSearchOutcome::TimedOut => super::WideSearchOutcome::TimedOut,
                                     CatalogWideSearchOutcome::Failed { message } => super::WideSearchOutcome::Failed(message),
@@ -68,7 +67,7 @@ impl StorePage {
         self.loading = true;
         self.error = None;
         let source_id = source.id.clone();
-        let operation = self.library.spawn(move |library| async move { library.search_catalog(&source_id, &search, CatalogSearchQuery { query, title: None, author: None }, None).await.map_err(|error| error.to_string()) });
+        let operation = self.library.spawn(move |library| async move { library.search_catalog(&source_id, &search, CatalogSearchQuery { query, title: None, author: None }).await.map_err(|error| error.to_string()) });
         self.task = Some(cx.spawn(async move |view, cx| {
             let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = view.update(cx, |view, cx| {

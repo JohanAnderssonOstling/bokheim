@@ -112,7 +112,7 @@ mod tests {
     fn annotation(id: &str, color: &str) -> ReaderAnnotation {
         ReaderAnnotation {
             id: id.to_owned(),
-            book_id: "1".to_owned(),
+            content_hash: "1".to_owned(),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()),
             exact_text: "a furrow".to_owned(),
             style: AnnotationStyle::Highlight,

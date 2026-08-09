@@ -19,9 +19,6 @@ required_files=(
     opds.json
     bokheim-sync.service
     bokheim-catalogs.service
-    bokheim-gc.service
-    bokheim-gc.timer
-    bokheim-tmpfiles.conf
 )
 
 for file in "${required_files[@]}"; do
@@ -49,15 +46,8 @@ install -o root -g root -m 0644 "${source_root}/bokheim-sync.service" \
     /etc/systemd/system/bokheim-sync.service
 install -o root -g root -m 0644 "${source_root}/bokheim-catalogs.service" \
     /etc/systemd/system/bokheim-catalogs.service
-install -o root -g root -m 0644 "${source_root}/bokheim-gc.service" \
-    /etc/systemd/system/bokheim-gc.service
-install -o root -g root -m 0644 "${source_root}/bokheim-gc.timer" \
-    /etc/systemd/system/bokheim-gc.timer
-install -d -o root -g root -m 0755 /etc/tmpfiles.d
-install -o root -g root -m 0644 "${source_root}/bokheim-tmpfiles.conf" \
-    /etc/tmpfiles.d/bokheim.conf
-systemd-tmpfiles --create /etc/tmpfiles.d/bokheim.conf
-
+systemctl disable --now bokheim-gc.timer >/dev/null 2>&1 || true
+rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.timer /etc/tmpfiles.d/bokheim.conf
 systemctl daemon-reload
 systemctl restart bokheim-sync.service
 systemctl restart bokheim-catalogs.service

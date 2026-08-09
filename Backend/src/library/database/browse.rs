@@ -137,14 +137,14 @@ pub(super) fn get_child_directories(conn: &Connection, dir_path: &str) -> Result
     })?;
     Ok(sub_dirs)
 }
-pub fn get_descendant_book_ids(conn: &Connection, dir_id: &str) -> Result<Vec<BookId>, rusqlite::Error> {
-    let mut book_ids = Vec::new();
-    conn.get_descendant_book_ids(dir_id, |row| {
+pub fn get_descendant_content_hashes(conn: &Connection, dir_id: &str) -> Result<Vec<ContentHash>, rusqlite::Error> {
+    let mut content_hashes = Vec::new();
+    conn.get_descendant_content_hashes(dir_id, |row| {
         let raw: String = row.get(0)?;
-        book_ids.push(BookId::parse(&raw).map_err(|error| invalid_text_column(0, error.to_string()))?);
+        content_hashes.push(ContentHash::new(&raw));
         Ok(())
     })?;
-    Ok(book_ids)
+    Ok(content_hashes)
 }
 pub fn get_folder_download_counts(conn: &Connection, dir_id: &str) -> Result<(usize, usize), rusqlite::Error> {
     let mut counts = (0, 0);
@@ -156,9 +156,9 @@ pub fn get_folder_download_counts(conn: &Connection, dir_id: &str) -> Result<(us
     })?;
     Ok(counts)
 }
-pub fn get_book_ancestor_dir_ids(conn: &Connection, book_id: BookId) -> Result<Vec<DirId>, rusqlite::Error> {
+pub fn get_book_ancestor_dir_ids(conn: &Connection, content_hash: ContentHash) -> Result<Vec<DirId>, rusqlite::Error> {
     let mut dir_ids = Vec::new();
-    conn.get_book_ancestor_dir_ids(&book_id.canonical(), |row| {
+    conn.get_book_ancestor_dir_ids(content_hash.as_str(), |row| {
         let raw: String = row.get(0)?;
         dir_ids.push(DirId::parse(&raw).map_err(|error| invalid_text_column(0, error.to_string()))?);
         Ok(())

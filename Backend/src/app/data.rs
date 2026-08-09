@@ -1,4 +1,4 @@
-use crate::BookId;
+use crate::ContentHash;
 pub(crate) use library_registry::read_library_manifest;
 use library_registry::LibraryRegistry;
 pub use library_registry::{LibraryEntry, LIBRARY_MANIFEST_FILENAME};
@@ -77,15 +77,15 @@ impl BackendContext {
         self.remote_library_storage == RemoteLibraryStorage::Managed
     }
 
-    pub fn try_get_thumbnail(&self, book_id: BookId) -> std::io::Result<Option<Vec<u8>>> {
-        match self.resolve_thumbnail(book_id)? {
+    pub fn try_get_thumbnail(&self, content_hash: ContentHash) -> std::io::Result<Option<Vec<u8>>> {
+        match self.resolve_thumbnail(content_hash)? {
             None => Ok(None),
             Some(thumb_path) => fs::read(thumb_path).map(Some),
         }
     }
 
-    pub fn resolve_thumbnail(&self, book_id: BookId) -> std::io::Result<Option<PathBuf>> {
-        let thumb_path = self.app_data_root.as_path().join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{book_id}.jpg"));
+    pub fn resolve_thumbnail(&self, content_hash: ContentHash) -> std::io::Result<Option<PathBuf>> {
+        let thumb_path = self.app_data_root.as_path().join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg"));
         match fs::metadata(&thumb_path) {
             Ok(metadata) if metadata.is_file() => Ok(Some(thumb_path)),
             Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("thumbnail path is not a file: {}", thumb_path.display()))),

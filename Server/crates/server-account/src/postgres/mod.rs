@@ -6,15 +6,14 @@ mod public_registration;
 mod rate_limit;
 
 use crate::core::{AccountSession, AuthAttempt, AuthError, AuthenticatedUser, IssuedSession, SessionRevocation};
-use bokheim_account_contract::{EMAIL_MAX_BYTES, PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
+use bokheim_account_contract::{EMAIL_MAX_BYTES, PASSWORD_MAX_BYTES};
 use chrono::{DateTime, Duration, Utc};
-use server_database::PostgresDatabase;
+use server_postgres::PostgresDatabase;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 
-const ADMIN_EMAIL: &str = "admin@bokheim.local";
 const ACCESS_TOKEN_TTL_HOURS: i64 = 1;
 const REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 const TOKEN_LEN: usize = 43;
@@ -276,8 +275,8 @@ impl PostgresAccountService {
         if let Some(user) = cached {
             return Ok(user);
         }
-        let row: Option<(String, String, bool, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-            "SELECT users.id, users.email, users.is_admin,
+        let row: Option<(String, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
+            "SELECT users.id, users.email,
                     auth_token.expires_at, auth_token.session_id
              FROM auth_token
              JOIN users ON users.id = auth_token.user_id
@@ -288,10 +287,10 @@ impl PostgresAccountService {
         .fetch_optional(&self.pool)
         .await
         .map_err(internal)?;
-        let Some((user_id, email, is_admin, token_expires_at, session_id)) = row else {
+        let Some((user_id, email, token_expires_at, session_id)) = row else {
             return Err(AuthError::InvalidCredentials);
         };
-        let user = AuthenticatedUser { user_id, email, is_admin };
+        let user = AuthenticatedUser { user_id, email };
         self.identity_cache.insert_if_revision(cache_revision, token_hash, user.clone(), session_id, token_expires_at);
         Ok(user)
     }
@@ -306,24 +305,6 @@ impl PostgresAccountService {
         self.clear_subject_rate_limit_impl(attempt, subject).await
     }
 
-    pub async fn bootstrap_admin(&self, password: Option<&str>) -> Result<(), AuthError> {
-        let Some(password) = password else {
-            return Ok(());
-        };
-        if password.chars().count() < PASSWORD_MIN_CHARACTERS || !valid_password_size(password) {
-            return Err(AuthError::InvalidPassword { min_characters: PASSWORD_MIN_CHARACTERS, max_bytes: PASSWORD_MAX_BYTES });
-        }
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1").bind(ADMIN_EMAIL).fetch_optional(&self.pool).await.map_err(internal)?;
-        if existing.is_some() {
-            return Ok(());
-        }
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let hash = self.hash_password(password.to_owned()).await?;
-        sqlx::query("INSERT INTO users (id, email, password_hash, is_admin) VALUES ($1, $2, $3, TRUE)").bind(&user_id).bind(ADMIN_EMAIL).bind(&hash).execute(&self.pool).await.map_err(internal)?;
-        tracing::info!("bootstrapped admin user '{}'", ADMIN_EMAIL);
-        Ok(())
-    }
-
     pub async fn login(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
         let Ok(email) = normalized_email(email, &self.blocked_email_domains) else {
             self.verify_password_dummy(if valid_password_size(password) { password.to_owned() } else { "invalid-password-size".to_string() }).await?;
@@ -333,9 +314,9 @@ impl PostgresAccountService {
             self.verify_password_dummy("invalid-password-size".to_string()).await?;
             return Err(AuthError::InvalidCredentials);
         }
-        let row: Option<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, email, password_hash, is_admin FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
-        let Some((user_id, stored_email, password_hash, is_admin)) = row else {
+        let row: Option<(String, String, String)> =
+            sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
+        let Some((user_id, stored_email, password_hash)) = row else {
             self.verify_password_dummy(password.to_owned()).await?;
             return Err(AuthError::InvalidCredentials);
         };
@@ -345,7 +326,7 @@ impl PostgresAccountService {
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         let tokens = issue_token_pair(&mut transaction, &user_id).await?;
         transaction.commit().await.map_err(internal)?;
-        Ok(issued_session(tokens, AuthenticatedUser { user_id, email: stored_email, is_admin }))
+        Ok(issued_session(tokens, AuthenticatedUser { user_id, email: stored_email }))
     }
 
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<IssuedSession, AuthError> {
@@ -371,8 +352,8 @@ impl PostgresAccountService {
         .execute(&mut *transaction)
         .await
         .map_err(internal)?;
-        let session: Option<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT auth_session.id, users.id, users.email, users.is_admin
+        let session: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT auth_session.id, users.id, users.email
              FROM auth_session
              JOIN users ON users.id = auth_session.user_id
              WHERE auth_session.refresh_token_hash = $1
@@ -383,7 +364,7 @@ impl PostgresAccountService {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(internal)?;
-        let Some((session_id, user_id, email, is_admin)) = session else {
+        let Some((session_id, user_id, email)) = session else {
             let reused_session: Option<(String, String)> = sqlx::query_as(
                 "SELECT auth_session.id, auth_session.user_id
                  FROM auth_consumed_refresh_token
@@ -427,7 +408,7 @@ impl PostgresAccountService {
             .map_err(internal)?;
         transaction.commit().await.map_err(internal)?;
         self.identity_cache.invalidate_session(&session_id);
-        Ok(issued_session(IssuedTokens { access_token: new_access_token, access_expires_at, refresh_token: new_refresh_token, refresh_expires_at }, AuthenticatedUser { user_id, email, is_admin }))
+        Ok(issued_session(IssuedTokens { access_token: new_access_token, access_expires_at, refresh_token: new_refresh_token, refresh_expires_at }, AuthenticatedUser { user_id, email }))
     }
 
     pub async fn logout(&self, token: &str) -> Result<(), AuthError> {
@@ -568,7 +549,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     fn cached_identity(user_id: &str) -> AuthenticatedUser {
-        AuthenticatedUser { user_id: user_id.to_string(), email: format!("user-{user_id}@example.com"), is_admin: false }
+        AuthenticatedUser { user_id: user_id.to_string(), email: format!("user-{user_id}@example.com") }
     }
 
     /// Schema application has no migration history to make repeat calls
@@ -584,7 +565,7 @@ mod tests {
         let separator = if database_url.contains('?') { '&' } else { '?' };
         let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
         let pool = PgPoolOptions::new().max_connections(max_connections).connect(&scoped_url).await.unwrap();
-        server_database::migrate(&PostgresDatabase::from_pool(pool.clone())).await.unwrap();
+        server_postgres::migrate(&PostgresDatabase::from_pool(pool.clone())).await.unwrap();
         pool
     }
 
@@ -657,7 +638,6 @@ mod tests {
 
         let resolved = service.resolve_token(&token).await.unwrap();
         assert_eq!(resolved.user_id, user_id);
-        assert!(!resolved.is_admin);
         assert_eq!(service.identity_cache.len(), 1, "the first database resolution must populate the bounded cache");
         let stored_after: (DateTime<Utc>, String) = sqlx::query_as("SELECT expires_at, xmin::text FROM auth_token WHERE token_hash = $1").bind(&token_hash).fetch_one(&pool).await.unwrap();
         assert_eq!(stored_after, stored_before, "token resolution must not create a new PostgreSQL row version");
@@ -678,13 +658,6 @@ mod tests {
         assert!(matches!(service.refresh_session(&refreshed.refresh_token).await, Err(AuthError::InvalidCredentials)));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user_id).execute(&pool).await.unwrap();
 
-        service.bootstrap_admin(Some("correct-horse-admin-password")).await.unwrap();
-        let issued = service.login(ADMIN_EMAIL, "correct-horse-admin-password").await.unwrap();
-        assert!(issued.user.is_admin);
-        assert!(service.resolve_token(&issued.token).await.unwrap().is_admin);
-        service.logout(&issued.token).await.unwrap();
-        assert!(matches!(service.resolve_token(&issued.token).await, Err(AuthError::InvalidCredentials)), "logout must invalidate a cached access token immediately");
-        sqlx::query("DELETE FROM users WHERE email = $1").bind(ADMIN_EMAIL).execute(&pool).await.unwrap();
     }
 
     #[tokio::test]

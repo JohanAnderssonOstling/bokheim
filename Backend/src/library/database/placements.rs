@@ -3,14 +3,14 @@
 use super::assets::{dir_path_from_components, get_dir_path_components};
 use super::*;
 
-pub fn set_book_downloaded(conn: &Connection, rel_path: &RelativeBookPath, book_id: BookId, downloaded: bool) -> Result<(), rusqlite::Error> {
-    let Some((found_book_id, dir_id, _file_name)) = get_book_dir_entry_by_path(conn, rel_path)? else {
+pub fn set_book_downloaded(conn: &Connection, rel_path: &RelativeBookPath, content_hash: ContentHash, downloaded: bool) -> Result<(), rusqlite::Error> {
+    let Some((found_content_hash, dir_id, _file_name)) = get_book_dir_entry_by_path(conn, rel_path)? else {
         return Ok(());
     };
-    if found_book_id != book_id {
+    if found_content_hash != content_hash {
         return Err(invalid_text_column(0, "book placement identity mismatch"));
     }
-    conn.set_book_downloaded(dir_id.as_str(), &book_id.canonical(), i32::from(downloaded))?;
+    conn.set_book_downloaded(dir_id.as_str(), content_hash.as_str(), i32::from(downloaded))?;
     Ok(())
 }
 
@@ -103,9 +103,6 @@ pub fn get_book_dirs_by_local_fingerprint(conn: &Connection) -> Result<HashMap<u
         let Ok(fingerprint) = row.get::<_, String>(0)?.parse::<u64>() else { return Ok(()) };
         let dir_id = DirId::parse(&row.get::<_, String>(2)?).map_err(|error| invalid_text_column(2, error.to_string()))?;
         let file_name = FileName::parse(&row.get::<_, String>(3)?).map_err(|error| invalid_text_column(3, error.to_string()))?;
-        if ContentHash::parse(&row.get::<_, String>(4)?).is_err() {
-            return Ok(());
-        }
         result.entry(fingerprint).or_insert(BookDir { dir_id, file_name, description_missing: row.get(5)? });
         Ok(())
     })?;
@@ -113,17 +110,13 @@ pub fn get_book_dirs_by_local_fingerprint(conn: &Connection) -> Result<HashMap<u
 }
 
 #[cfg(any(test, all(feature = "scanner", not(target_os = "android"))))]
-pub fn insert_book(transaction: &Transaction, book_id: BookId, format: BookFormat) -> Result<(), rusqlite::Error> {
-    transaction.insert_scanned_book(&book_id.canonical(), unix_millis()?, format.canonical_extension())?;
+pub fn insert_book(transaction: &Transaction, content_hash: ContentHash, format: BookFormat) -> Result<(), rusqlite::Error> {
+    transaction.insert_scanned_book(content_hash.as_str(), unix_millis()?, format.canonical_extension())?;
     Ok(())
 }
 
-pub fn insert_local_book_dir(transaction: &Transaction, dir_id: &DirId, book_id: BookId, file_name: &FileName, local_hash: u64, content_hash: &ContentHash, last_scan: i64) -> Result<(), rusqlite::Error> {
-    transaction.insert_book_dir(dir_id.as_str(), &book_id.canonical(), file_name.as_str(), &local_hash.to_string(), last_scan, 1)?;
-    // Content identity is synchronized with the lifecycle rather than each
-    // placement. The outbox trigger coalesces this update with the initial
-    // local lifecycle write produced while scanning.
-    transaction.set_book_content_hash(content_hash.as_str(), &book_id.canonical())?;
+pub fn insert_local_book_dir(transaction: &Transaction, dir_id: &DirId, content_hash: ContentHash, file_name: &FileName, local_hash: u64, last_scan: i64) -> Result<(), rusqlite::Error> {
+    transaction.insert_book_dir(dir_id.as_str(), content_hash.as_str(), file_name.as_str(), &local_hash.to_string(), last_scan, 1)?;
     Ok(())
 }
 
@@ -133,9 +126,9 @@ pub fn mark_known_book_dir_seen(transaction: &Transaction, scan_id: i64, dir_id:
 }
 
 #[cfg(any(test, all(feature = "scanner", not(target_os = "android"))))]
-pub fn book_has_live_placement(transaction: &Transaction, dir_id: &DirId, book_id: BookId) -> Result<bool, rusqlite::Error> {
+pub fn book_has_live_placement(transaction: &Transaction, dir_id: &DirId, content_hash: ContentHash) -> Result<bool, rusqlite::Error> {
     let mut exists = false;
-    transaction.book_has_live_placement(dir_id.as_str(), &book_id.canonical(), |row| {
+    transaction.book_has_live_placement(dir_id.as_str(), content_hash.as_str(), |row| {
         exists = row.get(0)?;
         Ok(())
     })?;

@@ -1,9 +1,9 @@
-use bokheim_identifiers::{BookId, UnixMillis};
+use bokheim_identifiers::{ContentHash, UnixMillis};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookmarkState {
-    pub book_id: BookId,
+    pub content_hash: ContentHash,
     pub cfi: String,
     pub label: String,
     pub created_at: UnixMillis,
@@ -13,8 +13,8 @@ pub struct BookmarkState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookLinkState {
-    pub source_book_id: BookId,
-    pub target_book_id: BookId,
+    pub source_content_hash: ContentHash,
+    pub target_content_hash: ContentHash,
     pub relation: String,
     pub note: String,
     pub created_at: UnixMillis,

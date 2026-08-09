@@ -61,7 +61,7 @@
   type BookBytes = ArrayBuffer | Uint8Array | number[];
   type DownloadStatusEvent = {
     library_id: string;
-    event: { DownloadStatusChanged: { book_id: string; state: DownloadState } };
+    event: { DownloadStatusChanged: { content_hash: string; state: DownloadState } };
   };
   type FolderDownloadStatusEvent = {
     library_id: string;
@@ -76,13 +76,13 @@
   const BROWSING_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-browsing-ui-preferences`;
   const DEFAULT_LIBRARY_VIEW_MODE: LibraryViewMode = "cover";
 
-  function currentSessionFromWebRoute(): AppUiSession | null {
+  function currentSessionFromRoute(): AppUiSession | null {
     const libraryId = (page.url.searchParams.get("library") || page.params.libraryId || undefined)?.trim() || undefined;
     const routeId = page.route.id;
     if (routeId === "/reader/[bookId]" && page.params.bookId && page.params.bookId.trim()) {
       return {
         kind: "reader",
-        book_id: page.params.bookId,
+        content_hash: page.params.bookId,
         library_id: libraryId,
       };
     }
@@ -130,22 +130,6 @@
       destination: activeDestination || "home",
       library_id: activeLibraryId || libraryId,
       folder_id: folderStack.at(-1)?.id || "__root__",
-    };
-  }
-
-  function currentSessionFromRuntimeState(): AppUiSession {
-    if (readerBook?.bookId && !readerBook.bookId.startsWith("foliate-position:")) {
-      return {
-        kind: "reader",
-        book_id: readerBook.bookId,
-        library_id: activeLibraryId || undefined,
-      };
-    }
-    return {
-      kind: "browse",
-      destination: activeDestination,
-      library_id: activeLibraryId || undefined,
-      folder_id: activeDestination === "library" ? (folderStack.at(-1)?.id || "__root__") : undefined,
     };
   }
 
@@ -235,6 +219,7 @@
   let preferenceVersion = 0;
   let restoringReaderId = "";
   let readerReturnPath = "";
+  let routesReady = $state(false);
   const readerRouteCache = new Map<string, ReaderBook>();
 
   const destinationTitle = $derived(activeDestination === "account" ? "Account" : activeDestination === "settings" ? "Settings" : NAV_ITEMS.find((item) => item.id === activeDestination)?.label ?? APP_NAME);
@@ -260,12 +245,12 @@
     return library;
   }
 
-  function navigate(path: string, replaceState = false) {
-    if (isWebApp && `${page.url.pathname}${page.url.search}` !== path) void goto(path, { replaceState, noScroll: true, keepFocus: true });
+  async function navigate(path: string, replaceState = false) {
+    if (`${page.url.pathname}${page.url.search}` !== path) await goto(path, { replaceState, noScroll: true, keepFocus: true });
   }
 
   function closeReader() {
-    if (isWebApp && page.route.id === "/reader/[bookId]") {
+    if (page.route.id === "/reader/[bookId]") {
       const destination = readerReturnPath || libraryRoute("home", activeLibraryId);
       readerBook = null;
       navigate(destination, true);
@@ -275,7 +260,6 @@
   }
 
   function navigateToReader(bookId: string, book: ReaderBook) {
-    if (!isWebApp) return;
     if (page.route.id !== "/reader/[bookId]") {
       readerReturnPath = `${page.url.pathname}${page.url.search}`;
     }
@@ -299,7 +283,7 @@
   });
 
   $effect(() => {
-    if (!isWebApp) return;
+    if (!routesReady) return;
     const route = {
       id: page.route.id,
       pathname: page.url.pathname,
@@ -308,10 +292,11 @@
       bookId: page.params.bookId,
       readerLibraryId: page.url.searchParams.get("library") ?? undefined,
     };
-    void synchronizeWebRoute(route);
+    void synchronizeRoute(route);
   });
 
   $effect(() => {
+    if (!routesReady) return;
     const session = buildSessionForPersistence();
     writeUiSession(session);
   });
@@ -320,7 +305,7 @@
     return reason instanceof Error ? reason.message : String(reason);
   }
 
-  async function synchronizeWebRoute(route: {
+  async function synchronizeRoute(route: {
     id: string | null;
     pathname: string;
     libraryId?: string;
@@ -328,16 +313,16 @@
     bookId?: string;
     readerLibraryId?: string;
   }) {
-    if (!accountResolved) return;
-    if (!accountStatus.signed_in) {
+    if (isWebApp && !accountResolved) return;
+    if (isWebApp && !accountStatus.signed_in) {
       readerBook = null;
-      if (route.id !== "/login") navigate("/login", true);
+      if (route.id !== "/login") await navigate("/login", true);
       return;
     }
-    if (!webAppReady) return;
+    if (isWebApp && !webAppReady) return;
 
     if (route.id === "/" || route.id === "/login" || route.id === "/library") {
-      navigate(libraryRoute("home"), true);
+      await navigate(libraryRoute("home"), true);
       return;
     }
 
@@ -391,21 +376,16 @@
   }
 
   function buildSessionForPersistence(): AppUiSession | null {
-    if (isWebApp) {
-      const session = currentSessionFromWebRoute();
-      if (!session) return null;
-      if (session.kind === "reader" && session.book_id.startsWith("foliate-position:")) return null;
-      return session;
-    }
-    const session = currentSessionFromRuntimeState();
-    if (session.kind === "reader" && session.book_id.startsWith("foliate-position:")) return null;
+    const session = currentSessionFromRoute();
+    if (!session) return null;
+    if (session.kind === "reader" && session.content_hash.startsWith("foliate-position:")) return null;
     return session;
   }
 
   function routeFromSession(session: AppUiSession): string {
     if (session.kind === "reader") {
       const library = session.library_id ? `?library=${encodeURIComponent(session.library_id)}` : "";
-      return `/reader/${encodeURIComponent(session.book_id)}${library}`;
+      return `/reader/${encodeURIComponent(session.content_hash)}${library}`;
     }
     if (session.destination === "account") return "/account";
     if (session.destination === "settings") return "/settings";
@@ -422,81 +402,13 @@
     return libraryRoute("home", session.library_id);
   }
 
-  async function selectSessionLibrary(libraryId: string | undefined): Promise<boolean> {
-    if (!libraryId) return Boolean(activeLibraryId);
-    if (libraryId === activeLibraryId) return true;
-    if (!libraries.some((entry) => entry.library_id === libraryId)) return false;
-    await selectLibrary(libraryId, false);
-    return activeLibraryId === libraryId;
-  }
-
   async function restoreUiSession(session: AppUiSession | null) {
-    if (!session) return;
-    if (isWebApp) {
-      const current = `${page.url.pathname}${page.url.search}`;
-      if (page.route.id !== "/" && page.route.id !== "/library" && page.route.id !== "/login" && page.route.id !== null) return;
-      const route = routeFromSession(session);
-      if (route && route !== current) {
-        navigate(route, true);
-      }
-      return;
-    }
-
-    if (session.kind === "reader") {
-      const restored = await selectSessionLibrary(session.library_id);
-      if (restored) {
-        await restoreReaderRoute(session.book_id);
-      } else {
-        const fallback: AppUiSession = { kind: "browse", destination: "home" };
-        await restoreReaderSession(fallback);
-      }
-      return;
-    }
-    await restoreReaderSession(session);
-  }
-
-  async function restoreReaderSession(session: AppUiSession) {
-    if (session.kind === "reader") {
-      if (!session.book_id) return;
-      if (!(await selectSessionLibrary(session.library_id))) return;
-      await restoreReaderRoute(session.book_id);
-      return;
-    }
-    if (session.destination === "account" || session.destination === "settings" || session.destination === "store") {
-      activeDestination = session.destination;
-      libraryError = "";
-      return;
-    }
-    if (session.destination === "home") {
-      activeDestination = "home";
-      libraryError = "";
-      if (activeLibraryId) await ensureDestination("home");
-      return;
-    }
-    if (session.destination === "authors") {
-      activeDestination = "authors";
-      libraryError = "";
-      if (await selectSessionLibrary(session.library_id)) await ensureDestination("authors");
-      return;
-    }
-    if (session.destination === "search") {
-      activeDestination = "search";
-      libraryError = "";
-      if (await selectSessionLibrary(session.library_id)) {
-        await ensureDestination("search");
-        requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
-      }
-      return;
-    }
-    await selectSessionLibrary(session.library_id);
-    activeDestination = "library";
-    const folderId = session.folder_id && session.folder_id !== "__root__" ? session.folder_id : "__root__";
-    if (folderId === "__root__") {
-      if (activeLibraryId) await loadDirectory("__root__", []);
-    } else {
-      await loadDirectory(folderId, [{ id: folderId, name: "" }]);
-    }
-    if (activeDestination !== "library") return;
+    if (!session) return false;
+    const current = `${page.url.pathname}${page.url.search}`;
+    if (page.route.id !== "/" && page.route.id !== "/library" && page.route.id !== "/login" && page.route.id !== null) return false;
+    const route = routeFromSession(session);
+    if (route && route !== current) await navigate(route, true);
+    return true;
   }
 
   function setDestination(destination: Destination, updateRoute = true) {
@@ -563,7 +475,7 @@
 
   function mergeBookDownloadStates(books: BookCardData[]) {
     const next = { ...bookDownloadStates };
-    for (const book of books) next[book.book_id] = book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded";
+    for (const book of books) next[book.content_hash] = book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded";
     bookDownloadStates = next;
   }
 
@@ -576,11 +488,11 @@
   }
 
   async function downloadBook(book: BookCardData) {
-    if (bookDownloadStates[book.book_id] === "Downloaded") return Promise.resolve();
-    bookDownloadStates = { ...bookDownloadStates, [book.book_id]: "Queued" };
+    if (bookDownloadStates[book.content_hash] === "Downloaded") return Promise.resolve();
+    bookDownloadStates = { ...bookDownloadStates, [book.content_hash]: "Queued" };
     try {
-      const state = await commands.downloadBook(activeLibraryId, book.book_id);
-      if (bookDownloadStates[book.book_id] !== "Downloaded") bookDownloadStates = { ...bookDownloadStates, [book.book_id]: state };
+      const state = await commands.downloadBook(activeLibraryId, book.content_hash);
+      if (bookDownloadStates[book.content_hash] !== "Downloaded") bookDownloadStates = { ...bookDownloadStates, [book.content_hash]: state };
     } catch (reason) {
       libraryError = errorMessage(reason);
       throw reason;
@@ -591,8 +503,8 @@
     if (!window.confirm(`Remove the downloaded copy of “${book.title || "Untitled"}” from this device? You can download it again later.`)) return;
     libraryError = "";
     try {
-      const state = await commands.removeLocalBookCopy(activeLibraryId, book.book_id);
-      bookDownloadStates = { ...bookDownloadStates, [book.book_id]: state };
+      const state = await commands.removeLocalBookCopy(activeLibraryId, book.content_hash);
+      bookDownloadStates = { ...bookDownloadStates, [book.content_hash]: state };
     } catch (reason) {
       libraryError = errorMessage(reason);
     }
@@ -803,12 +715,14 @@
       // Network reporting is advisory and must not prevent the application opening.
     }
     await restoreUiSession(readUiSession());
+    routesReady = true;
     webAppReady = true;
   }
 
   async function initializeWebApp() {
     await loadAccountStatus();
     if (accountStatus.signed_in) await prepareAuthenticatedWebApp();
+    else routesReady = true;
   }
 
   async function loadServerTransferState() {
@@ -1207,20 +1121,20 @@
   }
 
   async function openLibraryBook(book: BookCardData) {
-    openingBookId = book.book_id;
+    openingBookId = book.content_hash;
     libraryError = "";
     try {
-      if ((bookDownloadStates[book.book_id] ?? (book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded")) !== "Downloaded") {
+      if ((bookDownloadStates[book.content_hash] ?? (book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded")) !== "Downloaded") {
         pendingOpenBook = book;
         await measureInvoke("download_book", () => downloadBook(book));
-        if (bookDownloadStates[book.book_id] !== "Downloaded") {
+        if (bookDownloadStates[book.content_hash] !== "Downloaded") {
           return;
         }
       }
       pendingOpenBook = null;
-      const openedBook = await openDownloadedBook(book.book_id, book.title || "Untitled", book.author);
+      const openedBook = await openDownloadedBook(book.content_hash, book.title || "Untitled", book.author);
       readerBook = openedBook;
-      navigateToReader(book.book_id, openedBook);
+      navigateToReader(book.content_hash, openedBook);
     } catch (reason) {
       libraryError = errorMessage(reason);
     } finally {
@@ -1279,7 +1193,7 @@
     restoringReaderId = bookId;
     try {
       const knownBook = [...recentlyAdded, ...recentlyRead, ...directoryContent.books, ...authorBooks, ...searchResults]
-        .find((book) => book.book_id === bookId);
+        .find((book) => book.content_hash === bookId);
       const openedBook = await openDownloadedBook(bookId, knownBook?.title, knownBook?.author);
       readerRouteCache.set(bookId, openedBook);
       readerBook = openedBook;
@@ -1371,23 +1285,29 @@
       void initializeWebApp();
     } else {
       void (async () => {
-        await loadLibraries();
-        await restoreUiSession(readUiSession());
-        await loadAccountStatus();
-        await loadBrowsingPreferences();
-        await loadReaderPreferences();
-        await loadTransferPreferences();
+        try {
+          const session = readUiSession();
+          await loadLibraries();
+          await restoreUiSession(session);
+          routesReady = true;
+          await loadAccountStatus();
+          await loadBrowsingPreferences();
+          await loadReaderPreferences();
+          await loadTransferPreferences();
+        } finally {
+          routesReady = true;
+        }
       })();
     }
     void listen<DownloadStatusEvent>("library:download-status", ({ payload }) => {
       if (payload.library_id !== activeLibraryId) return;
       const change = payload.event.DownloadStatusChanged;
-      bookDownloadStates = { ...bookDownloadStates, [change.book_id]: change.state };
-      if (pendingOpenBook?.book_id === change.book_id && change.state === "Downloaded" && openingBookId !== change.book_id) {
+      bookDownloadStates = { ...bookDownloadStates, [change.content_hash]: change.state };
+      if (pendingOpenBook?.content_hash === change.content_hash && change.state === "Downloaded" && openingBookId !== change.content_hash) {
         const book = pendingOpenBook;
         pendingOpenBook = null;
         queueMicrotask(() => void openLibraryBook(book));
-      } else if (pendingOpenBook?.book_id === change.book_id && change.state === "NotDownloaded") {
+      } else if (pendingOpenBook?.content_hash === change.content_hash && change.state === "NotDownloaded") {
         libraryError = "Could not download the book.";
       }
     }).then((unlisten) => {

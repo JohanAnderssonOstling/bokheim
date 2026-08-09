@@ -38,7 +38,7 @@
     error = "";
     try {
       if (action.kind === "import") {
-        await commands.importCatalogBook({ library_id: activeLibraryId, directory_id: "__root__" }, action.request, null, null);
+        await commands.importCatalogBook({ library_id: activeLibraryId, directory_id: "__root__" }, action.request);
         imported = { ...imported, [key]: true };
         await onimported();
       } else {

@@ -33,7 +33,6 @@ socket=${BOKHEIM_SERVER_SOCKET:-/run/bokheim/sync.sock}
 systemctl is-active --quiet bokheim-sync.service
 systemctl is-active --quiet bokheim-catalogs.service
 systemctl is-active --quiet caddy.service
-systemctl is-active --quiet bokheim-gc.timer
 caddy validate --envfile "${caddy_env}" --config "${caddy_config}" >/dev/null
 
 if [[ ! -S ${socket} ]]; then

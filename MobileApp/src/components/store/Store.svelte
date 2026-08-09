@@ -2,14 +2,13 @@
   import { commands } from "../../lib/commands";
   import { catalogActionKey } from "../../lib/catalog-actions";
   import { catalogLinkAction, catalogLinkCount } from "../../lib/catalog-links";
-  import { createCatalogPageCache } from "../../lib/catalog-page-cache";
   import { openExternalUrl } from "../../lib/external-links";
   import { isNativeApp } from "../../lib/platform";
   import { STORE_CONTRACT } from "../../lib/types";
   import FolderBreadcrumbs from "../library/FolderBreadcrumbs.svelte";
   import FolderNavigationCard from "../library/FolderNavigationCard.svelte";
   import CatalogCover from "./CatalogCover.svelte";
-  import type { CatalogImportRequest, CatalogLink, CatalogOwnershipStatus, CatalogPage, CatalogPublication, CatalogPublicationAction, CatalogSearch, CatalogSource, CatalogWideSearchResult } from "../../lib/bindings";
+  import type { CatalogImportRequest, CatalogLink, CatalogPage, CatalogPageView, CatalogPublication, CatalogPublicationAction, CatalogSearch, CatalogSource, CatalogWideSearchResult } from "../../lib/bindings";
 
   let { activeLibraryId, libraryName, onimported }: { activeLibraryId: string; libraryName: string; onimported: () => void | Promise<void> } = $props();
 
@@ -22,8 +21,6 @@
   let catalog = $state<CatalogPage | null>(null);
   let searchDefinition = $state<CatalogSearch | null>(null);
   let levels = $state<CatalogLevel[]>([]);
-  let username = $state("");
-  let password = $state("");
   let query = $state("");
   let titleQuery = $state("");
   let authorQuery = $state("");
@@ -31,38 +28,22 @@
   let error = $state("");
   let importStates = $state<Record<string, ImportState>>({});
   let importErrors = $state<Record<string, string>>({});
-  let ownership = $state<Record<string, CatalogOwnershipStatus>>({});
+  let ownership = $state<Record<string, boolean>>({});
   let sourceRefresh = $state<SourceRefresh>({ kind: "available" });
   let customSourceIds = $state<string[]>([]);
   let customTitle = $state("");
   let customUrl = $state("");
-  let customRequiresSignIn = $state(false);
-  let customUsernameLabel = $state("Username");
-  let customPasswordRequired = $state(true);
   let customSaving = $state(false);
   let wideQuery = $state("");
   let wideResult = $state<CatalogWideSearchResult | null>(null);
   let wideSearching = $state(false);
   let wideSearchGeneration = 0;
   let sourcesInitialized = false;
-  let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
-  let hoverPrefetchCancel: (() => void) | null = null;
-  let idlePrefetchTimer: ReturnType<typeof setTimeout> | null = null;
-  let idlePrefetchCancels: Array<() => void> = [];
-
-  const publicCatalogPages = createCatalogPageCache((sourceId, locator) => commands.getCatalogPage(sourceId, locator, null, null));
-
-  const needsCredentials = $derived(selected?.authentication.kind === "basic");
   const needsExternalAuthentication = $derived(selected?.authentication.kind === "external");
-  const canConnect = $derived(!needsCredentials || username.trim().length > 0);
   const canSearch = $derived(Boolean(query.trim() || titleQuery.trim() || authorQuery.trim()));
 
   function message(reason: unknown) {
     return reason instanceof Error ? reason.message : String(reason);
-  }
-
-  function credentials() {
-    return { username: username.trim() || null, password: password || null };
   }
 
   function linkKey(link: CatalogLink) {
@@ -72,7 +53,6 @@
 
   function authenticationSummary(source: CatalogSource) {
     if (source.authentication.kind === "none") return "No sign-in required";
-    if (source.authentication.kind === "basic") return "Sign-in required";
     return "Continues in provider";
   }
 
@@ -84,89 +64,12 @@
     return `${sourceId}:${editionId}`;
   }
 
-  function widePublications(page: CatalogPage) {
-    const seen = new Set<string>();
-    return [...page.publications, ...page.groups.flatMap((group) => group.publications)].filter((publication) => {
-      const key = `${publication.identity.edition_id}:${publication.identity.work_id ?? ""}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  function ownedEditions(keys: string[]) {
+    return Object.fromEntries(keys.map((key) => [key, true]));
   }
 
-  function catalogPage(source: CatalogSource, locator: string | null, auth: { username: string | null; password: string | null }) {
-    return source.authentication.kind === "none" ? publicCatalogPages.get(source.id, locator) : commands.getCatalogPage(source.id, locator, auth.username, auth.password);
-  }
-
-  function prefetchCatalogLocator(source: CatalogSource, locator: string | null) {
-    return source.authentication.kind === "none" ? publicCatalogPages.prefetch(source.id, locator) : () => undefined;
-  }
-
-  function prefetchCatalogLink(link: CatalogLink) {
-    if (selected && link.target.kind === "page" && !link.active) prefetchCatalogLocator(selected, link.target.locator);
-  }
-
-  function scheduleCatalogLinkPrefetch(link: CatalogLink) {
-    const source = selected;
-    cancelCatalogLinkPrefetch();
-    if (!source || link.target.kind !== "page" || link.active) return;
-    const locator = link.target.locator;
-    prefetchTimer = setTimeout(() => { hoverPrefetchCancel = prefetchCatalogLocator(source, locator); }, 120);
-  }
-
-  function scheduleCatalogLocatorPrefetch(source: CatalogSource, locator: string | null) {
-    cancelCatalogLinkPrefetch();
-    prefetchTimer = setTimeout(() => { hoverPrefetchCancel = prefetchCatalogLocator(source, locator); }, 120);
-  }
-
-  function cancelCatalogLinkPrefetch() {
-    if (prefetchTimer !== null) clearTimeout(prefetchTimer);
-    prefetchTimer = null;
-    hoverPrefetchCancel?.();
-    hoverPrefetchCancel = null;
-  }
-
-  function cancelIdleCatalogPrefetch() {
-    if (idlePrefetchTimer !== null) clearTimeout(idlePrefetchTimer);
-    idlePrefetchTimer = null;
-    for (const cancel of idlePrefetchCancels) cancel();
-    idlePrefetchCancels = [];
-  }
-
-  function scheduleIdleCatalogPrefetch(source: CatalogSource, loaded: CatalogPage) {
-    cancelIdleCatalogPrefetch();
-    if (source.authentication.kind !== "none") return;
-    const formatLocators = loaded.facets.filter((facet) => facet.title.trim().toLowerCase() === "format").flatMap((facet) => facet.links).filter((link) => link.target.kind === "page" && !link.active).map((link) => link.target.kind === "page" ? link.target.locator : "");
-    const candidates = [...formatLocators, loaded.pagination.next].filter((locator): locator is string => Boolean(locator) && locator !== loaded.locator);
-    const locators = [...new Set(candidates)].slice(0, 3);
-    idlePrefetchTimer = setTimeout(() => {
-      idlePrefetchTimer = null;
-      idlePrefetchCancels = locators.map((locator) => publicCatalogPages.prefetch(source.id, locator));
-    }, 350);
-  }
-
-  async function ownershipForPage(source: CatalogSource, loaded: CatalogPage, libraryId: string) {
-    const identities = [...loaded.publications, ...loaded.groups.flatMap((group) => group.publications)].map((publication) => publication.identity);
-    if (!libraryId || !identities.length) return {};
-    try {
-      const statuses = await commands.getCatalogOwnership(libraryId, source.id, identities);
-      return Object.fromEntries(statuses.map((status) => [ownershipKey(source.id, status.edition_id), status.status]));
-    } catch {
-      return {};
-    }
-  }
-
-  async function ownershipForWideResult(result: CatalogWideSearchResult, libraryId: string) {
-    if (!libraryId) return {};
-    const searchable = result.groups.filter((group) => group.outcome.kind === "results");
-    const settled = await Promise.allSettled(searchable.map(async (group) => {
-      if (group.outcome.kind !== "results") return [];
-      const identities = widePublications(group.outcome.page).map((publication) => publication.identity);
-      if (!identities.length) return [];
-      const statuses = await commands.getCatalogOwnership(libraryId, group.source.id, identities);
-      return statuses.map((status) => [ownershipKey(group.source.id, status.edition_id), status.status] as const);
-    }));
-    return Object.fromEntries(settled.flatMap((entry) => entry.status === "fulfilled" ? entry.value : []));
+  function catalogPage(source: CatalogSource, locator: string | null) {
+    return commands.getCatalogPage(activeLibraryId, source.id, locator);
   }
 
   async function refreshSources() {
@@ -196,15 +99,11 @@
     customSaving = true;
     error = "";
     try {
-      const usernameLabel = customRequiresSignIn ? customUsernameLabel.trim() || "Username" : null;
-      const source = await commands.addCustomCatalog(customTitle.trim(), customUrl.trim(), usernameLabel, customRequiresSignIn && customPasswordRequired);
+      const source = await commands.addCustomCatalog(customTitle.trim(), customUrl.trim());
       sources = [...sources.filter((candidate) => candidate.id !== source.id), source];
       customSourceIds = [...customSourceIds, source.id];
       customTitle = "";
       customUrl = "";
-      customRequiresSignIn = false;
-      customUsernameLabel = "Username";
-      customPasswordRequired = true;
     } catch (reason) {
       error = message(reason);
     } finally {
@@ -228,8 +127,6 @@
   }
 
   async function chooseSource(source: CatalogSource) {
-    cancelCatalogLinkPrefetch();
-    cancelIdleCatalogPrefetch();
     wideSearchGeneration += 1;
     wideSearching = false;
     wideResult = null;
@@ -240,8 +137,6 @@
     query = "";
     titleQuery = "";
     authorQuery = "";
-    username = "";
-    password = "";
     error = "";
     importStates = {};
     ownership = {};
@@ -257,12 +152,10 @@
     wideSearching = true;
     error = "";
     try {
-      const result = await commands.searchCatalogs(terms);
+      const view = await commands.searchCatalogs(activeLibraryId, terms);
       if (generation !== wideSearchGeneration || wideQuery.trim() !== terms) return;
-      const nextOwnership = await ownershipForWideResult(result, activeLibraryId);
-      if (generation !== wideSearchGeneration || wideQuery.trim() !== terms) return;
-      ownership = nextOwnership;
-      wideResult = result;
+      ownership = ownedEditions(view.owned_editions);
+      wideResult = view.result;
     } catch (reason) {
       if (generation === wideSearchGeneration) error = message(reason);
     } finally {
@@ -282,18 +175,14 @@
   async function loadCatalog(url: string | null, title: string, root = false) {
     if (!selected || loading) return;
     if (url && catalog?.locator === url) return;
-    cancelCatalogLinkPrefetch();
-    cancelIdleCatalogPrefetch();
     loading = true;
     error = "";
     try {
-      const auth = credentials();
-      const loaded = await catalogPage(selected, url, auth);
-      const nextOwnership = await ownershipForPage(selected, loaded, activeLibraryId);
+      const view = await catalogPage(selected, url);
+      const loaded = view.page;
       if (!selected) return;
-      ownership = nextOwnership;
+      ownership = ownedEditions(view.owned_editions);
       catalog = loaded;
-      scheduleIdleCatalogPrefetch(selected, loaded);
       if (root) {
         levels = [{ title: loaded.title || title, url: loaded.locator }];
         searchDefinition = loaded.search;
@@ -329,25 +218,17 @@
     }
   }
 
-  async function connectAuthenticated() {
-    if (!selected || !canConnect) return;
-    await loadCatalog(null, selected.title, true);
-  }
-
   async function goToLevel(index: number) {
     if (!selected || loading || index < 0 || index >= levels.length) return;
     if (index === levels.length - 1) return;
-    cancelCatalogLinkPrefetch();
-    cancelIdleCatalogPrefetch();
     const target = levels[index];
     loading = true;
     error = "";
     try {
-      const auth = credentials();
-      const loaded = await catalogPage(selected, target.url, auth);
-      ownership = await ownershipForPage(selected, loaded, activeLibraryId);
+      const view = await catalogPage(selected, target.url);
+      const loaded = view.page;
+      ownership = ownedEditions(view.owned_editions);
       catalog = loaded;
-      scheduleIdleCatalogPrefetch(selected, loaded);
       levels = levels.slice(0, index + 1);
       query = "";
       titleQuery = "";
@@ -362,17 +243,14 @@
   async function runSearch(event: SubmitEvent) {
     event.preventDefault();
     if (!selected || !searchDefinition || !canSearch || loading) return;
-    cancelCatalogLinkPrefetch();
-    cancelIdleCatalogPrefetch();
     loading = true;
     error = "";
     try {
-      const auth = credentials();
       const searchQuery = { query: query.trim(), title: titleQuery.trim() || null, author: authorQuery.trim() || null };
-      const results = await commands.searchCatalog(selected.id, searchDefinition, searchQuery, auth.username, auth.password);
-      ownership = await ownershipForPage(selected, results, activeLibraryId);
+      const view = await commands.searchCatalog(activeLibraryId, selected.id, searchDefinition, searchQuery);
+      const results = view.page;
+      ownership = ownedEditions(view.owned_editions);
       catalog = results;
-      scheduleIdleCatalogPrefetch(selected, results);
       const label = query.trim() || titleQuery.trim() || authorQuery.trim();
       levels = [...levels.slice(0, 1), { title: `Search: ${label}`, url: results.locator }];
     } catch (reason) {
@@ -385,14 +263,13 @@
   async function addBook(source: CatalogSource, publication: CatalogPublication, request: CatalogImportRequest) {
     const importDestination = activeLibraryId ? { library_id: activeLibraryId, directory_id: "__root__" } : null;
     const actionKey = catalogActionKey({ kind: "import", request });
-    if (!source || !importDestination || importStates[actionKey] === "adding" || ownership[ownershipKey(source.id, publication.identity.edition_id)] === "exact_edition_owned") return;
+    if (!source || !importDestination || importStates[actionKey] === "adding" || ownership[ownershipKey(source.id, publication.identity.edition_id)]) return;
     importStates = { ...importStates, [actionKey]: "adding" };
     importErrors = { ...importErrors, [actionKey]: "" };
     try {
-      const auth = selected?.id === source.id ? credentials() : { username: null, password: null };
-      await commands.importCatalogBook(importDestination, request, auth.username, auth.password);
+      await commands.importCatalogBook(importDestination, request);
       importStates = { ...importStates, [actionKey]: "added" };
-      ownership = { ...ownership, [ownershipKey(source.id, publication.identity.edition_id)]: "exact_edition_owned" };
+      ownership = { ...ownership, [ownershipKey(source.id, publication.identity.edition_id)]: true };
       await onimported();
     } catch (reason) {
       importStates = { ...importStates, [actionKey]: "idle" };
@@ -441,10 +318,6 @@
             external={link.target.kind === "external"}
             active={link.active}
             disabled={loading}
-            onpointerenter={() => scheduleCatalogLinkPrefetch(link)}
-            onpointerleave={cancelCatalogLinkPrefetch}
-            onfocus={() => prefetchCatalogLink(link)}
-            onpointerdown={() => prefetchCatalogLink(link)}
             onclick={() => void followCatalogLink(link)}
           />
         </div>
@@ -457,13 +330,13 @@
   <div class="facet-options">
     {#each links as link (linkKey(link))}
       {@const count = catalogLinkCount(link)}
-      <button type="button" class:active={link.active} disabled={link.active || loading} aria-pressed={link.active} onpointerenter={() => scheduleCatalogLinkPrefetch(link)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => prefetchCatalogLink(link)} onpointerdown={() => prefetchCatalogLink(link)} onclick={() => void followCatalogLink(link)}><span>{link.title}</span>{#if count}<small>{count}</small>{/if}{#if link.active}<i aria-hidden="true">✓</i>{/if}</button>
+      <button type="button" class:active={link.active} disabled={link.active || loading} aria-pressed={link.active} onclick={() => void followCatalogLink(link)}><span>{link.title}</span>{#if count}<small>{count}</small>{/if}{#if link.active}<i aria-hidden="true">✓</i>{/if}</button>
     {/each}
   </div>
 {/snippet}
 
 {#snippet publicationCards(source: CatalogSource, items: CatalogPublication[])}
-  {@const visibleItems = items.filter((publication) => ownership[ownershipKey(source.id, publication.identity.edition_id)] !== "exact_edition_owned")}
+  {@const visibleItems = items.filter((publication) => !ownership[ownershipKey(source.id, publication.identity.edition_id)])}
   {#if visibleItems.length}
     <div class="catalog-books">
       {#each visibleItems as publication (`${publication.identity.edition_id}:${publication.title}`)}
@@ -525,9 +398,9 @@
       <div class="wide-groups">
         {#each wideResult.groups as group (group.source.id)}
           <section class="wide-group">
-            <header><span class="source-mark">{group.source.title.slice(0, 1)}</span><div><h2>{group.source.title}</h2><small>{providerLabel(group.source)} · {group.source.languages.join(" · ")}</small></div><button type="button" onpointerenter={() => scheduleCatalogLocatorPrefetch(group.source, null)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => prefetchCatalogLocator(group.source, null)} onpointerdown={() => prefetchCatalogLocator(group.source, null)} onclick={() => void chooseSource(group.source)}>Open catalog</button></header>
+            <header><span class="source-mark">{group.source.title.slice(0, 1)}</span><div><h2>{group.source.title}</h2><small>{providerLabel(group.source)} · {group.source.languages.join(" · ")}</small></div><button type="button" onclick={() => void chooseSource(group.source)}>Open catalog</button></header>
             {#if group.outcome.kind === "results"}
-              {@const resultPublications = widePublications(group.outcome.page)}
+              {@const resultPublications = [...group.outcome.page.publications, ...group.outcome.page.groups.flatMap((catalogGroup) => catalogGroup.publications)]}
               {@render publicationCards(group.source, resultPublications)}
               {#if group.outcome.page.navigation.some((link) => link.target.kind === "external")}
                 <div class="wide-external-links">
@@ -537,8 +410,6 @@
                 </div>
               {/if}
               {#if !resultPublications.length && !group.outcome.page.navigation.some((link) => link.target.kind === "external")}<p class="wide-status">No matching books were returned.</p>{/if}
-            {:else if group.outcome.kind === "authentication_required"}
-              <p class="wide-status">Sign in to this catalog to search it.</p>
             {:else if group.outcome.kind === "unsupported"}
               <p class="wide-status">This catalog does not advertise search.</p>
             {:else if group.outcome.kind === "timed_out"}
@@ -558,11 +429,6 @@
             <label><span>Catalog URL</span><input bind:value={customUrl} type="url" inputmode="url" placeholder="https://…" required autocomplete="url" /></label>
           </div>
           <div class="custom-options">
-            <label class="check"><input bind:checked={customRequiresSignIn} type="checkbox" /><span>Requires sign-in</span></label>
-            {#if customRequiresSignIn}
-              <label><span>Username label</span><input bind:value={customUsernameLabel} maxlength="120" required autocomplete="off" /></label>
-              <label class="check"><input bind:checked={customPasswordRequired} type="checkbox" /><span>Password required</span></label>
-            {/if}
             <button type="submit" disabled={customSaving || !customTitle.trim() || !customUrl.trim()}>{customSaving ? "Saving…" : "Add catalog"}</button>
           </div>
         </form>
@@ -570,7 +436,7 @@
       <div class="sources">
         {#each sources as source (source.id)}
           <div class="source-entry">
-            <button class="source-card" type="button" onpointerenter={() => scheduleCatalogLocatorPrefetch(source, null)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => prefetchCatalogLocator(source, null)} onpointerdown={() => prefetchCatalogLocator(source, null)} onclick={() => void chooseSource(source)}>
+            <button class="source-card" type="button" onclick={() => void chooseSource(source)}>
               <span class="source-mark">{source.title.slice(0, 1)}</span>
               <span class="source-copy"><strong>{source.title}</strong><small>{source.description}</small><i>{providerLabel(source)} · {source.languages.join(" · ")} · {authenticationSummary(source)}</i></span>
               <span class="chevron">›</span>
@@ -586,19 +452,7 @@
       <div><p class="eyebrow">{providerLabel(selected)} · {selected.languages.join(" · ")}</p><h1>{selected.title}</h1></div>
     </header>
 
-    {#if needsCredentials && !catalog}
-      <form class="credentials" onsubmit={(event) => { event.preventDefault(); void connectAuthenticated(); }}>
-        <strong>{STORE_CONTRACT.sign_in_needed_label}</strong>
-        <p>{selected.description}</p>
-        <label><span>{selected.authentication.kind === "basic" ? selected.authentication.username_label : "Username"}</span><input bind:value={username} autocomplete="username" type="text" /></label>
-        {#if selected.authentication.kind === "basic" && selected.authentication.password === "required"}
-          <label><span>Password</span><input bind:value={password} autocomplete="current-password" type="password" /></label>
-        {:else}
-          <small>This provider expects the password to be left empty.</small>
-        {/if}
-        <button class="primary" type="submit" disabled={!canConnect || loading}>Continue</button>
-      </form>
-    {:else if needsExternalAuthentication && !catalog}
+    {#if needsExternalAuthentication && !catalog}
       <section class="credentials">
         <strong>{STORE_CONTRACT.sign_in_needed_label}</strong>
         <p>{selected.description}</p>
@@ -640,7 +494,7 @@
         <div class="catalog-groups">
           {#each catalog.groups as group, index (group.page_locator ?? `${group.title}:${index}`)}
             <section class="catalog-group">
-              <header><h2>{group.title}</h2>{#if group.number_of_items !== null}<small>{group.number_of_items.toLocaleString()} books</small>{/if}{#if group.page_locator}<button type="button" disabled={loading} onpointerenter={() => selected && scheduleCatalogLocatorPrefetch(selected, group.page_locator)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => selected && prefetchCatalogLocator(selected, group.page_locator)} onpointerdown={() => selected && prefetchCatalogLocator(selected, group.page_locator)} onclick={() => void loadCatalog(group.page_locator, group.title)}>View all</button>{/if}</header>
+              <header><h2>{group.title}</h2>{#if group.number_of_items !== null}<small>{group.number_of_items.toLocaleString()} books</small>{/if}{#if group.page_locator}<button type="button" disabled={loading} onclick={() => void loadCatalog(group.page_locator, group.title)}>View all</button>{/if}</header>
               {@render catalogLinks(group.navigation)}
               {@render publicationCards(selected, group.publications)}
             </section>
@@ -653,10 +507,10 @@
       {/if}
 
       <div class="pagination">
-        {#if catalog.pagination.previous}<button type="button" onpointerenter={() => selected && scheduleCatalogLocatorPrefetch(selected, catalog!.pagination.previous!)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => selected && prefetchCatalogLocator(selected, catalog!.pagination.previous!)} onpointerdown={() => selected && prefetchCatalogLocator(selected, catalog!.pagination.previous!)} onclick={() => void loadCatalog(catalog!.pagination.previous!, "Previous page")}>← Previous</button>{/if}
-        {#if catalog.pagination.next}<button type="button" onpointerenter={() => selected && scheduleCatalogLocatorPrefetch(selected, catalog!.pagination.next!)} onpointerleave={cancelCatalogLinkPrefetch} onfocus={() => selected && prefetchCatalogLocator(selected, catalog!.pagination.next!)} onpointerdown={() => selected && prefetchCatalogLocator(selected, catalog!.pagination.next!)} onclick={() => void loadCatalog(catalog!.pagination.next!, "Next page")}>Next →</button>{/if}
+        {#if catalog.pagination.previous}<button type="button" onclick={() => void loadCatalog(catalog!.pagination.previous!, "Previous page")}>← Previous</button>{/if}
+        {#if catalog.pagination.next}<button type="button" onclick={() => void loadCatalog(catalog!.pagination.next!, "Next page")}>Next →</button>{/if}
       </div>
-    {:else if !needsCredentials && loading}
+    {:else if loading}
       <div class="loading"><span></span>Opening {selected.title}…</div>
     {:else if error}
       <p class="error" role="alert">{error}</p>
@@ -699,7 +553,6 @@
   .custom-catalog label:not(.check) { display: grid; gap: .25rem; font-weight: 700; }
   .custom-catalog input:not([type="checkbox"]) { min-width: 0; min-height: 2.35rem; padding: .45rem .6rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: inherit; background: var(--color-surface-bg); outline: none; }
   .custom-options { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; }
-  .custom-options .check { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .35rem; font-weight: 700; }
   .custom-options button { min-height: 2.35rem; margin-left: auto; padding: .45rem .75rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-white-surface); background: var(--color-accent); font-weight: 750; cursor: pointer; }
   .sources { display: grid; grid-template-columns: 1fr; gap: .75rem; }
   .source-entry { position: relative; min-width: 0; }
@@ -717,10 +570,7 @@
   .catalog-heading { justify-content: flex-start; align-items: center; }
   .catalog-heading > div { padding-left: 1rem; border-left: 1px solid var(--color-border-color); }
   .credentials { display: grid; max-width: 32rem; gap: .9rem; padding: 1.15rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-md); background: var(--color-white-surface); }
-  .credentials label { display: grid; gap: .35rem; color: var(--color-subtle-text); font-size: .72rem; font-weight: 700; }
-  .credentials input, .catalog-search input { min-width: 0; border: 1px solid var(--color-border-color); color: inherit; background: var(--color-surface-bg); outline: none; }
-  .credentials input { min-height: 2.7rem; padding: .65rem .75rem; border-radius: var(--radius-sm); }
-  .credentials small { color: var(--color-subtle-text); }
+  .catalog-search input { min-width: 0; border: 1px solid var(--color-border-color); color: inherit; background: var(--color-surface-bg); outline: none; }
   .primary, .retry, .pagination button { width: max-content; min-height: 2.55rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-white-surface); background: var(--color-accent); font-weight: 750; cursor: pointer; }
   .catalog-tools { display: grid; gap: .85rem; margin-bottom: 1rem; }
   .catalog-search { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; max-width: 46rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); background: var(--color-white-surface); }

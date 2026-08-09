@@ -473,15 +473,14 @@ mod tests {
             .map(|sequence| bokheim_domain::StateMutation {
                 mutation_id: sync_common::MutationId::new(),
                 body: bokheim_domain::MutationBody::BookLifecycle {
-                    book_id: sync_common::BookId::new(sequence as u64),
+                    content_hash: sync_common::ContentHash::from_fixture_u64(sequence as u64),
                     value: bokheim_domain::BookLifecycleState::Present {
                         metadata: bokheim_domain::BookMetadataState { title: format!("Book {sequence}"), contributors: Vec::new(), description: String::new(), publication: Default::default() },
-                        added_at: sync_common::UnixMillis::new(1).unwrap(),
-                        content_hash: sync_common::ContentHash::parse(&"a".repeat(64)).unwrap(),
+                        added_at: 1,
                         format: bokheim_domain::BookFormat::Epub,
                     },
                 },
-                changed_at: sync_common::UnixMillis::new(1).unwrap(),
+                changed_at: 1,
                 replica_seq: sync_common::ReplicaSeq::new(sequence as u64).unwrap(),
             })
             .collect()

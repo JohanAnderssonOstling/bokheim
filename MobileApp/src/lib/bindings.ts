@@ -43,34 +43,33 @@ export const commands = {
 	getCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("get_catalog_sources"),
 	refreshCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("refresh_catalog_sources"),
 	getCustomCatalogSources: () => __TAURI_INVOKE<CatalogSource[]>("get_custom_catalog_sources"),
-	addCustomCatalog: (title: string, url: string, usernameLabel: string | null, passwordRequired: boolean) => __TAURI_INVOKE<CatalogSource>("add_custom_catalog", { title, url, usernameLabel, passwordRequired }),
+	addCustomCatalog: (title: string, url: string) => __TAURI_INVOKE<CatalogSource>("add_custom_catalog", { title, url }),
 	removeCustomCatalog: (sourceId: CatalogSourceId) => __TAURI_INVOKE<null>("remove_custom_catalog", { sourceId }),
-	searchCatalogs: (query: string) => __TAURI_INVOKE<CatalogWideSearchResult>("search_catalogs", { query }),
-	getCatalogPage: (sourceId: CatalogSourceId, locator: string | null, username: string | null, password: string | null) => __TAURI_INVOKE<CatalogPage>("get_catalog_page", { sourceId, locator, username, password }),
-	searchCatalog: (sourceId: CatalogSourceId, search: CatalogSearch, query: CatalogSearchQuery, username: string | null, password: string | null) => __TAURI_INVOKE<CatalogPage>("search_catalog", { sourceId, search, query, username, password }),
+	searchCatalogs: (libraryId: string, query: string) => __TAURI_INVOKE<CatalogWideSearchView>("search_catalogs", { libraryId, query }),
+	getCatalogPage: (libraryId: string, sourceId: CatalogSourceId, locator: string | null) => __TAURI_INVOKE<CatalogPageView>("get_catalog_page", { libraryId, sourceId, locator }),
+	searchCatalog: (libraryId: string, sourceId: CatalogSourceId, search: CatalogSearch, query: CatalogSearchQuery) => __TAURI_INVOKE<CatalogPageView>("search_catalog", { libraryId, sourceId, search, query }),
 	getCatalogCover: (sourceId: CatalogSourceId, imageUrl: string) => __TAURI_INVOKE<BinaryBytes>("get_catalog_cover", { sourceId, imageUrl }),
-	getCatalogOwnership: (libraryId: string, sourceId: CatalogSourceId, publications: CatalogPublicationIdentity[]) => __TAURI_INVOKE<CatalogPublicationOwnership[]>("get_catalog_ownership", { libraryId, sourceId, publications }),
-	importCatalogBook: (destination: BookImportDestination, request: CatalogImportRequest, username: string | null, password: string | null) => __TAURI_INVOKE<null>("import_catalog_book", { destination, request, username, password }),
+	importCatalogBook: (destination: BookImportDestination, request: CatalogImportRequest) => __TAURI_INVOKE<null>("import_catalog_book", { destination, request }),
 	getLibraryHome: (libraryId: string, limit: number) => __TAURI_INVOKE<LibraryHomeView>("get_library_home", { libraryId, limit }),
 	searchLibrary: (libraryId: string, query: string, limit: number) => __TAURI_INVOKE<BookCardRow[]>("search_library", { libraryId, query, limit }),
 	getLibraryAuthors: (libraryId: string, selectedAuthorId: string | null) => __TAURI_INVOKE<LibraryAuthorsView>("get_library_authors", { libraryId, selectedAuthorId }),
 	discoverCatalogAuthorBooks: (libraryId: string, authorId: string) => __TAURI_INVOKE<CatalogAuthorDiscoveryResult>("discover_catalog_author_books", { libraryId, authorId }),
-	getBookThumbnail: (libraryId: string, bookId: string) => __TAURI_INVOKE<BinaryBytes>("get_book_thumbnail", { libraryId, bookId }),
-	openBook: (libraryId: string, bookId: string) => __TAURI_INVOKE<BinaryBytes>("open_book", { libraryId, bookId }),
-	getBookFileName: (libraryId: string, bookId: string) => __TAURI_INVOKE<string>("get_book_file_name", { libraryId, bookId }),
-	getBookReadingPosition: (libraryId: string, bookId: string) => __TAURI_INVOKE<string | null>("get_book_reading_position", { libraryId, bookId }),
-	updateReadingPosition: (libraryId: string, bookId: string, cfi: string, progress: number | null) => __TAURI_INVOKE<null>("update_reading_position", { libraryId, bookId, cfi, progress }),
-	getAnnotations: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderAnnotation[]>("get_annotations", { libraryId, bookId }),
+	getBookThumbnail: (libraryId: string, contentHash: string) => __TAURI_INVOKE<BinaryBytes>("get_book_thumbnail", { libraryId, contentHash }),
+	openBook: (libraryId: string, contentHash: string) => __TAURI_INVOKE<BinaryBytes>("open_book", { libraryId, contentHash }),
+	getBookFileName: (libraryId: string, contentHash: string) => __TAURI_INVOKE<string>("get_book_file_name", { libraryId, contentHash }),
+	getBookReadingPosition: (libraryId: string, contentHash: string) => __TAURI_INVOKE<string | null>("get_book_reading_position", { libraryId, contentHash }),
+	updateReadingPosition: (libraryId: string, contentHash: string, cfi: string, progress: number | null) => __TAURI_INVOKE<null>("update_reading_position", { libraryId, contentHash, cfi, progress }),
+	getAnnotations: (libraryId: string, contentHash: string) => __TAURI_INVOKE<ReaderAnnotation[]>("get_annotations", { libraryId, contentHash }),
 	upsertAnnotation: (libraryId: string, annotation: ReaderAnnotation) => __TAURI_INVOKE<null>("upsert_annotation", { libraryId, annotation }),
 	deleteAnnotation: (libraryId: string, annotationId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_annotation", { libraryId, annotationId, modifiedAt }),
-	getBookmarks: (libraryId: string, bookId: string) => __TAURI_INVOKE<ReaderBookmark[]>("get_bookmarks", { libraryId, bookId }),
+	getBookmarks: (libraryId: string, contentHash: string) => __TAURI_INVOKE<ReaderBookmark[]>("get_bookmarks", { libraryId, contentHash }),
 	createBookmark: (libraryId: string, bookmark: ReaderBookmark) => __TAURI_INVOKE<null>("create_bookmark", { libraryId, bookmark }),
 	deleteBookmark: (libraryId: string, bookmarkId: string, deletedAt: number | null) => __TAURI_INVOKE<null>("delete_bookmark", { libraryId, bookmarkId, deletedAt }),
-	getBookLinks: (libraryId: string, bookId: string) => __TAURI_INVOKE<BookLink[]>("get_book_links", { libraryId, bookId }),
+	getBookLinks: (libraryId: string, contentHash: string) => __TAURI_INVOKE<BookLink[]>("get_book_links", { libraryId, contentHash }),
 	upsertBookLink: (libraryId: string, link: BookLink) => __TAURI_INVOKE<null>("upsert_book_link", { libraryId, link }),
 	deleteBookLink: (libraryId: string, linkId: string, modifiedAt: number | null) => __TAURI_INVOKE<null>("delete_book_link", { libraryId, linkId, modifiedAt }),
-	downloadBook: (libraryId: string, bookId: string) => __TAURI_INVOKE<DownloadState>("download_book", { libraryId, bookId }),
-	removeLocalBookCopy: (libraryId: string, bookId: string) => __TAURI_INVOKE<DownloadState>("remove_local_book_copy", { libraryId, bookId }),
+	downloadBook: (libraryId: string, contentHash: string) => __TAURI_INVOKE<DownloadState>("download_book", { libraryId, contentHash }),
+	removeLocalBookCopy: (libraryId: string, contentHash: string) => __TAURI_INVOKE<DownloadState>("remove_local_book_copy", { libraryId, contentHash }),
 	downloadFolder: (libraryId: string, dirId: string) => __TAURI_INVOKE<FolderDownloadStatus>("download_folder", { libraryId, dirId }),
 };
 
@@ -153,7 +152,7 @@ export type BookActionsContract = {
 
 /**  Everything a browsing card renders for one book. */
 export type BookCardRow = {
-	book_id: string,
+	content_hash: string,
 	title: string,
 	author: string,
 	description: string,
@@ -179,8 +178,8 @@ export type BookImportDestination = {
 /**  A directed, user-authored relationship between two books in one library. */
 export type BookLink = {
 	id: string,
-	source_book_id: string,
-	target_book_id: string,
+	source_content_hash: string,
+	target_content_hash: string,
 	relation: string,
 	note: string,
 	created_at: number,
@@ -287,7 +286,7 @@ export type BrowsingStatesContract = {
 	retry_label: string,
 };
 
-export type CatalogAuthentication = { kind: "none" } | { kind: "basic"; username_label: string; password: CatalogPasswordRequirement } | { kind: "external"; action_label: string; url: string };
+export type CatalogAuthentication = { kind: "none" } | { kind: "external"; action_label: string; url: string };
 
 export type CatalogAuthorCredit = {
 	name: string,
@@ -349,8 +348,6 @@ export type CatalogLink = {
 
 export type CatalogLinkTarget = { kind: "page"; locator: string } | { kind: "external"; url: string };
 
-export type CatalogOwnershipStatus = "not_owned" | "other_edition_owned" | "exact_edition_owned";
-
 export type CatalogPage = {
 	source_id: CatalogSourceId,
 	freshness: CatalogFreshness,
@@ -364,6 +361,11 @@ export type CatalogPage = {
 	search: CatalogSearch | null,
 };
 
+export type CatalogPageView = {
+	page: CatalogPage,
+	owned_editions: string[],
+};
+
 export type CatalogPagination = {
 	first: string | null,
 	previous: string | null,
@@ -373,8 +375,6 @@ export type CatalogPagination = {
 	items_per_page: number | null,
 	current_page: number | null,
 };
-
-export type CatalogPasswordRequirement = "required" | "empty";
 
 export type CatalogPrice = {
 	currency: string,
@@ -404,11 +404,6 @@ export type CatalogPublicationIdentifierScheme = "isbn" | "asin" | "doi" | "oclc
 export type CatalogPublicationIdentity = {
 	edition_id: string,
 	work_id: string | null,
-};
-
-export type CatalogPublicationOwnership = {
-	edition_id: string,
-	status: CatalogOwnershipStatus,
 };
 
 export type CatalogSearch = {
@@ -443,11 +438,16 @@ export type CatalogWideSearchGroup = {
 	outcome: CatalogWideSearchOutcome,
 };
 
-export type CatalogWideSearchOutcome = { kind: "results"; page: CatalogPage } | { kind: "authentication_required" } | { kind: "unsupported" } | { kind: "timed_out" } | { kind: "failed"; message: string };
+export type CatalogWideSearchOutcome = { kind: "results"; page: CatalogPage } | { kind: "unsupported" } | { kind: "timed_out" } | { kind: "failed"; message: string };
 
 export type CatalogWideSearchResult = {
 	query: string,
 	groups: CatalogWideSearchGroup[],
+};
+
+export type CatalogWideSearchView = {
+	result: CatalogWideSearchResult,
+	owned_editions: string[],
 };
 
 export type Dir = {
@@ -591,17 +591,9 @@ export type OpdsEndpoint = {
 	description: string,
 	languages: string[],
 	url: string,
-	access: OpdsEndpointAccess,
-	authentication: OpdsEndpointAuthentication,
 };
 
-export type OpdsEndpointAccess = "open" | "membership";
-
-export type OpdsEndpointAuthentication = { kind: "none" } | { kind: "basic"; username_label: string; password: OpdsPasswordRequirement };
-
 export type OpdsEndpointId = string;
-
-export type OpdsPasswordRequirement = "required" | "empty";
 
 export type PdfAnnotationRect = {
 	left: number,
@@ -619,7 +611,7 @@ export type PdfPageLayoutOption = {
 
 export type ReaderAnnotation = {
 	id: string,
-	book_id: string,
+	content_hash: string,
 	anchor: AnnotationAnchor,
 	exact_text: string,
 	style: AnnotationStyle,
@@ -631,7 +623,7 @@ export type ReaderAnnotation = {
 
 export type ReaderBookmark = {
 	id: string,
-	book_id: string,
+	content_hash: string,
 	cfi: string,
 	label: string,
 	created_at: number,
@@ -818,7 +810,7 @@ export type TransferStatus = {
 	id: string,
 	kind: TransferJobKind,
 	content_hash: string,
-	book_id: string | null,
+	book_content_hash: string | null,
 	path: string | null,
 	state: TransferState,
 	origin: TransferOrigin,

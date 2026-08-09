@@ -1,13 +1,13 @@
 //! Generates and atomically publishes UI and synchronized book covers.
 
 use crate::app::BackendContext;
-use crate::{BookId, ContentHash, LibraryRoot};
+use crate::{ContentHash, LibraryRoot};
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn generate_thumbnail_for_sync(context: &BackendContext, library_root: &LibraryRoot, book_path: &Path, book_id: BookId, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
-    let thumbnail_path = context.thumbnails_dir()?.join(format!("{book_id}.jpg"));
+pub(crate) fn generate_thumbnail_for_sync(context: &BackendContext, library_root: &LibraryRoot, book_path: &Path, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    let thumbnail_path = context.thumbnails_dir()?.join(format!("{content_hash}.jpg"));
     let sync_path = crate::sync::transfer::thumbnail_path_from_content_hash(library_root, content_hash);
     let publish_thumbnail = thumbnail_path_needs_publish(&thumbnail_path)?;
     let publish_sync = thumbnail_path_needs_publish(&sync_path)?;

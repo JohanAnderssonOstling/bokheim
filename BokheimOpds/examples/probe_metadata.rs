@@ -3,7 +3,7 @@
 //! Example:
 //! cargo run -p bokheim-opds --example probe_metadata -- --pages 3 --search book
 
-use bokheim_opds::{endpoints_from_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointAccess, OpdsEndpointAuthentication, OpdsEndpointId, OpdsLinkTarget};
+use bokheim_opds::{endpoints_from_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointId, OpdsLinkTarget};
 use futures_util::{stream, StreamExt};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -95,7 +95,7 @@ async fn inspect_catalog(http: Arc<reqwest::Client>, endpoint: OpdsEndpoint, pag
     let mut urls = vec![endpoint.url.clone()];
     let mut errors = Vec::new();
     let discovery = OpdsClient::new().expect("OPDS client should initialize");
-    match discovery.fetch_catalog(&endpoint.url, None).await {
+    match discovery.fetch_catalog(&endpoint.url).await {
         Ok(root) => {
             if !search_terms.is_empty() && root.search.is_some() {
                 match discovery.search(&root, search_terms, None).await {
@@ -325,8 +325,6 @@ fn endpoints(options: &Options) -> Vec<OpdsEndpoint> {
             description: "Ad hoc metadata probe target".to_owned(),
             languages: vec!["Unspecified".to_owned()],
             url: url.clone(),
-            access: OpdsEndpointAccess::Open,
-            authentication: OpdsEndpointAuthentication::None,
         }];
     }
     let bytes = std::fs::read(&options.registry).unwrap_or_else(|error| panic!("cannot read {}: {error}", options.registry.display()));
@@ -334,7 +332,6 @@ fn endpoints(options: &Options) -> Vec<OpdsEndpoint> {
     endpoints_from_registry(registry)
         .unwrap_or_else(|error| panic!("invalid catalog endpoints: {error}"))
         .into_iter()
-        .filter(|endpoint| endpoint.access == OpdsEndpointAccess::Open)
         .filter(|endpoint| options.only_id.as_deref().is_none_or(|id| endpoint.id.as_str() == id))
         .collect()
 }

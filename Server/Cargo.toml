@@ -9,8 +9,6 @@ resolver = "2"
 members = [
     ".",
     "crates/server-account",
-    "crates/server-core",
-    "crates/server-database",
     "crates/server-postgres",
     "crates/server-asset-store",
     "crates/server-http",
@@ -32,12 +30,10 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4"] }
-server-core = { path = "crates/server-core" }
 server-postgres = { path = "crates/server-postgres" }
 server-asset-store = { path = "crates/server-asset-store" }
 server-http = { path = "crates/server-http" }
 server-account = { path = "crates/server-account" }
-server-database = { path = "crates/server-database" }
 
 [dev-dependencies]
 bokheim-account-contract = { path = "../BokheimAccountContract" }
