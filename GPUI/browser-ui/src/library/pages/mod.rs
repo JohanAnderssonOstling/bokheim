@@ -1,0 +1,6 @@
+//! Pages backed by the currently selected library.
+
+pub(crate) mod authors;
+pub(crate) mod folders;
+pub(crate) mod home;
+pub(crate) mod search;

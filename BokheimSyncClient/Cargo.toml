@@ -1,0 +1,23 @@
+[package]
+name = "bokheim-sync-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+blake3 = "1"
+bokheim-account-contract = { path = "../BokheimAccountContract" }
+bokheim-domain = { path = "../BokheimDomain" }
+bokheim-wire = { path = "../BokheimWire" }
+serde = { version = "1", features = ["derive"] }
+sync-common = { path = "../SyncCommon" }
+futures-util = "0.3"
+tokio = { version = "1", features = ["net", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+urlencoding = "2"
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

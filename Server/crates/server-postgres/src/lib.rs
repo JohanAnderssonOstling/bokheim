@@ -1,15 +1,16 @@
-//! PostgreSQL adapter for synchronization, quota accounting, and cross-process
+//! PostgreSQL adapter for synchronization, asset storage, and cross-process
 //! maintenance coordination. Account persistence lives in
-//! `server-account-postgres`; schema migration lives in `server-database`.
+//! Account persistence is implemented by `server-account`; schema migration
+//! lives in `server-database`.
 
+mod applications;
 mod assets;
-mod preferences;
-mod quota;
 mod sync;
 mod sync_store;
+#[cfg(test)]
+mod test_support;
 
-pub use preferences::PostgresPreferenceRepository;
-pub use quota::PostgresStorageQuotaService;
-pub use sync::PostgresSyncRepository;
+pub use applications::AssetApplication;
+pub use sync::{GarbageCollector, PostgresSyncRepository};
 
 pub use server_database::{connect, migrate, PostgresDatabase};

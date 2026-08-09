@@ -1,20 +1,21 @@
+use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
 use epub_svelte_lib::app::{AccountSessionSummary, AccountStatus, AppBackend, AppEvent, LibraryCatalogueState, LibrarySyncStatus};
-use epub_svelte_lib::library::LibraryBackend;
+use epub_svelte_lib::app::{AppDataLocation, LibraryEntry};
+use epub_svelte_lib::catalog::opds::{OpdsCredentials, OpdsEndpoint};
 use epub_svelte_lib::catalog::{
     opds_endpoint_id, opds_source, CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationOwnership, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId,
     CatalogWideSearchResult,
 };
-use epub_svelte_lib::FrontendContract;
-use epub_svelte_lib::app::{AppDataLocation, LibraryEntry};
-use epub_svelte_lib::library::{BookCardRow, BookImportDestination, Dir, LibraryAuthorsView, LibraryFolderView, LibraryHomeView};
-use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
-use epub_svelte_lib::catalog::opds::{OpdsCredentials, OpdsEndpoint};
 use epub_svelte_lib::library::links::BookLink;
 use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
+use epub_svelte_lib::library::LibraryBackend;
+use epub_svelte_lib::library::{BookCardRow, BookImportDestination, Dir, LibraryAuthorsView, LibraryFolderView, LibraryHomeView};
 use epub_svelte_lib::platform::scanner::LibraryEvent;
+use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::{DownloadState, FolderDownloadStatus, LibraryTransfers, NetworkStatus};
 use specta::Type;
 use specta_typescript::Typescript;
+use std::fs;
 use std::path::Path;
 use std::time::Instant;
 use tauri::ipc::{InvokeResponseBody, IpcResponse};
@@ -78,7 +79,6 @@ fn library_event_name(event: &LibraryEvent) -> &'static str {
         LibraryEvent::DownloadStatusChanged { .. } => "library:download-status",
         LibraryEvent::FolderDownloadStatusChanged { .. } => "library:folder-download-status",
         LibraryEvent::TransferStatusChanged => "library:transfer-status",
-        LibraryEvent::BookOpened { .. } => "library:book-opened",
         LibraryEvent::ScanComplete => "library:scan-complete",
     }
 }
@@ -133,14 +133,14 @@ async fn revoke_other_account_sessions(state: State<'_, AppState>) -> Result<u32
 
 #[tauri::command]
 #[specta::specta]
-async fn login(state: State<'_, AppState>, username: String, password: String) -> Result<AccountStatus, String> {
-    state.core.login(&username, &password).await.map_err(|error| error.to_string())
+async fn login(state: State<'_, AppState>, email: String, password: String) -> Result<AccountStatus, String> {
+    state.core.login(&email, &password).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn request_public_registration(state: State<'_, AppState>, email: String, username: String, password: String) -> Result<(), String> {
-    state.core.request_public_registration(&email, &username, &password).await.map_err(|error| error.to_string())
+async fn request_public_registration(state: State<'_, AppState>, email: String, password: String) -> Result<(), String> {
+    state.core.request_public_registration(&email, &password).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -475,14 +475,6 @@ async fn update_reading_position(state: State<'_, AppState>, library_id: String,
 
 #[tauri::command]
 #[specta::specta]
-async fn update_last_read(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<(), String> {
-    let library = library(&state.core, &library_id)?;
-    let book_id = parse_book_id(&book_id)?;
-    run_blocking("update_last_read", move || library.update_last_read(book_id).map_err(|error| error.to_string())).await
-}
-
-#[tauri::command]
-#[specta::specta]
 async fn get_annotations(state: State<'_, AppState>, library_id: String, book_id: String) -> Result<Vec<ReaderAnnotation>, String> {
     let library = library(&state.core, &library_id)?;
     let book_id = parse_book_id(&book_id)?;
@@ -517,20 +509,20 @@ async fn get_bookmarks(state: State<'_, AppState>, library_id: String, book_id: 
 
 #[tauri::command]
 #[specta::specta]
-async fn upsert_bookmark(state: State<'_, AppState>, library_id: String, bookmark: ReaderBookmark) -> Result<(), String> {
+async fn create_bookmark(state: State<'_, AppState>, library_id: String, bookmark: ReaderBookmark) -> Result<(), String> {
     let library = library(&state.core, &library_id)?;
-    run_blocking("upsert_bookmark", move || library.upsert_bookmark(&bookmark).map_err(|error| error.to_string())).await
+    run_blocking("create_bookmark", move || library.create_bookmark(&bookmark).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn delete_bookmark(state: State<'_, AppState>, library_id: String, bookmark_id: String, modified_at: f64) -> Result<(), String> {
+async fn delete_bookmark(state: State<'_, AppState>, library_id: String, bookmark_id: String, deleted_at: f64) -> Result<(), String> {
     let library = library(&state.core, &library_id)?;
-    if !modified_at.is_finite() || modified_at.fract() != 0.0 || modified_at < 0.0 || modified_at > i64::MAX as f64 {
-        return Err("modified_at must be a non-negative integer timestamp".to_owned());
+    if !deleted_at.is_finite() || deleted_at.fract() != 0.0 || deleted_at < 0.0 || deleted_at > i64::MAX as f64 {
+        return Err("deleted_at must be a non-negative integer timestamp".to_owned());
     }
-    let modified_at = modified_at as i64;
-    run_blocking("delete_bookmark", move || library.delete_bookmark(&bookmark_id, modified_at).map_err(|error| error.to_string())).await
+    let deleted_at = deleted_at as i64;
+    run_blocking("delete_bookmark", move || library.delete_bookmark(&bookmark_id, deleted_at).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -648,12 +640,11 @@ fn command_builder() -> Builder<tauri::Wry> {
             get_book_file_name,
             get_book_reading_position,
             update_reading_position,
-            update_last_read,
             get_annotations,
             upsert_annotation,
             delete_annotation,
             get_bookmarks,
-            upsert_bookmark,
+            create_bookmark,
             delete_bookmark,
             get_book_links,
             upsert_book_link,
@@ -667,8 +658,12 @@ fn command_builder() -> Builder<tauri::Wry> {
         .error_handling(ErrorHandlingMode::Throw)
 }
 
-pub fn export_bindings(path: impl AsRef<Path>) -> Result<(), specta_typescript::Error> {
-    command_builder().export(Typescript::default(), path)
+pub fn export_bindings(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = path.as_ref();
+    command_builder().export(Typescript::default(), path)?;
+    let generated = fs::read_to_string(path)?;
+    fs::write(path, format!("{}\n", generated.trim_end()))?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

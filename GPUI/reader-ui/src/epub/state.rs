@@ -198,10 +198,8 @@ impl ReaderView {
         let annotation = epub_svelte_lib::library::marks::ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
             book_id: self.locator.book_id().canonical(),
-            anchor: epub_svelte_lib::library::marks::AnnotationAnchor::epub_cfi(selection.cfi_range).expect("renderer selection returns a valid EPUB CFI"),
+            anchor: epub_svelte_lib::library::marks::AnnotationAnchor::epub_cfi(selection.cfi_range),
             exact_text: selection.text,
-            prefix: selection.prefix,
-            suffix: selection.suffix,
             style: epub_svelte_lib::library::marks::AnnotationStyle::Highlight,
             color: "#f6c945".to_owned(),
             note: String::new(),
@@ -303,7 +301,7 @@ impl ReaderView {
             cx,
             self.library.clone(),
             "save bookmark",
-            move |library| library.upsert_bookmark(&stored).map_err(|error| error.to_string()),
+            move |library| library.create_bookmark(&stored).map_err(|error| error.to_string()),
             move |this, cx, ()| {
                 this.marks.bookmarks.push(bookmark);
                 this.reader_state_visible = true;
@@ -314,13 +312,13 @@ impl ReaderView {
     }
 
     pub(crate) fn delete_bookmark(&mut self, id: String, cx: &mut Context<Self>) {
-        let modified_at = Self::now_millis();
+        let deleted_at = Self::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
             self.library.clone(),
             "delete bookmark",
-            move |library| library.delete_bookmark(&stored_id, modified_at).map_err(|error| error.to_string()),
+            move |library| library.delete_bookmark(&stored_id, deleted_at).map_err(|error| error.to_string()),
             move |this, cx, ()| {
                 this.marks.remove_bookmark(&id);
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
@@ -400,7 +398,7 @@ impl ReaderView {
                 false
             }
             RendererEvent::SelectionFinished { cfi_range, exact_text, prefix, suffix, .. } => {
-                if !self.marks.set_selection(Selection { cfi_range: cfi_range.clone(), text: exact_text.clone(), prefix: prefix.clone(), suffix: suffix.clone() }) {
+                if !self.marks.set_selection(Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
                     return;
                 }
                 true

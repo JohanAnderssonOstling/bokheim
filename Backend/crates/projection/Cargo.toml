@@ -1,0 +1,9 @@
+[package]
+name = "projection"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sync-common = { path = "../../../SyncCommon" }
+bokheim-domain = { path = "../../../BokheimDomain" }

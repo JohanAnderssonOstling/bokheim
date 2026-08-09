@@ -49,21 +49,6 @@ pub mod assets {
         pub upload: Vec<ContentHash>,
         pub rejected: Vec<RejectedBlobManifestEntry>,
     }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct BlobsExistsRequest {
-        pub hashes: Vec<ContentHash>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct ThumbnailsExistsRequest {
-        pub content_hashes: Vec<ContentHash>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct ExistsResponse {
-        pub present: Vec<ContentHash>,
-    }
 }
 
 pub mod libraries {
@@ -93,9 +78,8 @@ pub mod notifications {
     #[serde(rename_all = "snake_case")]
     pub enum NotificationMessage {
         Hello { heartbeat_seconds: u64, timeout_seconds: u64 },
-        LibraryChanged { library_id: LibraryId, reading: bool, other: bool, assets: bool },
+        LibraryChanged { library_id: LibraryId },
         CatalogueChanged,
-        PreferencesChanged,
         Reconcile,
     }
 }
@@ -119,35 +103,21 @@ mod tests {
 
     #[test]
     fn authentication_contracts_have_distinct_access_and_refresh_credentials() {
-        let login = auth::LoginRequest { username: "reader".into(), password: "secret".into() };
+        let login = auth::LoginRequest { email: "reader@example.com".into(), password: "secret".into() };
         let login = round_trip(&login);
-        assert_eq!((login.username.as_str(), login.password.as_str()), ("reader", "secret"));
+        assert_eq!((login.email.as_str(), login.password.as_str()), ("reader@example.com", "secret"));
 
-        let signup = auth::SignupRequest { username: "reader".into(), password: "secret".into(), invite: "invite-code".into() };
-        let signup = round_trip(&signup);
-        assert_eq!((signup.username.as_str(), signup.password.as_str(), signup.invite.as_str()), ("reader", "secret", "invite-code"));
-
-        let registration = auth::PublicRegistrationRequest { email: "reader@example.com".into(), username: "reader".into(), password: "secret".into() };
+        let registration = auth::PublicRegistrationRequest { email: "reader@example.com".into(), password: "secret".into() };
         let registration = round_trip(&registration);
-        assert_eq!((registration.email.as_str(), registration.username.as_str(), registration.password.as_str()), ("reader@example.com", "reader", "secret"));
+        assert_eq!((registration.email.as_str(), registration.password.as_str()), ("reader@example.com", "secret"));
 
-        let response = round_trip(&auth::AuthResponse { token: "token".into(), expires_at: 1_900_000_000, refresh_token: "refresh".into(), refresh_expires_at: 1_910_000_000, user_id: "user-1".into(), username: "reader".into() });
+        let response = round_trip(&auth::AuthResponse { token: "token".into(), expires_at: 1_900_000_000, refresh_token: "refresh".into(), refresh_expires_at: 1_910_000_000, user_id: "user-1".into(), email: "reader@example.com".into() });
         assert_eq!(response.token, "token");
         assert_eq!(response.expires_at, 1_900_000_000);
         assert_eq!(response.refresh_token, "refresh");
         assert_eq!(response.refresh_expires_at, 1_910_000_000);
         assert_eq!(response.user_id, "user-1");
-        assert_eq!(response.username, "reader");
-    }
-
-    #[test]
-    fn asset_contracts_keep_book_and_thumbnail_request_keys_distinct() {
-        let book_hash = hash('a');
-        let thumbnail_hash = hash('b');
-        assert_eq!(round_trip(&assets::BlobsExistsRequest { hashes: vec![book_hash.clone()] }).hashes, vec![book_hash.clone()]);
-        assert_eq!(round_trip(&assets::ThumbnailsExistsRequest { content_hashes: vec![thumbnail_hash.clone()] }).content_hashes, vec![thumbnail_hash.clone()]);
-        let response = round_trip(&assets::ExistsResponse { present: vec![book_hash.clone(), thumbnail_hash.clone()] });
-        assert_eq!(response.present, vec![book_hash, thumbnail_hash]);
+        assert_eq!(response.email, "reader@example.com");
     }
 
     #[test]
@@ -177,8 +147,9 @@ mod tests {
 
     #[test]
     fn notification_contract_is_granular_without_carrying_state() {
-        let message = notifications::NotificationMessage::LibraryChanged { library_id: LibraryId::parse("library-1").unwrap(), reading: true, other: false, assets: false };
+        let message = notifications::NotificationMessage::LibraryChanged { library_id: LibraryId::parse("library-1").unwrap() };
         assert_eq!(round_trip(&message), message);
-        assert_eq!(crate::wire::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap(), b"BKHM\x05\x02");
+        let expected: Vec<u8> = crate::wire::header_bytes().into_iter().chain([0x02]).collect();
+        assert_eq!(crate::wire::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap(), expected);
     }
 }

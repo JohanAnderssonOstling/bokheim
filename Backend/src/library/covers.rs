@@ -1,0 +1,68 @@
+//! Generates and atomically publishes UI and synchronized book covers.
+
+use crate::app::BackendContext;
+use crate::{BookId, ContentHash, LibraryRoot};
+use std::fs;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+
+pub(crate) fn generate_thumbnail_for_sync(context: &BackendContext, library_root: &LibraryRoot, book_path: &Path, book_id: BookId, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    let thumbnail_path = context.thumbnails_dir()?.join(format!("{book_id}.jpg"));
+    let sync_path = crate::sync::transfer::thumbnail_path_from_content_hash(library_root, content_hash);
+    let publish_thumbnail = thumbnail_path_needs_publish(&thumbnail_path)?;
+    let publish_sync = thumbnail_path_needs_publish(&sync_path)?;
+    if !publish_thumbnail && !publish_sync {
+        return Ok(());
+    }
+
+    let Some(thumbnail) = thumbnail::generate_thumbnail(book_path)? else {
+        return Ok(());
+    };
+
+    if publish_thumbnail {
+        atomic_publish_bytes(&thumbnail_path, &thumbnail)?;
+    }
+    if publish_sync {
+        atomic_publish_bytes(&sync_path, &thumbnail)?;
+    }
+    Ok(())
+}
+
+fn thumbnail_path_needs_publish(path: &Path) -> std::io::Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(!metadata.is_file() || metadata.len() == 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn atomic_publish_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "thumbnail target has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = PathBuf::from(format!("{}.tmp-{}", path.display(), uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                if let Err(rename_error) = fs::rename(&temporary, path) {
+                    if rename_error.kind() == std::io::ErrorKind::AlreadyExists {
+                        fs::remove_file(path)?;
+                        fs::rename(&temporary, path)?;
+                    } else {
+                        fs::copy(&temporary, path)?;
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_file(&temporary);
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}

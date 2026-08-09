@@ -9,12 +9,14 @@ workspace = true
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
-bokheim-app-contract = { path = "../../../BokheimAppContract" }
 bokheim-wire = { path = "../../../BokheimWire" }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
-server-account-core = { path = "../server-account-core" }
+server-account = { path = "../server-account" }
+server-asset-store = { path = "../server-asset-store" }
 server-core = { path = "../server-core" }
+server-postgres = { path = "../server-postgres" }
+server-database = { path = "../server-database" }
 server-wire-http = { path = "../server-wire-http" }
 sync-common = { path = "../../../SyncCommon" }
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }

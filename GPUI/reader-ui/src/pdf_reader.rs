@@ -268,17 +268,15 @@ impl PdfReaderView {
 
     fn create_annotation(&mut self, open_notes: bool, cx: &mut Context<Self>) {
         let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
-        let rects = selection.rects.iter().filter_map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
-        let Some(anchor) = PdfAnnotationAnchor::new(selection.page_index as u32, rects, None) else { return };
-        let Some(anchor) = AnnotationAnchor::pdf(anchor) else { return };
+        let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
+        let anchor = PdfAnnotationAnchor::new(selection.page_index as u32, rects, None);
+        let anchor = AnnotationAnchor::pdf(anchor);
         let now = Self::now_millis();
         let annotation = ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
             book_id: self.locator.book_id().canonical(),
             anchor,
             exact_text: selection.text,
-            prefix: None,
-            suffix: None,
             style: AnnotationStyle::Highlight,
             color: "#f6c945".to_owned(),
             note: String::new(),
@@ -376,7 +374,7 @@ impl PdfReaderView {
             cx,
             self.library.clone(),
             "save PDF bookmark",
-            move |library| library.upsert_bookmark(&stored).map_err(|error| error.to_string()),
+            move |library| library.create_bookmark(&stored).map_err(|error| error.to_string()),
             move |this, cx, ()| {
                 this.marks.bookmarks.push(bookmark);
                 this.annotations_visible = true;
@@ -387,13 +385,13 @@ impl PdfReaderView {
     }
 
     fn delete_bookmark(&mut self, id: String, cx: &mut Context<Self>) {
-        let modified_at = Self::now_millis();
+        let deleted_at = Self::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
             self.library.clone(),
             "delete PDF bookmark",
-            move |library| library.delete_bookmark(&stored_id, modified_at).map_err(|error| error.to_string()),
+            move |library| library.delete_bookmark(&stored_id, deleted_at).map_err(|error| error.to_string()),
             move |this, cx, ()| {
                 this.marks.remove_bookmark(&id);
                 crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
