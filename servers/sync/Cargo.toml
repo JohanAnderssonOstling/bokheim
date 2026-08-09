@@ -36,8 +36,8 @@ server-http = { path = "crates/server-http" }
 server-account = { path = "crates/server-account" }
 
 [dev-dependencies]
-account-contract = { path = "../crates/account-contract" }
-wire = { path = "../crates/wire" }
+account-contract = { path = "../../crates/account-contract" }
+wire = { path = "../../crates/wire" }
 blake3 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 futures-util = "0.3"
@@ -45,5 +45,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-sync-common = { path = "../crates/sync-common" }
+sync-common = { path = "../../crates/sync-common" }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

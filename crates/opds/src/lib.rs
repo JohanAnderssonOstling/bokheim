@@ -2089,7 +2089,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live third-party catalog servers"]
     async fn curated_catalogs_are_live_and_parseable() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../Catalogs/opds.json");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../servers/catalog/opds.json");
         let registry: CatalogRegistry = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let endpoints = endpoints_from_registry(registry).unwrap();
         let futures = endpoints.iter().map(|endpoint| async {

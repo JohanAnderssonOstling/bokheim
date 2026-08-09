@@ -47,7 +47,7 @@ credential or synchronization persistence.
 - Account and synchronization HTTP modules expose only router constructors. Their
   Axum states, handlers, extractors, and wire DTOs remain module-internal.
 
-Run `cargo test --manifest-path Server/Cargo.toml --workspace` to execute the
+Run `cargo test --manifest-path servers/sync/Cargo.toml --workspace` to execute the
 server tests.
 
 ## Public registration
@@ -272,7 +272,7 @@ It verifies that every acknowledged event is observable and every downloaded
 blob exactly matches its upload:
 
 ```sh
-Server/tests/run_server_stress.sh
+servers/sync/tests/run_server_stress.sh
 ```
 
 The harness reports throughput and p50/p95/p99/max request latency. Workload

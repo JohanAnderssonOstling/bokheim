@@ -6,7 +6,7 @@ After the host has been prepared once with `install-server.sh`, deploy a new
 release from this checkout with:
 
 ```sh
-Server/deploy/deploy-remote.sh
+servers/sync/deploy/deploy-remote.sh
 ```
 
 The script builds `sync-server` and `catalog-server`, transfers the
@@ -14,7 +14,7 @@ release artifacts over SSH, and runs `install-staged.sh` with `sudo` on the
 host. It defaults to `192.168.1.68`; override the SSH account when needed:
 
 ```sh
-BOKHEIM_DEPLOY_USER=johan Server/deploy/deploy-remote.sh
+BOKHEIM_DEPLOY_USER=johan servers/sync/deploy/deploy-remote.sh
 ```
 
 The remote account must have SSH access and passwordless `sudo` (or an
@@ -73,8 +73,8 @@ Build the release executable and install it without making it writable by the
 service account:
 
 ```sh
-cargo build --release --manifest-path Server/Cargo.toml -p sync-server
-sudo install -o root -g root -m 0755 Server/target/release/sync-server /usr/local/bin/sync-server
+cargo build --release --manifest-path servers/sync/Cargo.toml -p sync-server
+sudo install -o root -g root -m 0755 servers/sync/target/release/sync-server /usr/local/bin/sync-server
 ```
 
 Create `/etc/bokheim/database-url` containing a PostgreSQL URL that resolves to
@@ -119,11 +119,11 @@ The checked-in service unit supplies this fixed path through
 ## Install service configuration
 
 ```sh
-sudo install -o root -g root -m 0644 Server/deploy/bokheim-sync.service /etc/systemd/system/bokheim-sync.service
+sudo install -o root -g root -m 0644 servers/sync/deploy/bokheim-sync.service /etc/systemd/system/bokheim-sync.service
 sudo install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
-sudo install -o root -g root -m 0644 Server/deploy/caddy-bokheim.conf /etc/systemd/system/caddy.service.d/bokheim.conf
-sudo install -o root -g root -m 0644 Server/deploy/Caddyfile /etc/caddy/Caddyfile
-sudo install -o root -g root -m 0600 Server/deploy/caddy.env.example /etc/bokheim/caddy.env
+sudo install -o root -g root -m 0644 servers/sync/deploy/caddy-bokheim.conf /etc/systemd/system/caddy.service.d/bokheim.conf
+sudo install -o root -g root -m 0644 servers/sync/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo install -o root -g root -m 0600 servers/sync/deploy/caddy.env.example /etc/bokheim/caddy.env
 ```
 
 Edit `/etc/bokheim/caddy.env` and replace both example values. Point the domain's
@@ -159,7 +159,7 @@ cannot amplify into repeated durable writes on the asset volume.
 Run the complete deployment gate after DNS and certificate issuance settle:
 
 ```sh
-sudo Server/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se
+sudo servers/sync/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se
 ```
 
 It verifies both services, the Caddy configuration, Unix-socket permissions,

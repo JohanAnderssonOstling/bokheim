@@ -6,7 +6,7 @@ set -euo pipefail
 # install-server.sh; this script performs code/data upgrades only.
 
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repository_root=$(cd -- "${script_directory}/../.." && pwd)
+repository_root=$(cd -- "${script_directory}/../../.." && pwd)
 host=${BOKHEIM_DEPLOY_HOST:-192.168.1.68}
 user=${BOKHEIM_DEPLOY_USER:-${USER}}
 remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/tmp/bokheim-deploy}
@@ -17,7 +17,7 @@ fi
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'EOF'
-Usage: Server/deploy/deploy-remote.sh
+Usage: servers/sync/deploy/deploy-remote.sh
 
 Environment:
   BOKHEIM_DEPLOY_HOST          SSH host (default: 192.168.1.68)
@@ -45,13 +45,13 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Building sync-server..."
-cargo build --release --manifest-path "${repository_root}/Server/Cargo.toml" -p sync-server
+cargo build --release --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
 echo "Building catalog-server..."
-cargo build --release --manifest-path "${repository_root}/Catalogs/Cargo.toml" -p catalog-server
+cargo build --release --manifest-path "${repository_root}/servers/catalog/Cargo.toml" -p catalog-server
 
-sync_binary=${repository_root}/Server/target/release/sync-server
+sync_binary=${repository_root}/servers/sync/target/release/sync-server
 catalog_binary=${repository_root}/target/release/catalog-server
-for required in "${sync_binary}" "${catalog_binary}" "${repository_root}/Catalogs/opds.json"; do
+for required in "${sync_binary}" "${catalog_binary}" "${repository_root}/servers/catalog/opds.json"; do
     if [[ ! -x ${required} && ${required} != *.json ]]; then
         echo "missing release artifact: ${required}" >&2
         exit 1
@@ -64,10 +64,10 @@ done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
 install -m 0755 "${catalog_binary}" "${stage}/catalog-server"
-install -m 0644 "${repository_root}/Catalogs/opds.json" "${stage}/opds.json"
-install -m 0644 "${repository_root}/Server/deploy/install-staged.sh" "${stage}/install-staged.sh"
-install -m 0644 "${repository_root}/Server/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
-install -m 0644 "${repository_root}/Catalogs/deploy/catalog-providers.service" "${stage}/catalog-providers.service"
+install -m 0644 "${repository_root}/servers/catalog/opds.json" "${stage}/opds.json"
+install -m 0644 "${repository_root}/servers/sync/deploy/install-staged.sh" "${stage}/install-staged.sh"
+install -m 0644 "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
+install -m 0644 "${repository_root}/servers/catalog/deploy/catalog-providers.service" "${stage}/catalog-providers.service"
 
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")

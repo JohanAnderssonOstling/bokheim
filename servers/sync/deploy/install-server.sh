@@ -13,8 +13,8 @@ fi
 
 sync_binary=${source_root}/deploy-target/release/sync-server
 catalog_binary=${source_root}/deploy-target/release/catalog-server
-catalog_file=${source_root}/Catalogs/opds.json
-for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/Server/deploy/bokheim-sync.service" "${source_root}/Catalogs/deploy/catalog-providers.service" "${source_root}/Server/deploy/Caddyfile"; do
+catalog_file=${source_root}/servers/catalog/opds.json
+for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/servers/sync/deploy/bokheim-sync.service" "${source_root}/servers/catalog/deploy/catalog-providers.service" "${source_root}/servers/sync/deploy/Caddyfile"; do
     if [[ ! -f ${required} ]]; then
         echo "missing staged deployment file: ${required}" >&2
         exit 1
@@ -128,13 +128,13 @@ install -o root -g root -m 0755 "${catalog_binary}" /usr/local/bin/catalog-serve
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/catalog-providers/opds.json
 
-install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/Catalogs/deploy/catalog-providers.service" /etc/systemd/system/catalog-providers.service
+install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
+install -o root -g root -m 0644 "${source_root}/servers/catalog/deploy/catalog-providers.service" /etc/systemd/system/catalog-providers.service
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
-install -o root -g root -m 0644 "${source_root}/Server/deploy/caddy-bokheim.conf" /etc/systemd/system/caddy.service.d/bokheim.conf
-install -o root -g root -m 0644 "${source_root}/Server/deploy/Caddyfile" /etc/caddy/Caddyfile
-install -o root -g root -m 0600 "${source_root}/Server/deploy/caddy.env.example" /etc/bokheim/caddy.env
-install -o root -g root -m 0755 "${source_root}/Server/deploy/verify-public.sh" /usr/local/sbin/bokheim-verify-public
+install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/caddy-bokheim.conf" /etc/systemd/system/caddy.service.d/bokheim.conf
+install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/Caddyfile" /etc/caddy/Caddyfile
+install -o root -g root -m 0600 "${source_root}/servers/sync/deploy/caddy.env.example" /etc/bokheim/caddy.env
+install -o root -g root -m 0755 "${source_root}/servers/sync/deploy/verify-public.sh" /usr/local/sbin/bokheim-verify-public
 
 # Remove bootstrap artifacts left by deployments that created the former
 # built-in administrator account.

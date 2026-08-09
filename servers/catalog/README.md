@@ -57,7 +57,7 @@ Configuration:
 Validate a candidate registry without starting the service:
 
 ```sh
-cargo run -p catalog-server -- --check-catalog Catalogs/opds.json
+cargo run -p catalog-server -- --check-catalog servers/catalog/opds.json
 ```
 
 Every published change must increment `revision`. Production clients use

@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "account-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,6 +35,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "algorithms"
+version = "0.1.0"
+dependencies = [
+ "identifiers",
+ "serde",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
@@ -262,40 +279,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "account-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "algorithms"
-version = "0.1.0"
-dependencies = [
- "identifiers",
- "serde",
- "unicode-normalization",
- "uuid",
-]
-
-[[package]]
-name = "identifiers"
-version = "0.1.0"
-dependencies = [
- "serde",
- "uuid",
-]
-
-[[package]]
-name = "wire"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "serde",
- "zstd",
 ]
 
 [[package]]
@@ -1015,6 +998,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "identifiers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1671,12 +1662,11 @@ dependencies = [
 name = "server-account"
 version = "0.1.0"
 dependencies = [
+ "account-contract",
  "argon2",
  "async-trait",
  "axum",
  "base64 0.22.1",
- "account-contract",
- "wire",
  "chrono",
  "rand",
  "server-postgres",
@@ -1687,6 +1677,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wire",
 ]
 
 [[package]]
@@ -1708,7 +1699,6 @@ name = "server-http"
 version = "0.1.0"
 dependencies = [
  "axum",
- "wire",
  "futures-util",
  "server-account",
  "server-asset-store",
@@ -1720,6 +1710,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "wire",
 ]
 
 [[package]]
@@ -1739,10 +1730,10 @@ name = "server-wire-http"
 version = "0.1.0"
 dependencies = [
  "axum",
- "wire",
  "serde",
  "tokio",
  "tracing",
+ "wire",
 ]
 
 [[package]]
@@ -2130,20 +2121,19 @@ dependencies = [
  "account-contract",
  "algorithms",
  "identifiers",
- "wire",
  "serde",
  "uuid",
+ "wire",
 ]
 
 [[package]]
 name = "sync-server"
 version = "0.1.0"
 dependencies = [
+ "account-contract",
  "axum",
  "axum-server",
  "blake3",
- "account-contract",
- "wire",
  "futures-util",
  "reqwest",
  "serde",
@@ -2159,6 +2149,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wire",
  "zip",
 ]
 
@@ -2911,6 +2902,15 @@ name = "windows_x86_64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+
+[[package]]
+name = "wire"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "zstd",
+]
 
 [[package]]
 name = "wit-bindgen"

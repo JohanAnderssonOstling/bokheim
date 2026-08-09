@@ -74,7 +74,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
 }
 
 /// Applies the schema in `schema/*.sql` (embedded at compile time) to an
-/// empty database. There is no migration history: `Server/deploy/install-server.sh`
+/// empty database. There is no migration history: `servers/sync/deploy/install-server.sh`
 /// drops and recreates the database on every deploy, so this only ever runs
 /// against a fresh, empty schema. Files are applied in filename order --
 /// `01_core.sql` before the domain files that reference it.

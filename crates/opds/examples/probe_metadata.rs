@@ -337,7 +337,7 @@ fn endpoints(options: &Options) -> Vec<OpdsEndpoint> {
 }
 
 fn options() -> Options {
-    let mut registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Catalogs/opds.json");
+    let mut registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../servers/catalog/opds.json");
     let mut pages = DEFAULT_PAGES;
     let mut concurrency = DEFAULT_CONCURRENCY;
     let mut search = "book".to_owned();

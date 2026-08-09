@@ -2,8 +2,8 @@
 
 **Status:** ⬜ open — **requires plan 38 first**
 
-Touches `Server/crates/server-database/schema/03_sync.sql`,
-`Server/crates/server-postgres/src/{sync_store.rs,sync.rs,assets.rs}` and most of
+Touches `servers/sync/crates/server-database/schema/03_sync.sql`,
+`servers/sync/crates/server-postgres/src/{sync_store.rs,sync.rs,assets.rs}` and most of
 `src/sql/sync/`, `SyncCommon/src/lib.rs`, and the client's decode/identity paths in
 `Backend/src/library/database/{remote_reducer.rs,sync_state.rs,mod.rs}`.
 
