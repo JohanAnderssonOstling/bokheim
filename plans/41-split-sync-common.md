@@ -31,9 +31,9 @@ Two supporting costs today:
 
 Verified against the tree, all three preconditions already hold:
 
-1. `bokheim-domain` exists and **depends on `sync-common`**, so moving domain types
+1. `domain` exists and **depends on `sync-common`**, so moving domain types
    into it creates no cycle — the arrow already points the right way.
-2. **No server crate depends on `bokheim-domain`.** Its dependents are all
+2. **No server crate depends on `domain`.** Its dependents are all
    client-side: `Backend`, `Backend/crates/book-metadata`, `BokheimAppContract`,
    `BokheimLibraryFiles`, `BokheimCatalogProvider`.
 3. After plan 39 the server's production use of domain types is **zero**. Today the
@@ -75,16 +75,16 @@ Two crates, split by who interprets what.
 - `MutationId`, `UnixMillis`, `ReplicaSeq`, `LibraryRevision`
 - `MutationRejection`, `MutationRejectionReason`
 - `MAX_PUSH_MUTATIONS`, `MAX_PULL_CHANGES`, `MAX_LWW_FUTURE_SKEW_MS`
-- `pub use bokheim_wire as wire`
+- `pub use wire as wire`
 - `api` (all transport: `BlobManifest*`, `LibrarySummary`, `UpsertLibraryRequest`,
   `NotificationMessage`)
-- the `bokheim_identifiers` re-exports the server needs (`LibraryId`, `ClientId`,
+- the `identifiers` re-exports the server needs (`LibraryId`, `ClientId`,
   `ContentHash`, `BookId`, `DirId`, `FileName`)
 
-Dependencies after the move: `serde`, `uuid`, `bokheim-identifiers`, `bokheim-wire`,
-`bokheim-account-contract`. **No `specta`, no `specta-typescript`.**
+Dependencies after the move: `serde`, `uuid`, `identifiers`, `wire`,
+`account-contract`. **No `specta`, no `specta-typescript`.**
 
-**`bokheim-domain` — client-only interpretation.** Moves out of `sync-common`:
+**`domain` — client-only interpretation.** Moves out of `sync-common`:
 
 - `MutationBody` and `StateKey`
 - `VersionKey` (client-side merge decisions; the server orders in SQL)
@@ -117,27 +117,27 @@ not link the crate that defines one.
    re-exports, so that re-export is the thing to check.
 4. Update `use` paths in the client crates that consume the moved types: `Backend`,
    `Backend/crates/book-metadata`, `Backend/crates/projection`, `BokheimSyncClient`,
-   `BokheimAppContract`, `BokheimOpds`. Prefer adding `bokheim-domain` as a direct
+   `BokheimAppContract`, `BokheimOpds`. Prefer adding `domain` as a direct
    dependency over re-exporting the moved types from `sync-common`, which would
    defeat the split.
 5. Remove `sync-common`'s now-unused re-exports and confirm nothing in `Server/`
    references a moved type. Move the server's test fixtures that construct
    `BookLifecycleState`/`BookMetadataState` (`sync_store.rs:511-583`) to build opaque
    byte payloads instead — a server test should not need the domain crate either.
-6. Add `bokheim-domain` to the server workspace's forbidden-dependency check if one
+6. Add `domain` to the server workspace's forbidden-dependency check if one
    exists; if not, this plan's guard is test 1 below.
 
 ## Tests
 
 1. **The server cannot link the domain crate.** A check that fails if any crate under
-   `Server/` gains a direct or transitive dependency on `bokheim-domain`. `cargo tree
-   -p server-postgres -i bokheim-domain` returning non-empty is the failure condition.
+   `Server/` gains a direct or transitive dependency on `domain`. `cargo tree
+   -p server-postgres -i domain` returning non-empty is the failure condition.
    This is the only durable enforcement of the plan's invariant — without it the
    split decays back to a convention.
 2. **`specta` is out of the server graph.** `cargo tree -p Server -i specta` is empty.
    Concrete and easy to assert; also the measurable build-time win.
 3. **Wire round-trip is unchanged.** Encode a mutation of every kind through
-   `sync-common`, decode through `bokheim-domain`, assert equality with the
+   `sync-common`, decode through `domain`, assert equality with the
    pre-split fixtures. Guards against a serde representation shifting during the move
    — a renamed module can silently change a `#[serde(rename_all)]` tag path.
 4. **No server crate reaches a domain type through a dev-dependency either.** Test 1
@@ -157,7 +157,7 @@ plan first and let 35 move both crates together.
 
 ## Non-goals
 
-- **Splitting `bokheim-domain` further.** It already holds unrelated concerns
+- **Splitting `domain` further.** It already holds unrelated concerns
   (author identity, contributor roles, paths). Tidying that is plan 35's territory.
 - **Changing any wire representation.** If a payload's bytes change, this plan has
   overreached; test 3 exists to catch that.

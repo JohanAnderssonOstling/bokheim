@@ -1,0 +1,17 @@
+[package]
+name = "algorithms"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+identifiers = { path = "../identifiers" }
+serde = { version = "1", features = ["derive"] }
+unicode-normalization = "0.1"
+uuid = "1"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lib]
+path = "src/lib.rs"

@@ -1,6 +1,6 @@
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use bokheim_wire::{self as wire, ContentEncoding, WireError};
+use wire::{self as wire, ContentEncoding, WireError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 fn header_accepts(headers: &HeaderMap, name: header::HeaderName, expected: &str) -> bool {

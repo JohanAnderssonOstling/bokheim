@@ -46,11 +46,11 @@ trap cleanup EXIT
 
 echo "Building sync-server..."
 cargo build --release --manifest-path "${repository_root}/Server/Cargo.toml" -p sync-server
-echo "Building bokheim-catalog-server..."
-cargo build --release --manifest-path "${repository_root}/Catalogs/Cargo.toml" -p bokheim-catalog-server
+echo "Building catalog-server..."
+cargo build --release --manifest-path "${repository_root}/Catalogs/Cargo.toml" -p catalog-server
 
 sync_binary=${repository_root}/Server/target/release/sync-server
-catalog_binary=${repository_root}/target/release/bokheim-catalog-server
+catalog_binary=${repository_root}/target/release/catalog-server
 for required in "${sync_binary}" "${catalog_binary}" "${repository_root}/Catalogs/opds.json"; do
     if [[ ! -x ${required} && ${required} != *.json ]]; then
         echo "missing release artifact: ${required}" >&2
@@ -63,11 +63,11 @@ for required in "${sync_binary}" "${catalog_binary}" "${repository_root}/Catalog
 done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
-install -m 0755 "${catalog_binary}" "${stage}/bokheim-catalog-server"
+install -m 0755 "${catalog_binary}" "${stage}/catalog-server"
 install -m 0644 "${repository_root}/Catalogs/opds.json" "${stage}/opds.json"
 install -m 0644 "${repository_root}/Server/deploy/install-staged.sh" "${stage}/install-staged.sh"
 install -m 0644 "${repository_root}/Server/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
-install -m 0644 "${repository_root}/Catalogs/deploy/bokheim-catalogs.service" "${stage}/bokheim-catalogs.service"
+install -m 0644 "${repository_root}/Catalogs/deploy/catalog-providers.service" "${stage}/catalog-providers.service"
 
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")

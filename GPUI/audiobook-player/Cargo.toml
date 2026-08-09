@@ -11,7 +11,7 @@ name = "m4b-metadata-probe"
 path = "src/bin/m4b_metadata_probe.rs"
 
 [dependencies]
-audiobook-library = { path = "../../AudiobookLibrary" }
+audiobook-library = { path = "../../crates/audiobook-library" }
 bokheim-ui-components = { path = "../bokheim-ui-components" }
 gpui.workspace = true
 gpui-component.workspace = true

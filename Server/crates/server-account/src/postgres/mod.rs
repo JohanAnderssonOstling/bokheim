@@ -6,7 +6,7 @@ mod public_registration;
 mod rate_limit;
 
 use crate::core::{AccountSession, AuthAttempt, AuthError, AuthenticatedUser, IssuedSession, SessionRevocation};
-use bokheim_account_contract::{EMAIL_MAX_BYTES, PASSWORD_MAX_BYTES};
+use account_contract::{EMAIL_MAX_BYTES, PASSWORD_MAX_BYTES};
 use chrono::{DateTime, Duration, Utc};
 use server_postgres::PostgresDatabase;
 use sqlx::{PgPool, Postgres, Transaction};

@@ -9,7 +9,7 @@ release from this checkout with:
 Server/deploy/deploy-remote.sh
 ```
 
-The script builds `sync-server` and `bokheim-catalog-server`, transfers the
+The script builds `sync-server` and `catalog-server`, transfers the
 release artifacts over SSH, and runs `install-staged.sh` with `sudo` on the
 host. It defaults to `192.168.1.68`; override the SSH account when needed:
 
@@ -138,7 +138,7 @@ Validate and start the deployment:
 sudo systemctl daemon-reload
 sudo caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
 sudo systemctl enable --now bokheim-sync.service
-sudo systemctl enable --now bokheim-catalogs.service
+sudo systemctl enable --now catalog-providers.service
 sudo systemctl enable caddy.service
 sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health

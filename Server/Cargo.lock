@@ -265,24 +265,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-account-contract"
+name = "account-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "bokheim-algorithms"
+name = "algorithms"
 version = "0.1.0"
 dependencies = [
- "bokheim-identifiers",
+ "identifiers",
  "serde",
  "unicode-normalization",
  "uuid",
 ]
 
 [[package]]
-name = "bokheim-identifiers"
+name = "identifiers"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -290,7 +290,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-wire"
+name = "wire"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -1675,8 +1675,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "bokheim-account-contract",
- "bokheim-wire",
+ "account-contract",
+ "wire",
  "chrono",
  "rand",
  "server-postgres",
@@ -1708,7 +1708,7 @@ name = "server-http"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bokheim-wire",
+ "wire",
  "futures-util",
  "server-account",
  "server-asset-store",
@@ -1739,7 +1739,7 @@ name = "server-wire-http"
 version = "0.1.0"
 dependencies = [
  "axum",
- "bokheim-wire",
+ "wire",
  "serde",
  "tokio",
  "tracing",
@@ -2127,10 +2127,10 @@ dependencies = [
 name = "sync-common"
 version = "0.1.0"
 dependencies = [
- "bokheim-account-contract",
- "bokheim-algorithms",
- "bokheim-identifiers",
- "bokheim-wire",
+ "account-contract",
+ "algorithms",
+ "identifiers",
+ "wire",
  "serde",
  "uuid",
 ]
@@ -2142,8 +2142,8 @@ dependencies = [
  "axum",
  "axum-server",
  "blake3",
- "bokheim-account-contract",
- "bokheim-wire",
+ "account-contract",
+ "wire",
  "futures-util",
  "reqwest",
  "serde",

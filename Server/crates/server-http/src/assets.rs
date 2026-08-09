@@ -148,7 +148,7 @@ pub(super) async fn put_blob(State(state): State<AppState>, user: AuthUser, Path
 }
 
 pub(super) async fn post_blob_manifest(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
-    let request: BlobManifestRequest = server_wire_http::decode_request(&headers, &body, bokheim_wire::MAX_DECODED_REQUEST_BYTES)?;
+    let request: BlobManifestRequest = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
     if request.blobs.len() > MAX_BLOB_MANIFEST_ENTRIES {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }

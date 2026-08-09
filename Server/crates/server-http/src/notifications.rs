@@ -137,7 +137,7 @@ enum SocketAction {
 async fn serve(socket: WebSocket, mut notifications: NotificationSubscription, credential: Arc<str>, config: NotificationConfig) {
     let (mut outgoing, mut incoming) = socket.split();
     let hello = NotificationMessage::Hello { heartbeat_seconds: config.heartbeat.as_secs(), timeout_seconds: config.timeout.as_secs() };
-    let Ok(bytes) = bokheim_wire::encode(&hello) else { return };
+    let Ok(bytes) = wire::encode(&hello) else { return };
     if outgoing.send(Message::Binary(bytes.into())).await.is_err() {
         return;
     }
@@ -162,11 +162,11 @@ async fn serve(socket: WebSocket, mut notifications: NotificationSubscription, c
             },
             event = notifications.recv() => match event {
                 Ok(event) if event.origin_credential.as_deref() == Some(credential.as_ref()) => SocketAction::Ignore,
-                Ok(event) => match bokheim_wire::encode(&event.message) {
+                Ok(event) => match wire::encode(&event.message) {
                     Ok(bytes) => SocketAction::Send(Message::Binary(bytes.into())),
                     Err(_) => SocketAction::Stop,
                 },
-                Err(broadcast::error::RecvError::Lagged(_)) => match bokheim_wire::encode(&NotificationMessage::Reconcile) {
+                Err(broadcast::error::RecvError::Lagged(_)) => match wire::encode(&NotificationMessage::Reconcile) {
                     Ok(bytes) => SocketAction::Send(Message::Binary(bytes.into())),
                     Err(_) => SocketAction::Stop,
                 },

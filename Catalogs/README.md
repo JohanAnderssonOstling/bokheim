@@ -42,7 +42,7 @@ displaces the last valid registry.
 ## Local use
 
 ```sh
-cargo run -p bokheim-catalog-server
+cargo run -p catalog-server
 curl --compressed --header 'Accept: application/vnd.bokheim+bincode; version=5' --header 'Accept-Encoding: zstd' --output /dev/null http://127.0.0.1:8090/api/opds/catalogs
 ```
 
@@ -57,7 +57,7 @@ Configuration:
 Validate a candidate registry without starting the service:
 
 ```sh
-cargo run -p bokheim-catalog-server -- --check-catalog Catalogs/opds.json
+cargo run -p catalog-server -- --check-catalog Catalogs/opds.json
 ```
 
 Every published change must increment `revision`. Production clients use

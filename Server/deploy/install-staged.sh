@@ -15,10 +15,10 @@ fi
 
 required_files=(
     sync-server
-    bokheim-catalog-server
+    catalog-server
     opds.json
     bokheim-sync.service
-    bokheim-catalogs.service
+    catalog-providers.service
 )
 
 for file in "${required_files[@]}"; do
@@ -28,29 +28,29 @@ for file in "${required_files[@]}"; do
     fi
 done
 
-if [[ ! -x ${source_root}/sync-server || ! -x ${source_root}/bokheim-catalog-server ]]; then
+if [[ ! -x ${source_root}/sync-server || ! -x ${source_root}/catalog-server ]]; then
     echo "staged server binaries must be executable" >&2
     exit 1
 fi
 
 install -o root -g root -m 0755 "${source_root}/sync-server" \
     /usr/local/bin/sync-server
-install -o root -g root -m 0755 "${source_root}/bokheim-catalog-server" \
-    /usr/local/bin/bokheim-catalog-server
+install -o root -g root -m 0755 "${source_root}/catalog-server" \
+    /usr/local/bin/catalog-server
 
-install -d -o root -g root -m 0755 /usr/local/share/bokheim-catalogs
+install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${source_root}/opds.json" \
-    /usr/local/share/bokheim-catalogs/opds.json
+    /usr/local/share/catalog-providers/opds.json
 
 install -o root -g root -m 0644 "${source_root}/bokheim-sync.service" \
     /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/bokheim-catalogs.service" \
-    /etc/systemd/system/bokheim-catalogs.service
+install -o root -g root -m 0644 "${source_root}/catalog-providers.service" \
+    /etc/systemd/system/catalog-providers.service
 systemctl disable --now bokheim-gc.timer >/dev/null 2>&1 || true
 rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.timer /etc/tmpfiles.d/bokheim.conf
 systemctl daemon-reload
 systemctl restart bokheim-sync.service
-systemctl restart bokheim-catalogs.service
+systemctl restart catalog-providers.service
 
 sync_ready=false
 catalog_ready=false
@@ -72,9 +72,9 @@ done
 
 if [[ ${sync_ready} != true || ${catalog_ready} != true ]]; then
     echo "deployment did not become healthy" >&2
-    systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service >&2 || true
+    systemctl --no-pager --full status bokheim-sync.service catalog-providers.service >&2 || true
     exit 1
 fi
 
 echo "Bokheim server deployment installed and healthy."
-systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service
+systemctl --no-pager --full status bokheim-sync.service catalog-providers.service

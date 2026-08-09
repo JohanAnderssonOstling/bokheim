@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 async-channel = "2"
-bokheim-app-contract = { path = "../../../BokheimAppContract" }
+app-contract = { path = "../../../crates/app-contract" }
 gpui.workspace = true
 html-view-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

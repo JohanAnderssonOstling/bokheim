@@ -265,7 +265,7 @@ pub fn folder_breadcrumb() -> Breadcrumb {
 
 pub fn folder_breadcrumb_item(label: impl Into<SharedString>, current: bool) -> BreadcrumbItem {
     let label = label.into();
-    let max_characters = usize::from(bokheim_app_contract::frontend::BREADCRUMB_ITEM_MAX_CHARACTERS);
+    let max_characters = usize::from(app_contract::frontend::BREADCRUMB_ITEM_MAX_CHARACTERS);
     let mut characters = label.chars();
     let visible = characters.by_ref().take(max_characters).collect::<String>();
     let visible = if characters.next().is_some() { format!("{}…", visible.chars().take(max_characters.saturating_sub(1)).collect::<String>()) } else { visible };

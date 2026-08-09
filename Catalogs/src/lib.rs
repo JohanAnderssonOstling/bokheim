@@ -4,10 +4,10 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use bokheim_app_contract::catalog::{CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogPage, CatalogSourceId, CatalogWideSearchResult};
-use bokheim_catalog::{opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator, CatalogCoverCache, CatalogServerSearchRequest};
-use bokheim_opds::{endpoints_from_registry, validate_curated_registry, CatalogRegistry, OpdsClient, OpdsEndpoint};
-use bokheim_wire::{self as wire, ContentEncoding};
+use app_contract::catalog::{CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogPage, CatalogSourceId, CatalogWideSearchResult};
+use catalog_provider::{opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator, CatalogCoverCache, CatalogServerSearchRequest};
+use opds::{endpoints_from_registry, validate_curated_registry, CatalogRegistry, OpdsClient, OpdsEndpoint};
+use wire::{self as wire, ContentEncoding};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -219,8 +219,8 @@ impl CatalogService {
             return Err(CatalogServiceError("catalog search definition is not the currently advertised definition".to_owned()));
         }
         let search_origin = match &definition {
-            bokheim_opds::OpdsSearch::UriTemplate { base_url, .. } => base_url,
-            bokheim_opds::OpdsSearch::OpenSearchDescription { url } => url,
+            opds::OpdsSearch::UriTemplate { base_url, .. } => base_url,
+            opds::OpdsSearch::OpenSearchDescription { url } => url,
         };
         validate_opds_catalog_locator(&endpoint, search_origin).map_err(|error| CatalogServiceError(error.to_string()))?;
         let catalog = self.state.opds.search_definition(&definition, &opds_search_query(request.query)).await.map_err(|error| CatalogServiceError(error.to_string()))?;
@@ -458,7 +458,7 @@ impl CatalogService {
 }
 
 fn default_cover_cache_directory() -> PathBuf {
-    std::env::temp_dir().join(format!("bokheim-catalog-server-{}-covers", std::process::id()))
+    std::env::temp_dir().join(format!("catalog-server-{}-covers", std::process::id()))
 }
 
 fn cover_cache_directory_for(cache_path: &Path) -> PathBuf {
@@ -648,8 +648,8 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use axum::routing::get;
-    use bokheim_app_contract::catalog::{CatalogAuthorDiscoveryEvidence, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme};
-    use bokheim_opds::{registry_from_endpoints, OpdsEndpointId};
+    use app_contract::catalog::{CatalogAuthorDiscoveryEvidence, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme};
+    use opds::{registry_from_endpoints, OpdsEndpointId};
     use image::{DynamicImage, ImageOutputFormat};
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -871,14 +871,14 @@ mod tests {
         let service = service_with_endpoint(endpoint(format!("http://{upstream_address}/root")));
         let server = app(service.clone());
         let server_task = tokio::spawn(async move { axum::serve(server_listener, server).await.unwrap() });
-        let client = bokheim_catalog::CatalogServerClient::new(&format!("http://{server_address}/")).unwrap();
+        let client = catalog_provider::CatalogServerClient::new(&format!("http://{server_address}/")).unwrap();
         let source_id = CatalogSourceId::parse("opds-test").unwrap();
         assert_eq!(client.registry().await.unwrap().catalogs.len(), 1);
         let page = client.catalog_page(&source_id, None, false).await.unwrap();
         assert_eq!(page.title, "Through Server");
         assert_eq!(client.catalog_page(&source_id, None, false).await.unwrap().title, "Through Server");
         let search = page.search.unwrap();
-        let query = bokheim_app_contract::catalog::CatalogSearchQuery { query: "book".to_owned(), title: None, author: None };
+        let query = app_contract::catalog::CatalogSearchQuery { query: "book".to_owned(), title: None, author: None };
         assert_eq!(client.search_catalog(&source_id, search.clone(), query.clone()).await.unwrap().title, "Search Result");
         assert_eq!(client.search_catalog(&source_id, search.clone(), query.clone()).await.unwrap().title, "Search Result");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -969,7 +969,7 @@ mod tests {
         let service = service_with_endpoint(endpoint(format!("http://{address}/root")));
         let first = service.search_catalogs("book").await.unwrap();
         let second = service.search_catalogs("BOOK").await.unwrap();
-        assert!(first.groups.iter().any(|group| matches!(&group.outcome, bokheim_app_contract::catalog::CatalogWideSearchOutcome::Results { page } if page.publications.iter().any(|publication| publication.title == "One Book"))));
+        assert!(first.groups.iter().any(|group| matches!(&group.outcome, app_contract::catalog::CatalogWideSearchOutcome::Results { page } if page.publications.iter().any(|publication| publication.title == "One Book"))));
         assert_eq!(second.groups, first.groups);
         let application = app(service);
         let response =
