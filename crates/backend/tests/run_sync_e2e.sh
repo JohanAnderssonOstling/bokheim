@@ -51,14 +51,14 @@ postgres_started=1
 database_name="sync_e2e_$$"
 createdb -h 127.0.0.1 -p "$postgres_port" -U postgres "$database_name"
 
-server_target=${SYNC_E2E_SERVER_TARGET_DIR:-$repo_root/Server/target}
+server_target=${SYNC_E2E_SERVER_TARGET_DIR:-$repo_root/servers/sync/target}
 backend_target=${SYNC_E2E_BACKEND_TARGET_DIR:-$repo_root/target}
-CARGO_TARGET_DIR="$server_target" cargo build --manifest-path "$repo_root/Server/Cargo.toml"
+CARGO_TARGET_DIR="$server_target" cargo build --manifest-path "$repo_root/servers/sync/Cargo.toml"
 
 SYNC_E2E_DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
 CARGO_TARGET_DIR="$server_target" \
 cargo test \
-    --manifest-path "$repo_root/Server/Cargo.toml" \
+    --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p server-account \
     -p server-postgres \
     -- \
@@ -68,7 +68,7 @@ cargo test \
 SYNC_E2E_DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
 CARGO_TARGET_DIR="$server_target" \
 cargo test \
-    --manifest-path "$repo_root/Server/Cargo.toml" \
+    --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p sync-server \
     --test public_registration \
     -- \

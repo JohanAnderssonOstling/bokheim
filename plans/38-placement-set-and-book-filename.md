@@ -3,8 +3,8 @@
 **Status:** ⬜ open
 
 Atomic but wide. Touches `SyncCommon/src/lib.rs`, `SyncCommon/src/library_state.rs`,
-`Server/crates/server-database/schema/03_sync.sql`,
-`Server/crates/server-postgres/src/{sync_store.rs,assets.rs}` and its
+`servers/sync/crates/server-database/schema/03_sync.sql`,
+`servers/sync/crates/server-postgres/src/{sync_store.rs,assets.rs}` and its
 `sql/sync/upsert_placement_batch.sql`, `Backend/src/library/database/remote_reducer.rs`,
 `Backend/src/platform/scanner.rs`, and the local `book_dir` schema.
 
@@ -286,7 +286,7 @@ other to be picked up on the next scan with no promotion logic.
    device-independence — collision sets legitimately differ across devices.
 8. **Blob refcount follows lifecycle.** Book `Present` → 1 reference; `Deleted` → 0;
    placement add/remove alone → no change. Replaces the placement-delta assertions
-   in `Server/crates/server-postgres/src/sync.rs:658-707`
+   in `servers/sync/crates/server-postgres/src/sync.rs:658-707`
    (`canonical_path_state_does_not_resurrect_displaced_books`), which tests
    behaviour this plan deletes and should be **removed rather than adapted**.
 9. **Cell identity agrees across every mapping.** For each `MutationBody` variant,

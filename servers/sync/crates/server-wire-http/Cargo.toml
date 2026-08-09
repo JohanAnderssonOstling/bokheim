@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 axum = "0.7"
-wire = { path = "../../../crates/wire" }
+wire = { path = "../../../../crates/wire" }
 serde = "1"
 tracing = "0.1"
 

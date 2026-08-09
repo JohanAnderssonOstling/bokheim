@@ -82,7 +82,7 @@ async fn profile_endpoint(client: &OpdsClient, endpoint: &OpdsEndpoint, run: usi
 }
 
 fn options() -> Options {
-    let mut registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Catalogs/opds.json");
+    let mut registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../servers/catalog/opds.json");
     let mut runs = 1;
     let mut concurrency = 4;
     let mut only_id = None;

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/../.." && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
 temp_root=${TMPDIR:-/tmp}
 stress_tmp=$(mktemp -d "$temp_root/bokheim-server-stress.XXXXXX")
 postgres_data="$stress_tmp/postgres"
@@ -142,8 +142,8 @@ while (echo >/dev/tcp/127.0.0.1/"$server_port") >/dev/null 2>&1; do
     server_port=$((server_port + 1))
 done
 
-server_target=${BOKHEIM_STRESS_TARGET_DIR:-$repo_root/Server/target}
-cargo build --release --manifest-path "$repo_root/Server/Cargo.toml" --bin sync-server --example sync_stress --target-dir "$server_target"
+server_target=${BOKHEIM_STRESS_TARGET_DIR:-$repo_root/servers/sync/target}
+cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml" --bin sync-server --example sync_stress --target-dir "$server_target"
 
 stress_email="server-stress@example.com"
 stress_password="server-stress-user-password"

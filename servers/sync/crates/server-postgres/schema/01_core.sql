@@ -3,7 +3,7 @@
 -- file must be applied first.
 --
 -- This schema is applied to a freshly created, empty database on every
--- deploy (see Server/deploy/install-server.sh) -- there is no migration
+-- deploy (see servers/sync/deploy/install-server.sh) -- there is no migration
 -- history to preserve. Edit these files directly; do not add incremental
 -- migration files.
 

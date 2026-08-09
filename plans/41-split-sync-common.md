@@ -120,7 +120,7 @@ not link the crate that defines one.
    `BokheimAppContract`, `BokheimOpds`. Prefer adding `domain` as a direct
    dependency over re-exporting the moved types from `sync-common`, which would
    defeat the split.
-5. Remove `sync-common`'s now-unused re-exports and confirm nothing in `Server/`
+5. Remove `sync-common`'s now-unused re-exports and confirm nothing in `servers/sync/`
    references a moved type. Move the server's test fixtures that construct
    `BookLifecycleState`/`BookMetadataState` (`sync_store.rs:511-583`) to build opaque
    byte payloads instead — a server test should not need the domain crate either.
@@ -130,7 +130,7 @@ not link the crate that defines one.
 ## Tests
 
 1. **The server cannot link the domain crate.** A check that fails if any crate under
-   `Server/` gains a direct or transitive dependency on `domain`. `cargo tree
+   `servers/sync/` gains a direct or transitive dependency on `domain`. `cargo tree
    -p server-postgres -i domain` returning non-empty is the failure condition.
    This is the only durable enforcement of the plan's invariant — without it the
    split decays back to a convention.

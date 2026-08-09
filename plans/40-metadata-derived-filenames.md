@@ -2,8 +2,8 @@
 
 **Status:** ⬜ open — **assumes plan 38 is implemented; does not assume plan 39**
 
-Touches `SyncCommon/src/lib.rs`, `Server/crates/server-database/schema/03_sync.sql`,
-`Server/crates/server-postgres/src/{sync_store.rs,sql/sync/}`, and
+Touches `SyncCommon/src/lib.rs`, `servers/sync/crates/server-database/schema/03_sync.sql`,
+`servers/sync/crates/server-postgres/src/{sync_store.rs,sql/sync/}`, and
 `Backend/src/{platform/scanner.rs,sync/transfer.rs,library/database/}`.
 
 **No migration.** Deployment wipes the database; do not write backfill code.

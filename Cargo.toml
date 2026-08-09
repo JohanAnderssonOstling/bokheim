@@ -16,7 +16,7 @@ members = [
     "crates/projection",
     "crates/storage-sqlite",
     "crates/thumbnail",
-    "Catalogs",
+    "servers/catalog",
     "crates/audiobook-library",
     "crates/algorithms",
     "crates/wire",
@@ -39,7 +39,7 @@ members = [
     ,"GPUI/audiobook-player",
     "GPUI/kobo-device"
 ]
-exclude = ["Server"]
+exclude = ["servers/sync"]
 
 [workspace.lints]
 

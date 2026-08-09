@@ -11,7 +11,7 @@ flamegraph.svg
 # its own lockfile so application and release builds remain reproducible.
 **/Cargo.lock
 !/Cargo.lock
-!/Server/Cargo.lock
+!/servers/sync/Cargo.lock
 
 # JavaScript dependencies, generated output, and tool caches
 **/node_modules/
@@ -60,6 +60,10 @@ pnpm-debug.log*
 **/.bookrium/thumbnails/
 /books/
 /thumbnails/
+/servers/sync/books/
+/servers/sync/thumbnails/
+# Legacy locations remain ignored so the layout migration never stages or
+# silently relocates developers' existing local server state.
 /Server/books/
 /Server/thumbnails/
 

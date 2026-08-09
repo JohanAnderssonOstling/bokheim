@@ -13,8 +13,8 @@ Build and install it separately from the synchronization server:
 cargo build --release -p catalog-server
 sudo install -o root -g root -m 0755 target/release/catalog-server /usr/local/bin/catalog-server
 sudo install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
-sudo install -o root -g root -m 0644 Catalogs/opds.json /usr/local/share/catalog-providers/opds.json
-sudo install -o root -g root -m 0644 Catalogs/deploy/catalog-providers.service /etc/systemd/system/catalog-providers.service
+sudo install -o root -g root -m 0644 servers/catalog/opds.json /usr/local/share/catalog-providers/opds.json
+sudo install -o root -g root -m 0644 servers/catalog/deploy/catalog-providers.service /etc/systemd/system/catalog-providers.service
 ```
 
 Install [Caddyfile](Caddyfile) and [caddy.env.example](caddy.env.example) on the
