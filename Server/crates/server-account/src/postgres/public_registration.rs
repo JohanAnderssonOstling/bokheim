@@ -1,6 +1,6 @@
 use super::{crypto, email_taken, internal, issue_token_pair, issued_session, normalized_email, PostgresAccountService, TOKEN_LEN};
 use crate::core::{AuthError, AuthenticatedUser, IssuedSession};
-use bokheim_account_contract::{PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
+use account_contract::{PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
 use chrono::{Duration, Utc};
 use sqlx::{Postgres, Transaction};
 

@@ -1,14 +1,14 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use bokheim_account_contract::{AuthResponse, EmailRequest, LoginRequest, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary};
+use account_contract::{AuthResponse, EmailRequest, LoginRequest, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary};
 use server_account::{AccountEmailKind, AccountPolicy, ClientAddressSource, PostgresAccountService};
 use std::sync::Arc;
 use tower::ServiceExt;
 
 async fn post<T: serde::Serialize + ?Sized>(app: &Router, path: &str, body: &T, bearer: Option<&str>) -> axum::response::Response {
-    let encoded = bokheim_wire::encode(body).unwrap();
-    let mut request = Request::builder().method("POST").uri(path).header(header::CONTENT_TYPE, bokheim_wire::MEDIA_TYPE).header(header::ACCEPT, bokheim_wire::MEDIA_TYPE).header("x-forwarded-for", "203.0.113.20");
+    let encoded = wire::encode(body).unwrap();
+    let mut request = Request::builder().method("POST").uri(path).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).header(header::ACCEPT, wire::MEDIA_TYPE).header("x-forwarded-for", "203.0.113.20");
     if let Some(token) = bearer {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -17,16 +17,16 @@ async fn post<T: serde::Serialize + ?Sized>(app: &Router, path: &str, body: &T, 
 
 async fn auth_response(response: axum::response::Response) -> AuthResponse {
     assert!(response.status().is_success());
-    bokheim_wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
+    wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
 }
 
 async fn response_body<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     assert!(response.status().is_success());
-    bokheim_wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
+    wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
 }
 
 fn accepted(request: axum::http::request::Builder) -> axum::http::request::Builder {
-    request.header(header::ACCEPT, bokheim_wire::MEDIA_TYPE)
+    request.header(header::ACCEPT, wire::MEDIA_TYPE)
 }
 
 #[tokio::test]

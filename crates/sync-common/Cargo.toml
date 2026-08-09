@@ -1,0 +1,15 @@
+[package]
+name = "sync-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+algorithms = { path = "../algorithms" }
+account-contract = { path = "../account-contract" }
+identifiers = { path = "../identifiers" }
+wire = { path = "../wire" }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+
+[dev-dependencies]
+serde_json = "1"

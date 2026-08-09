@@ -12,9 +12,9 @@ if [[ ! ${source_root} = /* ]]; then
 fi
 
 sync_binary=${source_root}/deploy-target/release/sync-server
-catalog_binary=${source_root}/deploy-target/release/bokheim-catalog-server
+catalog_binary=${source_root}/deploy-target/release/catalog-server
 catalog_file=${source_root}/Catalogs/opds.json
-for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/Server/deploy/bokheim-sync.service" "${source_root}/Catalogs/deploy/bokheim-catalogs.service" "${source_root}/Server/deploy/Caddyfile"; do
+for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/Server/deploy/bokheim-sync.service" "${source_root}/Catalogs/deploy/catalog-providers.service" "${source_root}/Server/deploy/Caddyfile"; do
     if [[ ! -f ${required} ]]; then
         echo "missing staged deployment file: ${required}" >&2
         exit 1
@@ -124,12 +124,12 @@ DATABASE_URL="${database_url}" "${sync_binary}" migrate
 unset database_url
 
 install -o root -g root -m 0755 "${sync_binary}" /usr/local/bin/sync-server
-install -o root -g root -m 0755 "${catalog_binary}" /usr/local/bin/bokheim-catalog-server
-install -d -o root -g root -m 0755 /usr/local/share/bokheim-catalogs
-install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/bokheim-catalogs/opds.json
+install -o root -g root -m 0755 "${catalog_binary}" /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
+install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/catalog-providers/opds.json
 
 install -o root -g root -m 0644 "${source_root}/Server/deploy/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/Catalogs/deploy/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service
+install -o root -g root -m 0644 "${source_root}/Catalogs/deploy/catalog-providers.service" /etc/systemd/system/catalog-providers.service
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "${source_root}/Server/deploy/caddy-bokheim.conf" /etc/systemd/system/caddy.service.d/bokheim.conf
 install -o root -g root -m 0644 "${source_root}/Server/deploy/Caddyfile" /etc/caddy/Caddyfile
@@ -144,9 +144,9 @@ rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.t
 
 systemctl daemon-reload
 caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
-systemctl enable bokheim-sync.service bokheim-catalogs.service caddy.service
+systemctl enable bokheim-sync.service catalog-providers.service caddy.service
 systemctl restart bokheim-sync.service
-systemctl restart bokheim-catalogs.service
+systemctl restart catalog-providers.service
 systemctl restart caddy.service
 
 for _ in $(seq 1 20); do

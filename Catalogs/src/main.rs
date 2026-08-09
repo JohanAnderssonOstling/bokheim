@@ -1,4 +1,4 @@
-use bokheim_catalog_server::{app, CatalogService};
+use catalog_server::{app, CatalogService};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);
     if let Some(argument) = arguments.next() {
         if argument != "--check-catalog" {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "usage: bokheim-catalog-server [--check-catalog PATH]").into());
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "usage: catalog-server [--check-catalog PATH]").into());
         }
         let path = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--check-catalog requires a path"))?;
         if arguments.next().is_some() {
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cover_cache_directory = std::env::var_os("BOKHEIM_CATALOG_COVER_CACHE_DIR")
         .map(PathBuf::from)
         .or_else(|| cache_path.as_deref().and_then(Path::parent).map(|parent| parent.join("covers")))
-        .unwrap_or_else(|| std::env::temp_dir().join("bokheim-catalog-server-covers"));
+        .unwrap_or_else(|| std::env::temp_dir().join("catalog-server-covers"));
     let service = match registry_path {
         Some(path) => CatalogService::from_file_with_storage(path, cache_path, cover_cache_directory).await?,
         None => CatalogService::bundled_with_storage(cache_path, cover_cache_directory)?,

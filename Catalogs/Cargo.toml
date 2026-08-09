@@ -1,5 +1,5 @@
 [package]
-name = "bokheim-catalog-server"
+name = "catalog-server"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -10,10 +10,10 @@ workspace = true
 [dependencies]
 axum = "0.7"
 blake3 = "1"
-bokheim-app-contract = { path = "../BokheimAppContract" }
-bokheim-catalog = { path = "../BokheimCatalogProvider" }
-bokheim-opds = { path = "../BokheimOpds" }
-bokheim-wire = { path = "../BokheimWire" }
+app-contract = { path = "../crates/app-contract" }
+catalog-provider = { path = "../crates/catalog-provider" }
+opds = { path = "../crates/opds" }
+wire = { path = "../crates/wire" }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

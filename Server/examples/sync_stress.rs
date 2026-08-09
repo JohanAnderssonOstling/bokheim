@@ -1,7 +1,7 @@
 //! Bounded, loopback-only stress workload for the production HTTP and
 //! PostgreSQL synchronization path.
 
-use bokheim_account_contract::{AuthResponse, LoginRequest, OneTimeTokenRequest, PublicRegistrationRequest};
+use account_contract::{AuthResponse, LoginRequest, OneTimeTokenRequest, PublicRegistrationRequest};
 use reqwest::{Client, Url};
 use std::error::Error;
 use std::io;

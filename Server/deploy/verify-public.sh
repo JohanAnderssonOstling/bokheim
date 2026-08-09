@@ -31,7 +31,7 @@ caddy_config=${BOKHEIM_CADDY_CONFIG:-/etc/caddy/Caddyfile}
 socket=${BOKHEIM_SERVER_SOCKET:-/run/bokheim/sync.sock}
 
 systemctl is-active --quiet bokheim-sync.service
-systemctl is-active --quiet bokheim-catalogs.service
+systemctl is-active --quiet catalog-providers.service
 systemctl is-active --quiet caddy.service
 caddy validate --envfile "${caddy_env}" --config "${caddy_config}" >/dev/null
 

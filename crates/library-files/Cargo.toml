@@ -1,0 +1,17 @@
+[package]
+name = "library-files"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+blake3 = "1"
+domain = { path = "../domain" }
+identifiers = { path = "../identifiers" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

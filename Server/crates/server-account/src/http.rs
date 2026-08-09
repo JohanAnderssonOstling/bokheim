@@ -9,7 +9,7 @@ use axum::http::{request::Parts, HeaderMap, HeaderName, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use bokheim_account_contract::{
+use account_contract::{
     AuthResponse, EmailRequest, LoginRequest, MeResponse, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
 };
 use std::net::{IpAddr, SocketAddr};

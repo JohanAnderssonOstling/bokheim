@@ -124,6 +124,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "account-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wire",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -193,6 +201,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "algorithms"
+version = "0.1.0"
+dependencies = [
+ "identifiers",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
@@ -387,6 +406,19 @@ name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
+name = "app-contract"
+version = "0.1.0"
+dependencies = [
+ "account-contract",
+ "domain",
+ "serde",
+ "serde_json",
+ "specta",
+ "specta-typescript",
+ "sync-common",
+]
 
 [[package]]
 name = "ar_archive_writer"
@@ -1211,81 +1243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-account-contract"
-version = "0.1.0"
-dependencies = [
- "bokheim-wire",
- "serde",
-]
-
-[[package]]
-name = "bokheim-algorithms"
-version = "0.1.0"
-dependencies = [
- "bokheim-identifiers",
- "serde",
- "serde_json",
- "unicode-normalization",
- "uuid",
-]
-
-[[package]]
-name = "bokheim-app-contract"
-version = "0.1.0"
-dependencies = [
- "bokheim-account-contract",
- "bokheim-domain",
- "serde",
- "serde_json",
- "specta",
- "specta-typescript",
- "sync-common",
-]
-
-[[package]]
-name = "bokheim-catalog"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "bokheim-app-contract",
- "bokheim-domain",
- "bokheim-opds",
- "bokheim-wire",
- "futures-util",
- "image 0.24.9",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "url",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "bokheim-catalog-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "bokheim-app-contract",
- "bokheim-catalog",
- "bokheim-opds",
- "bokheim-wire",
- "futures-util",
- "image 0.24.9",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bokheim-desktop"
 version = "0.1.0"
 dependencies = [
@@ -1308,86 +1265,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-domain"
-version = "0.1.0"
-dependencies = [
- "bokheim-algorithms",
- "bokheim-identifiers",
- "bokheim-wire",
- "serde",
- "specta",
- "specta-typescript",
- "sync-common",
- "unicode-normalization",
-]
-
-[[package]]
-name = "bokheim-identifiers"
-version = "0.1.0"
-dependencies = [
- "serde",
- "uuid",
-]
-
-[[package]]
-name = "bokheim-library-files"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "bokheim-domain",
- "bokheim-identifiers",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "bokheim-opds"
-version = "0.1.0"
-dependencies = [
- "ammonia",
- "atom_syndication",
- "axum",
- "blake3",
- "futures-util",
- "html-engine",
- "log",
- "quick-xml 0.41.0",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "specta",
- "sync-common",
- "tempfile",
- "tokio",
- "uri-template",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "bokheim-sync-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "bokheim-account-contract",
- "bokheim-domain",
- "bokheim-wire",
- "futures-util",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "sync-common",
- "tokio",
- "tokio-tungstenite",
- "urlencoding",
-]
-
-[[package]]
 name = "bokheim-ui-components"
 version = "0.1.0"
 dependencies = [
- "bokheim-app-contract",
+ "app-contract",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -1402,20 +1283,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-wire"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "serde",
- "zstd",
-]
-
-[[package]]
 name = "book-metadata"
 version = "0.1.0"
 dependencies = [
  "audiobook-library",
- "bokheim-domain",
+ "domain",
  "epub_provider",
  "html-publication",
  "mp4ameta",
@@ -1732,6 +1604,49 @@ checksum = "374b7c592d9c00c1f4972ea58390ac6b18cbb6ab79011f3bdc90a0b82ca06b77"
 dependencies = [
  "serde",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "catalog-provider"
+version = "0.1.0"
+dependencies = [
+ "app-contract",
+ "axum",
+ "blake3",
+ "domain",
+ "futures-util",
+ "image 0.24.9",
+ "opds",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wire",
+]
+
+[[package]]
+name = "catalog-server"
+version = "0.1.0"
+dependencies = [
+ "app-contract",
+ "axum",
+ "blake3",
+ "catalog-provider",
+ "futures-util",
+ "image 0.24.9",
+ "opds",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "wire",
 ]
 
 [[package]]
@@ -3038,6 +2953,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "domain"
+version = "0.1.0"
+dependencies = [
+ "algorithms",
+ "identifiers",
+ "serde",
+ "specta",
+ "specta-typescript",
+ "sync-common",
+ "unicode-normalization",
+ "wire",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3430,27 +3359,26 @@ dependencies = [
 name = "epub-svelte"
 version = "0.1.0"
 dependencies = [
+ "app-contract",
  "axum",
  "blake3",
- "bokheim-app-contract",
- "bokheim-catalog",
- "bokheim-domain",
- "bokheim-library-files",
- "bokheim-opds",
- "bokheim-sync-client",
  "book-metadata",
+ "catalog-provider",
  "crossbeam-channel",
  "dirs",
+ "domain",
  "env_logger",
  "epub_provider",
  "futures-util",
  "html-publication",
  "image 0.24.9",
  "include-sqlite-sql",
+ "library-files",
  "library-registry",
  "log",
  "lopdf",
  "notify 6.1.1",
+ "opds",
  "pdf-reader-core",
  "projection",
  "r2d2",
@@ -3464,6 +3392,7 @@ dependencies = [
  "specta-typescript",
  "sqlx",
  "storage-sqlite",
+ "sync-client",
  "sync-common",
  "tempfile",
  "thumbnail",
@@ -5606,8 +5535,8 @@ dependencies = [
 name = "html-view-gpui"
 version = "0.1.0"
 dependencies = [
+ "app-contract",
  "async-channel",
- "bokheim-app-contract",
  "epub_provider",
  "gpui",
  "gpui_platform",
@@ -6016,6 +5945,14 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "identifiers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
 
 [[package]]
 name = "idna"
@@ -6800,12 +6737,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "library-files"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "domain",
+ "identifiers",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "library-registry"
 version = "0.1.0"
 dependencies = [
- "bokheim-identifiers",
- "bokheim-library-files",
  "csv",
+ "identifiers",
+ "library-files",
  "serde",
  "serde_json",
  "specta",
@@ -8347,6 +8295,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "opds"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "atom_syndication",
+ "axum",
+ "blake3",
+ "futures-util",
+ "html-engine",
+ "log",
+ "quick-xml 0.41.0",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "specta",
+ "sync-common",
+ "tempfile",
+ "tokio",
+ "uri-template",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "open"
 version = "5.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9127,7 +9099,7 @@ dependencies = [
 name = "projection"
 version = "0.1.0"
 dependencies = [
- "bokheim-domain",
+ "domain",
  "sync-common",
 ]
 
@@ -9789,11 +9761,11 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "remote-reader"
 version = "0.1.0"
 dependencies = [
- "bokheim-identifiers",
- "bokheim-sync-client",
+ "identifiers",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
+ "sync-client",
  "tempfile",
  "urlencoding",
 ]
@@ -12245,16 +12217,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-client"
+version = "0.1.0"
+dependencies = [
+ "account-contract",
+ "axum",
+ "blake3",
+ "domain",
+ "futures-util",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "sync-common",
+ "tokio",
+ "tokio-tungstenite",
+ "urlencoding",
+ "wire",
+]
+
+[[package]]
 name = "sync-common"
 version = "0.1.0"
 dependencies = [
- "bokheim-account-contract",
- "bokheim-algorithms",
- "bokheim-identifiers",
- "bokheim-wire",
+ "account-contract",
+ "algorithms",
+ "identifiers",
  "serde",
  "serde_json",
  "uuid",
+ "wire",
 ]
 
 [[package]]
@@ -15734,6 +15725,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d129932f4644ac2396cb456385cbf9e63b5b30c6e8dc4820bdca4eb082037a5"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "wire"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "zstd",
 ]
 
 [[package]]
