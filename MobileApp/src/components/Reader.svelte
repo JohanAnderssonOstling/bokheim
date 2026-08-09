@@ -103,7 +103,7 @@
   let maxBlockSize = $state(1440);
   const READER_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-reader-ui-preferences`;
   let isPdfBook = $derived(book.file.type === "application/pdf" || /\.pdf$/i.test(book.file.name));
-  let selection = $state<{ cfi: string; text: string; prefix: string | null; suffix: string | null; pdfAnchor?: PdfAnnotationAnchor } | null>(null);
+  let selection = $state<{ cfi: string; text: string; pdfAnchor?: PdfAnnotationAnchor } | null>(null);
   let selectionNote = $state("");
   let activeAnnotation = $state<ReaderAnnotation | null>(null);
   let annotationNoteDraft = $state("");
@@ -471,8 +471,6 @@
       const range = selected.getRangeAt(0).cloneRange();
       const text = selected.toString().trim();
       if (!text) return;
-      const startText = range.startContainer.textContent || "";
-      const endText = range.endContainer.textContent || "";
       const cfi = view?.getCFI(index, range) || "";
       const canvasBounds = doc.querySelector<HTMLCanvasElement>("#canvas canvas")?.getBoundingClientRect();
       const rects = canvasBounds
@@ -486,8 +484,6 @@
       selection = {
         cfi,
         text,
-        prefix: startText.slice(Math.max(0, range.startOffset - 48), range.startOffset) || null,
-        suffix: endText.slice(range.endOffset, range.endOffset + 48) || null,
         pdfAnchor: isPdfBook && rects.length ? { kind: "pdf", page_index: index, rects, fallback_cfi: cfi || null } : undefined,
       };
       selectionNote = "";
@@ -557,7 +553,7 @@
     const cfi = (event as CustomEvent<{ value: string }>).detail.value;
     const annotation = annotations.find((item) => annotationCfi(item) === cfi);
     if (!annotation) return;
-    selection = { cfi, text: annotation.exact_text, prefix: annotation.prefix, suffix: annotation.suffix, pdfAnchor: pdfAnnotationAnchor(annotation) ?? undefined };
+    selection = { cfi, text: annotation.exact_text, pdfAnchor: pdfAnnotationAnchor(annotation) ?? undefined };
     selectionNote = annotation.note;
   }
 
@@ -565,7 +561,7 @@
     const anchor = pdfAnnotationAnchor(annotation);
     if (anchor && isPdfBook) {
       await view?.goTo(anchor.page_index);
-      selection = { cfi: anchor.fallback_cfi || "", text: annotation.exact_text, prefix: annotation.prefix, suffix: annotation.suffix, pdfAnchor: anchor };
+      selection = { cfi: anchor.fallback_cfi || "", text: annotation.exact_text, pdfAnchor: anchor };
       selectionNote = annotation.note;
       activeAnnotation = annotation;
       annotationNoteDraft = annotation.note;
@@ -585,7 +581,7 @@
     const now = Date.now();
     const annotation: ReaderAnnotation = {
       id: existing?.id || crypto.randomUUID(), book_id: book.bookId, anchor,
-      exact_text: selection.text, prefix: selection.prefix, suffix: selection.suffix,
+      exact_text: selection.text,
       style: existing?.style || style, color: existing?.color || "#f6c945", note: selectionNote,
       created_at: existing?.created_at || now, modified_at: now,
     };
@@ -636,10 +632,10 @@
   }
 
   async function addBookmark() {
-    if (!lastCfi || !book.bookId || !book.upsertBookmark) return;
+    if (!lastCfi || !book.bookId || !book.createBookmark) return;
     const now = Date.now();
     const bookmark: ReaderBookmark = { id: crypto.randomUUID(), book_id: book.bookId, cfi: lastCfi, label: tocItems.find((item) => item.href === activeTocHref)?.label || `Location ${currentLocation + 1}`, created_at: now, modified_at: now };
-    await book.upsertBookmark(bookmark);
+    await book.createBookmark(bookmark);
     bookmarks = [bookmark, ...bookmarks];
   }
 
@@ -1091,7 +1087,7 @@
       <button class:active={notesOpen} class="reader-control" type="button" title="Annotations and bookmarks" onclick={() => togglePanel("notes")}>Annotations</button>
     {/if}
     <button class:active={infoOpen} class="reader-control" type="button" title="Book information" onclick={() => togglePanel("info")}>Info</button>
-    {#if book.upsertBookmark}
+    {#if book.createBookmark}
       <button class="reader-control" type="button" disabled={!lastCfi} title="Bookmark the current location" onclick={() => void addBookmark()}>Bookmark</button>
     {/if}
     <button class:active={ttsPlaying} class="reader-control" type="button" title="Read the visible page aloud" onclick={() => ttsPlaying ? stopTts() : void toggleTts()}>{ttsPlaying ? "Stop" : "Read"}</button>
