@@ -1,0 +1,58 @@
+-- Asset/quota domain: content-addressed blob storage accounting, upload
+-- reservations, and per-user storage quotas. Depends only on 01_core.sql
+-- (users, libraries).
+
+-- quota_bytes/used_bytes/reserved_bytes keep their >= 0 CHECKs deliberately:
+-- they are adjusted in place by raw SQL ("reserved_bytes=reserved_bytes-$2"
+-- in sql/assets/adjust_reserved.sql), so an arithmetic bug there could drive
+-- a column negative in a way Rust's type system cannot catch. quota_bytes's
+-- default is the account creation policy (5 GiB); ensure_exists.sql relies
+-- on it by never passing quota_bytes explicitly.
+CREATE TABLE user_storage_account (
+    user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    quota_bytes bigint NOT NULL DEFAULT '5368709120'::bigint CHECK (quota_bytes >= 0),
+    used_bytes bigint NOT NULL DEFAULT 0 CHECK (used_bytes >= 0),
+    reserved_bytes bigint NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0)
+);
+
+-- content_hash carries no regex CHECK on any table below: ContentHash::parse
+-- (BokheimIdentifiers) is the only constructor for this value and already
+-- enforces "64 lowercase hex characters" -- the exact shape the regex
+-- duplicated. size_bytes is always a validated non-negative cast from a byte
+-- length, never raw-SQL arithmetic, so it doesn't need the same treatment as
+-- the quota columns above.
+CREATE TABLE blob_object (
+    content_hash text PRIMARY KEY,
+    size_bytes bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+CREATE TABLE user_blob_charge (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content_hash text NOT NULL REFERENCES blob_object(content_hash) ON DELETE RESTRICT,
+    charged_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, content_hash)
+);
+
+-- reference_count keeps its CHECK: sql/assets/apply_blob_reference_deltas.sql
+-- adjusts it with raw SQL ("reference_count=reference_count+delta"), the
+-- same arithmetic-underflow risk as the quota columns above.
+CREATE TABLE user_blob_reference (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    reference_count bigint NOT NULL CHECK (reference_count > 0),
+    PRIMARY KEY (user_id, content_hash)
+);
+
+CREATE TABLE book_upload_reservation (
+    id text PRIMARY KEY,
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    size_bytes bigint NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    UNIQUE (user_id, content_hash)
+);
+
+CREATE INDEX idx_book_upload_reservation_expiry ON book_upload_reservation USING btree (expires_at);
