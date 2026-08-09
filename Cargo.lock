@@ -418,6 +418,7 @@ dependencies = [
  "specta",
  "specta-typescript",
  "sync-common",
+ "test-support",
 ]
 
 [[package]]
@@ -3377,6 +3378,7 @@ dependencies = [
  "sync-client",
  "sync-common",
  "tempfile",
+ "test-support",
  "thumbnail",
  "tokio",
  "tokio-util",
@@ -12211,6 +12213,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sync-common",
+ "test-support",
  "tokio",
  "tokio-tungstenite",
  "urlencoding",
@@ -12848,6 +12851,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "test-support"
+version = "0.1.0"
+dependencies = [
+ "identifiers",
 ]
 
 [[package]]

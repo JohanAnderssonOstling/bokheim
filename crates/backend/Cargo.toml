@@ -59,19 +59,20 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.31"
 notify = { version = "6.1", optional = true }
 futures-util = "0.3"
-html-publication = { path = "../../HtmlRenderer/crates/html-publication" }
+html-publication = { path = "../../renderers/html/crates/html-publication" }
 crossbeam-channel = "0.5"
 sync-common = { path = "../sync-common" }
 urlencoding = "2"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 blake3 = "1"
-pdf-reader-core = { path = "../../PdfRenderer", optional = true }
+pdf-reader-core = { path = "../../renderers/pdf/core", optional = true }
 dirs = "6"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 specta-typescript = "0.0.12"
 [dev-dependencies]
+test-support = { path = "../test-support" }
 axum = "0.7"
-epub_provider = { path = "../../HtmlRenderer/epub_provider" }
+epub_provider = { path = "../../renderers/html/epub_provider" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 lopdf = { version = "0.44", default-features = false }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { parse } from "../src/vendor/foliate-js/epubcfi.js";
 
-const fixtures = JSON.parse(await readFile(new URL("../../../HtmlRenderer/testdata/cfi/foliate-native.json", import.meta.url), "utf8"));
+const fixtures = JSON.parse(await readFile(new URL("../../../renderers/html/testdata/cfi/foliate-native.json", import.meta.url), "utf8"));
 
 for (const fixture of fixtures) {
   const parsed = parse(fixture.cfi);
