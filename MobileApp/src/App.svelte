@@ -217,7 +217,7 @@
   let browsingPreferences = $state<BrowsingPreferences>({ ...DEFAULT_BROWSING_PREFERENCES });
   let readerPreferences = $state<ReaderPreferences>({ ...DEFAULT_READER_PREFERENCES });
   let libraryViewMode = $state<LibraryViewMode>(DEFAULT_LIBRARY_VIEW_MODE);
-  let accountStatus = $state<AccountStatus>({ signed_in: false, server_url: null, username: null });
+  let accountStatus = $state<AccountStatus>({ signed_in: false, server_url: null, email: null });
   let accountBusy = $state(false);
   let accountProgress = $state("");
   let accountError = $state("");
@@ -777,7 +777,7 @@
       const status = await commands.getAccountStatus();
       accountStatus = status;
     } catch (reason) {
-      accountStatus = { signed_in: false, server_url: null, username: null };
+      accountStatus = { signed_in: false, server_url: null, email: null };
       if (isWebApp) accountError = `Could not check your session: ${errorMessage(reason)}`;
     } finally {
       accountResolved = true;
@@ -875,13 +875,13 @@
     if (isWebApp) navigate(libraryRoute("home"), true);
   }
 
-  async function loginToServer(username: string, password: string): Promise<boolean> {
+  async function loginToServer(email: string, password: string): Promise<boolean> {
     if (accountBusy) return false;
     accountBusy = true;
     accountError = "";
     accountProgress = "Signing in…";
     try {
-      await finishAccountAuthentication(await commands.login(username, password));
+      await finishAccountAuthentication(await commands.login(email, password));
       return true;
     } catch (reason) {
       accountError = errorMessage(reason);
@@ -910,7 +910,7 @@
     }
   }
 
-  const registerAccount = (email: string, username: string, password: string) => runAccountRequest("Creating account…", "Check your email for the verification token.", () => commands.requestPublicRegistration(email, username, password));
+  const registerAccount = (email: string, password: string) => runAccountRequest("Creating account…", "Check your email for the verification token.", () => commands.requestPublicRegistration(email, password));
   const resendAccountVerification = (email: string) => runAccountRequest("Sending verification token…", "If the registration is pending, a new token has been sent.", () => commands.resendVerification(email));
   const requestAccountPasswordReset = (email: string) => runAccountRequest("Requesting password reset…", "If the account exists, a reset token has been sent.", () => commands.requestPasswordReset(email));
   const resetAccountPassword = (token: string, password: string) => runAccountRequest("Updating password…", "Password updated. Sign in with the new password.", () => commands.resetPassword(token, password));
@@ -1252,9 +1252,6 @@
         : extension === "mobi" || extension === "azw" || extension === "azw3" ? "application/x-mobipocket-ebook"
         : "application/octet-stream";
       const file = new File([buffer], fileName, { type: mediaType });
-      void measureInvoke("update_last_read", () => commands.updateLastRead(libraryId, bookId)).catch((reason) => {
-        console.error("Could not update the book's last-read time", reason);
-      });
       return {
         key: `library:${libraryId}:${bookId}`,
         bookId,
@@ -1267,8 +1264,8 @@
         upsertAnnotation: async (annotation) => { await commands.upsertAnnotation(libraryId, annotation); },
         deleteAnnotation: async (annotationId, modifiedAt) => { await commands.deleteAnnotation(libraryId, annotationId, modifiedAt); },
         loadBookmarks: () => commands.getBookmarks(libraryId, bookId),
-        upsertBookmark: async (bookmark) => { await commands.upsertBookmark(libraryId, bookmark); },
-        deleteBookmark: async (bookmarkId, modifiedAt) => { await commands.deleteBookmark(libraryId, bookmarkId, modifiedAt); },
+        createBookmark: async (bookmark) => { await commands.createBookmark(libraryId, bookmark); },
+        deleteBookmark: async (bookmarkId, deletedAt) => { await commands.deleteBookmark(libraryId, bookmarkId, deletedAt); },
       };
   }
 
