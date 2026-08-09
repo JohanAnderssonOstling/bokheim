@@ -20,7 +20,7 @@ members = [
     "crates/audiobook-library",
     "crates/algorithms",
     "crates/wire",
-    "MobileApp/src-tauri",
+    "apps/mobile/src-tauri",
     "crates/sync-common",
     "data-analysis",
     "HtmlRenderer",
@@ -30,14 +30,14 @@ members = [
     "ReaderStyle",
     "PdfViewCommon",
     "PdfRenderer",
-    "GPUI/bokheim-desktop",
-    "GPUI/browser-ui",
-    "GPUI/reader-ui",
-    "GPUI/pdf-view-gpui",
-    "GPUI/bokheim-ui-components",
-    "GPUI/bokheim-ui-runtime"
-    ,"GPUI/audiobook-player",
-    "GPUI/kobo-device"
+    "apps/desktop-gpui",
+    "apps/audiobook-player",
+    "apps/kobo-device",
+    "ui/gpui/browser",
+    "ui/gpui/reader",
+    "ui/gpui/pdf-view",
+    "ui/gpui/components",
+    "ui/gpui/runtime"
 ]
 exclude = ["servers/sync"]
 

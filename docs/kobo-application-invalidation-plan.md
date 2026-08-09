@@ -22,7 +22,7 @@ Device logs show that many input events invoke a render taking 200-980 ms and th
 
 ## Phase 1: Notification Audit and No-op Guards
 
-Audit `GPUI/browser-ui` and `GPUI/reader-ui` for every `cx.notify()`, entity update, subscription, observer, timer, and asynchronous callback.
+Audit `ui/gpui/browser` and `ui/gpui/reader` for every `cx.notify()`, entity update, subscription, observer, timer, and asynchronous callback.
 
 Classify each notification as one of:
 

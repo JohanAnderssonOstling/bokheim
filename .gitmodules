@@ -1,3 +1,3 @@
-[submodule "MobileApp/src/vendor/foliate-js"]
-	path = MobileApp/src/vendor/foliate-js
+[submodule "apps/mobile/src/vendor/foliate-js"]
+	path = apps/mobile/src/vendor/foliate-js
 	url = https://github.com/johnfactotum/foliate-js

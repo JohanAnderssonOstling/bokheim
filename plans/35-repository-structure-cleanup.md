@@ -113,7 +113,7 @@ configuration.
 | Current path | Target path | Target Cargo package / Rust crate |
 |---|---|
 | `MobileApp` | `apps/mobile` | `mobileapp` / `mobileapp_lib` |
-| `GPUI/bokheim-desktop` | `apps/desktop-gpui` | `desktop-gpui` / `desktop_gpui` |
+| `GPUI/desktop-gpui` | `apps/desktop-gpui` | `desktop-gpui` / `desktop_gpui` |
 | `GPUI/audiobook-player` | `apps/audiobook-player` | `audiobook-player` / `audiobook_player` |
 | `GPUI/kobo-device` | `apps/kobo-device` | `kobo-device` / `kobo_device` |
 | `UI` | `apps/desktop-floem` | retain its established package name |
@@ -144,8 +144,8 @@ configuration.
 | `PdfRenderer` | `renderers/pdf/core` | `pdf-reader-core` / `pdf_reader_core` |
 | `PdfViewCommon` | `renderers/pdf/view-common` | `pdf-view-common` / `pdf_view_common` |
 | `ReaderStyle` | `renderers/shared/reader-style` | `reader-style` / `reader_style` |
-| `GPUI/bokheim-ui-components` | `ui/gpui/components` | `ui-components` / `ui_components` |
-| `GPUI/bokheim-ui-runtime` | `ui/gpui/runtime` | `ui-runtime` / `ui_runtime` |
+| `GPUI/ui-components` | `ui/gpui/components` | `ui-components` / `ui_components` |
+| `GPUI/ui-runtime` | `ui/gpui/runtime` | `ui-runtime` / `ui_runtime` |
 | `GPUI/browser-ui` | `ui/gpui/browser` | `browser-ui` / `browser_ui` |
 | `GPUI/pdf-view-gpui` | `ui/gpui/pdf-view` | `pdf-view-gpui` / `pdf_view_gpui` |
 | `GPUI/reader-ui` | `ui/gpui/reader` | `reader-ui` / `reader_ui` |
