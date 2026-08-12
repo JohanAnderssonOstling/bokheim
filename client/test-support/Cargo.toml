@@ -1,0 +1,13 @@
+[package]
+name = "test-support"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+protocol-test-support = { path = "../../shared/protocol-test-support" }
+sync-common = { path = "../../shared/sync-common" }
+uuid = "1"
+
+[lints]
+workspace = true

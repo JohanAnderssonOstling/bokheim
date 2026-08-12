@@ -1,0 +1,20 @@
+[package]
+name = "html-renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+floem = {version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"]}
+floem_renderer = {version = "0.2.0"}
+rustc_data_structures = "0.1.2"
+scraper.workspace = true
+lightningcss.workspace = true
+parcel_selectors.workspace = true
+kurbo.workspace = true
+peniko.workspace = true
+sha2 = "0.10"
+epub_provider = { path = "epub_provider" }
+arboard = "3.6.1"
+html.workspace = true
+html-publication = { path = "crates/html-publication" }
+html-view-core.workspace = true

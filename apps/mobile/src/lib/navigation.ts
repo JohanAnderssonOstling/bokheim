@@ -18,6 +18,7 @@ const LIBRARY_PATHS: Record<LibraryFeature, string> = {
   folders: "M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5zm0 17A2.5 2.5 0 0 1 6.5 19H20v3H6.5A2.5 2.5 0 0 1 4 19.5z",
   subjects: "M20.6 13.6 13.7 20.5a2 2 0 0 1-2.8 0L3.5 13.1a2 2 0 0 1 0-2.8V4h6.3a2 2 0 0 1 1.4.6l9.4 9a1.4 1.4 0 0 1 0 2zM7.2 7.2h.1",
   authors: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m7-10a4 4 0 1 0 0-8 4 4 0 0 0 0 8m13 10v-2a4 4 0 0 0-3-3.87m-2-12a4 4 0 0 1 0 7.75",
+  trash: "M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m5 5v5m4-5v5",
 };
 
 const UNIVERSAL_PATHS: Record<UniversalFeature, string> = {

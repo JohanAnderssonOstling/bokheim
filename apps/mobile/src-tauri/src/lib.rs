@@ -7,7 +7,7 @@ use epub_svelte_lib::catalog::{CatalogAuthorDiscoveryResult, CatalogImportReques
 use epub_svelte_lib::library::links::BookLink;
 use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
 use epub_svelte_lib::library::LibraryBackend;
-use epub_svelte_lib::library::{BookImportDestination, Dir, LibraryAuthorsView, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectView};
+use epub_svelte_lib::library::{AuthorSort, BookImportDestination, Dir, LibraryAuthorsView, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectView};
 use epub_svelte_lib::platform::scanner::LibraryEvent;
 use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::{DownloadState, FolderDownloadStatus, LibraryTransfers, NetworkStatus};
@@ -474,10 +474,11 @@ async fn search_library_subject(state: State<'_, AppState>, library_id: String, 
 
 #[tauri::command]
 #[specta::specta]
-async fn get_library_authors(state: State<'_, AppState>, library_id: String, selected_author_id: Option<String>) -> Result<LibraryAuthorsView, String> {
+async fn get_library_authors(state: State<'_, AppState>, library_id: String, selected_author_id: Option<String>, sort: Option<AuthorSort>) -> Result<LibraryAuthorsView, String> {
     let library = library(&state.core, &library_id)?;
     let selected = selected_author_id.map(|author_id| epub_svelte_lib::AgentId::parse_str(&author_id).map_err(|error| error.to_string())).transpose()?;
-    run_blocking("get_library_authors", move || library.authors(selected).map_err(|error| error.to_string())).await
+    let sort = sort.unwrap_or_default();
+    run_blocking("get_library_authors", move || library.authors(selected, sort).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]

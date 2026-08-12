@@ -16,6 +16,9 @@ desktop = [
     "reader-ui/native-audio",
     "reader-ui/pdf",
 ]
+# Flatpak installs PDFium as /app/lib/libpdfium.so. Keep this separate from the
+# normal desktop feature so standalone binaries remain self-contained.
+flatpak = ["desktop", "reader-ui/packaged-pdfium"]
 kobo = ["dep:gpui_kobo", "dep:kobo-device", "epub_svelte_lib/scanner", "browser-ui/kobo", "reader-ui/kobo"]
 
 [[bin]]

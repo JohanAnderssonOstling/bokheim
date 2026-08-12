@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "revision": 6,
+  "catalogs": [
+    { "id": "project-gutenberg", "title": "Project Gutenberg", "description": "A large multilingual collection of free ebooks, with browsing and catalog search.", "languages": ["Multilingual"], "url": "https://www.gutenberg.org/ebooks/search.opds/" },
+    { "id": "open-library", "title": "Open Library", "description": "A multilingual Open Library and Internet Archive catalog with public-domain downloads and library lending links.", "languages": ["Multilingual"], "url": "https://openlibrary.org/opds/" },
+    { "id": "unglue-it", "title": "Unglue.it", "description": "Open and Creative Commons ebooks collected by the Free Ebook Foundation.", "languages": ["Multilingual"], "url": "https://unglue.it/api/opds/" },
+    { "id": "textos-info", "title": "textos.info", "description": "A Spanish-language catalog of freely available literature.", "languages": ["Spanish"], "url": "https://www.textos.info/catalogo.atom" },
+    { "id": "ebooks-gratuits", "title": "Ebooks Gratuits", "description": "French-language public-domain and freely distributed ebooks.", "languages": ["French"], "url": "https://www.ebooksgratuits.com/opds/index.php" },
+    { "id": "office-of-the-historian", "title": "Office of the Historian", "description": "The official Foreign Relations of the United States ebook collection.", "languages": ["English"], "url": "https://history.state.gov/api/v1/catalog" },
+    { "id": "gallica", "title": "Gallica", "description": "Public-domain publications from the Bibliothèque nationale de France.", "languages": ["French"], "url": "https://gallica.bnf.fr/opds" },
+    { "id": "litteraturbanken", "title": "Litteraturbanken", "description": "Swedish literature from Litteraturbanken, available as free EPUB downloads.", "languages": ["Swedish", "English", "German", "French", "Latin", "Sámi languages"], "url": "https://litteraturbanken.se/epub?visa=epub&sort=popularitet" },
+    { "id": "anarchist-library", "title": "The Anarchist Library", "description": "An open collection of anarchist and anti-authoritarian writing.", "languages": ["English"], "url": "https://theanarchistlibrary.org/opds" },
+    { "id": "elephant-editions", "title": "Elephant Editions", "description": "An open archive of books and pamphlets from Elephant Editions.", "languages": ["English"], "url": "https://www.elephanteditions.net/opds" },
+    { "id": "chitanka", "title": "Chitanka", "description": "A large Bulgarian-language digital library.", "languages": ["Bulgarian"], "url": "https://chitanka.info/catalog.opds" },
+    { "id": "wolne-lektury", "title": "Wolne Lektury", "description": "A Polish open library of literature and educational texts.", "languages": ["Polish"], "url": "https://wolnelektury.pl/opds/" },
+    { "id": "bokselskap", "title": "Bokselskap", "description": "Norwegian literary classics from the Norwegian Language and Literature Society.", "languages": ["Norwegian"], "url": "https://www.bokselskap.no/wp-content/themes/bokselskap/tekster/opds/root.xml" },
+    { "id": "knihi", "title": "Беларуская Палічка", "description": "Belarusian books and cultural publications in several downloadable formats.", "languages": ["Belarusian"], "url": "https://knihi.com/opds.xml" },
+    { "id": "hungarian-electronic-library", "title": "Hungarian Electronic Library", "description": "The National Széchényi Library's electronic book collection.", "languages": ["Hungarian"], "url": "https://bookserver.mek.oszk.hu/" },
+    { "id": "openedition", "title": "OpenEdition", "description": "Academic books and journals from OpenEdition publishers.", "languages": ["Multilingual"], "url": "https://opds.openedition.org/" },
+    { "id": "wikisource-english", "title": "Wikisource — English", "description": "Export-ready English Wikisource works with direct EPUB downloads.", "languages": ["English"], "url": "https://ws-export.wmcloud.org/opds/en/Ready_for_export.xml" },
+    { "id": "wikisource-french", "title": "Wikisource — French", "description": "Export-ready French Wikisource works with direct EPUB downloads.", "languages": ["French"], "url": "https://ws-export.wmcloud.org/opds/fr/Bon_pour_export.xml" },
+    { "id": "anarkistiska-biblioteket", "title": "Anarkistiska biblioteket", "description": "Swedish-language anarchist literature and pamphlets.", "languages": ["Swedish"], "url": "https://www.anarkistiskabiblioteket.se/opds" },
+    { "id": "bibliotheque-anarchiste", "title": "Bibliothèque Anarchiste", "description": "French-language anarchist literature and pamphlets.", "languages": ["French"], "url": "https://fr.anarchistlibraries.net/opds" },
+    { "id": "biblioteca-anarquista", "title": "Biblioteca Anarquista", "description": "Spanish-language anarchist literature and pamphlets.", "languages": ["Spanish"], "url": "https://es.anarchistlibraries.net/opds" },
+    { "id": "biblioteca-anarchica", "title": "Biblioteca Anarchica", "description": "Italian-language anarchist literature and pamphlets.", "languages": ["Italian"], "url": "https://bibliotecaanarchica.org/opds" },
+    { "id": "tatsu-zine", "title": "Tatsu-zine", "description": "A Japanese commercial ebook catalogue.", "languages": ["Japanese"], "url": "https://tatsu-zine.com/catalogs.opds" },
+    { "id": "gihyo-digital-publishing", "title": "Gihyo Digital Publishing", "description": "Japanese technical books from Gihyo Digital Publishing.", "languages": ["Japanese"], "url": "https://gihyo.jp/dp/catalogs.opds" }
+  ]
+}

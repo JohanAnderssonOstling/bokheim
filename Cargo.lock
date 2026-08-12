@@ -1552,7 +1552,6 @@ dependencies = [
  "opds",
  "reqwest 0.11.27",
  "serde",
- "sys-locale",
  "tempfile",
  "tokio",
  "url",
@@ -6769,6 +6768,7 @@ dependencies = [
  "library-model",
  "serde",
  "sync-common",
+ "test-support",
 ]
 
 [[package]]
@@ -6882,6 +6882,17 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "litteraturbanken"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"
@@ -8299,13 +8310,13 @@ dependencies = [
  "blake3",
  "futures-util",
  "html-engine",
+ "litteraturbanken",
  "log",
  "quick-xml 0.41.0",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
  "specta",
- "sync-common",
  "tempfile",
  "tokio",
  "uri-template",

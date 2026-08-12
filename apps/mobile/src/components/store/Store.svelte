@@ -7,13 +7,13 @@
   import { catalogLinkAction, catalogLinkCount } from "../../lib/catalog-links";
   import { openExternalUrl } from "../../lib/external-links";
   import { isNativeApp } from "../../lib/platform";
-  import { STORE_CONTRACT } from "../../lib/types";
+  import { BROWSING_PREFERENCES_CONTRACT, SETTINGS_CONTRACT, STORE_CONTRACT, type BrowsingPreferencePatch, type BrowsingPreferences } from "../../lib/types";
   import FolderBreadcrumbs from "../library/FolderBreadcrumbs.svelte";
   import FolderNavigationCard from "../library/FolderNavigationCard.svelte";
   import CatalogCover from "./CatalogCover.svelte";
   import type { CatalogImportRequest, CatalogLink, CatalogPage, CatalogPageView, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSearch, CatalogSource, CatalogWideSearchResult, CatalogWideSearchView } from "../../lib/bindings";
 
-  let { activeLibraryId, libraryName, onimported }: { activeLibraryId: string; libraryName: string; onimported: () => void | Promise<void> } = $props();
+  let { activeLibraryId, libraryName, preferences, onpreferencechange, onimported }: { activeLibraryId: string; libraryName: string; preferences: BrowsingPreferences; onpreferencechange: (patch: BrowsingPreferencePatch) => void | Promise<void>; onimported: () => void | Promise<void> } = $props();
 
   type CatalogLevel = { title: string; url: string };
   type ImportState = "idle" | "adding" | "added";
@@ -44,6 +44,7 @@
   let sourcesInitialized = false;
   const needsExternalAuthentication = $derived(selected?.authentication.kind === "external");
   const canSearch = $derived(Boolean(query.trim() || titleQuery.trim() || authorQuery.trim()));
+  const catalogLanguageValues = BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.map((option) => option.value);
 
   type WideSearchRefresh = { library_id: string; query: string; view: CatalogWideSearchView };
   type SourceSearchRefresh = { library_id: string; source_id: string; query: string; view: CatalogPageView };
@@ -149,6 +150,10 @@
   async function runWideSearch(event: SubmitEvent) {
     event.preventDefault();
     const terms = wideQuery.trim();
+    await searchWide(terms);
+  }
+
+  async function searchWide(terms: string) {
     if (!terms || wideSearching) return;
     const generation = ++wideSearchGeneration;
     wideSearching = true;
@@ -162,6 +167,21 @@
     } finally {
       if (generation === wideSearchGeneration) wideSearching = false;
     }
+  }
+
+  function catalogLanguageIncluded(language: string): boolean {
+    return preferences.included_catalog_languages.length === 0 || preferences.included_catalog_languages.includes(language);
+  }
+
+  async function setCatalogLanguages(languages: string[]) {
+    await onpreferencechange({ preference: "included_catalog_languages", value: languages });
+    if (wideResult && wideQuery.trim()) await searchWide(wideQuery.trim());
+  }
+
+  function toggleCatalogLanguage(language: string, included: boolean) {
+    const current = preferences.included_catalog_languages.length === 0 ? [...catalogLanguageValues] : [...preferences.included_catalog_languages];
+    const next = included ? [...new Set([...current, language])] : current.filter((value) => value !== language);
+    return setCatalogLanguages(next.length === catalogLanguageValues.length ? [] : next);
   }
 
   function installWideSearch(view: CatalogWideSearchView) {
@@ -354,15 +374,6 @@
   {/if}
 {/snippet}
 
-{#snippet facetLinks(links: CatalogLink[])}
-  <div class="facet-options">
-    {#each links as link (linkKey(link))}
-      {@const count = catalogLinkCount(link)}
-      <button type="button" class:active={link.active} disabled={link.active || loading} aria-pressed={link.active} onclick={() => void followCatalogLink(link)}><span>{link.title}</span>{#if count}<small>{count}</small>{/if}{#if link.active}<i aria-hidden="true">✓</i>{/if}</button>
-    {/each}
-  </div>
-{/snippet}
-
 {#snippet publicationCards(source: CatalogSource, items: CatalogPublication[])}
   {@const visibleItems = items.filter((publication) => !ownership[ownershipKey(source.id, publication.identity.edition_id)])}
   {#if visibleItems.length}
@@ -421,6 +432,15 @@
       <input type="search" bind:value={wideQuery} placeholder={STORE_CONTRACT.search_all_placeholder} aria-label={STORE_CONTRACT.search_all_placeholder} autocomplete="off" />
       <button type="submit" disabled={!wideQuery.trim() || wideSearching}>{STORE_CONTRACT.search_label}</button>
     </form>
+    <section class="language-filter" aria-label={SETTINGS_CONTRACT.included_catalog_languages_label}>
+      <header><strong>{SETTINGS_CONTRACT.included_catalog_languages_label}</strong><small>{SETTINGS_CONTRACT.included_catalog_languages_description}</small></header>
+      <div class="language-options">
+        <button type="button" class:active={preferences.included_catalog_languages.length === 0} aria-pressed={preferences.included_catalog_languages.length === 0} onclick={() => void setCatalogLanguages([])}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
+        {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
+          <button type="button" class:active={catalogLanguageIncluded(option.value)} aria-pressed={catalogLanguageIncluded(option.value)} onclick={() => void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value))}>{option.label}</button>
+        {/each}
+      </div>
+    </section>
     {#if wideResult}
       <header class="wide-heading"><div><p class="eyebrow">All catalogs</p><h1>Results for “{wideResult.query}”</h1></div><button type="button" onclick={clearWideSearch}>Clear search</button></header>
       <div class="wide-groups">
@@ -518,7 +538,20 @@
       {#if catalog.facets.length}
         <div class="catalog-facets" aria-label="Catalog filters">
           {#each catalog.facets as facet (`${facet.title}:${facet.links.map(linkKey).join(":")}`)}
-            <section class="catalog-facet"><h2>{facet.title}</h2>{@render facetLinks(facet.links)}</section>
+            <label class="catalog-facet">
+              <span>{facet.title}</span>
+              <select
+                aria-label={facet.title}
+                onchange={(event) => {
+                  const link = facet.links[Number(event.currentTarget.value)];
+                  if (link && !link.active) void followCatalogLink(link);
+                }}
+              >
+                {#each facet.links as link, index (linkKey(link))}
+                  <option value={index} selected={link.active}>{link.title}{link.number_of_items !== null ? ` (${link.number_of_items.toLocaleString()})` : ""}</option>
+                {/each}
+              </select>
+            </label>
           {/each}
         </div>
       {/if}
@@ -568,6 +601,13 @@
   .wide-search svg { width: 1.1rem; margin-left: .8rem; fill: none; stroke: var(--color-subtle-text); stroke-width: 1.8; }
   .wide-search input { min-width: 0; min-height: 3rem; padding: .65rem .8rem; border: 0; color: inherit; background: transparent; outline: none; }
   .wide-search button { align-self: stretch; padding: 0 1rem; border: 0; border-left: 1px solid var(--color-border); color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
+  .language-filter { display: grid; gap: .55rem; margin: -.35rem 0 1.2rem; }
+  .language-filter header { display: grid; gap: .12rem; }
+  .language-filter header strong { color: var(--color-ink-text); font-size: .78rem; }
+  .language-filter header small { color: var(--color-subtle-text); font-size: .68rem; }
+  .language-options { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .language-options button { min-height: 2rem; padding: .35rem .65rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-subtle-text); background: var(--color-raised-bg); font-size: .68rem; font-weight: 700; cursor: pointer; }
+  .language-options button.active { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-active-highlight); }
   .source-error { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .source-error button { flex: none; min-height: 2.25rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
   .wide-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .3rem 0 1rem; }
@@ -619,14 +659,10 @@
   .catalog-search button { align-self: stretch; padding: 0 .9rem; border: 0; border-left: 1px solid var(--color-border); color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
   .catalog-folders { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .45rem; margin: 1rem 0 1.4rem; }
   .catalog-folder { width: max-content; max-width: 100%; min-width: 0; }
-  .catalog-facets { display: grid; gap: .75rem; margin: 1rem 0 1.4rem; padding: .85rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
-  .catalog-facet { display: grid; gap: .45rem; }
-  .catalog-facet h2 { margin: 0; color: var(--color-ink-text); font: 700 .74rem var(--font-interface-family); }
-  .facet-options { display: flex; flex-wrap: wrap; gap: .4rem; }
-  .facet-options button { display: inline-flex; align-items: center; gap: .38rem; min-height: 2rem; padding: .35rem .6rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-subtle-text); background: var(--color-surface-bg); font-size: .68rem; cursor: pointer; }
-  .facet-options button.active { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-active-highlight); font-weight: 750; opacity: 1; }
-  .facet-options small { color: inherit; font-size: .62rem; opacity: .8; }
-  .facet-options i { font-style: normal; }
+  .catalog-facets { display: flex; align-items: end; gap: .55rem; margin: 1rem 0 1.4rem; padding: .65rem; overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
+  .catalog-facet { display: grid; flex: 0 0 auto; gap: .2rem; }
+  .catalog-facet > span { color: var(--color-subtle-text); font-size: .62rem; font-weight: 750; }
+  .catalog-facet select { min-width: 8rem; height: 2rem; padding: 0 1.75rem 0 .55rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-ink-text); background: var(--color-surface-bg); font-size: .68rem; }
   .catalog-groups { display: grid; gap: 1.5rem; margin-top: 1.5rem; }
   .catalog-group { display: grid; gap: .7rem; }
   .catalog-group > header { display: flex; align-items: baseline; gap: .55rem; padding-bottom: .5rem; border-bottom: 1px solid var(--color-border); }

@@ -1,0 +1,12 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$BOKHEIM_CATALOG_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8090
+}

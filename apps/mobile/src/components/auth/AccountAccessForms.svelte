@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ACCOUNT_CONTRACT } from "../../lib/types";
+  import PinEntry from "./PinEntry.svelte";
 
   let {
     busy,
@@ -105,15 +106,15 @@
       <label><span>Password</span><input required type="password" bind:value={password} autocomplete="new-password" /></label>
       <small>At least {ACCOUNT_CONTRACT.validation.password_min_characters} characters.</small>
       <button class="primary" type="submit" disabled={busy || !email.trim() || !password}>Create account</button>
-      <button class="link" type="button" onclick={() => selectMode("verify")}>Already have a verification PIN?</button>
     {:else if mode === "verify"}
       <p>Enter the 6-digit PIN from your email. Verification signs you in.</p>
-      <label><span>PIN</span><input required maxlength={ACCOUNT_CONTRACT.validation.verification_pin_digits} bind:value={token} autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" spellcheck="false" /></label>
-      <button class="primary" type="submit" disabled={busy || !token.trim()}>Verify email</button>
-      {#if ACCOUNT_CONTRACT.capabilities.resend_verification}
-        <label><span>Email for resend</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
-        <button class="secondary" type="button" disabled={busy || !email.trim()} onclick={() => void onresendverification(email.trim())}>Resend PIN</button>
-      {/if}
+      <div class="verification-row">
+        <PinEntry bind:value={token} length={ACCOUNT_CONTRACT.validation.verification_pin_digits} disabled={busy} />
+        <button class="primary" type="submit" disabled={busy || !token.trim()}>Verify email</button>
+        {#if ACCOUNT_CONTRACT.capabilities.resend_verification}
+          <button class="secondary" type="button" disabled={busy || !email.trim()} onclick={() => void onresendverification(email.trim())}>Resend PIN</button>
+        {/if}
+      </div>
     {:else if mode === "request-reset"}
       <p>Request a password-reset token. The response is deliberately the same whether the address exists or not.</p>
       <label><span>Email</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
@@ -153,5 +154,7 @@
   .progress, .error { margin: 0; padding: .2rem .1rem; font-size: .72rem; }
   .progress { color: var(--color-subtle-text); }
   .error { color: var(--color-danger-text); overflow-wrap: anywhere; }
+  .verification-row { display: grid; grid-template-columns: minmax(0, 1fr) repeat(2, minmax(6rem, .55fr)); align-items: center; gap: .55rem; }
+  .verification-row button { box-sizing: border-box; width: 100%; height: 2.65rem; min-height: 2.65rem; }
   @media (max-width: 24rem) { nav { grid-template-columns: 1fr; } label { grid-template-columns: 1fr; padding-top: .4rem; } }
 </style>

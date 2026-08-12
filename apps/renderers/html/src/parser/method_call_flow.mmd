@@ -1,0 +1,76 @@
+
+
+
+graph TD
+    %% Entry points
+    from_path["from_path()"]
+    from_string["from_string()"]
+    from_string_with_provider["from_string_with_provider()"]
+
+    %% Main processing methods
+    process_block["process_block()"]
+    process_block_with_parent["process_block_with_parent()"]
+    process_block_children["process_block_children_with_parent()"]
+    process_inline_children["process_inline_children_with_parent()"]
+    process_inline_element["process_inline_element()"]
+    collect_inline_text["collect_inline_text_with_box()"]
+
+    %% Helper methods
+    intern_elem_info["intern_elem_info()"]
+    create_anonymous_box["create_anonymous_box()"]
+    emit_text_with_whitespace["emit_text_with_whitespace()"]
+    add_text_run["add_text_run()"]
+    add_newline_run["add_newline_run()"]
+    add_image_run["add_image_run()"]
+    resolve_image_source["resolve_image_source()"]
+    next_list_marker["next_list_marker()"]
+
+    %% Entry point flows
+    from_path -->|"always"| from_string
+    from_string -->|"if body exists"| process_block
+    from_string_with_provider -->|"if body exists"| process_block
+
+    %% Main process flow
+    process_block -->|"always"| process_block_with_parent
+
+    process_block_with_parent -->|"calls for elem info"| intern_elem_info
+    process_block_with_parent -->|"if tag == 'li' && !marker"| next_list_marker
+    process_block_with_parent -->|"if has_block_child == true"| process_block_children
+    process_block_with_parent -->|"if has_block_child == false"| process_inline_children
+
+    %% Block children processing
+    process_block_children -->|"if child is block element"| process_block_with_parent
+    process_block_children -->|"before block child & inline_run_start.is_some()"| create_anonymous_box
+    process_block_children -->|"if child is Text node"| emit_text_with_whitespace
+    process_block_children -->|"if has list_marker"| add_text_run
+    process_block_children -->|"if child is 'br' element"| add_newline_run
+    process_block_children -->|"if child is inline element"| process_inline_element
+    process_block_children -->|"after all children & inline_run_start.is_some()"| create_anonymous_box
+
+    %% Inline children processing
+    process_inline_children -->|"if list_marker.is_some()"| add_text_run
+    process_inline_children -->|"always"| collect_inline_text
+
+    %% Inline element processing
+    process_inline_element -->|"always"| intern_elem_info
+    process_inline_element -->|"if tag == 'img' || 'image'"| add_image_run
+    process_inline_element -->|"else (not img)"| collect_inline_text
+
+    %% Inline text collection
+    collect_inline_text -->|"if child is Text node"| emit_text_with_whitespace
+    collect_inline_text -->|"if child is 'br' element"| add_newline_run
+    collect_inline_text -->|"if child is Element"| process_inline_element
+
+    %% Helper method calls
+    emit_text_with_whitespace -->|"if text non-empty & not all whitespace"| add_text_run
+    add_image_run -->|"always"| resolve_image_source
+
+    %% Styling
+    classDef entryPoint fill:#e1f5ff,stroke:#01579b,stroke-width:2px
+    classDef mainProcess fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef helper fill:#f3e5f5,stroke:#4a148c,stroke-width:1px
+
+    class from_path,from_string,from_string_with_provider entryPoint
+    class process_block,process_block_with_parent,process_block_children,process_inline_children,process_inline_element,collect_inline_text mainProcess
+    class intern_elem_info,create_anonymous_box,emit_text_with_whitespace,add_text_run,add_newline_run,add_image_run,resolve_image_source,next_list_marker helper
+

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 
 const host = process.env.TAURI_DEV_HOST;
+const webApiProxy = process.env.BOKHEIM_WEB_API_PROXY ?? "https://api.bokheim.se";
 const designTokens = JSON.parse(readFileSync(fileURLToPath(new URL("../ui/design-tokens/design_tokens.json", import.meta.url)), "utf8"));
 
 function tokenVariables(tokens) {
@@ -41,6 +42,24 @@ const sharedDesign = {
   },
 };
 
+const crossOriginIsolation = {
+  name: "cross-origin-isolation",
+  configureServer(server) {
+    server.middlewares.use((_request, response, next) => {
+      response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+      next();
+    });
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use((_request, response, next) => {
+      response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+      next();
+    });
+  },
+};
+
 // Foliate's PDF adapter expects its demo asset tree to be served verbatim and
 // cannot be bundled by Vite. PDF remains handled by the app's existing PDF
 // reader; only the direct MOBI/FB2/CBZ adapters are enabled here.
@@ -63,7 +82,13 @@ const foliateWithoutPdf = {
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sharedDesign, foliateWithoutPdf, sveltekit()],
+  plugins: [sharedDesign, crossOriginIsolation, foliateWithoutPdf, sveltekit()],
+
+  // SQLite ships its own WASM loader and must remain outside Vite's dependency
+  // pre-bundle so the same module can initialize inside the backend worker.
+  optimizeDeps: {
+    exclude: ["@sqlite.org/sqlite-wasm"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -74,6 +99,13 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     host: host || false,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+    proxy: {
+      "/api": { target: webApiProxy, changeOrigin: true },
+    },
     hmr: host
       ? {
           protocol: "ws",
@@ -84,6 +116,15 @@ export default defineConfig(async () => ({
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
+    },
+  },
+  preview: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+    proxy: {
+      "/api": { target: webApiProxy, changeOrigin: true },
     },
   },
 }));

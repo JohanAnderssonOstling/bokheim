@@ -1,0 +1,13 @@
+[package]
+name = "metadata-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bincode = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
