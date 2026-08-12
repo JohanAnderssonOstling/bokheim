@@ -1,5 +1,5 @@
 use account_contract::{
-    AuthResponse, EmailRequest, LibraryStorageUsageResponse, LoginRequest, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
+    AuthResponse, EmailRequest, LibraryStorageUsageResponse, LoginRequest, MeResponse, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
     SessionSummary, StorageUsageResponse,
 };
 use axum::body::{to_bytes, Body};
@@ -26,6 +26,10 @@ async fn auth_response(response: axum::response::Response) -> AuthResponse {
 async fn response_body<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     assert!(response.status().is_success());
     wire::decode(&to_bytes(response.into_body(), 64 * 1024).await.unwrap(), 64 * 1024).unwrap()
+}
+
+fn session_cookie(response: &axum::response::Response) -> String {
+    response.headers().get_all(header::SET_COOKIE).iter().map(|value| value.to_str().unwrap().split(';').next().unwrap()).collect::<Vec<_>>().join("; ")
 }
 
 fn accepted(request: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -85,6 +89,33 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(post(&app, "/api/auth/refresh", &RefreshRequest { refresh_token: verified.refresh_token.clone() }, None).await.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(post(&app, "/api/auth/login", &LoginRequest { email: email.clone(), password: original_password.to_owned() }, None).await.status(), StatusCode::UNAUTHORIZED);
     let valid_login = LoginRequest { email: email.clone(), password: new_password.to_owned() };
+
+    let web_login = app
+        .clone()
+        .oneshot(
+            Request::post("/api/auth/web/login")
+                .header(header::CONTENT_TYPE, wire::MEDIA_TYPE)
+                .header(header::ACCEPT, wire::MEDIA_TYPE)
+                .header("x-forwarded-for", "203.0.113.21")
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::from(wire::encode(&valid_login).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(web_login.status(), StatusCode::OK);
+    let cookies = session_cookie(&web_login);
+    assert!(cookies.contains("__Host-bokheim_access="));
+    assert!(cookies.contains("__Host-bokheim_refresh="));
+    let web_profile: MeResponse = response_body(web_login).await;
+    assert_eq!(web_profile.email, email);
+    let restored = app.clone().oneshot(accepted(Request::get("/api/auth/web/me")).header(header::COOKIE, &cookies).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response_body::<MeResponse>(restored).await.email, email);
+    let web_logout = app.clone().oneshot(accepted(Request::post("/api/auth/web/logout")).header(header::COOKIE, &cookies).header("sec-fetch-site", "same-origin").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(web_logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(web_logout.headers().get_all(header::SET_COOKIE).iter().filter(|value| value.to_str().unwrap().contains("Max-Age=0")).count(), 2);
+    assert_eq!(app.clone().oneshot(accepted(Request::get("/api/auth/web/me")).header(header::COOKIE, &cookies).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
     let current = auth_response(post(&app, "/api/auth/login", &valid_login, None).await).await;
     let other = auth_response(post(&app, "/api/auth/login", &valid_login, None).await).await;
     let sessions_response = app.clone().oneshot(accepted(Request::get("/api/auth/sessions")).header(header::AUTHORIZATION, format!("Bearer {}", current.token)).body(Body::empty()).unwrap()).await.unwrap();
@@ -132,10 +163,8 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(storage, StorageUsageResponse { used_bytes: 0, reserved_bytes: 0, quota_bytes: quota as u64 });
     // An account holding nothing reports no library shares at all rather than a
     // row of zeroes: the client knows which libraries exist and fills the rest.
-    let library_storage: LibraryStorageUsageResponse = response_body(
-        app.clone().oneshot(accepted(Request::get("/api/account/storage/libraries")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap(),
-    )
-    .await;
+    let library_storage: LibraryStorageUsageResponse =
+        response_body(app.clone().oneshot(accepted(Request::get("/api/account/storage/libraries")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap()).await;
     assert_eq!(library_storage, LibraryStorageUsageResponse { libraries: Vec::new() });
 
     let rotated_password = "configured-user-rotated-password";

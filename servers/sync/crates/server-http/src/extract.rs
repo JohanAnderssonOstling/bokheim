@@ -14,8 +14,19 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        let header = parts.headers.get(axum::http::header::AUTHORIZATION).and_then(|value| value.to_str().ok()).ok_or(StatusCode::UNAUTHORIZED)?;
-        let token = header.strip_prefix("Bearer ").filter(|token| !token.is_empty()).ok_or(StatusCode::UNAUTHORIZED)?;
+        let bearer = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|header| header.strip_prefix("Bearer "))
+            .filter(|token| !token.is_empty());
+        let token = match bearer {
+            Some(token) => token,
+            None => {
+                server_account::http::require_same_origin_web_request(&parts.method, &parts.headers)?;
+                server_account::http::web_access_token(&parts.headers).ok_or(StatusCode::UNAUTHORIZED)?
+            }
+        };
         let session = state.account.resolve_token(token).await.map_err(server_account::auth_error)?;
         Ok(Self { user_id: session.user_id, credential: Arc::from(token) })
     }
