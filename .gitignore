@@ -103,6 +103,8 @@ venv/
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
 # live outside this directory.
 /apps/renderers/html/testdata/wpt/
+# Screenshots emitted by ignored, human-inspection rendering tests.
+/apps/renderers/html/visual-artifacts/
 # Keep pre-migration external WPT checkouts ignored in place. Set
 # HTML_WPT_ROOT to use them without moving local data automatically.
 /HtmlRenderer/testdata/wpt/
