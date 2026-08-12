@@ -1,6 +1,10 @@
 # Rust build output
 /target/
 **/target/
+# Dedicated Cargo target directory used for local Android deployment builds.
+# Keep this explicit: its name does not match the standard `target/` rule and
+# it can grow to several gigabytes.
+/target-mobile-deploy/
 *.profraw
 *.profdata
 perf.data
