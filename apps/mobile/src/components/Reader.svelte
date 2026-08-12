@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import designTokens from "../../../../ui/design-tokens/design_tokens.json";
+  import designTokens from "../../../ui/design-tokens/design_tokens.json";
 
   // Foliate is vendored as a pinned submodule. Importing view.js registers the
   // <foliate-view> custom element and keeps the unstable API boundary here.
@@ -10,7 +10,7 @@
   import { DEFAULT_READER_PREFERENCES, READER_NAVIGATION_CONTRACT, READER_PREFERENCES_CONTRACT, READER_SETTINGS_PRESENTATION_CONTRACT } from "../lib/types";
   import { openExternalUrl } from "../lib/external-links";
   import { isNativeApp } from "../lib/platform";
-  import { enableVolumePageTurning, onVolumePageTurn } from "../lib/volume-navigation";
+  import { enableReaderImmersiveMode, enableVolumePageTurning, onVolumePageTurn } from "../lib/volume-navigation";
   import { APP_NAME_LOWER } from "../lib/application-name";
   import type {
     FoliateRelocateDetail,
@@ -24,7 +24,6 @@
     ReaderAnnotationStyle,
     ApplicationTheme,
     ReaderBookmark,
-    ReaderFlow,
     ReaderFontFamily,
     ReaderNavigationAction,
     ReaderNavigationKey,
@@ -37,12 +36,14 @@
     book,
     preferences,
     applicationTheme,
+    applicationAppearance,
     onpreferenceschange,
     onclose,
   }: {
     book: ReaderBook;
     preferences: ReaderPreferences;
     applicationTheme: ApplicationTheme;
+    applicationAppearance: "light" | "dark";
     onpreferenceschange: (patch: ReaderPreferencePatch) => void | Promise<void>;
     onclose: () => void;
   } = $props();
@@ -73,17 +74,11 @@
   let currentSection = $state(0);
   let totalSections = $state(0);
   let currentPageLabel = $state("");
-  let canHistoryBack = $state(false);
-  let canHistoryForward = $state(false);
   let searchQuery = $state("");
   let searchResults = $state<SearchResult[]>([]);
   let searchProgress = $state(0);
   let searching = $state(false);
   let searchError = $state("");
-  let searchMatchCase = $state(false);
-  let searchMatchDiacritics = $state(false);
-  let searchMatchWholeWords = $state(false);
-  let searchScope = $state<"book" | "section">("book");
   let selectedSearchIndex = $state(-1);
   let saveState = $state<"idle" | "saving" | "saved" | "error">("idle");
   let annotations = $state<ReaderAnnotation[]>([]);
@@ -96,37 +91,36 @@
   let hasMediaOverlay = $state(false);
   let mediaOverlayPlaying = $state(false);
   let imageViewerSrc = $state("");
-  let tapZonesEnabled = $state(true);
   let chromeVisible = $state(true);
   let readerMargin = $state(48);
   let pageGap = $state(7);
   let maxBlockSize = $state(1440);
   const READER_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-reader-ui-preferences`;
-  let isPdfBook = $derived(book.file.type === "application/pdf" || /\.pdf$/i.test(book.file.name));
+  let isPdfBook = $derived(typeof book.file !== "string"
+    ? book.file.type === "application/pdf" || /\.pdf$/i.test(book.file.name)
+    : /\.pdf$/i.test(book.fileName ?? new URL(book.file).pathname));
   let selection = $state<{ cfi: string; text: string; pdfAnchor?: PdfAnnotationAnchor } | null>(null);
   let selectionNote = $state("");
   let activeAnnotation = $state<ReaderAnnotation | null>(null);
   let annotationNoteDraft = $state("");
+  let annotationSavedDraft = "";
+  let annotationAnchorRect = $state<ViewportRect | null>(null);
+  let annotationPopupPosition = $state<{ x: number; y: number; placement: PopupPlacement } | null>(null);
+  let annotationPopupElement = $state<HTMLElement>();
+  let annotationNoteInput = $state<HTMLTextAreaElement>();
   let selectionContextMenu = $state<{ x: number; y: number } | null>(null);
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingChromeToggle: ReturnType<typeof setTimeout> | undefined;
+  let annotationSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let annotationSaveQueue = Promise.resolve();
   const READER_UI_PREFERENCES_VERSION = 2;
   const preferenceConstraints = READER_PREFERENCES_CONTRACT.constraints;
 
-  function buildSettingOptions([minimum, maximum]: readonly [number, number], step: number, decimals: number) {
-    const values: number[] = [];
-    for (let value = minimum; value <= maximum + 1e-9; value += step) {
-      const scale = 10 ** decimals;
-      values.push(Number((Math.round(value * scale) / scale).toFixed(decimals)));
-    }
-    return values;
+  function adjustedValue(value: number, delta: number, [minimum, maximum]: readonly [number, number], decimals = 0) {
+    const scale = 10 ** decimals;
+    return Math.min(maximum, Math.max(minimum, Math.round((value + delta) * scale) / scale));
   }
-
-  const maxLineWidthOptions = buildSettingOptions(preferenceConstraints.max_line_width_px, 40, 0);
-  const readerFontSizeOptions = buildSettingOptions(preferenceConstraints.font_size_px, 1, 0);
-  const zoomOptions = buildSettingOptions(preferenceConstraints.zoom, 0.1, 1);
-  const maxColumnCountOptions = buildSettingOptions(preferenceConstraints.max_column_count, 1, 0);
-  const lineHeightOptions = buildSettingOptions(preferenceConstraints.line_height, 0.1, 1);
   let lastCfi = $state("");
   let lastPersistedCfi = "";
   let positionSaveQueue = Promise.resolve();
@@ -149,6 +143,15 @@
   interface SearchResult extends FoliateSearchMatch {
     section: string;
   }
+
+  interface ViewportRect {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  }
+
+  type PopupPlacement = "above" | "below" | "left" | "right";
 
   interface PdfAnnotationRect {
     left: number;
@@ -242,26 +245,30 @@
   });
 
   function readerStyles(readerPreferences: ReaderPreferences) {
-    const colors = designTokens.themes[applicationTheme];
+    const colors = designTokens.themes[applicationTheme][applicationAppearance];
     const family = designTokens.font_families[readerPreferences.font_family];
     const familyRule = family ? `font-family: ${family} !important;` : "";
     const alignmentRule = readerPreferences.text_alignment === "publisher" ? "" : `text-align: ${readerPreferences.text_alignment} !important;`;
     const hyphens = readerPreferences.hyphenation ? "auto" : "manual";
+    const colorScheme = relativeLuminance(colors.surface_bg) < 0.35 ? "dark" : "light";
     return `
-      :root { color-scheme: light; font-size: ${readerPreferences.font_size_px}px !important; }
-      html, body { background: ${colors.app_bg} !important; color: ${colors.ink_text} !important; ${familyRule} }
+      :root { color-scheme: ${colorScheme}; font-size: ${readerPreferences.font_size_px}px !important; }
+      html, body { background: ${colors.surface_bg} !important; color: ${colors.ink_text} !important; ${familyRule} }
       p, li, blockquote, dd { line-height: ${readerPreferences.line_height} !important; ${alignmentRule} -webkit-hyphens: ${hyphens}; hyphens: ${hyphens}; }
       a { color: ${colors.accent} !important; }
-      img, svg { max-width: 100% !important; max-height: 95vh !important; object-fit: contain; }
+      img, svg { max-width: 100% !important; max-height: 95vh !important; object-fit: contain; background-color: ${colors.surface_bg}; }
     `;
   }
 
+  function relativeLuminance(hex: string) {
+    const channels = [1, 3, 5]
+      .map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+      .map((value) => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  }
+
   function contrastRatio(first: string, second: string) {
-    const luminance = (hex: string) => {
-      const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((value) => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
-      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
-    };
-    const values = [luminance(first), luminance(second)].sort((left, right) => right - left);
+    const values = [relativeLuminance(first), relativeLuminance(second)].sort((left, right) => right - left);
     return (values[0] + 0.05) / (values[1] + 0.05);
   }
 
@@ -327,27 +334,19 @@
     if (detail.cfi) scheduleSave(detail.cfi);
   }
 
-  function updateHistoryAvailability() {
-    canHistoryBack = view?.history?.canGoBack ?? false;
-    canHistoryForward = view?.history?.canGoForward ?? false;
-  }
-
   function updatePreference<K extends keyof ReaderPreferences>(key: K, value: ReaderPreferences[K]) {
     settings = { ...settings, [key]: value };
     applyReaderPreferences();
     void onpreferenceschange({ preference: key, value } as ReaderPreferencePatch);
   }
 
-  function resetReaderSettings() {
-    settings = { ...DEFAULT_READER_PREFERENCES };
-    readerMargin = 48;
-    pageGap = 7;
-    maxBlockSize = 1440;
-    applyReaderPreferences(settings);
-    for (const [preference, value] of Object.entries(DEFAULT_READER_PREFERENCES)) {
-      if (preference === "theme") continue;
-      void onpreferenceschange({ preference, value } as ReaderPreferencePatch);
-    }
+  function adjustPreference(
+    key: "max_line_width_px" | "font_size_px" | "zoom" | "line_height" | "max_column_count",
+    delta: number,
+    decimals = 0,
+  ) {
+    const value = adjustedValue(settings[key], delta, preferenceConstraints[key], decimals);
+    updatePreference(key, value);
   }
 
   function closePanels() {
@@ -366,6 +365,13 @@
     if (panel === "settings") settingsOpen = next;
     if (panel === "notes") notesOpen = next;
     if (panel === "info") infoOpen = next;
+  }
+
+  function dismissSettingsFromOutside(event: PointerEvent) {
+    if (!settingsOpen) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest(".settings-panel, .reader-settings-trigger")) return;
+    settingsOpen = false;
   }
 
   function pdfAnnotationAnchor(annotation: ReaderAnnotation): PdfAnnotationAnchor | null {
@@ -457,9 +463,161 @@
     }
   }
 
+  function documentRectToViewport(doc: Document, rect: ViewportRect): ViewportRect {
+    const frame = doc.defaultView?.frameElement as HTMLElement | null;
+    const frameBounds = frame?.getBoundingClientRect();
+    const scaleX = frameBounds && doc.defaultView?.innerWidth ? frameBounds.width / doc.defaultView.innerWidth : 1;
+    const scaleY = frameBounds && doc.defaultView?.innerHeight ? frameBounds.height / doc.defaultView.innerHeight : 1;
+    return {
+      left: (frameBounds?.left ?? 0) + rect.left * scaleX,
+      top: (frameBounds?.top ?? 0) + rect.top * scaleY,
+      right: (frameBounds?.left ?? 0) + rect.right * scaleX,
+      bottom: (frameBounds?.top ?? 0) + rect.bottom * scaleY,
+    };
+  }
+
+  function rangeViewportRect(range: Range, doc: Document): ViewportRect | null {
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+    if (!rects.length) return null;
+    return documentRectToViewport(doc, {
+      left: Math.min(...rects.map((rect) => rect.left)),
+      top: Math.min(...rects.map((rect) => rect.top)),
+      right: Math.max(...rects.map((rect) => rect.right)),
+      bottom: Math.max(...rects.map((rect) => rect.bottom)),
+    });
+  }
+
+  function pdfAnnotationViewportRect(annotation: ReaderAnnotation): ViewportRect | null {
+    const anchor = pdfAnnotationAnchor(annotation);
+    if (!anchor?.rects.length) return null;
+    const content = (view?.renderer?.getContents?.() ?? []).find((item) => item.index === anchor.page_index);
+    const canvas = content?.doc.querySelector<HTMLCanvasElement>("#canvas canvas");
+    if (!content || !canvas) return null;
+    const canvasBounds = canvas.getBoundingClientRect();
+    const left = Math.min(...anchor.rects.map((rect) => rect.left));
+    const top = Math.min(...anchor.rects.map((rect) => rect.top));
+    const right = Math.max(...anchor.rects.map((rect) => rect.left + rect.width));
+    const bottom = Math.max(...anchor.rects.map((rect) => rect.top + rect.height));
+    return documentRectToViewport(content.doc, {
+      left: canvasBounds.left + left * canvasBounds.width,
+      top: canvasBounds.top + top * canvasBounds.height,
+      right: canvasBounds.left + right * canvasBounds.width,
+      bottom: canvasBounds.top + bottom * canvasBounds.height,
+    });
+  }
+
+  function resizeAnnotationNoteInput() {
+    const input = annotationNoteInput;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  }
+
+  function positionAnnotationPopup() {
+    const popup = annotationPopupElement;
+    if (!popup || !activeAnnotation) return;
+    const viewport = document.querySelector<HTMLElement>(".viewport")?.getBoundingClientRect();
+    const anchor = annotationAnchorRect ?? (viewport ? {
+      left: viewport.left + viewport.width / 2,
+      right: viewport.left + viewport.width / 2,
+      top: viewport.top + viewport.height / 2,
+      bottom: viewport.top + viewport.height / 2,
+    } : { left: window.innerWidth / 2, right: window.innerWidth / 2, top: window.innerHeight / 2, bottom: window.innerHeight / 2 });
+    const bounds = popup.getBoundingClientRect();
+    const edge = 12;
+    const gap = 10;
+    const centerX = (anchor.left + anchor.right) / 2;
+    const centerY = (anchor.top + anchor.bottom) / 2;
+    const candidates = [
+      { placement: "below" as const, space: window.innerHeight - anchor.bottom, fits: window.innerHeight - anchor.bottom >= bounds.height + gap, x: centerX - bounds.width / 2, y: anchor.bottom + gap },
+      { placement: "above" as const, space: anchor.top, fits: anchor.top >= bounds.height + gap, x: centerX - bounds.width / 2, y: anchor.top - bounds.height - gap },
+      { placement: "right" as const, space: window.innerWidth - anchor.right, fits: window.innerWidth - anchor.right >= bounds.width + gap, x: anchor.right + gap, y: centerY - bounds.height / 2 },
+      { placement: "left" as const, space: anchor.left, fits: anchor.left >= bounds.width + gap, x: anchor.left - bounds.width - gap, y: centerY - bounds.height / 2 },
+    ];
+    const candidate = candidates.find((item) => item.fits)
+      ?? candidates.reduce((best, item) => item.space > best.space ? item : best);
+    annotationPopupPosition = {
+      x: Math.max(edge, Math.min(candidate.x, window.innerWidth - bounds.width - edge)),
+      y: Math.max(edge, Math.min(candidate.y, window.innerHeight - bounds.height - edge)),
+      placement: candidate.placement,
+    };
+  }
+
+  async function openAnnotationEditor(annotation: ReaderAnnotation, anchor = annotationAnchorRect) {
+    if (activeAnnotation && activeAnnotation.id !== annotation.id) closeActiveAnnotation();
+    activeAnnotation = annotation;
+    annotationNoteDraft = annotation.note;
+    annotationSavedDraft = annotation.note;
+    annotationAnchorRect = anchor;
+    annotationPopupPosition = null;
+    await tick();
+    resizeAnnotationNoteInput();
+    positionAnnotationPopup();
+    annotationNoteInput?.focus();
+  }
+
+  function queueAnnotationSave(annotation: ReaderAnnotation, note: string) {
+    if (!book.upsertAnnotation || note === annotationSavedDraft) return;
+    annotationSavedDraft = note;
+    const updated = { ...annotation, note, modified_at: Date.now() };
+    annotations = annotations.map((item) => item.id === updated.id ? updated : item);
+    if (activeAnnotation?.id === updated.id) activeAnnotation = updated;
+    annotationSaveQueue = annotationSaveQueue.then(async () => {
+      await book.upsertAnnotation?.(updated);
+    }).catch((reason) => {
+      readerStateError = reason instanceof Error ? reason.message : String(reason);
+    });
+  }
+
+  function scheduleAnnotationSave() {
+    if (!activeAnnotation) return;
+    if (annotationSaveTimer) clearTimeout(annotationSaveTimer);
+    const annotation = activeAnnotation;
+    const note = annotationNoteDraft;
+    annotationSaveTimer = setTimeout(() => {
+      annotationSaveTimer = undefined;
+      queueAnnotationSave(annotation, note);
+    }, 450);
+  }
+
+  function updateAnnotationDraft(event: Event) {
+    annotationNoteDraft = (event.currentTarget as HTMLTextAreaElement).value;
+    resizeAnnotationNoteInput();
+    requestAnimationFrame(positionAnnotationPopup);
+    scheduleAnnotationSave();
+  }
+
+  function closeActiveAnnotation() {
+    const annotation = activeAnnotation;
+    if (!annotation) return;
+    if (annotationSaveTimer) {
+      clearTimeout(annotationSaveTimer);
+      annotationSaveTimer = undefined;
+    }
+    queueAnnotationSave(annotation, annotationNoteDraft);
+    activeAnnotation = null;
+    annotationPopupPosition = null;
+    annotationAnchorRect = null;
+  }
+
+  function deleteActiveAnnotation() {
+    const annotation = activeAnnotation;
+    if (!annotation) return;
+    if (annotationSaveTimer) {
+      clearTimeout(annotationSaveTimer);
+      annotationSaveTimer = undefined;
+    }
+    activeAnnotation = null;
+    annotationPopupPosition = null;
+    annotationAnchorRect = null;
+    annotationSaveQueue = annotationSaveQueue.then(() => removeAnnotation(annotation)).catch((reason) => {
+      readerStateError = reason instanceof Error ? reason.message : String(reason);
+    });
+  }
+
   function handleSectionLoad(event: Event) {
     const { doc, index } = (event as CustomEvent<{ doc: Document; index: number }>).detail;
-    let lastPointerType = "";
+    let tapStart: { pointerId: number; x: number; y: number; time: number; moved: boolean } | null = null;
     if (isPdfBook) {
       setTimeout(() => paintPdfAnnotations(doc, index));
       const canvasHost = doc.querySelector("#canvas");
@@ -486,14 +644,54 @@
         text,
         pdfAnchor: isPdfBook && rects.length ? { kind: "pdf", page_index: index, rects, fallback_cfi: cfi || null } : undefined,
       };
+      annotationAnchorRect = rangeViewportRect(range, doc);
       selectionNote = "";
     };
     doc.addEventListener("pointerdown", (event) => {
       selectionContextMenu = null;
-      lastPointerType = event.pointerType;
+      if (activeAnnotation) {
+        closeActiveAnnotation();
+        tapStart = null;
+        return;
+      }
+      if (settingsOpen) {
+        settingsOpen = false;
+        tapStart = null;
+        return;
+      }
+      tapStart = event.isPrimary && event.button === 0
+        ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp, moved: false }
+        : null;
     });
-    doc.addEventListener("pointerup", () => setTimeout(capture));
-    doc.addEventListener("pointermove", revealChromeAtTopEdge);
+    doc.addEventListener("pointermove", (event) => {
+      if (tapStart?.pointerId === event.pointerId
+        && Math.hypot(event.clientX - tapStart.x, event.clientY - tapStart.y) > 12) {
+        tapStart.moved = true;
+      }
+      revealChromeAtTopEdge(event);
+    });
+    doc.addEventListener("pointerup", (event) => {
+      const start = tapStart;
+      tapStart = null;
+      setTimeout(capture);
+      if (!start || start.pointerId !== event.pointerId) return;
+      const movement = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+      const duration = event.timeStamp - start.time;
+      const target = event.target as Element | null;
+      if (start.moved || movement > 12 || duration > 500
+        || target?.closest?.("a,button,input,textarea,select,img,svg")
+        || doc.getSelection()?.type === "Range"
+        || settingsOpen || tocOpen || searchOpen || notesOpen || infoOpen || footnoteOpen) return;
+      // Foliate performs annotation hit-testing on the click event, which is
+      // dispatched just after pointerup. Defer the ordinary page-tap action so
+      // handleShowAnnotation can cancel it when this tap hit an annotation.
+      if (pendingChromeToggle) clearTimeout(pendingChromeToggle);
+      pendingChromeToggle = setTimeout(() => {
+        pendingChromeToggle = undefined;
+        chromeVisible = !chromeVisible;
+      });
+    });
+    doc.addEventListener("pointercancel", () => (tapStart = null));
     doc.addEventListener("keyup", capture);
     doc.addEventListener("keydown", handleReaderKey);
     doc.addEventListener("contextmenu", (event) => {
@@ -526,13 +724,6 @@
     doc.addEventListener("click", (event) => {
       const image = (event.target as Element | null)?.closest?.("img,svg") as HTMLImageElement | SVGElement | null;
       if (image instanceof HTMLImageElement && image.currentSrc) imageViewerSrc = image.currentSrc;
-      if (!tapZonesEnabled || image || (event.target as Element | null)?.closest?.("a,button,input,textarea,select") || doc.getSelection()?.type === "Range" || settingsOpen || tocOpen || searchOpen || notesOpen || infoOpen || footnoteOpen) return;
-      const ratio = (event as MouseEvent).clientX / Math.max(1, doc.documentElement.clientWidth);
-      if (ratio >= 0.3 && ratio <= 0.7) chromeVisible = !chromeVisible;
-      else if (lastPointerType === "touch" && !isKoboReader()) {
-        if (ratio < 0.3) void view?.goLeft();
-        else void view?.goRight();
-      }
     });
   }
 
@@ -550,11 +741,17 @@
   }
 
   function handleShowAnnotation(event: Event) {
-    const cfi = (event as CustomEvent<{ value: string }>).detail.value;
+    if (pendingChromeToggle) {
+      clearTimeout(pendingChromeToggle);
+      pendingChromeToggle = undefined;
+    }
+    const { value: cfi, range } = (event as CustomEvent<{ value: string; range?: Range }>).detail;
     const annotation = annotations.find((item) => annotationCfi(item) === cfi);
     if (!annotation) return;
     selection = { cfi, text: annotation.exact_text, pdfAnchor: pdfAnnotationAnchor(annotation) ?? undefined };
     selectionNote = annotation.note;
+    const doc = range?.startContainer.ownerDocument;
+    void openAnnotationEditor(annotation, range && doc ? rangeViewportRect(range, doc) : pdfAnnotationViewportRect(annotation));
   }
 
   async function showStoredAnnotation(annotation: ReaderAnnotation) {
@@ -563,14 +760,26 @@
       await view?.goTo(anchor.page_index);
       selection = { cfi: anchor.fallback_cfi || "", text: annotation.exact_text, pdfAnchor: anchor };
       selectionNote = annotation.note;
-      activeAnnotation = annotation;
-      annotationNoteDraft = annotation.note;
+      await tick();
+      await openAnnotationEditor(annotation, pdfAnnotationViewportRect(annotation));
       return;
     }
     const overlay = annotationOverlay(annotation);
     if (overlay) await view?.showAnnotation(overlay);
-    activeAnnotation = annotation;
-    annotationNoteDraft = annotation.note;
+    // showAnnotation emits the precise range and opens the editor. Keep a
+    // fallback for renderers that do not emit that event.
+    if (activeAnnotation?.id !== annotation.id) await openAnnotationEditor(annotation);
+  }
+
+  async function activateStoredAnnotation(annotation: ReaderAnnotation) {
+    // In the compact layout the annotations panel covers the publication, so
+    // dismiss it before navigation and popup positioning. Wide layouts retain
+    // the list alongside the document for quick annotation-to-annotation work.
+    if (window.matchMedia("(max-width: 720px)").matches) {
+      notesOpen = false;
+      await tick();
+    }
+    await showStoredAnnotation(annotation);
   }
 
   async function saveSelection(style: ReaderAnnotationStyle = "highlight"): Promise<ReaderAnnotation | undefined> {
@@ -605,20 +814,7 @@
   async function saveSelectionAndOpenAnnotation() {
     const annotation = await saveSelection("highlight");
     if (!annotation) return;
-    activeAnnotation = annotation;
-    annotationNoteDraft = annotation.note;
-  }
-
-  async function saveActiveAnnotation() {
-    if (!activeAnnotation || !book.upsertAnnotation) return;
-    const annotation = { ...activeAnnotation, note: annotationNoteDraft, modified_at: Date.now() };
-    try {
-      await book.upsertAnnotation(annotation);
-      annotations = annotations.map((item) => item.id === annotation.id ? annotation : item);
-      activeAnnotation = null;
-    } catch (reason) {
-      readerStateError = reason instanceof Error ? reason.message : String(reason);
-    }
+    await openAnnotationEditor(annotation);
   }
 
   async function removeAnnotation(annotation: ReaderAnnotation) {
@@ -659,6 +855,11 @@
   }
 
   function speakTts(payload: string | undefined) {
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      ttsPlaying = false;
+      ttsPaused = false;
+      return;
+    }
     const text = speechText(payload);
     if (!text) {
       stopTts();
@@ -675,6 +876,7 @@
   }
 
   async function toggleTts() {
+    if (!("speechSynthesis" in window)) return;
     if (!ttsPlaying) {
       await view?.initTTS("sentence");
       ttsPlaying = true;
@@ -690,7 +892,7 @@
   }
 
   function stopTts() {
-    speechSynthesis.cancel();
+    window.speechSynthesis?.cancel();
     ttsPlaying = false;
     ttsPaused = false;
   }
@@ -820,10 +1022,10 @@
     try {
       for await (const result of currentView.search({
         query,
-        index: searchScope === "section" ? currentSection : undefined,
-        matchCase: searchMatchCase,
-        matchDiacritics: searchMatchDiacritics,
-        matchWholeWords: searchMatchWholeWords,
+        index: undefined,
+        matchCase: false,
+        matchDiacritics: false,
+        matchWholeWords: false,
       })) {
         if (generation !== searchGeneration) return;
         if (typeof result === "string") continue;
@@ -919,6 +1121,10 @@
   }
 
   async function requestClose() {
+    if (activeAnnotation) {
+      closeActiveAnnotation();
+      return;
+    }
     if (footnoteOpen) {
       closeFootnote();
       return;
@@ -934,6 +1140,11 @@
   }
 
   onMount(() => {
+    // Android enters immersive reading immediately, so start its own reader
+    // chrome hidden as well. Desktop retains visible controls and can use the
+    // keyboard; a stationary tap anywhere in the publication toggles the
+    // controls on touch devices, while swipe gestures remain page navigation.
+    if (window.BokheimAndroid) chromeVisible = false;
     tocOpen = initialTocState();
 
     let disposed = false;
@@ -948,18 +1159,25 @@
     element.addEventListener("draw-annotation", handleDrawAnnotation);
     element.addEventListener("show-annotation", handleShowAnnotation);
     element.addEventListener("create-overlay", handleCreateOverlay);
-    element.history?.addEventListener("index-change", updateHistoryAvailability);
     host.append(element);
     view = element;
-    updateHistoryAvailability();
 
     const unlistenVolumePageTurn = onVolumePageTurn((direction) => {
       if (direction === "next") void view?.goRight();
       else void view?.goLeft();
     });
     enableVolumePageTurning(true);
+    enableReaderImmersiveMode(true);
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") void flushPosition();
+      else {
+        enableVolumePageTurning(true);
+        enableReaderImmersiveMode(true);
+      }
+    };
+    const handleWindowFocus = () => {
+      enableVolumePageTurning(true);
+      enableReaderImmersiveMode(true);
     };
     const handlePageHide = () => void flushPosition();
     const closeSelectionContextMenu = (event?: Event) => {
@@ -967,9 +1185,21 @@
       if (target?.closest?.(".selection-context-menu")) return;
       selectionContextMenu = null;
     };
+    const dismissAnnotationFromOutside = (event: Event) => {
+      const target = event.target as Element | null;
+      if (!activeAnnotation || target?.closest?.(".annotation-popup")) return;
+      closeActiveAnnotation();
+    };
+    const handleWindowResize = () => {
+      closeSelectionContextMenu();
+      positionAnnotationPopup();
+    };
     window.addEventListener("keydown", handleReaderKey);
     window.addEventListener("pointerdown", closeSelectionContextMenu, true);
-    window.addEventListener("resize", closeSelectionContextMenu);
+    window.addEventListener("pointerdown", dismissAnnotationFromOutside, true);
+    window.addEventListener("resize", handleWindowResize);
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("pageshow", handleWindowFocus);
     window.addEventListener("pagehide", handlePageHide);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -1034,11 +1264,15 @@
     return () => {
       disposed = true;
       enableVolumePageTurning(false);
+      enableReaderImmersiveMode(false);
       unlistenVolumePageTurn();
       unlistenCloseRequested?.();
       window.removeEventListener("keydown", handleReaderKey);
       window.removeEventListener("pointerdown", closeSelectionContextMenu, true);
-      window.removeEventListener("resize", closeSelectionContextMenu);
+      window.removeEventListener("pointerdown", dismissAnnotationFromOutside, true);
+      window.removeEventListener("resize", handleWindowResize);
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("pageshow", handleWindowFocus);
       window.removeEventListener("pagehide", handlePageHide);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       element.removeEventListener("relocate", handleRelocate);
@@ -1048,7 +1282,6 @@
       element.removeEventListener("draw-annotation", handleDrawAnnotation);
       element.removeEventListener("show-annotation", handleShowAnnotation);
       element.removeEventListener("create-overlay", handleCreateOverlay);
-      element.history?.removeEventListener("index-change", updateHistoryAvailability);
       footnoteHandler?.removeEventListener("before-render", prepareFootnote);
       footnoteHandler?.removeEventListener("render", showFootnote);
       footnoteHandler = null;
@@ -1057,6 +1290,9 @@
       element.mediaOverlay?.stop();
       closeFootnote();
       if (saveTimer) clearTimeout(saveTimer);
+      if (pendingChromeToggle) clearTimeout(pendingChromeToggle);
+      if (activeAnnotation) closeActiveAnnotation();
+      if (annotationSaveTimer) clearTimeout(annotationSaveTimer);
       void flushPosition();
       element.close();
       element.remove();
@@ -1076,21 +1312,21 @@
   class="reader-shell"
   data-reader-settings-presentation={READER_SETTINGS_PRESENTATION_CONTRACT.presentation}
   onpointermove={revealChromeAtTopEdge}
+  onpointerdown={dismissSettingsFromOutside}
   style={`--reader-settings-max-width: ${READER_SETTINGS_PRESENTATION_CONTRACT.max_width_px}px; --reader-settings-max-height: ${READER_SETTINGS_PRESENTATION_CONTRACT.max_height_px}px; --reader-settings-padding: ${READER_SETTINGS_PRESENTATION_CONTRACT.padding_px}px; --reader-settings-gap: ${READER_SETTINGS_PRESENTATION_CONTRACT.gap_px}px; --reader-settings-min-column-width: ${READER_SETTINGS_PRESENTATION_CONTRACT.minimum_column_width_px}px;`}
 >
   <header class="reader-header" aria-label="Reader controls">
-    <button class="reader-control" type="button" onclick={() => void requestClose()}>Back</button>
-    <button class="reader-control square" type="button" disabled={!canHistoryBack} aria-label="Link history back" title="Link history back (Alt+←)" onclick={() => view?.history?.back()}>←</button>
-    <button class="reader-control square" type="button" disabled={!canHistoryForward} aria-label="Link history forward" title="Link history forward (Alt+→)" onclick={() => view?.history?.forward()}>→</button>
-    <button class:active={tocOpen} class="reader-control" type="button" onclick={() => togglePanel("toc")}>Contents</button>
+    <button class="reader-control square icon-control" type="button" aria-label="Return to library" title="Return to library" onclick={onclose}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+    </button>
+    <button class:active={tocOpen} class="reader-control square icon-control" type="button" aria-label="Contents" title="Contents" onclick={() => togglePanel("toc")}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6.5A3.5 3.5 0 0 1 14 9v10.5H7.5A3.5 3.5 0 0 0 4 23zM20 5.5h-2"></path><path d="M14 9a3.5 3.5 0 0 1 3.5-3.5H20V20h-2.5a3.5 3.5 0 0 0-3.5 3z"></path></svg>
+    </button>
     {#if book.loadAnnotations}
-      <button class:active={notesOpen} class="reader-control" type="button" title="Annotations and bookmarks" onclick={() => togglePanel("notes")}>Annotations</button>
+      <button class:active={notesOpen} class="reader-control square icon-control" type="button" aria-label="Annotations and bookmarks" title="Annotations and bookmarks" onclick={() => togglePanel("notes")}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17H5zM8 8h8M8 12h8M8 16h5"></path></svg>
+      </button>
     {/if}
-    <button class:active={infoOpen} class="reader-control" type="button" title="Book information" onclick={() => togglePanel("info")}>Info</button>
-    {#if book.createBookmark}
-      <button class="reader-control" type="button" disabled={!lastCfi} title="Bookmark the current location" onclick={() => void addBookmark()}>Bookmark</button>
-    {/if}
-    <button class:active={ttsPlaying} class="reader-control" type="button" title="Read the visible page aloud" onclick={() => ttsPlaying ? stopTts() : void toggleTts()}>{ttsPlaying ? "Stop" : "Read"}</button>
     {#if hasMediaOverlay}
       <button class="reader-control square" type="button" aria-label="Previous media-overlay segment" onclick={() => stepMediaOverlay(-1)}>◀</button>
       <button class:active={mediaOverlayPlaying} class="reader-control" type="button" onclick={() => void toggleMediaOverlay()}>{mediaOverlayPlaying ? "Pause audio" : "Book audio"}</button>
@@ -1100,8 +1336,10 @@
     <div class="book-heading" title={book.title}>
       <strong>{book.title}</strong>
     </div>
-    <button class:active={searchOpen} class="reader-control" type="button" title="Search in book (Ctrl+F)" onclick={() => togglePanel("search")}>Search</button>
-    <button class:active={settingsOpen} class="reader-control" type="button" aria-label="Reader settings" title="Reader settings" onclick={() => togglePanel("settings")}>{READER_SETTINGS_PRESENTATION_CONTRACT.trigger_label}</button>
+    <button class:active={searchOpen} class="reader-control square icon-control" type="button" aria-label="Search in book" title="Search in book (Ctrl+F)" onclick={() => togglePanel("search")}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
+    </button>
+    <button class:active={settingsOpen} class="reader-control reader-settings-trigger" type="button" aria-label="Reader settings" title="Reader settings" onclick={() => togglePanel("settings")}>{READER_SETTINGS_PRESENTATION_CONTRACT.trigger_label}</button>
   </header>
 
   {#if tocOpen}
@@ -1168,7 +1406,7 @@
       <div class="annotation-list">
         {#each annotations.filter((item) => `${item.exact_text} ${item.note}`.toLocaleLowerCase().includes(annotationFilter.toLocaleLowerCase())) as annotation (annotation.id)}
           <article>
-            <button class="annotation-target" type="button" onclick={() => void showStoredAnnotation(annotation)}>
+            <button class="annotation-target" type="button" onclick={() => void activateStoredAnnotation(annotation)}>
               <span class="annotation-color" style={`--annotation-color: ${annotation.color}`}></span>
               <q>{annotation.exact_text}</q>
               {#if annotation.note}<span>{annotation.note}</span>{/if}
@@ -1194,13 +1432,8 @@
       <form class="search-form" onsubmit={runSearch}>
         <input bind:value={searchQuery} type="search" enterkeyhint="search" placeholder="Search this book" aria-label="Search text" oninput={() => void runSearch()} />
         <span class="reader-match-count" aria-live="polite">{searchResults.length ? `${Math.max(1, selectedSearchIndex + 1)}/${searchResults.length}` : "0/0"}</span>
-        <button class:active={searchMatchCase} type="button" title="Match case" onclick={() => { searchMatchCase = !searchMatchCase; void runSearch(); }}>Aa</button>
-        <button class:active={searchMatchWholeWords} type="button" title="Match whole words" onclick={() => { searchMatchWholeWords = !searchMatchWholeWords; void runSearch(); }}>Word</button>
-        <button class:active={searchMatchDiacritics} type="button" title="Match diacritics exactly" onclick={() => { searchMatchDiacritics = !searchMatchDiacritics; void runSearch(); }}>Marks</button>
-        <button class:active={searchScope === "book"} type="button" title="Search current section or whole book" onclick={() => { searchScope = searchScope === "book" ? "section" : "book"; void runSearch(); }}>{searchScope === "book" ? "Book" : "Section"}</button>
         <button class="square" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" onclick={() => cycleSearchResult(-1)}>‹</button>
         <button class="square" type="button" aria-label="Next match" title="Next match (Enter)" onclick={() => cycleSearchResult(1)}>›</button>
-        <button class="square" type="button" aria-label="Close search" title="Close search (Esc)" onclick={() => { clearSearch(); searchOpen = false; }}>×</button>
       </form>
       {#if searchError}<span class="search-inline-error">{searchError}</span>{/if}
     </section>
@@ -1208,101 +1441,76 @@
 
   {#if settingsOpen}
     <section class="reader-panel settings-panel" aria-label="Reading settings">
-      <div class="panel-heading">
-        <strong>{READER_SETTINGS_PRESENTATION_CONTRACT.title}</strong>
-        <button type="button" aria-label="Close reading settings" onclick={() => (settingsOpen = false)}>×</button>
-      </div>
-      <div class="setting-option-row">
-        <span>Column width</span>
-        <div class="setting-button-group">
-          {#each maxLineWidthOptions as option}
-            <button
-              type="button"
-              class:active={settings.max_line_width_px === option}
-              aria-pressed={settings.max_line_width_px === option}
-              onclick={() => updatePreference("max_line_width_px", option)}
-            >
-              {option}px
-            </button>
-          {/each}
+      <div class="settings-section">
+        <h3>Typography</h3>
+        <div class="setting-option-row setting-choice-row">
+          <span id="reader-typeface-label">Typeface</span>
+          <div class="setting-choice-group" role="group" aria-labelledby="reader-typeface-label">
+            {#each READER_PREFERENCES_CONTRACT.options.font_families as option}
+              <button
+                type="button"
+                class:active={settings.font_family === option.value}
+                aria-pressed={settings.font_family === option.value}
+                onclick={() => updatePreference("font_family", option.value as ReaderFontFamily)}
+              >{option.label}</button>
+            {/each}
+          </div>
+        </div>
+        <div class="setting-option-row">
+          <span>Font size</span>
+          <div class="setting-stepper">
+            <button type="button" aria-label="Decrease font size" disabled={settings.font_size_px <= preferenceConstraints.font_size_px[0]} onclick={() => adjustPreference("font_size_px", -1)}>−</button>
+            <output>{settings.font_size_px.toFixed(0)}px</output>
+            <button type="button" aria-label="Increase font size" disabled={settings.font_size_px >= preferenceConstraints.font_size_px[1]} onclick={() => adjustPreference("font_size_px", 1)}>+</button>
+          </div>
+        </div>
+        <div class="setting-option-row">
+          <span>Line height</span>
+          <div class="setting-stepper">
+            <button type="button" aria-label="Decrease line height" disabled={settings.line_height <= preferenceConstraints.line_height[0]} onclick={() => adjustPreference("line_height", -0.1, 1)}>−</button>
+            <output>{settings.line_height.toFixed(1)}</output>
+            <button type="button" aria-label="Increase line height" disabled={settings.line_height >= preferenceConstraints.line_height[1]} onclick={() => adjustPreference("line_height", 0.1, 1)}>+</button>
+          </div>
+        </div>
+        <div class="setting-option-row setting-choice-row">
+          <span id="reader-alignment-label">Alignment</span>
+          <div class="setting-choice-group" role="group" aria-labelledby="reader-alignment-label">
+            {#each READER_PREFERENCES_CONTRACT.options.text_alignments as option}
+              <button
+                type="button"
+                class:active={settings.text_alignment === option.value}
+                aria-pressed={settings.text_alignment === option.value}
+                onclick={() => updatePreference("text_alignment", option.value as ReaderTextAlignment)}
+              >{option.label}</button>
+            {/each}
+          </div>
         </div>
       </div>
-      <div class="setting-option-row">
-        <span>Font size</span>
-        <div class="setting-button-group">
-          {#each readerFontSizeOptions as option}
-            <button
-              type="button"
-              class:active={settings.font_size_px === option}
-              aria-pressed={settings.font_size_px === option}
-              onclick={() => updatePreference("font_size_px", option)}
-            >
-              {option}px
-            </button>
-          {/each}
+      <div class="settings-section">
+        <h3>Page layout</h3>
+        <div class="setting-option-row">
+          <span>Column width</span>
+          <div class="setting-stepper">
+            <button type="button" aria-label="Decrease column width" disabled={settings.max_line_width_px <= preferenceConstraints.max_line_width_px[0]} onclick={() => adjustPreference("max_line_width_px", -40)}>−</button>
+            <output>{settings.max_line_width_px.toFixed(0)}px</output>
+            <button type="button" aria-label="Increase column width" disabled={settings.max_line_width_px >= preferenceConstraints.max_line_width_px[1]} onclick={() => adjustPreference("max_line_width_px", 40)}>+</button>
+          </div>
         </div>
-      </div>
-      <div class="setting-option-row">
-        <span>Zoom</span>
-        <div class="setting-button-group">
-          {#each zoomOptions as option}
-            <button
-              type="button"
-              class:active={Math.abs(settings.zoom - option) < 0.0001}
-              aria-pressed={Math.abs(settings.zoom - option) < 0.0001}
-              onclick={() => updatePreference("zoom", option)}
-            >
-              {option.toFixed(1)}×
-            </button>
-          {/each}
+        <div class="setting-option-row">
+          <span>Fit columns</span>
+          <div class="setting-stepper">
+            <button type="button" aria-label="Fit fewer columns" disabled={settings.max_column_count <= preferenceConstraints.max_column_count[0]} onclick={() => adjustPreference("max_column_count", -1)}>−</button>
+            <output>{settings.max_column_count}</output>
+            <button type="button" aria-label="Fit more columns" disabled={settings.max_column_count >= preferenceConstraints.max_column_count[1]} onclick={() => adjustPreference("max_column_count", 1)}>+</button>
+          </div>
         </div>
-      </div>
-      <label class="setting-select">
-        <span>Layout</span>
-        <select value={settings.flow} onchange={(event) => updatePreference("flow", event.currentTarget.value as ReaderFlow)}>
-          {#each READER_PREFERENCES_CONTRACT.options.flows as option}<option value={option.value}>{option.label}</option>{/each}
-        </select>
-      </label>
-      <label class="setting-select">
-        <span>Typeface</span>
-        <select value={settings.font_family} onchange={(event) => updatePreference("font_family", event.currentTarget.value as ReaderFontFamily)}>
-          {#each READER_PREFERENCES_CONTRACT.options.font_families as option}<option value={option.value}>{option.label}</option>{/each}
-        </select>
-      </label>
-      <label class="setting-select">
-        <span>Alignment</span>
-        <select value={settings.text_alignment} onchange={(event) => updatePreference("text_alignment", event.currentTarget.value as ReaderTextAlignment)}>
-          {#each READER_PREFERENCES_CONTRACT.options.text_alignments as option}<option value={option.value}>{option.label}</option>{/each}
-        </select>
-      </label>
-      <div class="setting-option-row">
-        <span>Maximum columns</span>
-        <div class="setting-button-group">
-          {#each maxColumnCountOptions as option}
-            <button
-              type="button"
-              class:active={settings.max_column_count === option}
-              aria-pressed={settings.max_column_count === option}
-              onclick={() => updatePreference("max_column_count", option)}
-            >
-              {option}
-            </button>
-          {/each}
-        </div>
-      </div>
-      <div class="setting-option-row">
-        <span>Line height</span>
-        <div class="setting-button-group">
-          {#each lineHeightOptions as option}
-            <button
-              type="button"
-              class:active={Math.abs(settings.line_height - option) < 0.0001}
-              aria-pressed={Math.abs(settings.line_height - option) < 0.0001}
-              onclick={() => updatePreference("line_height", option)}
-            >
-              {option.toFixed(1)}
-            </button>
-          {/each}
+        <div class="setting-option-row">
+          <span>Zoom</span>
+          <div class="setting-stepper">
+            <button type="button" aria-label="Zoom out" disabled={settings.zoom <= preferenceConstraints.zoom[0]} onclick={() => adjustPreference("zoom", -0.1, 1)}>−</button>
+            <output>{settings.zoom.toFixed(1)}×</output>
+            <button type="button" aria-label="Zoom in" disabled={settings.zoom >= preferenceConstraints.zoom[1]} onclick={() => adjustPreference("zoom", 0.1, 1)}>+</button>
+          </div>
         </div>
       </div>
     </section>
@@ -1333,16 +1541,25 @@
   {/if}
 
   {#if activeAnnotation}
-    <section class="annotation-popup" aria-label="Annotation">
-      <div class="panel-heading">
-        <strong>Annotation</strong>
-        <button type="button" aria-label="Close annotation" onclick={() => (activeAnnotation = null)}>×</button>
-      </div>
+    <section
+      bind:this={annotationPopupElement}
+      class="annotation-popup"
+      aria-label="Annotation"
+      data-placement={annotationPopupPosition?.placement}
+      style={annotationPopupPosition
+        ? `left: ${annotationPopupPosition.x}px; top: ${annotationPopupPosition.y}px;`
+        : "left: 0; top: 0; visibility: hidden;"}
+    >
       <q>{activeAnnotation.exact_text}</q>
-      <textarea bind:value={annotationNoteDraft} placeholder="Add a note" aria-label="Annotation note"></textarea>
+      <textarea
+        bind:this={annotationNoteInput}
+        value={annotationNoteDraft}
+        placeholder="Add a note"
+        aria-label="Annotation note"
+        oninput={updateAnnotationDraft}
+      ></textarea>
       <div class="annotation-popup-actions">
-        <button type="button" onclick={() => void saveActiveAnnotation()}>Save</button>
-        <button type="button" onclick={() => { const annotation = activeAnnotation; activeAnnotation = null; if (annotation) void removeAnnotation(annotation); }}>Delete</button>
+        <button type="button" onclick={deleteActiveAnnotation}>Delete</button>
       </div>
     </section>
   {/if}
@@ -1386,7 +1603,7 @@
 
   .reader-shell {
     --chrome: var(--color-surface-bg);
-    --chrome-strong: var(--color-border-color);
+    --chrome-strong: var(--color-border);
     --ink: var(--color-ink-text);
     --accent: var(--color-accent);
     display: grid;
@@ -1394,7 +1611,7 @@
     width: 100%;
     height: 100dvh;
     color: var(--ink);
-    background: var(--color-app-bg);
+    background: var(--color-surface-bg);
     position: relative;
     transition: grid-template-rows 160ms ease;
   }
@@ -1460,7 +1677,7 @@
     padding: 0 10px;
     border: 1px solid var(--chrome-strong);
     border-radius: 8px;
-    background: var(--color-white-surface);
+    background: var(--color-raised-bg);
     font-size: 0.875rem;
     white-space: nowrap;
   }
@@ -1469,6 +1686,16 @@
     width: 34px;
     padding: 0;
     font-size: 1.125rem;
+  }
+
+  .reader-control.icon-control svg {
+    width: 19px;
+    height: 19px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
   .reader-control:disabled {
@@ -1502,12 +1729,10 @@
   }
 
   .annotation-popup {
-    position: absolute;
-    z-index: 8;
-    top: calc(58px + env(safe-area-inset-top) + .75rem);
-    right: max(.75rem, env(safe-area-inset-right));
-    width: min(24rem, calc(100% - 1.5rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
-    max-height: calc(100dvh - 58px - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 1.5rem);
+    position: fixed;
+    z-index: 21;
+    width: min(22rem, calc(100vw - 1.5rem));
+    max-height: calc(100dvh - 1.5rem);
     box-sizing: border-box;
     overflow: auto;
     padding: .75rem;
@@ -1519,9 +1744,9 @@
   }
 
   .annotation-popup q { display: block; margin-bottom: .75rem; line-height: 1.45; }
-  .annotation-popup textarea { width: 100%; min-height: 7rem; box-sizing: border-box; resize: vertical; border: 1px solid var(--chrome-strong); border-radius: .55rem; padding: .65rem; color: inherit; background: var(--color-white-surface); font: inherit; }
-  .annotation-popup-actions { display: flex; gap: .5rem; margin-top: .65rem; }
-  .annotation-popup-actions button { border: 1px solid var(--chrome-strong); background: var(--color-white-surface); }
+  .annotation-popup textarea { width: 100%; min-height: 2.75rem; max-height: 10rem; box-sizing: border-box; resize: none; overflow-y: auto; field-sizing: content; border: 1px solid var(--chrome-strong); border-radius: .55rem; padding: .65rem; color: inherit; background: var(--color-raised-bg); font: inherit; line-height: 1.4; }
+  .annotation-popup-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .65rem; }
+  .annotation-popup-actions button { border: 1px solid var(--chrome-strong); background: var(--color-raised-bg); }
 
   .book-heading {
     min-width: 9rem;
@@ -1597,12 +1822,14 @@
   }
 
   .settings-panel {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--reader-settings-min-column-width)), 1fr));
+    --reader-setting-control-size: 44px;
+    display: flex;
+    flex-direction: column;
     gap: var(--reader-settings-gap);
     width: min(var(--reader-settings-max-width), calc(100% - 1.3rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
     max-height: min(var(--reader-settings-max-height), calc(100dvh - 58px - env(safe-area-inset-top)));
     padding: var(--reader-settings-padding);
+    border-radius: 1rem;
   }
 
   .reader-search-bar {
@@ -1635,7 +1862,7 @@
     border: 1px solid var(--chrome-strong);
     border-radius: 8px;
     color: inherit;
-    background: var(--color-white-surface);
+    background: var(--color-raised-bg);
     font: inherit;
   }
 
@@ -1647,7 +1874,7 @@
     padding: 0 10px;
     border: 1px solid var(--chrome-strong);
     border-radius: 8px;
-    background: var(--color-white-surface);
+    background: var(--color-raised-bg);
     white-space: nowrap;
   }
 
@@ -1678,7 +1905,7 @@
   }
 
   .panel-heading strong {
-    font-family: var(--font-heading-family);
+    font-family: var(--font-interface-family);
   }
 
   .panel-heading button {
@@ -1722,7 +1949,7 @@
     background: var(--chrome);
   }
 
-  .image-viewer img { width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+  .image-viewer img { width: 100%; height: 100%; min-height: 0; object-fit: contain; background: var(--color-surface-bg); }
 
   .toc-row {
     display: grid;
@@ -1774,58 +2001,119 @@
   }
 
   .setting-option-row {
-    grid-column: 1 / -1;
     display: grid;
-    gap: 0.35rem;
+    grid-template-columns: minmax(5.75rem, 1fr) auto;
+    align-items: center;
+    gap: 0.65rem;
     font-size: 0.78rem;
     font-weight: 700;
   }
 
-  .setting-button-group {
+  .settings-section {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr));
+    gap: 0.5rem;
+  }
+
+  .settings-section + .settings-section {
+    padding-top: var(--reader-settings-gap);
+    border-top: 1px solid var(--chrome-strong);
+  }
+
+  .settings-section h3 {
+    margin: 0 0 0.1rem;
+    color: var(--color-subtle-text);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .setting-choice-row {
+    grid-template-columns: 1fr;
+  }
+
+  .setting-stepper {
+    display: grid;
+    grid-template-columns: var(--reader-setting-control-size) 72px var(--reader-setting-control-size);
+    align-items: center;
     gap: 1px;
-    border: 1px solid var(--chrome-strong);
-    border-radius: var(--radius-sm);
     overflow: hidden;
+    border: 1px solid var(--chrome-strong);
+    border-radius: 0.55rem;
     background: var(--chrome-strong);
   }
 
-  .setting-button-group button {
-    min-height: 34px;
-    padding: 0.45rem 0.4rem;
-    border: 0;
+  .setting-stepper button {
+    width: var(--reader-setting-control-size);
+    height: var(--reader-setting-control-size);
+    min-height: var(--reader-setting-control-size);
+    padding: 0;
     border-radius: 0;
-    background: var(--color-white-surface);
-    color: var(--color-ink-text);
-    font-size: 0.74rem;
-    font-weight: 700;
-    cursor: pointer;
+    background: var(--color-raised-bg);
+  }
+
+  .setting-stepper output {
+    display: flex;
+    height: var(--reader-setting-control-size);
+    align-items: center;
+    justify-content: center;
+    color: var(--color-subtle-text);
+    background: var(--color-raised-bg);
+    text-align: center;
+    font-size: 0.78rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .setting-choice-group {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--chrome-strong);
+    border-radius: 0.55rem;
+    background: var(--chrome-strong);
+  }
+
+  .setting-choice-group button {
+    min-width: 0;
+    min-height: var(--reader-setting-control-size);
+    padding: 0 0.55rem;
+    border-radius: 0;
+    color: inherit;
+    background: var(--chrome);
+    font-size: 0.72rem;
     white-space: nowrap;
   }
 
-  .setting-button-group button.active {
-    color: var(--color-white-surface);
-    background: var(--color-accent);
+  .setting-choice-group button + button {
+    border-left: 1px solid var(--chrome-strong);
   }
 
-  .setting-select {
-    display: grid;
-    min-width: 0;
-    gap: 0.3rem;
-    font-size: 0.75rem;
-    font-weight: 700;
+  .setting-choice-group button.active {
+    color: var(--color-raised-bg);
+    background: var(--accent);
   }
 
-  .setting-select select {
-    min-width: 0;
-    height: 2.4rem;
-    padding: 0 0.55rem;
-    border: 1px solid var(--chrome-strong);
-    border-radius: 0.55rem;
-    color: inherit;
-    background: var(--chrome);
-    font: inherit;
+  .settings-panel button:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .settings-panel button:disabled {
+    opacity: 0.45;
+  }
+
+  @media (min-width: 420px) {
+    .setting-choice-row {
+      grid-template-columns: minmax(5.75rem, 1fr) auto;
+    }
+  }
+
+  @media (min-width: 720px) {
+    .settings-panel { --reader-setting-control-size: 34px; }
   }
 
   .view-host,

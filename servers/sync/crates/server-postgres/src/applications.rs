@@ -1,14 +1,49 @@
 use crate::assets::{self, BookUploadAdmission};
-use crate::{sync_store, PostgresDatabase};
+use crate::{PostgresDatabase, sync_store};
 use server_asset_store::{AssetError, AssetKind, AssetReader, FsAssetStore, StoredAsset};
 use sqlx::PgPool;
 use std::sync::Arc;
-use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
 use sync_common::ContentHash;
+use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse};
+use tokio::io::AsyncReadExt;
+
+async fn consume_upload(mut reader: AssetReader, expected_len: u64) -> Result<(), AssetError> {
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).await.map_err(|error| AssetError::InvalidInput(error.to_string()))?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > expected_len {
+            return Err(AssetError::LengthMismatch { expected: expected_len, actual: total });
+        }
+    }
+    if total != expected_len {
+        return Err(AssetError::LengthMismatch { expected: expected_len, actual: total });
+    }
+    Ok(())
+}
 
 pub struct AssetApplication {
     pool: PgPool,
     store: Arc<FsAssetStore>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageUsage {
+    pub used_bytes: u64,
+    pub reserved_bytes: u64,
+    pub quota_bytes: u64,
+}
+
+/// One library's share of the charged bytes. The shares partition
+/// [`StorageUsage::used_bytes`]; they are not independent per-library totals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryStorageUsage {
+    pub library_id: sync_common::LibraryId,
+    pub used_bytes: u64,
 }
 
 impl AssetApplication {
@@ -18,11 +53,7 @@ impl AssetApplication {
 
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
         let owned = sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        if owned {
-            Ok(())
-        } else {
-            Err(AssetError::Forbidden)
-        }
+        if owned { Ok(()) } else { Err(AssetError::Forbidden) }
     }
 
     async fn claim_existing_book(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
@@ -35,6 +66,14 @@ impl AssetApplication {
 
     pub async fn negotiate_books(&self, user_id: &str, library_id: &sync_common::LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AssetError> {
         assets::negotiate_books(&self.pool, user_id, library_id, &blobs).await
+    }
+
+    pub async fn storage_usage(&self, user_id: &str) -> Result<StorageUsage, AssetError> {
+        assets::storage_usage(&self.pool, user_id).await
+    }
+
+    pub async fn library_storage_usage(&self, user_id: &str) -> Result<Vec<LibraryStorageUsage>, AssetError> {
+        assets::library_storage_usage(&self.pool, user_id).await
     }
 
     pub async fn open_from(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
@@ -52,14 +91,11 @@ impl AssetApplication {
             return Ok(());
         }
         let expected_len = expected_len.ok_or(AssetError::LengthRequired)?;
-        if expected_len > kind.max_bytes() {
-            return Err(AssetError::TooLarge { limit: kind.max_bytes() });
-        }
-        if self.claim_existing_book(user_id, library_id, hash).await?.is_some() {
-            return Ok(());
+        if kind.max_bytes().is_some_and(|limit| expected_len > limit) {
+            return Err(AssetError::TooLarge { limit: kind.max_bytes().unwrap_or(u64::MAX) });
         }
         let reservation = match assets::reserve_book_upload(&self.pool, user_id, library_id, hash, expected_len).await? {
-            BookUploadAdmission::AlreadyOwned => return Ok(()),
+            BookUploadAdmission::AlreadyOwned => return consume_upload(reader, expected_len).await,
             BookUploadAdmission::Reserved(reservation) => reservation,
         };
         match self.store.put(user_id, kind, hash, Some(expected_len), reader).await {
@@ -71,5 +107,22 @@ impl AssetApplication {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_upload;
+    use server_asset_store::{AssetError, AssetReader};
+
+    fn upload(bytes: Vec<u8>) -> AssetReader {
+        Box::new(std::io::Cursor::new(bytes))
+    }
+
+    #[tokio::test]
+    async fn deduplicated_uploads_are_consumed_and_length_checked() {
+        assert!(consume_upload(upload(vec![0; 128 * 1024]), 128 * 1024).await.is_ok());
+        assert!(matches!(consume_upload(upload(vec![0; 9]), 8).await, Err(AssetError::LengthMismatch { .. })));
+        assert!(matches!(consume_upload(upload(vec![0; 7]), 8).await, Err(AssetError::LengthMismatch { .. })));
     }
 }

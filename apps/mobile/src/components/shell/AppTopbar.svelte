@@ -68,20 +68,20 @@
 <style>
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
   svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-  .topbar { position: sticky; z-index: 20; top: 0; display: flex; flex: none; align-items: center; gap: .75rem; min-height: calc(3.8rem + env(safe-area-inset-top)); padding: calc(.55rem + env(safe-area-inset-top)) var(--page-gutter, 1rem) .55rem; padding-right: max(var(--page-gutter, 1rem), env(safe-area-inset-right)); padding-left: max(var(--page-gutter, 1rem), env(safe-area-inset-left)); border-bottom: 1px solid color-mix(in srgb, var(--color-border-color) 55%, transparent); background: color-mix(in srgb, var(--color-surface-bg) 96%, transparent); backdrop-filter: blur(18px); }
+  .topbar { position: sticky; z-index: 20; top: 0; display: flex; flex: none; align-items: center; gap: .75rem; min-height: calc(3.8rem + env(safe-area-inset-top)); padding: calc(.55rem + env(safe-area-inset-top)) var(--page-gutter, 1rem) .55rem; padding-right: max(var(--page-gutter, 1rem), env(safe-area-inset-right)); padding-left: max(var(--page-gutter, 1rem), env(safe-area-inset-left)); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); background: color-mix(in srgb, var(--color-surface-bg) 96%, transparent); backdrop-filter: blur(18px); }
   .library-button { display: flex; flex: none; align-items: center; gap: .35rem; min-width: 0; max-width: min(13rem, 38vw); height: 2.65rem; padding: 0 .65rem; border: 0; border-radius: var(--radius-sm); color: var(--color-ink-text); background: transparent; font-weight: 720; text-align: left; cursor: pointer; }
-  .library-button:hover { background: var(--color-hover-bg); }
+  .library-button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .library-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .library-button svg { flex: none; width: 1rem; }
-  h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--color-ink-text); font: 500 1.25rem var(--font-heading-family); text-overflow: ellipsis; white-space: nowrap; }
+  h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--color-ink-text); font: 500 1.25rem var(--font-interface-family); text-overflow: ellipsis; white-space: nowrap; }
   .library-actions { display: flex; flex: none; align-items: center; gap: var(--layout-topbar-action-gap); }
-  .library-actions button { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; width: auto; height: var(--layout-topbar-action-height); padding: 0 var(--layout-topbar-action-horizontal-padding); border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-white-surface); font-size: .8125rem; font-weight: 750; cursor: pointer; }
-  .library-actions button:hover { background: var(--color-hover-bg); }
+  .library-actions button { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; width: auto; height: var(--layout-topbar-action-height); padding: 0 var(--layout-topbar-action-horizontal-padding); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-raised-bg); font-size: .8125rem; font-weight: 750; cursor: pointer; }
+  .library-actions button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .library-actions button:disabled { opacity: .5; cursor: default; }
   .library-actions svg { width: 1.2rem; }
   .library-actions button span { display: none; }
   .account-button, .settings-button { display: grid; flex: none; place-items: center; width: 2.65rem; height: 2.65rem; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; cursor: pointer; }
-  .account-button:hover, .settings-button:hover { color: var(--color-accent); background: var(--color-hover-bg); }
+  .account-button:hover, .settings-button:hover { color: var(--color-accent); background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .account-button svg, .settings-button svg { width: 1.2rem; }
   @media (min-width: 45rem) {
     .topbar { min-height: calc(var(--layout-topbar-height) + env(safe-area-inset-top)); }

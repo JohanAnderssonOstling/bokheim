@@ -18,8 +18,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'",
-      "devCsp": "default-src 'self' customprotocol: asset: http:; connect-src ipc: http://ipc.localhost http: ws:; img-src 'self' asset: http://asset.localhost blob: data: http: https:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'"
+      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost blob: data: https:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'",
+      "devCsp": "default-src 'self' customprotocol: asset: http:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost http: ws:; img-src 'self' asset: http://asset.localhost blob: data: http: https:; media-src 'self' blob: data:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src blob:; object-src 'none'; base-uri 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/libraries/**", "$DATA/bokheim/**"]
+      }
     }
   },
   "bundle": {

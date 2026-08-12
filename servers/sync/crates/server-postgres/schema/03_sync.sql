@@ -14,7 +14,7 @@
 --
 -- Every table below that participates in last-writer-wins conflict
 -- resolution gets a `lww_guard` trigger (enforce_lww_order()): it silently
--- cancels an UPDATE whose (changed_at, version_rank, client_id, client_seq,
+-- cancels an UPDATE whose (changed_at, version_rank, replica_id, replica_seq,
 -- event_id) tuple does not beat the stored row's, so every writer -- this
 -- server, a future service, a manual fix -- gets the same tie-break
 -- guarantee without repeating the comparison in every upsert query.
@@ -57,8 +57,8 @@ CREATE FUNCTION enforce_lww_order() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF (NEW.changed_at, NEW.version_rank, NEW.client_id COLLATE "C", NEW.client_seq, NEW.event_id COLLATE "C")
-       > (OLD.changed_at, OLD.version_rank, OLD.client_id COLLATE "C", OLD.client_seq, OLD.event_id COLLATE "C")
+    IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq, NEW.event_id COLLATE "C")
+       > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq, OLD.event_id COLLATE "C")
     THEN
         RETURN NEW;
     END IF;
@@ -93,8 +93,8 @@ CREATE TABLE sync_state (
     present boolean,
     content_hash text,
     changed_at bigint NOT NULL,
-    client_id text NOT NULL,
-    client_seq bigint NOT NULL,
+    replica_id text NOT NULL,
+    replica_seq bigint NOT NULL,
     version_rank smallint NOT NULL,
     event_id text NOT NULL,
     server_seq bigint NOT NULL DEFAULT nextval('sync_server_sequence'::regclass),
@@ -115,8 +115,8 @@ CREATE TABLE sync_reading_state (
     present boolean,
     content_hash text,
     changed_at bigint NOT NULL,
-    client_id text NOT NULL,
-    client_seq bigint NOT NULL,
+    replica_id text NOT NULL,
+    replica_seq bigint NOT NULL,
     version_rank smallint NOT NULL,
     event_id text NOT NULL,
     server_seq bigint NOT NULL DEFAULT nextval('sync_server_sequence'::regclass),

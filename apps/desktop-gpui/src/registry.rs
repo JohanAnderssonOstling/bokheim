@@ -1,14 +1,14 @@
 use std::thread::JoinHandle;
 
-use epub_svelte_lib::APP_NAME_LOWER;
 use epub_svelte_lib::app::AppBackend;
 use epub_svelte_lib::app::BackendContext;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
+use epub_svelte_lib::{APP_NAME_LOWER, LibraryId};
 use gpui::Global;
 
 pub struct LibraryRegistry {
     core: AppBackend,
-    events: async_channel::Receiver<(String, LibraryEvent)>,
+    events: async_channel::Receiver<(LibraryId, LibraryEvent)>,
     _event_thread: JoinHandle<()>,
 }
 
@@ -24,7 +24,7 @@ impl LibraryRegistry {
             .name(event_thread_name)
             .spawn(move || {
                 while let Ok(app_event) = backend_events.recv() {
-                    if event_sender.send_blocking((app_event.library_id.as_str().to_owned(), app_event.event)).is_err() {
+                    if event_sender.send_blocking((app_event.library_id, app_event.event)).is_err() {
                         break;
                     }
                 }
@@ -34,7 +34,7 @@ impl LibraryRegistry {
         Self { core, events, _event_thread: event_thread }
     }
 
-    pub fn events(&self) -> async_channel::Receiver<(String, LibraryEvent)> {
+    pub fn events(&self) -> async_channel::Receiver<(LibraryId, LibraryEvent)> {
         self.events.clone()
     }
 

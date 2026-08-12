@@ -12,6 +12,11 @@
 #   public *;
 #}
 
+# Tao and Wry look up these activity methods by their exact JVM names through
+# JNI. R8 must not rename Kotlin accessors such as getId() or getVersion(), nor
+# setWebView(), in release builds.
+-keep class se.bokheim.reader.WryActivity { *; }
+
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable

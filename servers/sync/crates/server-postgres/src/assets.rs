@@ -1,4 +1,4 @@
-use server_asset_store::{AssetError, AssetKind};
+use server_asset_store::AssetError;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRejectionReason, BlobManifestResponse, RejectedBlobManifestEntry};
 use sync_common::{ContentHash, LibraryId};
@@ -39,18 +39,26 @@ fn storage(error: impl std::fmt::Display) -> AssetError {
     AssetError::Storage(error.to_string())
 }
 
+pub(crate) async fn configure_user_storage_quota(database: &crate::PostgresDatabase, user_id: &str, quota_bytes: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO user_storage_account(user_id, quota_bytes) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET quota_bytes=EXCLUDED.quota_bytes
+         RETURNING quota_bytes",
+    )
+    .bind(user_id)
+    .bind(quota_bytes)
+    .fetch_one(database.pool())
+    .await
+}
+
 fn size_i64(size: u64) -> Result<i64, AssetError> {
     i64::try_from(size).map_err(|_| AssetError::Storage("book size does not fit the quota ledger".to_string()))
 }
 
 async fn require_library_owner(transaction: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId) -> Result<(), AssetError> {
-    let library_id = library_id.as_str();
-    let authorized = sqlx::query_file_scalar!("src/sql/assets/library_owned_by_user.sql", library_id, user_id).fetch_one(&mut **transaction).await.map_err(storage)?.unwrap_or(false);
-    if authorized {
-        Ok(())
-    } else {
-        Err(AssetError::Forbidden)
-    }
+    let library_id = library_id.to_string();
+    let authorized = sqlx::query_scalar::<_, bool>(include_str!("sql/assets/library_owned_by_user.sql")).bind(library_id).bind(user_id).fetch_one(&mut **transaction).await.map_err(storage)?;
+    if authorized { Ok(()) } else { Err(AssetError::Forbidden) }
 }
 
 async fn account_snapshot(transaction: &mut Transaction<'_, Postgres>, user_id: &str) -> Result<AccountSnapshot, AssetError> {
@@ -79,14 +87,35 @@ async fn prepare_account(transaction: &mut Transaction<'_, Postgres>, user_id: &
     Ok(account)
 }
 
+pub(super) async fn storage_usage(pool: &PgPool, user_id: &str) -> Result<crate::StorageUsage, AssetError> {
+    let mut transaction = pool.begin().await.map_err(storage)?;
+    let account = prepare_account(&mut transaction, user_id).await?;
+    transaction.commit().await.map_err(storage)?;
+    Ok(crate::StorageUsage { used_bytes: account.used.max(0) as u64, reserved_bytes: account.reserved.max(0) as u64, quota_bytes: account.limit.max(0) as u64 })
+}
+
+/// Splits the charged bytes across the libraries that hold them.
+///
+/// Attribution is a partition, not a per-library total: see the query for why a
+/// deduplicated quota cannot be summed per library. Libraries holding nothing
+/// are absent rather than reported as zero; the caller knows which libraries
+/// exist and the client renders the rest.
+pub(super) async fn library_storage_usage(pool: &PgPool, user_id: &str) -> Result<Vec<crate::LibraryStorageUsage>, AssetError> {
+    let rows = sqlx::query(include_str!("sql/assets/library_storage_usage.sql")).bind(user_id).fetch_all(pool).await.map_err(storage)?;
+    rows.into_iter()
+        .map(|row| {
+            let library_id: String = row.try_get("library_id").map_err(storage)?;
+            let used_bytes: i64 = row.try_get("used_bytes").map_err(storage)?;
+            let library_id = library_id.parse::<LibraryId>().map_err(|error| AssetError::Storage(format!("stored library id {library_id} is not a valid identifier: {error}")))?;
+            Ok(crate::LibraryStorageUsage { library_id, used_bytes: used_bytes.max(0) as u64 })
+        })
+        .collect()
+}
+
 async fn insert_blob_object(transaction: &mut Transaction<'_, Postgres>, hash: &ContentHash, size_bytes: i64) -> Result<(), AssetError> {
     let hash_str = hash.as_str();
     let inserted = sqlx::query_file_scalar!("src/sql/assets/insert_blob_object.sql", hash_str, size_bytes).fetch_optional(&mut **transaction).await.map_err(storage)?;
-    if inserted.is_some() {
-        Ok(())
-    } else {
-        Err(AssetError::Storage(format!("stored size for content hash {hash} is inconsistent")))
-    }
+    if inserted.is_some() { Ok(()) } else { Err(AssetError::Storage(format!("stored size for content hash {hash} is inconsistent"))) }
 }
 
 pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError> {
@@ -100,7 +129,7 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
     let mut hashes = Vec::with_capacity(blobs.len());
     let mut sizes = Vec::with_capacity(blobs.len());
     for blob in blobs {
-        if blob.size_bytes == 0 || blob.size_bytes > AssetKind::Book.max_bytes() {
+        if blob.size_bytes == 0 {
             response.rejected.push(RejectedBlobManifestEntry { content_hash: blob.content_hash.clone(), reason: BlobManifestRejectionReason::InvalidSize });
             continue;
         }
@@ -207,16 +236,8 @@ pub(super) async fn reserve_book_upload(pool: &PgPool, user_id: &str, library_id
         return Err(account_snapshot(&mut transaction, user_id).await?.quota_exceeded(size_bytes));
     }
     let reservation = BookUploadReservation { id: uuid::Uuid::new_v4().to_string(), user_id: user_id.to_string(), library_id: library_id.clone(), hash: hash.clone(), expected_size_bytes: size_bytes };
-    let library_id_str = library_id.as_str();
-    let inserted = sqlx::query(include_str!("sql/assets/insert_reservation.sql"))
-        .bind(&reservation.id)
-        .bind(user_id)
-        .bind(library_id_str)
-        .bind(hash_str)
-        .bind(size_i64)
-        .bind(UPLOAD_RESERVATION_TTL_SECONDS)
-        .execute(&mut *transaction)
-        .await;
+    let library_id_str = library_id.to_string();
+    let inserted = sqlx::query(include_str!("sql/assets/insert_reservation.sql")).bind(&reservation.id).bind(user_id).bind(library_id_str).bind(hash_str).bind(size_i64).bind(UPLOAD_RESERVATION_TTL_SECONDS).execute(&mut *transaction).await;
     if let Err(error) = inserted {
         if error.as_database_error().and_then(|database| database.code()).as_deref() == Some("23505") {
             return Err(AssetError::UploadInProgress);
@@ -304,26 +325,26 @@ mod tests {
     async fn seed_user(pool: &PgPool, quota: i64) -> (String, LibraryId) {
         let user_id = uuid::Uuid::new_v4().to_string();
         let email = format!("quota-{}@example.com", uuid::Uuid::new_v4().simple());
-        let library_id = LibraryId::parse(&format!("library-{}", uuid::Uuid::new_v4())).unwrap();
+        let library_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users(id, email) VALUES ($1, $2)").bind(&user_id).bind(email).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO libraries(id, user_id) VALUES ($1, $2)").bind(library_id.as_str()).bind(&user_id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO libraries(id, user_id) VALUES ($1, $2)").bind(library_id.to_string()).bind(&user_id).execute(pool).await.unwrap();
         sqlx::query("INSERT INTO user_storage_account(user_id, quota_bytes) VALUES ($1, $2)").bind(&user_id).bind(quota).execute(pool).await.unwrap();
         (user_id, library_id)
     }
 
-    async fn reference(pool: &PgPool, _user_id: &str, library_id: &LibraryId, hash: &ContentHash, client_seq: i64) {
+    async fn reference(pool: &PgPool, _user_id: &str, library_id: &LibraryId, hash: &ContentHash, replica_seq: i64) {
         sqlx::query(
             "INSERT INTO sync_state(
                  library_id,kind,entity_key,entity_subkey,value,present,content_hash,
-                 changed_at,client_id,client_seq,version_rank,event_id
+                 changed_at,replica_id,replica_seq,version_rank,event_id
              ) VALUES($1,'book_lifecycle',$2,'',$3,TRUE,$4,1,$5,$6,0,$7)",
         )
-        .bind(library_id.as_str())
-        .bind(format!("book-{client_seq}"))
+        .bind(library_id.to_string())
+        .bind(format!("book-{replica_seq}"))
         .bind(Vec::<u8>::new())
         .bind(hash.as_str())
-        .bind(format!("client-{client_seq}"))
-        .bind(client_seq)
+        .bind(format!("replica-{replica_seq}"))
+        .bind(replica_seq)
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(pool)
         .await
@@ -349,6 +370,7 @@ mod tests {
         let second_used: i64 = sqlx::query_scalar("SELECT used_bytes FROM user_storage_account WHERE user_id=$1").bind(&second_user).fetch_one(&pool).await.unwrap();
         let physical_objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_object WHERE content_hash=$1").bind(shared.as_str()).fetch_one(&pool).await.unwrap();
         assert_eq!((first_used, second_used, physical_objects), (60, 60, 1));
+        assert_eq!(storage_usage(&pool, &first_user).await.unwrap(), crate::StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
 
         let too_large = hash();
         assert!(matches!(claim_existing_book(&pool, &first_user, &first_library, &too_large, 41).await, Err(AssetError::QuotaExceeded { .. })));
@@ -393,11 +415,11 @@ mod tests {
         let placement_seq = if reservation.hash == left { 1_i64 } else { 2_i64 };
         sqlx::query(
             "UPDATE sync_state
-             SET present=FALSE, content_hash=NULL, changed_at=2, client_id='remover',client_seq=99,
+             SET present=FALSE, content_hash=NULL, changed_at=2, replica_id='remover',replica_seq=99,
                  version_rank=1, event_id=$3, server_seq=DEFAULT
              WHERE library_id=$1 AND kind='book_lifecycle' AND entity_key=$2 AND entity_subkey=''",
         )
-        .bind(concurrent_library.as_str())
+        .bind(concurrent_library.to_string())
         .bind(format!("book-{placement_seq}"))
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&pool)

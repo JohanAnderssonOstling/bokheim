@@ -1,8 +1,11 @@
+use account_contract::{
+    AuthResponse, EmailRequest, LibraryStorageUsageResponse, LoginRequest, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
+    SessionSummary, StorageUsageResponse,
+};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use account_contract::{AuthResponse, EmailRequest, LoginRequest, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary};
-use server_account::{AccountEmailKind, AccountPolicy, ClientAddressSource, PostgresAccountService};
+use server_account::{AccountEmailKind, ClientAddressSource, PostgresAccountService};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -35,8 +38,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let database_url = std::env::var("SYNC_E2E_DATABASE_URL").expect("run through Backend/tests/run_sync_e2e.sh");
     let database = server_postgres::connect(&database_url).await.unwrap();
     server_postgres::migrate(&database).await.unwrap();
-    let policy = AccountPolicy::with_blocked_email_domains(["disposable.example".to_string()]).unwrap();
-    let accounts = Arc::new(PostgresAccountService::with_policy(database.clone(), policy));
+    let accounts = Arc::new(PostgresAccountService::new(database.clone()));
     let disk = tempfile::tempdir().unwrap();
     let app = sync_server::app(
         database,
@@ -49,15 +51,14 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let email = format!("public-{unique}@example.com");
     let original_password = "correct-horse-public-password";
 
-    let rejected = post(&app, "/api/auth/register", &PublicRegistrationRequest { email: "reader@disposable.example".to_owned(), password: original_password.to_owned() }, None).await;
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-
     let registration = PublicRegistrationRequest { email: email.clone(), password: original_password.to_owned() };
     let registered = post(&app, "/api/auth/register", &registration, None).await;
     assert_eq!(registered.status(), StatusCode::ACCEPTED);
     let verification = accounts.claim_email("registration-test").await.unwrap().unwrap();
     assert_eq!(verification.kind, AccountEmailKind::VerifyEmail);
     assert_eq!(verification.recipient, email);
+    assert_eq!(verification.token.len(), 6);
+    assert!(verification.token.bytes().all(|byte| byte.is_ascii_digit()));
 
     // Existing account identifiers receive the same generic response and do
     // not create another pending account or leak an email.
@@ -114,5 +115,32 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     )
     .await;
     assert!(signed_out.signed_out);
-    assert_eq!(app.oneshot(Request::get("/api/auth/me").header(header::AUTHORIZATION, format!("Bearer {}", current.token)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(app.clone().oneshot(Request::get("/api/auth/me").header(header::AUTHORIZATION, format!("Bearer {}", current.token)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+    let configured_email = format!("configured-{unique}@example.com");
+    let configured = accounts.ensure_configured_user(&configured_email, original_password).await.unwrap();
+    let configured_session = accounts.login(&configured_email, original_password).await.unwrap();
+    let same = accounts.ensure_configured_user(&configured_email, original_password).await.unwrap();
+    assert_eq!(same.user_id, configured.user_id);
+    assert_eq!(accounts.resolve_token(&configured_session.token).await.unwrap().user_id, configured.user_id);
+
+    let database = server_postgres::connect(&database_url).await.unwrap();
+    let quota = 1_000_i64 * 1_000 * 1_000 * 1_000;
+    assert_eq!(server_postgres::configure_user_storage_quota(&database, &configured.user_id, quota).await.unwrap(), quota);
+    let storage: StorageUsageResponse =
+        response_body(app.clone().oneshot(accepted(Request::get("/api/account/storage")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap()).await;
+    assert_eq!(storage, StorageUsageResponse { used_bytes: 0, reserved_bytes: 0, quota_bytes: quota as u64 });
+    // An account holding nothing reports no library shares at all rather than a
+    // row of zeroes: the client knows which libraries exist and fills the rest.
+    let library_storage: LibraryStorageUsageResponse = response_body(
+        app.clone().oneshot(accepted(Request::get("/api/account/storage/libraries")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap(),
+    )
+    .await;
+    assert_eq!(library_storage, LibraryStorageUsageResponse { libraries: Vec::new() });
+
+    let rotated_password = "configured-user-rotated-password";
+    accounts.ensure_configured_user(&configured_email, rotated_password).await.unwrap();
+    assert!(accounts.resolve_token(&configured_session.token).await.is_err());
+    assert!(accounts.login(&configured_email, original_password).await.is_err());
+    assert_eq!(accounts.login(&configured_email, rotated_password).await.unwrap().user.user_id, configured.user_id);
 }

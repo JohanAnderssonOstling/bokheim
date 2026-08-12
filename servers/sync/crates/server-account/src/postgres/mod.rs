@@ -6,11 +6,11 @@ mod public_registration;
 mod rate_limit;
 
 use crate::core::{AccountSession, AuthAttempt, AuthError, AuthenticatedUser, IssuedSession, SessionRevocation};
-use account_contract::{EMAIL_MAX_BYTES, PASSWORD_MAX_BYTES};
+use account_contract::{EMAIL_MAX_BYTES, EMAIL_VERIFICATION_PIN_DIGITS, PASSWORD_MAX_BYTES};
 use chrono::{DateTime, Duration, Utc};
 use server_postgres::PostgresDatabase;
 use sqlx::{PgPool, Postgres, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -27,7 +27,6 @@ fn internal(error: impl std::fmt::Display) -> AuthError {
 
 pub struct PostgresAccountService {
     pool: PgPool,
-    blocked_email_domains: Arc<HashSet<String>>,
     password_permits: Arc<tokio::sync::Semaphore>,
     identity_cache: IdentityCache,
 }
@@ -116,41 +115,13 @@ impl IdentityCache {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct AccountPolicy {
-    blocked_email_domains: Arc<HashSet<String>>,
-}
-
-impl AccountPolicy {
-    pub fn with_blocked_email_domains(domains: impl IntoIterator<Item = String>) -> Result<Self, AuthError> {
-        let mut normalized = HashSet::new();
-        for domain in domains {
-            let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
-            if domain.is_empty() || domain.contains('@') || !valid_domain(&domain) {
-                return Err(AuthError::Internal(format!("invalid blocked email domain {domain:?}")));
-            }
-            normalized.insert(domain);
-        }
-        Ok(Self { blocked_email_domains: Arc::new(normalized) })
-    }
-}
-
 impl PostgresAccountService {
     pub fn new(database: PostgresDatabase) -> Self {
-        Self::with_policy(database, AccountPolicy::default())
+        Self::with_identity_cache(database, IDENTITY_CACHE_MAX_ENTRIES, IDENTITY_CACHE_TTL)
     }
 
-    pub fn with_policy(database: PostgresDatabase, policy: AccountPolicy) -> Self {
-        Self::with_policy_and_identity_cache(database, policy, IDENTITY_CACHE_MAX_ENTRIES, IDENTITY_CACHE_TTL)
-    }
-
-    fn with_policy_and_identity_cache(database: PostgresDatabase, policy: AccountPolicy, max_entries: usize, ttl: StdDuration) -> Self {
-        Self {
-            pool: database.pool().clone(),
-            blocked_email_domains: policy.blocked_email_domains,
-            password_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_OPERATIONS)),
-            identity_cache: IdentityCache::new(max_entries, ttl),
-        }
+    fn with_identity_cache(database: PostgresDatabase, max_entries: usize, ttl: StdDuration) -> Self {
+        Self { pool: database.pool().clone(), password_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_OPERATIONS)), identity_cache: IdentityCache::new(max_entries, ttl) }
     }
 
     async fn hash_password(&self, password: String) -> Result<String, AuthError> {
@@ -225,7 +196,7 @@ fn valid_domain(domain: &str) -> bool {
         })
 }
 
-fn normalized_email(email: &str, blocked_domains: &HashSet<String>) -> Result<String, AuthError> {
+fn normalized_email(email: &str) -> Result<String, AuthError> {
     let email = email.trim();
     if email.len() > EMAIL_MAX_BYTES || !email.is_ascii() || email.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(AuthError::InvalidEmail);
@@ -247,9 +218,6 @@ fn normalized_email(email: &str, blocked_domains: &HashSet<String>) -> Result<St
     if !valid_domain(&domain) {
         return Err(AuthError::InvalidEmail);
     }
-    if blocked_domains.iter().any(|blocked| domain == *blocked || domain.ends_with(&format!(".{blocked}"))) {
-        return Err(AuthError::EmailDomainNotAllowed);
-    }
     Ok(format!("{}@{domain}", local.to_ascii_lowercase()))
 }
 
@@ -259,6 +227,10 @@ fn valid_password_size(password: &str) -> bool {
 
 fn valid_urlsafe_secret(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_verification_pin(value: &str) -> bool {
+    value.len() == EMAIL_VERIFICATION_PIN_DIGITS && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn email_taken(error: &sqlx::Error) -> bool {
@@ -306,7 +278,7 @@ impl PostgresAccountService {
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
-        let Ok(email) = normalized_email(email, &self.blocked_email_domains) else {
+        let Ok(email) = normalized_email(email) else {
             self.verify_password_dummy(if valid_password_size(password) { password.to_owned() } else { "invalid-password-size".to_string() }).await?;
             return Err(AuthError::InvalidCredentials);
         };
@@ -314,8 +286,7 @@ impl PostgresAccountService {
             self.verify_password_dummy("invalid-password-size".to_string()).await?;
             return Err(AuthError::InvalidCredentials);
         }
-        let row: Option<(String, String, String)> =
-            sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
+        let row: Option<(String, String, String)> = sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
         let Some((user_id, stored_email, password_hash)) = row else {
             self.verify_password_dummy(password.to_owned()).await?;
             return Err(AuthError::InvalidCredentials);
@@ -522,6 +493,10 @@ impl PostgresAccountService {
         Ok(revoked)
     }
 
+    pub async fn ensure_configured_user(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
+        self.ensure_configured_user_impl(email, password).await
+    }
+
     pub async fn request_public_registration(&self, email: &str, password: &str) -> Result<(), AuthError> {
         self.request_public_registration_impl(email, password).await
     }
@@ -592,10 +567,8 @@ mod tests {
     #[test]
     fn authentication_inputs_are_bounded_before_expensive_work() {
         assert!(!valid_password_size(&"x".repeat(PASSWORD_MAX_BYTES + 1)));
-        let blocked = HashSet::from(["temporary.example".to_string()]);
-        assert_eq!(normalized_email(" Reader@Example.COM ", &blocked).unwrap(), "reader@example.com");
-        assert!(matches!(normalized_email("reader@temporary.example", &blocked), Err(AuthError::EmailDomainNotAllowed)));
-        assert!(matches!(normalized_email("reader@example", &blocked), Err(AuthError::InvalidEmail)));
+        assert_eq!(normalized_email(" Reader@Example.COM ").unwrap(), "reader@example.com");
+        assert!(matches!(normalized_email("reader@example"), Err(AuthError::InvalidEmail)));
     }
 
     #[test]
@@ -605,6 +578,14 @@ mod tests {
         assert!(!valid_urlsafe_secret("", TOKEN_LEN));
         assert!(!valid_urlsafe_secret(&format!("{token} "), TOKEN_LEN));
         assert!(!valid_urlsafe_secret(&"a".repeat(TOKEN_LEN + 1), TOKEN_LEN));
+    }
+
+    #[test]
+    fn verification_pins_require_exactly_six_ascii_digits() {
+        assert!(valid_verification_pin("012345"));
+        assert!(!valid_verification_pin("12345"));
+        assert!(!valid_verification_pin("1234567"));
+        assert!(!valid_verification_pin("12345a"));
     }
 
     #[tokio::test]
@@ -657,7 +638,6 @@ mod tests {
         service.logout(&refreshed.refresh_token).await.unwrap();
         assert!(matches!(service.refresh_session(&refreshed.refresh_token).await, Err(AuthError::InvalidCredentials)));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user_id).execute(&pool).await.unwrap();
-
     }
 
     #[tokio::test]

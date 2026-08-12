@@ -4,9 +4,10 @@ mod session;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
+#[cfg(not(feature = "kobo"))]
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use ui_runtime::BlockingWorker;
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, BrowserRoot, BrowserWindowGeometry, OpenReader, SaveBrowserState};
@@ -18,9 +19,22 @@ use gpui_component::Root;
 #[cfg(feature = "kobo")]
 use gpui_kobo::KoboKeyboardRoot;
 use reader_ui::{ReaderPreferences, ReaderWindowGeometry, SaveReaderSettings};
+use ui_runtime::BlockingWorker;
 
 use registry::LibraryRegistry;
 use session::{SessionSaveScheduler, UiSession, session_path};
+
+#[cfg(not(feature = "kobo"))]
+const DESKTOP_APP_ID: &str = "se.bokheim.Bokheim";
+
+#[cfg(not(feature = "kobo"))]
+static DESKTOP_ICON: LazyLock<Option<Arc<image::RgbaImage>>> =
+    LazyLock::new(|| image::load_from_memory_with_format(include_bytes!("../../ui/design-tokens/assets/icon/bokheim-180.png"), image::ImageFormat::Png).ok().map(|image| Arc::new(image.into_rgba8())));
+
+#[cfg(not(feature = "kobo"))]
+fn desktop_window_identity() -> (Option<String>, Option<Arc<image::RgbaImage>>) {
+    (Some(DESKTOP_APP_ID.to_owned()), DESKTOP_ICON.clone())
+}
 
 /// Small host-specific policy boundary. The complete browser and reader UI is shared.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +79,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     let saved_session = Rc::new(RefCell::new(UiSession::load(&session_path)));
 
     gpui_component::init(cx);
+    ui_components::init_page_scrolling(cx);
     browser_ui::bind_keys(cx);
     reader_ui::bind_keys(cx);
     let blocking_worker = BlockingWorker::new(cx.background_executor(), 2);
@@ -103,7 +118,6 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
             session.reader_preferences.column_width = preferences.max_line_width_px();
             session.reader_preferences.scale = preferences.zoom();
             session.reader_preferences.line_height = preferences.line_height();
-            session.reader_preferences.theme = preferences.theme();
             session.reader_preferences.font_family = preferences.font_family();
             session.reader_preferences.text_alignment = preferences.text_alignment();
             session.reader_preferences.max_column_count = preferences.max_column_count();
@@ -132,9 +146,6 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         }
         if previous.line_height != preferences.line_height {
             patches.push(ReaderPreferencePatch::LineHeight(preferences.line_height));
-        }
-        if previous.theme != preferences.theme {
-            patches.push(ReaderPreferencePatch::Theme(preferences.theme));
         }
         if previous.font_family != preferences.font_family {
             patches.push(ReaderPreferencePatch::FontFamily(preferences.font_family));
@@ -193,7 +204,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     #[cfg(feature = "audiobooks")]
     let audiobook_worker = blocking_worker.clone();
     let open_reader: OpenReader = Rc::new(move |locator, title, cx| {
-        let library = match reader_backend.library(locator.library_id().as_str()) {
+        let library = match reader_backend.library(locator.library_id()) {
             Ok(library) => library,
             Err(error) => {
                 log::error!("cannot open book {}: library {} is unavailable: {error}", locator.content_hash(), locator.library_id());
@@ -251,8 +262,9 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                             }
                         });
                         let bounds = Bounds::centered(None, gpui::size(px(1080.0), px(760.0)), cx);
+                        let (app_id, icon) = desktop_window_identity();
                         if let Err(error) = cx.open_window(
-                            WindowOptions { titlebar: Some(gpui::TitlebarOptions { title: Some(title.into()), ..Default::default() }), focus: true, window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
+                            WindowOptions { titlebar: Some(gpui::TitlebarOptions { title: Some(title.into()), ..Default::default() }), focus: true, window_bounds: Some(WindowBounds::Windowed(bounds)), app_id, icon, ..Default::default() },
                             move |window, cx| {
                                 let player = audiobook_player::open_library_source(source, initial_position, save_position, cx);
                                 cx.new(|cx| Root::new(player, window, cx))
@@ -299,11 +311,17 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     let browser_session = saved_session.borrow().browser.clone();
     let browser_out = Rc::new(RefCell::new(None));
     let browser_for_window = browser_out.clone();
+    #[cfg(not(feature = "kobo"))]
+    let (app_id, icon) = desktop_window_identity();
+    #[cfg(feature = "kobo")]
+    let (app_id, icon) = (None, None);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(browser_bounds),
             titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(epub_svelte_lib::APP_NAME)), ..Default::default() }),
             focus: true,
+            app_id,
+            icon,
             ..Default::default()
         },
         move |window, cx| {
@@ -334,7 +352,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     cx.activate(true);
 }
 
-fn forward_library_events(browser: WeakEntity<BrowserRoot>, events: async_channel::Receiver<(String, LibraryEvent)>, cx: &mut App) {
+fn forward_library_events(browser: WeakEntity<BrowserRoot>, events: async_channel::Receiver<(epub_svelte_lib::LibraryId, LibraryEvent)>, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Ok((library_id, event)) = events.recv().await {
             cx.update(|cx| {

@@ -14,6 +14,9 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.util.UUID
 import org.json.JSONObject
@@ -28,6 +31,7 @@ class MainActivity : TauriActivity() {
       "application/x-fictionbook+xml",
       "application/vnd.comicbook+zip",
       "application/webpub+zip",
+      "audio/mp4",
       "text/html",
       "application/xhtml+xml",
     )
@@ -39,7 +43,7 @@ class MainActivity : TauriActivity() {
 
   private var readerWebView: WebView? = null
   private var volumePageTurningEnabled = false
-  private val pressedVolumeKeys = mutableSetOf<Int>()
+  private var readerImmersiveEnabled = false
   private var pendingEpubRequestId: String? = null
   private var networkCallbackRegistered = false
   private val connectivityManager by lazy { getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager }
@@ -101,24 +105,36 @@ class MainActivity : TauriActivity() {
 
     return when (event.action) {
       KeyEvent.ACTION_DOWN -> {
-        // A held button produces repeated ACTION_DOWN events. The key remains
-        // latched until ACTION_UP, so one physical press turns exactly one page.
-        if (pressedVolumeKeys.add(event.keyCode)) {
+        // repeatCount is reliable even when Android drops ACTION_UP while focus
+        // changes. Depending on a latched pressed-key set could otherwise leave
+        // page turning permanently stuck after a system UI interruption.
+        if (event.repeatCount == 0) {
           emitVolumePageTurn(if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) "next" else "previous")
         }
         true
       }
-      KeyEvent.ACTION_UP -> {
-        pressedVolumeKeys.remove(event.keyCode)
-        true
-      }
+      KeyEvent.ACTION_UP -> true
       else -> true
     }
   }
 
-  override fun onPause() {
-    pressedVolumeKeys.clear()
-    super.onPause()
+  override fun onResume() {
+    super.onResume()
+    if (readerImmersiveEnabled) applyReaderImmersiveMode(true)
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (hasFocus && readerImmersiveEnabled) applyReaderImmersiveMode(true)
+  }
+
+  private fun applyReaderImmersiveMode(enabled: Boolean) {
+    readerImmersiveEnabled = enabled
+    WindowCompat.getInsetsController(window, window.decorView).apply {
+      systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      if (enabled) hide(WindowInsetsCompat.Type.systemBars())
+      else show(WindowInsetsCompat.Type.systemBars())
+    }
   }
 
   private fun emitVolumePageTurn(direction: String) {
@@ -174,7 +190,7 @@ class MainActivity : TauriActivity() {
     val safeName = displayName
       ?.substringAfterLast('/')
       ?.substringAfterLast('\\')
-      ?.takeIf { name -> listOf("epub", "pdf", "mobi", "azw", "azw3", "fb2", "cbz", "html", "htm", "xhtml", "webpub").any { name.endsWith(".$it", ignoreCase = true) } }
+      ?.takeIf { name -> listOf("epub", "pdf", "mobi", "azw", "azw3", "fb2", "cbz", "html", "htm", "xhtml", "webpub", "m4b").any { name.endsWith(".$it", ignoreCase = true) } }
       ?: "book.epub"
     val extension = safeName.substringAfterLast('.', "epub").lowercase()
     val staged = File(cacheDir, "book-import-${UUID.randomUUID()}.$extension")
@@ -214,8 +230,12 @@ class MainActivity : TauriActivity() {
     fun setVolumePageTurningEnabled(enabled: Boolean) {
       runOnUiThread {
         volumePageTurningEnabled = enabled
-        if (!enabled) pressedVolumeKeys.clear()
       }
+    }
+
+    @JavascriptInterface
+    fun setReaderImmersiveEnabled(enabled: Boolean) {
+      runOnUiThread { applyReaderImmersiveMode(enabled) }
     }
 
     @JavascriptInterface

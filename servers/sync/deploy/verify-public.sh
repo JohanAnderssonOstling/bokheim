@@ -31,7 +31,7 @@ caddy_config=${BOKHEIM_CADDY_CONFIG:-/etc/caddy/Caddyfile}
 socket=${BOKHEIM_SERVER_SOCKET:-/run/bokheim/sync.sock}
 
 systemctl is-active --quiet bokheim-sync.service
-systemctl is-active --quiet catalog-providers.service
+systemctl is-active --quiet bokheim-catalogs.service
 systemctl is-active --quiet caddy.service
 caddy validate --envfile "${caddy_env}" --config "${caddy_config}" >/dev/null
 
@@ -93,13 +93,13 @@ if [[ ${catalog_health} != ok ]]; then
     echo "unexpected catalog HTTPS health response: ${catalog_health}" >&2
     exit 1
 fi
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --compressed --header 'Accept: application/vnd.bokheim+bincode; version=5' --header 'Accept-Encoding: zstd' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
-if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+bincode;[[:space:]]*version=2([[:space:]]|\r)*$' "${headers}"; then
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --header 'Accept: application/vnd.bokheim+bincode; version=10' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
+if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+bincode;[[:space:]]*version=10([[:space:]]|\r)*$' "${headers}"; then
     echo "catalog registry did not use the current Bokheim binary media type" >&2
     exit 1
 fi
-if ! grep -Eqi '^content-encoding:[[:space:]]*zstd([[:space:]]|\r)*$' "${headers}"; then
-    echo "catalog registry was not zstd-compressed" >&2
+if grep -Eqi '^content-encoding:' "${headers}"; then
+    echo "catalog registry unexpectedly used content encoding" >&2
     exit 1
 fi
 if ! openssl s_client -connect "${catalog_domain}:443" -servername "${catalog_domain}" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -checkend 604800 >/dev/null; then

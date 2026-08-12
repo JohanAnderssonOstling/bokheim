@@ -1,5 +1,6 @@
 //! Axum transport adapter for the synchronization server.
 
+mod account;
 mod assets;
 mod bandwidth;
 mod extract;
@@ -10,7 +11,7 @@ mod sync;
 use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
-    routing::{get, head, post},
+    routing::{delete, get, head, post},
     Router,
 };
 use server_account::PostgresAccountService;
@@ -109,11 +110,17 @@ pub fn router_with_operational_limits(
         .route("/api/ready", get(ready))
         .route("/api/health", get(ready))
         .route("/api/notifications", get(notifications::connect))
+        .route("/api/account/storage", get(account::get_storage_usage))
+        .route("/api/account/storage/libraries", get(account::get_library_storage_usage))
         .route("/api/sync/exchange", post(sync::exchange_events))
+        .route("/api/sync/inventory", post(sync::compare_state_inventory))
         .route("/api/libraries", get(sync::list_libraries).post(sync::upsert_library))
+        .route("/api/libraries/deleted", get(sync::list_deleted_libraries))
+        .route("/api/libraries/:library_id", delete(sync::delete_library))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
         .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail))
+        .route("/api/libraries/:library_id/thumbnail-batch", post(assets::post_thumbnail_batch).put(assets::put_thumbnail_batch).layer(DefaultBodyLimit::max(sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }

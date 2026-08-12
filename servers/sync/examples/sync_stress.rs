@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::UpsertLibraryRequest;
-use sync_common::{ClientId, ContentHash, DirId, LibraryId, MutationId, PullStateResponse, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
+use sync_common::{ContentHash, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
+use test_support::fixture_content_hash;
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -177,14 +178,7 @@ async fn login(client: &Client, base: &Url) -> Result<Identity, AnyError> {
     let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required when BOKHEIM_STRESS_TOKEN is not set"))?;
     let password = std::env::var("BOKHEIM_STRESS_PASSWORD").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_PASSWORD is required"))?;
     let encoded = sync_common::wire::encode(&LoginRequest { email, password })?;
-    let response = client
-        .post(endpoint(base, "api/auth/login")?)
-        .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD)
-        .body(encoded)
-        .send()
-        .await?;
+    let response = client.post(endpoint(base, "api/auth/login")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
     let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
     Ok(Identity { token: auth.token.into() })
 }
@@ -203,20 +197,13 @@ async fn register(client: &Client, base: &Url) -> Result<(), AnyError> {
 async fn verify_email(client: &Client, base: &Url) -> Result<Identity, AnyError> {
     let token = std::env::var("BOKHEIM_STRESS_VERIFICATION_TOKEN").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_VERIFICATION_TOKEN is required"))?;
     let encoded = sync_common::wire::encode(&OneTimeTokenRequest { token })?;
-    let response = client
-        .post(endpoint(base, "api/auth/verify-email")?)
-        .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD)
-        .body(encoded)
-        .send()
-        .await?;
+    let response = client.post(endpoint(base, "api/auth/verify-email")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
     let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
     Ok(Identity { token: auth.token.into() })
 }
 
 async fn create_library(client: &Client, base: &Url, identity: &Identity, library_id: &LibraryId) -> Result<(), AnyError> {
-    let request = UpsertLibraryRequest { library_id: library_id.clone(), library_name: format!("Stress {}", library_id.as_str()) };
+    let request = UpsertLibraryRequest { library_id: *library_id, library_name: format!("Stress {library_id}") };
     let _: (sync_common::api::libraries::LibrarySummary, _, _) = post_api(client, endpoint(base, "api/libraries")?, identity, &request).await?;
     Ok(())
 }
@@ -227,54 +214,44 @@ async fn decode_api_response<T: serde::de::DeserializeOwned>(response: reqwest::
         return Err(io::Error::other(format!("API request failed with {status}: {}", response.text().await.unwrap_or_default())).into());
     }
     let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
-    let encoding = match response.headers().get(reqwest::header::CONTENT_ENCODING).and_then(|value| value.to_str().ok()).map(str::trim) {
-        None | Some("") => sync_common::wire::ContentEncoding::Identity,
-        Some(value) if value.eq_ignore_ascii_case(sync_common::wire::CONTENT_ENCODING_ZSTD) => sync_common::wire::ContentEncoding::Zstd,
-        Some(value) => return Err(io::Error::other(format!("unsupported stress response encoding {value}")).into()),
-    };
+    if response.headers().get(reqwest::header::CONTENT_ENCODING).and_then(|value| value.to_str().ok()).map(str::trim).is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity")) {
+        return Err(io::Error::other("compressed stress responses are unsupported").into());
+    }
     let bytes = response.bytes().await?;
     let wire_bytes = bytes.len();
     if !sync_common::wire::is_current_media_type(&content_type) {
         return Err(io::Error::other(format!("unsupported stress response content type {content_type}")).into());
     }
-    let decoded = sync_common::wire::decode_transport(&bytes, encoding, sync_common::wire::MAX_DECODED_RESPONSE_BYTES)?;
+    let decoded = sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_RESPONSE_BYTES)?;
     Ok((decoded, wire_bytes))
 }
 
 async fn post_api<T: serde::Serialize, R: serde::de::DeserializeOwned>(client: &Client, url: Url, identity: &Identity, value: &T) -> Result<(R, usize, usize), AnyError> {
-    let encoded = sync_common::wire::encode_transport(value, true)?;
-    let request_bytes = encoded.bytes.len();
-    let mut request = client
-        .post(url)
-        .bearer_auth(identity.token.as_ref())
-        .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
-        .header(reqwest::header::ACCEPT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD);
-    if encoded.encoding == sync_common::wire::ContentEncoding::Zstd {
-        request = request.header(reqwest::header::CONTENT_ENCODING, sync_common::wire::CONTENT_ENCODING_ZSTD);
-    }
-    let (response, response_bytes) = decode_api_response(request.body(encoded.bytes).send().await?).await?;
+    let encoded = sync_common::wire::encode(value)?;
+    let request_bytes = encoded.len();
+    let request = client.post(url).bearer_auth(identity.token.as_ref()).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE);
+    let (response, response_bytes) = decode_api_response(request.body(encoded).send().await?).await?;
     Ok((response, request_bytes, response_bytes))
 }
 
 /// The server intentionally exposes one atomic exchange endpoint. A pull is
 /// therefore an exchange with no local mutations.
-async fn pull_page(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ClientId, cursor: Option<sync_common::LibraryRevision>) -> Result<(PullStateResponse, usize), AnyError> {
+async fn pull_page(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ReplicaId, cursor: Option<sync_common::LibraryRevision>) -> Result<(PullStateResponse, usize), AnyError> {
     let request = SyncExchangeRequest { library_id, replica_id, mutations: Vec::new(), cursor };
     let (response, _, response_bytes): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
     Ok((response.pull, response_bytes))
 }
 
 async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, book_count: usize, directory_count: usize) -> Result<(), AnyError> {
-    let wire_label = "bincode+zstd";
-    let library_id = LibraryId::parse(&format!("ingest-{}", Uuid::new_v4().simple()))?;
+    let wire_label = "bincode";
+    let library_id = Uuid::new_v4();
     create_library(client, base, identity, &library_id).await?;
-    let replica_id = ClientId::parse("library-ingest")?;
+    let replica_id = Uuid::new_v4();
     let clock = now_ms();
     let mut mutations = Vec::with_capacity(directory_count * 3 + book_count * 2);
     let mut sequence = 1_u64;
     for index in 1..=directory_count {
-        let dir_id = DirId::parse(&format!("ingest-dir-{index}"))?;
+        let dir_id = format!("ingest-dir-{index}");
         mutations.push(wire_mutation("directory_name", dir_id.as_str(), "", sequence, clock)?);
         sequence += 1;
         mutations.push(wire_mutation("directory_parent", dir_id.as_str(), "", sequence, clock)?);
@@ -284,7 +261,7 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     }
     for index in 1..=book_count {
         let content_hash = index.to_string();
-        let dir_id = DirId::parse(&format!("ingest-dir-{}", (index - 1) % directory_count + 1))?;
+        let dir_id = format!("ingest-dir-{}", (index - 1) % directory_count + 1);
         mutations.push(wire_mutation("book_lifecycle", content_hash.clone(), "", sequence, clock)?);
         sequence += 1;
         mutations.push(wire_mutation("placement", content_hash, dir_id.as_str(), sequence, clock)?);
@@ -322,7 +299,7 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     let mut pull_pages = 0_usize;
     let mut response_bytes = 0_usize;
     loop {
-        let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: ClientId::parse("library-ingest-reader")?, mutations: Vec::new(), cursor };
+        let request = SyncExchangeRequest { library_id, replica_id: Uuid::new_v4(), mutations: Vec::new(), cursor };
         let (response, _, wire_bytes): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
         let page = response.pull;
         response_bytes += wire_bytes;
@@ -367,12 +344,12 @@ async fn run_pushes(label: &str, client: &Client, base: &Url, identity: &Identit
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let client_id = ClientId::parse(&format!("stress-{id_offset}-{worker}"))?;
+            let replica_id = Uuid::new_v4();
             let clock = now_ms();
             let mut samples = Vec::with_capacity(workload.requests_per_worker);
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: client_id.clone(), mutations: changes(worker, request_index, workload, id_offset, clock), cursor: None };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: changes(worker, request_index, workload, id_offset, clock), cursor: None };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !response.push.rejected.is_empty() || response.push.accepted.len() != workload.events_per_request {
@@ -405,14 +382,14 @@ async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity:
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let client_id = ClientId::parse(&format!("position-{content_hash_offset}-{worker}"))?;
+            let replica_id = Uuid::new_v4();
             let clock = now_ms();
-            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
+            let content_hash = fixture_content_hash(content_hash_offset + worker as u64 + 1);
             let mut samples = Vec::with_capacity(workload.requests_per_worker);
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: client_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !response.push.rejected.is_empty() || response.push.accepted.len() != 1 {
@@ -445,11 +422,11 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let client_id = ClientId::parse(&format!("position-cycle-{content_hash_offset}-{worker}"))?;
-            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
+            let replica_id = Uuid::new_v4();
+            let content_hash = fixture_content_hash(content_hash_offset + worker as u64 + 1);
             let mut cursor = None;
             loop {
-                let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), client_id.clone(), cursor).await?;
+                let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), replica_id.clone(), cursor).await?;
                 cursor = pulled.next_cursor.or(cursor);
                 if !pulled.has_more {
                     break;
@@ -461,7 +438,7 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: client_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor };
                 let cycle_started = Instant::now();
                 let (exchanged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !exchanged.push.rejected.is_empty() || exchanged.push.accepted.len() != 1 {
@@ -501,9 +478,9 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
         let library_id = libraries[worker % libraries.len()].clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let writer_id = ClientId::parse(&format!("position-remote-writer-{content_hash_offset}-{worker}"))?;
-            let reader_id = ClientId::parse(&format!("position-remote-reader-{content_hash_offset}-{worker}"))?;
-            let content_hash = ContentHash::from_fixture_u64(content_hash_offset + worker as u64 + 1);
+            let writer_id = Uuid::new_v4();
+            let reader_id = Uuid::new_v4();
+            let content_hash = fixture_content_hash(content_hash_offset + worker as u64 + 1);
             let mut cursor = None;
             loop {
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), reader_id.clone(), cursor).await?;
@@ -544,13 +521,13 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
     Ok(())
 }
 
-async fn pull_once(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, client_id: ClientId, expected_events: usize) -> Result<PullSample, AnyError> {
+async fn pull_once(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ReplicaId, expected_events: usize) -> Result<PullSample, AnyError> {
     let started = Instant::now();
     let mut cursor = None;
     let mut response_bytes = 0_usize;
     let mut pulled_events = 0_usize;
     loop {
-        let (pulled, wire_bytes) = pull_page(client, base, identity, library_id.clone(), client_id.clone(), cursor).await?;
+        let (pulled, wire_bytes) = pull_page(client, base, identity, library_id.clone(), replica_id.clone(), cursor).await?;
         response_bytes += wire_bytes;
         if pulled.has_more && pulled.mutations.is_empty() {
             return Err(io::Error::other("pull returned an empty non-final page").into());
@@ -571,8 +548,8 @@ async fn verify_sharded_pulls(client: &Client, base: &Url, identity: &Identity, 
     let started = Instant::now();
     let mut samples = Vec::with_capacity(libraries.len());
     let mut total_bytes = 0_usize;
-    for (index, library) in libraries.iter().enumerate() {
-        let sample = pull_once(client, base, identity, library.clone(), ClientId::parse(&format!("sharded-probe-{index}"))?, expected_events).await?;
+    for library in libraries {
+        let sample = pull_once(client, base, identity, *library, Uuid::new_v4(), expected_events).await?;
         samples.push(sample.elapsed);
         total_bytes += sample.response_bytes;
     }
@@ -585,7 +562,7 @@ async fn run_pull_fanout(client: &Client, base: &Url, identity: &Identity, libra
     let barrier = Arc::new(Barrier::new(fanout));
     let started = Instant::now();
     let mut tasks = JoinSet::new();
-    for index in 0..fanout {
+    for _ in 0..fanout {
         let client = client.clone();
         let base = base.clone();
         let identity = identity.clone();
@@ -593,7 +570,7 @@ async fn run_pull_fanout(client: &Client, base: &Url, identity: &Identity, libra
         let barrier = barrier.clone();
         tasks.spawn(async move {
             barrier.wait().await;
-            pull_once(&client, &base, &identity, library, ClientId::parse(&format!("fanout-probe-{index}"))?, expected_events).await
+            pull_once(&client, &base, &identity, library, Uuid::new_v4(), expected_events).await
         });
     }
     let mut samples = Vec::with_capacity(fanout);
@@ -635,7 +612,7 @@ async fn run_blob_transfers(client: &Client, base: &Url, identity: &Identity, li
         let barrier = barrier.clone();
         let upload_permits = upload_permits.clone();
         tasks.spawn(async move {
-            let url = endpoint(&base, &format!("api/libraries/{}/blobs/{}", fixture.library_id.as_str(), fixture.hash))?;
+            let url = endpoint(&base, &format!("api/libraries/{}/blobs/{}", fixture.library_id, fixture.hash))?;
             barrier.wait().await;
             let started = Instant::now();
             let _permit = upload_permits.acquire_owned().await.map_err(|_| io::Error::other("upload concurrency gate closed"))?;
@@ -664,7 +641,7 @@ async fn run_blob_transfers(client: &Client, base: &Url, identity: &Identity, li
         let identity = identity.clone();
         let barrier = barrier.clone();
         tasks.spawn(async move {
-            let url = endpoint(&base, &format!("api/libraries/{}/blobs/{}", fixture.library_id.as_str(), fixture.hash))?;
+            let url = endpoint(&base, &format!("api/libraries/{}/blobs/{}", fixture.library_id, fixture.hash))?;
             barrier.wait().await;
             let started = Instant::now();
             let response = client.get(url).bearer_auth(identity.token.as_ref()).send().await?;
@@ -690,7 +667,7 @@ async fn run_blob_transfers(client: &Client, base: &Url, identity: &Identity, li
 }
 
 async fn run_blob_manifest_profile(client: &Client, base: &Url, identity: &Identity, book_count: usize, repetitions: usize) -> Result<(), AnyError> {
-    let library_id = LibraryId::parse(&format!("asset-profile-{}", Uuid::new_v4().simple()))?;
+    let library_id = Uuid::new_v4();
     create_library(client, base, identity, &library_id).await?;
     let fixtures: Vec<_> = (0..book_count)
         .map(|index| {
@@ -711,7 +688,7 @@ async fn run_blob_manifest_profile(client: &Client, base: &Url, identity: &Ident
             let hash = hash.clone();
             let bytes = bytes.clone();
             tasks.spawn(async move {
-                let response = client.put(endpoint(&base, &format!("api/libraries/{}/blobs/{}", library_id.as_str(), hash.as_str()))?).bearer_auth(identity.token.as_ref()).body(bytes.as_ref().clone()).send().await?;
+                let response = client.put(endpoint(&base, &format!("api/libraries/{library_id}/blobs/{}", hash.as_str()))?).bearer_auth(identity.token.as_ref()).body(bytes.as_ref().clone()).send().await?;
                 let status = response.status();
                 if !status.is_success() {
                     return Err::<(), AnyError>(io::Error::other(format!("asset profile seed failed with {status}: {}", response.text().await.unwrap_or_default())).into());
@@ -731,7 +708,7 @@ async fn run_blob_manifest_profile(client: &Client, base: &Url, identity: &Ident
     let batch_wall = Instant::now();
     for _ in 0..repetitions {
         let started = Instant::now();
-        let (response, _, _): (BlobManifestResponse, _, _) = post_api(client, endpoint(&base, &format!("api/libraries/{}/blobs/negotiate", library_id.as_str()))?, identity, &BlobManifestRequest { blobs: manifest.clone() }).await?;
+        let (response, _, _): (BlobManifestResponse, _, _) = post_api(client, endpoint(&base, &format!("api/libraries/{library_id}/blobs/negotiate"))?, identity, &BlobManifestRequest { blobs: manifest.clone() }).await?;
         if response.owned.len() != book_count || !response.claimed.is_empty() || !response.upload.is_empty() || !response.rejected.is_empty() {
             return Err(io::Error::other(format!("batch negotiation did not classify all {book_count} seeded blobs as owned")).into());
         }
@@ -795,7 +772,7 @@ async fn profile_upload_kind(client: &Client, base: &Url, identity: &Identity, l
         let len = bytes.len();
         let started = Instant::now();
         let response = client
-            .put(endpoint(base, &format!("api/libraries/{}/blobs/{hash}", library_id.as_str()))?)
+            .put(endpoint(base, &format!("api/libraries/{library_id}/blobs/{hash}"))?)
             .bearer_auth(identity.token.as_ref())
             .header(reqwest::header::CONTENT_LENGTH, len)
             .body(streaming_profile_body(Arc::new(bytes), consumed.clone()))
@@ -826,7 +803,7 @@ async fn profile_upload_kind(client: &Client, base: &Url, identity: &Identity, l
 }
 
 async fn run_upload_pipeline_profile(client: &Client, base: &Url, identity: &Identity, payload_bytes: usize, repetitions: usize) -> Result<(), AnyError> {
-    let library_id = LibraryId::parse(&format!("upload-profile-{}", Uuid::new_v4().simple()))?;
+    let library_id = Uuid::new_v4();
     create_library(client, base, identity, &library_id).await?;
     profile_upload_kind(client, base, identity, &library_id, UploadProfileKind::Valid, payload_bytes, repetitions).await?;
     profile_upload_kind(client, base, identity, &library_id, UploadProfileKind::Unsupported, payload_bytes, repetitions).await?;
@@ -885,9 +862,8 @@ async fn main() -> Result<(), AnyError> {
         println!("stress correctness checks passed for mode=uploads");
         return Ok(());
     }
-    let run_id = Uuid::new_v4().simple().to_string();
-    let sharded: Vec<_> = (0..workload.workers).map(|worker| LibraryId::parse(&format!("stress-{run_id}-shard-{worker}")).expect("generated library id is valid")).collect();
-    let contended = LibraryId::parse(&format!("stress-{run_id}-shared"))?;
+    let sharded: Vec<_> = (0..workload.workers).map(|_| Uuid::new_v4()).collect();
+    let contended = Uuid::new_v4();
     for library in sharded.iter().chain(std::iter::once(&contended)) {
         create_library(&client, &base, &identity, library).await?;
     }
@@ -910,7 +886,7 @@ async fn main() -> Result<(), AnyError> {
         run_pushes("single-library position seed", &client, &base, &identity, std::slice::from_ref(&contended), Workload { requests_per_worker: 1, events_per_request: 1, ..workload }, 3_000_000_000).await?;
         run_position_pushes("single-library reading-position push", &client, &base, &identity, std::slice::from_ref(&contended), position_workload, 3_000_000_000).await?;
         let expected_contended_events = if mode == "position" { workload.workers * 2 } else { total_events + workload.workers * 2 };
-        let _ = pull_once(&client, &base, &identity, contended.clone(), ClientId::parse("position-correctness-probe")?, expected_contended_events).await?;
+        let _ = pull_once(&client, &base, &identity, contended, Uuid::new_v4(), expected_contended_events).await?;
     }
 
     if mode == "full" {

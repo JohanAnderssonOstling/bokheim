@@ -19,8 +19,10 @@ sync-server
   `postgres` modules. Synchronization receives only its `IdentityResolver`
   capability; account persistence owns password hashing, sessions, signup,
   rate limits, and the account-email outbox.
-- Email delivery is external. `server-account` exposes the outbox and sender
-  traits, but contains no SMTP, sendmail, or provider-specific implementation.
+- `server-account` exposes a provider-neutral email outbox and sender trait. The
+  composition binary runs a Resend adapter when its API key and sender address
+  are configured; account persistence contains no provider credentials or HTTP
+  implementation.
 - `server-postgres` owns the shared PostgreSQL pool, readiness probe, ordered
   schema application, synchronization and quota persistence, atomic
   library-ownership authorization, asset upload orchestration, and PostgreSQL
@@ -52,14 +54,15 @@ server tests.
 
 ## Public registration
 
-Public signup is always exposed. Server startup requires:
+Public signup is always exposed. Email addresses are validated syntactically and
+must be verified before an account becomes active.
 
-- `BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE`, an actively maintained, non-empty,
-  one-domain-per-line denylist no larger than 4 MiB;
-
-An external email worker must consume `account_email_outbox`, claim rows with
-the account outbox contract, and deliver verification/reset messages through
-the configured provider.
+Set `BOKHEIM_RESEND_API_KEY` and `BOKHEIM_EMAIL_FROM` together to enable the
+built-in Resend worker. The API key may instead be supplied as the
+`resend_api_key` systemd credential. The worker claims `account_email_outbox`
+rows, uses each row ID as Resend's idempotency key, removes successful sends,
+and retries failures without logging recipients or one-time tokens. If neither
+setting is present, the server starts but leaves account emails queued.
 
 Registration reserves the canonical email and username for 24 hours and stores
 only an Argon2 password hash plus a hash of the verification token. Verification
@@ -73,6 +76,12 @@ Requests for existing accounts and unknown password-reset emails deliberately
 return the same `202 Accepted` response. Disposable-domain policy rejection and
 malformed email/password inputs return `400` because they reveal no account
 existence.
+
+For development deployments, `BOKHEIM_TEST_USER_EMAIL` together with either
+`BOKHEIM_TEST_USER_PASSWORD` or the `test_user_password` systemd credential
+upserts a verified account at startup. The configured password is validated by
+the normal account policy. Deployment assigns that account a fixed 1000 GB
+book quota; password changes revoke its existing sessions.
 
 ## Authentication lookup cache
 
@@ -145,13 +154,12 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+bincode; version=5` representation. The wire body
+`application/vnd.bokheim+bincode; version=11` representation. The wire body
 starts with a Bokheim magic/version header and uses positional bincode fields
-and numeric enum variants. Bodies of at least 1 KiB are zstd level-1 compressed when compression makes them
-smaller. Decoded bodies retain the 8 MiB request limit, preventing compressed
-expansion from bypassing request bounds. JSON is neither accepted nor returned
-by this protocol; unsupported media types, missing version negotiation, and
-unsupported versions fail before application logic runs. Raw book and thumbnail
+and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
+request limit. JSON is neither accepted nor returned by this protocol;
+unsupported media types, missing version negotiation, unsupported versions, and
+compressed bodies fail before application logic runs. Raw book and thumbnail
 endpoints continue to transfer their exact validated bytes.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
@@ -161,8 +169,7 @@ activate the hierarchy only when its real parent state arrives. A child or book
 placement can consequently commit on one page without violating foreign keys or
 becoming visible before a dependency delivered by a later page.
 
-Compression is deliberately limited to synchronization metadata. Book and
-thumbnail routes retain their original bytes, content hashes, content lengths,
+Book and thumbnail routes retain their original bytes, content hashes, content lengths,
 and byte-range semantics and never pass through the sync codec.
 
 Upload and download traffic have independent, work-conserving deficit-round-
@@ -191,8 +198,6 @@ BOKHEIM_DATABASE_ACQUIRE_TIMEOUT_SECONDS=5
 BOKHEIM_DATABASE_IDLE_TIMEOUT_SECONDS=600
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS=16
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT=4
-BOKHEIM_MAX_STAGED_BOOK_BYTES=4294967296
-BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT=2147483648
 BOKHEIM_MAX_IN_FLIGHT_REQUESTS=512
 BOKHEIM_NOTIFICATION_HEARTBEAT_SECS=60
 BOKHEIM_NOTIFICATION_TIMEOUT_SECS=150
@@ -282,4 +287,4 @@ size can be changed with `BOKHEIM_STRESS_WORKERS`,
 by `BOKHEIM_STRESS_BLOB_BYTES`. All values are bounded, and the workload binary
 refuses non-loopback URLs so it cannot accidentally load-test the public service.
 
-`BOKHEIM_STRESS_MODE=ingest` uses the production bincode+zstd sync transport.
+`BOKHEIM_STRESS_MODE=ingest` uses the production bincode sync transport.

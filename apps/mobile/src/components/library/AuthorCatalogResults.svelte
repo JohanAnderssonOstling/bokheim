@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
 
   import { commands } from "../../lib/commands";
+  import { ROOT_DIRECTORY_ID } from "../../lib/directory-id";
   import { openExternalUrl } from "../../lib/external-links";
   import CatalogCover from "../store/CatalogCover.svelte";
   import type { CatalogAuthorDiscoveryMatch, CatalogAuthorDiscoveryResult, CatalogPublicationAction } from "../../lib/bindings";
@@ -38,7 +39,7 @@
     error = "";
     try {
       if (action.kind === "import") {
-        await commands.importCatalogBook({ library_id: activeLibraryId, directory_id: "__root__" }, action.request);
+        await commands.importCatalogBook({ library_id: activeLibraryId, directory_id: ROOT_DIRECTORY_ID }, action.request);
         imported = { ...imported, [key]: true };
         await onimported();
       } else {
@@ -105,21 +106,21 @@
 </section>
 
 <style>
-  .catalog-results { display: grid; gap: .7rem; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--color-border-color); }
+  .catalog-results { display: grid; gap: .7rem; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--color-border); }
   header { display: flex; align-items: end; justify-content: space-between; gap: .75rem; }
   header p, h3, h4, p { margin: 0; }
   header p { color: var(--color-accent); font-size: .62rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
-  header h3 { margin-top: .15rem; color: var(--color-heading-text); font: 600 1.05rem var(--font-heading-family); }
+  header h3 { margin-top: .15rem; color: var(--color-ink-text); font: 600 1.05rem var(--font-interface-family); }
   header small, .summary, .status { color: var(--color-subtle-text); font-size: .7rem; line-height: 1.5; }
   .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(23rem, 100%), 1fr)); gap: .6rem; }
-  article { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) auto; align-items: center; gap: .75rem; min-height: 5.2rem; padding: .65rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); background: var(--color-white-surface); }
+  article { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) auto; align-items: center; gap: .75rem; min-height: 5.2rem; padding: .65rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); }
   .cover { width: 3.4rem; height: 4.8rem; overflow: hidden; border-radius: .25rem; background: var(--color-active-highlight); }
   .copy { display: grid; min-width: 0; gap: .12rem; }
-  .copy h4 { overflow: hidden; color: var(--color-heading-text); font: 650 .86rem var(--font-heading-family); text-overflow: ellipsis; white-space: nowrap; }
+  .copy h4 { overflow: hidden; color: var(--color-ink-text); font: 650 .86rem var(--font-interface-family); text-overflow: ellipsis; white-space: nowrap; }
   .copy p, .copy small { overflow: hidden; color: var(--color-subtle-text); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
   .evidence { width: max-content; max-width: 100%; color: var(--color-subtle-text); font-size: .58rem; font-weight: 750; text-transform: uppercase; }
   .evidence.strong-evidence { color: var(--color-accent); }
-  .action, .retry { min-height: 2.35rem; padding: .45rem .7rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-white-surface); background: var(--color-accent); font: inherit; font-size: .7rem; font-weight: 750; cursor: pointer; }
+  .action, .retry { min-height: 2.35rem; padding: .45rem .7rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font: inherit; font-size: .7rem; font-weight: 750; cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .error { color: var(--color-danger-text); font-size: .72rem; }
   .retry { width: max-content; }

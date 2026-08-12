@@ -8,14 +8,15 @@ publish = false
 workspace = true
 
 [dependencies]
+account-contract = { path = "../../../../shared/account-contract" }
 axum = { version = "0.7", features = ["ws"] }
-wire = { path = "../../../../crates/wire" }
+wire = { path = "../../../../shared/wire" }
 futures-util = "0.3"
 server-account = { path = "../server-account" }
 server-asset-store = { path = "../server-asset-store" }
 server-postgres = { path = "../server-postgres" }
 server-wire-http = { path = "../server-wire-http" }
-sync-common = { path = "../../../../crates/sync-common" }
+sync-common = { path = "../../../../shared/sync-common" }
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "util"] }

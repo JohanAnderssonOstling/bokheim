@@ -13,8 +13,8 @@ fi
 
 sync_binary=${source_root}/deploy-target/release/sync-server
 catalog_binary=${source_root}/deploy-target/release/catalog-server
-catalog_file=${source_root}/servers/catalog/opds.json
-for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/servers/sync/deploy/bokheim-sync.service" "${source_root}/servers/catalog/deploy/catalog-providers.service" "${source_root}/servers/sync/deploy/Caddyfile"; do
+catalog_file=${source_root}/servers/opds-cache/opds.json
+for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/servers/sync/deploy/bokheim-sync.service" "${source_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${source_root}/servers/sync/deploy/Caddyfile"; do
     if [[ ! -f ${required} ]]; then
         echo "missing staged deployment file: ${required}" >&2
         exit 1
@@ -74,13 +74,22 @@ install -d -o bokheim -g bokheim -m 0750 /var/lib/bokheim/assets/books /var/lib/
 
 systemctl enable --now postgresql.service
 install -d -o root -g root -m 0700 /etc/bokheim
-disposable_domains_file=/etc/bokheim/disposable-email-domains
-if [[ ! -f ${disposable_domains_file} ]] || ! grep -Eq '^[[:space:]]*[^#[:space:]]' "${disposable_domains_file}"; then
-    echo "create ${disposable_domains_file} with at least one disposable email domain before installing" >&2
+rm -f -- /etc/bokheim/disposable-email-domains \
+    /usr/local/share/bokheim/disposable-email-domains
+resend_credential=/etc/bokheim/resend-api-key
+if [[ ! -s ${resend_credential} ]]; then
+    echo "create ${resend_credential} with a Resend API key before installing" >&2
     exit 2
 fi
-chmod 0644 "${disposable_domains_file}"
-chown root:root "${disposable_domains_file}"
+chmod 0600 "${resend_credential}"
+chown root:root "${resend_credential}"
+test_user_credential=/etc/bokheim/test-user-password
+if [[ ! -s ${test_user_credential} ]]; then
+    echo "create ${test_user_credential} with the test account password before installing" >&2
+    exit 2
+fi
+chmod 0600 "${test_user_credential}"
+chown root:root "${test_user_credential}"
 database_credential=/etc/bokheim/database-url
 if [[ -f ${database_credential} ]]; then
     database_url=$(<"${database_credential}")
@@ -129,7 +138,7 @@ install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/catalog-providers/opds.json
 
 install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/bokheim-sync.service" /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/servers/catalog/deploy/catalog-providers.service" /etc/systemd/system/catalog-providers.service
+install -o root -g root -m 0644 "${source_root}/servers/opds-cache/deploy/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/caddy-bokheim.conf" /etc/systemd/system/caddy.service.d/bokheim.conf
 install -o root -g root -m 0644 "${source_root}/servers/sync/deploy/Caddyfile" /etc/caddy/Caddyfile
@@ -144,9 +153,9 @@ rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.t
 
 systemctl daemon-reload
 caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
-systemctl enable bokheim-sync.service catalog-providers.service caddy.service
+systemctl enable bokheim-sync.service bokheim-catalogs.service caddy.service
 systemctl restart bokheim-sync.service
-systemctl restart catalog-providers.service
+systemctl restart bokheim-catalogs.service
 systemctl restart caddy.service
 
 for _ in $(seq 1 20); do
@@ -159,6 +168,7 @@ done
 if [[ ${sync_ready:-false} != true ]]; then
     echo "sync server did not become healthy" >&2
     systemctl --no-pager --full status bokheim-sync.service >&2 || true
+    journalctl -u bokheim-sync.service -n 40 --no-pager -o cat >&2 || true
     exit 1
 fi
 curl --fail --silent --show-error http://127.0.0.1:8090/health | grep -Fqx ok

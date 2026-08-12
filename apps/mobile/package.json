@@ -13,8 +13,11 @@
     "test:semantic-links": "node --test src/lib/semantic-links.test.ts",
     "test:browsing-contract": "node --test src/lib/browsing-contract.test.ts",
     "test:account-contract": "node --test src/lib/account-contract.test.ts",
+    "test:sync-summary": "node --test src/lib/sync-summary.test.ts",
     "generate:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings",
     "check:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings -- --check",
+    "generate:tokens": "cargo run --manifest-path ../../client/app-contract/Cargo.toml --bin export_design_tokens",
+    "check:tokens": "cargo run --manifest-path ../../client/app-contract/Cargo.toml --bin export_design_tokens -- --check",
     "check:watch": "svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },

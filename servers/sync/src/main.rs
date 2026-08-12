@@ -1,9 +1,13 @@
-use server_account::{AccountPolicy, PostgresAccountService};
+mod resend;
+
+use server_account::PostgresAccountService;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use sync_server::transport::ServerConfig;
 use tracing_subscriber::{fmt, EnvFilter};
+
+const TEST_USER_QUOTA_BYTES: i64 = 1_000 * 1_000 * 1_000 * 1_000;
 
 fn secret_from_environment_or_systemd_credential(environment_name: &str, credential_name: &str) -> Result<Option<String>, io::Error> {
     let environment = std::env::var(environment_name).ok().filter(|value| !value.is_empty());
@@ -20,20 +24,6 @@ fn secret_from_environment_or_systemd_credential(environment_name: &str, credent
         (Some(_), Some(_)) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("configure only one of {environment_name} or the {credential_name} systemd credential"))),
         (environment, credential) => Ok(environment.or(credential)),
     }
-}
-
-fn blocked_email_domains() -> Result<Vec<String>, io::Error> {
-    let path = std::env::var_os("BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE is required"))?;
-    let path = PathBuf::from(path);
-    let metadata = std::fs::metadata(&path)?;
-    if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "disposable email domain list must be a regular file no larger than 4 MiB"));
-    }
-    let domains: Vec<_> = std::fs::read_to_string(path)?.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).map(ToOwned::to_owned).collect();
-    if domains.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "disposable email domain list must contain at least one domain"));
-    }
-    Ok(domains)
 }
 
 #[tokio::main]
@@ -65,8 +55,24 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let database_pool = server_postgres::DatabasePoolConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let pool = server_postgres::connect_configured(&database_url, database_pool).await?;
 
-    let policy = AccountPolicy::with_blocked_email_domains(blocked_email_domains()?).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let auth = Arc::new(PostgresAccountService::with_policy(pool.clone(), policy));
+    let auth = Arc::new(PostgresAccountService::new(pool.clone()));
+    let test_user_email = std::env::var("BOKHEIM_TEST_USER_EMAIL").ok().filter(|value| !value.is_empty());
+    let test_user_password = secret_from_environment_or_systemd_credential("BOKHEIM_TEST_USER_PASSWORD", "test_user_password")?;
+    match (test_user_email, test_user_password) {
+        (Some(email), Some(password)) => {
+            let user = auth.ensure_configured_user(&email, &password).await.map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            server_postgres::configure_user_storage_quota(&pool, &user.user_id, TEST_USER_QUOTA_BYTES).await?;
+            tracing::info!(user_id = %user.user_id, quota_bytes = TEST_USER_QUOTA_BYTES, "configured test account");
+        }
+        (None, None) => {}
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_TEST_USER_EMAIL and BOKHEIM_TEST_USER_PASSWORD/test_user_password credential must be configured together").into()),
+    }
+    let resend_api_key = secret_from_environment_or_systemd_credential("BOKHEIM_RESEND_API_KEY", "resend_api_key")?;
+    if let Some(sender) = resend::ResendEmailSender::from_config(resend_api_key, std::env::var("BOKHEIM_EMAIL_FROM").ok())? {
+        tokio::spawn(resend::run_email_worker(auth.clone(), sender));
+    } else {
+        tracing::warn!("email delivery is not configured; account emails will remain queued");
+    }
 
     let server = ServerConfig::from_env()?;
     let transfer_limits = server_http::TransferLimits::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;

@@ -19,13 +19,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
 tauri-plugin-os = "2"
 tauri-plugin-opener = "2"
-epub_svelte_lib = { package = "epub-svelte", path = "../../../crates/backend", default-features = false, features = ["mobile"] }
+epub_svelte_lib = { package = "epub-svelte", path = "../../../client/backend", default-features = false, features = ["mobile"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -20,5 +20,8 @@ CREATE TABLE libraries (
     id text PRIMARY KEY,
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
-    name text NOT NULL DEFAULT 'Library'::text
+    name text NOT NULL DEFAULT 'Library'::text,
+    -- A deleted UUID is retained permanently so stale replicas cannot
+    -- recreate the same logical library through upsert or implicit sync.
+    deleted_at timestamp with time zone
 );

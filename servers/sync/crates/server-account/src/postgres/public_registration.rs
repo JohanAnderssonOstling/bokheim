@@ -27,15 +27,57 @@ fn validate_password(password: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+fn validate_configured_password(password: &str) -> Result<(), AuthError> {
+    if password.is_empty() || password.len() > PASSWORD_MAX_BYTES {
+        return Err(AuthError::InvalidPassword { min_characters: 1, max_bytes: PASSWORD_MAX_BYTES });
+    }
+    Ok(())
+}
+
 impl PostgresAccountService {
+    pub(super) async fn ensure_configured_user_impl(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
+        let email = normalized_email(email)?;
+        validate_configured_password(password)?;
+
+        let existing: Option<(String, Option<String>)> = sqlx::query_as("SELECT id, password_hash FROM users WHERE email=$1").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
+        if let Some((user_id, Some(password_hash))) = &existing {
+            if self.verify_password(password.to_owned(), password_hash.clone()).await? {
+                return Ok(AuthenticatedUser { user_id: user_id.clone(), email });
+            }
+        }
+
+        let password_hash = self.hash_password(password.to_owned()).await?;
+        let proposed_user_id = uuid::Uuid::new_v4().to_string();
+        let mut transaction = self.pool.begin().await.map_err(internal)?;
+        let user_id: String = sqlx::query_scalar(
+            "INSERT INTO users(id, password_hash, email) VALUES ($1, $2, $3)
+             ON CONFLICT (email) WHERE email IS NOT NULL
+             DO UPDATE SET password_hash=EXCLUDED.password_hash
+             RETURNING id",
+        )
+        .bind(proposed_user_id)
+        .bind(password_hash)
+        .bind(&email)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(internal)?;
+        sqlx::query("DELETE FROM auth_session WHERE user_id=$1").bind(&user_id).execute(&mut *transaction).await.map_err(internal)?;
+        sqlx::query("DELETE FROM password_reset WHERE user_id=$1").bind(&user_id).execute(&mut *transaction).await.map_err(internal)?;
+        sqlx::query("DELETE FROM pending_registration WHERE email=$1").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
+        sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
+        transaction.commit().await.map_err(internal)?;
+        self.identity_cache.invalidate_user(&user_id);
+        Ok(AuthenticatedUser { user_id, email })
+    }
+
     pub(super) async fn request_public_registration_impl(&self, email: &str, password: &str) -> Result<(), AuthError> {
-        let email = normalized_email(email, &self.blocked_email_domains)?;
+        let email = normalized_email(email)?;
         validate_password(password)?;
 
         // Hash before conflict checks so accepted responses do not expose
         // email existence through the dominant work factor.
         let password_hash = self.hash_password(password.to_owned()).await?;
-        let (token, token_hash) = crypto::mint_token();
+        let (token, token_hash) = crypto::mint_verification_pin();
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         sqlx::query("DELETE FROM pending_registration WHERE expires_at <= now()").execute(&mut *transaction).await.map_err(internal)?;
         let conflict: bool = sqlx::query_scalar(
@@ -70,7 +112,7 @@ impl PostgresAccountService {
     }
 
     pub(super) async fn resend_verification_impl(&self, email: &str) -> Result<(), AuthError> {
-        let email = normalized_email(email, &self.blocked_email_domains)?;
+        let email = normalized_email(email)?;
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         let pending: Option<(String, chrono::DateTime<Utc>)> =
             sqlx::query_as("SELECT id, last_sent_at FROM pending_registration WHERE email=$1 AND expires_at > now() FOR UPDATE").bind(&email).fetch_optional(&mut *transaction).await.map_err(internal)?;
@@ -82,7 +124,7 @@ impl PostgresAccountService {
             transaction.commit().await.map_err(internal)?;
             return Ok(());
         }
-        let (token, token_hash) = crypto::mint_token();
+        let (token, token_hash) = crypto::mint_verification_pin();
         sqlx::query(
             "UPDATE pending_registration
              SET verification_hash=$2, expires_at=$3, last_sent_at=now()
@@ -100,7 +142,7 @@ impl PostgresAccountService {
     }
 
     pub(super) async fn verify_email_impl(&self, token: &str) -> Result<IssuedSession, AuthError> {
-        if !super::valid_urlsafe_secret(token, TOKEN_LEN) {
+        if !super::valid_verification_pin(token) {
             return Err(AuthError::InvalidOneTimeToken);
         }
         let token_hash = crypto::sha256_hex(token.as_bytes());
@@ -131,7 +173,7 @@ impl PostgresAccountService {
     }
 
     pub(super) async fn request_password_reset_impl(&self, email: &str) -> Result<(), AuthError> {
-        let email = normalized_email(email, &self.blocked_email_domains)?;
+        let email = normalized_email(email)?;
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         let user_id: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email=$1").bind(&email).fetch_optional(&mut *transaction).await.map_err(internal)?;
         let Some(user_id) = user_id else {
@@ -190,5 +232,17 @@ impl PostgresAccountService {
         transaction.commit().await.map_err(internal)?;
         self.identity_cache.invalidate_user(&user_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_configured_password, validate_password};
+
+    #[test]
+    fn configured_test_password_may_be_short_but_public_passwords_may_not() {
+        assert!(validate_configured_password("short").is_ok());
+        assert!(validate_password("short").is_err());
+        assert!(validate_configured_password("").is_err());
     }
 }

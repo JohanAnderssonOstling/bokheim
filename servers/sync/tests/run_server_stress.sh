@@ -148,10 +148,8 @@ cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml" --bin
 stress_email="server-stress@example.com"
 stress_password="server-stress-user-password"
 mkdir -p "$stress_tmp/assets/books" "$stress_tmp/assets/thumbnails"
-printf '%s\n' 'disposable.invalid' >"$stress_tmp/disposable-email-domains"
 DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
 SYNC_SERVER_ADDR="127.0.0.1:$server_port" \
-BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE="$stress_tmp/disposable-email-domains" \
 BOKHEIM_ASSETS_DIR="$stress_tmp/assets" \
 RUST_LOG=warn \
 "$server_target/release/sync-server" >"$stress_tmp/server.log" 2>&1 &
