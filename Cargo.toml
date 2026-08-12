@@ -15,6 +15,7 @@ members = [
     "shared/content-address",
     "shared/catalog-contract",
     "shared/catalog-model",
+    "shared/litteraturbanken",
     "shared/opds",
     "shared/account-contract",
     "shared/catalog-core",

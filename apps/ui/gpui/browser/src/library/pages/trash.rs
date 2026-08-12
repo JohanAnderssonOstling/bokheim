@@ -1,0 +1,230 @@
+//! Library Trash. Deleted items remain recoverable here until explicitly purged.
+
+use epub_svelte_lib::library::{LibraryTrashView, TrashedBook, TrashedFolder};
+use gpui::prelude::*;
+use gpui::{Context, IntoElement, Render, SharedString, Window, div, px};
+use gpui_component::dialog::DialogButtonProps;
+use gpui_component::{IconName, WindowExt};
+use ui_components as components;
+
+use crate::library::services::{LatestRequest, LibraryContext};
+
+pub(crate) struct TrashPage {
+    ui: LibraryContext,
+    contents: Option<LibraryTrashView>,
+    error: Option<SharedString>,
+    request: LatestRequest,
+}
+
+impl TrashPage {
+    pub(crate) fn new(ui: LibraryContext) -> Self {
+        Self { ui, contents: None, error: None, request: LatestRequest::default() }
+    }
+
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        let generation = self.request.begin();
+        let load = self.ui.load_trash();
+        let task = cx.spawn(async move |page, cx| {
+            let result = load.await;
+            let _ = page.update(cx, |page, cx| {
+                if !page.request.is_current(generation) {
+                    return;
+                }
+                match result {
+                    Ok(contents) => {
+                        page.contents = Some(contents);
+                        page.error = None;
+                    }
+                    Err(error) => page.error = Some(error.into()),
+                }
+                cx.notify();
+            });
+        });
+        self.request.install(task);
+    }
+
+    fn finish(&mut self, result: Result<(), String>, action: &str, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => self.refresh(cx),
+            Err(error) => {
+                self.error = Some(format!("Could not {action}: {error}").into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn restore_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
+        let operation = self.ui.restore_book(book.content_hash);
+        cx.spawn(async move |page, cx| {
+            let result = operation.await;
+            let _ = page.update(cx, |page, cx| page.finish(result, "restore book", cx));
+        })
+        .detach();
+    }
+
+    fn restore_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
+        let operation = self.ui.restore_folder(folder.id, None);
+        cx.spawn(async move |page, cx| {
+            let result = operation.await.map(|_| ());
+            let _ = page.update(cx, |page, cx| page.finish(result, "restore folder", cx));
+        })
+        .detach();
+    }
+
+    fn purge_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
+        let operation = self.ui.purge_book(book.content_hash);
+        cx.spawn(async move |page, cx| {
+            let result = operation.await;
+            let _ = page.update(cx, |page, cx| page.finish(result, "delete book permanently", cx));
+        })
+        .detach();
+    }
+
+    fn purge_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
+        let operation = self.ui.purge_folder(folder.id);
+        cx.spawn(async move |page, cx| {
+            let result = operation.await;
+            let _ = page.update(cx, |page, cx| page.finish(result, "delete folder permanently", cx));
+        })
+        .detach();
+    }
+
+    fn confirm_purge_book(&self, book: TrashedBook, cx: &mut Context<Self>) {
+        let page = cx.entity();
+        self.ui.with_window(cx, move |window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let page = page.clone();
+                let book = book.clone();
+                dialog
+                    .title(format!("Delete “{}” permanently?", book.title))
+                    .child("The book file, metadata, reading data, and placements will be removed. This cannot be undone.")
+                    .button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true))
+                    .on_ok(move |_, _, cx| {
+                        page.update(cx, |page, cx| page.purge_book(book.clone(), cx));
+                        true
+                    })
+            });
+        });
+    }
+
+    fn confirm_purge_folder(&self, folder: TrashedFolder, cx: &mut Context<Self>) {
+        let page = cx.entity();
+        self.ui.with_window(cx, move |window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let page = page.clone();
+                let folder = folder.clone();
+                dialog
+                    .title(format!("Delete “{}” permanently?", folder.name))
+                    .child("The folder will be removed permanently. Its books will not be permanently deleted.")
+                    .button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true))
+                    .on_ok(move |_, _, cx| {
+                        page.update(cx, |page, cx| page.purge_folder(folder.clone(), cx));
+                        true
+                    })
+            });
+        });
+    }
+
+    fn empty(&mut self, cx: &mut Context<Self>) {
+        let operation = self.ui.empty_trash();
+        cx.spawn(async move |page, cx| {
+            let result = operation.await;
+            let _ = page.update(cx, |page, cx| page.finish(result, "empty Trash", cx));
+        })
+        .detach();
+    }
+
+    fn confirm_empty(&self, cx: &mut Context<Self>) {
+        let page = cx.entity();
+        self.ui.with_window(cx, move |window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let page = page.clone();
+                dialog.title("Empty Trash?").child("Books and folders in Trash will be deleted permanently. This cannot be undone.").button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true)).on_ok(
+                    move |_, _, cx| {
+                        page.update(cx, |page, cx| page.empty(cx));
+                        true
+                    },
+                )
+            });
+        });
+    }
+
+    fn render_book(&self, book: &TrashedBook, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
+        let restore_book = book.clone();
+        let purge_book = book.clone();
+        let restore = cx.entity();
+        let purge = restore.clone();
+        components::browser_settings_row(
+            book.title.clone(),
+            if book.format.is_empty() { "Book".to_owned() } else { book.format.to_uppercase() },
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(components::topbar_action_button(format!("restore-book-{}", book.content_hash), "Restore", IconName::Undo2, theme).on_click(move |_, _, cx| {
+                    restore.update(cx, |page, cx| page.restore_book(restore_book.clone(), cx));
+                }))
+                .child(components::topbar_action_button(format!("purge-book-{}", book.content_hash), "Delete permanently", IconName::WindowClose, theme).on_click(move |_, _, cx| {
+                    purge.update(cx, |page, cx| page.confirm_purge_book(purge_book.clone(), cx));
+                })),
+            theme,
+        )
+    }
+
+    fn render_folder(&self, folder: &TrashedFolder, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
+        let restore_folder = folder.clone();
+        let purge_folder = folder.clone();
+        let restore = cx.entity();
+        let purge = restore.clone();
+        components::browser_settings_row(
+            folder.name.clone(),
+            "Folder",
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(components::topbar_action_button(format!("restore-folder-{}", folder.id), "Restore", IconName::Undo2, theme).on_click(move |_, _, cx| {
+                    restore.update(cx, |page, cx| page.restore_folder(restore_folder.clone(), cx));
+                }))
+                .child(components::topbar_action_button(format!("purge-folder-{}", folder.id), "Delete permanently", IconName::WindowClose, theme).on_click(move |_, _, cx| {
+                    purge.update(cx, |page, cx| page.confirm_purge_folder(purge_folder.clone(), cx));
+                })),
+            theme,
+        )
+    }
+}
+
+impl Render for TrashPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = components::browser_theme(cx);
+        let Some(contents) = self.contents.as_ref() else {
+            return components::browser_loading_message("Loading Trash…", theme).into_any_element();
+        };
+        let empty = contents.books.is_empty() && contents.folders.is_empty();
+        let page = cx.entity();
+        let header =
+            components::browser_topbar(theme).child(components::browser_topbar_left().child(div().text_xl().font_weight(gpui::FontWeight::SEMIBOLD).child("Trash"))).child(components::browser_topbar_right().when(!empty, |actions| {
+                actions.child(components::topbar_action_button("empty-trash", "Empty Trash", IconName::WindowClose, theme).on_click(move |_, _, cx| {
+                    page.update(cx, |page, cx| page.confirm_empty(cx));
+                }))
+            }));
+        let mut body = components::browser_settings_page();
+        if empty {
+            body = body.child(components::browser_actionable_empty("Trash is empty", "Deleted books and folders will appear here.", div(), theme));
+        } else {
+            let mut sections = components::browser_settings_sections();
+            if !contents.folders.is_empty() {
+                sections = sections.child(components::browser_settings_fieldset("Folders", theme).children(contents.folders.iter().map(|folder| self.render_folder(folder, theme, cx))));
+            }
+            if !contents.books.is_empty() {
+                sections = sections.child(components::browser_settings_fieldset("Books", theme).children(contents.books.iter().map(|book| self.render_book(book, theme, cx))));
+            }
+            body = body.child(sections);
+        }
+        components::library_section_content()
+            .child(header)
+            .child(components::browser_error_banner(self.error.clone(), "Retry".into(), theme, body.into_any_element(), {
+                let page = cx.entity();
+                move |cx| page.update(cx, |page, cx| page.refresh(cx))
+            }))
+            .into_any_element()
+    }
+}

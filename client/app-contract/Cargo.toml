@@ -1,0 +1,22 @@
+[package]
+name = "app-contract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["full"]
+full = ["dep:account-contract", "dep:catalog-contract", "dep:library-model", "dep:sync-common"]
+
+[dependencies]
+account-contract = { path = "../../shared/account-contract", optional = true }
+catalog-contract = { path = "../../shared/catalog-contract", optional = true }
+library-model = { path = "../library-model", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+specta-typescript = "0.0.12"
+sync-common = { path = "../../shared/sync-common", optional = true }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

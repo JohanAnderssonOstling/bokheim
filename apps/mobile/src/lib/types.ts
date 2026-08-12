@@ -1,6 +1,6 @@
 import { FRONTEND_CONTRACT as GENERATED_FRONTEND_CONTRACT } from "./bindings";
 import type { LocalLibraryStorageUsage as GeneratedLocalLibraryStorageUsage, ServerLibraryStorageUsage as GeneratedServerLibraryStorageUsage } from "./bindings";
-import type { AccountContract as GeneratedAccountContract, AccountSessionSummary as GeneratedAccountSessionSummary, AccountStatus as GeneratedAccountStatus, AccountStorageUsage as GeneratedAccountStorageUsage, ApplicationAppearance as GeneratedApplicationAppearance, ApplicationTheme as GeneratedApplicationTheme, AuthorSummary as GeneratedAuthorSummary, BookCardRow, BookLink as GeneratedBookLink, BrowsingContentContract as GeneratedBrowsingContentContract, BrowsingPreferencePatch as GeneratedBrowsingPreferencePatch, BrowsingPreferences as GeneratedBrowsingPreferences, BrowsingPreferencesContract as GeneratedBrowsingPreferencesContract, DownloadState as GeneratedDownloadState, FolderDownloadStatus as GeneratedFolderDownloadStatus, FrontendContract as GeneratedFrontendContract, LibraryEntry as GeneratedLibraryEntry, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySearchResult as GeneratedLibrarySearchResult, LibrarySyncStatus as GeneratedLibrarySyncStatus, LibraryTransfers as GeneratedLibraryTransfers, NetworkStatus as GeneratedNetworkStatus, ReaderFlow as GeneratedReaderFlow, ReaderFontFamily as GeneratedReaderFontFamily, ReaderNavigationAction as GeneratedReaderNavigationAction, ReaderNavigationContract as GeneratedReaderNavigationContract, ReaderNavigationKey as GeneratedReaderNavigationKey, ReaderPreferencePatch as GeneratedReaderPreferencePatch, ReaderPreferences as GeneratedReaderPreferences, ReaderPreferencesContract as GeneratedReaderPreferencesContract, ReaderTextAlignment as GeneratedReaderTextAlignment, SettingsContract as GeneratedSettingsContract, TransferPreferencePatch as GeneratedTransferPreferencePatch, TransferPreferences as GeneratedTransferPreferences, UiFontFamily as GeneratedUiFontFamily, WebPreferenceProfile as GeneratedWebPreferenceProfile } from "./bindings";
+import type { AccountContract as GeneratedAccountContract, AccountSessionSummary as GeneratedAccountSessionSummary, AccountStatus as GeneratedAccountStatus, AccountStorageUsage as GeneratedAccountStorageUsage, ApplicationAppearance as GeneratedApplicationAppearance, ApplicationTheme as GeneratedApplicationTheme, AuthorSort as GeneratedAuthorSort, AuthorSummary as GeneratedAuthorSummary, BookCardRow, BookLink as GeneratedBookLink, BrowsingContentContract as GeneratedBrowsingContentContract, BrowsingPreferencePatch as GeneratedBrowsingPreferencePatch, BrowsingPreferences as GeneratedBrowsingPreferences, BrowsingPreferencesContract as GeneratedBrowsingPreferencesContract, DownloadState as GeneratedDownloadState, FolderDownloadStatus as GeneratedFolderDownloadStatus, FrontendContract as GeneratedFrontendContract, LibraryEntry as GeneratedLibraryEntry, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySearchResult as GeneratedLibrarySearchResult, LibrarySyncStatus as GeneratedLibrarySyncStatus, LibraryTransfers as GeneratedLibraryTransfers, NetworkStatus as GeneratedNetworkStatus, ReaderFlow as GeneratedReaderFlow, ReaderFontFamily as GeneratedReaderFontFamily, ReaderNavigationAction as GeneratedReaderNavigationAction, ReaderNavigationContract as GeneratedReaderNavigationContract, ReaderNavigationKey as GeneratedReaderNavigationKey, ReaderPreferencePatch as GeneratedReaderPreferencePatch, ReaderPreferences as GeneratedReaderPreferences, ReaderPreferencesContract as GeneratedReaderPreferencesContract, ReaderTextAlignment as GeneratedReaderTextAlignment, SettingsContract as GeneratedSettingsContract, TransferPreferencePatch as GeneratedTransferPreferencePatch, TransferPreferences as GeneratedTransferPreferences, UiFontFamily as GeneratedUiFontFamily, WebPreferenceProfile as GeneratedWebPreferenceProfile } from "./bindings";
 
 export type LibraryEntry = GeneratedLibraryEntry;
 export type AccountStatus = GeneratedAccountStatus;
@@ -24,6 +24,7 @@ export type FolderDownloadStatus = GeneratedFolderDownloadStatus;
 export type LibraryDirectory = LibraryHierarchyEntry;
 export type DirectoryContent = LibraryHierarchyView;
 export type AuthorSummary = GeneratedAuthorSummary;
+export type AuthorSort = GeneratedAuthorSort;
 export type ApplicationAppearance = GeneratedApplicationAppearance;
 export type ApplicationTheme = GeneratedApplicationTheme;
 export type BrowsingPreferences = GeneratedBrowsingPreferences;
@@ -51,7 +52,10 @@ export const ACCOUNT_CONTRACT = FRONTEND_CONTRACT.account;
 export const SETTINGS_CONTRACT = FRONTEND_CONTRACT.settings;
 export const BROWSING_CONTENT_CONTRACT = { ...FRONTEND_CONTRACT.browsing_content, breadcrumb_item_max_characters: 24 } as const;
 export const BROWSING_PREFERENCES_CONTRACT = FRONTEND_CONTRACT.browsing_preferences;
-export const DEFAULT_BROWSING_PREFERENCES: BrowsingPreferences = { ...BROWSING_PREFERENCES_CONTRACT.defaults };
+export const DEFAULT_BROWSING_PREFERENCES: BrowsingPreferences = {
+  ...BROWSING_PREFERENCES_CONTRACT.defaults,
+  included_catalog_languages: [...BROWSING_PREFERENCES_CONTRACT.defaults.included_catalog_languages],
+};
 export const READER_PREFERENCES_CONTRACT = FRONTEND_CONTRACT.reader_preferences;
 export const READER_SETTINGS_PRESENTATION_CONTRACT = FRONTEND_CONTRACT.reader_settings;
 export const READER_NAVIGATION_CONTRACT = FRONTEND_CONTRACT.reader_navigation;

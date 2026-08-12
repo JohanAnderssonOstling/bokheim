@@ -1,0 +1,19 @@
+[package]
+name = "book-metadata"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+audiobook-library = { path = "../audiobook-library" }
+library-model = { path = "../library-model" }
+epub_provider = { path = "../../apps/renderers/html/epub_provider" }
+html-publication = { path = "../../apps/renderers/html/crates/html-publication" }
+mp4ameta = "0.13.0"
+mobi.workspace = true
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+roxmltree = "0.20"
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

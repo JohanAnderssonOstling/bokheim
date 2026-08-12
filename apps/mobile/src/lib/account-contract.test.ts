@@ -21,6 +21,10 @@ test("account and settings semantics are shared across both frontends", () => {
   }
   assert.match(source("../components/auth/LoginScreen.svelte"), /AccountAccessForms/);
   assert.match(source("../components/shell/ServerAccountDialog.svelte"), /AccountAccessForms/);
+  assert.doesNotMatch(sharedAccessForm, /Already have a verification PIN/);
+  assert.match(sharedAccessForm, /PinEntry/);
+  assert.match(source("../components/auth/PinEntry.svelte"), /placeholder="Verification pin"/);
+  assert.doesNotMatch(sharedAccessForm, /Email for resend/);
 
   const nativeAccount = ["authentication.rs", "account.rs"]
     .map((file) => source(`../../../ui/gpui/browser/src/universal/sync/${file}`))
@@ -28,6 +32,8 @@ test("account and settings semantics are shared across both frontends", () => {
   for (const operation of ["request_public_registration", "resend_verification", "verify_email", "request_password_reset", "reset_password"]) {
     assert.match(nativeAccount, new RegExp(`\\b${operation}\\b`));
   }
+  assert.doesNotMatch(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /account-have-verification/);
+  assert.doesNotMatch(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /Email for resend/);
 
   const accountPage = source("../components/shell/ServerAccountDialog.svelte");
   for (const hidden of ["Sessions", "Current session", "Other session", "onrevokesession", "onrevokeothersessions"]) {

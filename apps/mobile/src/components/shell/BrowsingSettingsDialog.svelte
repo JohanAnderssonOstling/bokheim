@@ -21,7 +21,18 @@
   } = $props();
 
   const [minimumUiFontSize, maximumUiFontSize] = BROWSING_PREFERENCES_CONTRACT.constraints.ui_font_size_px;
+  const catalogLanguageValues = BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.map((option) => option.value);
   let autoDownloadLimit = $derived(transferPreferences.auto_download_limit_mb ?? 0);
+
+  function catalogLanguageIncluded(language: string): boolean {
+    return preferences.included_catalog_languages.length === 0 || preferences.included_catalog_languages.includes(language);
+  }
+
+  function toggleCatalogLanguage(language: string, included: boolean) {
+    const current = preferences.included_catalog_languages.length === 0 ? [...catalogLanguageValues] : [...preferences.included_catalog_languages];
+    const next = included ? [...new Set([...current, language])] : current.filter((value) => value !== language);
+    return onchange({ preference: "included_catalog_languages", value: next.length === catalogLanguageValues.length ? [] : next });
+  }
 
 </script>
 
@@ -61,6 +72,21 @@
           <button type="button" aria-label="Increase UI font size" disabled={preferences.ui_font_size_px >= maximumUiFontSize} onclick={() => onchange({ preference: "ui_font_size_px", value: Math.min(maximumUiFontSize, preferences.ui_font_size_px + 1) })}>+</button>
         </div>
       </div>
+      <fieldset>
+        <legend>{SETTINGS_CONTRACT.catalogues_section_label}</legend>
+        <span class="setting-label">{SETTINGS_CONTRACT.included_catalog_languages_label}</span>
+        <small>{SETTINGS_CONTRACT.included_catalog_languages_description}</small>
+        <label class:active={preferences.included_catalog_languages.length === 0}>
+          <input type="checkbox" checked={preferences.included_catalog_languages.length === 0} onchange={() => onchange({ preference: "included_catalog_languages", value: [] })} />
+          <span><strong>{SETTINGS_CONTRACT.all_catalog_languages_label}</strong></span>
+        </label>
+        {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
+          <label class:active={catalogLanguageIncluded(option.value)}>
+            <input type="checkbox" checked={catalogLanguageIncluded(option.value)} onchange={(event) => toggleCatalogLanguage(option.value, event.currentTarget.checked)} />
+            <span><strong>{option.label}</strong></span>
+          </label>
+        {/each}
+      </fieldset>
       <fieldset>
         <legend>{SETTINGS_CONTRACT.transfers_section_label}</legend>
         <div class="network-policy">

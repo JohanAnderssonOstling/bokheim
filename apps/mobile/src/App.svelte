@@ -7,9 +7,9 @@
   import { listen } from "./lib/app-events";
 
   import Reader from "./components/Reader.svelte";
-  import LoginScreen from "./components/auth/LoginScreen.svelte";
   import BookGrid from "./components/library/BookGrid.svelte";
   import BookShelf from "./components/library/BookShelf.svelte";
+  import AuthorRow from "./components/library/AuthorRow.svelte";
   import AuthorCatalogResults from "./components/library/AuthorCatalogResults.svelte";
   import CreateFolderDialog from "./components/library/CreateFolderDialog.svelte";
   import CreateLibraryDialog from "./components/library/CreateLibraryDialog.svelte";
@@ -39,6 +39,7 @@
     DEFAULT_BROWSING_PREFERENCES,
     type AccountStatus,
     type AccountStorageUsage,
+    type AuthorSort,
     type AuthorSummary,
     type BookCardData,
     type BrowsingPreferencePatch,
@@ -160,6 +161,9 @@
     `--book-card-height: ${BROWSING_LAYOUT_CONTRACT.book_card_height_px}px`,
     `--book-grid-column-gap: ${BROWSING_LAYOUT_CONTRACT.book_grid_column_gap_px}px`,
     `--book-grid-row-height: ${BROWSING_LAYOUT_CONTRACT.book_grid_row_height_px}px`,
+    `--author-row-cover-width: ${BROWSING_LAYOUT_CONTRACT.author_row_cover_width_px}px`,
+    `--author-row-cover-height: ${BROWSING_LAYOUT_CONTRACT.author_row_cover_height_px}px`,
+    `--author-row-height: ${BROWSING_LAYOUT_CONTRACT.author_row_height_px}px`,
   ].join("; ");
 
   let libraries = $state<LibraryEntry[]>([]);
@@ -177,6 +181,9 @@
   let subjectsLoadedFor = $state("");
   let subjectRequest = 0;
   let authors = $state<AuthorSummary[]>([]);
+  // Filing order groups the list under letters; book count does not, so the
+  // dividers go with it.
+  let authorSort = $state<AuthorSort>("name");
   let authorFilter = $state("");
   let focusedAuthorIndex = $state(0);
   let selectedAuthorId = $state("");
@@ -250,7 +257,15 @@
   const visibleRecentlyInProgress = $derived(recentlyInProgress);
   const visibleRecentlyFinished = $derived(recentlyFinished);
   const visibleRecentlyAdded = $derived(recentlyAdded);
-  const filteredAuthors = $derived(authors.filter((author) => author.name.toLocaleLowerCase().includes(authorFilter.trim().toLocaleLowerCase())));
+  const filteredAuthors = $derived(
+    authors.filter((author) => {
+      const filter = authorFilter.trim().toLocaleLowerCase();
+      // Both forms match: the reader may type either the name as printed or
+      // the one the index files under.
+      return !filter || author.name.toLocaleLowerCase().includes(filter) || author.sort_name.toLocaleLowerCase().includes(filter);
+    }),
+  );
+
   const visibleAuthors = $derived(filteredAuthors);
 
   function libraryRoute(destination: Destination = activeDestination, libraryId = activeLibraryId, locationId?: string) {
@@ -339,11 +354,6 @@
     readerLibraryId?: string;
   }) {
     if (isWebApp && !accountResolved) return;
-    if (isWebApp && !accountStatus.signed_in) {
-      readerBook = null;
-      if (route.id !== "/login") await navigate("/login", true);
-      return;
-    }
     if (isWebApp && !webAppReady) return;
 
     if (route.id === "/" || route.id === "/login" || route.id === "/library") {
@@ -670,12 +680,19 @@
     }
   }
 
+  async function setAuthorSort(sort: AuthorSort) {
+    if (authorSort === sort) return;
+    authorSort = sort;
+    focusedAuthorIndex = 0;
+    await loadAuthors(libraryGeneration, true);
+  }
+
   async function loadAuthors(generation: number, force = false) {
     const libraryId = activeLibraryId;
     if (!libraryId || authorsLoading || (!force && authorsLoadedFor === libraryId)) return;
     authorsLoading = true;
     try {
-      const view = await measureInvoke("authors", () => commands.getLibraryAuthors(libraryId, null));
+      const view = await measureInvoke("authors", () => commands.getLibraryAuthors(libraryId, null, authorSort));
       if (generation !== libraryGeneration || libraryId !== activeLibraryId) return;
       await commitAndMeasureRender("authors", () => {
         authors = view.authors;
@@ -783,14 +800,10 @@
     }
   }
 
-  async function prepareAuthenticatedWebApp() {
-    webAppReady = false;
+  async function refreshAuthenticatedWebApp() {
     const enrollment = await Promise.allSettled([commands.bootstrapRemoteLibraries()]);
     const results = [...enrollment, ...await Promise.allSettled([
       loadServerTransferState(),
-      loadBrowsingPreferences(),
-      loadReaderPreferences(),
-      loadTransferPreferences(),
     ])];
     const failed = results.find((result) => result.status === "rejected");
     if (failed?.status === "rejected") libraryError = errorMessage(failed.reason);
@@ -801,15 +814,22 @@
     } catch {
       // Network reporting is advisory and must not prevent the application opening.
     }
-    await restoreUiSession(readUiSession());
-    routesReady = true;
-    webAppReady = true;
   }
 
   async function initializeWebApp() {
-    await loadAccountStatus();
-    if (accountStatus.signed_in) await prepareAuthenticatedWebApp();
-    else routesReady = true;
+    webAppReady = false;
+    const session = readUiSession();
+    try {
+      await loadAccountStatus();
+      await Promise.all([loadLibraries(), loadBrowsingPreferences(), loadReaderPreferences(), loadTransferPreferences()]);
+      await restoreUiSession(session);
+    } finally {
+      routesReady = true;
+      webAppReady = true;
+    }
+    if (accountStatus.signed_in) {
+      void refreshAuthenticatedWebApp().catch((reason) => (accountError = errorMessage(reason)));
+    }
   }
 
   async function loadServerTransferState() {
@@ -870,15 +890,17 @@
 
   async function finishAccountAuthentication(status: AccountStatus) {
     accountStatus = status;
-    accountProgress = "Fetching libraries…";
-    if (isWebApp) await prepareAuthenticatedWebApp();
-    else {
+    if (isWebApp) {
+      accountProgress = "";
+      navigate(libraryRoute("home"), true);
+      void refreshAuthenticatedWebApp().catch((reason) => (accountError = errorMessage(reason)));
+    } else {
+      accountProgress = "Fetching libraries…";
       await loadServerTransferState();
       clearThumbnailCache();
       await loadLibraries();
+      accountProgress = "";
     }
-    accountProgress = "";
-    if (isWebApp) navigate(libraryRoute("home"), true);
   }
 
   async function loginToServer(email: string, password: string): Promise<boolean> {
@@ -903,7 +925,10 @@
    * transfer and storage state, so the verdict at the top of the page is the
    * one the user just asked for.
    */
-  const syncAccountNow = () => runAccountRequest(ACCOUNT_CONTRACT.summary.syncing_label, "", () => loadServerTransferState());
+  const syncAccountNow = () => runAccountRequest(ACCOUNT_CONTRACT.summary.syncing_label, "", async () => {
+    await commands.syncAllLibraries();
+    await loadServerTransferState();
+  });
 
   async function runAccountRequest(progress: string, success: string, request: () => Promise<unknown>): Promise<boolean> {
     if (accountBusy) return false;
@@ -959,13 +984,9 @@
       accountStorageUsage = null;
       if (isWebApp) {
         webAppReady = false;
-        readerBook = null;
-        libraries = [];
-        activeLibraryId = "";
-        loadingLibrary = true;
-        libraryError = "";
-        resetLibraryData();
-        navigate("/login", true);
+        await loadLibraries();
+        navigate(activeLibraryId ? libraryRoute("home") : "/library", true);
+        webAppReady = true;
       } else {
         await loadLibraries();
       }
@@ -1079,7 +1100,7 @@
     authorBooksLoading = true;
     libraryError = "";
     try {
-      const view = await measureInvoke("author_books", () => commands.getLibraryAuthors(activeLibraryId, authorId));
+      const view = await measureInvoke("author_books", () => commands.getLibraryAuthors(activeLibraryId, authorId, authorSort));
       if (request !== authorRequest || generation !== libraryGeneration) return;
       const books = view.books ?? [];
       await commitAndMeasureRender("author_books", () => {
@@ -1248,18 +1269,20 @@
       return {
         key: `library:${libraryId}:${bookId}`,
         bookId,
-        file: convertFileSrc(localPath),
+        file: isWebApp ? localPath : convertFileSrc(localPath),
         fileName,
         title: resolvedTitle,
         author,
         initialCfi,
         saveCfi: async (cfi, progress) => { await measureInvoke("update_reading_position", () => commands.updateReadingPosition(libraryId, bookId, cfi, progress)); },
-        loadAnnotations: () => commands.getAnnotations(libraryId, bookId),
-        upsertAnnotation: async (annotation) => { await commands.upsertAnnotation(libraryId, annotation); },
-        deleteAnnotation: async (annotationId, modifiedAt) => { await commands.deleteAnnotation(libraryId, annotationId, modifiedAt); },
-        loadBookmarks: () => commands.getBookmarks(libraryId, bookId),
-        createBookmark: async (bookmark) => { await commands.createBookmark(libraryId, bookmark); },
-        deleteBookmark: async (bookmarkId, deletedAt) => { await commands.deleteBookmark(libraryId, bookmarkId, deletedAt); },
+        ...(isWebApp ? {} : {
+          loadAnnotations: () => commands.getAnnotations(libraryId, bookId),
+          upsertAnnotation: async (annotation) => { await commands.upsertAnnotation(libraryId, annotation); },
+          deleteAnnotation: async (annotationId, modifiedAt) => { await commands.deleteAnnotation(libraryId, annotationId, modifiedAt); },
+          loadBookmarks: () => commands.getBookmarks(libraryId, bookId),
+          createBookmark: async (bookmark) => { await commands.createBookmark(libraryId, bookmark); },
+          deleteBookmark: async (bookmarkId, deletedAt) => { await commands.deleteBookmark(libraryId, bookmarkId, deletedAt); },
+        }),
       };
   }
 
@@ -1333,7 +1356,8 @@
       await measureInvoke("import_book", () => commands.importBook({ library_id: activeLibraryId, directory_id: toBackendDirectoryId(parentId) }, sourcePath, picked.name));
       homeLoadedFor = "";
       authorsLoadedFor = "";
-      await loadDirectory(parentId, folderStack, libraryGeneration, true);
+      if (activeDestination === "home") await loadHome(libraryGeneration, true);
+      else await loadDirectory(parentId, folderStack, libraryGeneration, true);
     } catch (reason) {
       libraryError = errorMessage(reason);
     } finally {
@@ -1456,7 +1480,7 @@
   });
 </script>
 
-<svelte:head><title>{isWebApp && !accountStatus.signed_in ? `Account · ${APP_NAME}` : readerBook ? `${readerBook.title} · Reader` : `${destinationTitle} · ${APP_NAME}`}</title></svelte:head>
+<svelte:head><title>{readerBook ? `${readerBook.title} · Reader` : `${destinationTitle} · ${APP_NAME}`}</title></svelte:head>
 
 {#snippet searchResults()}
   <div class="scoped-search-results" aria-live="polite">
@@ -1505,23 +1529,11 @@
   </label>
 {/snippet}
 
-{#if isWebApp && (!accountResolved || (accountStatus.signed_in && !webAppReady))}
+{#if isWebApp && (!accountResolved || !webAppReady)}
   <main class="auth-loading" aria-live="polite">
     <span class="loader"></span>
-    <strong>{accountResolved ? "Opening your library" : "Checking your session"}</strong>
+    <strong>{accountResolved ? "Opening your library" : "Starting the local reader"}</strong>
   </main>
-{:else if isWebApp && !accountStatus.signed_in}
-  <LoginScreen
-    busy={accountBusy}
-    progress={accountProgress}
-    error={accountError}
-    onlogin={loginToServer}
-    onregister={registerAccount}
-    onresendverification={resendAccountVerification}
-    onverifyemail={verifyAccountEmail}
-    onrequestpasswordreset={requestAccountPasswordReset}
-    onresetpassword={resetAccountPassword}
-  />
 {:else if readerBook}
   {#key readerBook.key}
     <Reader
@@ -1610,7 +1622,7 @@
             onprimary={() => setDestination("folders")}
           />
         {:else if activeDestination === "store"}
-          <Store {activeLibraryId} libraryName={activeLibrary?.library_name ?? "library"} onimported={storeBookImported} />
+          <Store {activeLibraryId} libraryName={activeLibrary?.library_name ?? "library"} preferences={browsingPreferences} onpreferencechange={saveBrowsingPreference} onimported={storeBookImported} />
         {:else if loadingLibrary}
           <section class="page-state" aria-live="polite">
             <span class="loader"></span>
@@ -1718,23 +1730,23 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
                 <input id="author-filter" type="search" bind:value={authorFilter} onkeydown={handleAuthorFilterKeydown} autocomplete="off" aria-label="Filter authors" />
               </label>
+              <div class="author-sort" role="group" aria-label="Sort authors">
+                <button class:on={authorSort === "name"} type="button" aria-pressed={authorSort === "name"} onclick={() => void setAuthorSort("name")}>A–Z</button>
+                <button class:on={authorSort === "book_count"} type="button" aria-pressed={authorSort === "book_count"} onclick={() => void setAuthorSort("book_count")}>Books</button>
+              </div>
               {#if filteredAuthors.length}
                 <div class="author-list-scroll">
                   <div class="author-list">
                     {#each visibleAuthors as author, index}
-                      <button
-                        class:active={selectedAuthorId === author.id}
-                        type="button"
-                        data-author-index={index}
+                      <AuthorRow
+                        {author}
+                        libraryId={activeLibraryId}
+                        active={selectedAuthorId === author.id}
                         tabindex={index === focusedAuthorIndex ? 0 : -1}
                         onfocus={() => (focusedAuthorIndex = index)}
                         onkeydown={(event) => handleAuthorKeydown(event, index)}
-                        onclick={() => { focusedAuthorIndex = index; void selectAuthor(author.id, author.name); }}
-                      >
-                        <span class="author-avatar">{author.name.slice(0, 1).toUpperCase() || "?"}</span>
-                        <span><strong>{author.name || "Unknown author"}</strong><small>{author.book_count} {author.book_count === 1 ? "book" : "books"}</small></span>
-                        <i>›</i>
-                      </button>
+                        onselect={() => { focusedAuthorIndex = index; void selectAuthor(author.id, author.name); }}
+                      />
                     {/each}
                   </div>
                 </div>
@@ -1751,7 +1763,7 @@
               {#if selectedAuthorId}
                 <div class="section-heading author-heading">
                   <button class="author-back" type="button" onclick={clearSelectedAuthor}>← <span>Authors</span></button>
-                <div><h2>{selectedAuthorName}</h2><p>{visibleAuthorBooks.length} {visibleAuthorBooks.length === 1 ? "book" : "books"}</p></div>
+                <div><h2>{selectedAuthorName}</h2></div>
                 </div>
                 <BookGrid
                   libraryId={activeLibraryId}
@@ -1945,28 +1957,19 @@
   .author-filter svg { width: 1.05rem; color: var(--color-accent); }
   .author-filter input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; font-size: .82rem; }
   .author-list-scroll { flex: 1; min-height: 0; padding-right: .2rem; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-color: var(--color-border) transparent; scrollbar-width: thin; }
-  .author-list { display: grid; gap: .4rem; }
-  .author-list button {
-    display: grid;
-    grid-template-columns: 2.65rem minmax(0, 1fr) auto;
-    align-items: center;
-    gap: .7rem;
-    width: 100%;
-    min-height: 3.65rem;
-    padding: .5rem .65rem;
-    border: 1px solid transparent;
-    border-radius: .85rem;
-    color: inherit;
-    text-align: left;
+  .author-sort { display: flex; gap: .3rem; margin: .6rem 0 .4rem; }
+  .author-sort button {
+    padding: .2rem .6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-subtle-text);
     background: transparent;
+    font: 500 .78rem var(--font-interface-family);
+    cursor: pointer;
   }
-  .author-list button.active { border-color: var(--color-border); background: color-mix(in srgb, var(--color-raised-bg) 60%, transparent); }
-  .author-list button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
-  .author-list button > span:nth-child(2) { display: grid; min-width: 0; gap: .12rem; }
-  .author-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .95rem var(--font-interface-family); }
-  .author-list small { color: var(--color-subtle-text); font-size: .68rem; }
-  .author-list i { color: var(--color-border); font-style: normal; }
-  .author-avatar { display: grid; place-items: center; width: 2.65rem; aspect-ratio: 1; border-radius: 50%; color: var(--color-raised-bg); background: var(--color-accent); font: 500 1rem var(--font-interface-family); }
+  .author-sort button.on { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-raised-bg); font-weight: 650; }
+  .author-list { display: grid; gap: .2rem; }
+  .author-list :global(button:focus-visible) { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 
   .search-field { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-height: 3.6rem; padding: 0 1rem; border: 1px solid var(--color-border); border-radius: 1rem; background: color-mix(in srgb, var(--color-raised-bg) 70%, transparent); box-shadow: 0 .7rem 2rem color-mix(in srgb, var(--color-box-shadow) 20%, transparent); }
   .search-field svg { width: 1.25rem; color: var(--color-accent); }

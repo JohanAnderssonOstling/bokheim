@@ -54,11 +54,13 @@ function publicationMime(name: string) {
   return "application/octet-stream";
 }
 
-function pickInBrowser(importFormats: boolean): Promise<PickedEpub | null> {
+function pickInBrowser(_importFormats: boolean): Promise<PickedEpub | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = importFormats ? BOOK_EXTENSIONS.map((extension) => `.${extension}`).join(",") : `.epub,${EPUB_MIME}`;
+    // The browser backend currently supports the EPUB reader path only.
+    // Native imports retain the broader format list below.
+    input.accept = `.epub,${EPUB_MIME}`;
     input.addEventListener("change", () => {
       const file = input.files?.[0];
       resolve(file

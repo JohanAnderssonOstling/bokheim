@@ -1,0 +1,30 @@
+[package]
+name = "catalog-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+catalog-contract = { path = "../catalog-contract" }
+catalog-model = { path = "../catalog-model" }
+opds = { path = "../opds" }
+wire = { path = "../wire" }
+futures-util = "0.3"
+image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
+blake3 = "1"
+log = "0.4"
+reqwest = { version = "0.11", default-features = false, features = ["brotli", "gzip", "json", "rustls-tls", "stream"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+sys-locale = "0.3.2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+axum = "0.7"
+tempfile = "3"

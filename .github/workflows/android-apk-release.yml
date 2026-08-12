@@ -20,6 +20,7 @@ jobs:
     env:
       NDK_VERSION: 29.0.14206865
       CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "1"
 
     steps:
       - name: Check out source
@@ -49,12 +50,12 @@ jobs:
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
-      - name: Install Rust Android target
+      - name: Install Rust build targets
         shell: bash
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
-          rustup target add aarch64-linux-android
+          rustup target add aarch64-linux-android wasm32-unknown-unknown
 
       - name: Select the self-contained mobile workspace
         shell: bash
