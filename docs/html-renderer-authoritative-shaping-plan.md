@@ -213,13 +213,13 @@ Desktop correctness has priority over these thresholds. A performance improvemen
 
 ## Expected file areas
 
-- `renderers/html/crates/html-layout/src/shaping.rs`
-- `renderers/html/crates/html-layout/src/stages.rs`
-- `renderers/html/crates/html-layout/src/layout/`
-- `renderers/html/crates/html-view-core/src/renderer/interaction.rs`
-- `renderers/html/crates/html-view-core/src/session.rs`
-- `renderers/html/crates/html-view-gpui/src/text.rs`
-- `renderers/html/crates/html-view-gpui/src/paint.rs`
+- `apps/renderers/html/crates/html-layout/src/shaping.rs`
+- `apps/renderers/html/crates/html-layout/src/stages.rs`
+- `apps/renderers/html/crates/html-layout/src/layout/`
+- `apps/renderers/html/crates/html-view-core/src/renderer/interaction.rs`
+- `apps/renderers/html/crates/html-view-core/src/session.rs`
+- `apps/renderers/html/crates/html-view-gpui/src/text.rs`
+- `apps/renderers/html/crates/html-view-gpui/src/paint.rs`
 - Renderer typography and integration tests
 
 ## Risks

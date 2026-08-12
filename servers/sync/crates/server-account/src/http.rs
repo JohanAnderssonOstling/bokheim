@@ -2,6 +2,9 @@
 
 use crate::core::AuthAttempt;
 use crate::postgres::PostgresAccountService;
+use account_contract::{
+    AuthResponse, EmailRequest, LoginRequest, MeResponse, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
+};
 use axum::async_trait;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, State};
@@ -9,9 +12,6 @@ use axum::http::{request::Parts, HeaderMap, HeaderName, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use account_contract::{
-    AuthResponse, EmailRequest, LoginRequest, MeResponse, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
-};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ pub fn auth_error(error: crate::core::AuthError) -> StatusCode {
         crate::core::AuthError::InvalidCredentials | crate::core::AuthError::InvalidOneTimeToken => StatusCode::UNAUTHORIZED,
         crate::core::AuthError::EmailTaken => StatusCode::CONFLICT,
         crate::core::AuthError::Forbidden => StatusCode::FORBIDDEN,
-        crate::core::AuthError::InvalidPassword { .. } | crate::core::AuthError::InvalidEmail | crate::core::AuthError::EmailDomainNotAllowed => StatusCode::BAD_REQUEST,
+        crate::core::AuthError::InvalidPassword { .. } | crate::core::AuthError::InvalidEmail => StatusCode::BAD_REQUEST,
         crate::core::AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         crate::core::AuthError::Internal(reason) => {
             tracing::error!(%reason, "authentication error");

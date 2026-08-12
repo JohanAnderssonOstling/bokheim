@@ -19,7 +19,7 @@ test("book actions and typed book cards stay shared across both browsing fronten
   const mobileCard = source("../components/library/BookCard.svelte");
   assert.match(mobileCard, /BOOK_ACTIONS_CONTRACT/);
   assert.match(mobileCard, /<details class="book-actions"[^>]*>/);
-  const nativeCard = source("../../../../ui/gpui/browser/src/library/widgets/book_card.rs");
+  const nativeCard = source("../../../ui/gpui/browser/src/library/widgets/book_card.rs");
   assert.match(nativeCard, /BookCardRow/);
   assert.match(nativeCard, /components::book_card/);
   assert.match(nativeCard, /ui\.open_reader/);

@@ -12,8 +12,8 @@ axum = "0.7"
 argon2 = "0.5"
 async-trait = "0.1"
 base64 = "0.22"
-account-contract = { path = "../../../../crates/account-contract" }
-wire = { path = "../../../../crates/wire" }
+account-contract = { path = "../../../../shared/account-contract" }
+wire = { path = "../../../../shared/wire" }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 server-postgres = { path = "../server-postgres" }

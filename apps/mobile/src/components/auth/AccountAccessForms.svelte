@@ -62,8 +62,8 @@
       return;
     }
     if (mode === "verify") {
-      if (byteLength(cleanToken) !== ACCOUNT_CONTRACT.validation.one_time_token_bytes) {
-        localError = "Enter the complete verification token from your email.";
+      if (!new RegExp(`^\\d{${ACCOUNT_CONTRACT.validation.verification_pin_digits}}$`).test(cleanToken)) {
+        localError = `Enter the ${ACCOUNT_CONTRACT.validation.verification_pin_digits}-digit PIN from your email.`;
         return;
       }
       await onverifyemail(cleanToken);
@@ -100,19 +100,19 @@
       <button class="primary" type="submit" disabled={busy || !email.trim() || !password}>Sign in</button>
       <button class="link" type="button" onclick={() => selectMode("request-reset")}>Forgot password?</button>
     {:else if mode === "register"}
-      <p>Create an account, then enter the verification token sent by email.</p>
+      <p>Create an account, then enter the 6-digit PIN sent by email.</p>
       <label><span>Email</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
       <label><span>Password</span><input required type="password" bind:value={password} autocomplete="new-password" /></label>
       <small>At least {ACCOUNT_CONTRACT.validation.password_min_characters} characters.</small>
       <button class="primary" type="submit" disabled={busy || !email.trim() || !password}>Create account</button>
-      <button class="link" type="button" onclick={() => selectMode("verify")}>Already have a verification token?</button>
+      <button class="link" type="button" onclick={() => selectMode("verify")}>Already have a verification PIN?</button>
     {:else if mode === "verify"}
-      <p>Enter the verification token from your email. Verification signs you in.</p>
-      <label><span>Token</span><input required maxlength={ACCOUNT_CONTRACT.validation.one_time_token_bytes} bind:value={token} autocomplete="one-time-code" spellcheck="false" /></label>
+      <p>Enter the 6-digit PIN from your email. Verification signs you in.</p>
+      <label><span>PIN</span><input required maxlength={ACCOUNT_CONTRACT.validation.verification_pin_digits} bind:value={token} autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" spellcheck="false" /></label>
       <button class="primary" type="submit" disabled={busy || !token.trim()}>Verify email</button>
       {#if ACCOUNT_CONTRACT.capabilities.resend_verification}
         <label><span>Email for resend</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
-        <button class="secondary" type="button" disabled={busy || !email.trim()} onclick={() => void onresendverification(email.trim())}>Resend token</button>
+        <button class="secondary" type="button" disabled={busy || !email.trim()} onclick={() => void onresendverification(email.trim())}>Resend PIN</button>
       {/if}
     {:else if mode === "request-reset"}
       <p>Request a password-reset token. The response is deliberately the same whether the address exists or not.</p>
@@ -134,12 +134,12 @@
 
 <style>
   .account-access { display: grid; gap: .8rem; }
-  nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); background: var(--color-border-color); }
-  nav button { min-width: 0; min-height: 2.3rem; padding: .35rem; border: 0; color: var(--color-subtle-text); background: var(--color-white-surface); font-size: .68rem; font-weight: 750; }
-  nav button.active { color: var(--color-white-surface); background: var(--color-accent); }
+  nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-border); }
+  nav button { min-width: 0; min-height: 2.3rem; padding: .35rem; border: 0; color: var(--color-subtle-text); background: var(--color-raised-bg); font-size: .68rem; font-weight: 750; }
+  nav button.active { color: var(--color-raised-bg); background: var(--color-accent); }
   form { display: grid; gap: .55rem; }
   form > p { margin: 0 0 .15rem; color: var(--color-subtle-text); font-size: .72rem; line-height: 1.5; }
-  label { display: grid; grid-template-columns: 6rem minmax(0, 1fr); align-items: center; min-height: 2.8rem; padding: 0 .7rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); background: var(--color-white-surface); }
+  label { display: grid; grid-template-columns: 6rem minmax(0, 1fr); align-items: center; min-height: 2.8rem; padding: 0 .7rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); }
   label:focus-within { border-color: var(--color-accent); }
   label span, small { color: var(--color-subtle-text); font-size: .7rem; font-weight: 700; }
   input, button { font: inherit; }
@@ -147,7 +147,7 @@
   button { cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .primary, .secondary { min-height: 2.65rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); font-size: .75rem; font-weight: 750; }
-  .primary { color: var(--color-white-surface); background: var(--color-accent); }
+  .primary { color: var(--color-raised-bg); background: var(--color-accent); }
   .secondary { color: var(--color-accent); background: transparent; }
   .link { justify-self: start; padding: .25rem 0; border: 0; color: var(--color-accent); background: transparent; font-size: .7rem; font-weight: 750; }
   .progress, .error { margin: 0; padding: .2rem .1rem; font-size: .72rem; }

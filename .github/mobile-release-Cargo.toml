@@ -3,8 +3,8 @@ resolver = "3"
 members = [
     "Backend",
     "BookFormat",
-    "HtmlRenderer/crates/html-source",
-    "HtmlRenderer/epub_provider",
+    "apps/renderers/html/crates/html-source",
+    "apps/renderers/html/epub_provider",
     "apps/mobile/src-tauri",
     "SyncCommon",
 ]

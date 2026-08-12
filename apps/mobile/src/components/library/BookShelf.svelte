@@ -70,18 +70,18 @@
   .book-shelf { margin-top: 1.8rem; }
   .book-shelf.first { margin-top: 0; }
   .heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
-  h2 { margin: 0; font: 500 1.35rem var(--font-heading-family); letter-spacing: -.02em; }
+  h2 { margin: 0; font: 500 1.35rem var(--font-interface-family); letter-spacing: -.02em; }
   .actions, .controls { display: flex; align-items: center; }
   .actions { gap: .65rem; }
   .controls { gap: .3rem; }
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
-  .controls button { display: grid; place-items: center; width: 2.1rem; height: 2.1rem; padding: 0 0 .14rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-white-surface); font-size: 1.35rem; line-height: 1; cursor: pointer; }
-  .controls button:hover { background: var(--color-hover-bg); }
+  .controls button { display: grid; place-items: center; width: 2.1rem; height: 2.1rem; padding: 0 0 .14rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-raised-bg); font-size: 1.35rem; line-height: 1; cursor: pointer; }
+  .controls button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .controls button:active { transform: translateY(1px); }
-  .track { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(7.5rem, 42%); gap: .8rem; width: 100%; padding: .1rem .05rem .75rem; overflow-x: auto; overscroll-behavior-inline: contain; scroll-padding-inline: .05rem; scroll-snap-type: inline mandatory; scrollbar-color: var(--color-disabled-text) transparent; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+  .track { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(7.5rem, 42%); gap: .8rem; width: 100%; padding: .1rem .05rem .75rem; overflow-x: auto; overscroll-behavior-inline: contain; scroll-padding-inline: .05rem; scroll-snap-type: inline mandatory; scrollbar-color: var(--color-border) transparent; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
   .track::-webkit-scrollbar { height: .42rem; }
   .track::-webkit-scrollbar-track { background: transparent; }
-  .track::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--color-disabled-text); }
+  .track::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--color-border); }
   .slide { min-width: 0; scroll-snap-align: start; }
   .inline-empty { display: grid; min-height: 5rem; place-items: center start; color: var(--color-subtle-text); font-size: .84rem; text-align: left; }
   @media (min-width: 36rem) { .track { grid-auto-columns: minmax(8.5rem, 30%); gap: 1rem; } }

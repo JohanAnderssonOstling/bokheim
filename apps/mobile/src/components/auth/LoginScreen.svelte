@@ -56,9 +56,9 @@
   .login-card {
     width: min(100%, 27rem);
     padding: clamp(1.5rem, 5vw, 2.5rem);
-    border: 1px solid var(--color-border-color);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--color-card-bg) 96%, transparent);
+    background: color-mix(in srgb, var(--color-raised-bg) 96%, transparent);
     box-shadow: 0 1.5rem 4rem var(--color-box-shadow);
   }
   .brand {
@@ -68,13 +68,13 @@
     margin-bottom: 1.5rem;
     place-items: center;
     border-radius: 1rem;
-    color: var(--color-white-surface);
+    color: var(--color-raised-bg);
     background: var(--color-accent);
-    font: 600 1.45rem var(--font-heading-family);
+    font: 600 1.45rem var(--font-interface-family);
   }
   .heading { margin-bottom: 1.55rem; }
   .heading p { margin: 0 0 .4rem; color: var(--color-accent); font-size: .68rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
-  h1 { margin: 0; font: 500 clamp(2rem, 8vw, 2.7rem)/1.05 var(--font-heading-family); letter-spacing: -.035em; }
+  h1 { margin: 0; font: 500 clamp(2rem, 8vw, 2.7rem)/1.05 var(--font-interface-family); letter-spacing: -.035em; }
   .heading span { display: block; margin-top: .65rem; color: var(--color-subtle-text); font-size: .82rem; line-height: 1.55; }
-  .account-note { margin: 1.15rem 0 0; padding-top: 1rem; border-top: 1px solid var(--color-border-color); color: var(--color-subtle-text); font-size: .68rem; line-height: 1.5; }
+  .account-note { margin: 1.15rem 0 0; padding-top: 1rem; border-top: 1px solid var(--color-border); color: var(--color-subtle-text); font-size: .68rem; line-height: 1.5; }
 </style>

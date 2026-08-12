@@ -16,7 +16,7 @@ export default {
         "frame-src": ["self", "data:", "blob:"],
         "style-src": ["self", "unsafe-inline"],
         "script-src": ["self", "wasm-unsafe-eval"],
-        "connect-src": ["self", "data:", "blob:"],
+        "connect-src": ["self", "data:", "blob:", "ipc:", "http://ipc.localhost", "asset:", "http://asset.localhost"],
         "object-src": ["none"],
         "base-uri": ["self"],
       },

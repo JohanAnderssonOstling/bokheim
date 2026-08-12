@@ -6,7 +6,11 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use futures_util::{StreamExt, TryStreamExt};
 use server_asset_store::AssetKind;
-use sync_common::api::assets::{BlobManifestRequest, MAX_BLOB_MANIFEST_ENTRIES};
+use std::collections::HashSet;
+use std::io::Cursor;
+use sync_common::api::assets::{
+    BlobManifestRequest, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, MAX_BLOB_MANIFEST_ENTRIES, MAX_THUMBNAIL_BATCH_BYTES, MAX_THUMBNAIL_BATCH_ENTRIES,
+};
 use sync_common::{ContentHash, LibraryId};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -115,8 +119,8 @@ async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Asse
     if kind == AssetKind::Book && content_length.is_none() {
         return Err(StatusCode::LENGTH_REQUIRED);
     }
-    if let Some(len) = content_length {
-        if len > kind.max_bytes() {
+    if let (Some(len), Some(limit)) = (content_length, kind.max_bytes()) {
+        if len > limit {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
     }
@@ -166,6 +170,55 @@ pub(super) async fn get_thumbnail(State(state): State<AppState>, user: AuthUser,
 
 pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
     put(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash, &headers, body).await
+}
+
+pub(super) async fn put_thumbnail_batch(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<StatusCode, StatusCode> {
+    let request: ThumbnailBatchUploadRequest = server_wire_http::decode_request(&headers, &body, MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)?;
+    if request.thumbnails.is_empty() || request.thumbnails.len() > MAX_THUMBNAIL_BATCH_ENTRIES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut seen = HashSet::with_capacity(request.thumbnails.len());
+    let mut total = 0_usize;
+    for thumbnail in request.thumbnails {
+        if !seen.insert(thumbnail.content_hash.clone()) || thumbnail.bytes.len() > sync_common::MAX_THUMBNAIL_BYTES as usize {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        total = total.checked_add(thumbnail.bytes.len()).ok_or(StatusCode::PAYLOAD_TOO_LARGE)?;
+        if total > MAX_THUMBNAIL_BATCH_BYTES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        let len = thumbnail.bytes.len() as u64;
+        state.assets.put(&user.user_id, &library_id, AssetKind::Thumbnail, &thumbnail.content_hash, Some(len), Box::new(Cursor::new(thumbnail.bytes))).await.map_err(asset_error)?;
+    }
+    Ok(StatusCode::OK)
+}
+
+pub(super) async fn post_thumbnail_batch(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
+    let request: ThumbnailBatchDownloadRequest = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
+    if request.content_hashes.is_empty() || request.content_hashes.len() > MAX_THUMBNAIL_BATCH_ENTRIES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut seen = HashSet::with_capacity(request.content_hashes.len());
+    let mut response = ThumbnailBatchDownloadResponse { thumbnails: Vec::new(), missing: Vec::new() };
+    let mut total = 0_usize;
+    for hash in request.content_hashes {
+        if !seen.insert(hash.clone()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        match state.assets.open_from(&user.user_id, &library_id, AssetKind::Thumbnail, &hash, 0).await.map_err(asset_error)? {
+            Some(mut asset) => {
+                let mut bytes = Vec::with_capacity(asset.total_len as usize);
+                asset.reader.read_to_end(&mut bytes).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                total = total.checked_add(bytes.len()).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                if total > MAX_THUMBNAIL_BATCH_BYTES {
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                response.thumbnails.push(ThumbnailBatchEntry { content_hash: hash, bytes });
+            }
+            None => response.missing.push(hash),
+        }
+    }
+    server_wire_http::response(&headers, response)
 }
 
 #[cfg(test)]

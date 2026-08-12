@@ -9,9 +9,30 @@ release from this checkout with:
 servers/sync/deploy/deploy-remote.sh
 ```
 
+If remote sudo must be entered from a shell on the server, stage the release
+without attempting installation:
+
+```sh
+servers/sync/deploy/deploy-remote.sh --stage-only
+```
+
+The command prints the exact path of a self-contained privileged entry point.
+SSH to the deployment host and run that command, for example:
+
+```sh
+sudo /tmp/bokheim-deploy.ABC123/deploy-sudo.sh
+```
+
+`deploy-sudo.sh` takes no arguments. It validates the staged artifacts and
+credentials before stopping services or replacing the database.
+
 The script builds `sync-server` and `catalog-server`, transfers the
 release artifacts over SSH, and runs `install-staged.sh` with `sudo` on the
-host. It defaults to `192.168.1.68`; override the SSH account when needed:
+host. The staged installer deliberately drops and recreates only the local
+`bokheim` PostgreSQL database before migrating and restarting; book and
+thumbnail files remain on disk. It refuses the destructive step unless the
+database credential matches the expected local database exactly. The script
+defaults to `192.168.1.68`; override the SSH account when needed:
 
 ```sh
 BOKHEIM_DEPLOY_USER=johan servers/sync/deploy/deploy-remote.sh
@@ -19,8 +40,9 @@ BOKHEIM_DEPLOY_USER=johan servers/sync/deploy/deploy-remote.sh
 
 The remote account must have SSH access and passwordless `sudo` (or an
 interactive sudo configuration; the installer allocates a TTY for a remote
-sudo password prompt. Do not prefix the local command with `sudo`. The script does not provision a new host or
-modify database, Caddy, or credentials.
+sudo password prompt. Do not prefix the local command with `sudo`. The script
+does not provision a new host, modify Caddy, replace credentials, or delete
+asset files; it does replace the `bokheim` database as described above.
 
 This deployment exposes only Caddy to the Internet. The Rust server accepts
 requests through `/run/bokheim/sync.sock`, whose filesystem permissions allow
@@ -96,25 +118,41 @@ PostgreSQL memory.
 
 ## Public registration
 
-Public registration is always enabled. Configure an external email worker for
-the `account_email_outbox` table. The
-worker owns provider credentials, SMTP authentication, TLS, delivery retries,
-and bounce handling; the Bokheim server only creates and manages queued
-verification/reset messages.
+Public registration is always enabled and requires email verification. The
+sync server delivers verification and password-reset messages through Resend,
+using its transactional PostgreSQL outbox for retries and idempotency.
 
-Before running `install-server.sh`, create
-`/etc/bokheim/disposable-email-domains` as a non-empty list containing
-one lowercase domain per line. Blank lines and lines beginning with `#` are
-ignored. Treat this list as abuse reduction, not proof that a provider is
-permanent; mailbox verification remains authoritative.
+Add and verify `mail.bokheim.se` in Resend, then publish the DNS records Resend
+provides. The checked-in service sends as
+`Bokheim <accounts@mail.bokheim.se>`; change `BOKHEIM_EMAIL_FROM` in the unit if
+a different verified domain is chosen. Create a sending-only API key in Resend
+and install it on the host without a trailing command or variable name:
 
 ```sh
 sudo install -d -o root -g root -m 0700 /etc/bokheim
-sudo install -o root -g root -m 0644 disposable-email-domains /etc/bokheim/disposable-email-domains
+sudo install -o root -g root -m 0600 resend-api-key /etc/bokheim/resend-api-key
 ```
 
-The checked-in service unit supplies this fixed path through
-`BOKHEIM_DISPOSABLE_EMAIL_DOMAINS_FILE`.
+The systemd unit exposes that file to the service as a read-only credential.
+The service is allowed outbound network access because Resend's HTTPS endpoint
+does not have stable addresses suitable for `IPAddressAllow`; PostgreSQL and
+the sync HTTP listener remain local-only.
+
+## Configured test account
+
+The checked-in service configures `test@bokheim.se` at startup with a 1000 GB
+book quota. Store its password in a second protected credential:
+
+```sh
+sudo install -o root -g root -m 0600 test-user-password /etc/bokheim/test-user-password
+```
+
+The credential file contains only the password and must not be empty. The
+configured test user is exempt from the public-registration password minimum.
+Change `BOKHEIM_TEST_USER_EMAIL` in the unit to use a different identifier.
+Changing the credential rotates the password at the next
+restart and revokes that account's existing sessions; an unchanged password
+preserves sessions.
 
 ## Install service configuration
 
@@ -138,12 +176,12 @@ Validate and start the deployment:
 sudo systemctl daemon-reload
 sudo caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
 sudo systemctl enable --now bokheim-sync.service
-sudo systemctl enable --now catalog-providers.service
+sudo systemctl enable --now bokheim-catalogs.service
 sudo systemctl enable caddy.service
 sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
 curl --fail https://catalogs.bokheim.se/health
-curl --fail --compressed --header 'Accept: application/vnd.bokheim+bincode; version=5' --header 'Accept-Encoding: zstd' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
+curl --fail --header 'Accept: application/vnd.bokheim+bincode; version=11' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production

@@ -1,8 +1,8 @@
-import type { CatalogPublicationAction } from "./bindings";
+import type { CatalogBookFormat, CatalogPublicationAction } from "./bindings";
 
 type CatalogOwnershipStatus = "not_owned" | "exact_edition_owned" | "other_edition_owned";
 
-const formatLabel = (format: "epub" | "pdf") => format.toUpperCase();
+const formatLabel = (format: CatalogBookFormat) => format === "web_pub" ? "WebPub" : format.toUpperCase();
 
 export function catalogActionKey(action: CatalogPublicationAction) {
   return action.kind === "import" ? `import:${action.request.source_id}:${action.request.publication.edition_id}:${action.request.book_format}:${action.request.download_url}` : `external:${action.purpose}:${action.url}`;

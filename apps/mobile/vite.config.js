@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 
 const host = process.env.TAURI_DEV_HOST;
-const designTokens = JSON.parse(readFileSync(fileURLToPath(new URL("../../ui/design-tokens/design_tokens.json", import.meta.url)), "utf8"));
+const designTokens = JSON.parse(readFileSync(fileURLToPath(new URL("../ui/design-tokens/design_tokens.json", import.meta.url)), "utf8"));
 
 function tokenVariables(tokens) {
   const variables = (prefix, group, unit = "") => {
@@ -13,9 +13,20 @@ function tokenVariables(tokens) {
     return values.join("");
   };
   const foundations = variables("spacing", tokens.spacing, "px") + variables("radius", tokens.radius, "px") + variables("size", tokens.size, "px") + variables("type", tokens.typography, "px");
-  const librarySerif = variables("color", tokens.themes.library_serif);
-  const grecoFuturistic = variables("color", tokens.themes.greco_futuristic);
-  return `:root{${foundations}${grecoFuturistic}--font-interface-family:sans-serif;--font-heading-family:serif;}:root[data-application-theme="library_serif"]{${librarySerif}}:root[data-application-theme="greco_futuristic"]{${grecoFuturistic}}`;
+  const palette = (theme, appearance) => variables("color", tokens.themes[theme][appearance]);
+
+  // Two independent axes: which theme, and light or dark. `data-application-appearance`
+  // is always written by the app with `System` already resolved, so the CSS
+  // never has to consult `prefers-color-scheme` itself.
+  const rules = [];
+  for (const theme of Object.keys(tokens.themes)) {
+    for (const appearance of ["light", "dark"]) {
+      rules.push(`:root[data-application-theme="${theme}"][data-application-appearance="${appearance}"]{${palette(theme, appearance)}}`);
+    }
+  }
+
+  const fallback = palette("greco_futuristic", "light");
+  return `:root{${foundations}${fallback}--font-interface-family:sans-serif;--font-heading-family:serif;}` + rules.join("");
 }
 
 const sharedDesign = {

@@ -32,7 +32,8 @@
   {:else}
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
   {/if}
-  <span>{name}{#if count}<small>{count}</small>{/if}</span>
+  <span>{name}</span>
+  {#if count !== null && count !== undefined}<small>{count}</small>{/if}
   {#if active}
     <i aria-hidden="true">✓</i>
   {:else if external}
@@ -41,15 +42,15 @@
 </button>
 
 <style>
-  button { display: grid; width: 100%; min-width: 0; min-height: 2.6rem; grid-template-columns: 1.35rem minmax(0, 1fr) auto; gap: .65rem; align-items: center; padding: .72rem .75rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: inherit; background: var(--color-white-surface); font: inherit; text-align: left; cursor: pointer; }
-  button:hover { background: var(--color-hover-bg); }
+  button { display: grid; width: 100%; min-width: 0; min-height: 2.6rem; grid-template-columns: 1.35rem minmax(0, 1fr) auto; gap: .65rem; align-items: center; padding: .72rem .75rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: inherit; background: var(--color-raised-bg); font: inherit; text-align: left; cursor: pointer; }
+  button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   button:active { transform: translateY(1px); }
   button:disabled { cursor: default; }
   button.active { border-color: var(--color-accent); background: var(--color-active-highlight); opacity: 1; }
   button.reserve-end { padding-right: 2.7rem; }
   svg { width: 1.35rem; height: 1.35rem; fill: none; stroke: var(--color-accent); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
   button.external svg { stroke: var(--color-subtle-text); }
-  span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  small { margin-left: .45rem; color: var(--color-subtle-text); font-size: .65rem; font-weight: 650; }
+  span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 500; }
+  small { color: var(--color-subtle-text); font-size: .8125rem; font-weight: 650; text-align: right; }
   i { color: var(--color-subtle-text); font-style: normal; }
 </style>

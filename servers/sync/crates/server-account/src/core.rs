@@ -74,8 +74,6 @@ pub enum AuthError {
     InvalidPassword { min_characters: usize, max_bytes: usize },
     #[error("email address is invalid")]
     InvalidEmail,
-    #[error("email domain is not accepted")]
-    EmailDomainNotAllowed,
     #[error("invalid or expired one-time token")]
     InvalidOneTimeToken,
     #[error("too many authentication attempts")]

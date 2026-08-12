@@ -122,34 +122,34 @@
   .book-open { display: grid; width: 100%; min-width: 0; padding: 0; border: 0; color: inherit; text-align: left; background: transparent; cursor: pointer; }
   .book-open:active { transform: scale(.985); }
   .book-open:disabled { opacity: .58; }
-  .book-open.detailed { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: .85rem; min-height: 6.5rem; padding: .75rem .85rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-md); background: var(--color-card-bg); }
+  .book-open.detailed { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: .85rem; min-height: 6.5rem; padding: .75rem .85rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
   .book-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: .35rem; min-width: 0; align-content: start; }
   .book-meta { display: grid; gap: .18rem; min-width: 0; }
   .book-meta strong, .book-meta span { overflow: hidden; text-overflow: ellipsis; }
   .book-meta strong { display: -webkit-box; min-height: 2em; line-height: 1.15; font-size: .9rem; font-weight: 750; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .book-meta span { color: var(--color-subtle-text); font-size: .7rem; }
   .book-description { display: -webkit-box; min-height: 1.9em; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; color: var(--color-subtle-text); font-size: .74rem; line-height: 1.32; }
-  .book-cover { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: .69; overflow: hidden; border: 1px solid color-mix(in srgb, var(--color-border-color) 55%, transparent); border-radius: var(--radius-sm); color: var(--color-subtle-text); background: var(--color-app-bg); box-shadow: 0 .35rem .9rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); }
-  .book-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .book-cover { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: .69; overflow: hidden; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: var(--color-surface-bg); box-shadow: 0 .35rem .9rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); }
+  .book-cover img { width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
   .book-cover > svg { width: 2rem; height: 2rem; }
   .card-copy { display: grid; gap: .18rem; min-width: 0; padding: .55rem .15rem 0; }
   .card-copy strong, .card-copy > span:not(.progress-track) { overflow: hidden; text-overflow: ellipsis; }
   .card-copy strong { display: -webkit-box; min-height: 2.3em; font-size: .84rem; font-weight: 720; line-height: 1.15; white-space: normal; line-clamp: 2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .card-copy > span:not(.progress-track) { white-space: nowrap; }
   .card-copy > span:not(.progress-track) { color: var(--color-subtle-text); font-size: .69rem; }
-  .progress-track { display: block; width: 70%; height: .2rem; margin-top: .3rem; overflow: hidden; border-radius: 99px; background: var(--color-border-color); }
+  .progress-track { display: block; width: 70%; height: .2rem; margin-top: .3rem; overflow: hidden; border-radius: 99px; background: var(--color-border); }
   .progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--color-accent); }
-  .opening { position: absolute; inset: auto .45rem 3.8rem; padding: .35rem; border-radius: var(--radius-sm); color: var(--color-white-surface); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .68rem; font-weight: 750; }
+  .opening { position: absolute; inset: auto .45rem 3.8rem; padding: .35rem; border-radius: var(--radius-sm); color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .68rem; font-weight: 750; }
   .book-actions { position: absolute; z-index: 4; top: .45rem; right: .45rem; }
-  .book-actions summary { display: grid; place-items: center; width: 2.35rem; height: 2.35rem; padding: 0; border: 1px solid color-mix(in srgb, var(--color-border-color) 70%, transparent); border-radius: 50%; color: var(--color-ink-text); background: color-mix(in srgb, var(--color-card-bg) 92%, transparent); box-shadow: 0 .2rem .7rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); cursor: pointer; list-style: none; backdrop-filter: blur(10px); }
+  .book-actions summary { display: grid; place-items: center; width: 2.35rem; height: 2.35rem; padding: 0; border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); border-radius: 50%; color: var(--color-ink-text); background: color-mix(in srgb, var(--color-raised-bg) 92%, transparent); box-shadow: 0 .2rem .7rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); cursor: pointer; list-style: none; backdrop-filter: blur(10px); }
   .book-actions summary::-webkit-details-marker { display: none; }
   .book-actions summary svg { width: 1.15rem; height: 1.15rem; fill: currentColor; stroke: none; }
-  .book-actions[open] summary { color: var(--color-white-surface); background: var(--color-accent); }
-  .book-menu { position: absolute; top: calc(100% + .35rem); right: 0; display: grid; width: max-content; min-width: 11.5rem; padding: .35rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); background: var(--color-card-bg); box-shadow: 0 .8rem 2rem var(--color-box-shadow); }
+  .book-actions[open] summary { color: var(--color-raised-bg); background: var(--color-accent); }
+  .book-menu { position: absolute; top: calc(100% + .35rem); right: 0; display: grid; width: max-content; min-width: 11.5rem; padding: .35rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); box-shadow: 0 .8rem 2rem var(--color-box-shadow); }
   .book-menu button { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr); align-items: center; gap: .55rem; min-height: 2.45rem; padding: .55rem .7rem; border: 0; border-radius: calc(var(--radius-sm) - .15rem); color: var(--color-ink-text); background: transparent; text-align: left; font-size: .76rem; font-weight: 650; cursor: pointer; }
   .book-menu button svg { width: 1.05rem; height: 1.05rem; }
-  .book-menu button:hover { background: var(--color-hover-bg); }
-  .book-menu button:disabled { color: var(--color-disabled-text); cursor: default; }
+  .book-menu button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
+  .book-menu button:disabled { color: var(--color-border); cursor: default; }
   .book-menu button.danger { color: var(--color-danger-text); }
   @media (min-width: 45rem) {
     .book-card { width: var(--book-cover-width); height: var(--book-card-height); }

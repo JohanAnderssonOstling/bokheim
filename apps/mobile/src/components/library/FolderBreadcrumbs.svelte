@@ -19,7 +19,7 @@
 </nav>
 
 <style>
-  nav { display: flex; flex: 1; align-items: center; justify-content: start; gap: .45rem; min-width: 0; min-height: 2.65rem; overflow-x: auto; color: var(--color-disabled-text); white-space: nowrap; scrollbar-width: none; }
+  nav { display: flex; flex: 1; align-items: center; justify-content: start; gap: .45rem; min-width: 0; min-height: 2.65rem; overflow-x: auto; color: var(--color-border); white-space: nowrap; scrollbar-width: none; }
   nav::-webkit-scrollbar { display: none; }
   button { flex: none; min-height: 2.65rem; padding: .55rem .25rem; border: 0; color: var(--color-subtle-text); background: none; font: inherit; font-size: .86rem; cursor: pointer; }
   button.current { color: var(--color-ink-text); font-weight: 750; }

@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use ui_runtime::BlockingWorker;
 use browser_ui::{BrowserSession, BrowserWindowGeometry};
 use gpui::App;
 use reader_ui::{ReaderPreferences, ReaderWindowGeometry};
 use serde::{Deserialize, Serialize};
+use ui_runtime::BlockingWorker;
 
 const SESSION_VERSION: u32 = 1;
 

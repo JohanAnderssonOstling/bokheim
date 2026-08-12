@@ -1,50 +1,99 @@
 # OPDS Store decisions
 
-Date: 2026-08-01
+Date: 2026-08-09
 
-## Product model
+## Ownership
 
-Store is a fifth navigation destination in both the desktop and mobile clients. An OPDS catalog is presented as a read-only remote library: users choose a source, navigate folders with breadcrumbs, search when the source advertises search support, page through results, and add free EPUBs to the active local library.
+Catalog support is split by responsibility:
 
-The first version imports books into the library root. Choosing an import folder, loans, DRM, and purchases are intentionally deferred. OPDS catalogs are anonymous; authenticated feeds are not part of the product model.
+- `shared/opds` implements direct external OPDS behavior: registry validation,
+  OPDS 1/2 parsing, conditional requests, URL resolution, search templates, and
+  verified acquisition downloads.
+- `shared/catalog-model` and `shared/catalog-contract` own provider-neutral
+  values and the client/cache-server protocol.
+- `shared/catalog-core` owns behavior shared by both providers: normalization,
+  SQLite storage, language filtering, OPDS-to-contract conversion, and cover
+  thumbnails.
+- `client/catalog-client` composes the internal cache provider with direct OPDS
+  fallback and persists only catalog data the client has encountered.
+- `servers/opds-cache` crawls curated external catalogs and serves its complete
+  local SQLite snapshot. It never contacts an upstream catalog on a user search
+  or page request.
+- `client/backend` adds imports and a synchronized, library-owned relation from
+  catalog source/publication identity to content hash, but contains no OPDS
+  protocol implementation. Catalog URLs and cached metadata remain outside the
+  library database.
 
-## Built-in sources
+The internal and external providers expose the same neutral catalog contract
+without duplicating OPDS or persistence types.
 
-The catalog registry, cache persistence, revision policy, and device-local custom endpoint store live in `BokheimOpds`; clients do not duplicate URLs or source metadata. `Backend` only composes that store with catalog-server fallback and local-library import.
+## Storage and refresh
 
-| Source | Endpoint | Languages |
-| --- | --- | --- |
-| Project Gutenberg | `https://www.gutenberg.org/ebooks/search.opds/` | Multilingual |
-| Open Library | `https://openlibrary.org/opds/` | Multilingual |
-| Unglue.it | `https://unglue.it/api/opds/` | Multilingual |
-| textos.info | `https://www.textos.info/catalogo.atom` | Spanish |
-| Ebooks Gratuits | `https://www.ebooksgratuits.com/opds/index.php` | French |
-| Office of the Historian | `https://history.state.gov/api/v1/catalog` | English |
-| Gallica | `https://gallica.bnf.fr/opds` | French |
+The client and cache server use the same SQLite schema and publication search
+implementation. A catalog URL change invalidates that catalog's stored pages.
+Existing caches from older implementations are ignored.
 
-## Shared contract and correctness boundary
+The cache server owns one crawl task per catalog. Catalogs are spread evenly
+over a fixed 24-hour cycle. A crawl begins at the catalog root, follows the
+current same-origin catalog graph, uses HTTP validators where available, and
+activates the new generation atomically. A failed crawl leaves the previous
+generation active. Pages that are no longer reachable disappear at the next
+successful activation.
 
-Catalog fetching, OPDS 1.2 Atom parsing, OPDS 2.0 JSON parsing, URL resolution, search-template expansion, acquisition classification, downloads, and EPUB import all live in the Rust backend. The mobile client calls typed Tauri commands generated with tauri-specta; desktop calls the same `AppCore` operations directly.
+Each stored publication has a sequence number that changes only when its
+normalized payload changes. Client requests include the active epoch and the
+publication sequences they already know. The server returns page/search layout
+plus only the changed or missing publication payloads. The server never keeps
+per-client state and the client is not required to store the complete catalog.
 
-The backend exposes `OpdsPublication.free_epub` as the only acquisition that the clients may present as an immediate free download. It is present only for an EPUB whose OPDS acquisition relation is open-access or generic. Buy, borrow, preview/sample, and subscribe relations remain visible in parsed data but never become an Add-to-library action. The Rust importer independently enforces the same rule at its command boundary, so a forged client request still cannot import a paid or borrowed acquisition as though it were free. This keeps the policy identical in both UIs and makes adding another acquisition kind a Rust-only decision.
+## Search
 
-Downloads go to an application-owned temporary directory, are size-limited, and pass through the normal Rust EPUB importer before becoming library books. Partial and invalid downloads are removed. Catalog and acquisition URLs must be absolute HTTP(S) URLs without embedded credentials, responses have size and idle-time limits, and HTTP errors are surfaced per catalog without affecting the local library.
+Catalog and local-library searches share one text normalizer. Matching is
+case- and diacritic-insensitive, collapses all whitespace runs to one space,
+keeps punctuation significant, and requires the normalized query to be one
+contiguous substring. For example, `harry   potter` matches `Harry Potter`, but
+`har pot` does not.
 
-## UI behavior
+A search returns two ordered sections from one query: title matches first, then
+author matches that did not already match the title. There is no result-count
+limit. Catalog search is served from SQLite and never calls an external OPDS
+source on the request path.
 
-- Source failures are isolated and offer retry; one unavailable provider does not disable Store.
-- The root catalog's search descriptor remains available while navigating so search works from subfolders.
-- OPDS groups are flattened into the matching folder and publication views so both OPDS versions have the same interaction model.
-- Previous and next links use the same catalog loader and navigation history.
-- An Add-to-library button is shown only when `free_epub` is present. It is disabled until a local library exists and transitions through Adding and Added states.
-- A successful mobile import invalidates home, author, and folder caches; a successful desktop import advances the shared library refresh signal.
+Clients display local cached matches immediately while refreshing from the
+selected provider. A successful refresh replaces the displayed results; a
+refresh failure leaves the cached results in place without displaying a
+"could not refresh" message. If the internal cache server is unavailable or
+access policy later prevents its use, curated sources fall back to their direct
+OPDS search endpoint. Custom sources are always direct.
 
-## Source references
+## Languages
 
-- Project Gutenberg offline catalog documentation: <https://www.gutenberg.org/ebooks/offline_catalogs.html>
-- OPDS 2.0 specification: <https://specs.opds.io/opds-2.0>
-- Office of the Historian catalog API: <https://history.state.gov/developer/catalog>
-- Gallica API documentation: <https://api.bnf.fr/fr/node/2640>
-- Unglue.it API help: <https://unglue.it/api/help>
+The client sends its supported language tags with internal search requests and
+uses the same filter locally. A catalog with no overlap with the client's
+languages is hidden before it is queried. A catalog declared multilingual is
+kept, but publications whose language metadata has no client-supported match
+are filtered out.
 
-The seven built-in endpoints were live-fetched and parsed by the ignored integration test `open_built_in_catalogs_are_live_and_parseable` on 2026-08-01.
+## Covers and downloads
+
+Covers are keyed by their absolute image URL and stored as standard 408 by 612
+JPEG thumbnails. An unchanged URL reuses the existing JPEG indefinitely. Each
+server crawl hands its deduplicated URL list to download workers; completed
+downloads are handed to a separate thumbnail worker pool. Catalog activation
+does not wait for cover processing, and failed covers are retried on a later
+crawl.
+
+The catalog cache server stores metadata and covers only. It never stores or
+serves books. Import always performs a fresh verification against the external
+OPDS catalog on the client and then downloads the external acquisition. EPUB,
+PDF, MOBI/AZW/AZW3, FB2, CBZ, WebPub, and M4B acquisitions are represented by
+the neutral contract; actual import remains subject to the local library's
+supported formats and acquisition policy.
+
+## Transport and access
+
+The internal service is public and unauthenticated today. Its structured API
+uses the versioned Bokheim bincode media type with identity encoding only;
+content compression and the former HTTP response-cache layer are not supported.
+Registry responses retain normal HTTP ETag handling. External OPDS traffic
+remains standards-compliant XML or JSON.

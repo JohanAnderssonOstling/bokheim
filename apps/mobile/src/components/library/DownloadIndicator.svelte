@@ -34,11 +34,11 @@
 {/if}
 
 <style>
-  .indicator { position: relative; display: grid; width: 2rem; height: 2rem; padding: 0; place-items: center; border: 0; border-radius: 50%; color: var(--color-accent); background: color-mix(in srgb, var(--color-white-surface) 92%, transparent); box-shadow: 0 .1rem .35rem color-mix(in srgb, var(--color-box-shadow) 45%, transparent); }
-  .indicator.complete { width: 1.55rem; height: 1.55rem; color: color-mix(in srgb, var(--color-accent) 75%, var(--color-subtle-text)); background: color-mix(in srgb, var(--color-white-surface) 82%, transparent); box-shadow: none; }
+  .indicator { position: relative; display: grid; width: 2rem; height: 2rem; padding: 0; place-items: center; border: 0; border-radius: 50%; color: var(--color-accent); background: color-mix(in srgb, var(--color-raised-bg) 92%, transparent); box-shadow: 0 .1rem .35rem color-mix(in srgb, var(--color-box-shadow) 45%, transparent); }
+  .indicator.complete { width: 1.55rem; height: 1.55rem; color: color-mix(in srgb, var(--color-accent) 75%, var(--color-subtle-text)); background: color-mix(in srgb, var(--color-raised-bg) 82%, transparent); box-shadow: none; }
   .ring { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); fill: none; }
   .track, .value { fill: none; stroke-width: 2.2; }
-  .track { stroke: color-mix(in srgb, var(--color-border-color) 75%, transparent); }
+  .track { stroke: color-mix(in srgb, var(--color-border) 75%, transparent); }
   .value { stroke: currentColor; stroke-dasharray: 100; stroke-linecap: round; transition: stroke-dashoffset .2s ease; }
   .check { position: relative; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
   .check { width: .95rem; height: .95rem; stroke-width: 2.2; }

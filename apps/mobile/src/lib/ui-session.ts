@@ -14,6 +14,7 @@ export type BrowseUiSession = {
   destination: Destination;
   library_id?: string;
   folder_id?: string;
+  subject_id?: string;
 };
 
 export type AppUiSession = ReaderUiSession | BrowseUiSession;
@@ -33,7 +34,7 @@ function normalizeContentHash(value: unknown): string | null {
 
 function normalizeDestination(value: unknown): value is Destination {
   if (typeof value !== "string") return false;
-  return value === "home" || value === "library" || value === "authors" || value === "search" || value === "store" || value === "account" || value === "settings";
+  return value === "home" || value === "folders" || value === "subjects" || value === "authors" || value === "store" || value === "account" || value === "settings";
 }
 
 function normalizeId(value: unknown): string | undefined {
@@ -72,6 +73,7 @@ export function readUiSession(): AppUiSession | null {
       destination,
       library_id: normalizeId((session as { library_id?: unknown }).library_id),
       folder_id: normalizeId((session as { folder_id?: unknown }).folder_id),
+      subject_id: normalizeId((session as { subject_id?: unknown }).subject_id),
     };
     return normalized;
   }

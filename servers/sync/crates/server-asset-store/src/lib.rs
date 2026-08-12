@@ -17,10 +17,10 @@ pub enum AssetKind {
 }
 
 impl AssetKind {
-    pub const fn max_bytes(self) -> u64 {
+    pub const fn max_bytes(self) -> Option<u64> {
         match self {
-            Self::Book => 1_000_000_000,
-            Self::Thumbnail => sync_common::MAX_THUMBNAIL_BYTES,
+            Self::Book => None,
+            Self::Thumbnail => Some(sync_common::MAX_THUMBNAIL_BYTES),
         }
     }
 }
@@ -59,27 +59,22 @@ pub enum AssetError {
 
 const DEFAULT_MAX_STAGED_BOOKS: usize = 16;
 const DEFAULT_MAX_STAGED_BOOKS_PER_ACCOUNT: usize = 4;
-const DEFAULT_MAX_STAGED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const DEFAULT_MAX_STAGED_BYTES_PER_ACCOUNT: u64 = 2 * 1024 * 1024 * 1024;
-const STAGING_BYTE_QUANTUM: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadLimits {
     pub max_staged_books: usize,
     pub max_staged_books_per_account: usize,
-    pub max_staged_bytes: u64,
-    pub max_staged_bytes_per_account: u64,
 }
 
 impl Default for UploadLimits {
     fn default() -> Self {
-        Self { max_staged_books: DEFAULT_MAX_STAGED_BOOKS, max_staged_books_per_account: DEFAULT_MAX_STAGED_BOOKS_PER_ACCOUNT, max_staged_bytes: DEFAULT_MAX_STAGED_BYTES, max_staged_bytes_per_account: DEFAULT_MAX_STAGED_BYTES_PER_ACCOUNT }
+        Self { max_staged_books: DEFAULT_MAX_STAGED_BOOKS, max_staged_books_per_account: DEFAULT_MAX_STAGED_BOOKS_PER_ACCOUNT }
     }
 }
 
 impl UploadLimits {
     pub fn from_env() -> Result<Self, String> {
-        let names = ["BOKHEIM_MAX_STAGED_BOOK_UPLOADS", "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT", "BOKHEIM_MAX_STAGED_BOOK_BYTES", "BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT"];
+        let names = ["BOKHEIM_MAX_STAGED_BOOK_UPLOADS", "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT"];
         let mut values = HashMap::new();
         for name in names {
             match std::env::var(name) {
@@ -98,69 +93,50 @@ impl UploadLimits {
         let integer = |raw: Option<String>, name: &str| raw.map(|raw| raw.parse::<u64>().map_err(|_| format!("{name} must be an integer"))).transpose();
         let max_staged_books = integer(value("BOKHEIM_MAX_STAGED_BOOK_UPLOADS"), "BOKHEIM_MAX_STAGED_BOOK_UPLOADS")?.unwrap_or(defaults.max_staged_books as u64);
         let max_staged_books_per_account = integer(value("BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT"), "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT")?.unwrap_or(defaults.max_staged_books_per_account as u64);
-        let max_staged_bytes = integer(value("BOKHEIM_MAX_STAGED_BOOK_BYTES"), "BOKHEIM_MAX_STAGED_BOOK_BYTES")?.unwrap_or(defaults.max_staged_bytes);
-        let max_staged_bytes_per_account = integer(value("BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT"), "BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT")?.unwrap_or(defaults.max_staged_bytes_per_account);
         if !(1..=256).contains(&max_staged_books) || !(1..=max_staged_books).contains(&max_staged_books_per_account) {
             return Err("staged book upload counts must be between 1 and 256 and the per-account limit cannot exceed the global limit".to_string());
         }
-        if !(STAGING_BYTE_QUANTUM..=1024 * 1024 * 1024 * 1024).contains(&max_staged_bytes) || !(STAGING_BYTE_QUANTUM..=max_staged_bytes).contains(&max_staged_bytes_per_account) {
-            return Err("staged book byte limits must be between 1 MiB and 1 TiB and the per-account limit cannot exceed the global limit".to_string());
-        }
-        Ok(Self { max_staged_books: max_staged_books as usize, max_staged_books_per_account: max_staged_books_per_account as usize, max_staged_bytes, max_staged_bytes_per_account })
+        Ok(Self { max_staged_books: max_staged_books as usize, max_staged_books_per_account: max_staged_books_per_account as usize })
     }
 }
 
 struct AccountStagingLimit {
     books: Arc<Semaphore>,
-    bytes: Arc<Semaphore>,
 }
 
 struct StagingPermit {
     _account_books: OwnedSemaphorePermit,
-    _account_bytes: OwnedSemaphorePermit,
     _global_books: OwnedSemaphorePermit,
-    _global_bytes: OwnedSemaphorePermit,
     _account: Arc<AccountStagingLimit>,
 }
 
 struct StagingGate {
     books: Arc<Semaphore>,
-    bytes: Arc<Semaphore>,
     per_account_books: usize,
-    per_account_byte_units: usize,
     accounts: Mutex<HashMap<String, Weak<AccountStagingLimit>>>,
 }
 
 impl StagingGate {
     fn new(limits: UploadLimits) -> Self {
-        Self {
-            books: Arc::new(Semaphore::new(limits.max_staged_books)),
-            bytes: Arc::new(Semaphore::new((limits.max_staged_bytes / STAGING_BYTE_QUANTUM) as usize)),
-            per_account_books: limits.max_staged_books_per_account,
-            per_account_byte_units: (limits.max_staged_bytes_per_account / STAGING_BYTE_QUANTUM) as usize,
-            accounts: Mutex::new(HashMap::new()),
-        }
+        Self { books: Arc::new(Semaphore::new(limits.max_staged_books)), per_account_books: limits.max_staged_books_per_account, accounts: Mutex::new(HashMap::new()) }
     }
 
-    fn acquire(&self, user_id: &str, size_bytes: u64) -> Result<StagingPermit, AssetError> {
-        let units = size_bytes.div_ceil(STAGING_BYTE_QUANTUM).max(1) as u32;
+    fn acquire(&self, user_id: &str, _size_bytes: u64) -> Result<StagingPermit, AssetError> {
         let account = {
             let mut accounts = self.accounts.lock().map_err(|_| AssetError::Storage("upload staging account lock is poisoned".to_string()))?;
             accounts.retain(|_, account| account.strong_count() > 0);
             match accounts.get(user_id).and_then(Weak::upgrade) {
                 Some(account) => account,
                 None => {
-                    let account = Arc::new(AccountStagingLimit { books: Arc::new(Semaphore::new(self.per_account_books)), bytes: Arc::new(Semaphore::new(self.per_account_byte_units)) });
+                    let account = Arc::new(AccountStagingLimit { books: Arc::new(Semaphore::new(self.per_account_books)) });
                     accounts.insert(user_id.to_string(), Arc::downgrade(&account));
                     account
                 }
             }
         };
         let account_books = account.books.clone().try_acquire_owned().map_err(|_| AssetError::Busy)?;
-        let account_bytes = account.bytes.clone().try_acquire_many_owned(units).map_err(|_| AssetError::Busy)?;
         let global_books = self.books.clone().try_acquire_owned().map_err(|_| AssetError::Busy)?;
-        let global_bytes = self.bytes.clone().try_acquire_many_owned(units).map_err(|_| AssetError::Busy)?;
-        Ok(StagingPermit { _account_books: account_books, _account_bytes: account_bytes, _global_books: global_books, _global_bytes: global_bytes, _account: account })
+        Ok(StagingPermit { _account_books: account_books, _global_books: global_books, _account: account })
     }
 }
 
@@ -314,8 +290,8 @@ impl FsAssetStore {
             if expected_len.is_some_and(|expected| total > expected) {
                 return Err(AssetError::LengthMismatch { expected: expected_len.unwrap_or(0), actual: total });
             }
-            if total > kind.max_bytes() {
-                return Err(AssetError::TooLarge { limit: kind.max_bytes() });
+            if kind.max_bytes().is_some_and(|limit| total > limit) {
+                return Err(AssetError::TooLarge { limit: kind.max_bytes().unwrap_or(u64::MAX) });
             }
             file.write_all(&buffer[..count]).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         }
@@ -368,30 +344,26 @@ mod tests {
         let configured = UploadLimits::from_values(|name| match name {
             "BOKHEIM_MAX_STAGED_BOOK_UPLOADS" => Some("8".to_string()),
             "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT" => Some("2".to_string()),
-            "BOKHEIM_MAX_STAGED_BOOK_BYTES" => Some((8 * STAGING_BYTE_QUANTUM).to_string()),
-            "BOKHEIM_MAX_STAGED_BOOK_BYTES_PER_ACCOUNT" => Some((2 * STAGING_BYTE_QUANTUM).to_string()),
             _ => None,
         })
         .unwrap();
         assert_eq!(configured.max_staged_books, 8);
         assert_eq!(configured.max_staged_books_per_account, 2);
-        assert_eq!(configured.max_staged_bytes, 8 * STAGING_BYTE_QUANTUM);
-        assert_eq!(configured.max_staged_bytes_per_account, 2 * STAGING_BYTE_QUANTUM);
         assert!(UploadLimits::from_values(|name| (name == "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT").then(|| "17".to_string())).is_err());
     }
 
     #[test]
     fn staged_upload_capacity_is_bounded_per_account_and_globally_and_releases_on_drop() {
-        let limits = UploadLimits { max_staged_books: 2, max_staged_books_per_account: 1, max_staged_bytes: 2 * STAGING_BYTE_QUANTUM, max_staged_bytes_per_account: STAGING_BYTE_QUANTUM, ..UploadLimits::default() };
+        let limits = UploadLimits { max_staged_books: 2, max_staged_books_per_account: 1 };
         let gate = StagingGate::new(limits);
         let alice = gate.acquire("alice", 1).unwrap();
         assert!(matches!(gate.acquire("alice", 1), Err(AssetError::Busy)));
-        let bob = gate.acquire("bob", STAGING_BYTE_QUANTUM).unwrap();
+        let bob = gate.acquire("bob", u64::MAX).unwrap();
         assert!(matches!(gate.acquire("carol", 1), Err(AssetError::Busy)));
         drop(alice);
         let carol = gate.acquire("carol", 1).unwrap();
         drop((bob, carol));
-        assert!(gate.acquire("alice", STAGING_BYTE_QUANTUM).is_ok());
+        assert!(gate.acquire("alice", u64::MAX).is_ok());
     }
 
     fn jpeg(pixel: [u8; 3]) -> Vec<u8> {
@@ -545,7 +517,8 @@ mod tests {
         let store = FsAssetStore::new(temp.path().join("books"), thumbnails.clone());
         store.initialize().await.unwrap();
         let hash = ContentHash::new(&"a".repeat(64));
-        assert!(matches!(store.put("alice", AssetKind::Thumbnail, &hash, None, reader(vec![0; AssetKind::Thumbnail.max_bytes() as usize + 1])).await, Err(AssetError::TooLarge { .. })));
+        let thumbnail_limit = AssetKind::Thumbnail.max_bytes().unwrap();
+        assert!(matches!(store.put("alice", AssetKind::Thumbnail, &hash, None, reader(vec![0; thumbnail_limit as usize + 1])).await, Err(AssetError::TooLarge { .. })));
 
         let first = jpeg([1, 2, 3]);
         let second = jpeg([9, 8, 7]);

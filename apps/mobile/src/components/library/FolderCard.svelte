@@ -25,7 +25,7 @@
 </script>
 
 <div class="folder-card">
-  <FolderNavigationCard name={folder.name} reserveEnd={!isWebApp && total > 0} onclick={() => { if (!isWebApp && total > 0 && !complete) void ondownload(folder); return onopen(folder); }} />
+  <FolderNavigationCard name={folder.name} count={folder.book_count} reserveEnd={!isWebApp && total > 0} onclick={() => { if (!isWebApp && total > 0 && !complete) void ondownload(folder); return onopen(folder); }} />
   {#if !isWebApp && total > 0}
     <div class="download-action">
       <DownloadIndicator
@@ -39,6 +39,7 @@
 </div>
 
 <style>
-  .folder-card { position: relative; width: max-content; max-width: 100%; min-width: 0; }
+  .folder-card { position: relative; width: auto; min-width: 0; margin: .125rem; }
+  .folder-card :global(button) { min-height: 2.6rem; border: 0; border-radius: 0; background: var(--color-raised-bg); }
   .download-action { position: absolute; top: 50%; right: .55rem; transform: translateY(-50%); }
 </style>

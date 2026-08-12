@@ -9,6 +9,7 @@
     onselect,
     oncreate,
     onopen,
+    onremove,
   }: {
     libraries: LibraryEntry[];
     activeLibraryId: string;
@@ -16,6 +17,7 @@
     onselect: (libraryId: string) => void | Promise<void>;
     oncreate: () => void;
     onopen: () => void | Promise<void>;
+    onremove: (libraryId: string) => void | Promise<void>;
   } = $props();
 </script>
 
@@ -43,22 +45,26 @@
     <p>Library actions</p>
     <button type="button" onclick={oncreate}>Create library</button>
     <button type="button" onclick={() => void onopen()}>Open library</button>
+    {#if activeLibraryId}
+      <button class="danger" type="button" onclick={() => void onremove(activeLibraryId)}>Delete selected library</button>
+    {/if}
   </div>
 </div>
 
 <style>
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
   .scrim { position: fixed; z-index: 90; inset: 0; width: 100%; height: 100%; border: 0; background: var(--color-overlay-scrim); }
-  .sheet { position: fixed; z-index: 91; right: 0; bottom: 0; left: 0; max-height: min(78dvh, 38rem); padding: 1rem max(1rem, env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); border: 1px solid var(--color-border-color); border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--color-white-surface); box-shadow: 0 -1rem 3rem color-mix(in srgb, var(--color-box-shadow) 55%, transparent); }
+  .sheet { position: fixed; z-index: 91; right: 0; bottom: 0; left: 0; max-height: min(78dvh, 38rem); padding: 1rem max(1rem, env(safe-area-inset-right)) calc(1rem + env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); border: 1px solid var(--color-border); border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--color-raised-bg); box-shadow: 0 -1rem 3rem color-mix(in srgb, var(--color-box-shadow) 55%, transparent); }
   header { display: flex; align-items: center; justify-content: space-between; min-height: 2.6rem; margin-bottom: .5rem; }
-  h2 { margin: 0; font: 500 1.3rem var(--font-heading-family); }
+  h2 { margin: 0; font: 500 1.3rem var(--font-interface-family); }
   header button { width: 2.5rem; height: 2.5rem; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; font-size: 1.5rem; }
   .list { display: grid; max-height: 48dvh; overflow-y: auto; }
-  .library-select { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; min-height: 3.25rem; padding: .55rem .7rem; overflow: hidden; border: 0; border-bottom: 1px solid var(--color-border-color); color: var(--color-ink-text); background: transparent; text-align: left; cursor: pointer; }
+  .library-select { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; min-height: 3.25rem; padding: .55rem .7rem; overflow: hidden; border: 0; border-bottom: 1px solid var(--color-border); color: var(--color-ink-text); background: transparent; text-align: left; cursor: pointer; }
   .library-select span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .library-select.active { color: var(--color-accent); background: var(--color-active-highlight); font-weight: 750; }
-  .library-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .55rem; margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--color-border-color); }
+  .library-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .55rem; margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--color-border); }
   .library-actions p { grid-column: 1 / -1; margin: 0; color: var(--color-subtle-text); font-size: .68rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
-  .library-actions button { min-height: 2.8rem; border: 1px solid var(--color-border-color); border-radius: var(--radius-sm); color: var(--color-accent); background: transparent; font-size: .78rem; font-weight: 750; cursor: pointer; }
+  .library-actions button { min-height: 2.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-accent); background: transparent; font-size: .78rem; font-weight: 750; cursor: pointer; }
+  .library-actions button.danger { grid-column: 1 / -1; color: var(--color-danger-text); }
   @media (min-width: 45rem) { .sheet { top: 50%; right: auto; bottom: auto; left: 50%; width: min(30rem, calc(100vw - 2rem)); padding: 1.1rem; border-radius: .75rem; transform: translate(-50%, -50%); } }
 </style>

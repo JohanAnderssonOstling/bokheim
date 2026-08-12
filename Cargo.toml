@@ -1,44 +1,46 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/backend",
-    "crates/domain",
-    "crates/opds",
-    "crates/account-contract",
-    "crates/app-contract",
-    "crates/catalog-provider",
-    "crates/sync-client",
-    "crates/library-files",
-    "crates/identifiers",
-    "crates/test-support",
-    "crates/book-metadata",
-    "crates/library-registry",
-    "crates/remote-reader",
-    "crates/projection",
-    "crates/storage-sqlite",
-    "crates/thumbnail",
-    "servers/catalog",
-    "crates/audiobook-library",
-    "crates/algorithms",
-    "crates/wire",
+    "client/backend",
+    "client/library-replica",
+    "client/sync-client",
+    "client/library-registry",
+    "client/remote-reader",
+    "client/book-metadata",
+    "client/thumbnail",
+    "client/audiobook-library",
+    "client/app-contract",
+    "client/library-model",
+    "client/test-support",
+    "shared/content-address",
+    "shared/catalog-contract",
+    "shared/catalog-model",
+    "shared/opds",
+    "shared/account-contract",
+    "shared/catalog-core",
+    "client/catalog-client",
+    "shared/protocol-test-support",
+    "shared/wire",
+    "shared/metadata-contract",
     "apps/mobile/src-tauri",
-    "crates/sync-common",
-    "data-analysis",
-    "renderers/html",
-    "renderers/html/crates/html-publication",
-    "renderers/html/crates/html-view-gpui",
-    "renderers/html/floem-smoke",
-    "renderers/shared/reader-style",
-    "renderers/pdf/view-common",
-    "renderers/pdf/core",
+    "shared/sync-common",
+    "apps/renderers/html",
+    "apps/renderers/html/crates/html-publication",
+    "apps/renderers/html/crates/html-view-gpui",
+    "apps/renderers/html/floem-smoke",
+    "apps/renderers/shared/reader-style",
+    "apps/renderers/pdf/view-common",
+    "apps/renderers/pdf/core",
     "apps/desktop-gpui",
-    "apps/audiobook-player",
+    "apps/ui/gpui/audiobook-player",
     "apps/kobo-device",
-    "ui/gpui/browser",
-    "ui/gpui/reader",
-    "ui/gpui/pdf-view",
-    "ui/gpui/components",
-    "ui/gpui/runtime"
+    "apps/ui/gpui/browser",
+    "apps/ui/gpui/reader",
+    "apps/ui/gpui/pdf-view",
+    "apps/ui/gpui/components",
+    "apps/ui/gpui/runtime",
+    "servers/opds-cache",
+    "servers/metadata"
 ]
 exclude = ["servers/sync"]
 
@@ -58,6 +60,9 @@ gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform", features = ["wayla
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 pdfium-render = { version = "0.9.3", default-features = false }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+mobi = "0.8.0"
+encoding_rs = "0.8"
 
 [patch.crates-io]
 gpui = { path = "../GPUI-Fork/crates/gpui" }
@@ -66,3 +71,10 @@ gpui = { path = "../GPUI-Fork/crates/gpui" }
 gpui = { path = "../GPUI-Fork/crates/gpui" }
 gpui_macros = { path = "../GPUI-Fork/crates/gpui_macros" }
 gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
+
+# Temporary: note rendering needs unpushed HtmlViewCore work.
+[patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]
+html-engine = { path = "../HtmlEngine/crates/html" }
+
+[patch."https://github.com/JohanAnderssonOstling/HtmlViewCore"]
+html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }

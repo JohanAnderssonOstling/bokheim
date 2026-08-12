@@ -76,6 +76,7 @@ jobs:
         run: |
           npm run check
           npm run check:bindings
+          npm run check:tokens
 
       - name: Test shared mobile backend
         run: cargo test -p epub-svelte --lib --no-default-features --features mobile

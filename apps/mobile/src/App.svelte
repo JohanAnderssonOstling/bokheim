@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { convertFileSrc } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -20,8 +21,9 @@
   import LibrarySwitcher from "./components/shell/LibrarySwitcher.svelte";
   import ServerAccountDialog from "./components/shell/ServerAccountDialog.svelte";
   import Store from "./components/store/Store.svelte";
-  import { applyApplicationAppearance } from "./lib/application-appearance";
+  import { applyApplicationAppearance, observeSystemAppearance, resolveAppearance } from "./lib/application-appearance";
   import { commands } from "./lib/commands";
+  import { toBackendDirectoryId } from "./lib/directory-id";
   import { pickEpub, type PickedEpub } from "./lib/epub-picker";
   import { NAV_ITEMS, type Destination } from "./lib/navigation";
   import { observeNetworkStatus, UNKNOWN_NETWORK_STATUS } from "./lib/network-status";
@@ -29,13 +31,14 @@
   import { clearThumbnailCache } from "./lib/thumbnail-cache";
   import { readUiSession, writeUiSession, type AppUiSession } from "./lib/ui-session";
   import {
+    ACCOUNT_CONTRACT,
     BROWSING_CONTENT_CONTRACT,
     BROWSING_LAYOUT_CONTRACT,
     BROWSING_STATES_CONTRACT,
     DEFAULT_READER_PREFERENCES,
     DEFAULT_BROWSING_PREFERENCES,
-    type AccountSessionSummary,
     type AccountStatus,
+    type AccountStorageUsage,
     type AuthorSummary,
     type BookCardData,
     type BrowsingPreferencePatch,
@@ -47,6 +50,8 @@
     type LibraryEntry,
     type LibrarySyncStatus,
     type LibraryTransfers,
+    type LocalLibraryStorageUsage,
+    type ServerLibraryStorageUsage,
     type NetworkStatus,
     type ReaderBook,
     type ReaderPreferencePatch,
@@ -58,7 +63,6 @@
   import { isWebApp } from "./lib/platform";
 
   type FolderLevel = { id: string; name: string };
-  type BookBytes = ArrayBuffer | Uint8Array | number[];
   type DownloadStatusEvent = {
     library_id: string;
     event: { DownloadStatusChanged: { content_hash: string; state: DownloadState } };
@@ -67,14 +71,11 @@
     library_id: string;
     event: { FolderDownloadStatusChanged: { dir_id: string; downloaded_books: number; total_books: number } };
   };
-  type LibraryViewMode = "cover" | "detailed";
 
-  const EMPTY_DIRECTORY: DirectoryContent = { books: [], directories: [] };
+  const EMPTY_DIRECTORY: DirectoryContent = { books: [], children: [] };
   const SEARCH_DEBOUNCE_MS = BROWSING_CONTENT_CONTRACT.search_debounce_ms;
   const naturalCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
   const WEB_PREFERENCES_KEY = `${APP_NAME_LOWER}-reader-preferences`;
-  const BROWSING_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-browsing-ui-preferences`;
-  const DEFAULT_LIBRARY_VIEW_MODE: LibraryViewMode = "cover";
 
   function currentSessionFromRoute(): AppUiSession | null {
     const libraryId = (page.url.searchParams.get("library") || page.params.libraryId || undefined)?.trim() || undefined;
@@ -90,7 +91,7 @@
       const folderId = page.params.folderId?.trim() || "__root__";
       return {
         kind: "browse",
-        destination: "library",
+        destination: "folders",
         library_id: page.params.libraryId || libraryId,
         folder_id: folderId === "__root__" ? "__root__" : folderId,
       };
@@ -102,11 +103,13 @@
         library_id: page.params.libraryId || libraryId,
       };
     }
-    if (routeId === "/library/[libraryId]/search") {
+    if (routeId === "/library/[libraryId]/subjects/[subjectId]") {
+      const subjectId = page.params.subjectId?.trim();
       return {
         kind: "browse",
-        destination: "search",
+        destination: "subjects",
         library_id: page.params.libraryId || libraryId,
+        subject_id: subjectId === "__root__" ? undefined : subjectId,
       };
     }
     if (routeId === "/store") {
@@ -137,6 +140,11 @@
     return naturalCollator.compare(left, right);
   }
 
+  function subjectBreadcrumb(subjectId: string): FolderLevel[] {
+    const names = subjectId.split(" / ").map((name) => name.trim()).filter(Boolean);
+    return names.map((name, index) => ({ id: names.slice(0, index + 1).join(" / "), name }));
+  }
+
   function sortedLibraries(entries: LibraryEntry[]) {
     return [...entries].sort((left, right) => naturalCompare(left.library_name, right.library_name));
   }
@@ -163,6 +171,11 @@
   const recentlyFinished = $derived(recentlyRead.filter((book) => (book.progress ?? 0) >= BROWSING_CONTENT_CONTRACT.finished_progress_threshold));
   let directoryContent = $state<DirectoryContent>(EMPTY_DIRECTORY);
   let folderStack = $state<FolderLevel[]>([]);
+  let subjectContent = $state<DirectoryContent>(EMPTY_DIRECTORY);
+  let subjectStack = $state<FolderLevel[]>([]);
+  let subjectsLoading = $state(false);
+  let subjectsLoadedFor = $state("");
+  let subjectRequest = 0;
   let authors = $state<AuthorSummary[]>([]);
   let authorFilter = $state("");
   let focusedAuthorIndex = $state(0);
@@ -170,8 +183,10 @@
   let selectedAuthorName = $state("");
   let authorBooks = $state<BookCardData[]>([]);
   let searchQuery = $state("");
-  let searchResults = $state<BookCardData[]>([]);
+  let titleSearchResults = $state<BookCardData[]>([]);
+  let authorSearchResults = $state<BookCardData[]>([]);
   let searchCompletedQuery = $state("");
+  let searchCompletedScope = $state("");
   let searchPending = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let showLibrarySwitcher = $state(false);
@@ -200,17 +215,20 @@
   let addingBook = $state(false);
   let browsingPreferences = $state<BrowsingPreferences>({ ...DEFAULT_BROWSING_PREFERENCES });
   let readerPreferences = $state<ReaderPreferences>({ ...DEFAULT_READER_PREFERENCES });
-  let libraryViewMode = $state<LibraryViewMode>(DEFAULT_LIBRARY_VIEW_MODE);
   let accountStatus = $state<AccountStatus>({ signed_in: false, server_url: null, email: null });
+  let accountStorageUsage = $state<AccountStorageUsage | null>(null);
   let accountBusy = $state(false);
   let accountProgress = $state("");
   let accountError = $state("");
+  let accountStatusError = $state("");
   let settingsError = $state("");
-  let accountResolved = $state(!isWebApp);
+  let accountResolved = $state(false);
   let webAppReady = $state(!isWebApp);
   let librarySyncStatuses = $state<LibrarySyncStatus[]>([]);
   let libraryTransfers = $state<LibraryTransfers[]>([]);
-  let accountSessions = $state<AccountSessionSummary[]>([]);
+  let localLibraryStorageUsage = $state<LocalLibraryStorageUsage[]>([]);
+  /** Null until a server that reports storage per library answers. */
+  let serverLibraryStorageUsage = $state<ServerLibraryStorageUsage[] | null>(null);
   let networkStatus = $state<NetworkStatus>({ ...UNKNOWN_NETWORK_STATUS });
   let transferPreferences = $state<TransferPreferences>({ allow_background_on_metered: false, auto_download_limit_mb: null });
   let browsingPreferenceSaveQueue = Promise.resolve();
@@ -225,23 +243,25 @@
   const destinationTitle = $derived(activeDestination === "account" ? "Account" : activeDestination === "settings" ? "Settings" : NAV_ITEMS.find((item) => item.id === activeDestination)?.label ?? APP_NAME);
   const activeLibrary = $derived(libraries.find((library) => library.library_id === activeLibraryId));
   const visibleDirectoryBooks = $derived(directoryContent.books);
+  const visibleSubjectBooks = $derived(subjectContent.books);
   const visibleAuthorBooks = $derived(authorBooks);
-  const visibleSearchResults = $derived(searchResults);
+  const visibleTitleSearchResults = $derived(titleSearchResults);
+  const visibleAuthorSearchResults = $derived(authorSearchResults);
   const visibleRecentlyInProgress = $derived(recentlyInProgress);
   const visibleRecentlyFinished = $derived(recentlyFinished);
   const visibleRecentlyAdded = $derived(recentlyAdded);
   const filteredAuthors = $derived(authors.filter((author) => author.name.toLocaleLowerCase().includes(authorFilter.trim().toLocaleLowerCase())));
   const visibleAuthors = $derived(filteredAuthors);
 
-  function libraryRoute(destination: Destination = activeDestination, libraryId = activeLibraryId, folderId?: string) {
+  function libraryRoute(destination: Destination = activeDestination, libraryId = activeLibraryId, locationId?: string) {
     if (destination === "account") return "/account";
     if (destination === "settings") return "/settings";
     if (destination === "store") return "/store";
     if (!libraryId) return "/library";
     const library = `/library/${encodeURIComponent(libraryId)}`;
-    if (destination === "library") return folderId && folderId !== "__root__" ? `${library}/folder/${encodeURIComponent(folderId)}` : `${library}/folder/__root__`;
+    if (destination === "folders") return locationId && locationId !== "__root__" ? `${library}/folder/${encodeURIComponent(locationId)}` : `${library}/folder/__root__`;
+    if (destination === "subjects") return `${library}/subjects/${encodeURIComponent(locationId || "__root__")}`;
     if (destination === "authors") return `${library}/authors`;
-    if (destination === "search") return `${library}/search`;
     return library;
   }
 
@@ -272,14 +292,12 @@
     applyApplicationAppearance(browsingPreferences);
   });
 
+  // Without this, "follow system" would only be honoured at startup.
+  $effect(() => observeSystemAppearance(() => applyApplicationAppearance(browsingPreferences)));
+
   $effect(() => {
     authorFilter;
     focusedAuthorIndex = 0;
-  });
-
-  $effect(() => {
-    if (activeDestination !== "account" || !accountStatus.signed_in) return;
-    void Promise.all([loadServerTransferState(), loadAccountSessions()]).catch((reason) => (accountError = errorMessage(reason)));
   });
 
   $effect(() => {
@@ -289,6 +307,7 @@
       pathname: page.url.pathname,
       libraryId: page.params.libraryId,
       folderId: page.params.folderId,
+      subjectId: page.params.subjectId,
       bookId: page.params.bookId,
       readerLibraryId: page.url.searchParams.get("library") ?? undefined,
     };
@@ -301,6 +320,11 @@
     writeUiSession(session);
   });
 
+  $effect(() => {
+    if (activeDestination !== "account") return;
+    void refreshAccountView();
+  });
+
   function errorMessage(reason: unknown) {
     return reason instanceof Error ? reason.message : String(reason);
   }
@@ -310,6 +334,7 @@
     pathname: string;
     libraryId?: string;
     folderId?: string;
+    subjectId?: string;
     bookId?: string;
     readerLibraryId?: string;
   }) {
@@ -345,12 +370,12 @@
       return;
     }
 
-    const destination: Destination = route.id === "/library/[libraryId]/authors"
+    const destination: Destination = route.id === "/library/[libraryId]/subjects/[subjectId]"
+      ? "subjects"
+      : route.id === "/library/[libraryId]/authors"
       ? "authors"
-      : route.id === "/library/[libraryId]/search"
-        ? "search"
-        : route.id === "/library/[libraryId]/folder/[folderId]"
-          ? "library"
+      : route.id === "/library/[libraryId]/folder/[folderId]"
+          ? "folders"
           : "home";
 
     if (route.libraryId && route.libraryId !== activeLibraryId && libraries.some((entry) => entry.library_id === route.libraryId)) {
@@ -359,19 +384,24 @@
     if (!activeLibraryId) return;
     activeDestination = destination;
     libraryError = "";
-    if (destination === "library") {
+    if (destination === "folders") {
       const folderId = route.folderId ?? "__root__";
       const stack = folderId === "__root__"
         ? []
         : folderStack.at(-1)?.id === folderId
           ? folderStack
-          : [{ id: folderId, name: directoryContent.directories.find((folder) => folder.id === folderId)?.name ?? "Folder" }];
+          : (await commands.getLibraryFolderPath(activeLibraryId, toBackendDirectoryId(folderId))).map((folder) => ({ id: folder.id, name: folder.name }));
       await loadDirectory(folderId, stack);
+    } else if (destination === "subjects") {
+      const subjectId = route.subjectId && route.subjectId !== "__root__" ? route.subjectId : undefined;
+      const stack = subjectId
+        ? subjectStack.at(-1)?.id === subjectId
+          ? subjectStack
+          : subjectBreadcrumb(subjectId)
+        : [];
+      await loadSubjects(subjectId, stack);
     } else {
       await ensureDestination(destination);
-    }
-    if (destination === "search") {
-      requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
     }
   }
 
@@ -390,14 +420,14 @@
     if (session.destination === "account") return "/account";
     if (session.destination === "settings") return "/settings";
     if (session.destination === "store") return "/store";
-    if (session.destination === "library") {
-      return libraryRoute("library", session.library_id, session.folder_id);
+    if (session.destination === "folders") {
+      return libraryRoute("folders", session.library_id, session.folder_id);
     }
     if (session.destination === "authors") {
       return libraryRoute("authors", session.library_id);
     }
-    if (session.destination === "search") {
-      return libraryRoute("search", session.library_id);
+    if (session.destination === "subjects") {
+      return libraryRoute("subjects", session.library_id, session.subject_id);
     }
     return libraryRoute("home", session.library_id);
   }
@@ -412,16 +442,14 @@
   }
 
   function setDestination(destination: Destination, updateRoute = true) {
+    const enteringAccount = destination === "account" && activeDestination !== "account";
+    if (destination !== activeDestination) clearLibrarySearch();
     activeDestination = destination;
     libraryError = "";
     void ensureDestination(destination);
-    if (updateRoute) navigate(libraryRoute(destination, activeLibraryId, folderStack.at(-1)?.id));
-    if (destination === "search") {
-      requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#library-search")?.focus());
-    }
-    if (destination === "account" && accountStatus.signed_in) {
-      void loadServerTransferState().catch((reason) => (accountError = errorMessage(reason)));
-    }
+    const locationId = destination === "subjects" ? subjectStack.at(-1)?.id : folderStack.at(-1)?.id;
+    if (updateRoute) navigate(libraryRoute(destination, activeLibraryId, locationId));
+    if (enteringAccount) void refreshAccountView();
   }
 
   function openLibrarySwitcher() {
@@ -439,7 +467,8 @@
       return;
     }
     if (activeDestination === "home") await loadHome(libraryGeneration, true);
-    if (activeDestination === "library") await loadDirectory(folderStack.at(-1)?.id ?? "__root__", folderStack, libraryGeneration, true);
+    if (activeDestination === "folders") await loadDirectory(folderStack.at(-1)?.id ?? "__root__", folderStack, libraryGeneration, true);
+    if (activeDestination === "subjects") await loadSubjects(subjectStack.at(-1)?.id, subjectStack, libraryGeneration, true);
     if (activeDestination === "authors") await loadAuthors(libraryGeneration, true);
     if (activeDestination === "account") await loadServerTransferState();
   }
@@ -455,6 +484,11 @@
     recentlyAdded = [];
     recentlyRead = [];
     directoryContent = EMPTY_DIRECTORY;
+    subjectContent = EMPTY_DIRECTORY;
+    subjectStack = [];
+    subjectsLoadedFor = "";
+    subjectsLoading = false;
+    subjectRequest += 1;
     authors = [];
     authorFilter = "";
     focusedAuthorIndex = 0;
@@ -463,7 +497,8 @@
     authorBooks = [];
     folderStack = [];
     searchQuery = "";
-    searchResults = [];
+    titleSearchResults = [];
+    authorSearchResults = [];
     homeLoadedFor = "";
     folderLoadedFor = "";
     authorsLoadedFor = "";
@@ -515,7 +550,7 @@
     activeFolderDownloads = { ...activeFolderDownloads, [folder.id]: true };
     libraryError = "";
     try {
-      const status = await commands.downloadFolder(activeLibraryId, folder.id);
+      const status = await commands.downloadFolder(activeLibraryId, toBackendDirectoryId(folder.id));
       folderDownloadStatuses = { ...folderDownloadStatuses, [folder.id]: status };
     } catch (reason) {
       libraryError = errorMessage(reason);
@@ -570,9 +605,14 @@
   async function ensureDestination(destination: Destination, generation = libraryGeneration) {
     if (!activeLibraryId || loadingLibrary || generation !== libraryGeneration) return;
     if (destination === "home" && homeLoadedFor !== activeLibraryId) await loadHome(generation);
-    if (destination === "library") {
+    if (destination === "folders") {
       const dirId = folderStack.at(-1)?.id ?? "__root__";
       if (folderLoadedFor !== `${activeLibraryId}:${dirId}`) await loadDirectory(dirId, folderStack, generation);
+    }
+    if (destination === "subjects") {
+      const subjectId = subjectStack.at(-1)?.id;
+      const key = `${activeLibraryId}:${subjectId ?? "__root__"}`;
+      if (subjectsLoadedFor !== key) await loadSubjects(subjectId, subjectStack, generation);
     }
     if (destination === "authors" && authorsLoadedFor !== activeLibraryId) await loadAuthors(generation);
   }
@@ -606,20 +646,20 @@
     folderLoading = true;
     libraryError = "";
     try {
-      const content = await measureInvoke("directory", () => commands.getLibraryFolder(libraryId, dirId));
+      const content = await measureInvoke("directory", () => commands.getLibraryFolder(libraryId, toBackendDirectoryId(dirId)));
       if (request !== folderRequest || generation !== libraryGeneration || libraryId !== activeLibraryId) return;
       const sortedContent = {
         ...content,
-        directories: [...content.directories].sort((left, right) => naturalCompare(left.name, right.name)),
+        children: [...content.children].sort((left, right) => naturalCompare(left.name, right.name)),
         books: [...content.books].sort((left, right) => naturalCompare(left.title, right.title)),
       };
       await commitAndMeasureRender("directory", () => {
         directoryContent = sortedContent;
         folderStack = nextStack;
         folderLoadedFor = key;
-      }, content.books.length + content.directories.length);
+      }, content.books.length + content.children.length);
       mergeBookDownloadStates(content.books);
-      replaceFolderDownloadStates(content.directories);
+      replaceFolderDownloadStates(content.children);
     } catch (reason) {
       if (request === folderRequest && generation === libraryGeneration) libraryError = errorMessage(reason);
     } finally {
@@ -646,6 +686,45 @@
     } finally {
       if (generation === libraryGeneration) authorsLoading = false;
     }
+  }
+
+  async function loadSubjects(subjectId: string | undefined, nextStack: FolderLevel[], generation = libraryGeneration, force = false) {
+    const libraryId = activeLibraryId;
+    const key = `${libraryId}:${subjectId ?? "__root__"}`;
+    if (!libraryId || subjectsLoading || (!force && subjectsLoadedFor === key)) return;
+    const request = ++subjectRequest;
+    subjectsLoading = true;
+    libraryError = "";
+    try {
+      const view = await measureInvoke("subjects", () => commands.getLibrarySubjects(libraryId, subjectId ?? null));
+      if (request !== subjectRequest || generation !== libraryGeneration || libraryId !== activeLibraryId) return;
+      subjectContent = {
+        children: [...view.children].sort((left, right) => naturalCompare(left.name, right.name)),
+        books: [...view.books].sort((left, right) => naturalCompare(left.title, right.title)),
+      };
+      subjectStack = nextStack;
+      subjectsLoadedFor = key;
+      mergeBookDownloadStates(view.books);
+    } catch (reason) {
+      if (request === subjectRequest && generation === libraryGeneration) libraryError = errorMessage(reason);
+    } finally {
+      if (request === subjectRequest && generation === libraryGeneration) subjectsLoading = false;
+    }
+  }
+
+  async function openSubject(subject: LibraryDirectory) {
+    clearLibrarySearch();
+    const nextStack = [...subjectStack, { id: subject.id, name: subject.name }];
+    await loadSubjects(subject.id, nextStack);
+    await navigate(libraryRoute("subjects", activeLibraryId, subject.id));
+  }
+
+  async function goToSubject(level: number) {
+    clearLibrarySearch();
+    const nextStack = level < 0 ? [] : subjectStack.slice(0, level + 1);
+    const subjectId = nextStack.at(-1)?.id;
+    await loadSubjects(subjectId, nextStack);
+    await navigate(libraryRoute("subjects", activeLibraryId, subjectId));
   }
 
   async function selectLibrary(libraryId: string, updateRoute = true) {
@@ -685,14 +764,22 @@
   }
 
   async function loadAccountStatus() {
+    accountResolved = false;
     try {
       const status = await commands.getAccountStatus();
       accountStatus = status;
+      accountStatusError = "";
     } catch (reason) {
-      accountStatus = { signed_in: false, server_url: null, email: null };
-      if (isWebApp) accountError = `Could not check your session: ${errorMessage(reason)}`;
+      accountStatusError = `Could not check your session: ${errorMessage(reason)}`;
     } finally {
       accountResolved = true;
+    }
+  }
+
+  async function refreshAccountView() {
+    await loadAccountStatus();
+    if (!accountStatusError && accountStatus.signed_in) {
+      await loadServerTransferState().catch((reason) => (accountError = errorMessage(reason)));
     }
   }
 
@@ -729,23 +816,28 @@
     if (!accountStatus.signed_in) {
       librarySyncStatuses = [];
       libraryTransfers = [];
+      localLibraryStorageUsage = [];
+      accountStorageUsage = null;
+      serverLibraryStorageUsage = null;
       return;
     }
-    const [catalogue, transfers] = await Promise.all([
+    const [catalogue, transfers, storageUsage, localStorageUsage, serverStorageUsage] = await Promise.all([
       commands.reconcileLibraryCatalogue(),
       commands.getTransferStatuses(),
+      // Older servers do not expose the optional account quota endpoint yet.
+      // Keep catalogue and transfer synchronization usable in that case.
+      commands.getAccountStorageUsage().catch(() => null),
+      commands.getLocalLibraryStorageUsage(),
+      // Null both when the server predates the per-library endpoint and when
+      // the call fails: either way there is no breakdown to show.
+      commands.getServerLibraryStorageUsage().catch(() => null),
     ]);
     libraries = sortedLibraries(catalogue.libraries);
     librarySyncStatuses = catalogue.sync_statuses;
     libraryTransfers = transfers;
-  }
-
-  async function loadAccountSessions() {
-    if (!accountStatus.signed_in) {
-      accountSessions = [];
-      return;
-    }
-    accountSessions = await commands.getAccountSessions();
+    accountStorageUsage = storageUsage;
+    localLibraryStorageUsage = localStorageUsage;
+    serverLibraryStorageUsage = serverStorageUsage;
   }
 
   async function loadTransferStatuses() {
@@ -806,6 +898,13 @@
     }
   }
 
+  /**
+   * The account page's primary action: reconcile the catalogue and re-read the
+   * transfer and storage state, so the verdict at the top of the page is the
+   * one the user just asked for.
+   */
+  const syncAccountNow = () => runAccountRequest(ACCOUNT_CONTRACT.summary.syncing_label, "", () => loadServerTransferState());
+
   async function runAccountRequest(progress: string, success: string, request: () => Promise<unknown>): Promise<boolean> {
     if (accountBusy) return false;
     accountBusy = true;
@@ -824,8 +923,8 @@
     }
   }
 
-  const registerAccount = (email: string, password: string) => runAccountRequest("Creating account…", "Check your email for the verification token.", () => commands.requestPublicRegistration(email, password));
-  const resendAccountVerification = (email: string) => runAccountRequest("Sending verification token…", "If the registration is pending, a new token has been sent.", () => commands.resendVerification(email));
+  const registerAccount = (email: string, password: string) => runAccountRequest("Creating account…", "Check your email for the 6-digit verification PIN.", () => commands.requestPublicRegistration(email, password));
+  const resendAccountVerification = (email: string) => runAccountRequest("Sending verification PIN…", "If the registration is pending, a new PIN has been sent.", () => commands.resendVerification(email));
   const requestAccountPasswordReset = (email: string) => runAccountRequest("Requesting password reset…", "If the account exists, a reset token has been sent.", () => commands.requestPasswordReset(email));
   const resetAccountPassword = (token: string, password: string) => runAccountRequest("Updating password…", "Password updated. Sign in with the new password.", () => commands.resetPassword(token, password));
 
@@ -856,7 +955,8 @@
       accountProgress = "";
       librarySyncStatuses = [];
       libraryTransfers = [];
-      accountSessions = [];
+      localLibraryStorageUsage = [];
+      accountStorageUsage = null;
       if (isWebApp) {
         webAppReady = false;
         readerBook = null;
@@ -869,59 +969,6 @@
       } else {
         await loadLibraries();
       }
-    } catch (reason) {
-      accountError = errorMessage(reason);
-      accountProgress = "";
-    } finally {
-      accountBusy = false;
-    }
-  }
-
-  async function revokeAccountSession(sessionId: string) {
-    if (accountBusy) return;
-    const selected = accountSessions.find((session) => session.session_id === sessionId);
-    const prompt = selected?.current ? "Sign out this session?" : "Revoke this session? The device will need to sign in again.";
-    if (!window.confirm(prompt)) return;
-    accountBusy = true;
-    accountError = "";
-    accountProgress = selected?.current ? "Signing out this session…" : "Revoking session…";
-    try {
-      accountStatus = await commands.revokeAccountSession(sessionId);
-      accountProgress = "";
-      if (accountStatus.signed_in) {
-        await loadAccountSessions();
-      } else {
-        accountSessions = [];
-        librarySyncStatuses = [];
-        libraryTransfers = [];
-        if (isWebApp) {
-          webAppReady = false;
-          readerBook = null;
-          libraries = [];
-          activeLibraryId = "";
-          resetLibraryData();
-          navigate("/login", true);
-        } else {
-          await loadLibraries();
-        }
-      }
-    } catch (reason) {
-      accountError = errorMessage(reason);
-      accountProgress = "";
-    } finally {
-      accountBusy = false;
-    }
-  }
-
-  async function revokeOtherAccountSessions() {
-    if (accountBusy || accountSessions.length <= 1 || !window.confirm("Sign out every other session? Those devices will need to sign in again.")) return;
-    accountBusy = true;
-    accountError = "";
-    accountProgress = "Signing out other sessions…";
-    try {
-      const revoked = await commands.revokeOtherAccountSessions();
-      await loadAccountSessions();
-      accountProgress = revoked === 1 ? "Signed out 1 other session." : `Signed out ${revoked} other sessions.`;
     } catch (reason) {
       accountError = errorMessage(reason);
       accountProgress = "";
@@ -969,25 +1016,60 @@
     if (failures.length) libraryError = `Could not open some libraries: ${failures.join("; ")}`;
   }
 
+  async function removeLibraryFromDevice(libraryId: string) {
+    const library = libraries.find((entry) => entry.library_id === libraryId);
+    if (!library) return;
+    const confirmed = window.confirm(
+      `Delete “${library.library_name}”?\n\nIts database and state will be removed from this device immediately. Server deletion will happen now when possible, or automatically after the next sign-in. Local book files, folders, and stored server blobs will be kept.`,
+    );
+    if (!confirmed) return;
+
+    showLibrarySwitcher = false;
+    loadingLibrary = true;
+    libraryError = "";
+    try {
+      await commands.removeLibrary(libraryId);
+      const remaining = sortedLibraries(await commands.getLibraries());
+      libraries = remaining;
+      librarySyncStatuses = librarySyncStatuses.filter((status) => status.library_id !== libraryId);
+      libraryTransfers = libraryTransfers.filter((group) => group.library_id !== libraryId);
+      localLibraryStorageUsage = localLibraryStorageUsage.filter((usage) => usage.library_id !== libraryId);
+      if (remaining.length) {
+        await selectLibrary(remaining[0].library_id);
+      } else {
+        libraryGeneration += 1;
+        activeLibraryId = "";
+        resetLibraryData();
+        loadingLibrary = false;
+        await navigate("/library", true);
+      }
+    } catch (reason) {
+      libraryError = `Could not remove library: ${errorMessage(reason)}`;
+      loadingLibrary = false;
+    }
+  }
+
   async function openFolder(folder: LibraryDirectory) {
+    clearLibrarySearch();
     await loadDirectory(folder.id, [...folderStack, { id: folder.id, name: folder.name }]);
-    navigate(libraryRoute("library", activeLibraryId, folder.id));
+    navigate(libraryRoute("folders", activeLibraryId, folder.id));
   }
 
   async function goToFolder(level: number) {
+    clearLibrarySearch();
     const nextStack = folderStack.slice(0, level);
     const dirId = nextStack.at(-1)?.id ?? "__root__";
     await loadDirectory(dirId, nextStack);
-    navigate(libraryRoute("library", activeLibraryId, dirId));
+    navigate(libraryRoute("folders", activeLibraryId, dirId));
   }
 
   async function createFolder(name: string) {
     const parentId = folderStack.at(-1)?.id ?? "__root__";
-    const created = await measureInvoke("create_directory", () => commands.createDirectory(activeLibraryId, parentId, name));
-    const dirs = directoryContent.directories.filter((folder) => folder.id !== created.id);
+    const created = await measureInvoke("create_directory", () => commands.createDirectory(activeLibraryId, toBackendDirectoryId(parentId), name));
+    const dirs = directoryContent.children.filter((folder) => folder.id !== created.id);
     directoryContent = {
       ...directoryContent,
-      directories: [...dirs, created].sort((left, right) => naturalCompare(left.name, right.name)),
+      children: [...dirs, created].sort((left, right) => naturalCompare(left.name, right.name)),
     };
   }
 
@@ -1013,12 +1095,29 @@
     }
   }
 
+  function clearLibrarySearch() {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchQuery = "";
+    titleSearchResults = [];
+    authorSearchResults = [];
+    searchCompletedQuery = "";
+    searchCompletedScope = "";
+    searchPending = false;
+  }
+
+  function focusContextualSearch() {
+    if (activeDestination !== "folders" && activeDestination !== "subjects") setDestination("folders");
+    requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#contextual-library-search")?.focus());
+  }
+
   function scheduleSearch() {
     if (searchTimer) clearTimeout(searchTimer);
     const query = searchQuery.trim();
     if (!query) {
-      searchResults = [];
+      titleSearchResults = [];
+      authorSearchResults = [];
       searchCompletedQuery = "";
+      searchCompletedScope = "";
       searchPending = false;
       return;
     }
@@ -1027,12 +1126,30 @@
   }
 
   async function runSearch(query: string) {
+    const scope = activeDestination === "folders"
+      ? `folder:${folderStack.at(-1)?.id ?? "__root__"}`
+      : activeDestination === "subjects"
+        ? `subject:${subjectStack.at(-1)?.id ?? "__root__"}`
+        : "global";
     try {
-      const results = await measureInvoke("search", () => commands.searchLibrary(activeLibraryId, query, BROWSING_CONTENT_CONTRACT.search_result_limit));
-      if (query === searchQuery.trim()) {
-        await commitAndMeasureRender("search", () => (searchResults = results), results.length);
+      const results = await measureInvoke("search", () => scope.startsWith("folder:")
+        ? commands.searchLibraryFolder(activeLibraryId, toBackendDirectoryId(scope.slice("folder:".length)), query, BROWSING_CONTENT_CONTRACT.search_result_limit)
+        : scope.startsWith("subject:")
+          ? commands.searchLibrarySubject(activeLibraryId, scope === "subject:__root__" ? null : scope.slice("subject:".length), query, BROWSING_CONTENT_CONTRACT.search_result_limit)
+          : commands.searchLibrary(activeLibraryId, query, BROWSING_CONTENT_CONTRACT.search_result_limit));
+      const currentScope = activeDestination === "folders"
+        ? `folder:${folderStack.at(-1)?.id ?? "__root__"}`
+        : activeDestination === "subjects"
+          ? `subject:${subjectStack.at(-1)?.id ?? "__root__"}`
+          : "global";
+      if (query === searchQuery.trim() && scope === currentScope) {
+        await commitAndMeasureRender("search", () => {
+          titleSearchResults = results.title_matches;
+          authorSearchResults = results.author_matches;
+        }, results.title_matches.length + results.author_matches.length);
         searchCompletedQuery = query;
-        mergeBookDownloadStates(results);
+        searchCompletedScope = scope;
+        mergeBookDownloadStates([...results.title_matches, ...results.author_matches]);
       }
     } catch (reason) {
       if (query === searchQuery.trim()) libraryError = errorMessage(reason);
@@ -1061,29 +1178,6 @@
       browsingPreferences = await measureInvoke("browsing_preferences", () => commands.getBrowsingPreferences());
     } catch {
       browsingPreferences = { ...DEFAULT_BROWSING_PREFERENCES };
-    }
-  }
-
-  function loadLibraryViewPreferences() {
-    try {
-      const saved = localStorage.getItem(BROWSING_UI_PREFERENCES_KEY);
-      const parsed = saved ? JSON.parse(saved) : {};
-      if (parsed?.library_view_mode === "cover" || parsed?.library_view_mode === "detailed") {
-        libraryViewMode = parsed.library_view_mode;
-      } else {
-        libraryViewMode = DEFAULT_LIBRARY_VIEW_MODE;
-      }
-    } catch {
-      libraryViewMode = DEFAULT_LIBRARY_VIEW_MODE;
-    }
-  }
-
-  function saveLibraryViewPreference(mode: LibraryViewMode) {
-    libraryViewMode = mode;
-    try {
-      localStorage.setItem(BROWSING_UI_PREFERENCES_KEY, JSON.stringify({ library_view_mode: mode }));
-    } catch {
-      // Ignore persistence failures for optional local preference state.
     }
   }
 
@@ -1145,31 +1239,17 @@
   async function openDownloadedBook(bookId: string, title?: string, author?: string): Promise<ReaderBook> {
       const libraryId = activeLibraryId;
       if (!libraryId) throw new Error("No library is selected");
-      const [rawBytes, fileName, initialCfi] = await Promise.all([
-        measureInvoke("open_book", () => commands.openBook(libraryId, bookId) as unknown as Promise<BookBytes>),
+      const [localPath, fileName, initialCfi] = await Promise.all([
+        measureInvoke("open_book", () => commands.openBook(libraryId, bookId)),
         commands.getBookFileName(libraryId, bookId),
         measureInvoke("reading_position", () => commands.getBookReadingPosition(libraryId, bookId)),
       ]);
-      const buffer = rawBytes instanceof ArrayBuffer
-        ? rawBytes
-        : rawBytes instanceof Uint8Array
-          ? rawBytes.slice().buffer
-          : Uint8Array.from(rawBytes).buffer;
       const resolvedTitle = title || fileName.replace(/\.[^.]+$/, "") || "Untitled";
-      const extension = fileName.split(".").at(-1)?.toLocaleLowerCase();
-      const mediaType = extension === "epub" ? "application/epub+zip"
-        : extension === "fb2" ? "application/x-fictionbook+xml"
-        : extension === "cbz" ? "application/vnd.comicbook+zip"
-        : extension === "webpub" ? "application/webpub+zip"
-        : extension === "html" || extension === "htm" ? "text/html"
-        : extension === "xhtml" ? "application/xhtml+xml"
-        : extension === "mobi" || extension === "azw" || extension === "azw3" ? "application/x-mobipocket-ebook"
-        : "application/octet-stream";
-      const file = new File([buffer], fileName, { type: mediaType });
       return {
         key: `library:${libraryId}:${bookId}`,
         bookId,
-        file,
+        file: convertFileSrc(localPath),
+        fileName,
         title: resolvedTitle,
         author,
         initialCfi,
@@ -1192,7 +1272,7 @@
     }
     restoringReaderId = bookId;
     try {
-      const knownBook = [...recentlyAdded, ...recentlyRead, ...directoryContent.books, ...authorBooks, ...searchResults]
+      const knownBook = [...recentlyAdded, ...recentlyRead, ...directoryContent.books, ...authorBooks, ...titleSearchResults, ...authorSearchResults]
         .find((book) => book.content_hash === bookId);
       const openedBook = await openDownloadedBook(bookId, knownBook?.title, knownBook?.author);
       readerRouteCache.set(bookId, openedBook);
@@ -1250,7 +1330,7 @@
       const sourcePath = await picked.asImportPath();
       if (!sourcePath) throw new Error("Adding books requires the native application.");
       const parentId = folderStack.at(-1)?.id ?? "__root__";
-      await measureInvoke("import_book", () => commands.importBook({ library_id: activeLibraryId, directory_id: parentId }, sourcePath, picked.name));
+      await measureInvoke("import_book", () => commands.importBook({ library_id: activeLibraryId, directory_id: toBackendDirectoryId(parentId) }, sourcePath, picked.name));
       homeLoadedFor = "";
       authorsLoadedFor = "";
       await loadDirectory(parentId, folderStack, libraryGeneration, true);
@@ -1273,8 +1353,8 @@
     let unlistenDownloadStatus: (() => void) | undefined;
     let unlistenFolderDownloadStatus: (() => void) | undefined;
     let unlistenTransferStatus: (() => void) | undefined;
+    let unlistenCatalogueChanged: (() => void) | undefined;
     let transferRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-    loadLibraryViewPreferences();
     const unobserveNetwork = observeNetworkStatus((status) => {
       networkStatus = status;
       if (!isWebApp || accountStatus.signed_in) {
@@ -1287,10 +1367,15 @@
       void (async () => {
         try {
           const session = readUiSession();
+          await loadAccountStatus();
           await loadLibraries();
           await restoreUiSession(session);
           routesReady = true;
-          await loadAccountStatus();
+          if (accountStatus.signed_in) {
+            void loadServerTransferState().catch((reason) => {
+              accountError = errorMessage(reason);
+            });
+          }
           await loadBrowsingPreferences();
           await loadReaderPreferences();
           await loadTransferPreferences();
@@ -1337,15 +1422,22 @@
       if (disposed) unlisten();
       else unlistenTransferStatus = unlisten;
     }).catch(() => undefined);
+    void listen("library:catalogue-changed", () => {
+      if (!accountStatus.signed_in) return;
+      void loadServerTransferState().catch((reason) => (accountError = errorMessage(reason)));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenCatalogueChanged = unlisten;
+    }).catch(() => undefined);
     const handleShortcut = (event: KeyboardEvent) => {
       if (isWebApp || readerBook || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
-      const destination = ({ "1": "home", "2": "library", "3": "authors", "4": "search", "5": "store", "6": "account", "7": "settings" } as const)[event.key];
+      const destination = ({ "1": "home", "2": "folders", "3": "subjects", "4": "authors", "5": "store", "6": "account", "7": "settings" } as const)[event.key];
       if (destination) {
         event.preventDefault();
         setDestination(destination);
       } else if (event.key.toLocaleLowerCase() === "f") {
         event.preventDefault();
-        setDestination("search");
+        focusContextualSearch();
       }
     };
     document.addEventListener("keydown", handleShortcut);
@@ -1354,6 +1446,7 @@
       unlistenDownloadStatus?.();
       unlistenFolderDownloadStatus?.();
       unlistenTransferStatus?.();
+      unlistenCatalogueChanged?.();
       if (transferRefreshTimer) clearTimeout(transferRefreshTimer);
       document.removeEventListener("keydown", handleShortcut);
       unobserveNetwork();
@@ -1364,6 +1457,53 @@
 </script>
 
 <svelte:head><title>{isWebApp && !accountStatus.signed_in ? `Account · ${APP_NAME}` : readerBook ? `${readerBook.title} · Reader` : `${destinationTitle} · ${APP_NAME}`}</title></svelte:head>
+
+{#snippet searchResults()}
+  <div class="scoped-search-results" aria-live="polite">
+    {#if searchPending}
+      <div class="inline-empty">Searching…</div>
+    {:else if searchCompletedQuery}
+      {#if visibleTitleSearchResults.length}
+        <h2>Title matches</h2>
+        <BookGrid
+          libraryId={activeLibraryId}
+          books={visibleTitleSearchResults}
+          detailed={browsingPreferences.library_view === "detailed"}
+          emptyMessage=""
+          {openingBookId}
+          downloadStates={bookDownloadStates}
+          onopen={openLibraryBook}
+          ondownload={downloadBook}
+          onremove={removeLocalBookCopy}
+        />
+      {/if}
+      {#if visibleAuthorSearchResults.length}
+        <h2>Author matches</h2>
+        <BookGrid
+          libraryId={activeLibraryId}
+          books={visibleAuthorSearchResults}
+          detailed={browsingPreferences.library_view === "detailed"}
+          emptyMessage=""
+          {openingBookId}
+          downloadStates={bookDownloadStates}
+          onopen={openLibraryBook}
+          ondownload={downloadBook}
+          onremove={removeLocalBookCopy}
+        />
+      {/if}
+      {#if !visibleTitleSearchResults.length && !visibleAuthorSearchResults.length}
+        <div class="inline-empty">{BROWSING_STATES_CONTRACT.no_search_results_label}</div>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet contextualSearch(placeholder: string)}
+  <label class="search-field contextual-search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
+    <input id="contextual-library-search" type="search" bind:value={searchQuery} oninput={scheduleSearch} {placeholder} aria-label={placeholder} autocomplete="off" />
+  </label>
+{/snippet}
 
 {#if isWebApp && (!accountResolved || (accountStatus.signed_in && !webAppReady))}
   <main class="auth-loading" aria-live="polite">
@@ -1388,6 +1528,7 @@
       book={readerBook}
       preferences={readerPreferences}
       applicationTheme={browsingPreferences.theme}
+      applicationAppearance={resolveAppearance(browsingPreferences.appearance)}
       onpreferenceschange={saveReaderPreference}
       onclose={closeReader}
     />
@@ -1407,9 +1548,9 @@
       <AppTopbar
         pageTitle={destinationTitle}
         libraryName={activeLibrary?.library_name ?? "Libraries"}
-        folders={folderStack}
-        showBreadcrumb={activeDestination === "library"}
-        showLibraryActions={activeDestination === "library"}
+        folders={activeDestination === "subjects" ? subjectStack : folderStack}
+        showBreadcrumb={activeDestination === "folders" || activeDestination === "subjects"}
+        showLibraryActions={activeDestination === "folders"}
         {addingBook}
         accountSignedIn={accountStatus.signed_in}
         onlibraries={openLibrarySwitcher}
@@ -1417,46 +1558,56 @@
         onsettings={() => setDestination("settings")}
         onaddbook={addBookToCurrentFolder}
         onnewfolder={() => (showCreateFolder = true)}
-        onfolder={goToFolder}
+        onfolder={activeDestination === "subjects" ? goToSubject : goToFolder}
       />
 
-      <main class:library-view={activeDestination === "library"} class:authors-view={activeDestination === "authors"} class:store-view={activeDestination === "store"} class="content">
+      <main class:library-view={activeDestination === "folders" || activeDestination === "subjects"} class:authors-view={activeDestination === "authors"} class:store-view={activeDestination === "store"} class="content">
         {#if activeDestination === "account"}
-          <ServerAccountDialog
-            account={accountStatus}
-            {accountBusy}
-            {accountProgress}
-            {accountError}
-            {librarySyncStatuses}
-            {libraryTransfers}
-            {accountSessions}
-            onlogin={loginToServer}
-            onlogout={logoutFromServer}
-            onrevokesession={revokeAccountSession}
-            onrevokeothersessions={revokeOtherAccountSessions}
-            onregister={registerAccount}
-            onresendverification={resendAccountVerification}
-            onverifyemail={verifyAccountEmail}
-            onrequestpasswordreset={requestAccountPasswordReset}
-            onresetpassword={resetAccountPassword}
-          />
+          {#if !accountResolved}
+            <section class="account-status-state" aria-live="polite"><span class="loader"></span><strong>Checking your session</strong></section>
+          {:else if accountStatusError}
+            <section class="account-status-state" role="alert">
+              <strong>Account status unavailable</strong>
+              <p>{accountStatusError}</p>
+              <button type="button" onclick={() => void refreshAccountView()}>Retry</button>
+            </section>
+          {:else}
+            <ServerAccountDialog
+              account={accountStatus}
+              {accountBusy}
+              {accountProgress}
+              {accountError}
+              storageUsage={accountStorageUsage}
+              {librarySyncStatuses}
+              {libraryTransfers}
+              {localLibraryStorageUsage}
+              {serverLibraryStorageUsage}
+              onrefresh={syncAccountNow}
+              onlogin={loginToServer}
+              onlogout={logoutFromServer}
+              onregister={registerAccount}
+              onresendverification={resendAccountVerification}
+              onverifyemail={verifyAccountEmail}
+              onrequestpasswordreset={requestAccountPasswordReset}
+              onresetpassword={resetAccountPassword}
+            />
+          {/if}
         {:else if activeDestination === "settings"}
           <BrowsingSettingsDialog
             preferences={browsingPreferences}
             {networkStatus}
             {transferPreferences}
-            {libraryViewMode}
+            serverConnected={accountStatus.signed_in && networkStatus.connected && networkStatus.validated !== false}
             error={settingsError}
             onchange={saveBrowsingPreference}
             ontransferpreference={saveTransferPreference}
-            onlibraryviewmode={saveLibraryViewPreference}
           />
         {:else if activeDestination === "store" && !activeLibraryId}
           <EmptyPage
             title={BROWSING_STATES_CONTRACT.no_libraries_title}
             description={BROWSING_STATES_CONTRACT.no_libraries_description}
             primaryLabel={BROWSING_STATES_CONTRACT.create_library_label}
-            onprimary={() => setDestination("library")}
+            onprimary={() => setDestination("folders")}
           />
         {:else if activeDestination === "store"}
           <Store {activeLibraryId} libraryName={activeLibrary?.library_name ?? "library"} onimported={storeBookImported} />
@@ -1518,11 +1669,15 @@
             onremove={removeLocalBookCopy}
           />{/if}
           {/if}
-        {:else if activeDestination === "library"}
+        {:else if activeDestination === "folders"}
           <section class="content-section library-section">
-              {#if directoryContent.directories.length}
+            {@render contextualSearch(folderStack.length ? `Search books or authors in ${folderStack.at(-1)?.name} and subfolders` : "Search books or authors")}
+            {#if searchQuery.trim()}
+              {@render searchResults()}
+            {:else}
+              {#if directoryContent.children.length}
                 <div class="folder-grid">
-                  {#each directoryContent.directories.filter((folder) => folder.id !== "__root__") as folder}
+                  {#each directoryContent.children.filter((folder) => folder.id !== "__root__") as folder}
                     <FolderCard
                       {folder}
                       status={folderDownloadStatuses[folder.id]}
@@ -1536,7 +1691,7 @@
               <BookGrid
                 libraryId={activeLibraryId}
                 books={visibleDirectoryBooks}
-                detailed={libraryViewMode === "detailed"}
+                detailed={browsingPreferences.library_view === "detailed"}
                 emptyMessage=""
                 {openingBookId}
                 downloadStates={bookDownloadStates}
@@ -1544,7 +1699,7 @@
                 ondownload={downloadBook}
                 onremove={removeLocalBookCopy}
               />
-              {#if !directoryContent.directories.length && !visibleDirectoryBooks.length}
+              {#if !directoryContent.children.length && !visibleDirectoryBooks.length}
                 <EmptyPage
                   title={folderStack.length ? BROWSING_STATES_CONTRACT.empty_folder_title : BROWSING_STATES_CONTRACT.empty_library_title}
                   description={folderStack.length ? BROWSING_STATES_CONTRACT.empty_folder_description : BROWSING_STATES_CONTRACT.empty_library_description}
@@ -1554,6 +1709,7 @@
                   onsecondary={() => { showCreateFolder = true; }}
                 />
               {/if}
+            {/if}
           </section>
         {:else if activeDestination === "authors"}
           <section class="authors-layout" aria-label="Authors">
@@ -1600,7 +1756,7 @@
                 <BookGrid
                   libraryId={activeLibraryId}
                   books={visibleAuthorBooks}
-                  detailed={libraryViewMode === "detailed"}
+                  detailed={browsingPreferences.library_view === "detailed"}
                   emptyMessage="No books found for this author."
                   {openingBookId}
                   downloadStates={bookDownloadStates}
@@ -1614,24 +1770,39 @@
               {/if}
             </div>
           </section>
-        {:else}
-          <section class="search-page">
-            <label class="search-field">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
-              <input id="library-search" type="search" bind:value={searchQuery} oninput={scheduleSearch} placeholder="Title" autocomplete="off" />
-            </label>
-            {#if searchCompletedQuery}
+        {:else if activeDestination === "subjects"}
+          <section class="content-section library-section" aria-label="Subjects">
+            {@render contextualSearch(subjectStack.length ? `Search books or authors in ${subjectStack.at(-1)?.name} and subsubjects` : "Search books or authors in all subjects")}
+            {#if searchQuery.trim()}
+              {@render searchResults()}
+            {:else if subjectsLoading}
+              <section class="page-state" aria-live="polite"><span class="loader"></span><strong>Loading subjects…</strong></section>
+            {:else}
+              {#if subjectContent.children.length}
+                <div class="subject-grid">
+                  {#each subjectContent.children as subject}
+                    <button type="button" onclick={() => void openSubject(subject)}>
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.6 13.6 13.7 20.5a2 2 0 0 1-2.8 0L3.5 13.1a2 2 0 0 1 0-2.8V4h6.3a2 2 0 0 1 1.4.6l9.4 9a1.4 1.4 0 0 1 0 2zM7.2 7.2h.1"></path></svg>
+                      <span>{subject.name}</span>
+                      <small>{subject.book_count}</small>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
               <BookGrid
                 libraryId={activeLibraryId}
-                books={visibleSearchResults}
-                detailed={libraryViewMode === "detailed"}
-                emptyMessage={BROWSING_STATES_CONTRACT.no_search_results_label}
+                books={visibleSubjectBooks}
+                detailed={browsingPreferences.library_view === "detailed"}
+                emptyMessage=""
                 {openingBookId}
                 downloadStates={bookDownloadStates}
                 onopen={openLibraryBook}
                 ondownload={downloadBook}
                 onremove={removeLocalBookCopy}
               />
+              {#if !subjectContent.children.length && !visibleSubjectBooks.length}
+                <EmptyPage title="No subjects" description="No books have subject information here yet." />
+              {/if}
             {/if}
           </section>
         {/if}
@@ -1650,6 +1821,7 @@
         onselect={selectLibrary}
         oncreate={() => { showLibrarySwitcher = false; showCreateLibrary = true; }}
         onopen={openLibraryFolders}
+        onremove={removeLibraryFromDevice}
       />
     {/if}
 
@@ -1684,6 +1856,9 @@
   svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 
   .auth-loading { display: grid; min-height: 100dvh; place-content: center; justify-items: center; gap: .8rem; color: var(--color-subtle-text); background: var(--color-surface-bg); font-size: .8rem; }
+  .account-status-state { display: grid; width: min(100%, 36rem); margin: 2rem auto; padding: 1.25rem; justify-items: center; gap: .7rem; color: var(--color-subtle-text); text-align: center; }
+  .account-status-state p { margin: 0; overflow-wrap: anywhere; font-size: .75rem; }
+  .account-status-state button { min-height: 2.5rem; padding: .5rem .9rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font: inherit; font-weight: 700; }
 
   .adaptive-shell {
     --page-gutter: 1rem;
@@ -1712,23 +1887,23 @@
     width: 100%;
     max-width: 92rem;
     margin: 0 auto;
-    padding: 1rem var(--page-gutter) calc(6.7rem + env(safe-area-inset-bottom));
+    padding: 1rem var(--page-gutter) calc(4.9rem + env(safe-area-inset-bottom));
     padding-right: max(var(--page-gutter), env(safe-area-inset-right));
     padding-left: max(var(--page-gutter), env(safe-area-inset-left));
     overflow-y: scroll;
     overscroll-behavior-y: contain;
     scrollbar-gutter: stable;
-    scrollbar-color: var(--color-disabled-text) transparent;
+    scrollbar-color: var(--color-border) transparent;
     scrollbar-width: thin;
   }
   .content::-webkit-scrollbar { width: .55rem; }
   .content::-webkit-scrollbar-track { background: transparent; }
-  .content::-webkit-scrollbar-thumb { border: .14rem solid transparent; border-radius: 999px; background: var(--color-disabled-text); background-clip: padding-box; }
+  .content::-webkit-scrollbar-thumb { border: .14rem solid transparent; border-radius: 999px; background: var(--color-border); background-clip: padding-box; }
   .content.library-view { padding-top: 0; }
 
   .section-heading h2 {
     margin: 0;
-    font-family: var(--font-heading-family);
+    font-family: var(--font-interface-family);
     font-weight: 500;
     letter-spacing: -.035em;
   }
@@ -1745,12 +1920,17 @@
     color: var(--color-subtle-text);
   }
   .page-state { gap: .75rem; }
-  .loader { width: 1.4rem; height: 1.4rem; border: .18rem solid var(--color-border-color); border-top-color: var(--color-accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  .loader { width: 1.4rem; height: 1.4rem; border: .18rem solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .inline-empty { display: grid; place-items: center; min-height: 8rem; color: var(--color-subtle-text); font-size: .84rem; text-align: center; }
 
   .library-section { margin-top: 0; }
-  .folder-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .45rem; margin-bottom: 1.25rem; }
+  .folder-grid, .subject-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr)); margin: -.125rem -.125rem 1.125rem; }
+  .subject-grid button { display: grid; grid-template-columns: 1.3rem minmax(0, 1fr) auto; align-items: center; gap: .65rem; min-height: 2.6rem; margin: .125rem; padding: .55rem .75rem; border: 0; border-radius: 0; color: inherit; background: var(--color-raised-bg); text-align: left; }
+  .subject-grid button:active { transform: translateY(1px); }
+  .subject-grid svg { width: 1.3rem; color: var(--color-accent); }
+  .subject-grid span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 500; }
+  .subject-grid small { color: var(--color-subtle-text); font-size: .8125rem; font-weight: 650; text-align: right; }
 
   .content.authors-view { display: flex; flex-direction: column; overflow: hidden; }
   .authors-layout { display: grid; flex: 1; width: min(1200px, 100%); min-height: 0; margin: 0 auto; gap: 2rem; overflow: hidden; }
@@ -1759,12 +1939,12 @@
   .author-books-panel { display: none; min-height: 0; overflow-y: auto; }
   .author-list-panel.has-selection + .author-books-panel { display: block; }
   .author-heading { align-items: start; justify-content: start; }
-  .author-back { display: inline-flex; align-items: center; gap: .35rem; padding: .45rem .55rem; border: 1px solid var(--color-border-color); border-radius: .65rem; color: var(--color-accent); background: color-mix(in srgb, var(--color-white-surface) 58%, transparent); font-size: .72rem; font-weight: 750; }
-  .author-filter { display: grid; flex: none; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .6rem; min-height: 2.9rem; margin-bottom: .8rem; padding: 0 .75rem; border: 1px solid var(--color-border-color); border-radius: .65rem; background: var(--color-white-surface); }
+  .author-back { display: inline-flex; align-items: center; gap: .35rem; padding: .45rem .55rem; border: 1px solid var(--color-border); border-radius: .65rem; color: var(--color-accent); background: color-mix(in srgb, var(--color-raised-bg) 58%, transparent); font-size: .72rem; font-weight: 750; }
+  .author-filter { display: grid; flex: none; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .6rem; min-height: 2.9rem; margin-bottom: .8rem; padding: 0 .75rem; border: 1px solid var(--color-border); border-radius: .65rem; background: var(--color-raised-bg); }
   .author-filter:focus-within { border-color: var(--color-accent); }
   .author-filter svg { width: 1.05rem; color: var(--color-accent); }
   .author-filter input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; font-size: .82rem; }
-  .author-list-scroll { flex: 1; min-height: 0; padding-right: .2rem; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-color: var(--color-disabled-text) transparent; scrollbar-width: thin; }
+  .author-list-scroll { flex: 1; min-height: 0; padding-right: .2rem; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-color: var(--color-border) transparent; scrollbar-width: thin; }
   .author-list { display: grid; gap: .4rem; }
   .author-list button {
     display: grid;
@@ -1780,17 +1960,20 @@
     text-align: left;
     background: transparent;
   }
-  .author-list button.active { border-color: var(--color-border-color); background: color-mix(in srgb, var(--color-white-surface) 60%, transparent); }
+  .author-list button.active { border-color: var(--color-border); background: color-mix(in srgb, var(--color-raised-bg) 60%, transparent); }
   .author-list button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
   .author-list button > span:nth-child(2) { display: grid; min-width: 0; gap: .12rem; }
-  .author-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .95rem var(--font-heading-family); }
+  .author-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .95rem var(--font-interface-family); }
   .author-list small { color: var(--color-subtle-text); font-size: .68rem; }
-  .author-list i { color: var(--color-disabled-text); font-style: normal; }
-  .author-avatar { display: grid; place-items: center; width: 2.65rem; aspect-ratio: 1; border-radius: 50%; color: var(--color-white-surface); background: var(--color-accent); font: 500 1rem var(--font-heading-family); }
+  .author-list i { color: var(--color-border); font-style: normal; }
+  .author-avatar { display: grid; place-items: center; width: 2.65rem; aspect-ratio: 1; border-radius: 50%; color: var(--color-raised-bg); background: var(--color-accent); font: 500 1rem var(--font-interface-family); }
 
-  .search-field { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-height: 3.6rem; padding: 0 1rem; border: 1px solid var(--color-border-color); border-radius: 1rem; background: color-mix(in srgb, var(--color-white-surface) 70%, transparent); box-shadow: 0 .7rem 2rem color-mix(in srgb, var(--color-box-shadow) 20%, transparent); }
+  .search-field { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; min-height: 3.6rem; padding: 0 1rem; border: 1px solid var(--color-border); border-radius: 1rem; background: color-mix(in srgb, var(--color-raised-bg) 70%, transparent); box-shadow: 0 .7rem 2rem color-mix(in srgb, var(--color-box-shadow) 20%, transparent); }
   .search-field svg { width: 1.25rem; color: var(--color-accent); }
   .search-field input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font-size: 1rem; }
+  .contextual-search { margin-bottom: 1rem; }
+  .scoped-search-results { display: grid; gap: .75rem; }
+  .scoped-search-results h2 { margin: .35rem 0 0; font: 600 1rem var(--font-interface-family); }
 
   .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1rem 0; padding: .75rem 1rem; border-radius: .75rem; color: var(--color-danger-text); background: var(--color-danger-bg); font-size: .75rem; overflow-wrap: anywhere; }
   .error-banner button { flex: none; min-height: 2.2rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
@@ -1815,7 +1998,7 @@
   }
 
   /* Compact library UI, aligned with the Floem desktop application. */
-  .adaptive-shell { background: var(--color-app-bg); }
+  .adaptive-shell { background: var(--color-surface-bg); }
   .content { max-width: none; padding-top: 1.1rem; }
   .content-section { margin-top: 1.8rem; }
   .section-heading { margin-bottom: .8rem; }

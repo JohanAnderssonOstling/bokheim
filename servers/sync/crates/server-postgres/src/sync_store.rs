@@ -2,35 +2,69 @@ use crate::sync::LibraryUpsertOutcome;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
-use sync_common::{ClientId, ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaSeq, ServerMutation, UnixMillis, WireMutation, MAX_PULL_CHANGES};
+use sync_common::StateCell;
+use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, UnixMillis, WireMutation, MAX_PULL_CHANGES};
 
 const FETCH_PAGE_SQL: &str = include_str!("sql/sync/fetch_page.sql");
 const FETCH_READING_POSITION_PAGE_SQL: &str = include_str!("sql/sync/fetch_reading_position_page.sql");
 
 pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<LibrarySummary>, sqlx::Error> {
-    let rows = sqlx::query_file!("src/sql/sync/list_libraries.sql", user_id).fetch_all(pool).await?;
-    rows.into_iter().map(|row| Ok(LibrarySummary { library_id: LibraryId::parse(&row.id).map_err(decode_err)?, library_name: row.name })).collect()
+    let rows = sqlx::query_as::<_, (String, String)>(include_str!("sql/sync/list_libraries.sql")).bind(user_id).fetch_all(pool).await?;
+    rows.into_iter().map(|(id, name)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name })).collect()
 }
 
 pub(super) async fn upsert_library(pool: &PgPool, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibraryUpsertOutcome>, sqlx::Error> {
-    let library_id = request.library_id.as_str();
-    let row = sqlx::query_file!("src/sql/sync/upsert_library.sql", library_id, user_id, request.library_name).fetch_optional(pool).await?;
-    row.map(|row| Ok(LibraryUpsertOutcome { library: LibrarySummary { library_id: LibraryId::parse(&row.id.unwrap_or_default()).map_err(decode_err)?, library_name: row.name.unwrap_or_default() }, changed: row.changed.unwrap_or(false) }))
-        .transpose()
+    let library_id = request.library_id.to_string();
+    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/upsert_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
+    row.map(|(id, name, changed)| Ok(LibraryUpsertOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
 }
 
 pub(super) async fn ensure_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
-    let library_id = library_id.as_str();
-    if let Some(owner) = sqlx::query_file_scalar!("src/sql/sync/get_library_owner.sql", library_id).fetch_optional(pool).await? {
+    let library_id = library_id.to_string();
+    if let Some(owner) = sqlx::query_scalar::<_, String>(include_str!("sql/sync/get_library_owner.sql")).bind(&library_id).fetch_optional(pool).await? {
         return Ok(owner == user_id);
     }
-    let owner = sqlx::query_file_scalar!("src/sql/sync/ensure_library.sql", library_id, user_id).fetch_one(pool).await?;
-    Ok(owner == user_id)
+    let owner = sqlx::query_scalar::<_, String>(include_str!("sql/sync/ensure_library.sql")).bind(&library_id).bind(user_id).fetch_optional(pool).await?;
+    Ok(owner.as_deref() == Some(user_id))
 }
 
 pub(super) async fn owns_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
-    let library_id = library_id.as_str();
-    Ok(sqlx::query_file_scalar!("src/sql/sync/owns_library.sql", library_id, user_id).fetch_one(pool).await?.unwrap_or(false))
+    let library_id = library_id.to_string();
+    Ok(sqlx::query_scalar::<_, bool>(include_str!("sql/sync/owns_library.sql")).bind(library_id).bind(user_id).fetch_one(pool).await?)
+}
+
+pub(super) async fn missing_state_cells(pool: &PgPool, library_id: &LibraryId, cells: &[StateCell]) -> Result<Vec<StateCell>, sqlx::Error> {
+    if cells.is_empty() {
+        return Ok(Vec::new());
+    }
+    let kinds = cells.iter().map(|cell| cell.kind.clone()).collect::<Vec<_>>();
+    let keys = cells.iter().map(|cell| cell.entity_key.clone()).collect::<Vec<_>>();
+    let subkeys = cells.iter().map(|cell| cell.entity_subkey.clone()).collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "WITH requested(kind, entity_key, entity_subkey) AS (
+             SELECT * FROM UNNEST($2::text[], $3::text[], $4::text[])
+         )
+         SELECT requested.kind, requested.entity_key, requested.entity_subkey
+         FROM requested
+         WHERE NOT EXISTS (
+             SELECT 1 FROM sync_state
+             WHERE library_id=$1 AND sync_state.kind=requested.kind
+               AND sync_state.entity_key=requested.entity_key
+               AND sync_state.entity_subkey=requested.entity_subkey
+         ) AND NOT EXISTS (
+             SELECT 1 FROM sync_reading_state
+             WHERE library_id=$1 AND sync_reading_state.kind=requested.kind
+               AND sync_reading_state.entity_key=requested.entity_key
+               AND sync_reading_state.entity_subkey=requested.entity_subkey
+         )",
+    )
+    .bind(library_id.to_string())
+    .bind(kinds)
+    .bind(keys)
+    .bind(subkeys)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(|row| Ok(StateCell { kind: row.try_get("kind")?, entity_key: row.try_get("entity_key")?, entity_subkey: row.try_get("entity_subkey")? })).collect()
 }
 
 pub(super) struct InsertChangesResult {
@@ -47,12 +81,12 @@ pub(super) fn storage_rejection(change: &WireMutation, server_now_ms: u64) -> Op
 }
 
 pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
-    change.kind == "reading_position"
+    change.kind == sync_common::mutation_kind::READING_POSITION
 }
 
 /// Stores opaque wire rows. The only routing knowledge is that reading state
 /// belongs to the hot table; cold kinds need no server-side enum arm.
-pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id: &str, library_id: &LibraryId, client_id: &ClientId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
+pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
     let now = server_now_ms();
     let (accepted, rejected): (Vec<_>, Vec<_>) = changes.iter().partition(|change| storage_rejection(change, now).is_none());
     let rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
@@ -60,16 +94,16 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
     // The server reads only declared lifecycle facts. It never decodes the
     // opaque value to maintain quota references.
     let mut lifecycle_deltas = Vec::new();
-    for change in accepted.iter().copied().filter(|change| change.kind == "book_lifecycle") {
-        let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql")).bind(library_id.as_str()).bind(&change.entity_key).fetch_optional(&mut **tx).await?;
-        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, client_id.as_str().to_owned(), change.replica_seq.get() as i64, change.mutation_id.to_string());
+    for change in accepted.iter().copied().filter(|change| change.kind == sync_common::mutation_kind::BOOK_LIFECYCLE) {
+        let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql")).bind(library_id.to_string()).bind(&change.entity_key).fetch_optional(&mut **tx).await?;
+        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, replica_id.to_string(), change.replica_seq.get() as i64, change.mutation_id.to_string());
         let wins = existing.as_ref().is_none_or(|row| {
             incoming
                 > (
                     row.try_get::<i64, _>("changed_at").unwrap_or_default(),
                     row.try_get::<i16, _>("version_rank").unwrap_or_default(),
-                    row.try_get::<String, _>("client_id").unwrap_or_default(),
-                    row.try_get::<i64, _>("client_seq").unwrap_or_default(),
+                    row.try_get::<String, _>("replica_id").unwrap_or_default(),
+                    row.try_get::<i64, _>("replica_seq").unwrap_or_default(),
                     row.try_get::<String, _>("event_id").unwrap_or_default(),
                 )
         });
@@ -88,8 +122,8 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
     crate::assets::apply_lifecycle_reference_deltas(tx, _user_id, lifecycle_deltas).await?;
 
     for (table, rows) in [
-        ("sync_state", accepted.iter().copied().filter(|change| change.kind != "reading_position").collect::<Vec<_>>()),
-        ("sync_reading_state", accepted.iter().copied().filter(|change| change.kind == "reading_position").collect::<Vec<_>>()),
+        ("sync_state", accepted.iter().copied().filter(|change| change.kind != sync_common::mutation_kind::READING_POSITION).collect::<Vec<_>>()),
+        ("sync_reading_state", accepted.iter().copied().filter(|change| change.kind == sync_common::mutation_kind::READING_POSITION).collect::<Vec<_>>()),
     ] {
         if rows.is_empty() {
             continue;
@@ -106,7 +140,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
         let events = rows.iter().map(|change| change.mutation_id.to_string()).collect::<Vec<_>>();
         let statement = include_str!("sql/sync/upsert_state_batch.sql").replace("{{TABLE}}", table);
         sqlx::query(&statement)
-            .bind(library_id.as_str())
+            .bind(library_id.to_string())
             .bind(kinds)
             .bind(keys)
             .bind(subkeys)
@@ -117,7 +151,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
             .bind(sequences)
             .bind(ranks)
             .bind(events)
-            .bind(client_id.as_str())
+            .bind(replica_id.to_string())
             .execute(&mut **tx)
             .await?;
     }
@@ -158,14 +192,14 @@ fn cursor_is_ahead(value: Option<LibraryRevision>, current_revision: i64) -> boo
     cursor(value) > current_revision
 }
 async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, statement: &str, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
-    let rows = sqlx::query(statement).bind(library.as_str()).bind(cursor(since)).bind((MAX_PULL_CHANGES + 1) as i64).fetch_all(executor).await?;
+    let rows = sqlx::query(statement).bind(library.to_string()).bind(cursor(since)).bind((MAX_PULL_CHANGES + 1) as i64).fetch_all(executor).await?;
     let mut changes = Vec::with_capacity(rows.len());
     for row in rows {
         let raw: i64 = row.try_get("server_seq")?;
         let corrupt = |reason| FetchChangesError::CorruptStoredEvent { revision: raw, reason };
         let changed_at = millis(row.try_get::<i64, _>("changed_at")?).map_err(|_| corrupt("invalid timestamp"))?;
-        let replica_id = ClientId::parse(&row.try_get::<String, _>("client_id")?).map_err(|_| corrupt("invalid replica"))?;
-        let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("client_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
+        let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>("replica_id")?).map_err(|_| corrupt("invalid replica identity"))?;
+        let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("replica_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
         let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
         let mutation_id = MutationId::parse(&row.try_get::<String, _>("event_id")?).map_err(|_| corrupt("invalid mutation identity"))?;
         let present: Option<bool> = row.try_get("present")?;
@@ -219,12 +253,10 @@ async fn fetch_reading_position_page(pool: &PgPool, library: &LibraryId, since: 
     fetch_projected_page(pool, FETCH_READING_POSITION_PAGE_SQL, library, since).await
 }
 
-pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId, _client: &ClientId, since: Option<LibraryRevision>) -> Result<FetchChangesResult, FetchChangesError> {
-    let library_str = library.as_str();
-    let heads = sqlx::query_file!("src/sql/sync/get_pull_heads.sql", library_str, user).fetch_optional(pool).await?;
-    let Some(heads) = heads else { return Ok(FetchChangesResult::Unauthorized) };
-    let reading_revision: i64 = heads.reading_revision.unwrap_or(0);
-    let other_revision: i64 = heads.other_revision.unwrap_or(0);
+pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId, _replica_id: &ReplicaId, since: Option<LibraryRevision>) -> Result<FetchChangesResult, FetchChangesError> {
+    let library_str = library.to_string();
+    let heads = sqlx::query_as::<_, (i64, i64)>(include_str!("sql/sync/get_pull_heads.sql")).bind(library_str).bind(user).fetch_optional(pool).await?;
+    let Some((reading_revision, other_revision)) = heads else { return Ok(FetchChangesResult::Unauthorized) };
     if cursor_is_ahead(since, std::cmp::max(reading_revision, other_revision)) {
         return Err(FetchChangesError::CursorAhead);
     }
@@ -237,8 +269,8 @@ pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId
 }
 
 pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: Option<LibraryRevision>) -> Result<(), FetchChangesError> {
-    let library_str = library.as_str();
-    let current: i64 = sqlx::query_file_scalar!("src/sql/sync/validate_owned_cursor.sql", library_str).fetch_one(&mut **tx).await?.unwrap_or(0);
+    let library_str = library.to_string();
+    let current: i64 = sqlx::query_scalar(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library_str).fetch_one(&mut **tx).await?;
     if cursor_is_ahead(since, current) {
         return Err(FetchChangesError::CursorAhead);
     }
@@ -254,11 +286,11 @@ pub(super) enum AtomicSingletonExchange {
     CursorAhead,
     Handled(FetchChangesPage),
 }
-pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, library: &LibraryId, client: &ClientId, change: &WireMutation, since: Option<LibraryRevision>) -> Result<AtomicSingletonExchange, FetchChangesError> {
-    if change.kind != "reading_position" {
+pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, library: &LibraryId, replica_id: &ReplicaId, change: &WireMutation, since: Option<LibraryRevision>) -> Result<AtomicSingletonExchange, FetchChangesError> {
+    if change.kind != sync_common::mutation_kind::READING_POSITION {
         unreachable!()
     }
-    let library_str = library.as_str();
+    let library_str = library.to_string();
     let since_cursor = cursor(since);
     let row = sqlx::query(include_str!("sql/sync/exchange_authorized_reading_position.sql"))
         .bind(library_str)
@@ -270,7 +302,7 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
         .bind(change.blob_reference.as_ref().map(|reference| reference.present))
         .bind(change.blob_reference.as_ref().and_then(|reference| reference.content_hash.as_ref()).map(|hash| hash.as_str()))
         .bind(i64::try_from(change.changed_at).map_err(decode_err)?)
-        .bind(client.as_str())
+        .bind(replica_id.to_string())
         .bind(change.replica_seq.get() as i64)
         .bind(change.conflict_rank as i16)
         .bind(change.mutation_id.to_string())
@@ -287,11 +319,7 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
     let changed_revision = row.try_get::<Option<i64>, _>("server_seq")?;
     if row.try_get::<Option<bool>, _>("caught_up")?.unwrap_or(false) {
         let changes = if let Some(raw) = changed_revision {
-            vec![ServerMutation {
-                mutation: change.clone(),
-                replica_id: ClientId::parse(client.as_str()).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid replica" })?,
-                revision: LibraryRevision::new(raw as u64).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid revision" })?,
-            }]
+            vec![ServerMutation { mutation: change.clone(), replica_id: replica_id.clone(), revision: LibraryRevision::new(raw as u64).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid revision" })? }]
         } else {
             Vec::new()
         };
@@ -311,8 +339,8 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_is_ahead, pull_route, storage_rejection, PullRoute};
-    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
+    use super::{cursor_is_ahead, missing_state_cells, pull_route, storage_rejection, PullRoute};
+    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, StateCell, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
 
     fn reading_mutation(changed_at: u64) -> WireMutation {
         WireMutation {
@@ -359,5 +387,25 @@ mod tests {
         let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
         assert!(comparison.trim_start().starts_with("NEW.changed_at,"));
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
+    }
+
+    #[tokio::test]
+    async fn inventory_returns_only_state_cells_absent_from_both_server_tables() {
+        let Some(pool) = crate::test_support::isolated_pool("state_inventory", 2).await else { return };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let library_id = sync_common::LibraryId::new_v4();
+        sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)").bind(&user_id).bind(format!("{user_id}@example.com")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO libraries(id,user_id,name) VALUES($1,$2,'Books')").bind(library_id.to_string()).bind(&user_id).execute(&pool).await.unwrap();
+        for (table, kind, key) in [("sync_state", "book_lifecycle", "book"), ("sync_reading_state", "reading_position", "reading")] {
+            let statement = format!("INSERT INTO {table}(library_id,kind,entity_key,value,changed_at,replica_id,replica_seq,version_rank,event_id) VALUES($1,$2,$3,''::bytea,1,$4,1,0,$5)");
+            sqlx::query(&statement).bind(library_id.to_string()).bind(kind).bind(key).bind(uuid::Uuid::new_v4().to_string()).bind(uuid::Uuid::new_v4().to_string()).execute(&pool).await.unwrap();
+        }
+        let cells = vec![
+            StateCell { kind: "book_lifecycle".into(), entity_key: "book".into(), entity_subkey: String::new() },
+            StateCell { kind: "reading_position".into(), entity_key: "reading".into(), entity_subkey: String::new() },
+            StateCell { kind: "placement".into(), entity_key: "book".into(), entity_subkey: "shelf".into() },
+        ];
+
+        assert_eq!(missing_state_cells(&pool, &library_id, &cells).await.unwrap(), vec![cells[2].clone()]);
     }
 }

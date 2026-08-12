@@ -4,7 +4,7 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -35,6 +35,12 @@ pub(super) fn mint_token() -> (String, String) {
     mint(TOKEN_BYTES)
 }
 
+pub(super) fn mint_verification_pin() -> (String, String) {
+    let pin = format!("{:06}", OsRng.gen_range(0..1_000_000_u32));
+    let hash = sha256_hex(pin.as_bytes());
+    (pin, hash)
+}
+
 fn mint(bytes: usize) -> (String, String) {
     let mut buffer = vec![0_u8; bytes];
     OsRng.fill_bytes(&mut buffer);
@@ -48,4 +54,19 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
         output
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mint_verification_pin;
+
+    #[test]
+    fn verification_pin_contains_exactly_six_digits() {
+        for _ in 0..100 {
+            let (pin, hash) = mint_verification_pin();
+            assert_eq!(pin.len(), 6);
+            assert!(pin.bytes().all(|byte| byte.is_ascii_digit()));
+            assert_eq!(hash.len(), 64);
+        }
+    }
 }

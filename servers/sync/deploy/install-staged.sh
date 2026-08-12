@@ -18,7 +18,7 @@ required_files=(
     catalog-server
     opds.json
     bokheim-sync.service
-    catalog-providers.service
+    bokheim-catalogs.service
 )
 
 for file in "${required_files[@]}"; do
@@ -33,6 +33,26 @@ if [[ ! -x ${source_root}/sync-server || ! -x ${source_root}/catalog-server ]]; 
     exit 1
 fi
 
+if [[ ! -s /etc/bokheim/resend-api-key ]]; then
+    echo "missing Resend API key: create /etc/bokheim/resend-api-key before deploying" >&2
+    exit 2
+fi
+if [[ ! -s /etc/bokheim/test-user-password ]]; then
+    echo "missing test-user password: create /etc/bokheim/test-user-password before deploying" >&2
+    exit 2
+fi
+if [[ ! -s /etc/bokheim/database-url ]]; then
+    echo "missing database credential: /etc/bokheim/database-url" >&2
+    exit 2
+fi
+database_url=$(</etc/bokheim/database-url)
+if [[ ! ${database_url} =~ ^postgresql://bokheim_app:[[:xdigit:]]{64}@127\.0\.0\.1/bokheim$ ]]; then
+    echo "database credential does not identify the expected local bokheim database; refusing destructive deployment" >&2
+    exit 2
+fi
+
+systemctl stop bokheim-sync.service
+
 install -o root -g root -m 0755 "${source_root}/sync-server" \
     /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${source_root}/catalog-server" \
@@ -41,26 +61,36 @@ install -o root -g root -m 0755 "${source_root}/catalog-server" \
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${source_root}/opds.json" \
     /usr/local/share/catalog-providers/opds.json
+rm -f -- /etc/bokheim/disposable-email-domains \
+    /usr/local/share/bokheim/disposable-email-domains
 
 install -o root -g root -m 0644 "${source_root}/bokheim-sync.service" \
     /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/catalog-providers.service" \
-    /etc/systemd/system/catalog-providers.service
+install -o root -g root -m 0644 "${source_root}/bokheim-catalogs.service" \
+    /etc/systemd/system/bokheim-catalogs.service
+
+# This development deployment intentionally starts from an empty metadata
+# database. Physical content-addressed assets remain on the large disk.
+runuser -u postgres -- dropdb --if-exists --force bokheim
+runuser -u postgres -- createdb --owner=bokheim_app bokheim
+DATABASE_URL="${database_url}" /usr/local/bin/sync-server migrate
+unset database_url
+
 systemctl disable --now bokheim-gc.timer >/dev/null 2>&1 || true
 rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.timer /etc/tmpfiles.d/bokheim.conf
 systemctl daemon-reload
 systemctl restart bokheim-sync.service
-systemctl restart catalog-providers.service
+systemctl restart bokheim-catalogs.service
 
 sync_ready=false
 catalog_ready=false
 for _ in $(seq 1 30); do
-    if curl --fail --silent --show-error \
+    if curl --fail --silent \
         --unix-socket /run/bokheim/sync.sock \
         http://localhost/api/ready | grep -Fqx ok; then
         sync_ready=true
     fi
-    if curl --fail --silent --show-error \
+    if curl --fail --silent \
         http://127.0.0.1:8090/health | grep -Fqx ok; then
         catalog_ready=true
     fi
@@ -72,9 +102,10 @@ done
 
 if [[ ${sync_ready} != true || ${catalog_ready} != true ]]; then
     echo "deployment did not become healthy" >&2
-    systemctl --no-pager --full status bokheim-sync.service catalog-providers.service >&2 || true
+    systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service >&2 || true
+    journalctl -u bokheim-sync.service -n 40 --no-pager -o cat >&2 || true
     exit 1
 fi
 
 echo "Bokheim server deployment installed and healthy."
-systemctl --no-pager --full status bokheim-sync.service catalog-providers.service
+systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service
