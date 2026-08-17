@@ -25,7 +25,6 @@
   } = $props();
 
   const [minimumUiFontSize, maximumUiFontSize] = BROWSING_PREFERENCES_CONTRACT.constraints.ui_font_size_px;
-  const catalogLanguageValues = BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.map((option) => option.value);
   let autoDownloadLimit = $derived(transferPreferences.auto_download_limit_mb ?? 0);
   let rememberedAutoDownloadLimit = $state(50);
   const hasAndroidBackgroundAudio = nativeAudiobookAvailable();
@@ -50,16 +49,6 @@
       preference: "auto_download_limit_mb",
       value: enabled ? Math.max(1, rememberedAutoDownloadLimit) : null,
     });
-  }
-
-  function catalogLanguageIncluded(language: string): boolean {
-    return preferences.included_catalog_languages.length === 0 || preferences.included_catalog_languages.includes(language);
-  }
-
-  function toggleCatalogLanguage(language: string, included: boolean) {
-    const current = preferences.included_catalog_languages.length === 0 ? [...catalogLanguageValues] : [...preferences.included_catalog_languages];
-    const next = included ? [...new Set([...current, language])] : current.filter((value) => value !== language);
-    return onchange({ preference: "included_catalog_languages", value: next.length === catalogLanguageValues.length ? [] : next });
   }
 
 </script>
@@ -88,7 +77,7 @@
         <span class="font-label">{SETTINGS_CONTRACT.interface_font_label}</span>
         <div class="font-buttons">
           {#each BROWSING_PREFERENCES_CONTRACT.options.fonts as option}
-            <button type="button" class:active={preferences.interface_font === option.value} aria-pressed={preferences.interface_font === option.value} onclick={() => onchange({ preference: "interface_font", value: option.value })}>{option.font_name}</button>
+            <button type="button" class:active={preferences.interface_font === option.value} aria-pressed={preferences.interface_font === option.value} onclick={() => onchange({ preference: "interface_font", value: option.value })}>{option.label}</button>
           {/each}
         </div>
       </div>
@@ -114,23 +103,6 @@
             </div>
           </fieldset>
         {/if}
-      {/if}
-      {#if !isWebApp}
-        <fieldset>
-          <legend>{SETTINGS_CONTRACT.catalogues_section_label}</legend>
-          <span class="setting-label">{SETTINGS_CONTRACT.included_catalog_languages_label}</span>
-          <small>{SETTINGS_CONTRACT.included_catalog_languages_description}</small>
-          <label class:active={preferences.included_catalog_languages.length === 0}>
-            <input type="checkbox" checked={preferences.included_catalog_languages.length === 0} onchange={() => onchange({ preference: "included_catalog_languages", value: [] })} />
-            <span><strong>{SETTINGS_CONTRACT.all_catalog_languages_label}</strong></span>
-          </label>
-          {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
-            <label class:active={catalogLanguageIncluded(option.value)}>
-              <input type="checkbox" checked={catalogLanguageIncluded(option.value)} onchange={(event) => toggleCatalogLanguage(option.value, event.currentTarget.checked)} />
-              <span><strong>{option.label}</strong></span>
-            </label>
-          {/each}
-        </fieldset>
       {/if}
       {#if !isWebApp}
         <fieldset>
@@ -193,10 +165,10 @@
   .font-setting { display: grid; grid-template-columns: minmax(6rem, 1fr) auto; align-items: center; gap: .75rem; }
   .font-label { color: var(--color-subtle-text); font-size: .75rem; font-weight: 750; }
   .setting-label { color: var(--color-subtle-text); font-size: .75rem; font-weight: 750; }
-  .font-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-border); }
+  .font-buttons { width: 11.25rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-border); }
   .font-buttons button { min-height: 2.25rem; padding: .4rem .65rem; border: 0; border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); font-size: .76rem; font-weight: 700; cursor: pointer; }
   .font-buttons button.active { color: var(--color-raised-bg); background: var(--color-accent); }
-  .stepper { display: grid; grid-template-columns: 2.25rem minmax(4.5rem, auto) 2.25rem; align-items: center; }
+  .stepper { width: 11.25rem; display: grid; grid-template-columns: 2.25rem 6.75rem 2.25rem; align-items: center; }
   .stepper button { width: 2.25rem; min-height: 2.25rem; padding: 0; border: 1px solid var(--color-border); color: var(--color-ink-text); background: var(--color-raised-bg); cursor: pointer; }
   .stepper button:first-child { border-radius: 0; }
   .stepper button:last-child { border-radius: 0; }

@@ -3,8 +3,7 @@
   import FolderCard from "./FolderCard.svelte";
   import BookGrid from "./BookGrid.svelte";
   import BrowseNavigationGrid from "./BrowseNavigationGrid.svelte";
-  import ContextualLibrarySearch from "./ContextualLibrarySearch.svelte";
-  import FileTypeFilter from "./FileTypeFilter.svelte";
+  import BrowseFilterBar from "./BrowseFilterBar.svelte";
   import EmptyPage from "../shell/EmptyPage.svelte";
   import { BROWSING_CONTENT_CONTRACT, BROWSING_STATES_CONTRACT } from "../../lib/types";
   import type { BookCardData, DownloadState, FolderDownloadStatus, LibraryDirectory, LibraryFileTypeFilter } from "../../lib/types";
@@ -23,8 +22,7 @@
 </script>
 
 <section class="browse-page" aria-label="Folders">
-  <ContextualLibrarySearch bind:value={query} {placeholder} oninput={onsearch} />
-  <FileTypeFilter value={fileType} onchange={onfiletype} />
+  <BrowseFilterBar bind:query {placeholder} {fileType} {onsearch} {onfiletype} />
   {#if query.trim()}
     {@render searchResults()}
   {:else}

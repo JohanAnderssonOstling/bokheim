@@ -200,6 +200,13 @@ pub const CATALOG_SEARCH_WIDTH: f32 = 240.0;
 /// the filters here never costs a publication column.
 pub const CATALOG_FILTER_RAIL_WIDTH: f32 = 150.0;
 
+/// Shared geometry for segmented settings controls and steppers. Keeping
+/// these dimensions here prevents individual settings surfaces from drifting.
+pub const SETTINGS_CONTROL_HEIGHT: f32 = 36.0;
+pub const SETTINGS_CHOICE_SEGMENT_WIDTH: f32 = 116.0;
+pub const SETTINGS_STEPPER_VALUE_WIDTH: f32 = 72.0;
+pub const SETTINGS_CONTROL_GAP: f32 = 1.0;
+
 /// Returns the stable column count and common cell width for a hierarchy grid.
 ///
 /// A column is added only after every existing cell reaches its maximum, and

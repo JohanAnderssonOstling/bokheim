@@ -5,7 +5,7 @@ use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT,
+    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT,
     TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
@@ -64,7 +64,7 @@ pub fn navigation_icon(icon: app_contract::NavigationIcon) -> Icon {
 }
 
 pub fn browser_search_box() -> Div {
-    div().w(px(480.0)).max_w_full().h(px(TOPBAR_ACTION_HEIGHT)).flex_none()
+    div().w_full().max_w(px(480.0)).min_w_0().h(px(TOPBAR_ACTION_HEIGHT)).flex_1()
 }
 
 /// A text input that searches or filters.
@@ -287,7 +287,7 @@ pub fn browser_settings_font_choices(theme: BrowserTheme) -> Div {
 }
 
 pub fn browser_settings_button_group(theme: BrowserTheme) -> Div {
-    div().flex().flex_row().gap(px(1.0)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.border)
+    div().flex().flex_row().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.border)
 }
 
 /// A wrapping group for open-ended settings such as catalogue languages.
@@ -330,8 +330,9 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
         .label(label)
         .selected(checked)
         .ghost()
-        .min_w(px(116.0))
-        .h(px(36.0))
+        .w(px(SETTINGS_CHOICE_SEGMENT_WIDTH))
+        .flex_none()
+        .h(px(SETTINGS_CONTROL_HEIGHT))
         .px(px(SPACE_SM))
         .rounded(px(0.0))
         .border_0()
@@ -342,7 +343,7 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
 }
 
 pub fn browser_settings_font_size_button(id: impl Into<ElementId>, label: impl Into<SharedString>, disabled: bool, theme: BrowserTheme) -> Button {
-    Button::new(id).label(label).disabled(disabled).ghost().w(px(36.0)).h(px(36.0)).rounded(px(0.0)).border_0().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(16.0 / 16.0)).font_weight(FontWeight::SEMIBOLD)
+    Button::new(id).label(label).disabled(disabled).ghost().w(px(SETTINGS_CONTROL_HEIGHT)).h(px(SETTINGS_CONTROL_HEIGHT)).rounded(px(0.0)).border_0().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(16.0 / 16.0)).font_weight(FontWeight::SEMIBOLD)
 }
 
 pub fn browser_settings_font_size_stepper(decrease: impl IntoElement, value: impl Into<SharedString>, increase: impl IntoElement, theme: BrowserTheme) -> Div {
@@ -350,14 +351,14 @@ pub fn browser_settings_font_size_stepper(decrease: impl IntoElement, value: imp
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(1.0))
+        .gap(px(SETTINGS_CONTROL_GAP))
         .overflow_hidden()
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(theme.border)
         .bg(theme.border)
         .child(decrease)
-        .child(div().w(px(58.0)).h(px(36.0)).flex().items_center().justify_center().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).child(value.into()))
+        .child(div().w(px(SETTINGS_STEPPER_VALUE_WIDTH)).h(px(SETTINGS_CONTROL_HEIGHT)).flex().items_center().justify_center().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).child(value.into()))
         .child(increase)
 }
 

@@ -25,6 +25,20 @@ test("book actions and typed book cards stay shared across both browsing fronten
   assert.match(nativeCard, /ui\.open_reader/);
 });
 
+test("file format filters use checked dropdown menus in both frontends", () => {
+  const mobileFilter = source("../components/library/FileTypeFilter.svelte");
+  assert.match(mobileFilter, /<details[^>]*use:managedMenu/);
+  assert.match(mobileFilter, /role="menuitemradio"/);
+  assert.match(mobileFilter, /aria-checked=\{option\.value === value\}/);
+  assert.doesNotMatch(mobileFilter, /aria-pressed/);
+
+  for (const page of ["folders", "subjects"]) {
+    const nativePage = source(`../../../ui/gpui/browser/src/library/pages/${page}/mod.rs`);
+    assert.match(nativePage, /dropdown_menu/);
+    assert.match(nativePage, /\.checked\(file_type == selected_file_type\)/);
+  }
+});
+
 test("Android publication picker offers every import format and stages off the UI thread", () => {
   const activity = readFileSync(new URL("../../src-tauri/gen/android/app/src/main/java/se/bokheim/reader/MainActivity.kt", import.meta.url), "utf8");
   assert.match(activity, /type = "\*\/\*"/);

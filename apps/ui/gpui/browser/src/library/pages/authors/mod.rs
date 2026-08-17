@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use epub_svelte_lib::AuthorId;
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, container_query, div, px, uniform_list};
 use gpui_component::input::{InputEvent, InputState};
 use ui_components as components;
 use ui_components::ScrollableElement;
@@ -35,6 +35,10 @@ pub(crate) struct AuthorsPage {
     rows: Vec<Entity<AuthorRowView>>,
     /// The rows the current filter leaves.
     visible: Vec<Entity<AuthorRowView>>,
+    /// Changes whenever the filtered index is rebuilt, giving a replacement
+    /// virtual list fresh scroll state instead of retaining an out-of-range
+    /// offset from a previous query.
+    visible_generation: usize,
     selected: Option<AuthorId>,
     books: BookGrid,
     error: Option<SharedString>,
@@ -61,6 +65,7 @@ impl AuthorsPage {
             sort: AuthorSort::default(),
             rows: Vec::new(),
             visible: Vec::new(),
+            visible_generation: 0,
             selected: None,
             books,
             error: None,
@@ -114,6 +119,7 @@ impl AuthorsPage {
             visible.push(row.clone());
         }
         self.visible = visible;
+        self.visible_generation = self.visible_generation.wrapping_add(1);
     }
 
     /// Re-asks the backend for the index in the chosen order. The sort lives
@@ -218,10 +224,49 @@ impl AuthorsPage {
         });
     }
 
-    fn render_index(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_index(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let has_authors = !self.visible.is_empty();
-        let cards = components::author_card_grid().children(self.visible.clone());
+        let visible_cover_limit = if f32::from(window.viewport_size().width) <= 480.0 {
+            1
+        } else if f32::from(window.viewport_size().width) <= 700.0 {
+            2
+        } else {
+            components::AUTHOR_ROW_COVER_COUNT
+        };
+        let cards = Rc::new(
+            self.visible
+                .iter()
+                .map(|row| {
+                    let cover_count = row.read(cx).author().cover_hashes().len().min(visible_cover_limit);
+                    (row.clone(), components::author_card_width(cover_count))
+                })
+                .collect::<Vec<_>>(),
+        );
+        let generation = self.visible_generation;
+        let cards_view = container_query(move |size, _, _| {
+            let available_width = f32::from(size.width);
+            let mut packed = Vec::<Vec<Entity<AuthorRowView>>>::new();
+            let mut current = Vec::new();
+            let mut occupied = 0.0;
+            for (card, card_width) in cards.iter() {
+                let required = if current.is_empty() { *card_width } else { components::BOOK_GRID_GAP + *card_width };
+                if !current.is_empty() && occupied + required > available_width {
+                    packed.push(std::mem::take(&mut current));
+                    occupied = 0.0;
+                }
+                occupied += if current.is_empty() { *card_width } else { components::BOOK_GRID_GAP + *card_width };
+                current.push(card.clone());
+            }
+            if !current.is_empty() {
+                packed.push(current);
+            }
+            let packed = Rc::new(packed);
+            let row_count = packed.len();
+            let rows = packed.clone();
+            let list = uniform_list(format!("authors-index-virtual-{generation}"), row_count, move |range, _, _| range.map(|index| components::author_virtual_row().children(rows[index].clone())).collect::<Vec<_>>());
+            div().size_full().flex().flex_col().child(components::virtual_list(list))
+        });
 
         let empty_emitter = cx.entity();
         let empty_action = components::topbar_action_button("authors-add-book", self.ui.contracts().library_actions.add_book_label.clone(), gpui_component::IconName::BookOpen, theme).on_click(move |_, _, cx| {
@@ -233,19 +278,10 @@ impl AuthorsPage {
             .on_action(|_: &FocusPreviousListItem, window, cx| window.focus_prev(cx))
             .on_action(|_: &FocusNextListItem, window, cx| window.focus_next(cx))
             .child(components::author_filter_box().child(components::browser_search_input(&self.filter_input)))
-            .child(self.render_sort_control(theme, cx))
             .when(self.rows.is_empty(), |panel| panel.child(components::browser_actionable_empty("No authors", "", empty_action, theme)))
             .when(!self.rows.is_empty() && !has_authors, |panel| panel.child(components::browser_inline_note("No matching authors", theme)))
-            .when(has_authors, |panel| panel.child(div().w_full().min_h_0().flex_1().overflow_y_scrollbar().child(cards)))
+            .when(has_authors, |panel| panel.child(div().w_full().min_h_0().flex_1().child(cards_view)))
             .into_any_element()
-    }
-
-    /// The two orders the contract defines, as a pair of chips.
-    fn render_sort_control(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> impl IntoElement {
-        let choose = |sort: AuthorSort, page: Entity<Self>| move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| page.update(cx, |page, cx| page.set_sort(sort, cx));
-        components::author_sort_control()
-            .child(components::author_sort_option("authors-sort-name", "A–Z", self.sort == AuthorSort::Name, theme).on_click(choose(AuthorSort::Name, cx.entity())))
-            .child(components::author_sort_option("authors-sort-books", "Books", self.sort == AuthorSort::BookCount, theme).on_click(choose(AuthorSort::BookCount, cx.entity())))
     }
 
     fn render_books(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -264,17 +300,15 @@ impl AuthorsPage {
         let heading = div().flex_none().flex().flex_row().items_center().gap(px(components::SPACE_MD)).child(back).child(components::author_books_heading(author, theme));
         let mut panel = components::author_books_panel().child(heading);
         if self.books.is_empty() {
-            panel = panel.child(components::browser_inline_note("No books found for this author", theme));
+            panel = panel.child(div().w_full().min_h_0().flex_1().child(components::browser_inline_note("No books found for this author", theme)));
         } else {
-            // Still the static grid: the panel scrolls as one column so that
-            // the catalogue disclosure sits under the books rather than in a
-            // second scroll area, and a virtualized list cannot size itself
-            // inside a parent that grows to its content. Virtualizing this
-            // wants the panel split into its own scroll regions first.
-            panel = panel.child(self.books.render_static("author-books-static", window, cx));
+            panel = panel.child(self.books.render_virtualized("author-books-virtual", window, cx));
         }
 
-        panel.child(self.discovery.clone()).overflow_y_scrollbar().into_any_element()
+        // Catalogue discovery is independently bounded so its variable-height
+        // results cannot make the book list grow to content and defeat the
+        // virtual viewport above it.
+        panel.child(div().w_full().max_h(px(360.0)).min_h_0().flex_none().child(self.discovery.clone()).overflow_y_scrollbar_with_id("author-discovery-scroll")).into_any_element()
     }
 }
 

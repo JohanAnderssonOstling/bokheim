@@ -440,8 +440,10 @@ test("folders, paths, authors and uncategorized subjects use stored library stat
   assert.equal((await getWebLibraryAuthors(library.library_id, authorId)).books?.[0].title, "Austen");
 
   const subjects = await getWebLibrarySubjects(library.library_id, null);
-  assert.deepEqual(subjects.children.map(({ id, book_count }) => [id, book_count]), [["__other_subject_systems__", 1]]);
+  assert.deepEqual(subjects.children, [], "stored subjects from other systems are not exposed as a Subjects root");
   assert.equal((await getWebLibrarySubjects(library.library_id, "__uncategorized__")).books.length, 0);
+  // Keep the hidden route readable so old sessions do not lose access and,
+  // more importantly, prove that hiding the root did not discard metadata.
   assert.equal((await getWebLibrarySubjects(library.library_id, "__other_subject_systems__")).books[0].title, "Austen");
   assert.equal((await searchWebLibrarySubject(library.library_id, "__other_subject_systems__", "austen", 10)).title_matches.length, 1);
   await removeWebLibrary(library.library_id);

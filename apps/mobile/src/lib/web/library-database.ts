@@ -1344,8 +1344,6 @@ export async function getWebLibrarySubjects(libraryId: string, subjectPath: stri
     });
     const uncategorized = books.filter((book) => !hasAnySubject.has(book.content_hash)).length;
     if (uncategorized) children.push({ id: "__uncategorized__", name: "Uncategorized", book_count: uncategorized, downloaded_book_count: uncategorized });
-    const otherCount = books.filter((book) => otherSystems.has(book.content_hash)).length;
-    if (otherCount) children.push({ id: "__other_subject_systems__", name: "Other subject systems", book_count: otherCount, downloaded_book_count: otherCount });
   }
   const directBooks = subjectPath === null ? [] : booksInSubject(subjectPath, false);
   const seenBooks = new Set(directBooks.map((book) => book.content_hash));

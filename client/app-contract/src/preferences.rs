@@ -231,6 +231,13 @@ pub enum UiFontFamily {
 }
 
 impl UiFontFamily {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SansSerif => "Sans Serif",
+            Self::Serif => "Serif",
+        }
+    }
+
     pub const fn font_name(self) -> &'static str {
         match self {
             Self::SansSerif => "Noto Sans",
@@ -417,6 +424,7 @@ pub struct ApplicationThemeOption {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct UiFontOption {
     pub value: UiFontFamily,
+    pub label: String,
     pub font_name: String,
     pub generic_family: String,
 }
@@ -470,7 +478,10 @@ pub struct BrowsingPreferenceOptions {
 
 impl Default for BrowsingPreferenceOptions {
     fn default() -> Self {
-        let fonts = [UiFontFamily::SansSerif, UiFontFamily::Serif].into_iter().map(|value| UiFontOption { value, font_name: value.font_name().to_string(), generic_family: value.generic_family().to_string() }).collect();
+        let fonts = [UiFontFamily::SansSerif, UiFontFamily::Serif]
+            .into_iter()
+            .map(|value| UiFontOption { value, label: value.label().to_string(), font_name: value.font_name().to_string(), generic_family: value.generic_family().to_string() })
+            .collect();
         let themes = [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif].into_iter().map(|value| ApplicationThemeOption { value, label: value.label().to_string(), description: value.description().to_string() }).collect();
         let library_views = [LibraryView::Covers, LibraryView::Detailed].into_iter().map(|value| LibraryViewOption { value, label: value.label().to_string(), description: value.description().to_string() }).collect();
         let appearances = [ApplicationAppearance::System, ApplicationAppearance::Light, ApplicationAppearance::Dark]

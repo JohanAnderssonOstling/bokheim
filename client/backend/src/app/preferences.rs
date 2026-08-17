@@ -144,6 +144,7 @@ mod tests {
         assert_eq!(ApplicationTheme::GrecoFuturistic.next(), ApplicationTheme::LibrarySerif);
         assert_eq!(ApplicationTheme::LibrarySerif.next(), ApplicationTheme::GrecoFuturistic);
         assert_eq!(options.fonts.iter().map(|option| option.value).collect::<Vec<_>>(), vec![UiFontFamily::SansSerif, UiFontFamily::Serif]);
+        assert_eq!(options.fonts.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), vec!["Sans Serif", "Serif"]);
         assert!(options.fonts.iter().all(|option| !option.font_name.is_empty()));
         assert!(options.fonts.iter().all(|option| !option.generic_family.is_empty()));
     }

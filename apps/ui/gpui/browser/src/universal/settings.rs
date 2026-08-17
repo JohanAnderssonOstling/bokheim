@@ -6,7 +6,7 @@
 
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, TransferPreferencePatch};
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Window, div};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Window};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::group_box::{GroupBox, GroupBoxVariants};
@@ -171,42 +171,11 @@ impl Render for SettingsPage {
             .child(components::browser_settings_compact_row("Light or dark", appearances, theme))
             .child(components::browser_settings_compact_row(settings.application_theme_label.clone(), application_themes, theme));
 
-        let all_language_values = contract.options.catalog_languages.iter().map(|option| option.value.clone()).collect::<Vec<_>>();
-        let all_languages_selected = preferences.included_catalog_languages().is_empty();
-        let all_entity = entity.clone();
-        let mut catalog_languages =
-            components::browser_settings_chip_group().child(components::browser_settings_chip_button("catalog-language-all", settings.all_catalog_languages_label.clone(), all_languages_selected, theme).on_click(move |_, _, cx| {
-                all_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::IncludedCatalogLanguages(Vec::new()), cx));
-            }));
-        for (index, option) in contract.options.catalog_languages.iter().enumerate() {
-            let value = option.value.clone();
-            let active = all_languages_selected || preferences.included_catalog_languages().contains(&value);
-            let mut selected = if all_languages_selected { all_language_values.clone() } else { preferences.included_catalog_languages().to_vec() };
-            if active {
-                selected.retain(|language| language != &value);
-            } else {
-                selected.push(value.clone());
-                selected.sort();
-                selected.dedup();
-            }
-            if selected.len() == all_language_values.len() {
-                selected.clear();
-            }
-            let language_entity = entity.clone();
-            catalog_languages = catalog_languages.child(components::browser_settings_chip_button(format!("catalog-language-{index}"), option.label.clone(), active, theme).on_click(move |_, _, cx| {
-                language_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::IncludedCatalogLanguages(selected.clone()), cx));
-            }));
-        }
-        let catalog_language_policy = components::browser_settings_fieldset(settings.catalogues_section_label.clone(), theme)
-            .child(div().text_size(gpui::rems(13.0 / 16.0)).font_weight(gpui::FontWeight::MEDIUM).child(settings.included_catalog_languages_label.clone()))
-            .child(div().text_size(gpui::rems(11.0 / 16.0)).text_color(theme.text_muted).child(settings.included_catalog_languages_description.clone()))
-            .child(catalog_languages);
-
         let mut interface_fonts = components::browser_settings_font_choices(theme);
         for (index, option) in contract.options.fonts.iter().enumerate() {
             let value = option.value;
             let interface_entity = entity.clone();
-            interface_fonts = interface_fonts.child(components::browser_settings_font_button(format!("interface-font-{index}"), option.font_name.clone(), value == preferences.interface_font(), option.font_name.clone(), theme).on_click(
+            interface_fonts = interface_fonts.child(components::browser_settings_font_button(format!("interface-font-{index}"), option.label.clone(), value == preferences.interface_font(), option.font_name.clone(), theme).on_click(
                 move |_, _, cx| {
                     interface_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::InterfaceFont(value), cx));
                 },
@@ -277,7 +246,6 @@ impl Render for SettingsPage {
 
         let mut sections = components::browser_settings_sections()
             .child(appearance_settings)
-            .child(catalog_language_policy)
             .child(book_display)
             .child(components::browser_settings_font_row(settings.interface_font_label.clone(), interface_fonts, theme))
             .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme))

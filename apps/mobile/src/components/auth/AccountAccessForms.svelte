@@ -93,8 +93,8 @@
   <form onsubmit={submit}>
     {#if mode === "login"}
       <p>Sign in to synchronize your libraries and preferences.</p>
-      <label><span>Email</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
-      <label><span>Password</span><input required type="password" bind:value={password} autocomplete="current-password" /></label>
+      <label class="placeholder-field"><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" placeholder="Email" aria-label="Email" /></label>
+      <label class="placeholder-field"><input required type="password" bind:value={password} autocomplete="current-password" placeholder="Password" aria-label="Password" /></label>
       <div class="actions">
         <button class="primary" type="submit" disabled={busy || !email.trim() || !password}>Sign in</button>
         {#if ACCOUNT_CONTRACT.capabilities.public_registration}<button class="secondary" type="button" disabled={busy} onclick={() => selectMode("register")}>Create account</button>{/if}
@@ -102,8 +102,8 @@
       {#if loginFailed && ACCOUNT_CONTRACT.capabilities.password_recovery}<button class="link" type="button" onclick={() => selectMode("request-reset")}>Reset password</button>{/if}
     {:else if mode === "register"}
       <p>Create an account, then enter the six-digit verification PIN sent by email.</p>
-      <label><span>Email</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
-      <label><span>Password</span><input required type="password" bind:value={password} autocomplete="new-password" /></label>
+      <label class="placeholder-field"><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" placeholder="Email" aria-label="Email" /></label>
+      <label class="placeholder-field"><input required type="password" bind:value={password} autocomplete="new-password" placeholder="Password" aria-label="Password" /></label>
       <small>At least {ACCOUNT_CONTRACT.validation.password_min_characters} characters.</small>
       <div class="actions">
         <button class="primary" type="submit" disabled={busy || !email.trim() || !password}>Create account</button>
@@ -121,14 +121,14 @@
       <button class="link" type="button" disabled={busy} onclick={() => selectMode("login")}>Sign in instead</button>
     {:else if mode === "request-reset"}
       <p>Request a password-reset token. The response is deliberately the same whether the address exists or not.</p>
-      <label><span>Email</span><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" /></label>
+      <label class="placeholder-field"><input required type="email" maxlength={ACCOUNT_CONTRACT.validation.email_max_bytes} bind:value={email} autocomplete="email" placeholder="Email" aria-label="Email" /></label>
       <button class="primary" type="submit" disabled={busy || !email.trim()}>Send reset token</button>
       <button class="link" type="button" onclick={() => selectMode("reset")}>Already have a reset token?</button>
       <button class="link" type="button" onclick={() => selectMode("login")}>Back to sign in</button>
     {:else}
       <p>Enter the reset token and choose a new password.</p>
       <label><span>Token</span><input required maxlength={ACCOUNT_CONTRACT.validation.one_time_token_bytes} bind:value={token} autocomplete="one-time-code" spellcheck="false" /></label>
-      <label><span>New password</span><input required type="password" bind:value={password} autocomplete="new-password" /></label>
+      <label class="placeholder-field"><input required type="password" bind:value={password} autocomplete="new-password" placeholder="New password" aria-label="New password" /></label>
       <small>At least {ACCOUNT_CONTRACT.validation.password_min_characters} characters.</small>
       <button class="primary" type="submit" disabled={busy || !token.trim() || !password}>Set new password</button>
       <button class="link" type="button" onclick={() => selectMode("login")}>Back to sign in</button>
@@ -144,10 +144,12 @@
   form { display: grid; gap: .55rem; }
   form > p { margin: 0 0 .15rem; color: var(--color-subtle-text); font-size: .72rem; line-height: 1.5; }
   label { display: grid; grid-template-columns: 6rem minmax(0, 1fr); align-items: center; min-height: 2.8rem; padding: 0 .7rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
+  label.placeholder-field { grid-template-columns: minmax(0, 1fr); }
   label:focus-within { border-color: var(--color-accent); }
   label span, small { color: var(--color-subtle-text); font-size: .7rem; font-weight: 700; }
   input, button { font: inherit; }
   input { min-width: 0; height: 2.7rem; border: 0; outline: 0; color: inherit; background: transparent; font-size: .8rem; }
+  input::placeholder { color: var(--color-subtle-text); opacity: 1; }
   button { cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .primary, .secondary { min-height: 2.65rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: 0; font-size: .75rem; font-weight: 750; }

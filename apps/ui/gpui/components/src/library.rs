@@ -158,6 +158,21 @@ pub fn author_card_grid() -> Div {
     div().w_full().flex().flex_row().flex_wrap().items_start().gap(px(crate::BOOK_GRID_GAP))
 }
 
+/// The fixed width occupied by an author card with this many cover slots.
+/// Kept alongside [`author_list_row`] so virtualized index rows use exactly
+/// the same packing geometry as the cards they contain.
+pub fn author_card_width(cover_count: usize) -> f32 {
+    let cover_count = cover_count.clamp(1, AUTHOR_ROW_COVER_COUNT);
+    AUTHOR_ROW_HORIZONTAL_PADDING * 2.0 + AUTHOR_ROW_COVER_WIDTH * cover_count as f32 + AUTHOR_ROW_COVER_GAP * cover_count.saturating_sub(1) as f32
+}
+
+/// One fixed-height row in the virtualized author index. The trailing grid
+/// gap is included in the row height because `uniform_list` positions rows
+/// directly adjacent to one another.
+pub fn author_virtual_row() -> Div {
+    div().w_full().h(px(AUTHOR_ROW_HEIGHT + crate::BOOK_GRID_GAP)).flex_none().flex().flex_row().items_start().gap(px(crate::BOOK_GRID_GAP))
+}
+
 pub fn author_filter_box() -> Div {
     div().w_full().flex_none()
 }
@@ -188,8 +203,7 @@ pub fn author_sort_option(id: impl Into<ElementId>, label: impl Into<SharedStrin
 /// One author card. Its width follows the one-to-three regular-size covers it
 /// contains, while the name and vertical geometry remain identical.
 pub fn author_list_row(id: impl Into<ElementId>, cover_count: usize, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
-    let cover_count = cover_count.clamp(1, AUTHOR_ROW_COVER_COUNT);
-    let width = AUTHOR_ROW_HORIZONTAL_PADDING * 2.0 + AUTHOR_ROW_COVER_WIDTH * cover_count as f32 + AUTHOR_ROW_COVER_GAP * cover_count.saturating_sub(1) as f32;
+    let width = author_card_width(cover_count);
     div()
         .id(id)
         .w(px(width))

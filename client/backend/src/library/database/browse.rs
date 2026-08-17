@@ -339,10 +339,10 @@ impl LibraryBackend {
                     subjects.push(LibrarySubjectEntry { id: SubjectPath::new(id), name: name.to_owned(), book_count, downloaded_book_count });
                 }
             }
-            let specials = [
-                (UNCATEGORIZED_SUBJECT_PATH, "Uncategorized", scope.card_counts(get_uncategorized_book_cards_scoped(&conn, false).map_err(BackendError::operation)?)),
-                (OTHER_SUBJECT_SYSTEMS_PATH, "Other subject systems", scope.card_counts(get_other_subject_system_book_cards_scoped(&conn, false).map_err(BackendError::operation)?)),
-            ];
+            // Raw assignments from subject systems that do not map into the
+            // unified taxonomy stay stored and queryable through the legacy
+            // hidden path, but are not a visible Subjects root.
+            let specials = [(UNCATEGORIZED_SUBJECT_PATH, "Uncategorized", scope.card_counts(get_uncategorized_book_cards_scoped(&conn, false).map_err(BackendError::operation)?))];
             for (id, name, (mut book_count, downloaded_book_count)) in specials {
                 if downloaded_only {
                     book_count = downloaded_book_count;

@@ -118,7 +118,7 @@ export function arrowKeyNavigation(node: HTMLElement, options: ArrowNavigationOp
 
 export function managedMenu(node: HTMLDetailsElement) {
   const summary = node.querySelector<HTMLElement>("summary");
-  const items = () => visibleElements(node, "[role='menuitem']:not([disabled])");
+  const items = () => visibleElements(node, "[role='menuitem']:not([disabled]), [role='menuitemcheckbox']:not([disabled]), [role='menuitemradio']:not([disabled])");
   const close = (restoreFocus = true) => {
     if (!node.open) return;
     node.open = false;
