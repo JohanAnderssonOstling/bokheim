@@ -1,7 +1,7 @@
 //! Shared by every crate test module that needs a live Postgres.
 //!
-//! Schema application has no migration history to make repeat calls
-//! idempotent -- each test gets its own schema via `search_path` so many
+//! Baseline schema application is intentionally not repeatable -- each test
+//! gets its own schema via `search_path` so many
 //! tests can run against the same `SYNC_E2E_DATABASE_URL` without colliding
 //! on tables an earlier test already created.
 

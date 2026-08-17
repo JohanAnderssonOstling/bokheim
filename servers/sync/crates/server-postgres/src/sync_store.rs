@@ -482,29 +482,12 @@ mod tests {
     }
 
     const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
-    const LWW_UPGRADE_SQL: &str = include_str!("../schema/upgrade_20260817.sql");
 
     #[test]
     fn postgres_winner_order_begins_with_wall_clock_time() {
         let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
         assert!(comparison.trim_start().starts_with("NEW.changed_at,"));
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
-    }
-
-    /// A fresh install reads `03_sync.sql` and an existing deployment reads the
-    /// upgrade file, so the two definitions of the merge guard must not drift:
-    /// a server running the older body silently discards losing pushes and
-    /// strands their author on a value nothing will ever correct.
-    #[test]
-    fn the_upgrade_path_installs_the_same_merge_guard_as_a_fresh_schema() {
-        fn guard_body(sql: &str) -> &str {
-            let start = sql.find("FUNCTION enforce_lww_order()").expect("merge guard definition");
-            let body = &sql[start..];
-            &body[..body.find("\n$$;").expect("merge guard terminator")]
-        }
-
-        assert_eq!(guard_body(LWW_UPGRADE_SQL), guard_body(LWW_TRIGGER_SQL));
-        assert!(LWW_UPGRADE_SQL.contains("CREATE OR REPLACE FUNCTION enforce_lww_order()"), "an existing deployment must replace its installed guard");
     }
 
     #[tokio::test]

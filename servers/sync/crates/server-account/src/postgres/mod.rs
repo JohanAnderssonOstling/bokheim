@@ -583,8 +583,8 @@ mod tests {
         AuthenticatedUser { user_id: user_id.to_string(), email: format!("user-{user_id}@example.com") }
     }
 
-    /// Schema application has no migration history to make repeat calls
-    /// idempotent -- each test gets its own schema via `search_path` so
+    /// Baseline schema application is intentionally not repeatable -- each
+    /// test gets its own schema via `search_path` so
     /// tests can run against the same SYNC_E2E_DATABASE_URL without
     /// colliding on tables the previous test already created.
     async fn isolated_pool(max_connections: u32) -> sqlx::PgPool {

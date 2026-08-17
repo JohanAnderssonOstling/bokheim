@@ -39,10 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Applies the schema to an empty database. There is no migration history:
-/// deploys drop and recreate the database, then run this once before
-/// starting the server, which never applies schema itself -- restarting an
-/// already-schema'd server must not attempt to recreate its own tables.
+/// Applies the complete v14 baseline schema to an empty database. The server
+/// never applies schema implicitly on startup.
 async fn run_migrate() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;

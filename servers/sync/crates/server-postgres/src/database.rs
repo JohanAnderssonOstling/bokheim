@@ -73,11 +73,9 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-/// Applies the schema in `schema/*.sql` (embedded at compile time) to an
-/// empty database. There is no migration history: `servers/sync/deploy/install-server.sh`
-/// drops and recreates the database on every deploy, so this only ever runs
-/// against a fresh, empty schema. Files are applied in filename order --
-/// `01_core.sql` before the domain files that reference it.
+/// Applies the complete v14 baseline schema to an empty database. Files are
+/// applied in filename order -- `01_core.sql` before the domain files that
+/// reference it.
 pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
     const SCHEMA_FILES: &[&str] = &[include_str!("../schema/01_core.sql"), include_str!("../schema/02_accounts.sql"), include_str!("../schema/03_sync.sql"), include_str!("../schema/04_assets.sql"), include_str!("../schema/05_admin.sql")];
     for file in SCHEMA_FILES {
@@ -86,10 +84,28 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Upgrades an existing production database without recreating or deleting
-/// user data. The embedded SQL is transactional, serialized, and idempotent.
+/// Immutable migrations introduced after the v14 baseline. Append entries;
+/// never edit or reorder a migration after release.
+const POST_V14_MIGRATIONS: &[(&str, &str)] = &[];
+
+/// Upgrades an existing v14-or-newer database without recreating or deleting
+/// user data. Pre-v14 databases are deliberately rejected.
 pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(include_str!("../schema/upgrade_20260817.sql")).execute(database.pool()).await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('bokheim-schema-upgrade'))").execute(&mut *transaction).await?;
+    let is_v14: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bokheim_schema_migration WHERE version='14-baseline')").fetch_one(&mut *transaction).await?;
+    if !is_v14 {
+        return Err(sqlx::Error::Protocol("database predates the v14 migration baseline".to_owned()));
+    }
+    for &(version, sql) in POST_V14_MIGRATIONS {
+        let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bokheim_schema_migration WHERE version=$1)").bind(version).fetch_one(&mut *transaction).await?;
+        if applied {
+            continue;
+        }
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO bokheim_schema_migration(version) VALUES($1)").bind(version).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 
