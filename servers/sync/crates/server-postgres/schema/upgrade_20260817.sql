@@ -123,6 +123,47 @@ CREATE TRIGGER admin_audit_event_append_only
 BEFORE UPDATE OR DELETE ON admin_audit_event
 FOR EACH ROW EXECUTE FUNCTION reject_admin_audit_mutation();
 
+-- A push that loses the last-writer-wins comparison used to be cancelled
+-- silently while still being acknowledged as accepted, leaving the submitting
+-- replica holding a value no pull could ever correct. Republish the stored
+-- winner instead. Kept identical to schema/03_sync.sql; a unit test enforces it.
+CREATE OR REPLACE FUNCTION enforce_lww_order() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    republished_seq bigint;
+BEGIN
+    IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq, NEW.event_id COLLATE "C")
+       > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq, OLD.event_id COLLATE "C")
+    THEN
+        RETURN NEW;
+    END IF;
+    -- The stored row already is this mutation, so a retried push has nothing
+    -- to teach anyone. Cancel it rather than churn the channel head.
+    IF NEW.event_id COLLATE "C" = OLD.event_id COLLATE "C" THEN
+        RETURN NULL;
+    END IF;
+    -- The incoming mutation strictly loses. Its author applied it locally
+    -- before pushing and is told only that the push was accepted -- the
+    -- protocol has no "merged and discarded" acknowledgement -- so silently
+    -- cancelling here would leave that replica permanently divergent: the
+    -- winning row already sits at or below its pull cursor and would never be
+    -- redelivered. Keep the stored winner, but move it to the sequence this
+    -- statement already allocated so it lands above every replica's cursor and
+    -- the losing writer converges on its next pull page.
+    IF NEW.server_seq > OLD.server_seq THEN
+        republished_seq := NEW.server_seq;
+    ELSE
+        republished_seq := nextval('sync_server_sequence');
+    END IF;
+    NEW := OLD;
+    NEW.server_seq := republished_seq;
+    RETURN NEW;
+END;
+$$;
+
 INSERT INTO bokheim_schema_migration(version) VALUES('2026-08-17-admin-and-token-encryption')
+ON CONFLICT (version) DO NOTHING;
+INSERT INTO bokheim_schema_migration(version) VALUES('2026-08-17-lww-loser-republish')
 ON CONFLICT (version) DO NOTHING;
 COMMIT;

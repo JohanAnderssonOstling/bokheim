@@ -13,16 +13,21 @@
 -- interprets what is inside.
 --
 -- Every table below that participates in last-writer-wins conflict
--- resolution gets a `lww_guard` trigger (enforce_lww_order()): it silently
--- cancels an UPDATE whose (changed_at, version_rank, replica_id, replica_seq,
--- event_id) tuple does not beat the stored row's, so every writer -- this
--- server, a future service, a manual fix -- gets the same tie-break
--- guarantee without repeating the comparison in every upsert query.
+-- resolution gets a `lww_guard` trigger (enforce_lww_order()): it refuses an
+-- UPDATE whose (changed_at, version_rank, replica_id, replica_seq, event_id)
+-- tuple does not beat the stored row's, so every writer -- this server, a
+-- future service, a manual fix -- gets the same tie-break guarantee without
+-- repeating the comparison in every upsert query. A refused update is not
+-- simply cancelled: unless it is the stored row's own mutation arriving again,
+-- the guard republishes the stored winner under the freshly allocated
+-- server_seq, so the losing replica -- which applied the value locally and is
+-- only ever told that its push was accepted -- receives the authoritative
+-- value instead of diverging forever.
 --
 -- advance_library_sync_revision_statement() maintains sync_library_revision,
 -- the per-library pull cursor, from whichever rows a statement actually
 -- wrote (it fires on both INSERT and UPDATE, and does nothing for rows the
--- lww_guard trigger already cancelled).
+-- lww_guard trigger cancelled as a duplicate).
 --
 -- Cursor correctness requires every server_seq at or below an advertised
 -- channel head to be committed. Every write path therefore locks its library
@@ -69,13 +74,35 @@ $$;
 CREATE FUNCTION enforce_lww_order() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+DECLARE
+    republished_seq bigint;
 BEGIN
     IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq, NEW.event_id COLLATE "C")
        > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq, OLD.event_id COLLATE "C")
     THEN
         RETURN NEW;
     END IF;
-    RETURN NULL;
+    -- The stored row already is this mutation, so a retried push has nothing
+    -- to teach anyone. Cancel it rather than churn the channel head.
+    IF NEW.event_id COLLATE "C" = OLD.event_id COLLATE "C" THEN
+        RETURN NULL;
+    END IF;
+    -- The incoming mutation strictly loses. Its author applied it locally
+    -- before pushing and is told only that the push was accepted -- the
+    -- protocol has no "merged and discarded" acknowledgement -- so silently
+    -- cancelling here would leave that replica permanently divergent: the
+    -- winning row already sits at or below its pull cursor and would never be
+    -- redelivered. Keep the stored winner, but move it to the sequence this
+    -- statement already allocated so it lands above every replica's cursor and
+    -- the losing writer converges on its next pull page.
+    IF NEW.server_seq > OLD.server_seq THEN
+        republished_seq := NEW.server_seq;
+    ELSE
+        republished_seq := nextval('sync_server_sequence');
+    END IF;
+    NEW := OLD;
+    NEW.server_seq := republished_seq;
+    RETURN NEW;
 END;
 $$;
 

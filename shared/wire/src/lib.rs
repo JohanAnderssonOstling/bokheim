@@ -67,25 +67,6 @@ pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<
     Ok(value)
 }
 
-/// Decodes an explicitly allowed older persisted value only when its bincode
-/// payload remains byte-for-byte compatible with the current storage schema.
-pub fn decode_compatible<T: DeserializeOwned + Serialize>(body: &[u8], decoded_limit: usize, compatible_versions: &[u8]) -> Result<T, WireError> {
-    match decode(body, decoded_limit) {
-        Ok(value) => Ok(value),
-        Err(WireError::UnsupportedVersion(version)) if compatible_versions.contains(&version) => {
-            let mut current = body.to_vec();
-            current[MAGIC.len()] = VERSION;
-            let value = decode(&current, decoded_limit)?;
-            let encoded = encode(&value)?;
-            if encoded.get(HEADER_BYTES..) != body.get(HEADER_BYTES..) {
-                return Err(WireError::Decode(format!("storage version {version} is not byte-compatible with version {VERSION}")));
-            }
-            Ok(value)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,13 +105,5 @@ mod tests {
         let mut trailing = encode(&NumericVariant::First).unwrap();
         trailing.push(0);
         assert!(matches!(decode::<NumericVariant>(&trailing, 64), Err(WireError::Decode(_))));
-    }
-
-    #[test]
-    fn compatible_decoder_accepts_only_explicit_byte_identical_versions() {
-        let mut previous = encode(&example(3)).unwrap();
-        previous[MAGIC.len()] = VERSION - 1;
-        assert_eq!(decode_compatible::<Example>(&previous, 64, &[VERSION - 1]).unwrap(), example(3));
-        assert!(matches!(decode_compatible::<Example>(&previous, 64, &[VERSION - 2]), Err(WireError::UnsupportedVersion(version)) if version == VERSION - 1));
     }
 }

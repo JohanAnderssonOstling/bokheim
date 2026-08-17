@@ -26,7 +26,7 @@ changed AS (
         version_rank = EXCLUDED.version_rank,
         event_id = EXCLUDED.event_id,
         server_seq = DEFAULT
-    RETURNING server_seq
+    RETURNING server_seq, event_id
 )
 SELECT
     EXISTS(SELECT 1 FROM owned) AS authorized,
@@ -34,6 +34,7 @@ SELECT
     COALESCE((SELECT other_revision FROM owned) <= $14 AND (SELECT reading_revision FROM owned) <= $15, FALSE) AS caught_up,
     (SELECT reading_revision FROM owned) AS reading_revision,
     (SELECT other_revision FROM owned) AS other_revision,
-    changed.server_seq
+    changed.server_seq,
+    changed.event_id
 FROM (VALUES (1)) AS sentinel(value)
 LEFT JOIN changed ON TRUE;

@@ -455,6 +455,94 @@ mod tests {
         assert!(after_gap.pull.mutations.is_empty(), "nothing committed at or below the advertised head may appear later");
     }
 
+    /// A push that loses the stored row's last-writer-wins comparison is still
+    /// reported as accepted -- the protocol has no "merged and discarded"
+    /// acknowledgement -- and the submitting replica has already applied the
+    /// value locally. The winning row sits at or below that replica's cursor,
+    /// so cancelling the update silently would strand it forever. The guard
+    /// must republish the winner above the cursor instead.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_superseded_push_republishes_the_winner_above_the_losers_cursor() {
+        let Some(pool) = crate::test_support::isolated_pool("lww_republish", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let mut winner = wire_mutation("metadata", "book", 2_000, 1);
+        winner.value = b"winner".to_vec();
+        let published = repository.exchange(&user_id, &exchange_request(library_id, vec![winner.clone()])).await.expect("publish the winning version");
+        let cursor = published.pull.next_cursor;
+
+        // A replica whose clock runs behind writes the same cell honestly and
+        // loses. It pushes from the cursor that already covers the winner.
+        let mut loser = wire_mutation("metadata", "book", 1_000, 2);
+        loser.value = b"loser".to_vec();
+        let request = SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: vec![loser.clone()], cursor };
+        let response = repository.exchange(&user_id, &request).await.expect("a losing push is still accepted");
+
+        assert_eq!(response.push.accepted, vec![loser.mutation_id], "a merged-and-discarded mutation is acknowledged, not rejected");
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT value FROM sync_state WHERE library_id=$1 AND kind='metadata' AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, b"winner", "the stale write must not take the cell");
+
+        let delivered = response.pull.mutations.iter().map(|change| change.mutation.value.as_slice()).collect::<Vec<_>>();
+        assert_eq!(delivered, vec![b"winner".as_slice()], "the same exchange must hand the loser the authoritative value");
+        assert!(response.pull.next_cursor.state_revision.unwrap().get() > cursor.state_revision.unwrap().get(), "the republished winner advances the state channel");
+    }
+
+    /// Republishing must be reserved for a genuine conflict loss. A push
+    /// retried after a lost response carries the identity that already owns the
+    /// cell, and must not churn the channel head for every other replica.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_retried_push_of_the_stored_mutation_does_not_advance_the_head() {
+        let Some(pool) = crate::test_support::isolated_pool("lww_retry", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        // A retry replays the identical envelope, replica identity included:
+        // the authoritative actor comes from the request, not the mutation.
+        let replica_id = sync_common::ReplicaId::new_v4();
+        let mutation = wire_mutation("metadata", "book", 2_000, 1);
+        let publish = SyncExchangeRequest { library_id, replica_id, mutations: vec![mutation.clone()], cursor: SyncCursor::default() };
+        let published = repository.exchange(&user_id, &publish).await.expect("publish once");
+        let cursor = published.pull.next_cursor;
+
+        let retry = SyncExchangeRequest { library_id, replica_id, mutations: vec![mutation.clone()], cursor };
+        let response = repository.exchange(&user_id, &retry).await.expect("a retried push is accepted");
+
+        assert_eq!(response.push.accepted, vec![mutation.mutation_id]);
+        assert!(response.pull.mutations.is_empty(), "an idempotent retry has nothing to redeliver");
+        assert_eq!(response.pull.next_cursor, cursor, "an idempotent retry leaves the channel head where it was");
+    }
+
+    /// The atomic reading-position exchange answers from the row it just wrote
+    /// rather than re-reading a page. When that write lost, the row holds the
+    /// republished winner, so the response must carry the winner -- never echo
+    /// back the caller's own discarded position as though it had been stored.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_superseded_reading_position_is_answered_with_the_stored_winner() {
+        let Some(pool) = crate::test_support::isolated_pool("lww_reading_republish", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let mut winner = wire_mutation(sync_common::mutation_kind::READING_POSITION, "book", 2_000, 1);
+        winner.value = b"winner".to_vec();
+        let published = repository.exchange(&user_id, &exchange_request(library_id, vec![winner.clone()])).await.expect("publish the winning position");
+        let cursor = published.pull.next_cursor;
+
+        let mut loser = wire_mutation(sync_common::mutation_kind::READING_POSITION, "book", 1_000, 2);
+        loser.value = b"loser".to_vec();
+        let request = SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: vec![loser.clone()], cursor };
+        let response = repository.exchange(&user_id, &request).await.expect("a losing reading position is still accepted");
+
+        assert_eq!(response.push.accepted, vec![loser.mutation_id]);
+        let delivered = response.pull.mutations.iter().map(|change| change.mutation.value.as_slice()).collect::<Vec<_>>();
+        assert_eq!(delivered, vec![b"winner".as_slice()], "the caught-up fast path must not echo a discarded mutation");
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT value FROM sync_reading_state WHERE library_id=$1 AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, b"winner");
+    }
+
     /// A server whose state has regressed (a restore from an older backup)
     /// leaves every device holding a cursor the server can no longer honour.
     /// The service must say so distinctly rather than silently replaying.

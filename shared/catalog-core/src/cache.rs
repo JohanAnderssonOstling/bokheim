@@ -2657,8 +2657,8 @@ fn decode_page(payload: &[u8]) -> Result<CatalogPage, wire::WireError> {
     decode_cached(payload)
 }
 
-fn decode_cached<T: serde::de::DeserializeOwned + serde::Serialize>(payload: &[u8]) -> Result<T, wire::WireError> {
-    wire::decode_compatible(payload, wire::MAX_DECODED_RESPONSE_BYTES, &[11])
+fn decode_cached<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T, wire::WireError> {
+    wire::decode(payload, wire::MAX_DECODED_RESPONSE_BYTES)
 }
 
 fn sql_decode_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
@@ -2910,17 +2910,7 @@ mod tests {
         let source = source_id();
         cache.ensure_source(&source, "https://example.com/opds").unwrap();
         let crawl = cache.begin_crawl(&source, "https://example.com/opds").unwrap();
-        cache
-            .stage_page(
-                &crawl,
-                &page(
-                    "https://example.com/opds",
-                    vec![importable_epub("one", None), importable_epub("two", None), importable_epub("three", None)],
-                ),
-                None,
-                None,
-            )
-            .unwrap();
+        cache.stage_page(&crawl, &page("https://example.com/opds", vec![importable_epub("one", None), importable_epub("two", None), importable_epub("three", None)]), None, None).unwrap();
 
         assert!(cache.prepare_crawl_activation_batch(&crawl, 1).unwrap());
         assert!(cache.prepare_crawl_activation_batch(&crawl, 1).unwrap());
