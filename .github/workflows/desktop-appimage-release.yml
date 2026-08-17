@@ -1,4 +1,4 @@
-name: Desktop AppImage release
+name: GPUI desktop AppImage release
 
 on:
   workflow_dispatch:
@@ -33,7 +33,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: bokheim
-          submodules: recursive
 
       - name: Check out GPUI-Fork
         uses: actions/checkout@v4
@@ -102,9 +101,18 @@ jobs:
           VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop-gpui/Cargo.toml | head -n 1)
           test "v${VERSION}" = "$GITHUB_REF_NAME"
 
-      - name: Build desktop release
+      - name: Verify the desktop dependency graph is GPUI-only
         working-directory: bokheim
-        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui
+        shell: bash
+        run: |
+          if cargo tree --locked -p desktop-gpui --no-default-features --features desktop | grep -E -i '(^|[[:space:]])(tauri|wry|webkit2gtk|mobileapp)([[:space:]]|$)'; then
+            echo "The GPUI AppImage must not depend on Tauri or the mobile application." >&2
+            exit 1
+          fi
+
+      - name: Build GPUI desktop release
+        working-directory: bokheim
+        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui --no-default-features --features desktop
 
       - name: Build updateable AppImage
         working-directory: bokheim

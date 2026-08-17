@@ -171,8 +171,8 @@ test("browser rich enrichment presents directly referenced places and people as 
   })[0])) as { publication: { subject_paths: string[] } };
   assert.equal(synchronized.publication.subject_paths.includes("Humanities / Literature / Romance-Language Literatures / French & Related Literatures / Modern literature / 1900-1960"), true);
   assert.equal(synchronized.publication.subject_paths.includes("Science & Nature / Mathematics / Analysis, Calculus & Differential Equations / Analysis"), true);
-  assert.equal((await getWebLibrarySubjects(library.library_id, "Science & Nature")).children.some(({ name }) => name === "Mathematics"), true);
-  assert.equal((await getWebLibrarySubjects(library.library_id, "Humanities")).children.some(({ name }) => name === "Literature"), true);
+  assert.deepEqual((await getWebLibrarySubjects(library.library_id, "Science & Nature")).books.map(({ title }) => title), ["Paris Book"]);
+  assert.deepEqual((await getWebLibrarySubjects(library.library_id, "Humanities")).books.map(({ title }) => title), ["Paris Book"]);
   await removeWebLibrary(library.library_id);
 });
 
@@ -408,7 +408,7 @@ test("file type views prune empty folder and subject branches recursively", asyn
   assert.deepEqual((await getWebLibraryFolder(library.library_id, ROOT_DIRECTORY_ID, "pdf")).children.map(({ name, book_count }) => [name, book_count]), [["PDF branch", 1]]);
   assert.deepEqual((await getWebLibraryFolder(library.library_id, ROOT_DIRECTORY_ID, "audiobook")).children.map(({ name }) => name), ["Audio branch"]);
   assert.deepEqual((await getWebLibraryFolder(library.library_id, ROOT_DIRECTORY_ID, "book")).children.map(({ name }) => name), ["Book branch"]);
-  assert.deepEqual((await getWebLibrarySubjects(library.library_id, null, "pdf")).children.map(({ id }) => id), ["Science & Nature"]);
+  assert.deepEqual((await getWebLibrarySubjects(library.library_id, null, "pdf")).books.map(({ title }) => title), ["Paper"]);
   assert.deepEqual((await searchWebLibrarySubject(library.library_id, null, "paper", 10, "pdf")).title_matches.map(({ title }) => title), ["Paper"]);
   assert.deepEqual((await searchWebLibrarySubject(library.library_id, null, "novel", 10, "pdf")).title_matches, []);
   await removeWebLibrary(library.library_id);
@@ -459,9 +459,26 @@ test("EPUB descriptions and Rust-derived subjects populate the library hierarchy
 
   const home = await getWebLibraryHome(library.library_id);
   assert.equal(home.recently_added[0].description, "A history description");
-  assert.deepEqual((await getWebLibrarySubjects(library.library_id, null)).children.map(({ id }) => id), ["Humanities"]);
-  assert.deepEqual((await getWebLibrarySubjects(library.library_id, "Humanities")).children.map(({ id }) => id), ["Humanities / History"]);
+  assert.deepEqual((await getWebLibrarySubjects(library.library_id, null)).books.map(({ title }) => title), ["American Century"]);
+  assert.deepEqual((await getWebLibrarySubjects(library.library_id, "Humanities")).books.map(({ title }) => title), ["American Century"]);
   assert.deepEqual((await getWebLibrarySubjects(library.library_id, "Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century")).books.map(({ title }) => title), ["American Century"]);
   assert.deepEqual((await searchWebLibrarySubject(library.library_id, "Humanities / History", "american", 10)).title_matches.map(({ title }) => title), ["American Century"]);
+  await removeWebLibrary(library.library_id);
+});
+
+test("subject browsing removes empty choices and collapses non-branching hierarchy", async () => {
+  const library = await createWebLibrary(`Compact subjects ${crypto.randomUUID()}`);
+  const austin = await importWebBook({ library_id: library.library_id, directory_id: ROOT_DIRECTORY_ID }, new File([testEpub("Austin")], "Austin.epub"), "Austin.epub");
+  const dallas = await importWebBook({ library_id: library.library_id, directory_id: ROOT_DIRECTORY_ID }, new File([testEpub("Dallas")], "Dallas.epub"), "Dallas.epub");
+  const { db } = await import("./database.ts").then(({ getWebDatabase }) => getWebDatabase());
+  db.exec({ sql: "INSERT INTO book_subject_paths(library_id,content_hash,subject_path) VALUES (?,?,?)", bind: [library.library_id, austin, "Geography & Travel / United States / Texas / Austin"] });
+  db.exec({ sql: "INSERT INTO book_subject_paths(library_id,content_hash,subject_path) VALUES (?,?,?)", bind: [library.library_id, dallas, "Geography & Travel / United States / Texas / Dallas"] });
+
+  const root = await getWebLibrarySubjects(library.library_id, null);
+  assert.deepEqual(root.children.map(({ id }) => id), ["Geography & Travel / United States / Texas"]);
+  assert.deepEqual(root.books, []);
+  const texas = await getWebLibrarySubjects(library.library_id, "Geography & Travel / United States / Texas");
+  assert.deepEqual(texas.children, []);
+  assert.deepEqual(texas.books.map(({ title }) => title), ["Austin", "Dallas"]);
   await removeWebLibrary(library.library_id);
 });

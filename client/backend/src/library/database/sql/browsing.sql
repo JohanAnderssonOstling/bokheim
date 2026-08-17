@@ -188,6 +188,26 @@ WHERE route.path=:subject_path
   AND (:downloaded_only=0 OR card.downloaded)
 ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 
+-- name: get_book_cards_in_subject_tree?
+-- param: subject_path: &str
+-- param: downloaded_only: i32
+WITH RECURSIVE routes(path,concept_id) AS (
+    SELECT path,concept_id FROM unified_concept_route WHERE path=:subject_path
+    UNION ALL
+    SELECT child.path,child.concept_id
+    FROM routes parent
+    JOIN unified_concept_route child ON child.parent_path=parent.path
+)
+SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
+       card.downloaded, card.download_requested, card.audiobook,
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
+FROM book_cards card
+JOIN book_unified_concept assignment ON assignment.book_row_id=card.book_row_id
+JOIN routes ON routes.concept_id=assignment.concept_id
+WHERE (:downloaded_only=0 OR card.downloaded)
+ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
+
 -- name: get_uncategorized_book_cards?
 -- param: downloaded_only: i32
 SELECT card.content_hash, card.title, card.author, card.description, card.progress,

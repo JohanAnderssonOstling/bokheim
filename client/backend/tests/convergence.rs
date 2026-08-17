@@ -76,10 +76,16 @@ impl FakeServer {
         let candidate_version = VersionKey::new(candidate.change.changed_at, candidate.change.body.conflict_rank(), candidate.replica_id.clone(), candidate.change.replica_seq.get(), candidate.change.mutation_id);
         let incoming_wins =
             self.state.get(&key).is_none_or(|stored| candidate_version > VersionKey::new(stored.change.changed_at, stored.change.body.conflict_rank(), stored.replica_id.clone(), stored.change.replica_seq.get(), stored.change.mutation_id));
+        self.next_server_seq += 1;
+        let revision = LibraryRevision::new(self.next_server_seq).expect("positive server sequence");
         if incoming_wins {
-            self.next_server_seq += 1;
-            let revision = LibraryRevision::new(self.next_server_seq).expect("positive server sequence");
             self.state.insert(key, StoredEvent { revision, ..candidate });
+        } else {
+            // Mirrors `enforce_lww_order`: a strictly losing mutation is still
+            // acknowledged as accepted, so the pushing replica cannot tell that
+            // its local value was discarded. Republishing the stored winner
+            // above every cursor is what teaches it.
+            self.state.get_mut(&key).expect("a losing candidate has a stored winner").revision = revision;
         }
     }
 

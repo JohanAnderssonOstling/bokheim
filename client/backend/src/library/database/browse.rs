@@ -321,24 +321,16 @@ impl LibraryBackend {
             return external_people(&conn, subject_path.expect("checked above"), downloaded_only, &scope).map_err(BackendError::operation);
         }
         let parent_path = subject_path.unwrap_or("");
-        let mut subjects = get_subject_children(&conn, parent_path).map_err(BackendError::operation)?;
-        if !scope.is_all() {
-            let mut filtered = Vec::with_capacity(subjects.len());
-            for mut subject in subjects {
-                let (book_count, downloaded_book_count) = scope.counts(get_descendant_subject_content_hashes(&conn, subject.id.as_str()).map_err(BackendError::operation)?);
-                if book_count > 0 {
-                    subject.book_count = book_count;
-                    subject.downloaded_book_count = downloaded_book_count;
-                    filtered.push(subject);
-                }
-            }
-            subjects = filtered;
-        }
+        let mut books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
+        scope.retain_books(&mut books);
+        let (mut subjects, hoisted_books) = compact_subject_children(&conn, parent_path, downloaded_only, &scope).map_err(BackendError::operation)?;
+        let mut seen_books = books.iter().map(|book| book.content_hash.clone()).collect::<HashSet<_>>();
+        books.extend(hoisted_books.into_iter().filter(|book| seen_books.insert(book.content_hash.clone())));
         if subject_path.is_none() {
             let special = [(PLACES_SUBJECT_PATH, "Places", external_kind_hashes(&conn, "place").map_err(BackendError::operation)?), (PEOPLE_SUBJECT_PATH, "Persons", external_kind_hashes(&conn, "person").map_err(BackendError::operation)?)];
             for (id, name, hashes) in special {
                 let (book_count, downloaded_book_count) = if scope.is_all() { external_kind_counts(&conn, if id == PLACES_SUBJECT_PATH { "place" } else { "person" }).map_err(BackendError::operation)? } else { scope.counts(hashes) };
-                if scope.is_all() || book_count > 0 {
+                if book_count > 0 {
                     subjects.push(LibrarySubjectEntry { id: SubjectPath::new(id), name: name.to_owned(), book_count, downloaded_book_count });
                 }
             }
@@ -347,7 +339,7 @@ impl LibraryBackend {
                 (OTHER_SUBJECT_SYSTEMS_PATH, "Other subject systems", scope.card_counts(get_other_subject_system_book_cards_scoped(&conn, false).map_err(BackendError::operation)?)),
             ];
             for (id, name, (book_count, downloaded_book_count)) in specials {
-                if scope.is_all() || book_count > 0 {
+                if book_count > 0 {
                     subjects.push(LibrarySubjectEntry { id: SubjectPath::new(id), name: name.to_owned(), book_count, downloaded_book_count });
                 }
             }
@@ -358,10 +350,53 @@ impl LibraryBackend {
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
                 .then_with(|| left.id.as_str().cmp(right.id.as_str()))
         });
-        let mut books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
-        scope.retain_books(&mut books);
         Ok(LibrarySubjectView { children: subjects, books })
     }
+}
+
+/// Produces the useful choices immediately below a subject. Empty taxonomy
+/// branches disappear, a branch containing one book becomes that book, and a
+/// chain with no books or forks is represented by its first meaningful node.
+fn compact_subject_children(conn: &Connection, parent_path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<(Vec<LibrarySubjectEntry>, Vec<BookCardRow>), rusqlite::Error> {
+    let mut visible = Vec::new();
+    let mut hoisted_books = Vec::new();
+    for child in populated_subject_children(conn, parent_path, scope)? {
+        if child.book_count == 1 {
+            let mut books = get_book_cards_in_subject_tree_scoped(conn, child.id.as_str(), downloaded_only)?;
+            scope.retain_books(&mut books);
+            hoisted_books.extend(books);
+            continue;
+        }
+
+        let mut display = child;
+        loop {
+            let mut exact_books = get_book_cards_in_subject_scoped(conn, display.id.as_str(), downloaded_only)?;
+            scope.retain_books(&mut exact_books);
+            if !exact_books.is_empty() {
+                break;
+            }
+            let mut children = populated_subject_children(conn, display.id.as_str(), scope)?;
+            if children.len() != 1 {
+                break;
+            }
+            display = children.remove(0);
+        }
+        visible.push(display);
+    }
+    Ok((visible, hoisted_books))
+}
+
+fn populated_subject_children(conn: &Connection, parent_path: &str, scope: &FileTypeScope) -> Result<Vec<LibrarySubjectEntry>, rusqlite::Error> {
+    let mut populated = Vec::new();
+    for mut subject in get_subject_children(conn, parent_path)? {
+        if !scope.is_all() {
+            (subject.book_count, subject.downloaded_book_count) = scope.counts(get_descendant_subject_content_hashes(conn, subject.id.as_str())?);
+        }
+        if subject.book_count > 0 {
+            populated.push(subject);
+        }
+    }
+    Ok(populated)
 }
 
 fn convert_toc_entry(entry: epub_provider::TocEntry) -> BookTocEntry {
@@ -494,6 +529,15 @@ pub(super) fn get_book_cards_in_subject_scoped(conn: &Connection, subject_path: 
     Ok(cards)
 }
 
+fn get_book_cards_in_subject_tree_scoped(conn: &Connection, subject_path: &str, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
+    let mut cards = Vec::new();
+    conn.get_book_cards_in_subject_tree(subject_path, i32::from(downloaded_only), |row| {
+        cards.push(read_book_card_row(row)?);
+        Ok(())
+    })?;
+    Ok(cards)
+}
+
 pub(super) fn get_uncategorized_book_cards_scoped(conn: &Connection, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     let mut cards = Vec::new();
     conn.get_uncategorized_book_cards(i32::from(downloaded_only), |row| {
@@ -584,7 +628,7 @@ fn external_places(conn: &Connection, path: &str, downloaded_only: bool, scope: 
     let mut children = Vec::new();
     for (wikidata_id, name) in raw_places {
         let (book_count, downloaded_book_count) = if scope.is_all() { external_entity_counts(conn, &wikidata_id, false)? } else { scope.counts(get_external_entity_content_hashes(conn, &wikidata_id)?) };
-        if scope.is_all() || book_count > 0 {
+        if book_count > 0 {
             children.push(LibrarySubjectEntry { id: SubjectPath::new(format!("{PLACES_SUBJECT_PATH}/{wikidata_id}")), name, book_count, downloaded_book_count });
         }
     }
@@ -605,7 +649,7 @@ fn external_people(conn: &Connection, path: &str, downloaded_only: bool, scope: 
     let mut children = Vec::new();
     for (wikidata_id, name) in raw_people {
         let (book_count, downloaded_book_count) = if scope.is_all() { external_entity_counts(conn, &wikidata_id, false)? } else { scope.counts(get_external_entity_content_hashes(conn, &wikidata_id)?) };
-        if scope.is_all() || book_count > 0 {
+        if book_count > 0 {
             children.push(LibrarySubjectEntry { id: SubjectPath::new(format!("{PEOPLE_SUBJECT_PATH}/{wikidata_id}")), name, book_count, downloaded_book_count });
         }
     }

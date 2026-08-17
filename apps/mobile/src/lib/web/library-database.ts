@@ -1298,21 +1298,43 @@ export async function getWebLibrarySubjects(libraryId: string, subjectPath: stri
     sql: "SELECT DISTINCT subject_path FROM book_subject_paths WHERE library_id=? AND (?='' OR subject_path=? OR subject_path LIKE ?)",
     bind: [libraryId, parent, parent, `${parent} / %`], rowMode: 0, returnValue: "resultRows",
   }).map(String).filter(isUnifiedSubjectPath);
-  const childNames = new Set<string>();
-  for (const path of paths) {
-    const remainder = parent ? path.slice(parent.length + 3) : path;
-    const child = remainder.split(" / ")[0];
-    if (child && path !== parent) childNames.add(child);
+  const booksInSubject = (id: string, recursive: boolean) => {
+    const hashes = new Set(storedSubjectRows
+      .filter(([, path]) => isUnifiedSubjectPath(path) && (path === id || (recursive && path.startsWith(`${id} / `))))
+      .map(([contentHash]) => contentHash));
+    return books.filter((book) => hashes.has(book.content_hash));
+  };
+  const immediateChildren = (current: string) => {
+    const childNames = new Set<string>();
+    for (const path of paths) {
+      if (current && !path.startsWith(`${current} / `)) continue;
+      const remainder = current ? path.slice(current.length + 3) : path;
+      const name = remainder.split(" / ")[0];
+      if (name && path !== current) childNames.add(name);
+    }
+    return [...childNames].map((name) => {
+      const id = current ? `${current} / ${name}` : name;
+      const count = booksInSubject(id, true).length;
+      return { id, name, book_count: count, downloaded_book_count: count };
+    }).filter((child) => child.book_count > 0).sort((left, right) => left.name.localeCompare(right.name));
+  };
+
+  const children: LibraryHierarchyView["children"] = [];
+  const hoistedBooks: BookCardRow[] = [];
+  for (const child of immediateChildren(parent)) {
+    const descendants = booksInSubject(child.id, true);
+    if (descendants.length === 1) {
+      hoistedBooks.push(descendants[0]);
+      continue;
+    }
+    let display = child;
+    while (booksInSubject(display.id, false).length === 0) {
+      const next = immediateChildren(display.id);
+      if (next.length !== 1) break;
+      [display] = next;
+    }
+    children.push(display);
   }
-  const children = [...childNames].map((name) => {
-    const id = parent ? `${parent} / ${name}` : name;
-    const hashes = new Set(db.exec({
-      sql: "SELECT content_hash FROM book_subject_paths WHERE library_id=? AND (subject_path=? OR subject_path LIKE ?)",
-      bind: [libraryId, id, `${id} / %`], rowMode: 0, returnValue: "resultRows",
-    }).map(String));
-    const count = books.filter((book) => hashes.has(book.content_hash)).length;
-    return { id, name, book_count: count, downloaded_book_count: count };
-  }).filter((child) => child.book_count > 0).sort((left, right) => left.name.localeCompare(right.name));
   if (subjectPath === null) {
     const entityCounts = db.exec({
       sql: "SELECT kind,COUNT(DISTINCT content_hash) FROM web_book_external_entities WHERE library_id=? GROUP BY kind", bind: [libraryId], rowMode: "array", returnValue: "resultRows",
@@ -1325,11 +1347,14 @@ export async function getWebLibrarySubjects(libraryId: string, subjectPath: stri
     const otherCount = books.filter((book) => otherSystems.has(book.content_hash)).length;
     if (otherCount) children.push({ id: "__other_subject_systems__", name: "Other subject systems", book_count: otherCount, downloaded_book_count: otherCount });
   }
-  const exactHashes = subjectPath === null ? new Set<string>() : new Set(db.exec({
-    sql: "SELECT content_hash FROM book_subject_paths WHERE library_id=? AND subject_path=?",
-    bind: [libraryId, subjectPath], rowMode: 0, returnValue: "resultRows",
-  }).map(String));
-  return { children, books: books.filter((book) => exactHashes.has(book.content_hash)) };
+  const directBooks = subjectPath === null ? [] : booksInSubject(subjectPath, false);
+  const seenBooks = new Set(directBooks.map((book) => book.content_hash));
+  for (const book of hoistedBooks) {
+    if (seenBooks.has(book.content_hash)) continue;
+    seenBooks.add(book.content_hash);
+    directBooks.push(book);
+  }
+  return { children, books: directBooks };
 }
 
 export async function getWebLibraryAuthors(libraryId: string, selectedAuthorId: string | null, sort: AuthorSort = "name"): Promise<LibraryAuthorsView> {
