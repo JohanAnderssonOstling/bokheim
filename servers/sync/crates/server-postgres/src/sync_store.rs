@@ -78,7 +78,18 @@ pub(super) fn server_now_ms() -> u64 {
 }
 
 pub(super) fn storage_rejection(change: &WireMutation, server_now_ms: u64) -> Option<MutationRejectionReason> {
-    (change.changed_at > server_now_ms.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS)).then_some(MutationRejectionReason::TimestampTooFarFuture)
+    if change.changed_at > server_now_ms.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
+        return Some(MutationRejectionReason::TimestampTooFarFuture);
+    }
+    // The service never decodes `value`, so a lifecycle mutation's declared
+    // reference is its only statement about whether the book's bytes are still
+    // held. Admitting one without it stores an undeclared presence that the
+    // quota ledger cannot interpret. Declaring `present: false` is how a client
+    // says "no blob", so requiring the field costs it nothing.
+    if change.kind == sync_common::mutation_kind::BOOK_LIFECYCLE && change.blob_reference.is_none() {
+        return Some(MutationRejectionReason::InvalidPayload);
+    }
+    None
 }
 
 pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
@@ -87,7 +98,11 @@ pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
 
 #[derive(Debug)]
 struct StoredLifecycleReference {
-    present: bool,
+    /// `None` is an undeclared presence, not corruption: rows written before a
+    /// lifecycle declaration was mandatory have it. It must decode, or that one
+    /// cell answers every later exchange for its library with an internal
+    /// error. Absent means the cell holds no reference to release.
+    present: Option<bool>,
     content_hash: Option<String>,
     changed_at: i64,
     version_rank: i16,
@@ -150,10 +165,8 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         if !wins {
             continue;
         }
-        if existing.as_ref().is_some_and(|stored| stored.present) {
-            if let Some(hash) = existing.as_ref().and_then(|stored| stored.content_hash.as_ref()) {
-                lifecycle_deltas.push((ContentHash::new(&hash), -1));
-            }
+        if let Some(hash) = existing.as_ref().filter(|stored| stored.present == Some(true)).and_then(|stored| stored.content_hash.as_ref()) {
+            lifecycle_deltas.push((ContentHash::new(hash), -1));
         }
         if let Some(hash) = change.blob_reference.as_ref().filter(|reference| reference.present).and_then(|reference| reference.content_hash.clone()) {
             lifecycle_deltas.push((hash, 1));
@@ -481,6 +494,26 @@ mod tests {
         assert_eq!(storage_rejection(&reading_mutation(server_now), server_now), None);
     }
 
+    /// The declared reference is the whole of what the service knows about a
+    /// book's bytes, so a lifecycle mutation that omits it cannot be stored:
+    /// its row would leave the quota ledger unable to say what the cell holds.
+    /// Retrying cannot fix a malformed payload, so the rejection is permanent.
+    #[test]
+    fn server_admission_requires_a_lifecycle_blob_declaration() {
+        let server_now = 1_000_000;
+        let mut lifecycle = reading_mutation(server_now);
+        lifecycle.kind = sync_common::mutation_kind::BOOK_LIFECYCLE.to_owned();
+
+        assert_eq!(storage_rejection(&lifecycle, server_now), Some(MutationRejectionReason::InvalidPayload));
+        assert!(!MutationRejectionReason::InvalidPayload.is_transient(), "a client cannot make a malformed payload valid by retrying it");
+
+        lifecycle.blob_reference = Some(sync_common::DeclaredBlobReference { present: false, content_hash: None });
+        assert_eq!(storage_rejection(&lifecycle, server_now), None, "declaring that no blob is referenced is itself a complete declaration");
+
+        // Every other kind is opaque and carries no blob accounting at all.
+        assert_eq!(storage_rejection(&reading_mutation(server_now), server_now), None);
+    }
+
     const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
     const LWW_MIGRATION_SQL: &str = include_str!("../schema/migrations/15_lww_loser_republish.sql");
 
@@ -546,5 +579,27 @@ mod tests {
         .unwrap();
 
         assert!(matches!(decode_lifecycle_reference(row), Err(sqlx::Error::Decode(_))), "invalid persisted winner metadata must abort accounting instead of becoming a default value");
+    }
+
+    /// An undeclared presence is not corruption, and the two must not share a
+    /// failure mode: a row written before the declaration was mandatory has
+    /// `present = NULL`, and refusing to decode it makes that one cell answer
+    /// every later exchange for its library with an internal error forever.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn an_undeclared_lifecycle_presence_decodes_as_holding_no_reference() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_null_present", 2).await else { return };
+        let row = sqlx::query(
+            "SELECT NULL::boolean AS present, NULL::text AS content_hash,
+                    1::bigint AS changed_at, 0::smallint AS version_rank,
+                    'replica'::text AS replica_id, 1::bigint AS replica_seq,
+                    'event'::text AS event_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let decoded = decode_lifecycle_reference(row).expect("an absent declaration must decode");
+        assert_eq!(decoded.present, None, "absent stays absent rather than becoming a default `false`");
     }
 }

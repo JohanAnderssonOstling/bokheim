@@ -228,7 +228,7 @@ mod tests {
     use crate::sync_store;
     use sqlx::PgPool;
     use sync_common::api::libraries::UpsertLibraryRequest;
-    use sync_common::{DeclaredBlobReference, MutationId, ReplicaSeq, SyncCursor, SyncExchangeRequest, WireMutation};
+    use sync_common::{DeclaredBlobReference, MutationId, MutationRejection, MutationRejectionReason, ReplicaSeq, SyncCursor, SyncExchangeRequest, WireMutation};
 
     /// A user with one owned library, the minimum an exchange needs.
     async fn seed_account(pool: &PgPool) -> (String, sync_common::LibraryId) {
@@ -343,6 +343,73 @@ mod tests {
         assert_eq!(reference(winner.clone()).await, 1, "the applied hash is charged exactly once");
         assert_eq!(reference(superseded.clone()).await, 0, "a hash that never reached storage is never charged");
         assert_eq!(reference(original.clone()).await, 0, "the replaced hash is released exactly once");
+    }
+
+    /// `blob_reference` is optional on the wire, but for a lifecycle mutation it
+    /// is the service's only statement about whether a book's bytes are held.
+    /// Admitting one without it stored an undeclared presence that the quota
+    /// ledger could not interpret, and from then on every push touching that
+    /// cell failed as an internal error -- stalling the library's sync rather
+    /// than degrading. It must be refused up front, permanently.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn exchange_refuses_a_lifecycle_mutation_without_a_blob_declaration() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_undeclared", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let undeclared = wire_mutation("book_lifecycle", "book", 10, 1);
+        assert!(undeclared.blob_reference.is_none());
+        let response = repository.exchange(&user_id, &exchange_request(library_id, vec![undeclared.clone()])).await.expect("the batch itself is well formed");
+
+        assert!(response.push.accepted.is_empty(), "an undeclared lifecycle reference is not stored");
+        assert_eq!(response.push.rejected, vec![MutationRejection { mutation_id: undeclared.mutation_id, reason: MutationRejectionReason::InvalidPayload }]);
+        assert!(!MutationRejectionReason::InvalidPayload.is_transient(), "the client must stop retrying rather than queue it forever");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_state WHERE library_id=$1").bind(library_id.to_string()).fetch_one(&pool).await.unwrap(),
+            0,
+            "a refused mutation leaves no row behind to poison the cell"
+        );
+    }
+
+    /// Refusing new undeclared rows does not help a library that already has
+    /// one. Such a cell must read as holding no reference so the exchange
+    /// proceeds, instead of failing to decode and answering every later push
+    /// for that book with an internal error.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_stored_lifecycle_row_without_a_presence_declaration_does_not_wedge_the_library() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_null_row", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+        let replacement = "f".repeat(64);
+        sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(&replacement).execute(&pool).await.unwrap();
+
+        // `present` and `content_hash` are deliberately left NULL, exactly as a
+        // writer that never declared a reference would have stored them.
+        sqlx::query(
+            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
+             VALUES($1,'book_lifecycle','book','',''::bytea,NULL,NULL,1,$2,1,0,$3)",
+        )
+        .bind(library_id.to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut mutation = wire_mutation("book_lifecycle", "book", 10, 1);
+        mutation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&replacement)) });
+        let response = repository.exchange(&user_id, &exchange_request(library_id, vec![mutation.clone()])).await.expect("an undeclared stored presence must not fail the exchange");
+
+        assert_eq!(response.push.accepted, vec![mutation.mutation_id]);
+        let charged = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(reference_count), 0)::BIGINT FROM user_blob_reference WHERE user_id=$1 AND content_hash=$2")
+            .bind(&user_id)
+            .bind(&replacement)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(charged, 1, "the replacement is charged once and the undeclared cell released nothing");
     }
 
     /// Lifecycle accounting must inspect the exact logical cell that the

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::UpsertLibraryRequest;
-use sync_common::{ContentHash, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
+use sync_common::{ContentHash, DeclaredBlobReference, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
 use test_support::fixture_content_hash;
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
@@ -94,6 +94,11 @@ fn now_ms() -> u64 {
 }
 
 fn wire_mutation(kind: &str, entity_key: impl Into<String>, entity_subkey: impl Into<String>, sequence: u64, changed_at: u64) -> Result<WireMutation, AnyError> {
+    // A lifecycle mutation must declare whether it references a blob, because
+    // that declaration is all the service knows about the book's bytes. This
+    // workload measures relay throughput against synthetic keys and stores no
+    // bytes, so it declares that it holds no reference.
+    let blob_reference = (kind == sync_common::mutation_kind::BOOK_LIFECYCLE).then_some(DeclaredBlobReference { present: false, content_hash: None });
     Ok(WireMutation {
         mutation_id: MutationId::new(),
         kind: kind.to_owned(),
@@ -101,7 +106,7 @@ fn wire_mutation(kind: &str, entity_key: impl Into<String>, entity_subkey: impl 
         entity_subkey: entity_subkey.into(),
         value: Vec::new(),
         conflict_rank: 0,
-        blob_reference: None,
+        blob_reference,
         changed_at,
         replica_seq: ReplicaSeq::new(sequence)?,
     })

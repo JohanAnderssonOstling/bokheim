@@ -116,8 +116,11 @@
 <style>
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
   .primary-nav { display: none; }
-  .bottom-nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: .42rem max(.45rem, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(.45rem, env(safe-area-inset-left)); border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); background: color-mix(in srgb, var(--color-surface-bg) 97%, transparent); backdrop-filter: blur(18px); }
+  .bottom-nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); background: color-mix(in srgb, var(--color-surface-bg) 97%, transparent); backdrop-filter: blur(18px); }
   .bottom-nav button, .nav-items button { display: grid; place-items: center; gap: var(--navigation-icon-label-gap); min-width: 0; min-height: var(--navigation-touch-item-min-height); padding: .35rem; border: 0; border-radius: 0; color: var(--color-subtle-text); background: transparent; font-size: var(--navigation-label-size); font-weight: var(--navigation-label-weight); }
+  .bottom-nav button { padding-bottom: calc(.35rem + env(safe-area-inset-bottom)); }
+  .bottom-nav button:first-child { padding-left: max(.35rem, env(safe-area-inset-left)); }
+  .bottom-nav button:last-child { padding-right: max(.35rem, env(safe-area-inset-right)); }
   .bottom-nav button.active, .nav-items button.active { color: var(--color-accent); background: var(--color-active-highlight); }
   .more-scrim { position: fixed; z-index: 29; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: color-mix(in srgb, var(--color-ink-text) 12%, transparent); }
   .more-menu { position: fixed; z-index: 32; right: max(.65rem, env(safe-area-inset-right)); bottom: calc(4.75rem + env(safe-area-inset-bottom)); display: grid; width: min(15rem, calc(100vw - 1.3rem)); padding: .4rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 .8rem 2rem color-mix(in srgb, var(--color-box-shadow) 35%, transparent); }

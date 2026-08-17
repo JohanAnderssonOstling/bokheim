@@ -49,7 +49,7 @@
 <article class="book-detail">
   <div class="hero">
     <div class="cover-column">
-      <button class="cover-button" type="button" aria-label={`Open ${title}`} disabled={openingBookId === book.content_hash} onclick={() => onread(book)}>
+      <button class="cover-button" class:has-cover={Boolean(coverUrl)} type="button" aria-label={`Open ${title}`} disabled={openingBookId === book.content_hash} onclick={() => onread(book)}>
         {#if coverUrl}<img src={coverUrl} alt={`Cover of ${title}`} />{:else}<span aria-hidden="true">⌑</span>{/if}
       </button>
       {#if progress > 0}
@@ -94,7 +94,8 @@
   .book-detail { width:100%; max-width:calc(var(--book-cover-width) + 2rem + 80ch); margin:0 auto; padding-bottom:3rem; }
   .hero { display:grid; grid-template-columns:minmax(7.5rem, 38vw) minmax(0,1fr); align-items:start; gap:1.25rem; }
   .cover-button { display:grid; place-items:center; width:100%; aspect-ratio:5/8; padding:0; overflow:hidden; border:0; border-radius: 0; color:var(--color-subtle-text); background:var(--color-raised-bg); box-shadow:0 .55rem 1.5rem var(--color-box-shadow); cursor:pointer; }
-  .cover-button img { width:100%; height:100%; object-fit:contain; object-position:center top; } .cover-button span { font-size:2.5rem; } .cover-button:hover { outline:2px solid color-mix(in srgb,var(--color-accent) 45%,transparent); outline-offset:3px; } .cover-button:active { transform:scale(.99); }
+  .cover-button.has-cover { aspect-ratio:auto; background:transparent; }
+  .cover-button img { display:block; width:100%; height:auto; } .cover-button span { font-size:2.5rem; } .cover-button:hover { outline:2px solid color-mix(in srgb,var(--color-accent) 45%,transparent); outline-offset:3px; } .cover-button:active { transform:scale(.99); }
   .reading-progress { display:grid; gap:.35rem; margin-top:.8rem; color:var(--color-subtle-text); font-size:.72rem; } .reading-progress > div { height:.22rem; overflow:hidden; border-radius: 0; background:var(--color-border); } .reading-progress i { display:block; height:100%; background:var(--color-accent); }
   .title-row { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; } h1 { margin:0; font:650 clamp(1.35rem,4.2vw,2.2rem)/1.08 var(--font-interface-family); letter-spacing:-.035em; } .authors { margin:.45rem 0 0; color:var(--color-subtle-text); } .authors button { padding:0; border:0; color:inherit; background:transparent; cursor:pointer; font:inherit; } .authors button:hover { color:var(--color-accent); text-decoration:underline; }
   .desktop-actions { display:none; } .description { margin-top:1.2rem; color:var(--color-ink-text); font:400 1rem/1.65 var(--font-reading-family, serif); text-align:justify; hyphens:auto; }
