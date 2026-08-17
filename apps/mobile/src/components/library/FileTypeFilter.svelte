@@ -33,15 +33,15 @@
 </div>
 
 <style>
-  .file-type-filter { width: 11rem; min-width: 0; }
-  details { position: relative; width: 100%; }
-  summary { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: .75rem; width: 100%; min-height: 44px; padding: 0 .75rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); font: 700 max(12px, .75rem) var(--font-interface-family); cursor: pointer; list-style: none; }
+  .file-type-filter { width: auto; min-width: 0; }
+  details { position: relative; width: auto; }
+  summary { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: .75rem; width: auto; min-width: 4rem; min-height: var(--layout-topbar-action-height); padding: 0 .75rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); font: 700 max(12px, .75rem) var(--font-interface-family); cursor: pointer; list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
   details[open] summary { border-color: var(--color-accent); }
   .caret { color: var(--color-subtle-text); font-size: 1rem; transition: transform 120ms ease; }
   details[open] .caret { transform: rotate(180deg); }
-  .format-menu { position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; display: grid; width: 100%; min-width: 11rem; padding: 4px; border: 1px solid var(--color-border); background: var(--color-raised-bg); box-shadow: 0 .7rem 1.8rem var(--color-box-shadow); }
+  .format-menu { position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; display: grid; width: max-content; min-width: 11rem; padding: 4px; border: 1px solid var(--color-border); background: var(--color-raised-bg); box-shadow: 0 .7rem 1.8rem var(--color-box-shadow); }
   button { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); align-items: center; min-height: 42px; padding: .5rem .65rem; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; text-align: left; font: 650 max(12px, .74rem) var(--font-interface-family); cursor: pointer; }
   button:hover, button:focus-visible { background: var(--color-selected-surface); outline: 0; }
   button[aria-checked="true"] { color: var(--color-accent); font-weight: 750; }
@@ -50,6 +50,7 @@
 
   @media (max-width: 719px) {
     .file-type-filter { width: 8.5rem; }
+    details, summary { width: 100%; }
     summary { min-height: 48px; }
     .format-menu { right: auto; left: 0; min-width: 100%; }
     button { min-height: 48px; }

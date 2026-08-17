@@ -89,16 +89,12 @@ pub fn library_switcher_group(theme: BrowserTheme) -> Div {
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
-    let mut separator = theme.border;
-    separator.a *= 0.55;
-    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).border_b_1().border_color(separator).bg(theme.surface)
+    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).bg(theme.surface)
 }
 
 /// Two-line hierarchy header used when controls belong beneath the path.
 pub fn browser_stacked_topbar(theme: BrowserTheme) -> Div {
-    let mut separator = theme.border;
-    separator.a *= 0.55;
-    div().w_full().flex_none().flex().flex_col().gap(px(SPACE_XS)).px(px(CONTENT_PADDING)).py(px(SPACE_XS)).border_b_1().border_color(separator).bg(theme.surface)
+    div().w_full().flex_none().flex().flex_col().gap(px(SPACE_XS)).px(px(CONTENT_PADDING)).py(px(SPACE_XS)).bg(theme.surface)
 }
 
 pub fn browser_topbar_left() -> Div {

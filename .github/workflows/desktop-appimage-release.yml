@@ -86,26 +86,14 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
 
-      - name: Restore Cargo dependency downloads
-        uses: actions/cache@v5
+      - name: Restore Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: bokheim-cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/Cargo.lock') }}
-          restore-keys: |
-            bokheim-cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
-
-      - name: Restore Cargo release build artifacts
-        uses: actions/cache@v5
-        with:
-          path: |
-            bokheim/target/release
-          key: bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-${{ hashFiles('bokheim/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-
-            bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
+          prefix-key: bokheim-appimage-v2
+          shared-key: desktop-x86-64
+          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}
+          workspaces: bokheim -> target
+          cache-on-failure: true
 
       - name: Download pinned AppImage packaging tools
         run: |

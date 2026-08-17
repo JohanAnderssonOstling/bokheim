@@ -117,7 +117,7 @@
 <style>
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
   svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-  .topbar { position: sticky; z-index: 20; top: 0; display: flex; flex: none; align-items: center; gap: .55rem; min-height: calc(3.8rem + env(safe-area-inset-top)); padding: calc(.55rem + env(safe-area-inset-top)) max(var(--page-gutter, 1rem), env(safe-area-inset-right)) .55rem max(var(--page-gutter, 1rem), env(safe-area-inset-left)); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); background: color-mix(in srgb, var(--color-surface-bg) 96%, transparent); backdrop-filter: blur(18px); }
+  .topbar { position: sticky; z-index: 20; top: 0; display: flex; flex: none; align-items: center; gap: .55rem; min-height: calc(3.8rem + env(safe-area-inset-top)); padding: calc(.55rem + env(safe-area-inset-top)) max(var(--page-gutter, 1rem), env(safe-area-inset-right)) .55rem max(var(--page-gutter, 1rem), env(safe-area-inset-left)); background: color-mix(in srgb, var(--color-surface-bg) 96%, transparent); backdrop-filter: blur(18px); }
   .mobile-context { display: flex; flex: 1; align-items: center; min-width: 0; gap: .25rem; }
   .desktop-context, .desktop-actions { display: none; }
   .library-button, .back-button, .add-button { display: flex; flex: none; align-items: center; justify-content: center; height: 2.65rem; padding: 0; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; cursor: pointer; }

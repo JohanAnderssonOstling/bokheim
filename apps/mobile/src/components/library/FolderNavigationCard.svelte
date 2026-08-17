@@ -70,4 +70,8 @@
   span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--hierarchy-label-size); font-weight: 500; }
   small { color: var(--color-subtle-text); font-size: .8125rem; font-weight: 650; text-align: right; }
   i { color: var(--color-subtle-text); font-style: normal; }
+
+  @media (min-width: 45rem) {
+    button { min-height: var(--hierarchy-cell-height); height: var(--hierarchy-cell-height); padding-top: .5rem; padding-bottom: .5rem; }
+  }
 </style>
