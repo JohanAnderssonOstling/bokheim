@@ -181,23 +181,6 @@ impl LibraryContext {
         async move { operation.await.map_err(|error| error.to_string())? }
     }
 
-    pub(crate) fn load_subject_recommendations(
-        &self, subject_path: Option<String>, limit: u32,
-    ) -> impl Future<Output = Result<(epub_svelte_lib::catalog::CatalogRecommendationResponse, Vec<epub_svelte_lib::catalog::CatalogSource>), String>> + 'static {
-        let sources = self.app.backend.catalog_sources();
-        let operation = self.library.spawn(move |library| async move {
-            match subject_path {
-                Some(path) => library.catalog_subject_recommendations(&path, limit).await,
-                None => library.catalog_recommendations(limit).await,
-            }
-            .map_err(|error| error.to_string())
-        });
-        async move {
-            let recommendations = operation.await.map_err(|error| error.to_string())??;
-            Ok((recommendations, sources))
-        }
-    }
-
     /// Every book beneath `folder_id`, not just the ones placed directly in it.
     pub(crate) fn search_folder(&self, folder_id: DirId, query: String, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<SearchBrowseRows, String>> + 'static {
         let operation = self.library.spawn_blocking(move |library| library.search_folder_filtered(&folder_id, &query, file_type));

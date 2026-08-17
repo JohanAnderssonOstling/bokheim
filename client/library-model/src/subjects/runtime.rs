@@ -1,6 +1,6 @@
 use super::ddc::canonical_ddc_notation;
 use super::lcc::{compare_lcc_key, parse_lcc_call};
-use super::{DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION, compact_whitespace};
+use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 

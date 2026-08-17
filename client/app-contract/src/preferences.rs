@@ -605,7 +605,11 @@ struct UiFontSize(u8);
 
 impl UiFontSize {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("UI font size")) }
+        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(PreferenceValueError("UI font size"))
+        }
     }
 
     const fn get(self) -> u8 {
@@ -627,7 +631,11 @@ macro_rules! bounded_float {
 
         impl $name {
             fn new(value: $primitive) -> Result<Self, PreferenceValueError> {
-                if value.is_finite() && ($minimum..=$maximum).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError($label)) }
+                if value.is_finite() && ($minimum..=$maximum).contains(&value) {
+                    Ok(Self(value))
+                } else {
+                    Err(PreferenceValueError($label))
+                }
             }
 
             const fn get(self) -> $primitive {
@@ -655,7 +663,11 @@ struct ColumnCount(u8);
 
 impl ColumnCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (COLUMN_COUNT_MIN..=COLUMN_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("column count")) }
+        if (COLUMN_COUNT_MIN..=COLUMN_COUNT_MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(PreferenceValueError("column count"))
+        }
     }
 
     const fn get(self) -> u8 {
@@ -675,7 +687,11 @@ struct PdfPageCount(u8);
 
 impl PdfPageCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("PDF page count")) }
+        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(PreferenceValueError("PDF page count"))
+        }
     }
 
     const fn get(self) -> u8 {
@@ -1032,7 +1048,11 @@ mod palette_tests {
     use super::*;
 
     fn channel(value: f64) -> f64 {
-        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
     }
 
     fn luminance(colour: u32) -> f64 {

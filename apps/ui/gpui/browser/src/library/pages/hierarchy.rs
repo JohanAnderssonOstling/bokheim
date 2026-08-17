@@ -8,7 +8,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, div, px};
 use gpui_component::IconName;
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, PopupMenu};
 use gpui_component::scroll::ScrollableElement as ComponentScrollableElement;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -109,27 +109,15 @@ impl<P: Render + 'static> HierarchySplits<P> {
 pub(crate) enum HierarchySort {
     #[default]
     Name,
-    RecentlyAdded,
 }
 
 impl HierarchySort {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::RecentlyAdded => "Recently added",
-        }
-    }
-
     fn apply<P: 'static>(self, grid: &mut BookGrid, cx: &mut Context<P>) {
         grid.sort_by(move |left, right| self.compare(left, right), cx);
     }
 
     fn compare(self, left: &BookCardRow, right: &BookCardRow) -> std::cmp::Ordering {
-        let by_name = || left.title.to_lowercase().cmp(&right.title.to_lowercase()).then_with(|| left.title.cmp(&right.title)).then_with(|| left.content_hash.as_str().cmp(right.content_hash.as_str()));
-        match self {
-            Self::Name => by_name(),
-            Self::RecentlyAdded => right.added_at.cmp(&left.added_at).then_with(by_name),
-        }
+        left.title.to_lowercase().cmp(&right.title.to_lowercase()).then_with(|| left.title.cmp(&right.title)).then_with(|| left.content_hash.as_str().cmp(right.content_hash.as_str()))
     }
 }
 
@@ -173,12 +161,6 @@ mod tests {
         assert_eq!(books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Alpha", "zebra"]);
     }
 
-    #[test]
-    fn hierarchy_sorts_recent_books_first_with_name_as_tie_breaker() {
-        let mut books = [book("3", "Zulu", 10), book("2", "Beta", 20), book("1", "Alpha", 20)];
-        books.sort_by(|left, right| HierarchySort::RecentlyAdded.compare(left, right));
-        assert_eq!(books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Alpha", "Beta", "Zulu"]);
-    }
 }
 
 pub(crate) trait HierarchyCrumb: Clone + PartialEq + 'static {
@@ -332,18 +314,6 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         cx.notify();
     }
 
-    pub(crate) fn set_sort<P: 'static>(&mut self, sort: HierarchySort, cx: &mut Context<P>) {
-        if self.sort == sort {
-            return;
-        }
-        self.sort = sort;
-        sort.apply(&mut self.books, cx);
-        if let Some(results) = &mut self.results {
-            sort.apply(results, cx);
-        }
-        cx.notify();
-    }
-
     pub(crate) fn file_type(&self) -> epub_svelte_lib::library::LibraryFileTypeFilter {
         self.file_type
     }
@@ -365,9 +335,9 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render<P, SetPath, SetSort, Retry>(
+    pub(crate) fn render<P, SetPath, Retry>(
         &self, root_label: &'static str, hierarchy_icon: app_contract::NavigationIcon, button_prefix: &'static str, grid_id: &'static str, retry_label: gpui::SharedString, searching_label: gpui::SharedString, breadcrumb_actions: gpui::Div,
-        control_actions: gpui::Div, empty: gpui::AnyElement, page: Entity<P>, set_path: SetPath, set_sort: SetSort, retry: Retry, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
+        control_actions: gpui::Div, empty: gpui::AnyElement, page: Entity<P>, set_path: SetPath, retry: Retry, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
         child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>, child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>, show_books: bool,
         lead: Option<AnyElement>, footer: Option<AnyElement>, child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>, child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>,
         child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>, window: &mut Window, cx: &mut Context<P>,
@@ -375,11 +345,10 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
     where
         P: Render + 'static,
         SetPath: Fn(&mut P, Vec<C>, &mut Window, &mut Context<P>) + Clone + 'static,
-        SetSort: Fn(&mut P, HierarchySort, &mut Context<P>) + Clone + 'static,
         Retry: Fn(&mut P, &mut Context<P>) + 'static,
     {
         let theme = components::browser_theme(cx);
-        let header = self.render_header(root_label, breadcrumb_actions, control_actions, show_books, page.clone(), set_path.clone(), set_sort, cx);
+        let header = self.render_header(root_label, breadcrumb_actions, control_actions, show_books, page.clone(), set_path.clone(), cx);
         let query = self.query(cx);
         let has_lead = lead.is_some();
         // A virtual list owns the remaining viewport and its own scroll model.
@@ -470,13 +439,10 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         components::library_section_content().child(header).child(body).into_any_element()
     }
 
-    fn render_header<P, SetPath, SetSort>(
-        &self, root_label: &'static str, breadcrumb_actions: gpui::Div, control_actions: gpui::Div, show_controls: bool, page: Entity<P>, set_path: SetPath, set_sort: SetSort, cx: &mut Context<P>,
-    ) -> gpui::AnyElement
+    fn render_header<P, SetPath>(&self, root_label: &'static str, breadcrumb_actions: gpui::Div, control_actions: gpui::Div, show_controls: bool, page: Entity<P>, set_path: SetPath, cx: &mut Context<P>) -> gpui::AnyElement
     where
         P: 'static,
         SetPath: Fn(&mut P, Vec<C>, &mut Window, &mut Context<P>) + Clone + 'static,
-        SetSort: Fn(&mut P, HierarchySort, &mut Context<P>) + Clone + 'static,
     {
         let theme = components::browser_theme(cx);
         let mut breadcrumb = components::folder_breadcrumb();
@@ -501,18 +467,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                 }));
             }
         }
-        let selected_sort = self.sort;
-        let sort_page = page.clone();
-        let sort_control = components::catalog_dropdown_button("hierarchy-sort", selected_sort.label(), false, false, theme).h(gpui::px(components::TOPBAR_ACTION_HEIGHT)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
-            [HierarchySort::Name, HierarchySort::RecentlyAdded].into_iter().fold(menu, |menu, sort| {
-                let page = sort_page.clone();
-                let set_sort = set_sort.clone();
-                menu.item(PopupMenuItem::new(sort.label()).checked(sort == selected_sort).on_click(move |_, _, cx| {
-                    page.update(cx, |page, cx| set_sort(page, sort, cx));
-                }))
-            })
-        });
-        let controls = components::browser_topbar_center().gap(gpui::px(components::SPACE_XS)).child(components::browser_search_box().child(components::browser_search_input(&self.filter_input))).child(sort_control);
+        let controls = components::browser_topbar_center().child(components::browser_search_box().child(components::browser_search_input(&self.filter_input)));
         // Actions stay outside the breadcrumb viewport, so a long path can
         // never overlap them. Scrolling the trailing sentinel into view only
         // changes the offset when the left-aligned breadcrumb actually
@@ -530,7 +485,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
             .child(breadcrumb.flex_none())
             .child(gpui::div().w(gpui::px(1.0)).h(gpui::px(1.0)).flex_none());
         let breadcrumb_row = gpui::div().w_full().min_w_0().flex().items_center().gap(gpui::px(components::SPACE_MD)).child(breadcrumb_viewport).child(breadcrumb_actions);
-        let control_row = gpui::div().w_full().min_w_0().flex().items_center().gap(gpui::px(components::SPACE_MD)).child(controls.justify_start()).child(control_actions);
+        let control_row = gpui::div().w_full().min_w_0().flex().flex_wrap().items_center().gap(gpui::px(components::SPACE_MD)).child(controls.min_w(gpui::px(180.0)).justify_start()).child(control_actions.flex_none());
         components::browser_stacked_topbar(theme).child(breadcrumb_row).when(show_controls, |header| header.child(control_row)).into_any_element()
     }
 

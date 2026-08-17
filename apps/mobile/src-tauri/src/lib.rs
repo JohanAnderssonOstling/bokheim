@@ -1,4 +1,3 @@
-use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
 use epub_svelte_lib::app::{
     AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryCatalogueState, LibrarySyncStatus, LocalLibraryStorageUsage,
@@ -6,13 +5,14 @@ use epub_svelte_lib::app::{
 };
 use epub_svelte_lib::app::{AppDataLocation, LibraryEntry};
 use epub_svelte_lib::catalog::{CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest};
-use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::library::links::BookLink;
 use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
+use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::library::{
     AudiobookChapter, AuthorSort, BookDetail, BookImportDestination, Dir, EditionIdentityReview, LibraryAuthorsView, LibraryFileTypeFilter, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectView, LibraryTrashView,
 };
 use epub_svelte_lib::platform::scanner::LibraryEvent;
+use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::{DownloadState, FolderDownloadStatus, LibraryTransfers, NetworkStatus};
 use specta::Type;
 use specta_typescript::Typescript;
@@ -26,7 +26,7 @@ use std::time::Instant;
 use tauri::ipc::{InvokeResponseBody, IpcResponse};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
-use tauri_specta::{Builder, ErrorHandlingMode, collect_commands};
+use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
 struct AppState {
     core: AppBackend,

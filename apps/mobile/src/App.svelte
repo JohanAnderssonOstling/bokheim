@@ -40,7 +40,6 @@
     DEFAULT_BROWSING_PREFERENCES,
     type AccountStatus,
     type AccountStorageUsage,
-    type AuthorSort,
     type AuthorSummary,
     type BookCardData,
     type BrowsingPreferencePatch,
@@ -225,7 +224,7 @@
   let authors = $state<AuthorSummary[]>([]);
   // Filing order groups the list under letters; book count does not, so the
   // dividers go with it.
-  let authorSort = $state<AuthorSort>("name");
+  const authorSort = "name" as const;
   let authorFilter = $state("");
   let focusedAuthorIndex = $state(0);
   let selectedAuthorId = $state("");
@@ -1008,13 +1007,6 @@
         folderLoading = false;
       }
     }
-  }
-
-  async function setAuthorSort(sort: AuthorSort) {
-    if (authorSort === sort) return;
-    authorSort = sort;
-    focusedAuthorIndex = 0;
-    await loadAuthors(libraryGeneration, true);
   }
 
   async function loadAuthors(generation: number, force = false) {
@@ -2168,7 +2160,7 @@
       {:else if activeDestination === "account" || activeDestination === "settings" || activeDestination === "store"}
         <UniversalHost destination={activeDestination} {activeLibraryId} libraryName={activeLibrary?.library_name ?? "library"} {accountResolved} {accountStatusError} account={accountStatus} {accountBusy} {accountProgress} {accountError} {accountStorageUsage} {librarySyncStatuses} {libraryTransfers} {localLibraryStorageUsage} {serverLibraryStorageUsage} preferences={browsingPreferences} {networkStatus} {transferPreferences} {settingsError} {isWebApp} onrefresh={syncAccountNow} onretry={refreshAccountView} onlogin={loginToServer} onlogout={logoutFromServer} onregister={registerAccount} onresendverification={resendAccountVerification} onverifyemail={verifyAccountEmail} onrequestpasswordreset={requestAccountPasswordReset} onresetpassword={resetAccountPassword} onpreferencechange={saveBrowsingPreference} ontransferpreference={saveTransferPreference} onimported={storeBookImported} oncreatelibrary={() => setDestination("folders")} />
       {:else}
-        <LibraryHost destination={activeDestination} configured={libraries.length > 0} loading={loadingLibrary} libraryId={activeLibraryId} preferences={browsingPreferences} inProgress={visibleRecentlyInProgress} finished={visibleRecentlyFinished} recentlyAdded={visibleRecentlyAdded} {directoryContent} folderPath={folderStack} {subjectContent} subjectPath={subjectStack} fileType={hierarchyFileType} {subjectsLoading} authors={visibleAuthors} bind:authorFilter {authorSort} bind:focusedAuthorIndex {selectedAuthorId} {selectedAuthorName} authorBooks={visibleAuthorBooks} bind:searchQuery {searchPending} {searchCompletedQuery} titleSearchResults={visibleTitleSearchResults} authorSearchResults={visibleAuthorSearchResults} {trash} {trashLoading} {trashBusy} {trashError} {openingBookId} downloadStates={bookDownloadStates} {folderDownloadStatuses} {activeFolderDownloads} error={libraryError} oncreateLibrary={() => (showCreateLibrary = true)} onadd={addBookToCurrentFolder} onopen={openBookDetail} onopenbookhash={openBookDetailHash} ondownload={downloadBook} onremove={removeLocalBookCopy} ontrashbook={moveBookToTrash} oncopybook={copyBookToFolder} onmovebook={moveBookToFolder} onremovebookfromfolder={removeBookFromFolder} onopenfolder={openFolder} ondownloadfolder={downloadFolder} ontrashfolder={moveFolderToTrash} onrenamefolder={renameFolder} onmovefolder={chooseFolderMove} onnewfolder={() => (showCreateFolder = true)} onsearch={scheduleSearch} onfiletype={setHierarchyFileType} onopensubject={openSubject} onfilterkeydown={handleAuthorFilterKeydown} onsort={setAuthorSort} onauthorkeydown={handleAuthorKeydown} onselectauthor={selectAuthor} onclearauthor={clearSelectedAuthor} onimported={storeBookImported} onretry={retryActiveSection} onloadtrash={loadTrash} onrestorebook={restoreTrashedBook} onpurgebook={purgeTrashedBook} onrestorefolder={restoreTrashedFolder} onpurgefolder={purgeTrashedFolder} onemptytrash={emptyTrash} />
+        <LibraryHost destination={activeDestination} configured={libraries.length > 0} loading={loadingLibrary} libraryId={activeLibraryId} preferences={browsingPreferences} inProgress={visibleRecentlyInProgress} finished={visibleRecentlyFinished} recentlyAdded={visibleRecentlyAdded} {directoryContent} folderPath={folderStack} {subjectContent} subjectPath={subjectStack} fileType={hierarchyFileType} {subjectsLoading} authors={visibleAuthors} bind:authorFilter bind:focusedAuthorIndex {selectedAuthorId} {selectedAuthorName} authorBooks={visibleAuthorBooks} bind:searchQuery {searchPending} {searchCompletedQuery} titleSearchResults={visibleTitleSearchResults} authorSearchResults={visibleAuthorSearchResults} {trash} {trashLoading} {trashBusy} {trashError} {openingBookId} downloadStates={bookDownloadStates} {folderDownloadStatuses} {activeFolderDownloads} error={libraryError} oncreateLibrary={() => (showCreateLibrary = true)} onadd={addBookToCurrentFolder} onopen={openBookDetail} onopenbookhash={openBookDetailHash} ondownload={downloadBook} onremove={removeLocalBookCopy} ontrashbook={moveBookToTrash} oncopybook={copyBookToFolder} onmovebook={moveBookToFolder} onremovebookfromfolder={removeBookFromFolder} onopenfolder={openFolder} ondownloadfolder={downloadFolder} ontrashfolder={moveFolderToTrash} onrenamefolder={renameFolder} onmovefolder={chooseFolderMove} onnewfolder={() => (showCreateFolder = true)} onsearch={scheduleSearch} onfiletype={setHierarchyFileType} onopensubject={openSubject} onfilterkeydown={handleAuthorFilterKeydown} onauthorkeydown={handleAuthorKeydown} onselectauthor={selectAuthor} onclearauthor={clearSelectedAuthor} onimported={storeBookImported} onretry={retryActiveSection} onloadtrash={loadTrash} onrestorebook={restoreTrashedBook} onpurgebook={purgeTrashedBook} onrestorefolder={restoreTrashedFolder} onpurgefolder={purgeTrashedFolder} onemptytrash={emptyTrash} />
       {/if}
     {/snippet}
   </BrowserRoot>

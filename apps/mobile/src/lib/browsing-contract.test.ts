@@ -27,16 +27,26 @@ test("book actions and typed book cards stay shared across both browsing fronten
 
 test("file format filters use checked dropdown menus in both frontends", () => {
   const mobileFilter = source("../components/library/FileTypeFilter.svelte");
+  const mobileBar = source("../components/library/BrowseFilterBar.svelte");
   assert.match(mobileFilter, /<details[^>]*use:managedMenu/);
   assert.match(mobileFilter, /role="menuitemradio"/);
   assert.match(mobileFilter, /aria-checked=\{option\.value === value\}/);
   assert.doesNotMatch(mobileFilter, /aria-pressed/);
+  assert.match(mobileBar, /grid-template-columns: minmax\(0, 1fr\) auto/);
+  assert.match(mobileBar, /ContextualLibrarySearch[\s\S]*FileTypeFilter/);
 
   for (const page of ["folders", "subjects"]) {
     const nativePage = source(`../../../ui/gpui/browser/src/library/pages/${page}/mod.rs`);
     assert.match(nativePage, /dropdown_menu/);
     assert.match(nativePage, /\.checked\(file_type == selected_file_type\)/);
   }
+});
+
+test("sorting controls are absent from both browsing frontends", () => {
+  assert.doesNotMatch(source("../components/library/AuthorsPage.svelte"), /author-sort|aria-label="Sort authors"/);
+  assert.doesNotMatch(source("../components/library/LibraryHost.svelte"), /\bonsort\b/);
+  assert.doesNotMatch(source("../../../ui/gpui/browser/src/library/pages/authors/mod.rs"), /render_sort_control|authors-sort-/);
+  assert.doesNotMatch(source("../../../ui/gpui/browser/src/library/pages/hierarchy.rs"), /hierarchy-sort|sort_control/);
 });
 
 test("Android publication picker offers every import format and stages off the UI thread", () => {

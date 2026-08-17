@@ -683,10 +683,7 @@ impl SyncManager {
         let mut transient_rejections = Vec::new();
         let mut assets_needed = false;
         for mutation_id in &set_aside {
-            log::error!(
-                "Local sync mutation {mutation_id} encodes to more than the {} byte push limit and cannot be transmitted; it stays queued while every other change continues to synchronize",
-                sync_common::MAX_PUSH_MUTATION_BYTES
-            );
+            log::error!("Local sync mutation {mutation_id} encodes to more than the {} byte push limit and cannot be transmitted; it stays queued while every other change continues to synchronize", sync_common::MAX_PUSH_MUTATION_BYTES);
         }
         transient_rejections.extend(set_aside.into_iter().map(|mutation_id| sync_common::MutationRejection { mutation_id, reason: sync_common::MutationRejectionReason::InvalidPayload }));
         while !remaining.is_empty() || !sent_page {
@@ -694,11 +691,7 @@ impl SyncManager {
             let requested_ids = requested.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>();
             // Captured before the request consumes the page; a lifecycle or
             // placement mutation the server accepts may need its bytes moved.
-            let asset_bearing = requested
-                .iter()
-                .filter(|pending| matches!(pending.mutation.body, MutationBody::BookLifecycle { .. } | MutationBody::Placement { .. }))
-                .map(|pending| pending.mutation.mutation_id)
-                .collect::<Vec<_>>();
+            let asset_bearing = requested.iter().filter(|pending| matches!(pending.mutation.body, MutationBody::BookLifecycle { .. } | MutationBody::Placement { .. })).map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>();
             let wire_requested = requested.into_iter().map(|pending| pending.wire).collect::<Vec<_>>();
             let response = self.handle_client_result(sync_client::exchange_changes(&self.http_client, &session, self.library_id.clone(), self.replica_id.clone(), wire_requested, cursor).await)?;
             assets_needed |= asset_bearing.iter().any(|mutation_id| response.push.accepted.contains(mutation_id));
@@ -1604,11 +1597,7 @@ mod tests {
 
         assert_eq!(set_aside, vec![oversized.mutation_id], "only the untransmittable mutation is set aside");
         let page = take_push_page(&mut queued);
-        assert_eq!(
-            page.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>(),
-            vec![ahead.mutation_id, behind.mutation_id],
-            "the mutations queued behind it still go out, in sequence order"
-        );
+        assert_eq!(page.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>(), vec![ahead.mutation_id, behind.mutation_id], "the mutations queued behind it still go out, in sequence order");
         assert!(queued.is_empty(), "the exchange loop has nothing left to spin on");
     }
 
@@ -1806,11 +1795,7 @@ mod tests {
         async fn pull_page(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
             let request = decode_sync_exchange(&headers, &body);
             let pull = match request.cursor.state_revision {
-                None => pull_response(
-                    vec![pulled_change(1, MutationBody::Placement { dir_id: fixture_dir_id("Shelf"), content_hash: fixture_content_hash(1), present: false, origin_folder_id: None })],
-                    LibraryRevision::new(1).ok(),
-                    false,
-                ),
+                None => pull_response(vec![pulled_change(1, MutationBody::Placement { dir_id: fixture_dir_id("Shelf"), content_hash: fixture_content_hash(1), present: false, origin_folder_id: None })], LibraryRevision::new(1).ok(), false),
                 _ => PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
             };
             binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull })
@@ -2277,9 +2262,7 @@ mod tests {
             let conn = manager.db_pool.get().unwrap();
             conn.execute("UPDATE dir SET name='New' WHERE id=?1", [dir_id_text.as_str()]).unwrap();
         }
-        manager
-            .run_fs_action(&manager.db_pool.get().unwrap(), &db::FsAction::MoveDir { dir_id: dir_id.to_string(), old_path: "Old".to_owned(), new_path: "New".to_owned() })
-            .expect("a synchronized directory move relocates the folder");
+        manager.run_fs_action(&manager.db_pool.get().unwrap(), &db::FsAction::MoveDir { dir_id: dir_id.to_string(), old_path: "Old".to_owned(), new_path: "New".to_owned() }).expect("a synchronized directory move relocates the folder");
 
         assert!(!temp.path().join("Old").exists());
         assert_eq!(std::fs::read_to_string(temp.path().join("New").join(".biblos_uuid")).unwrap(), dir_id_text);

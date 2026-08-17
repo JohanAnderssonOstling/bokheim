@@ -21,8 +21,7 @@
     grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 9px;
-    height: 40px;
-    margin-bottom: 18px;
+    height: 44px;
     padding: 0 14px;
     border: 1px solid var(--color-border);
     border-radius: 0;
@@ -31,4 +30,5 @@
   .search-field:focus-within { border-color: var(--color-accent); }
   svg { width: 18px; color: var(--color-accent); fill: none; stroke: currentColor; stroke-width: 1.8; }
   input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; font: inherit; }
+  @media (max-width: 719px) { .search-field { height: 48px; } }
 </style>

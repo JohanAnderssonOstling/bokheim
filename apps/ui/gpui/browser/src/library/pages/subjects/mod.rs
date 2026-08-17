@@ -12,7 +12,6 @@ use gpui_component::{Disableable, Sizable};
 use ui_components as components;
 
 use super::hierarchy::{HierarchySplits, HierarchyState};
-use crate::catalog::CatalogCardGroup;
 use crate::library::services::{LatestRequest, LibraryContext};
 use crate::model::SubjectCrumb;
 
@@ -82,12 +81,8 @@ pub(crate) struct SubjectsPage {
     hierarchy: HierarchyState<SubjectCrumb>,
     refresh_request: LatestRequest,
     search_request: LatestRequest,
-    recommendation_request: LatestRequest,
     taxonomy_reload_request: LatestRequest,
-    recommendations: CatalogCardGroup,
-    recommendation_loading: bool,
     taxonomy_reloading: bool,
-    recommendation_error: Option<String>,
     review_request: LatestRequest,
     reviews: Rc<Vec<epub_svelte_lib::library::EditionIdentityReview>>,
     review_status: epub_svelte_lib::library::EditionIdentityReviewStatus,
@@ -112,18 +107,13 @@ impl SubjectsPage {
 
     fn new_pane(ui: LibraryContext, path: Vec<SubjectCrumb>, split_root: Option<WeakEntity<SubjectsPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, |page: &mut Self, cx| page.search(cx), window, cx);
-        let recommendations = ui.catalog_cards().empty_group();
         Self {
             hierarchy,
             ui,
             refresh_request: LatestRequest::default(),
             search_request: LatestRequest::default(),
-            recommendation_request: LatestRequest::default(),
             taxonomy_reload_request: LatestRequest::default(),
-            recommendations,
-            recommendation_loading: false,
             taxonomy_reloading: false,
-            recommendation_error: None,
             review_request: LatestRequest::default(),
             reviews: Rc::new(Vec::new()),
             review_status: epub_svelte_lib::library::EditionIdentityReviewStatus::Ambiguous,
@@ -187,17 +177,8 @@ impl SubjectsPage {
         });
         self.refresh_request.install(task);
         if is_uncategorized {
-            // Uncategorized can contain hundreds of local books. Catalogue
-            // recommendations do not have a meaningful taxonomy seed here,
-            // and their document-flow footer would force the local book grid
-            // out of its virtualized layout while the request is pending.
-            self.recommendation_request.begin();
-            self.recommendations = self.ui.catalog_cards().empty_group();
-            self.recommendation_loading = false;
-            self.recommendation_error = None;
             self.refresh_reviews(cx);
         } else {
-            self.refresh_recommendations(cx);
             self.review_request.begin();
             self.reviews = Rc::new(Vec::new());
             self.review_loading = false;
@@ -398,38 +379,6 @@ impl SubjectsPage {
         })
         .detach();
         cx.notify();
-    }
-
-    fn refresh_recommendations(&mut self, cx: &mut Context<Self>) {
-        let subject_path = self.selected_path().map(str::to_owned);
-        let generation = self.recommendation_request.begin();
-        self.recommendation_loading = true;
-        self.recommendation_error = None;
-        let load = self.ui.load_subject_recommendations(subject_path.clone(), 12);
-        let task = cx.spawn(async move |page, cx| {
-            let result = load.await;
-            let _ = page.update(cx, |page, cx| {
-                if !page.recommendation_request.is_current(generation) || page.selected_path() != subject_path.as_deref() {
-                    return;
-                }
-                page.recommendation_loading = false;
-                match result {
-                    Ok((response, sources)) => {
-                        let cards = page.ui.catalog_cards();
-                        let mut group = cards.empty_group();
-                        let owned = std::collections::HashSet::new();
-                        for recommendation in response.recommendations {
-                            let Some(source) = sources.iter().find(|source| source.id == recommendation.source_id) else { continue };
-                            group.append(cards.group(source, &[recommendation.publication], &owned, true, cx));
-                        }
-                        page.recommendations = group;
-                    }
-                    Err(error) => page.recommendation_error = Some(error),
-                }
-                cx.notify();
-            });
-        });
-        self.recommendation_request.install(task);
     }
 
     fn reload_taxonomy(&mut self, cx: &mut Context<Self>) {
@@ -839,39 +788,9 @@ impl Render for SubjectsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let review_only = self.selected_path() == Some(UNCATEGORIZED_SUBJECT_PATH);
         let empty = self.render_empty(cx);
-        let theme = components::browser_theme(cx);
         let breadcrumb_actions = self.split_actions(cx);
         let control_actions = self.control_actions(cx);
         let review_panel = self.render_review_panel(window, cx);
-        let contract = &self.ui.contracts().store;
-        let recommendation_grid = crate::virtual_grid::ResponsiveColumns::for_element(
-            "subject-recommendations-grid",
-            crate::virtual_grid::ColumnPolicy::MinimumItemWidth { width: crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px), gap: 16.0 },
-            window,
-            cx,
-        );
-        let columns = recommendation_grid.columns(cx);
-        let recommendation_footer = if self.hierarchy.file_type() != epub_svelte_lib::library::LibraryFileTypeFilter::All {
-            None
-        } else if self.recommendation_loading {
-            Some(components::browser_inline_note("Finding catalogue recommendations…", theme).into_any_element())
-        } else if let Some(error) = &self.recommendation_error {
-            Some(gpui_component::alert::Alert::error("subject-recommendations-error", format!("Catalogue recommendations unavailable: {error}")).into_any_element())
-        } else if !self.recommendations.is_empty() {
-            let title = self.hierarchy.last().map(|subject| format!("More in {}", subject.name)).unwrap_or_else(|| "Recommended from your subjects".to_owned());
-            Some(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(gpui::px(12.0))
-                    .child(components::section_header(title, format!("{} catalogue books", self.recommendations.len()), theme))
-                    .child(recommendation_grid.track(div().w_full().child(self.recommendations.grid(columns))))
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
         let hierarchy = self.hierarchy.render(
             "Subjects",
             app_contract::LibraryFeature::Subjects.icon(),
@@ -884,14 +803,13 @@ impl Render for SubjectsPage {
             empty,
             cx.entity(),
             |page, path, window, cx| page.set_path(path, window, cx),
-            |page, sort, cx| page.hierarchy.set_sort(sort, cx),
             |page, cx| page.refresh(cx),
             None,
             None,
             None,
             !review_only,
             review_panel,
-            recommendation_footer,
+            None,
             None,
             None,
             None,

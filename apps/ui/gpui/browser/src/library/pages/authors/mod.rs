@@ -122,17 +122,6 @@ impl AuthorsPage {
         self.visible_generation = self.visible_generation.wrapping_add(1);
     }
 
-    /// Re-asks the backend for the index in the chosen order. The sort lives
-    /// there, so the two frontends cannot disagree about ties.
-    fn set_sort(&mut self, sort: AuthorSort, cx: &mut Context<Self>) {
-        if self.sort == sort {
-            return;
-        }
-        self.sort = sort;
-        self.refresh(cx);
-        cx.notify();
-    }
-
     pub(crate) fn set_library_view(&mut self, library_view: app_contract::preferences::LibraryView, cx: &mut Context<Self>) {
         self.books.set_library_view(library_view, cx);
     }

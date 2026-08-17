@@ -1,7 +1,7 @@
 use crate::ContentHash;
-use library_registry::LibraryRegistry;
 pub(crate) use library_registry::read_library_manifest;
-pub use library_registry::{LIBRARY_MANIFEST_FILENAME, LibraryEntry};
+use library_registry::LibraryRegistry;
+pub use library_registry::{LibraryEntry, LIBRARY_MANIFEST_FILENAME};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

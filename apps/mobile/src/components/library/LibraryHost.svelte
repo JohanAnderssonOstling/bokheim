@@ -6,7 +6,7 @@
   import SubjectsPage from "./SubjectsPage.svelte";
   import TrashPage from "./TrashPage.svelte";
   import EmptyPage from "../shell/EmptyPage.svelte";
-  import { BROWSING_STATES_CONTRACT, type AuthorSort, type AuthorSummary, type BookCardData, type BrowsingPreferences, type DirectoryContent, type DownloadState, type FolderDownloadStatus, type LibraryDirectory, type LibraryFileTypeFilter } from "../../lib/types";
+  import { BROWSING_STATES_CONTRACT, type AuthorSummary, type BookCardData, type BrowsingPreferences, type DirectoryContent, type DownloadState, type FolderDownloadStatus, type LibraryDirectory, type LibraryFileTypeFilter } from "../../lib/types";
   import type { LibraryTrashView, TrashedBook, TrashedFolder } from "../../lib/bindings";
   import type { Destination } from "../../lib/navigation";
 
@@ -14,23 +14,23 @@
   let {
     destination, configured, loading, libraryId, preferences, inProgress, finished, recentlyAdded,
     directoryContent, folderPath, subjectContent, subjectPath, fileType, subjectsLoading, authors,
-    authorFilter = $bindable(), authorSort, focusedAuthorIndex = $bindable(), selectedAuthorId, selectedAuthorName, authorBooks,
+    authorFilter = $bindable(), focusedAuthorIndex = $bindable(), selectedAuthorId, selectedAuthorName, authorBooks,
     searchQuery = $bindable(), searchPending, searchCompletedQuery, titleSearchResults, authorSearchResults,
     trash, trashLoading, trashBusy, trashError, openingBookId, downloadStates, folderDownloadStatuses, activeFolderDownloads, error,
     oncreateLibrary, onadd, onopen, onopenbookhash, ondownload, onremove, ontrashbook, oncopybook, onmovebook, onremovebookfromfolder, onopenfolder, ondownloadfolder, ontrashfolder, onrenamefolder, onmovefolder,
-    onnewfolder, onsearch, onfiletype, onopensubject, onfilterkeydown, onsort, onauthorkeydown, onselectauthor, onclearauthor,
+    onnewfolder, onsearch, onfiletype, onopensubject, onfilterkeydown, onauthorkeydown, onselectauthor, onclearauthor,
     onimported, onretry, onloadtrash, onrestorebook, onpurgebook, onrestorefolder, onpurgefolder, onemptytrash,
   }: {
     destination: Destination; configured: boolean; loading: boolean; libraryId: string; preferences: BrowsingPreferences;
     inProgress: BookCardData[]; finished: BookCardData[]; recentlyAdded: BookCardData[]; directoryContent: DirectoryContent; folderPath: Level[];
-    subjectContent: DirectoryContent; subjectPath: Level[]; fileType: LibraryFileTypeFilter; subjectsLoading: boolean; authors: AuthorSummary[]; authorFilter: string; authorSort: AuthorSort;
+    subjectContent: DirectoryContent; subjectPath: Level[]; fileType: LibraryFileTypeFilter; subjectsLoading: boolean; authors: AuthorSummary[]; authorFilter: string;
     focusedAuthorIndex: number; selectedAuthorId: string; selectedAuthorName: string; authorBooks: BookCardData[]; searchQuery: string; searchPending: boolean;
     searchCompletedQuery: string; titleSearchResults: BookCardData[]; authorSearchResults: BookCardData[]; trash: LibraryTrashView; trashLoading: boolean; trashBusy: boolean;
     trashError: string; openingBookId: string; downloadStates: Record<string, DownloadState>; folderDownloadStatuses: Record<string, FolderDownloadStatus>; activeFolderDownloads: Record<string, boolean>; error: string;
     oncreateLibrary: () => void; onadd: () => void | Promise<void>; onopen: (book: BookCardData) => void | Promise<void>; onopenbookhash: (contentHash: string) => void | Promise<void>; ondownload: (book: BookCardData) => void | Promise<void>; onremove: (book: BookCardData) => void | Promise<void>; ontrashbook: (book: BookCardData) => void | Promise<void>;
     oncopybook: (book: BookCardData) => void | Promise<void>; onmovebook: (book: BookCardData) => void | Promise<void>; onremovebookfromfolder: (book: BookCardData) => void | Promise<void>;
     onopenfolder: (folder: LibraryDirectory) => void | Promise<void>; ondownloadfolder: (folder: LibraryDirectory) => void | Promise<void>; ontrashfolder: (folder: LibraryDirectory) => void | Promise<void>; onrenamefolder: (folder: LibraryDirectory) => void | Promise<void>; onmovefolder: (folder: LibraryDirectory) => void | Promise<void>; onnewfolder: () => void; onsearch: () => void; onfiletype: (value: LibraryFileTypeFilter) => void | Promise<void>; onopensubject: (subject: LibraryDirectory) => void | Promise<void>;
-    onfilterkeydown: (event: KeyboardEvent) => void; onsort: (sort: AuthorSort) => void | Promise<void>; onauthorkeydown: (event: KeyboardEvent, index: number) => void; onselectauthor: (id: string, name: string) => void | Promise<void>; onclearauthor: () => void; onimported: () => void | Promise<void>; onretry: () => void | Promise<void>; onloadtrash: () => void | Promise<void>;
+    onfilterkeydown: (event: KeyboardEvent) => void; onauthorkeydown: (event: KeyboardEvent, index: number) => void; onselectauthor: (id: string, name: string) => void | Promise<void>; onclearauthor: () => void; onimported: () => void | Promise<void>; onretry: () => void | Promise<void>; onloadtrash: () => void | Promise<void>;
     onrestorebook: (book: TrashedBook) => void | Promise<void>; onpurgebook: (book: TrashedBook) => void | Promise<void>; onrestorefolder: (folder: TrashedFolder) => void | Promise<void>; onpurgefolder: (folder: TrashedFolder) => void | Promise<void>; onemptytrash: () => void | Promise<void>;
   } = $props();
   const detailed = $derived(preferences.library_view === "detailed");
@@ -58,7 +58,7 @@
 {:else if destination === "folders"}
   <FoldersPage {libraryId} folders={directoryContent.children} books={directoryContent.books} folderPath={folderPath} {fileType} bind:query={searchQuery} {detailed} {openingBookId} {downloadStates} {folderDownloadStatuses} {activeFolderDownloads} {searchResults} {onsearch} {onfiletype} {onopenfolder} {ondownloadfolder} {ontrashfolder} {onrenamefolder} {onmovefolder} {onopen} {ondownload} {onremove} ontrash={ontrashbook} {oncopybook} {onmovebook} {onremovebookfromfolder} {onadd} {onnewfolder} />
 {:else if destination === "authors"}
-  <AuthorsPage {libraryId} {authors} bind:filter={authorFilter} sort={authorSort} bind:focusedIndex={focusedAuthorIndex} {selectedAuthorId} {selectedAuthorName} books={authorBooks} {detailed} {openingBookId} {downloadStates} {onfilterkeydown} {onsort} {onauthorkeydown} {onselectauthor} onclear={onclearauthor} {onadd} {onimported} {onopen} onopenbook={onopenbookhash} {ondownload} {onremove} ontrash={ontrashbook} />
+  <AuthorsPage {libraryId} {authors} bind:filter={authorFilter} bind:focusedIndex={focusedAuthorIndex} {selectedAuthorId} {selectedAuthorName} books={authorBooks} {detailed} {openingBookId} {downloadStates} {onfilterkeydown} {onauthorkeydown} {onselectauthor} onclear={onclearauthor} {onadd} {onimported} {onopen} onopenbook={onopenbookhash} {ondownload} {onremove} ontrash={ontrashbook} />
 {:else if destination === "subjects"}
   <SubjectsPage {libraryId} subjects={subjectContent.children} books={subjectContent.books} subjectPath={subjectPath} {fileType} loading={subjectsLoading} bind:query={searchQuery} {detailed} {openingBookId} {downloadStates} {searchResults} {onsearch} {onfiletype} {onopensubject} {onimported} {onopen} {ondownload} {onremove} ontrash={ontrashbook} />
 {/if}

@@ -175,11 +175,10 @@ impl Render for SettingsPage {
         for (index, option) in contract.options.fonts.iter().enumerate() {
             let value = option.value;
             let interface_entity = entity.clone();
-            interface_fonts = interface_fonts.child(components::browser_settings_font_button(format!("interface-font-{index}"), option.label.clone(), value == preferences.interface_font(), option.font_name.clone(), theme).on_click(
-                move |_, _, cx| {
+            interface_fonts =
+                interface_fonts.child(components::browser_settings_font_button(format!("interface-font-{index}"), option.label.clone(), value == preferences.interface_font(), option.font_name.clone(), theme).on_click(move |_, _, cx| {
                     interface_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::InterfaceFont(value), cx));
-                },
-            ));
+                }));
         }
 
         let decrease_entity = entity.clone();

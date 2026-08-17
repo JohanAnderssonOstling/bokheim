@@ -14,7 +14,10 @@ use gpui_component::popover::Popover;
 use gpui_component::{Disableable, ElementExt, Selectable};
 use gpui_component::{Icon, IconName};
 
-use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, action_button, browser_theme, scroll::Scrollable};
+use crate::{
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, action_button,
+    browser_theme, scroll::Scrollable,
+};
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
     div().h(px(58.0)).flex_none().w_full().min_w_0().px(px(SPACE_MD)).flex().items_center().gap(px(SPACE_SM)).bg(theme.surface)
@@ -202,7 +205,17 @@ pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
 }
 
 pub fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w(px(SETTINGS_STEPPER_VALUE_WIDTH)).h(px(SETTINGS_CONTROL_HEIGHT)).flex().items_center().justify_center().bg(theme.surface).text_align(gpui::TextAlign::Center).text_size(gpui::rems(TEXT_SM / 16.0)).text_color(theme.text_muted).child(value.into())
+    div()
+        .w(px(SETTINGS_STEPPER_VALUE_WIDTH))
+        .h(px(SETTINGS_CONTROL_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.surface)
+        .text_align(gpui::TextAlign::Center)
+        .text_size(gpui::rems(TEXT_SM / 16.0))
+        .text_color(theme.text_muted)
+        .child(value.into())
 }
 
 pub fn reader_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
@@ -210,7 +223,19 @@ pub fn reader_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedSt
 }
 
 pub fn reader_stepper_group(decrement: Button, value: impl Into<SharedString>, increment: Button, theme: BrowserTheme) -> Div {
-    div().flex_none().flex().items_center().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.border).child(decrement).child(reader_setting_value(value, theme)).child(increment)
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(SETTINGS_CONTROL_GAP))
+        .overflow_hidden()
+        .rounded(px(RADIUS_SM))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.border)
+        .child(decrement)
+        .child(reader_setting_value(value, theme))
+        .child(increment)
 }
 
 pub fn reader_toc_tree_item(id: impl Into<ElementId>, disclosure_id: impl Into<ElementId>, depth: usize, has_children: bool, expanded: bool, title: impl IntoElement, theme: BrowserTheme) -> ListItem {

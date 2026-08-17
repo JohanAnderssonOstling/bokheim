@@ -795,7 +795,6 @@ impl Render for FoldersPage {
             empty,
             cx.entity(),
             |page, path, window, cx| page.set_path(path, window, cx),
-            |page, sort, cx| page.hierarchy.set_sort(sort, cx),
             |page, cx| page.refresh(cx),
             Some(child_action),
             Some(child_menu),
