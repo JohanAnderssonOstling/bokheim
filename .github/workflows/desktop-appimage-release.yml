@@ -21,6 +21,8 @@ env:
   HTML_VIEW_CORE_REF: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
+  PDFIUM_LINUX_X64_URL: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-linux-x64.tgz
+  PDFIUM_LINUX_X64_SHA256: 019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2
 
 jobs:
   build:
@@ -30,26 +32,26 @@ jobs:
 
     steps:
       - name: Check out Bokheim
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: bokheim
 
       - name: Check out GPUI-Fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
           ref: ${{ env.GPUI_FORK_REF }}
           path: GPUI-Fork
 
       - name: Check out HtmlEngine
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlEngine
           ref: ${{ env.HTML_ENGINE_REF }}
           path: HtmlEngine
 
       - name: Check out HtmlViewCore
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlViewCore
           ref: ${{ env.HTML_VIEW_CORE_REF }}
@@ -57,8 +59,10 @@ jobs:
 
       - name: Install build and packaging dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y \
+            binutils \
+            build-essential \
             clang \
             cmake \
             curl \
@@ -94,6 +98,16 @@ jobs:
             "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" \
             "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
 
+      - name: Download pinned PDFium
+        shell: bash
+        run: |
+          PDFIUM_ARCHIVE="$RUNNER_TEMP/pdfium-linux-x64.tgz"
+          curl --fail --location --retry 3 \
+            "$PDFIUM_LINUX_X64_URL" \
+            --output "$PDFIUM_ARCHIVE"
+          printf '%s  %s\n' "$PDFIUM_LINUX_X64_SHA256" "$PDFIUM_ARCHIVE" | sha256sum --check -
+          echo "PDFIUM_ARCHIVE_PATH=$PDFIUM_ARCHIVE" >> "$GITHUB_ENV"
+
       - name: Check tagged version
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: bokheim
@@ -106,7 +120,8 @@ jobs:
         working-directory: bokheim
         shell: bash
         run: |
-          if cargo tree --locked -p desktop-gpui --no-default-features --features desktop | grep -E -i '(^|[[:space:]])(tauri|wry|webkit2gtk|mobileapp)([[:space:]]|$)'; then
+          cargo tree --locked -p desktop-gpui --no-default-features --features desktop > "$RUNNER_TEMP/desktop-dependency-tree.txt"
+          if grep -E -i '(^|[[:space:]])(tauri|wry|webkit2gtk|mobileapp)([[:space:]]|$)' "$RUNNER_TEMP/desktop-dependency-tree.txt"; then
             echo "The GPUI AppImage must not depend on Tauri or the mobile application." >&2
             exit 1
           fi
@@ -125,17 +140,27 @@ jobs:
 
       - name: Verify AppImage runtime and payload
         working-directory: bokheim
+        shell: bash
         run: |
           release/Bokheim-x86_64.AppImage --appimage-version
+          release/Bokheim-x86_64.AppImage --appimage-updateinformation
           release/Bokheim-x86_64.AppImage --appimage-extract >/dev/null
           test -x squashfs-root/usr/bin/desktop-gpui
           test -f squashfs-root/se.bokheim.Bokheim.desktop
           test -e squashfs-root/se.bokheim.Bokheim.svg -o -e squashfs-root/se.bokheim.Bokheim.png
+          test -s release/Bokheim-x86_64.AppImage.zsync
+          sha256sum --check release/Bokheim-x86_64.AppImage.sha256
+          ldd squashfs-root/usr/bin/desktop-gpui > "$RUNNER_TEMP/appimage-ldd.txt"
+          cat "$RUNNER_TEMP/appimage-ldd.txt"
+          if grep -F 'not found' "$RUNNER_TEMP/appimage-ldd.txt"; then
+            echo "The packaged desktop executable has unresolved shared libraries." >&2
+            exit 1
+          fi
           apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh release/Bokheim-x86_64.AppImage 2.35
           apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh squashfs-root 2.35
 
       - name: Retain workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bokheim-desktop-appimage-x86-64
           path: bokheim/release/*
