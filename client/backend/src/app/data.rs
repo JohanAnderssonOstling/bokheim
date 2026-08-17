@@ -1,7 +1,7 @@
 use crate::ContentHash;
-pub(crate) use library_registry::read_library_manifest;
 use library_registry::LibraryRegistry;
-pub use library_registry::{LibraryEntry, LIBRARY_MANIFEST_FILENAME};
+pub(crate) use library_registry::read_library_manifest;
+pub use library_registry::{LIBRARY_MANIFEST_FILENAME, LibraryEntry};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -177,6 +177,22 @@ fn install_runtime_taxonomy(app_data_root: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| format!("failed to create taxonomy directory {}: {error}", parent.display()))?;
         fs::write(&path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to create editable taxonomy database {}: {error}", path.display()))?;
     }
-    let concepts = library_model::read_unified_taxonomy_sqlite(&path)?;
+    match read_and_install_runtime_taxonomy(&path) {
+        Ok(()) => Ok(()),
+        Err(persisted_error) => {
+            // Server-resolved taxonomy slices are a rehydratable cache. An
+            // older slice can violate newer structural invariants and must not
+            // prevent the desktop from opening the user's libraries.
+            let backup_path = path.with_extension("sqlite3.invalid");
+            fs::copy(&path, &backup_path).map_err(|error| format!("failed to preserve invalid taxonomy database {} as {} after {persisted_error}: {error}", path.display(), backup_path.display()))?;
+            log::warn!("Resetting invalid taxonomy cache {} (backup: {}): {persisted_error}", path.display(), backup_path.display());
+            fs::write(&path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to reset invalid taxonomy database {}: {error}", path.display()))?;
+            read_and_install_runtime_taxonomy(&path).map_err(|reset_error| format!("failed to install bundled taxonomy database {} after persisted taxonomy failed ({persisted_error}): {reset_error}", path.display()))
+        }
+    }
+}
+
+fn read_and_install_runtime_taxonomy(path: &Path) -> Result<(), String> {
+    let concepts = library_model::read_unified_taxonomy_sqlite(path)?;
     library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))
 }

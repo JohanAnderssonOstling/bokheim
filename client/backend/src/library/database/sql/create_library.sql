@@ -452,6 +452,20 @@ create table if not exists sync_outbox(
     unique(state_kind, state_key, state_subkey)
 );
 
+-- The filesystem effects an applied pull page still owes the disk, recorded in
+-- the same transaction that advances the pull cursor. Without this the cursor
+-- can move past a page whose file work never ran: a synchronized deletion
+-- leaves its file on disk, the next scan reads that file as a new local
+-- placement, and the delete is undone on every device. Executed in insertion
+-- order after the commit and deleted as each one succeeds, so a crash replays
+-- only what is still owed.
+-- name: create_pending_fs_action_table!
+create table if not exists pending_fs_action(
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      BLOB not null,
+    created_at  INTEGER not null
+);
+
 -- One durable winning version per independently merged state cell. Domain
 -- tables contain materialized values only; all merge ordering lives here.
 -- name: create_sync_state_version_table!

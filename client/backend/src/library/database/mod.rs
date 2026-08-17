@@ -380,6 +380,7 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     conn.create_book_dir_book_index()?;
     conn.create_live_book_path_index()?;
     conn.create_sync_outbox_table()?;
+    conn.create_pending_fs_action_table()?;
     conn.create_sync_state_version_table()?;
     conn.create_annotation_table()?;
     conn.create_annotation_book_index()?;
@@ -727,8 +728,8 @@ pub(crate) use reading::{update_pdf_reading_page, update_reading_position};
 /// Synchronization outbox, scan generations, tombstones, and filesystem work.
 pub(crate) mod sync_state;
 pub(crate) use sync_state::{
-    LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata, next_scan_id, rebind_sync_account, set_pull_cursor,
-    set_sync_metadata, state_inventory,
+    FsAction, LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, complete_fs_action, enqueue_fs_actions, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata,
+    next_scan_id, pending_fs_actions, rebind_sync_account, set_pull_cursor, set_sync_metadata, state_inventory,
 };
 #[cfg(test)]
 pub(crate) use sync_state::{OutboxReadError, OutboxRow, decode_outbox_row};

@@ -1,6 +1,6 @@
 use super::ddc::canonical_ddc_notation;
 use super::lcc::{compare_lcc_key, parse_lcc_call};
-use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION};
+use super::{DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION, compact_whitespace};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -393,7 +393,25 @@ fn validate(concepts: &[UnifiedConceptDefinition]) -> Result<(), String> {
 }
 
 fn normalized_concept_label(value: &str) -> String {
-    value.to_lowercase().chars().map(|character| if character.is_alphanumeric() { character } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+    let characters = value.to_lowercase().chars().collect::<Vec<_>>();
+    characters
+        .iter()
+        .enumerate()
+        .map(|(index, character)| {
+            if character.is_alphanumeric() || matches!(character, '#' | '+') {
+                *character
+            } else if *character == '.' && characters[..index].iter().all(|previous| previous.is_whitespace()) && characters.get(index + 1).is_some_and(|next| next.is_alphanumeric()) {
+                // A leading dot is part of names such as `.NET`; a trailing
+                // dot remains decorative punctuation for duplicate checks.
+                *character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String, UnifiedConceptRoute>, String> {
@@ -525,6 +543,14 @@ mod tests {
             concept("right", "Ethnography.", &["other-root"], &["GN301..GN674@4"]),
         ];
         assert!(validate(&duplicate_source_record).unwrap_err().contains("duplicate source selector"));
+    }
+
+    #[test]
+    fn validation_preserves_meaningful_programming_language_punctuation() {
+        let programming_languages =
+            vec![concept("root", "Programming Languages", &[], &[]), concept("c", "C", &["root"], &[]), concept("c-sharp", "C#", &["root"], &[]), concept("c-plus-plus", "C++", &["root"], &[]), concept("dot-net", ".NET", &["root"], &[])];
+
+        assert!(validate(&programming_languages).is_ok());
     }
 
     #[test]

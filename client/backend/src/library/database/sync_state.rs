@@ -328,3 +328,53 @@ pub struct RemovedBookDir {
     pub dir_id: DirId,
     pub content_hash: ContentHash,
 }
+
+/// A filesystem effect an applied pull page still owes the disk.
+///
+/// Identities and paths are stored as text rather than the domain newtypes:
+/// the row outlives the process that wrote it, so it is re-parsed (and so
+/// re-validated against the library root) on the way back out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FsAction {
+    /// Create the directory and its identity marker.
+    MaterializeDir { dir_id: String },
+    /// Relocate a directory that synchronization moved or renamed.
+    MoveDir { dir_id: String, old_path: String, new_path: String },
+    /// Reconcile the file of a placement that a synchronized removal retired.
+    RetirePlacementFile { dir_id: String, content_hash: String },
+    /// Remove a directory synchronization no longer projects.
+    RemoveDir { path: String },
+}
+
+/// Records the filesystem work owed by a page. Must be called in the same
+/// transaction that advances the pull cursor: a cursor that moves past work
+/// this replica never performed can never be told to perform it again.
+pub fn enqueue_fs_actions(tx: &Transaction<'_>, actions: &[FsAction]) -> Result<(), rusqlite::Error> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let created_at = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(i64::MAX);
+    for action in actions {
+        let encoded = sync_common::wire::encode(action).map_err(|error| invalid_text_column(0, error.to_string()))?;
+        tx.execute("INSERT INTO pending_fs_action(action, created_at) VALUES(?1, ?2)", rusqlite::params![encoded, created_at])?;
+    }
+    Ok(())
+}
+
+/// Owed filesystem work in the order it was recorded. An entry that cannot be
+/// decoded is reported as `None` so the caller can retire it rather than let
+/// one unreadable row block every action queued behind it.
+pub fn pending_fs_actions(conn: &Connection) -> Result<Vec<(i64, Option<FsAction>)>, rusqlite::Error> {
+    let mut statement = conn.prepare("SELECT id, action FROM pending_fs_action ORDER BY id")?;
+    let rows = statement.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        let encoded: Vec<u8> = row.get(1)?;
+        Ok((id, sync_common::wire::decode::<FsAction>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES).ok()))
+    })?;
+    rows.collect()
+}
+
+pub fn complete_fs_action(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM pending_fs_action WHERE id=?1", [id])?;
+    Ok(())
+}

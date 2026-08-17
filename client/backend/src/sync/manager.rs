@@ -71,19 +71,64 @@ fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce:
     Ok((mutations, Some(Duration::from_millis(ready_at - now_millis))))
 }
 
-fn take_push_page(mutations: &mut VecDeque<StateMutation>) -> Result<Vec<StateMutation>, sync_common::transport::WireError> {
+/// A mutation paired with the wire form that will actually be transmitted.
+/// Both the page budget and the service's own request limit are expressed in
+/// transmitted bytes, so the size is measured there rather than on the local
+/// representation, and the encoding is kept for the request itself.
+struct PendingPush {
+    mutation: StateMutation,
+    wire: sync_common::WireMutation,
+    encoded_bytes: usize,
+}
+
+impl PendingPush {
+    fn encode(mutation: StateMutation) -> Result<Self, Box<dyn std::error::Error>> {
+        let wire = mutation.to_wire()?;
+        let encoded_bytes = sync_common::transport::encode(&wire)?.len();
+        Ok(Self { mutation, wire, encoded_bytes })
+    }
+
+    fn exceeds_a_whole_page(&self) -> bool {
+        self.encoded_bytes > sync_common::MAX_PUSH_MUTATION_BYTES
+    }
+}
+
+/// Separates mutations that can be transmitted from those no page can carry.
+///
+/// A mutation larger than a whole page is refused by the service's request
+/// limit however it is batched, and the client cannot page around it. Left at
+/// the head of the queue it would fail every exchange and block every later
+/// mutation behind it indefinitely. It is set aside so the rest continues to
+/// synchronize, but deliberately left in the outbox: acknowledging it would
+/// diverge this replica from the server with nothing left to notice.
+fn partition_transmittable(changes: Vec<StateMutation>) -> Result<(VecDeque<PendingPush>, Vec<sync_common::MutationId>), Box<dyn std::error::Error>> {
+    let mut transmittable = VecDeque::with_capacity(changes.len());
+    let mut set_aside = Vec::new();
+    for change in changes {
+        let pending = PendingPush::encode(change)?;
+        if pending.exceeds_a_whole_page() {
+            set_aside.push(pending.mutation.mutation_id);
+        } else {
+            transmittable.push_back(pending);
+        }
+    }
+    Ok((transmittable, set_aside))
+}
+
+fn take_push_page(mutations: &mut VecDeque<PendingPush>) -> Vec<PendingPush> {
     let mut page = Vec::with_capacity(sync_common::MAX_PUSH_MUTATIONS.min(mutations.len()));
     let mut encoded_bytes = 0_usize;
     while page.len() < sync_common::MAX_PUSH_MUTATIONS {
         let Some(next) = mutations.front() else { break };
-        let next_bytes = sync_common::transport::encode(next)?.len();
-        if !page.is_empty() && encoded_bytes.saturating_add(next_bytes) > sync_common::MAX_PUSH_MUTATION_BYTES {
+        // Nothing in the queue exceeds a whole page, so the first mutation
+        // always fits and the page can never come back empty.
+        if !page.is_empty() && encoded_bytes.saturating_add(next.encoded_bytes) > sync_common::MAX_PUSH_MUTATION_BYTES {
             break;
         }
-        encoded_bytes = encoded_bytes.saturating_add(next_bytes);
+        encoded_bytes = encoded_bytes.saturating_add(next.encoded_bytes);
         page.push(mutations.pop_front().expect("the inspected mutation is still queued"));
     }
-    Ok(page)
+    page
 }
 
 pub type DbPool = Pool<SqliteConnectionManager>;
@@ -104,12 +149,6 @@ pub struct SyncManager {
     pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
     sync_gate: tokio::sync::Mutex<()>,
     inventory_checked: AtomicBool,
-}
-
-#[derive(Debug)]
-enum DirUpsertMaterialization {
-    Create { dir_id: DirId },
-    Move { dir_id: DirId, old_path: RelativeDirPath, new_path: RelativeDirPath },
 }
 
 impl SyncManager {
@@ -197,6 +236,10 @@ impl SyncManager {
 
     pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> Result<SyncOutcome, Box<dyn std::error::Error>> {
         let _sync_guard = self.sync_gate.lock().await;
+        // Anything a previous run recorded but did not finish is owed to the
+        // disk before this one advances the cursor any further; the pull that
+        // queued it has already moved past it.
+        self.run_owed_fs_actions();
         let reading_debounce = match policy.reading_positions {
             #[cfg(test)]
             ReadingPositionSync::Immediate => None,
@@ -606,9 +649,8 @@ impl SyncManager {
         Ok(combined)
     }
 
-    fn apply_push_response(&self, requested: &[StateMutation], push_response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, Box<dyn std::error::Error>> {
-        let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
-        let validated = validate_push_response(&requested_ids, push_response)?;
+    fn apply_push_response(&self, requested_ids: &[sync_common::MutationId], push_response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, Box<dyn std::error::Error>> {
+        let validated = validate_push_response(requested_ids, push_response)?;
 
         for rejection in &push_response.rejected {
             if rejection.reason.is_transient() {
@@ -635,17 +677,32 @@ impl SyncManager {
             mutations_ready_for_push(coalesce_mutations_for_push(db::get_pending_mutations(&conn)?), reading_debounce, std::time::SystemTime::now())?
         };
         let session = self.current_session().ok_or("not signed in")?;
-        let mut remaining = VecDeque::from(changes);
+        let (mut remaining, set_aside) = partition_transmittable(changes)?;
         let mut cursor = starting_cursor;
         let mut sent_page = false;
         let mut transient_rejections = Vec::new();
         let mut assets_needed = false;
+        for mutation_id in &set_aside {
+            log::error!(
+                "Local sync mutation {mutation_id} encodes to more than the {} byte push limit and cannot be transmitted; it stays queued while every other change continues to synchronize",
+                sync_common::MAX_PUSH_MUTATION_BYTES
+            );
+        }
+        transient_rejections.extend(set_aside.into_iter().map(|mutation_id| sync_common::MutationRejection { mutation_id, reason: sync_common::MutationRejectionReason::InvalidPayload }));
         while !remaining.is_empty() || !sent_page {
-            let requested = take_push_page(&mut remaining)?;
-            let wire_requested = requested.iter().map(StateMutation::to_wire).collect::<Result<Vec<_>, _>>()?;
+            let requested = take_push_page(&mut remaining);
+            let requested_ids = requested.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>();
+            // Captured before the request consumes the page; a lifecycle or
+            // placement mutation the server accepts may need its bytes moved.
+            let asset_bearing = requested
+                .iter()
+                .filter(|pending| matches!(pending.mutation.body, MutationBody::BookLifecycle { .. } | MutationBody::Placement { .. }))
+                .map(|pending| pending.mutation.mutation_id)
+                .collect::<Vec<_>>();
+            let wire_requested = requested.into_iter().map(|pending| pending.wire).collect::<Vec<_>>();
             let response = self.handle_client_result(sync_client::exchange_changes(&self.http_client, &session, self.library_id.clone(), self.replica_id.clone(), wire_requested, cursor).await)?;
-            assets_needed |= requested.iter().any(|mutation| response.push.accepted.contains(&mutation.mutation_id) && matches!(mutation.body, MutationBody::BookLifecycle { .. } | MutationBody::Placement { .. }));
-            transient_rejections.extend(self.apply_push_response(&requested, &response.push)?);
+            assets_needed |= asset_bearing.iter().any(|mutation_id| response.push.accepted.contains(mutation_id));
+            transient_rejections.extend(self.apply_push_response(&requested_ids, &response.push)?);
             let (next_cursor, page_assets_needed) = self.pull_events_from_server_with_first(cursor, Some(response.pull)).await?;
             cursor = next_cursor;
             assets_needed |= page_assets_needed;
@@ -703,29 +760,36 @@ impl SyncManager {
                 }
             }
             let dirs_after = db::get_live_dir_paths_tx(&tx)?;
-            let dir_upserts: Vec<_> = dirs_after
-                .iter()
-                .filter_map(|(id, new_path)| match dirs_before.get(id) {
-                    None => Some(DirUpsertMaterialization::Create { dir_id: id.clone() }),
-                    Some(old_path) if old_path != new_path => Some(DirUpsertMaterialization::Move { dir_id: id.clone(), old_path: old_path.clone(), new_path: new_path.clone() }),
-                    Some(_) => None,
-                })
-                .collect();
-            let dir_deletes: Vec<_> = dirs_before.iter().filter(|(id, _)| !dirs_after.contains_key(*id)).map(|(_, old_path)| old_path.clone()).collect();
 
-            db::set_pull_cursor(&tx, next_cursor)?;
-
-            tx.commit()?;
-            drop(conn);
-
-            self.materialize_remote_dir_upserts(&dir_upserts);
             // A removal that won the LWW gate also acts on the local file, so a delete
             // on one device propagates to the others (otherwise the next scan would
             // see the still-present file and resurrect the placement). A move arrives
             // as add(new) then remove(old) — the grace period guarantees the add lands
             // first — so we relocate rather than delete + re-download.
-            self.apply_local_removals(&removed_placements)?;
-            self.materialize_remote_dir_deletes(&dir_deletes);
+            //
+            // These effects are recorded in the same commit that advances the
+            // cursor, because the cursor moving past work the disk never
+            // received is exactly what resurrects a deleted book.
+            let mut owed = Vec::new();
+            owed.extend(dirs_after.iter().filter_map(|(id, new_path)| match dirs_before.get(id) {
+                None => Some(db::FsAction::MaterializeDir { dir_id: id.to_string() }),
+                Some(old_path) if old_path != new_path => Some(db::FsAction::MoveDir { dir_id: id.to_string(), old_path: old_path.as_str().to_owned(), new_path: new_path.as_str().to_owned() }),
+                Some(_) => None,
+            }));
+            owed.extend(removed_placements.iter().map(|placement| db::FsAction::RetirePlacementFile { dir_id: placement.dir_id.to_string(), content_hash: placement.content_hash.to_string() }));
+            // Deepest first, so a parent is never asked to vanish while a child
+            // it still contains is queued behind it.
+            let mut dir_deletes: Vec<_> = dirs_before.iter().filter(|(id, _)| !dirs_after.contains_key(*id)).map(|(_, old_path)| old_path.clone()).collect();
+            dir_deletes.sort_by_key(|path| std::cmp::Reverse(path.as_path().components().count()));
+            owed.extend(dir_deletes.iter().map(|path| db::FsAction::RemoveDir { path: path.as_str().to_owned() }));
+
+            db::enqueue_fs_actions(&tx, &owed)?;
+            db::set_pull_cursor(&tx, next_cursor)?;
+
+            tx.commit()?;
+            drop(conn);
+
+            self.run_owed_fs_actions();
             cursor = next_cursor;
             if !has_more {
                 break;
@@ -734,118 +798,136 @@ impl SyncManager {
         Ok((cursor, assets_needed))
     }
 
-    fn materialize_remote_dir_upserts(&self, dirs: &[DirUpsertMaterialization]) {
-        if dirs.is_empty() {
-            return;
-        }
+    /// Performs the filesystem work recorded by applied pull pages, retiring
+    /// each entry as it completes.
+    ///
+    /// Every action re-derives what it needs from committed state and tolerates
+    /// having already been performed, so replaying whatever a crash left behind
+    /// is safe. An action that genuinely fails (a directory a user dropped
+    /// files into, say) is logged and retired rather than retried forever: the
+    /// log exists to survive a crash, not to make the filesystem obey.
+    pub(crate) fn run_owed_fs_actions(&self) {
         let Ok(conn) = self.db_pool.get() else {
             return;
         };
-        let library_root = &self.library_root;
-        for dir in dirs {
-            match dir {
-                DirUpsertMaterialization::Create { dir_id } => {
-                    if let Err(err) = db::materialize_dir_with_markers(&conn, library_root.as_path(), &dir_id.to_string()) {
-                        log::warn!("Failed to materialize remote dir {}: {}", dir_id, err);
+        let owed = match db::pending_fs_actions(&conn) {
+            Ok(owed) => owed,
+            Err(error) => {
+                log::warn!("Could not read the pending filesystem actions: {error}");
+                return;
+            }
+        };
+        for (id, action) in owed {
+            match action {
+                Some(action) => {
+                    if let Err(error) = self.run_fs_action(&conn, &action) {
+                        log::warn!("Synchronized filesystem action {action:?} did not complete: {error}");
                     }
                 }
-                DirUpsertMaterialization::Move { dir_id, old_path, new_path } => {
-                    let old_abs = old_path.resolve_under(library_root);
-                    let new_abs = new_path.resolve_under(library_root);
-                    if !old_abs.exists() {
-                        if let Err(err) = db::materialize_dir_with_markers(&conn, library_root.as_path(), &dir_id.to_string()) {
-                            log::warn!("Failed to materialize moved remote dir {}: {}", dir_id, err);
-                        }
-                        continue;
-                    }
-                    if let Err(err) = db::materialize_dir_parent_with_markers(&conn, library_root.as_path(), &dir_id.to_string()) {
-                        log::warn!("Failed to materialize parent for moved dir {}: {}", dir_id, err);
-                        continue;
-                    }
-                    match std::fs::rename(&old_abs, &new_abs) {
-                        Ok(()) => {
-                            if let Err(err) = db::materialize_dir_with_markers(&conn, library_root.as_path(), &dir_id.to_string()) {
-                                log::warn!("Moved dir {} but failed to verify marker: {}", dir_id, err);
-                            }
-                        }
-                        Err(err) => log::warn!("Failed to rename remote dir {:?} -> {:?}: {}", old_abs, new_abs, err),
-                    }
-                }
+                None => log::error!("Discarding an unreadable pending filesystem action so the work queued behind it can proceed"),
+            }
+            if let Err(error) = db::complete_fs_action(&conn, id) {
+                log::warn!("Could not retire a completed filesystem action: {error}");
+                return;
             }
         }
     }
 
-    fn materialize_remote_dir_deletes(&self, dirs: &[RelativeDirPath]) {
-        let library_root = &self.library_root;
-        let mut dirs: Vec<_> = dirs.iter().collect();
-        dirs.sort_by_key(|path| std::cmp::Reverse(path.as_path().components().count()));
-        for old_path in dirs {
-            let abs = old_path.resolve_under(library_root);
-            let marker = abs.join(".biblos_uuid");
-            // Read the marker before touching anything so we can restore it if
-            // remove_dir fails due to stray user files (leaving marker intact
-            // preserves the dir identity for the next scanner pass).
-            let marker_content = std::fs::read(&marker).ok();
-            if marker_content.is_some() {
-                match std::fs::remove_file(&marker) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => log::warn!("Failed to remove marker {:?}: {}", marker, err),
-                }
+    fn run_fs_action(&self, conn: &rusqlite::Connection, action: &db::FsAction) -> Result<(), Box<dyn std::error::Error>> {
+        match action {
+            db::FsAction::MaterializeDir { dir_id } => {
+                DirId::parse_str(dir_id)?;
+                db::materialize_dir_with_markers(conn, self.library_root.as_path(), dir_id)?;
+                Ok(())
             }
-            match std::fs::remove_dir(&abs) {
-                Ok(()) => log::info!("Removed remote-deleted dir {:?}", abs),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    log::warn!("Failed to remove remote-deleted dir {:?}: {}", abs, err);
-                    if let Some(content) = marker_content {
-                        let _ = std::fs::write(&marker, content);
-                    }
-                }
+            db::FsAction::MoveDir { dir_id, old_path, new_path } => self.move_remote_dir(conn, dir_id, old_path, new_path),
+            db::FsAction::RetirePlacementFile { dir_id, content_hash } => self.retire_placement_file(conn, &DirId::parse_str(dir_id)?, &content_hash.parse::<ContentHash>()?),
+            db::FsAction::RemoveDir { path } => {
+                self.remove_remote_dir(&RelativeDirPath::parse(path)?);
+                Ok(())
             }
         }
     }
 
-    fn apply_local_removals(&self, removed: &[db::RemovedBookDir]) -> Result<(), Box<dyn std::error::Error>> {
-        if removed.is_empty() {
+    fn move_remote_dir(&self, conn: &rusqlite::Connection, dir_id: &str, old_path: &str, new_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        DirId::parse_str(dir_id)?;
+        let library_root = &self.library_root;
+        let old_abs = RelativeDirPath::parse(old_path)?.resolve_under(library_root);
+        let new_abs = RelativeDirPath::parse(new_path)?.resolve_under(library_root);
+        // Already moved (or never materialized): create it where it belongs now.
+        if !old_abs.exists() {
+            db::materialize_dir_with_markers(conn, library_root.as_path(), dir_id)?;
             return Ok(());
         }
-        let conn = self.db_pool.get()?;
-        for placement in removed {
+        db::materialize_dir_parent_with_markers(conn, library_root.as_path(), dir_id)?;
+        std::fs::rename(&old_abs, &new_abs)?;
+        db::materialize_dir_with_markers(conn, library_root.as_path(), dir_id)?;
+        Ok(())
+    }
+
+    fn remove_remote_dir(&self, old_path: &RelativeDirPath) {
+        let abs = old_path.resolve_under(&self.library_root);
+        let marker = abs.join(".biblos_uuid");
+        // Read the marker before touching anything so we can restore it if
+        // remove_dir fails due to stray user files (leaving marker intact
+        // preserves the dir identity for the next scanner pass).
+        let marker_content = std::fs::read(&marker).ok();
+        if marker_content.is_some() {
+            match std::fs::remove_file(&marker) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => log::warn!("Failed to remove marker {:?}: {}", marker, err),
+            }
+        }
+        match std::fs::remove_dir(&abs) {
+            Ok(()) => log::info!("Removed remote-deleted dir {:?}", abs),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                log::warn!("Failed to remove remote-deleted dir {:?}: {}", abs, err);
+                if let Some(content) = marker_content {
+                    let _ = std::fs::write(&marker, content);
+                }
+            }
+        }
+    }
+
+    fn retire_placement_file(&self, conn: &rusqlite::Connection, dir_id: &DirId, placement_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+        {
             // Only act if still tombstoned in the committed state; a later add in
             // the same batch may have resurrected this exact placement.
-            let Some((rel_path, content_hash)) = db::resolve_removed_book_dir(&conn, &placement.dir_id.to_string(), placement.content_hash.clone())? else {
-                continue;
+            let Some((rel_path, content_hash)) = db::resolve_removed_book_dir(conn, &dir_id.to_string(), placement_hash.clone())? else {
+                return Ok(());
             };
             let abs_old = self.resolve_book_path(&rel_path);
             if !Path::new(&abs_old).exists() {
-                continue;
+                return Ok(());
             }
 
             // Move, not delete: if a live placement holds the same content but is
             // missing its file (the book was moved to a new path), relocate the
             // file there instead of deleting and later re-downloading it.
             if let Some(content_hash) = content_hash {
-                if let Some(target) = self.live_placement_missing_file(&conn, &content_hash)? {
+                if let Some(target) = self.live_placement_missing_file(conn, &content_hash)? {
                     let target_rel = target.rel_path;
                     let abs_new = self.resolve_book_path(&target_rel);
-                    if let Some((_, dir_id, _)) = db::get_book_dir_entry_by_path(&conn, &target_rel)? {
-                        if let Err(err) = db::materialize_dir_with_markers(&conn, self.library_root.as_path(), &dir_id.to_string()) {
+                    let mut target_ready = true;
+                    if let Some((_, dir_id, _)) = db::get_book_dir_entry_by_path(conn, &target_rel)? {
+                        if let Err(err) = db::materialize_dir_with_markers(conn, self.library_root.as_path(), &dir_id.to_string()) {
                             log::warn!("Failed to materialize relocation target {}: {}", target_rel, err);
-                            continue;
+                            target_ready = false;
                         }
                     } else if let Some(parent) = Path::new(&abs_new).parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    if std::fs::rename(&abs_old, &abs_new).is_ok() {
-                        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(&conn, &target_rel, target.content_hash.clone(), Path::new(&abs_new)) {
+                    if target_ready && std::fs::rename(&abs_old, &abs_new).is_ok() {
+                        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(conn, &target_rel, target.content_hash.clone(), Path::new(&abs_new)) {
                             log::warn!("Failed to stamp relocated fingerprint for {}: {}", abs_new, err);
                         }
-                        db::upsert_blob_local_ref(&conn, BlobKind::Book, &content_hash, &abs_new, true)?;
-                        db::complete_asset_request(&conn, BlobKind::Book, &content_hash)?;
-                        db::set_book_downloaded(&conn, &target_rel, target.content_hash, true)?;
+                        db::upsert_blob_local_ref(conn, BlobKind::Book, &content_hash, &abs_new, true)?;
+                        db::complete_asset_request(conn, BlobKind::Book, &content_hash)?;
+                        db::set_book_downloaded(conn, &target_rel, target.content_hash, true)?;
                         log::info!("Relocated {abs_old} -> {abs_new} (book moved)");
-                        continue;
+                        return Ok(());
                     }
                 }
             }
@@ -1488,52 +1570,85 @@ mod tests {
         }
     }
 
+    fn transmittable(changes: Vec<StateMutation>) -> VecDeque<PendingPush> {
+        let (queued, set_aside) = partition_transmittable(changes).unwrap();
+        assert!(set_aside.is_empty(), "this fixture holds nothing larger than a page");
+        queued
+    }
+
     #[test]
     fn push_pages_are_bounded_by_count_and_preserve_sequence_order() {
-        let mut changes = VecDeque::from((1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 7).map(|sequence| reading_change(sequence, sequence, "epubcfi(/6/2)", sequence)).collect::<Vec<_>>());
+        let mut changes = transmittable((1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 7).map(|sequence| reading_change(sequence, sequence, "epubcfi(/6/2)", sequence)).collect::<Vec<_>>());
 
-        let first = take_push_page(&mut changes).unwrap();
-        let second = take_push_page(&mut changes).unwrap();
+        let first = take_push_page(&mut changes);
+        let second = take_push_page(&mut changes);
 
         assert_eq!(first.len(), sync_common::MAX_PUSH_MUTATIONS);
         assert_eq!(second.len(), 7);
-        assert_eq!(first.first().unwrap().replica_seq.get(), 1);
-        assert_eq!(second.first().unwrap().replica_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
+        assert_eq!(first.first().unwrap().mutation.replica_seq.get(), 1);
+        assert_eq!(second.first().unwrap().mutation.replica_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
+    }
+
+    /// The service refuses a request larger than its decoded request limit, and
+    /// no batching makes an over-limit mutation fit. Left at the head of the
+    /// outbox it fails every exchange, so each retry blocks every later
+    /// mutation behind it. It must be set aside without being acknowledged:
+    /// dropping it would leave this replica silently diverged from the server.
+    #[test]
+    fn a_mutation_too_large_to_transmit_does_not_block_the_rest_of_the_outbox() {
+        let ahead = reading_change(1, 1, "epubcfi(/6/2)", 1);
+        let oversized = annotation_change(2, "x".repeat(sync_common::MAX_PUSH_MUTATION_BYTES + 1));
+        let behind = reading_change(3, 3, "epubcfi(/6/4)", 3);
+
+        let (mut queued, set_aside) = partition_transmittable(vec![ahead.clone(), oversized.clone(), behind.clone()]).unwrap();
+
+        assert_eq!(set_aside, vec![oversized.mutation_id], "only the untransmittable mutation is set aside");
+        let page = take_push_page(&mut queued);
+        assert_eq!(
+            page.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>(),
+            vec![ahead.mutation_id, behind.mutation_id],
+            "the mutations queued behind it still go out, in sequence order"
+        );
+        assert!(queued.is_empty(), "the exchange loop has nothing left to spin on");
     }
 
     #[test]
     fn push_pages_stop_before_the_encoded_byte_target() {
         let large_text = "x".repeat(64 * 1024);
-        let changes = (1..=100_u64)
-            .map(|sequence| StateMutation {
-                mutation_id: sync_common::MutationId::new(),
-                body: MutationBody::Annotation {
-                    annotation_id: uuid::Uuid::new_v4().to_string(),
-                    value: AnnotationState {
-                        content_hash: fixture_content_hash(sequence),
-                        anchor: AnnotationAnchor::EpubCfi { cfi: "epubcfi(/6/2)".to_owned() },
-                        exact_text: large_text.clone(),
-                        style: AnnotationStyle::Highlight,
-                        color: "yellow".to_owned(),
-                        note: large_text.clone(),
-                        created_at: millis(1),
-                        modified_at: millis(1),
-                        deleted: false,
-                    },
-                },
-                changed_at: millis(sequence),
-                replica_seq: local_seq(sequence),
-            })
-            .collect::<Vec<_>>();
-        let mut queued = VecDeque::from(changes);
+        let mut queued = transmittable((1..=100_u64).map(|sequence| annotation_change(sequence, large_text.clone())).collect::<Vec<_>>());
 
-        let page = take_push_page(&mut queued).unwrap();
-        let encoded_bytes = page.iter().map(|mutation| sync_common::transport::encode(mutation).unwrap().len()).sum::<usize>();
+        let page = take_push_page(&mut queued);
+        // The budget is spent in transmitted bytes, so the page is measured in
+        // the same wire encoding the request carries.
+        let encoded_bytes = page.iter().map(|pending| pending.encoded_bytes).sum::<usize>();
 
         assert!(!page.is_empty());
         assert!(page.len() < 100);
         assert!(encoded_bytes <= sync_common::MAX_PUSH_MUTATION_BYTES);
+        assert_eq!(encoded_bytes, page.iter().map(|pending| sync_common::transport::encode(&pending.wire).unwrap().len()).sum::<usize>());
         assert!(!queued.is_empty());
+    }
+
+    fn annotation_change(sequence: u64, text: String) -> StateMutation {
+        StateMutation {
+            mutation_id: sync_common::MutationId::new(),
+            body: MutationBody::Annotation {
+                annotation_id: uuid::Uuid::new_v4().to_string(),
+                value: AnnotationState {
+                    content_hash: fixture_content_hash(sequence),
+                    anchor: AnnotationAnchor::EpubCfi { cfi: "epubcfi(/6/2)".to_owned() },
+                    exact_text: text.clone(),
+                    style: AnnotationStyle::Highlight,
+                    color: "yellow".to_owned(),
+                    note: text,
+                    created_at: millis(1),
+                    modified_at: millis(1),
+                    deleted: false,
+                },
+            },
+            changed_at: millis(sequence),
+            replica_seq: local_seq(sequence),
+        }
     }
 
     #[test]
@@ -1664,7 +1779,7 @@ mod tests {
         }
         let response = PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: requested.mutation_id, reason: MutationRejectionReason::InvalidPayload }] };
 
-        assert!(manager.apply_push_response(std::slice::from_ref(&requested), &response).is_err());
+        assert!(manager.apply_push_response(&[requested.mutation_id], &response).is_err());
 
         let conn = manager.db_pool.get().unwrap();
         assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
@@ -1679,6 +1794,127 @@ mod tests {
 
         let contradictory = PushMutationsResponse { accepted: vec![requested[0].mutation_id], rejected: vec![MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::TimestampTooFarFuture }] };
         assert!(matches!(validate_push_response(&requested_ids[..1], &contradictory), Err(PushResponseError::InvalidAcknowledgments(_))));
+    }
+
+    /// A library holding one book placed in one directory, with its file on
+    /// disk and the placement already tombstoned — the committed state a pull
+    /// page leaves behind when synchronization removes a placement.
+    fn seed_tombstoned_placement(manager: &SyncManager, dir: &str, file_name: &str) -> (DirId, ContentHash, PathBuf) {
+        let dir_id = fixture_dir_id(dir);
+        let content_hash = fixture_content_hash(1);
+        let conn = manager.db_pool.get().unwrap();
+        conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1,'00000000-0000-0000-0000-000000000000',?2)", rusqlite::params![dir_id.to_string(), dir]).unwrap();
+        conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [content_hash.as_str()]).unwrap();
+        conn.execute(
+            "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded,deleted_at) VALUES (?2,(SELECT row_id FROM book WHERE content_hash=?1),?3,'fp',1,1)",
+            rusqlite::params![content_hash.as_str(), dir_id.to_string(), file_name],
+        )
+        .unwrap();
+        let on_disk = manager.library_root.join(dir).join(file_name);
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(&on_disk, b"book bytes").unwrap();
+        (dir_id, content_hash, on_disk)
+    }
+
+    /// The pull that applies a removal advances the cursor in the same commit,
+    /// so if the process dies before the file work runs, nothing will ever ask
+    /// for it again: the file stays on disk, the next scan reads it as a new
+    /// local placement, and the deletion is undone on every device. Recording
+    /// the work in that same commit is what makes it survivable.
+    #[test]
+    fn filesystem_work_owed_by_a_committed_pull_survives_a_crash_before_it_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        let (dir_id, content_hash, on_disk) = seed_tombstoned_placement(&manager, "Shelf", "book.epub");
+
+        // The pull page committed its cursor and its owed work, then the
+        // process died before performing any of it.
+        {
+            let conn = manager.db_pool.get().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            db::enqueue_fs_actions(&tx, &[db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() }]).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(on_disk.exists(), "the crash left the deletion unperformed");
+
+        manager.run_owed_fs_actions();
+
+        assert!(!on_disk.exists(), "the next run must still owe, and perform, the synchronized deletion");
+        let conn = manager.db_pool.get().unwrap();
+        assert!(db::pending_fs_actions(&conn).unwrap().is_empty(), "completed work is retired so it is not repeated");
+    }
+
+    /// Replay is only safe if an action that already ran is harmless the second
+    /// time — a crash can land after the effect but before the row is retired.
+    #[test]
+    fn replaying_completed_filesystem_work_is_harmless() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        let (dir_id, content_hash, on_disk) = seed_tombstoned_placement(&manager, "Shelf", "book.epub");
+        let action = db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() };
+
+        for _ in 0..2 {
+            let conn = manager.db_pool.get().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            db::enqueue_fs_actions(&tx, std::slice::from_ref(&action)).unwrap();
+            tx.commit().unwrap();
+            drop(conn);
+            manager.run_owed_fs_actions();
+        }
+
+        assert!(!on_disk.exists());
+        assert!(db::pending_fs_actions(&manager.db_pool.get().unwrap()).unwrap().is_empty());
+    }
+
+    /// One unreadable row must not become a second wedge: everything queued
+    /// behind it still owes the disk.
+    #[test]
+    fn an_unreadable_owed_action_is_discarded_without_blocking_the_rest() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        let (dir_id, content_hash, on_disk) = seed_tombstoned_placement(&manager, "Shelf", "book.epub");
+
+        {
+            let conn = manager.db_pool.get().unwrap();
+            conn.execute("INSERT INTO pending_fs_action(action, created_at) VALUES(?1, 1)", [b"not a decodable action".to_vec()]).unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            db::enqueue_fs_actions(&tx, &[db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() }]).unwrap();
+            tx.commit().unwrap();
+        }
+
+        manager.run_owed_fs_actions();
+
+        assert!(!on_disk.exists(), "work queued behind an unreadable row still runs");
+        assert!(db::pending_fs_actions(&manager.db_pool.get().unwrap()).unwrap().is_empty());
+    }
+
+    /// Directory removals are recorded deepest first, so a parent is never
+    /// asked to vanish while a child it still contains is queued behind it.
+    #[test]
+    fn owed_directory_removals_are_recorded_deepest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        let parent = manager.library_root.join("Shelf");
+        let child = parent.join("Sub");
+        std::fs::create_dir_all(&child).unwrap();
+
+        {
+            let conn = manager.db_pool.get().unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut paths = vec![RelativeDirPath::parse("/Shelf").unwrap(), RelativeDirPath::parse("/Shelf/Sub").unwrap()];
+            paths.sort_by_key(|path| std::cmp::Reverse(path.as_path().components().count()));
+            db::enqueue_fs_actions(&tx, &paths.iter().map(|path| db::FsAction::RemoveDir { path: path.as_str().to_owned() }).collect::<Vec<_>>()).unwrap();
+            tx.commit().unwrap();
+        }
+
+        manager.run_owed_fs_actions();
+
+        assert!(!child.exists(), "the child directory is removed");
+        assert!(!parent.exists(), "and the parent it emptied can then be removed too");
     }
 
     fn test_manager(root: &Path) -> SyncManager {
@@ -1979,7 +2215,9 @@ mod tests {
             let conn = manager.db_pool.get().unwrap();
             conn.execute("UPDATE dir SET name='New' WHERE id=?1", [dir_id_text.as_str()]).unwrap();
         }
-        manager.materialize_remote_dir_upserts(&[DirUpsertMaterialization::Move { dir_id, old_path: RelativeDirPath::parse("Old").unwrap(), new_path: RelativeDirPath::parse("New").unwrap() }]);
+        manager
+            .run_fs_action(&manager.db_pool.get().unwrap(), &db::FsAction::MoveDir { dir_id: dir_id.to_string(), old_path: "Old".to_owned(), new_path: "New".to_owned() })
+            .expect("a synchronized directory move relocates the folder");
 
         assert!(!temp.path().join("Old").exists());
         assert_eq!(std::fs::read_to_string(temp.path().join("New").join(".biblos_uuid")).unwrap(), dir_id_text);
@@ -2002,7 +2240,11 @@ mod tests {
         std::fs::write(temp.path().join("A").join(".biblos_uuid"), "a").unwrap();
         std::fs::write(temp.path().join("A").join("B").join(".biblos_uuid"), "b").unwrap();
 
-        manager.materialize_remote_dir_deletes(&[RelativeDirPath::parse("A").unwrap(), RelativeDirPath::parse("A/B").unwrap()]);
+        // Recorded deepest first, the order `pull_events_from_server_with_first`
+        // enqueues them in.
+        for path in ["A/B", "A"] {
+            manager.remove_remote_dir(&RelativeDirPath::parse(path).unwrap());
+        }
 
         assert!(!temp.path().join("A").exists());
     }
@@ -2017,7 +2259,7 @@ mod tests {
         std::fs::write(dir.join(".biblos_uuid"), "a").unwrap();
         std::fs::write(dir.join("stray.txt"), "user file").unwrap();
 
-        manager.materialize_remote_dir_deletes(&[RelativeDirPath::parse("A").unwrap()]);
+        manager.remove_remote_dir(&RelativeDirPath::parse("A").unwrap());
 
         assert!(dir.exists(), "non-empty dir should not be removed");
         assert!(dir.join(".biblos_uuid").exists(), "marker must survive so scanner keeps existing identity");
