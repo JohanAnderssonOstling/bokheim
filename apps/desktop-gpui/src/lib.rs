@@ -69,10 +69,10 @@ fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, _: &mut App) 
 pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &mut App) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(error) = cx.text_system().add_fonts(vec![
-        Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/NotoSans-Regular.ttf")),
-        Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/NotoSans-Bold.ttf")),
-        Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/LibertinusSerif-Regular.otf")),
-        Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/LibertinusSerif-Bold.otf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/NotoSans-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/NotoSans-Bold.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Regular.otf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Bold.otf")),
         #[cfg(feature = "kobo")]
         Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/TerminusTTF-Regular.ttf")),
         #[cfg(feature = "kobo")]

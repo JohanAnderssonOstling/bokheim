@@ -253,6 +253,45 @@ fn subject_scope_includes_books_assigned_to_descendant_subjects() {
 }
 
 #[test]
+fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO unified_concept(concept_id,preferred_label,status,introduced_version) VALUES
+            ('test:us','United States','active','test'),
+            ('test:texas','Texas','active','test'),
+            ('test:austin','Austin','active','test'),
+            ('test:dallas','Dallas','active','test'),
+            ('test:empty','Empty','active','test');
+         INSERT INTO unified_concept_route(path,concept_id,parent_path,label) VALUES
+            ('Test / United States','test:us','Test','United States'),
+            ('Test / United States / Texas','test:texas','Test / United States','Texas'),
+            ('Test / United States / Texas / Austin','test:austin','Test / United States / Texas','Austin'),
+            ('Test / United States / Texas / Dallas','test:dallas','Test / United States / Texas','Dallas'),
+            ('Test / Empty','test:empty','Test','Empty');
+         INSERT INTO book(content_hash,title,format) VALUES
+            (printf('%064x',101),'Austin book','epub'),
+            (printf('%064x',102),'Dallas book','epub');
+         INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) VALUES
+            ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',101)),'austin.epub','austin'),
+            ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'dallas.epub','dallas');
+         INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',101)),'test:austin',1),
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'test:dallas',1);",
+    )
+    .unwrap();
+
+    let scope = FileTypeScope::load(&conn, app_contract::library::LibraryFileTypeFilter::All).unwrap();
+    let (root_children, root_books) = compact_subject_children(&conn, "Test", false, &scope).unwrap();
+    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas"]);
+    assert!(root_books.is_empty());
+
+    let (texas_children, texas_books) = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
+    assert!(texas_children.is_empty());
+    assert_eq!(texas_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Austin book", "Dallas book"]);
+}
+
+#[test]
 fn unified_taxonomy_graph_rejects_cycles() {
     let conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();

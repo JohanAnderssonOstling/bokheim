@@ -482,12 +482,32 @@ mod tests {
     }
 
     const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
+    const LWW_MIGRATION_SQL: &str = include_str!("../schema/migrations/15_lww_loser_republish.sql");
 
     #[test]
     fn postgres_winner_order_begins_with_wall_clock_time() {
         let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
         assert!(comparison.trim_start().starts_with("NEW.changed_at,"));
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
+    }
+
+    /// A fresh install gets the merge guard from the v14 baseline while an
+    /// already-deployed database gets it from the migration, so the two bodies
+    /// must not drift: a server left on the older one silently discards losing
+    /// pushes and strands their author on a value nothing will ever correct.
+    #[test]
+    fn the_upgrade_path_installs_the_same_merge_guard_as_the_baseline() {
+        fn guard_body(sql: &str) -> &str {
+            let start = sql.find("FUNCTION enforce_lww_order()").expect("merge guard definition");
+            let body = &sql[start..];
+            &body[..body.find("\n$$;").expect("merge guard terminator")]
+        }
+
+        assert_eq!(guard_body(LWW_MIGRATION_SQL), guard_body(LWW_TRIGGER_SQL));
+        assert!(LWW_MIGRATION_SQL.contains("CREATE OR REPLACE FUNCTION enforce_lww_order()"), "an already-deployed database must replace its installed guard");
+        // The runner wraps every migration in one transaction and takes the
+        // schema advisory lock itself.
+        assert!(!LWW_MIGRATION_SQL.contains("BEGIN;") && !LWW_MIGRATION_SQL.contains("COMMIT;"), "a migration must not manage its own transaction");
     }
 
     #[tokio::test]
