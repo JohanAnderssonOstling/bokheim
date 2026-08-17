@@ -11,7 +11,8 @@ pub const MAX_ISBNS_PER_REQUEST: usize = 256;
 pub const MAX_EDITION_QUERIES_PER_REQUEST: usize = 128;
 
 mod protobuf_v2 {
-    include!(concat!(env!("OUT_DIR"), "/bokheim.metadata.v2.rs"));
+    // Generated from proto/metadata_v2.proto by prost-build 0.14.4.
+    include!("bokheim.metadata.v2.rs");
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

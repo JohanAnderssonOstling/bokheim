@@ -290,6 +290,24 @@ fn encode_thumbnail(decoded: RgbImage) -> ThumbnailResult<Vec<u8>> {
     encode_jpeg(destination.buffer(), THUMBNAIL_WIDTH, destination_height)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_bmp_cover_is_normalized_to_jpeg() {
+        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 3, image::Rgb([24, 96, 192])));
+        let mut bmp = Cursor::new(Vec::new());
+        source.write_to(&mut bmp, ImageFormat::Bmp).unwrap();
+
+        let thumbnail = generate_thumbnail_from_image_bytes(bmp.get_ref()).unwrap();
+
+        assert_eq!(image::guess_format(&thumbnail).unwrap(), ImageFormat::Jpeg);
+        let decoded = image::load_from_memory(&thumbnail).unwrap();
+        assert_eq!(decoded.to_rgb8().dimensions(), (THUMBNAIL_WIDTH, 900));
+    }
+}
+
 fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> ThumbnailResult<Vec<u8>> {
     let mut encoded = BufWriter::new(Vec::new());
     JpegEncoder::new(&mut encoded).write_image(rgb, width, height, ColorType::Rgb8)?;

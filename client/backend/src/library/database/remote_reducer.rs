@@ -1,6 +1,6 @@
 use super::*;
 use library_model::{BookFormat, DirectoryLifecycleState};
-use library_replica::{DirectoryIntent, project_directories};
+use library_replica::{project_directories, DirectoryIntent};
 
 /// Applies one remote change. Returns the placement to delete locally when the
 /// change was a removal that won the LWW gate; `None` otherwise.

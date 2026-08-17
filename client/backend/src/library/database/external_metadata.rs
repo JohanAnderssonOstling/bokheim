@@ -1,5 +1,5 @@
 use super::*;
-use library_model::{PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationSubject, canonical_isbn};
+use library_model::{canonical_isbn, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationSubject};
 use metadata_contract::{EditionIdentityMatch, EditionTitleMatch, EntitySource, PersonEntity, PlaceEntity, RichWorkMetadataMatch};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;

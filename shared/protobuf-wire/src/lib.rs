@@ -148,7 +148,8 @@ fn domain_value(value: protobuf::Value) -> Result<serde_value::Value, WireError>
 }
 
 pub mod protobuf {
-    include!(concat!(env!("OUT_DIR"), "/bokheim.wire.v14.rs"));
+    // Generated from proto/bokheim_wire.proto by prost-build 0.14.4.
+    include!("bokheim.wire.v14.rs");
 }
 
 /// Encodes one typed mutation value without the generic transport envelope.

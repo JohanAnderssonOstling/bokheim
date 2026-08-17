@@ -1,8 +1,8 @@
 //! Persistent semantic relationships between books in a library.
 
-use crate::ContentHash;
 use crate::app::BackendError;
 use crate::library::LibraryBackend;
+use crate::ContentHash;
 pub use app_contract::semantic_links::BookLink;
 use rusqlite::Connection;
 

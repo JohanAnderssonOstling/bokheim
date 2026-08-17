@@ -525,60 +525,71 @@ impl Render for AudiobookPlayer {
             )
             .child(div().id("chapter-scroll").flex_1().min_h_0().overflow_y_scrollbar().px(px(10.0)).py(px(10.0)).child(chapter_list))
             .child(
-                div().flex_none().relative().w_full().px(px(24.0)).pt(px(15.0)).pb(px(17.0)).bg(theme.surface).border_t_1().border_color(theme.border).child(
-                    div()
-                        .relative()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .child(transport_control("previous-chapter", chapter_icon(false, theme), theme).on_click(move |_, _, cx| {
-                            let _ = previous_chapter_target.update(cx, |this, cx| {
-                                this.previous_chapter();
-                                cx.notify();
-                            });
-                        }))
-                        .child(transport_control("seek-back", skip_icon(false, "15"), theme).on_click(move |_, _, cx| {
-                            let _ = back_target.update(cx, |this, cx| {
-                                this.seek_by(-15.0);
-                                cx.notify();
-                            });
-                        }))
-                        .child(
-                            transport_control("toggle-play", Icon::new(if playing { IconName::Pause } else { IconName::Play }).size(px(22.0)), theme)
-                                .size(px(56.0))
-                                .bg(theme.accent)
-                                .text_color(theme.page_bg)
-                                .hover(|style| style.bg(theme.accent).text_color(theme.page_bg))
-                                .on_click(move |_, _, cx| {
-                                    let _ = play_target.update(cx, |this, cx| {
-                                        this.toggle_playback();
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(transport_control("seek-forward", skip_icon(true, "30"), theme).on_click(move |_, _, cx| {
-                            let _ = forward_target.update(cx, |this, cx| {
-                                this.seek_by(30.0);
-                                cx.notify();
-                            });
-                        }))
-                        .child(transport_control("next-chapter", chapter_icon(true, theme), theme).on_click(move |_, _, cx| {
-                            let _ = next_chapter_target.update(cx, |this, cx| {
-                                this.next_chapter();
-                                cx.notify();
-                            });
-                        }))
-                        .child(div().absolute().right_0().bottom(px(4.0)).when(self.speed_menu_open, |wrapper| wrapper.child(speed_menu)).child(speed_control(format_playback_rate(current_rate), self.speed_menu_open, theme).on_click(
-                            move |_, _, cx| {
-                                let _ = rate_target.update(cx, |this, cx| {
-                                    this.toggle_speed_menu();
+                div()
+                    .flex_none()
+                    .relative()
+                    .w_full()
+                    .px(px(24.0))
+                    .pt(px(15.0))
+                    .pb(px(17.0))
+                    .bg(theme.surface)
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(6.0))
+                            .child(transport_control("previous-chapter", chapter_icon(false, theme), theme).on_click(move |_, _, cx| {
+                                let _ = previous_chapter_target.update(cx, |this, cx| {
+                                    this.previous_chapter();
                                     cx.notify();
                                 });
-                            },
-                        ))),
-                ).child(div().mt(px(8.0)).child(progress_row)),
+                            }))
+                            .child(transport_control("seek-back", skip_icon(false, "15"), theme).on_click(move |_, _, cx| {
+                                let _ = back_target.update(cx, |this, cx| {
+                                    this.seek_by(-15.0);
+                                    cx.notify();
+                                });
+                            }))
+                            .child(
+                                transport_control("toggle-play", Icon::new(if playing { IconName::Pause } else { IconName::Play }).size(px(22.0)), theme)
+                                    .size(px(56.0))
+                                    .bg(theme.accent)
+                                    .text_color(theme.page_bg)
+                                    .hover(|style| style.bg(theme.accent).text_color(theme.page_bg))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = play_target.update(cx, |this, cx| {
+                                            this.toggle_playback();
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .child(transport_control("seek-forward", skip_icon(true, "30"), theme).on_click(move |_, _, cx| {
+                                let _ = forward_target.update(cx, |this, cx| {
+                                    this.seek_by(30.0);
+                                    cx.notify();
+                                });
+                            }))
+                            .child(transport_control("next-chapter", chapter_icon(true, theme), theme).on_click(move |_, _, cx| {
+                                let _ = next_chapter_target.update(cx, |this, cx| {
+                                    this.next_chapter();
+                                    cx.notify();
+                                });
+                            }))
+                            .child(div().absolute().right_0().bottom(px(4.0)).when(self.speed_menu_open, |wrapper| wrapper.child(speed_menu)).child(speed_control(format_playback_rate(current_rate), self.speed_menu_open, theme).on_click(
+                                move |_, _, cx| {
+                                    let _ = rate_target.update(cx, |this, cx| {
+                                        this.toggle_speed_menu();
+                                        cx.notify();
+                                    });
+                                },
+                            ))),
+                    )
+                    .child(div().mt(px(8.0)).child(progress_row)),
             )
             .when_some(self.error.clone(), |column, error| column.child(div().absolute().left(px(16.0)).right(px(16.0)).top(px(16.0)).p(px(10.0)).rounded(px(0.0)).bg(theme.accent_soft).text_color(theme.danger).child(error)))
     }
@@ -626,14 +637,7 @@ impl Render for AudiobookDock {
 
         let (publication, error, playing, position, current_rate, speed_menu_open) = {
             let player = self.player.read(cx);
-            (
-                player.publication.clone(),
-                player.error.clone(),
-                player.is_playing(),
-                player.position(),
-                player.controller.as_ref().map(PlaybackController::rate).unwrap_or(1.0),
-                player.speed_menu_open,
-            )
+            (player.publication.clone(), player.error.clone(), player.is_playing(), player.position(), player.controller.as_ref().map(PlaybackController::rate).unwrap_or(1.0), player.speed_menu_open)
         };
 
         let Some(book) = publication else {

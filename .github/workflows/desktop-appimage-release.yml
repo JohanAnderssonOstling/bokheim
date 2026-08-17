@@ -79,7 +79,6 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             pkg-config \
-            protobuf-compiler \
             zsync
 
       - name: Install Rust

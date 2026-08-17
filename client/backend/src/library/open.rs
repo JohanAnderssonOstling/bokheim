@@ -1,13 +1,13 @@
 //! Opens one library and constructs the resources owned by its handle.
 
 use super::LibraryBackend;
-use crate::LibraryId;
 use crate::app::{AppBackend, BackendContext};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryScanner;
 use crate::sync::SyncManager;
+use crate::LibraryId;
 use crate::{ServerUrl, ServerUrlError};
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{unbounded, Receiver};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::fs;

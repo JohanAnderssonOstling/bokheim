@@ -62,14 +62,14 @@ pub(crate) fn generate_content_hash_blake3(path: &Path, _buf: &mut [u8]) -> std:
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthorSort, AuthorSummary, Dir, FolderSort, generate_content_hash_blake3, generate_thumbnail_for_sync};
+    use super::{generate_content_hash_blake3, generate_thumbnail_for_sync, AuthorSort, AuthorSummary, Dir, FolderSort};
     use crate::app::{AppBackend, AppDataLocation, BackendContext};
-    use crate::library::LibraryBackend;
     use crate::library::database as db;
+    use crate::library::LibraryBackend;
     use crate::{ContentHash, DownloadState};
     use image::{DynamicImage, ImageOutputFormat};
-    use library_model::{AuthorId, agent_id_from_migration_seed};
-    use lopdf::{Document, Object, Stream, dictionary};
+    use library_model::{agent_id_from_migration_seed, AuthorId};
+    use lopdf::{dictionary, Document, Object, Stream};
     use std::io::{Cursor, Write};
     use std::path::Path;
     use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id};

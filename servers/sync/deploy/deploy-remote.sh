@@ -66,11 +66,13 @@ cargo build --release --manifest-path "${repository_root}/Cargo.toml" -p metadat
 sync_binary=${repository_root}/servers/sync/target/release/sync-server
 catalog_binary=${repository_root}/target/release/catalog-server
 metadata_binary=${repository_root}/target/release/metadata-server
-for required in "${sync_binary}" "${catalog_binary}" "${metadata_binary}" "${repository_root}/servers/opds-cache/opds.json" "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${repository_root}/servers/metadata/deploy/bokheim-metadata.service"; do
-    if [[ ! -x ${required} && ${required} != *.json ]]; then
-        echo "missing release artifact: ${required}" >&2
+for required in "${sync_binary}" "${catalog_binary}" "${metadata_binary}"; do
+    if [[ ! -x ${required} ]]; then
+        echo "missing executable release artifact: ${required}" >&2
         exit 1
     fi
+done
+for required in "${repository_root}/servers/opds-cache/opds.json" "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${repository_root}/servers/metadata/deploy/bokheim-metadata.service"; do
     if [[ ! -f ${required} ]]; then
         echo "missing deployment file: ${required}" >&2
         exit 1

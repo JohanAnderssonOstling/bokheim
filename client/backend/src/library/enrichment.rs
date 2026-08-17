@@ -1,7 +1,7 @@
-use crate::ContentHash;
 use crate::app::BackendError;
-use crate::library::LibraryBackend;
 use crate::library::database as db;
+use crate::library::LibraryBackend;
+use crate::ContentHash;
 use book_metadata::external::{ExternalClassificationScheme, ExternalMetadataProviders, ExternalSubjectScheme};
 use book_metadata::library_of_congress::LibraryOfCongressProvider;
 use library_model::PublicationSubject;
@@ -994,7 +994,7 @@ fn provider_subjects(provider_id: &str, record: book_metadata::external::Externa
 #[cfg(test)]
 mod tests {
     use super::{
-        LibraryThingWorkEvidence, collect_alternative_edition_evidence, edition_identity_title_author_and_year, global_alternative_edition_consensus, isbn_from_filename_like_title, librarything_classification_consensus, merge_rich_matches,
+        collect_alternative_edition_evidence, edition_identity_title_author_and_year, global_alternative_edition_consensus, isbn_from_filename_like_title, librarything_classification_consensus, merge_rich_matches, LibraryThingWorkEvidence,
     };
     use metadata_contract::{Classification, ClassificationScheme, ClassificationSource, EntityReference, EntitySource, RichWorkMetadataMatch};
     use std::collections::BTreeSet;

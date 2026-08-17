@@ -62,7 +62,11 @@ fn sanitize_stem(value: &str) -> String {
         }
     }
     let output = output.trim().trim_end_matches('.').trim().to_owned();
-    if is_reserved(&output) { String::new() } else { output }
+    if is_reserved(&output) {
+        String::new()
+    } else {
+        output
+    }
 }
 
 fn is_reserved(value: &str) -> bool {

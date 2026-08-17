@@ -4,7 +4,7 @@
 //! filesystem projection. Local failures are rolled back before returning;
 //! destructive files are staged until their SQLite transaction commits.
 
-use super::{LibraryBackend, LibraryFolderDestination, LibraryTrashView, TrashedBook, TrashedFolder, database as db, filenames};
+use super::{database as db, filenames, LibraryBackend, LibraryFolderDestination, LibraryTrashView, TrashedBook, TrashedFolder};
 use crate::{BlobKind, ContentHash, DirId};
 use rusqlite::{OptionalExtension, Transaction};
 use std::collections::HashSet;

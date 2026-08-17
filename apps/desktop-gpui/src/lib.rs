@@ -239,7 +239,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         }
         #[cfg(feature = "audiobooks")]
         if library.is_audiobook(locator.content_hash()).unwrap_or(false) {
-            let requested_position = initial_target.as_deref().and_then(app_contract::library::audiobook_toc_position).map(Duration::from_millis);
+            let requested_position = initial_target.as_deref().and_then(epub_svelte_lib::library::audiobook_toc_position).map(Duration::from_millis);
             let request_generation = audiobook_request_generation.get().wrapping_add(1);
             audiobook_request_generation.set(request_generation);
             let active_request_generation = audiobook_request_generation.clone();

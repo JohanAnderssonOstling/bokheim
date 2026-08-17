@@ -1,10 +1,10 @@
 // `include_sql!` generates query methods with one argument per SQL parameter.
 #![allow(clippy::too_many_arguments)]
 
-use crate::RelativeDirPath;
 use crate::catalog::{CatalogPublicationIdentity, CatalogSourceId};
 use crate::library::Dir;
 use crate::sync::transfer::TransferOrigin;
+use crate::RelativeDirPath;
 use crate::{BlobKind, BookPlacement, ContentHash, RelativeBookPath};
 use crate::{EpubCfi, ReadProgress};
 pub(crate) use app_contract::library::BookCardRow;
@@ -16,11 +16,11 @@ use library_model::BookFormat;
 #[cfg(test)]
 use library_model::MarcRelatorCode;
 use library_model::{
-    AgentId, AuthorId, BISAC_MATCHER_VERSION, Contributor, DDC_MATCHER_VERSION, DDC_SYSTEM_ID, DDC_VERSION, ExternalAuthorId, LCC_MATCHER_VERSION, LCC_SYSTEM_ID, LCC_VERSION, PublicationIdentifierScheme, PublicationMetadata,
-    PublicationSubject, PublisherCredit, UNIFIED_MATCHER_VERSION, UNIFIED_SYSTEM_ID, bisac_subject_system, ddc_subject_path, lcc_subject_path,
+    bisac_subject_system, ddc_subject_path, lcc_subject_path, AgentId, AuthorId, Contributor, ExternalAuthorId, PublicationIdentifierScheme, PublicationMetadata, PublicationSubject, PublisherCredit, BISAC_MATCHER_VERSION,
+    DDC_MATCHER_VERSION, DDC_SYSTEM_ID, DDC_VERSION, LCC_MATCHER_VERSION, LCC_SYSTEM_ID, LCC_VERSION, UNIFIED_MATCHER_VERSION, UNIFIED_SYSTEM_ID,
 };
 use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, DirectoryLifecycleState, PdfAnnotationAnchor, PdfAnnotationRect, ReadingPositionState};
-use library_replica::{MutationBody, StateMutation, VersionKey, catalog_publication_state_subkey};
+use library_replica::{catalog_publication_state_subkey, MutationBody, StateMutation, VersionKey};
 use rusqlite::functions::{Context as FunctionContext, FunctionFlags};
 use rusqlite::types::Type;
 use rusqlite::{Connection, Transaction};
@@ -77,9 +77,9 @@ use assets::materialize_dir_components_with_markers;
 use books::read_book_card_row;
 
 pub(crate) use external_metadata::{
-    AuthorEnrichmentCandidate, EditionIdentityCandidate, RichEnrichmentCandidate, apply_alternative_edition_isbns, apply_author_enrichment, apply_edition_identity, apply_external_subjects, apply_filename_isbn,
-    apply_manual_edition_identity, apply_reviewed_edition_identity, apply_rich_enrichment, author_enrichment_candidates, edition_identity_candidate, edition_identity_candidates, edition_identity_reviews, record_external_metadata_attempt,
-    record_external_metadata_failures, reject_edition_identity_candidates, rich_enrichment_candidates, subject_enrichment_candidates, update_edition_identity_candidate_classifications,
+    apply_alternative_edition_isbns, apply_author_enrichment, apply_edition_identity, apply_external_subjects, apply_filename_isbn, apply_manual_edition_identity, apply_reviewed_edition_identity, apply_rich_enrichment,
+    author_enrichment_candidates, edition_identity_candidate, edition_identity_candidates, edition_identity_reviews, record_external_metadata_attempt, record_external_metadata_failures, reject_edition_identity_candidates,
+    rich_enrichment_candidates, subject_enrichment_candidates, update_edition_identity_candidate_classifications, AuthorEnrichmentCandidate, EditionIdentityCandidate, RichEnrichmentCandidate,
 };
 pub(crate) use remote_reducer::apply_remote_change_in_tx;
 
@@ -708,15 +708,15 @@ pub(crate) use browse::{get_book_ancestor_dir_ids, get_descendant_content_hashes
 
 mod catalog;
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
-pub(crate) use browse::{KnownDirectory, KnownDirectoryState, get_known_directories_for_scan, get_known_directory_scan_state, is_book_file_tombstoned};
+pub(crate) use browse::{get_known_directories_for_scan, get_known_directory_scan_state, is_book_file_tombstoned, KnownDirectory, KnownDirectoryState};
 pub(crate) use catalog::{catalog_recommendation_request, catalog_subject_recommendation_request, owned_catalog_publications, record_catalog_publication};
 
 /// Local and remote asset state, paths, and durable download intent.
 pub(crate) mod assets;
 pub(crate) use assets::{
-    BookPath, add_asset_request, book_placement_expects_hash, complete_asset_request, forget_remote_asset, get_asset_requests, get_blob_local_path, get_book_assets, get_book_dir_entry_by_path, get_book_file_path, get_book_format,
-    get_book_hashes, get_book_paths_by_content_hash, get_live_dir_paths_tx, get_locally_present_blob_hashes, get_remote_asset_hashes, is_blob_local, is_book_download_requested, is_book_downloaded, local_file_fingerprint,
-    materialize_dir_parent_with_markers, materialize_dir_with_markers, materialize_download_path, record_remote_asset, resolve_removed_book_dir, stamp_book_dir_local_hash_by_rel_path, upsert_blob_local_ref,
+    add_asset_request, book_placement_expects_hash, complete_asset_request, forget_remote_asset, get_asset_requests, get_blob_local_path, get_book_assets, get_book_dir_entry_by_path, get_book_file_path, get_book_format, get_book_hashes,
+    get_book_paths_by_content_hash, get_live_dir_paths_tx, get_locally_present_blob_hashes, get_remote_asset_hashes, is_blob_local, is_book_download_requested, is_book_downloaded, local_file_fingerprint,
+    materialize_dir_parent_with_markers, materialize_dir_with_markers, materialize_download_path, record_remote_asset, resolve_removed_book_dir, stamp_book_dir_local_hash_by_rel_path, upsert_blob_local_ref, BookPath,
 };
 
 /// Durable reader progress for EPUB, PDF, and audiobook formats.
@@ -728,13 +728,13 @@ pub(crate) use reading::{update_pdf_reading_page, update_reading_position};
 /// Synchronization outbox, scan generations, tombstones, and filesystem work.
 pub(crate) mod sync_state;
 pub(crate) use sync_state::{
-    FsAction, LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, complete_fs_action, enqueue_fs_actions, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata,
-    next_scan_id, pending_fs_actions, rebind_sync_account, set_pull_cursor, set_sync_metadata, state_inventory,
+    acknowledge_mutations, complete_fs_action, enqueue_fs_actions, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata, next_scan_id, pending_fs_actions, rebind_sync_account,
+    set_pull_cursor, set_sync_metadata, state_inventory, FsAction, LibrarySyncDetails, RemovedBookDir,
 };
-#[cfg(test)]
-pub(crate) use sync_state::{OutboxReadError, OutboxRow, decode_outbox_row};
 #[cfg(any(test, all(feature = "scanner", not(target_os = "android"))))]
 pub(crate) use sync_state::{count_pending_vanish_candidates, mark_vanished_book_dirs_unavailable};
+#[cfg(test)]
+pub(crate) use sync_state::{decode_outbox_row, OutboxReadError, OutboxRow};
 
 /// Typed book-card read models.
 pub(crate) mod books;

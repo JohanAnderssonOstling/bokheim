@@ -1,7 +1,7 @@
 //! Generates and atomically publishes UI and synchronized book covers.
 
-use crate::ContentHash;
 use crate::app::BackendContext;
+use crate::ContentHash;
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};

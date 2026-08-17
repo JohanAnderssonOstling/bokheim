@@ -10,6 +10,3 @@ workspace = true
 [dependencies]
 prost = "0.14.4"
 serde = { version = "1", features = ["derive"] }
-
-[build-dependencies]
-prost-build = "0.14.4"

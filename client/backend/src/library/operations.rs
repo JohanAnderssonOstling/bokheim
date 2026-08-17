@@ -2,7 +2,7 @@
 
 use super::covers::generate_thumbnail_for_sync;
 use super::handle::LibraryBackend;
-use super::model::{Dir, LibraryAccountState, ReaderFormat, ResolvedBook, generate_content_hash_blake3};
+use super::model::{generate_content_hash_blake3, Dir, LibraryAccountState, ReaderFormat, ResolvedBook};
 use crate::app::BackendError;
 use crate::catalog::{CatalogPublicationIdentity, CatalogSourceId};
 use crate::library::database as db;
@@ -46,11 +46,12 @@ impl LibraryBackend {
             let conn = self.db.get()?;
             let is_audiobook = matches!(db::get_book_format(&conn, &content_hash)?, Some(BookFormat::M4b));
             drop(conn);
-            if is_audiobook
-                && let Some(path) = self.local_book_path(content_hash.clone())?
-                && generate_thumbnail_for_sync(&self.context, &self.library_root, &path, &content_hash)?
-            {
-                bytes = self.context.try_get_thumbnail(content_hash)?;
+            if is_audiobook {
+                if let Some(path) = self.local_book_path(content_hash.clone())? {
+                    if generate_thumbnail_for_sync(&self.context, &self.library_root, &path, &content_hash)? {
+                        bytes = self.context.try_get_thumbnail(content_hash)?;
+                    }
+                }
             }
         }
         Ok(bytes)

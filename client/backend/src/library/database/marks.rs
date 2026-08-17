@@ -1,11 +1,11 @@
 //! Persistent reader annotations and bookmarks for a library.
 
-use crate::ContentHash;
 use crate::app::BackendError;
 use crate::library::LibraryBackend;
+use crate::ContentHash;
 pub use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use include_sqlite_sql::{impl_sql, include_sql};
-use rusqlite::{Connection, Row, types::Type};
+use rusqlite::{types::Type, Connection, Row};
 
 include_sql!("src/library/database/sql/annotations.sql");
 include_sql!("src/library/database/sql/bookmarks.sql");
