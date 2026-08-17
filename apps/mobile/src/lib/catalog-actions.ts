@@ -1,4 +1,5 @@
 import type { CatalogBookFormat, CatalogPublicationAction } from "./bindings";
+import { isNativeApp } from "./platform";
 
 type CatalogOwnershipStatus = "not_owned" | "exact_edition_owned" | "other_edition_owned";
 
@@ -6,6 +7,11 @@ const formatLabel = (format: CatalogBookFormat) => format === "web_pub" ? "WebPu
 
 export function catalogActionKey(action: CatalogPublicationAction) {
   return action.kind === "import" ? `import:${action.request.source_id}:${action.request.publication.edition_id}:${action.request.book_format}:${action.request.download_url}` : `external:${action.purpose}:${action.url}`;
+}
+
+export function primaryCatalogAction(actions: CatalogPublicationAction[]): CatalogPublicationAction | undefined {
+  return actions.find((action) => action.kind === "import" && (isNativeApp || action.request.book_format === "epub" || action.request.book_format === "pdf"))
+    ?? actions.find((action) => action.kind === "external");
 }
 
 export function catalogActionLabel(action: CatalogPublicationAction, ownership: CatalogOwnershipStatus, libraryName: string) {

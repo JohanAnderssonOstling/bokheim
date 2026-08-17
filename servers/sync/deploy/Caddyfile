@@ -21,6 +21,38 @@
 	reverse_proxy unix//run/bokheim/sync.sock
 }
 
+{$BOKHEIM_APP_DOMAIN:app.bokheim.se} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy unix//run/bokheim/sync.sock
+	}
+
+	redir /admin /admin/
+
+	handle_path /admin/* {
+		header {
+			Cache-Control "no-store"
+			Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		}
+		root * /usr/local/share/bokheim-web/current/admin
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		root * /usr/local/share/bokheim-web/current
+		try_files {path} /index.html
+		file_server
+	}
+}
+
 {$BOKHEIM_CATALOG_DOMAIN} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -28,4 +60,19 @@
 	}
 
 	reverse_proxy 127.0.0.1:8090
+}
+
+{$BOKHEIM_METADATA_DOMAIN:meta.bokheim.se} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	@metadata_api path /health /v1/enrichment /v2/enrichment /v2/edition-identities
+	handle @metadata_api {
+		reverse_proxy 127.0.0.1:8091
+	}
+
+	respond 404
 }

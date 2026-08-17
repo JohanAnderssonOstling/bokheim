@@ -1,6 +1,6 @@
-import { FRONTEND_CONTRACT as GENERATED_FRONTEND_CONTRACT } from "./bindings";
-import type { LocalLibraryStorageUsage as GeneratedLocalLibraryStorageUsage, ServerLibraryStorageUsage as GeneratedServerLibraryStorageUsage } from "./bindings";
-import type { AccountContract as GeneratedAccountContract, AccountSessionSummary as GeneratedAccountSessionSummary, AccountStatus as GeneratedAccountStatus, AccountStorageUsage as GeneratedAccountStorageUsage, ApplicationAppearance as GeneratedApplicationAppearance, ApplicationTheme as GeneratedApplicationTheme, AuthorSort as GeneratedAuthorSort, AuthorSummary as GeneratedAuthorSummary, BookCardRow, BookLink as GeneratedBookLink, BrowsingContentContract as GeneratedBrowsingContentContract, BrowsingPreferencePatch as GeneratedBrowsingPreferencePatch, BrowsingPreferences as GeneratedBrowsingPreferences, BrowsingPreferencesContract as GeneratedBrowsingPreferencesContract, DownloadState as GeneratedDownloadState, FolderDownloadStatus as GeneratedFolderDownloadStatus, FrontendContract as GeneratedFrontendContract, LibraryEntry as GeneratedLibraryEntry, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySearchResult as GeneratedLibrarySearchResult, LibrarySyncStatus as GeneratedLibrarySyncStatus, LibraryTransfers as GeneratedLibraryTransfers, NetworkStatus as GeneratedNetworkStatus, ReaderFlow as GeneratedReaderFlow, ReaderFontFamily as GeneratedReaderFontFamily, ReaderNavigationAction as GeneratedReaderNavigationAction, ReaderNavigationContract as GeneratedReaderNavigationContract, ReaderNavigationKey as GeneratedReaderNavigationKey, ReaderPreferencePatch as GeneratedReaderPreferencePatch, ReaderPreferences as GeneratedReaderPreferences, ReaderPreferencesContract as GeneratedReaderPreferencesContract, ReaderTextAlignment as GeneratedReaderTextAlignment, SettingsContract as GeneratedSettingsContract, TransferPreferencePatch as GeneratedTransferPreferencePatch, TransferPreferences as GeneratedTransferPreferences, UiFontFamily as GeneratedUiFontFamily, WebPreferenceProfile as GeneratedWebPreferenceProfile } from "./bindings";
+import { FRONTEND_CONTRACT as GENERATED_FRONTEND_CONTRACT } from "./bindings.ts";
+import type { LocalLibraryStorageUsage as GeneratedLocalLibraryStorageUsage, ServerLibraryStorageUsage as GeneratedServerLibraryStorageUsage } from "./bindings.ts";
+import type { AccountContract as GeneratedAccountContract, AccountSessionSummary as GeneratedAccountSessionSummary, AccountStatus as GeneratedAccountStatus, AccountStorageUsage as GeneratedAccountStorageUsage, ApplicationAppearance as GeneratedApplicationAppearance, ApplicationTheme as GeneratedApplicationTheme, AuthorSort as GeneratedAuthorSort, AuthorSummary as GeneratedAuthorSummary, BookCardRow, BookLink as GeneratedBookLink, BrowsingContentContract as GeneratedBrowsingContentContract, BrowsingPreferencePatch as GeneratedBrowsingPreferencePatch, BrowsingPreferences as GeneratedBrowsingPreferences, BrowsingPreferencesContract as GeneratedBrowsingPreferencesContract, DownloadState as GeneratedDownloadState, FolderDownloadStatus as GeneratedFolderDownloadStatus, FrontendContract as GeneratedFrontendContract, LibraryEntry as GeneratedLibraryEntry, LibraryFileTypeFilter as GeneratedLibraryFileTypeFilter, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySearchResult as GeneratedLibrarySearchResult, LibrarySyncStatus as GeneratedLibrarySyncStatus, LibraryTransfers as GeneratedLibraryTransfers, NetworkStatus as GeneratedNetworkStatus, ReaderFlow as GeneratedReaderFlow, ReaderFontFamily as GeneratedReaderFontFamily, ReaderNavigationAction as GeneratedReaderNavigationAction, ReaderNavigationContract as GeneratedReaderNavigationContract, ReaderNavigationKey as GeneratedReaderNavigationKey, ReaderPreferencePatch as GeneratedReaderPreferencePatch, ReaderPreferences as GeneratedReaderPreferences, ReaderPreferencesContract as GeneratedReaderPreferencesContract, ReaderTextAlignment as GeneratedReaderTextAlignment, SettingsContract as GeneratedSettingsContract, TransferPreferencePatch as GeneratedTransferPreferencePatch, TransferPreferences as GeneratedTransferPreferences, UiFontFamily as GeneratedUiFontFamily, WebPreferenceProfile as GeneratedWebPreferenceProfile } from "./bindings.ts";
 
 export type LibraryEntry = GeneratedLibraryEntry;
 export type AccountStatus = GeneratedAccountStatus;
@@ -19,6 +19,7 @@ export type BookCardData = BookCardRow;
 export type LibrarySearchResult = GeneratedLibrarySearchResult;
 export type BookLink = GeneratedBookLink;
 export type BrowsingContentContract = GeneratedBrowsingContentContract;
+export type LibraryFileTypeFilter = GeneratedLibraryFileTypeFilter;
 export type DownloadState = GeneratedDownloadState;
 export type FolderDownloadStatus = GeneratedFolderDownloadStatus;
 export type LibraryDirectory = LibraryHierarchyEntry;
@@ -44,7 +45,10 @@ export type WebPreferenceProfile = GeneratedWebPreferenceProfile;
 export type FrontendContract = GeneratedFrontendContract;
 export const FRONTEND_CONTRACT = GENERATED_FRONTEND_CONTRACT;
 export const BOOK_ACTIONS_CONTRACT = FRONTEND_CONTRACT.book_actions;
-export const BROWSING_LAYOUT_CONTRACT = FRONTEND_CONTRACT.browsing_layout;
+export const BROWSING_LAYOUT_CONTRACT = {
+  ...FRONTEND_CONTRACT.browsing_layout,
+  metadata_review_item_height_px: FRONTEND_CONTRACT.browsing_layout.detailed_row_height_px * 2 + 20,
+} as const;
 export const LIBRARY_ACTIONS_CONTRACT = FRONTEND_CONTRACT.library_actions;
 export const STORE_CONTRACT = FRONTEND_CONTRACT.store;
 export const BROWSING_STATES_CONTRACT = FRONTEND_CONTRACT.browsing_states;
@@ -65,12 +69,16 @@ export const DEFAULT_READER_PREFERENCES: ReaderPreferences = { ...READER_PREFERE
 export interface ReaderBook {
   key: string;
   bookId?: string;
-  file: File | string;
+  file: File | string | import("./foliate-range-epub.ts").RemoteEpubSource;
   fileName?: string;
   title: string;
   author?: string;
   initialCfi?: string | null;
+  initialPdfPage?: number | null;
+  /** Publication-native href/destination selected from the detail TOC. */
+  initialTarget?: string;
   saveCfi: (cfi: string, progress: number) => void | Promise<void>;
+  savePdfPage?: (pageIndex: number, progress: number) => void | Promise<void>;
   loadAnnotations?: () => Promise<ReaderAnnotation[]>;
   upsertAnnotation?: (annotation: ReaderAnnotation) => Promise<void>;
   deleteAnnotation?: (annotationId: string, modifiedAt: number) => Promise<void>;
@@ -180,6 +188,7 @@ export interface FoliateRelocateDetail {
 export interface FoliateRenderer extends HTMLElement {
   setStyles?: (css: string) => void;
   getContents?: () => Array<{ doc: Document; index: number }>;
+  render?: () => void;
 }
 
 export interface FoliateView extends HTMLElement {
@@ -192,7 +201,7 @@ export interface FoliateView extends HTMLElement {
     readonly canGoForward: boolean;
   };
   readonly isFixedLayout?: boolean;
-  open: (file: File | Blob | string) => Promise<void>;
+  open: (file: File | Blob | string | FoliateBook) => Promise<void>;
   init: (options?: { lastLocation?: string; showTextStart?: boolean }) => Promise<void>;
   close: () => void;
   goLeft: () => Promise<void> | void;

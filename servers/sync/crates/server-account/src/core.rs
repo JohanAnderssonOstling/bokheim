@@ -45,6 +45,7 @@ pub enum AuthAttempt {
     VerifyEmail,
     RequestPasswordReset,
     ResetPassword,
+    AdminRead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

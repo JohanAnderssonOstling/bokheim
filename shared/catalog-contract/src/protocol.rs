@@ -65,6 +65,7 @@ pub struct CatalogSearchResponse {
     pub query: String,
     pub title_matches: Vec<CatalogPublicationReference>,
     pub author_matches: Vec<CatalogPublicationReference>,
+    pub toc_matches: Vec<CatalogPublicationReference>,
     pub payloads: Vec<CatalogPublicationPayload>,
 }
 

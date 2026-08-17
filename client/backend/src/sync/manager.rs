@@ -42,10 +42,13 @@ pub(crate) struct SyncPolicy {
     pub reading_positions: ReadingPositionSync,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SyncOutcome {
     pub next_reading_upload_in: Option<Duration>,
+    pub deferred_mutations: Vec<sync_common::MutationRejection>,
 }
+
+const CURSOR_RECOVERY_PENDING_KEY: &str = "cursor_recovery_pending";
 
 fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce: Option<Duration>, now: std::time::SystemTime) -> Result<(Vec<StateMutation>, Option<Duration>), Box<dyn std::error::Error>> {
     let Some(reading_debounce) = reading_debounce else {
@@ -68,12 +71,12 @@ fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce:
     Ok((mutations, Some(Duration::from_millis(ready_at - now_millis))))
 }
 
-fn take_push_page(mutations: &mut VecDeque<StateMutation>) -> Result<Vec<StateMutation>, sync_common::wire::WireError> {
+fn take_push_page(mutations: &mut VecDeque<StateMutation>) -> Result<Vec<StateMutation>, sync_common::transport::WireError> {
     let mut page = Vec::with_capacity(sync_common::MAX_PUSH_MUTATIONS.min(mutations.len()));
     let mut encoded_bytes = 0_usize;
     while page.len() < sync_common::MAX_PUSH_MUTATIONS {
         let Some(next) = mutations.front() else { break };
-        let next_bytes = sync_common::wire::encode(next)?.len();
+        let next_bytes = sync_common::transport::encode(next)?.len();
         if !page.is_empty() && encoded_bytes.saturating_add(next_bytes) > sync_common::MAX_PUSH_MUTATION_BYTES {
             break;
         }
@@ -163,13 +166,20 @@ impl SyncManager {
         if session.server_url() != &self.server_url {
             return Err(format!("session belongs to {}, but this library syncs with {}", session.server_url(), self.server_url));
         }
+        let mut rebound = false;
         {
             let conn = self.db_pool.get().map_err(|e| e.to_string())?;
             match db::get_sync_metadata(&conn, "bound_user_id").map_err(|error| error.to_string())? {
-                Some(bound) if bound != session.user_id() => db::rebind_sync_account(&conn, session.user_id()).map_err(|error| error.to_string())?,
+                Some(bound) if bound != session.user_id() => {
+                    db::rebind_sync_account(&conn, session.user_id()).map_err(|error| error.to_string())?;
+                    rebound = true;
+                }
                 Some(_) => {}
                 None => db::set_sync_metadata(&conn, "bound_user_id", session.user_id()).map_err(|error| error.to_string())?,
             }
+        }
+        if rebound {
+            self.inventory_checked.store(false, Ordering::Release);
         }
         crate::auth::save_session_to(&session, &self.session_path).map_err(|error| error.to_string())?;
         let mut guard = self.session.write().map_err(|_| "session lock is poisoned".to_string())?;
@@ -192,7 +202,7 @@ impl SyncManager {
             ReadingPositionSync::Immediate => None,
             ReadingPositionSync::AfterQuietPeriod(duration) => Some(duration),
         };
-        let (signed_in, reading_delay, assets_needed) = self.sync_state_under_gate(reading_debounce).await?;
+        let (signed_in, reading_delay, assets_needed, deferred_mutations) = self.sync_state_under_gate(reading_debounce).await?;
         if !signed_in {
             return Ok(SyncOutcome::default());
         }
@@ -204,7 +214,7 @@ impl SyncManager {
         let completed_at = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
         let conn = self.db_pool.get()?;
         db::set_sync_metadata(&conn, "last_successful_sync_at", &completed_at.to_string())?;
-        Ok(SyncOutcome { next_reading_upload_in: reading_delay })
+        Ok(SyncOutcome { next_reading_upload_in: reading_delay, deferred_mutations })
     }
 
     #[cfg(test)]
@@ -212,32 +222,85 @@ impl SyncManager {
         self.synchronize(SyncPolicy { assets: AssetSync::Transfer(TransferOrigin::Background), reading_positions: ReadingPositionSync::Immediate }).await.map(|_| ())
     }
 
-    async fn sync_state_under_gate(&self, reading_debounce: Option<Duration>) -> Result<(bool, Option<Duration>, bool), Box<dyn std::error::Error>> {
+    async fn sync_state_under_gate(&self, reading_debounce: Option<Duration>) -> Result<(bool, Option<Duration>, bool, Vec<sync_common::MutationRejection>), Box<dyn std::error::Error>> {
         if !self.is_signed_in() {
             // Local-only mode: nothing to push, nothing to pull.
-            return Ok((false, None, false));
+            return Ok((false, None, false, Vec::new()));
         }
         if self.current_session().is_some_and(|session| if session.refresh_token().is_some() { session.refresh_expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) } else { session.expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) }) {
             self.clear_session().map_err(std::io::Error::other)?;
             log::warn!("Authentication credentials expired or are too close to expiry; sign in again before synchronizing");
-            return Ok((false, None, false));
+            return Ok((false, None, false, Vec::new()));
+        }
+
+        let mut recovery_assets_needed = false;
+        if self.cursor_recovery_pending()? {
+            recovery_assets_needed |= self.resume_cursor_recovery().await?;
         }
 
         self.reconcile_state_inventory_once().await?;
 
-        // Get last pull server_seq from metadata
-        let last_pull_server_seq = {
-            let conn = self.db_pool.get()?;
-            match db::get_sync_metadata(&conn, "last_pull_server_seq")? {
-                Some(value) => Some(sync_common::LibraryRevision::new(value.parse::<u64>()?)?),
-                None => None,
-            }
-        };
+        for attempt in 0..2 {
+            let pull_cursor = {
+                let conn = self.db_pool.get()?;
+                db::get_pull_cursor(&conn)?
+            };
 
-        // One authenticated exchange publishes the local outbox and returns the
-        // first incremental page from the resulting committed server snapshot.
-        let (reading_delay, assets_needed) = self.exchange_events_with_server(last_pull_server_seq, reading_debounce).await?;
-        Ok((true, reading_delay, assets_needed))
+            // One authenticated exchange publishes the local outbox and returns
+            // the first incremental page from the resulting committed snapshot.
+            let recover_cursor = {
+                match self.exchange_events_with_server(pull_cursor, reading_debounce).await {
+                    Ok((reading_delay, assets_needed, deferred)) => return Ok((true, reading_delay, recovery_assets_needed | assets_needed, deferred)),
+                    Err(error) if attempt == 0 && Self::sync_error_is_cursor_rejected(error.as_ref()) => true,
+                    Err(error) => return Err(error),
+                }
+            };
+            // Keep the non-Send boxed exchange error in the scope above, so it
+            // is destroyed before cursor recovery crosses another await point.
+            if recover_cursor {
+                self.begin_cursor_recovery()?;
+                recovery_assets_needed |= self.resume_cursor_recovery().await?;
+            }
+        }
+        unreachable!("cursor recovery retry must return")
+    }
+
+    fn sync_error_is_cursor_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
+        error.downcast_ref::<sync_client::AuthError>().is_some_and(sync_client::AuthError::is_cursor_rejected)
+    }
+
+    fn cursor_recovery_pending(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let conn = self.db_pool.get()?;
+        Ok(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY)?.as_deref() == Some("1"))
+    }
+
+    fn begin_cursor_recovery(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.db_pool.get()?;
+        let tx = conn.unchecked_transaction()?;
+        db::set_pull_cursor(&tx, sync_common::SyncCursor::default())?;
+        db::set_sync_metadata(&tx, CURSOR_RECOVERY_PENDING_KEY, "1")?;
+        tx.commit()?;
+        self.inventory_checked.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    async fn resume_cursor_recovery(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        // Pull first so local LWW reduction sees everything retained by the
+        // restored server before canonical local state is republished.
+        let (_, assets_needed) = self.pull_events_from_server_with_first(sync_common::SyncCursor::default(), None).await?;
+        let cells = {
+            let conn = self.db_pool.get()?;
+            db::state_inventory(&conn)?
+        };
+        let inserted = {
+            let mut conn = self.db_pool.get()?;
+            db::enqueue_missing_state_cells(&mut conn, &cells)?
+        };
+        let conn = self.db_pool.get()?;
+        conn.execute("DELETE FROM sync_metadata WHERE key=?1", [CURSOR_RECOVERY_PENDING_KEY])?;
+        self.inventory_checked.store(true, Ordering::Release);
+        log::warn!("Recovered a rejected synchronization cursor and queued {inserted} canonical cells for republishing");
+        Ok(assets_needed)
     }
 
     async fn reconcile_state_inventory_once(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -395,10 +458,11 @@ impl SyncManager {
                 db::complete_asset_request(&conn, BlobKind::Book, &content_hash)?;
                 continue;
             }
-            let Some(job) = self.download_job(&conn, &content_hash, origin)? else {
-                continue;
-            };
-            jobs.push(job);
+            match self.download_job(&conn, &content_hash, origin) {
+                Ok(Some(job)) => jobs.push(job),
+                Ok(None) => {}
+                Err(error) => log::warn!("Skipping invalid requested book download {content_hash}: {error}"),
+            }
         }
 
         if let Some(limit) = self.transfer_runtime.auto_download_limit_bytes() {
@@ -418,8 +482,10 @@ impl SyncManager {
                 if size > limit {
                     continue;
                 }
-                if let Some(job) = self.download_job(&conn, &content_hash, TransferOrigin::Background)? {
-                    jobs.push(job);
+                match self.download_job(&conn, &content_hash, TransferOrigin::Background) {
+                    Ok(Some(job)) => jobs.push(job),
+                    Ok(None) => {}
+                    Err(error) => log::warn!("Skipping invalid automatic book download {content_hash}: {error}"),
                 }
             }
         }
@@ -452,7 +518,10 @@ impl SyncManager {
             self.transfer_runtime.clone(),
             Arc::clone(&self.transfer_queue),
         )
-        .run(jobs, 4)
+        // A single queue consumer makes the priority ordering a strict phase:
+        // synchronized database state is already committed above, thumbnails
+        // finish before any full publication transfer begins.
+        .run(jobs, 1)
         .await?;
         Ok(())
     }
@@ -537,7 +606,7 @@ impl SyncManager {
         Ok(combined)
     }
 
-    fn apply_push_response(&self, requested: &[StateMutation], push_response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationId>, Box<dyn std::error::Error>> {
+    fn apply_push_response(&self, requested: &[StateMutation], push_response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, Box<dyn std::error::Error>> {
         let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
         let validated = validate_push_response(&requested_ids, push_response)?;
 
@@ -557,17 +626,17 @@ impl SyncManager {
         if let Some(&(mutation_id, reason)) = validated.permanent_rejections.first() {
             return Err(PushResponseError::PermanentRejection { mutation_id, reason }.into());
         }
-        Ok(validated.transient_rejections)
+        Ok(validated.transient_rejections.into_iter().map(|(mutation_id, reason)| sync_common::MutationRejection { mutation_id, reason }).collect())
     }
 
-    async fn exchange_events_with_server(&self, since_server_seq: Option<sync_common::LibraryRevision>, reading_debounce: Option<Duration>) -> Result<(Option<Duration>, bool), Box<dyn std::error::Error>> {
+    async fn exchange_events_with_server(&self, starting_cursor: sync_common::SyncCursor, reading_debounce: Option<Duration>) -> Result<(Option<Duration>, bool, Vec<sync_common::MutationRejection>), Box<dyn std::error::Error>> {
         let (changes, reading_delay) = {
             let conn = self.db_pool.get()?;
             mutations_ready_for_push(coalesce_mutations_for_push(db::get_pending_mutations(&conn)?), reading_debounce, std::time::SystemTime::now())?
         };
         let session = self.current_session().ok_or("not signed in")?;
         let mut remaining = VecDeque::from(changes);
-        let mut cursor = since_server_seq;
+        let mut cursor = starting_cursor;
         let mut sent_page = false;
         let mut transient_rejections = Vec::new();
         let mut assets_needed = false;
@@ -582,22 +651,16 @@ impl SyncManager {
             assets_needed |= page_assets_needed;
             sent_page = true;
         }
-        if !transient_rejections.is_empty() {
-            return Err(PushResponseError::TransientRejection { mutation_ids: transient_rejections }.into());
-        }
-        Ok((reading_delay, assets_needed))
+        Ok((reading_delay, assets_needed, transient_rejections))
     }
 
-    #[cfg(test)]
-    async fn pull_events_from_server(&self, since_server_seq: Option<sync_common::LibraryRevision>) -> Result<(), Box<dyn std::error::Error>> {
-        self.pull_events_from_server_with_first(since_server_seq, None).await.map(|_| ())
+    async fn pull_events_from_server(&self, cursor: sync_common::SyncCursor) -> Result<(), Box<dyn std::error::Error>> {
+        self.pull_events_from_server_with_first(cursor, None).await.map(|_| ())
     }
 
-    async fn pull_events_from_server_with_first(
-        &self, since_server_seq: Option<sync_common::LibraryRevision>, mut first_response: Option<PullStateResponse>,
-    ) -> Result<(Option<sync_common::LibraryRevision>, bool), Box<dyn std::error::Error>> {
+    async fn pull_events_from_server_with_first(&self, starting_cursor: sync_common::SyncCursor, mut first_response: Option<PullStateResponse>) -> Result<(sync_common::SyncCursor, bool), Box<dyn std::error::Error>> {
         let session = self.current_session().ok_or("not signed in")?;
-        let mut cursor = since_server_seq;
+        let mut cursor = starting_cursor;
         let mut assets_needed = false;
         loop {
             let pull_response = match first_response.take() {
@@ -615,10 +678,10 @@ impl SyncManager {
                     return Err("server returned an empty synchronization page with has_more=true".into());
                 }
                 if next_cursor != cursor {
-                    if let Some(next) = next_cursor {
-                        let conn = self.db_pool.get()?;
-                        db::set_sync_metadata(&conn, "last_pull_server_seq", &next.get().to_string())?;
-                    }
+                    let conn = self.db_pool.get()?;
+                    let tx = conn.unchecked_transaction()?;
+                    db::set_pull_cursor(&tx, next_cursor)?;
+                    tx.commit()?;
                 }
                 cursor = next_cursor;
                 break;
@@ -650,9 +713,7 @@ impl SyncManager {
                 .collect();
             let dir_deletes: Vec<_> = dirs_before.iter().filter(|(id, _)| !dirs_after.contains_key(*id)).map(|(_, old_path)| old_path.clone()).collect();
 
-            if let Some(next) = next_cursor {
-                db::set_sync_metadata(&tx, "last_pull_server_seq", &next.get().to_string())?;
-            }
+            db::set_pull_cursor(&tx, next_cursor)?;
 
             tx.commit()?;
             drop(conn);
@@ -837,7 +898,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Child, Command};
-    use sync_common::{LibraryRevision, MutationRejection, MutationRejectionReason, ReplicaSeq, ServerMutation};
+    use sync_common::{LibraryRevision, MutationRejection, MutationRejectionReason, ReplicaSeq, ServerMutation, SyncCursor};
     use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id, fixture_replica_id};
 
     #[test]
@@ -906,22 +967,39 @@ mod tests {
         }
     }
 
-    fn pull_response(mutations: Vec<ServerMutation>, next_cursor: Option<LibraryRevision>, has_more: bool) -> PullStateResponse {
+    fn cursor(revision: Option<LibraryRevision>) -> SyncCursor {
+        SyncCursor { state_revision: revision, reading_revision: revision }
+    }
+
+    fn pull_response(mutations: Vec<ServerMutation>, next_revision: Option<LibraryRevision>, has_more: bool) -> PullStateResponse {
+        let next_cursor = if has_more {
+            let mut cursor = SyncCursor::default();
+            for mutation in &mutations {
+                if mutation.mutation.kind == sync_common::mutation_kind::READING_POSITION {
+                    cursor.reading_revision = Some(mutation.revision);
+                } else {
+                    cursor.state_revision = Some(mutation.revision);
+                }
+            }
+            cursor
+        } else {
+            cursor(next_revision)
+        };
         PullStateResponse { mutations, next_cursor, has_more }
     }
 
     fn binary_sync_response<T: serde::Serialize>(value: &T) -> axum::response::Response {
         use axum::response::IntoResponse;
 
-        let encoded = sync_common::wire::encode(value).unwrap();
+        let encoded = sync_common::transport::encode(value).unwrap();
         let mut response = encoded.into_response();
-        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static(sync_common::wire::MEDIA_TYPE));
+        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static(sync_common::transport::MEDIA_TYPE));
         response
     }
 
     fn decode_sync_exchange(headers: &axum::http::HeaderMap, body: &[u8]) -> sync_common::SyncExchangeRequest {
         assert!(headers.get(axum::http::header::CONTENT_ENCODING).is_none());
-        sync_common::wire::decode(body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap()
+        sync_common::transport::decode(body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap()
     }
 
     #[tokio::test]
@@ -930,7 +1008,7 @@ mod tests {
         struct InventoryState(Arc<std::sync::Mutex<Vec<String>>>);
 
         async fn inventory(body: axum::body::Bytes) -> axum::response::Response {
-            let request: sync_common::StateInventoryRequest = sync_common::wire::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+            let request: sync_common::StateInventoryRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
             binary_sync_response(&sync_common::StateInventoryResponse { missing: request.cells })
         }
 
@@ -939,7 +1017,7 @@ mod tests {
             state.0.lock().unwrap().extend(request.mutations.iter().map(|mutation| mutation.kind.clone()));
             binary_sync_response(&SyncExchangeResponse {
                 push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-                pull: pull_response(Vec::new(), request.cursor, false),
+                pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
             })
         }
 
@@ -992,11 +1070,11 @@ mod tests {
     #[test]
     fn pull_batch_requires_strict_sequences_after_the_cursor() {
         let valid = pull_response(vec![pulled_change(11, deleted(1)), pulled_change(12, deleted(2))], LibraryRevision::new(12).ok(), false);
-        assert_eq!(validate_pull_batch(&valid, Some(LibraryRevision::new(10).unwrap())), Ok(()));
+        assert_eq!(validate_pull_batch(&valid, cursor(LibraryRevision::new(10).ok())), Ok(()));
 
         let repeated = pull_response(vec![pulled_change(11, deleted(1)), pulled_change(11, deleted(2))], LibraryRevision::new(11).ok(), false);
-        assert!(validate_pull_batch(&repeated, Some(LibraryRevision::new(10).unwrap())).is_err());
-        assert!(validate_pull_batch(&valid, Some(LibraryRevision::new(11).unwrap())).is_err());
+        assert!(validate_pull_batch(&repeated, cursor(LibraryRevision::new(10).ok())).is_err());
+        assert!(validate_pull_batch(&valid, cursor(LibraryRevision::new(11).ok())).is_err());
     }
 
     #[tokio::test]
@@ -1007,10 +1085,10 @@ mod tests {
         async fn pull_page(axum::extract::State(state): axum::extract::State<PageState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
             state.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let request = decode_sync_exchange(&headers, &body);
-            let pull = match request.cursor.map(LibraryRevision::get) {
+            let pull = match request.cursor.state_revision.map(LibraryRevision::get) {
                 None => pull_response(vec![pulled_change(1, added(1, "Paged book", 10))], LibraryRevision::new(1).ok(), true),
                 Some(1) => pull_response(vec![pulled_change(2, deleted(1))], LibraryRevision::new(2).ok(), false),
-                _ => pull_response(Vec::new(), request.cursor, false),
+                _ => PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
             };
             binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull })
         }
@@ -1027,11 +1105,11 @@ mod tests {
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
         *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
-        manager.pull_events_from_server(None).await.unwrap();
+        manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         let conn = manager.db_pool.get().unwrap();
-        assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap().as_deref(), Some("2"));
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(2).ok()));
         server.abort();
     }
 
@@ -1041,7 +1119,7 @@ mod tests {
             let request = decode_sync_exchange(&headers, &body);
             binary_sync_response(&SyncExchangeResponse {
                 push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-                pull: pull_response(vec![pulled_change(1, added(1, "Cursor book", 10))], request.cursor.or(LibraryRevision::new(10).ok()), false),
+                pull: pull_response(vec![pulled_change(1, added(1, "Cursor book", 10))], request.cursor.state_revision.or(LibraryRevision::new(10).ok()), false),
             })
         }
         let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(pull_page));
@@ -1054,10 +1132,10 @@ mod tests {
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
         *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
-        manager.pull_events_from_server(None).await.unwrap();
+        manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
 
         let conn = manager.db_pool.get().unwrap();
-        assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap().as_deref(), Some("10"));
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(10).ok()));
         server.abort();
     }
 
@@ -1065,7 +1143,7 @@ mod tests {
     async fn production_client_persists_advanced_cursor_from_empty_final_page() {
         async fn pull_page(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
             let request = decode_sync_exchange(&headers, &body);
-            assert_eq!(request.cursor.map(LibraryRevision::get), Some(10));
+            assert_eq!(request.cursor.state_revision.map(LibraryRevision::get), Some(10));
             binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: pull_response(Vec::new(), LibraryRevision::new(12).ok(), false) })
         }
         let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(pull_page));
@@ -1080,12 +1158,14 @@ mod tests {
         {
             let conn = manager.db_pool.get().unwrap();
             db::set_sync_metadata(&conn, "last_pull_server_seq", "10").unwrap();
+            assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(10).ok()));
         }
 
-        manager.pull_events_from_server(LibraryRevision::new(10).ok()).await.unwrap();
+        manager.pull_events_from_server(cursor(LibraryRevision::new(10).ok())).await.unwrap();
 
         let conn = manager.db_pool.get().unwrap();
-        assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap().as_deref(), Some("12"));
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(12).ok()));
+        assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap(), None);
         server.abort();
     }
 
@@ -1102,7 +1182,7 @@ mod tests {
         // with an advanced cursor and nothing to push.
         async fn exchange_page(axum::extract::State(state): axum::extract::State<ExchangeState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
             let request = decode_sync_exchange(&headers, &body);
-            match request.cursor.map(LibraryRevision::get) {
+            match request.cursor.state_revision.map(LibraryRevision::get) {
                 None => {
                     state.exchanges.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     binary_sync_response(&SyncExchangeResponse {
@@ -1131,12 +1211,12 @@ mod tests {
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
         *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
-        manager.exchange_events_with_server(None, None).await.unwrap();
+        manager.exchange_events_with_server(SyncCursor::default(), None).await.unwrap();
 
         assert_eq!(state.exchanges.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(state.pulls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let conn = manager.db_pool.get().unwrap();
-        assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap().as_deref(), Some("2"));
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(2).ok()));
         server.abort();
     }
 
@@ -1162,7 +1242,7 @@ mod tests {
                 assert_eq!(request.mutations.len(), 1);
                 PushMutationsResponse { accepted: vec![request.mutations[0].mutation_id], rejected: Vec::new() }
             };
-            binary_sync_response(&SyncExchangeResponse { push, pull: pull_response(Vec::new(), request.cursor, false) })
+            binary_sync_response(&SyncExchangeResponse { push, pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false } })
         }
 
         let state = ExchangeState { calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)), rejected: Arc::new(std::sync::Mutex::new(None)) };
@@ -1189,14 +1269,213 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        assert!(manager.exchange_events_with_server(None, None).await.is_err());
+        let (_, _, deferred) = manager.exchange_events_with_server(SyncCursor::default(), None).await.expect("a deferred page still completes the exchange");
 
         assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         let rejected = state.rejected.lock().unwrap().unwrap();
+        assert_eq!(deferred, vec![MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::MissingDependency }]);
         let conn = manager.db_pool.get().unwrap();
         let pending = db::get_pending_mutations(&conn).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].mutation_id, rejected);
+        server.abort();
+    }
+
+    fn queue_outbox_reading_change(manager: &SyncManager, mutation: &StateMutation, sequence: u64) {
+        let conn = manager.db_pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position',?3,?4,?5)",
+            rusqlite::params![sequence as i64, mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()],
+        )
+        .unwrap();
+    }
+
+    /// A deferred mutation means "ask again later", not "this exchange
+    /// failed". Failing the whole synchronization strands everything the
+    /// exchange did accomplish -- notably asset transfers and the completion
+    /// checkpoint -- behind one mutation the server will not take yet, which
+    /// for a device whose clock is ahead never resolves on its own.
+    #[tokio::test]
+    async fn a_deferred_mutation_does_not_fail_the_surrounding_synchronization() {
+        #[derive(Clone)]
+        struct ExchangeState {
+            deferred: Arc<std::sync::Mutex<Option<sync_common::MutationId>>>,
+        }
+        async fn exchange_page(axum::extract::State(state): axum::extract::State<ExchangeState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            let request = decode_sync_exchange(&headers, &body);
+            assert_eq!(request.mutations.len(), 2, "both queued positions travel in one page");
+            let deferred = request.mutations[0].mutation_id;
+            *state.deferred.lock().unwrap() = Some(deferred);
+            binary_sync_response(&SyncExchangeResponse {
+                push: PushMutationsResponse { accepted: vec![request.mutations[1].mutation_id], rejected: vec![MutationRejection { mutation_id: deferred, reason: MutationRejectionReason::TimestampTooFarFuture }] },
+                pull: pull_response(vec![pulled_change(1, added(1, "Pulled while deferred", 10))], LibraryRevision::new(1).ok(), false),
+            })
+        }
+
+        let state = ExchangeState { deferred: Arc::new(std::sync::Mutex::new(None)) };
+        let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(exchange_page)).with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        for sequence in 1..=2 {
+            queue_outbox_reading_change(&manager, &reading_change(sequence, sequence, "epubcfi(/6/2)", sequence), sequence);
+        }
+
+        let outcome = manager.synchronize(SyncPolicy { assets: AssetSync::Transfer(TransferOrigin::Background), reading_positions: ReadingPositionSync::Immediate }).await;
+
+        // Side effects first, so this test reports what the exchange actually
+        // did before it reports how it answered.
+        let conn = manager.db_pool.get().unwrap();
+        let pending = db::get_pending_mutations(&conn).unwrap();
+        assert_eq!(pending.len(), 1, "the deferred mutation stays queued for a later attempt");
+        assert_eq!(pending[0].mutation_id, state.deferred.lock().unwrap().unwrap());
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()), "the pulled page is still applied");
+
+        let outcome = outcome.expect("one deferred mutation must not fail the synchronization");
+        assert_eq!(outcome.deferred_mutations, vec![MutationRejection { mutation_id: state.deferred.lock().unwrap().unwrap(), reason: MutationRejectionReason::TimestampTooFarFuture }]);
+        assert!(db::get_sync_metadata(&conn, "last_successful_sync_at").unwrap().is_some(), "the exchange completed, so the sync is checkpointed");
+        server.abort();
+    }
+
+    /// When the server's state regresses beneath a device's cursor the device
+    /// cannot make progress in either direction. Recovery is the existing
+    /// republish path: drop the unusable cursor and re-reconcile, rather than
+    /// failing every future synchronization.
+    #[tokio::test]
+    async fn a_rejected_cursor_is_dropped_and_the_exchange_recovers() {
+        #[derive(Clone)]
+        struct ExchangeState {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        async fn exchange_page(axum::extract::State(state): axum::extract::State<ExchangeState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            use axum::response::IntoResponse;
+
+            let request = decode_sync_exchange(&headers, &body);
+            state.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match request.cursor.state_revision.map(LibraryRevision::get) {
+                // The server has regressed beneath this cursor and says so.
+                Some(99) => axum::http::StatusCode::GONE.into_response(),
+                None => binary_sync_response(&SyncExchangeResponse {
+                    push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
+                    pull: pull_response(vec![pulled_change(1, added(1, "Republished", 10))], LibraryRevision::new(1).ok(), false),
+                }),
+                Some(1) => binary_sync_response(&SyncExchangeResponse {
+                    push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
+                    pull: pull_response(Vec::new(), LibraryRevision::new(1).ok(), false),
+                }),
+                other => panic!("unexpected cursor {other:?}"),
+            }
+        }
+
+        let state = ExchangeState { calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)) };
+        let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(exchange_page)).with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        {
+            let conn = manager.db_pool.get().unwrap();
+            db::set_pull_cursor(&conn, cursor(LibraryRevision::new(99).ok())).unwrap();
+        }
+
+        manager.sync_once().await.expect("a rejected cursor must be recoverable without operator intervention");
+
+        assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 3, "recovery performs one clean pull before the one-shot publishing retry");
+        let conn = manager.db_pool.get().unwrap();
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()), "the device adopts the server's current head");
+        assert_eq!(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY).unwrap(), None, "successful recovery clears its durable marker");
+        server.abort();
+    }
+
+    #[test]
+    fn beginning_cursor_recovery_atomically_persists_a_clean_cursor_and_resume_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        {
+            let conn = manager.db_pool.get().unwrap();
+            db::set_pull_cursor(&conn, cursor(LibraryRevision::new(99).ok())).unwrap();
+        }
+
+        manager.begin_cursor_recovery().unwrap();
+
+        let conn = manager.db_pool.get().unwrap();
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), SyncCursor::default());
+        assert_eq!(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY).unwrap().as_deref(), Some("1"));
+    }
+
+    /// A backup can retain a cell while losing its newest value. Missing-key
+    /// inventory cannot detect that case, so cursor recovery must republish the
+    /// local canonical state even when the restored server says every key is
+    /// still present.
+    #[tokio::test]
+    async fn cursor_recovery_republishes_cells_that_still_exist_on_the_restored_server() {
+        #[derive(Clone)]
+        struct RecoveryState {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            pushed_kinds: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        async fn inventory(body: axum::body::Bytes) -> axum::response::Response {
+            let request: sync_common::StateInventoryRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+            assert!(!request.cells.is_empty(), "recovery has local canonical cells to consider");
+            binary_sync_response(&sync_common::StateInventoryResponse { missing: Vec::new() })
+        }
+
+        async fn exchange_page(axum::extract::State(state): axum::extract::State<RecoveryState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            use axum::response::IntoResponse;
+
+            let request = decode_sync_exchange(&headers, &body);
+            state.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if request.cursor.state_revision.map(LibraryRevision::get) == Some(99) {
+                return axum::http::StatusCode::GONE.into_response();
+            }
+            state.pushed_kinds.lock().unwrap().extend(request.mutations.iter().map(|mutation| mutation.kind.clone()));
+            binary_sync_response(&SyncExchangeResponse {
+                push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
+                pull: pull_response(Vec::new(), LibraryRevision::new(1).ok(), false),
+            })
+        }
+
+        let state = RecoveryState { calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)), pushed_kinds: Arc::new(std::sync::Mutex::new(Vec::new())) };
+        let app = axum::Router::new().route("/api/sync/inventory", axum::routing::post(inventory)).route("/api/sync/exchange", axum::routing::post(exchange_page)).with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        {
+            let conn = manager.db_pool.get().unwrap();
+            let hash = fixture_content_hash(77);
+            conn.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES(?1,'Newer local value',10,'epub')", [hash.as_str()]).unwrap();
+            assert!(!db::state_inventory(&conn).unwrap().is_empty());
+            conn.execute("DELETE FROM sync_outbox", []).unwrap();
+            db::set_pull_cursor(&conn, cursor(LibraryRevision::new(99).ok())).unwrap();
+        }
+        // Model a client that already performed its ordinary opening inventory
+        // pass before the server restore became visible.
+        manager.inventory_checked.store(true, Ordering::Release);
+
+        manager.sync_once().await.expect("cursor recovery must republish local canonical state");
+
+        assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 3, "one rejected exchange is followed by a clean pull and one publishing retry");
+        assert!(state.pushed_kinds.lock().unwrap().iter().any(|kind| kind == sync_common::mutation_kind::BOOK_LIFECYCLE), "the newer local lifecycle value must be republished even though its key still exists remotely");
+        assert_eq!(db::get_sync_metadata(&manager.db_pool.get().unwrap(), CURSOR_RECOVERY_PENDING_KEY).unwrap(), None, "successful recovery clears its durable marker");
         server.abort();
     }
 
@@ -1249,7 +1528,7 @@ mod tests {
         let mut queued = VecDeque::from(changes);
 
         let page = take_push_page(&mut queued).unwrap();
-        let encoded_bytes = page.iter().map(|mutation| sync_common::wire::encode(mutation).unwrap().len()).sum::<usize>();
+        let encoded_bytes = page.iter().map(|mutation| sync_common::transport::encode(mutation).unwrap().len()).sum::<usize>();
 
         assert!(!page.is_empty());
         assert!(page.len() < 100);
@@ -1350,7 +1629,7 @@ mod tests {
         let requested_ids = changes.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
         let validated = validate_push_response(&requested_ids, &response).unwrap();
         assert_eq!(validated.accepted, vec![changes[1].mutation_id]);
-        assert_eq!(validated.transient_rejections, vec![changes[0].mutation_id]);
+        assert_eq!(validated.transient_rejections, vec![(changes[0].mutation_id, MutationRejectionReason::TimestampTooFarFuture)]);
     }
 
     #[test]
@@ -1455,7 +1734,7 @@ mod tests {
 
         manager.sync_once().await.expect("publish Backend outbox through real server");
 
-        let observed = sync_client::exchange_changes(&reqwest::Client::new(), &session, library_id, fixture_replica_id("backend-e2e-observer"), Vec::new(), None).await.expect("pull through real server");
+        let observed = sync_client::exchange_changes(&reqwest::Client::new(), &session, library_id, fixture_replica_id("backend-e2e-observer"), Vec::new(), SyncCursor::default()).await.expect("pull through real server");
         assert!(observed.pull.mutations.iter().any(|change| change.mutation.kind == "directory_name"));
     }
 
@@ -1543,7 +1822,8 @@ mod tests {
             .collect::<Vec<_>>();
         for page in changes.chunks(sync_common::MAX_PUSH_MUTATIONS) {
             let wire_page = page.iter().map(StateMutation::to_wire).collect::<Result<Vec<_>, _>>().unwrap();
-            let response = sync_client::exchange_changes(&reqwest::Client::new(), &session, library_id.clone(), fixture_replica_id("backend-e2e-pagination-writer"), wire_page, None).await.expect("publish a page of reading registers");
+            let response =
+                sync_client::exchange_changes(&reqwest::Client::new(), &session, library_id.clone(), fixture_replica_id("backend-e2e-pagination-writer"), wire_page, SyncCursor::default()).await.expect("publish a page of reading registers");
             assert_eq!(response.push.accepted.len(), page.len());
             assert!(response.push.rejected.is_empty());
         }
@@ -1559,7 +1839,8 @@ mod tests {
         let conn = observer.db_pool.get().unwrap();
         let positions: i64 = conn.query_row("SELECT COUNT(*) FROM book WHERE read_pos IS NOT NULL", [], |row| row.get(0)).unwrap();
         assert_eq!(positions, sync_common::MAX_PULL_CHANGES as i64 + 1);
-        assert!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap().is_some(), "the final cursor is persisted with the final page");
+        let cursor = db::get_pull_cursor(&conn).unwrap();
+        assert!(cursor.reading_revision.is_some(), "the final reading cursor is persisted with the final page");
     }
 
     #[tokio::test]

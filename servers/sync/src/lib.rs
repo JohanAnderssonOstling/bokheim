@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub request_limits: server_http::RequestLimits,
     pub upload_limits: server_asset_store::UploadLimits,
     pub notification_config: server_http::NotificationConfig,
+    pub operational_services: server_http::OperationalServices,
 }
 
 impl Default for AppConfig {
@@ -31,12 +32,13 @@ impl Default for AppConfig {
             request_limits: server_http::RequestLimits::default(),
             upload_limits: server_asset_store::UploadLimits::default(),
             notification_config: server_http::NotificationConfig::default(),
+            operational_services: server_http::OperationalServices::default(),
         }
     }
 }
 
 pub async fn app(database: PostgresDatabase, account: Arc<PostgresAccountService>, config: AppConfig) -> Result<Router, AssetError> {
-    let AppConfig { books, thumbnails, client_address_source, transfer_limits, request_limits, upload_limits, notification_config } = config;
+    let AppConfig { books, thumbnails, client_address_source, transfer_limits, request_limits, upload_limits, notification_config, operational_services } = config;
 
     let assets = Arc::new(FsAssetStore::with_upload_limits(books, thumbnails, upload_limits));
     assets.initialize().await?;
@@ -45,6 +47,5 @@ pub async fn app(database: PostgresDatabase, account: Arc<PostgresAccountService
     let asset_service = Arc::new(AssetApplication::new(database.clone(), assets.clone()));
     let readiness = Arc::new(server_http::Readiness::new(database.clone(), assets.clone(), READINESS_CACHE_TTL));
     let account_routes = server_account::http::router(account.clone(), client_address_source);
-    let sync_routes = server_http::router_with_operational_limits(account, sync, asset_service, readiness, transfer_limits, notification_config);
-    Ok(request_limits.apply(account_routes.merge(sync_routes)))
+    Ok(server_http::router_with_operational_limits(database, account_routes, account, sync, asset_service, readiness, transfer_limits, request_limits, notification_config, operational_services, client_address_source))
 }

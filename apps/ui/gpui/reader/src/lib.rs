@@ -28,7 +28,7 @@ use gpui::actions;
 
 pub use backends::{NativeAudioBackend, NativeAudioState, NativeAudioStatus, SystemAudioBackend, SystemTtsProvider, TtsProvider, TtsState};
 pub use epub::ReaderWindowId;
-pub use epub_svelte_lib::app::preferences::PdfPageLayout;
+pub use epub_svelte_lib::app::preferences::PdfZoomMode;
 pub use epub_svelte_lib::app::preferences::{ReaderFontFamily, ReaderTextAlignment};
 pub use settings::{ReaderPreferences, ReaderWindowGeometry, SaveReaderSettings};
 pub use windows::{close_readers_for_library, configure, configure_audio_backend, configure_tts_provider, handle_book_removed, open_reader_window};

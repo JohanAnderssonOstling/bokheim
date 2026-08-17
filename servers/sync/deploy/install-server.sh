@@ -83,6 +83,20 @@ if [[ ! -s ${resend_credential} ]]; then
 fi
 chmod 0600 "${resend_credential}"
 chown root:root "${resend_credential}"
+account_token_credential=/etc/bokheim/account-token-key
+if [[ ! -s ${account_token_credential} ]]; then
+    umask 077
+    openssl rand -base64 32 >"${account_token_credential}"
+fi
+chmod 0600 "${account_token_credential}"
+chown root:root "${account_token_credential}"
+admin_credential=/etc/bokheim/admin-password
+if [[ ! -s ${admin_credential} ]]; then
+    echo "create ${admin_credential} with the administrator password before installing" >&2
+    exit 2
+fi
+chmod 0600 "${admin_credential}"
+chown root:root "${admin_credential}"
 test_user_credential=/etc/bokheim/test-user-password
 if [[ ! -s ${test_user_credential} ]]; then
     echo "create ${test_user_credential} with the test account password before installing" >&2

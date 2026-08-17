@@ -1,18 +1,25 @@
-pub use catalog_contract::{CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse};
+pub use catalog_contract::{
+    CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest,
+    CatalogSearchResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
+};
 pub use catalog_core::{
     discover_author_books_locally, opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, opds_source, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator, CatalogCache, CatalogCoverCache,
     CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches,
 };
-use catalog_core::{opds_endpoint_id, search_opds_catalogs, validate_server_cover};
+use catalog_core::{opds_endpoint_id, search_opds_catalogs, validate_server_cover, validated_opds_import};
 #[cfg(test)]
 use catalog_core::{opds_publication, opds_search, wide_search_concurrency};
 
+#[cfg(test)]
+use catalog_contract::CatalogBookFormat;
 use catalog_contract::{
-    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogBookFormat, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId,
-    CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
+    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogSearch, CatalogSearchQuery,
+    CatalogSource, CatalogSourceId, CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
 };
 use futures_util::stream::{self, StreamExt};
-use opds::{CatalogRegistry, DownloadedOpdsBook, OpdsAcquisition, OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsEndpointStore, OpdsPublicationIdentity, OpdsSearch};
+use opds::{CatalogRegistry, DownloadedOpdsBook, OpdsEndpoint, OpdsEndpointStore, OpdsSearch};
+#[cfg(test)]
+use opds::{OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsDirectAcquisition, OpdsEndpointId, OpdsPublicationIdentity};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -23,6 +30,19 @@ use url::Url;
 const MAX_WIDE_SEARCH_CONCURRENCY: usize = 16;
 const MAX_CATALOG_SERVER_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_COVER_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn normalize_project_gutenberg_publication(publication: &mut CatalogPublication) -> bool {
+    let previous = publication.description.clone();
+    let Some(description) = publication.description.take() else { return false };
+    publication.description = match description {
+        CatalogDescription::PlainText { text } => {
+            let text = opds::strip_project_gutenberg_plain_text(&text);
+            (!text.trim().is_empty()).then_some(CatalogDescription::PlainText { text })
+        }
+        CatalogDescription::RichHtml { safe_html, .. } => opds::project_gutenberg_description_parts(&safe_html).map(|(safe_html, plain_text)| CatalogDescription::RichHtml { safe_html, plain_text }),
+    };
+    publication.description != previous
+}
 
 #[derive(Clone)]
 pub struct CatalogServerClient {
@@ -62,6 +82,8 @@ impl CatalogClient {
         let opds = opds::OpdsClient::new().map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let server = CatalogServerClient::new(server_base_url)?;
         let cache = CatalogCache::open(data_directory.join("catalog-cache.db")).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let gutenberg = CatalogSourceId::parse("opds-project-gutenberg").map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        cache.rewrite_source_publications(&gutenberg, normalize_project_gutenberg_publication).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let covers = CatalogCoverCache::new(data_directory.join("catalog-covers"))?;
         let endpoints = OpdsEndpointStore::load(data_directory.join("opds-catalogs.json"), data_directory.join("custom-opds-catalogs.json"));
         Ok(Self { opds, server, cache, covers, endpoints: Mutex::new(endpoints), languages: RwLock::new(CatalogLanguageFilter::new(languages)) })
@@ -74,6 +96,15 @@ impl CatalogClient {
 
     fn language_filter(&self) -> CatalogLanguageFilter {
         self.languages.read().map(|languages| languages.clone()).unwrap_or_else(|_| CatalogLanguageFilter::new(std::iter::empty::<&str>()))
+    }
+
+    fn prepare_page(&self, source: &CatalogSource, page: &mut CatalogPage) {
+        self.language_filter().filter_page(source, page);
+        if source.id.as_str() == "opds-project-gutenberg" {
+            for publication in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())) {
+                normalize_project_gutenberg_publication(publication);
+            }
+        }
     }
 
     fn opds_endpoints(&self) -> Vec<OpdsEndpoint> {
@@ -92,6 +123,13 @@ impl CatalogClient {
 
     pub fn sources(&self) -> Vec<CatalogSource> {
         self.opds_endpoints().into_iter().map(|endpoint| opds_source(&endpoint)).collect()
+    }
+
+    /// Sources visible under the current language preference. Multilingual and
+    /// language-unspecified catalogues remain available because their
+    /// publications are filtered individually.
+    pub fn supported_sources(&self) -> Vec<CatalogSource> {
+        self.language_filter().filter_sources(self.sources())
     }
 
     pub fn custom_sources(&self) -> Result<Vec<CatalogSource>, CatalogProviderError> {
@@ -123,7 +161,7 @@ impl CatalogClient {
         let matches = self.cache.search(&source.id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let mut page = search_page(source.id.clone(), query.trim().to_owned(), matches);
         page.freshness = CatalogFreshness::Stale;
-        self.language_filter().filter_page(source, &mut page);
+        self.prepare_page(source, &mut page);
         Ok(page)
     }
 
@@ -161,6 +199,15 @@ impl CatalogClient {
         indexed.sort_by_key(|(index, _)| *index);
         let mut result = CatalogWideSearchResult { query: query.trim().to_owned(), groups: indexed.into_iter().map(|(_, group)| group).collect() };
         self.language_filter().filter_wide_search(&mut result);
+        for group in &mut result.groups {
+            if group.source.id.as_str() == "opds-project-gutenberg" {
+                if let CatalogWideSearchOutcome::Results { page } = &mut group.outcome {
+                    for publication in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())) {
+                        normalize_project_gutenberg_publication(publication);
+                    }
+                }
+            }
+        }
         self.covers.remember_wide_search(&result);
         Ok(result)
     }
@@ -174,17 +221,26 @@ impl CatalogClient {
             match self.server.catalog_page(source_id, &request).await {
                 Ok(response) => {
                     let mut page = self.cache.apply_page_response(&endpoint.url, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-                    self.language_filter().filter_page(&opds_source(&endpoint), &mut page);
+                    self.prepare_page(&opds_source(&endpoint), &mut page);
                     self.covers.remember_page(&page);
                     return Ok(page);
                 }
-                Err(error) => log::warn!(target: "catalog", "catalog server page unavailable; using direct OPDS: {error}"),
+                Err(error) => {
+                    log::warn!(target: "catalog", "catalog server page unavailable; using local page or direct OPDS: {error}");
+                    if let Some(cached) = self.cache.page(source_id, locator).map_err(|error| CatalogProviderError::new(error.to_string()))? {
+                        let mut page = cached.page;
+                        page.freshness = CatalogFreshness::Stale;
+                        self.prepare_page(&opds_source(&endpoint), &mut page);
+                        self.covers.remember_page(&page);
+                        return Ok(page);
+                    }
+                }
             }
         }
         let catalog = self.opds.fetch_catalog(locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
         let mut page = opds_page(source_id.clone(), catalog);
-        self.language_filter().filter_page(&opds_source(&endpoint), &mut page);
+        self.prepare_page(&opds_source(&endpoint), &mut page);
         self.cache.put_page(source_id, &endpoint.url, &page, None, None).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         self.covers.remember_page(&page);
         Ok(page)
@@ -195,7 +251,7 @@ impl CatalogClient {
         if self.is_curated_endpoint(&endpoint)? {
             match self.search_cached_source(source_id, &endpoint, &query.query).await {
                 Ok(mut page) => {
-                    self.language_filter().filter_page(&opds_source(&endpoint), &mut page);
+                    self.prepare_page(&opds_source(&endpoint), &mut page);
                     self.covers.remember_page(&page);
                     return Ok(page);
                 }
@@ -212,9 +268,10 @@ impl CatalogClient {
         let catalog = self.opds.search_definition(&search, &opds_search_query(query)).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
         let mut page = opds_page(source_id.clone(), catalog);
-        self.language_filter().filter_page(&opds_source(&endpoint), &mut page);
+        self.prepare_page(&opds_source(&endpoint), &mut page);
         self.cache.put_page(source_id, &endpoint.url, &page, None, None).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         page = search_page(source_id.clone(), query_text.clone(), self.cache.search(source_id, &query_text).map_err(|error| CatalogProviderError::new(error.to_string()))?);
+        self.prepare_page(&opds_source(&endpoint), &mut page);
         self.covers.remember_page(&page);
         Ok(page)
     }
@@ -224,10 +281,39 @@ impl CatalogClient {
         if self.is_curated_endpoint(&endpoint)? {
             match self.covers.cover_with(source_id, image_url, self.server.catalog_cover(source_id, image_url)).await {
                 Ok(bytes) => return Ok(bytes),
-                Err(error) => log::warn!(target: "catalog", "catalog server cover unavailable; fetching the remembered OPDS cover directly: {error}"),
+                Err(error) if is_direct_cover_url(image_url) => log::warn!(target: "catalog", "catalog server cover unavailable; fetching the remembered OPDS cover directly: {error}"),
+                Err(error) => return Err(error),
             }
         }
         self.covers.cover(source_id, image_url).await
+    }
+
+    pub async fn recommendations(&self, mut request: CatalogRecommendationRequest) -> Result<CatalogRecommendationResponse, CatalogProviderError> {
+        if request.supported_languages.is_empty() {
+            request.supported_languages = self.language_filter().supported().to_vec();
+        }
+        let mut response = self.server.recommendations(&request).await?;
+        for recommendation in &mut response.recommendations {
+            if recommendation.source_id.as_str() == "opds-project-gutenberg" {
+                normalize_project_gutenberg_publication(&mut recommendation.publication);
+            }
+        }
+        self.covers.remember_recommendations(&response);
+        Ok(response)
+    }
+
+    pub async fn browse_subjects(&self, mut request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogProviderError> {
+        if request.supported_languages.is_empty() {
+            request.supported_languages = self.language_filter().supported().to_vec();
+        }
+        let mut response = self.server.browse_subjects(&request).await?;
+        for item in &mut response.publications {
+            if item.source_id.as_str() == "opds-project-gutenberg" {
+                normalize_project_gutenberg_publication(&mut item.publication);
+            }
+        }
+        self.covers.remember_subject_browse(&response);
+        Ok(response)
     }
 
     pub async fn download_import(&self, request: &CatalogImportRequest, temporary_directory: &Path) -> Result<CatalogDownload, CatalogProviderError> {
@@ -235,7 +321,7 @@ impl CatalogClient {
         validate_opds_catalog_locator(&endpoint, &request.catalog_locator)?;
         let catalog = self.opds.fetch_catalog_fresh(&request.catalog_locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
-        let (_, identity, acquisition) = opds_import_request(request, &catalog)?;
+        let (identity, acquisition) = validated_opds_import(request, &catalog)?;
         identity.validate().map_err(|error| CatalogProviderError::new(error.to_string()))?;
         self.opds.download_book(&acquisition, temporary_directory).await.map(|download| CatalogDownload { download }).map_err(|error| CatalogProviderError::new(error.to_string()))
     }
@@ -309,12 +395,22 @@ impl CatalogClient {
     async fn search_cached_source(&self, source_id: &CatalogSourceId, endpoint: &OpdsEndpoint, query: &str) -> Result<CatalogPage, CatalogProviderError> {
         let cached = self.cache.search(source_id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let state = self.cache.source_state(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let known_publications = cached.title_matches.iter().chain(&cached.author_matches).map(|publication| CatalogPublicationReference { identity: publication.publication.identity.clone(), sequence: publication.sequence }).collect();
+        let known_publications = cached
+            .title_matches
+            .iter()
+            .chain(&cached.author_matches)
+            .chain(&cached.toc_matches)
+            .map(|publication| CatalogPublicationReference { identity: publication.publication.identity.clone(), sequence: publication.sequence })
+            .collect();
         let request = CatalogSearchRequest { query: query.to_owned(), supported_languages: self.language_filter().supported().to_vec(), epoch: state.and_then(|state| state.provider_epoch), known_publications };
         let response = self.server.search_catalog(source_id, &request).await?;
         let matches = self.cache.apply_search_response(&endpoint.url, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         Ok(search_page(source_id.clone(), query.to_owned(), matches))
     }
+}
+
+fn is_direct_cover_url(value: &str) -> bool {
+    Url::parse(value).ok().is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some() && url.username().is_empty() && url.password().is_none())
 }
 
 fn refresh_outcome_or_cached(refreshed: Result<CatalogWideSearchOutcome, CatalogProviderError>, cached: CatalogPage) -> CatalogWideSearchOutcome {
@@ -333,13 +429,16 @@ fn search_page(source_id: CatalogSourceId, query: String, matches: CatalogSearch
         locator: format!("catalog-search:{query}"),
         navigation: Vec::new(),
         publications: matches.title_matches.into_iter().map(|publication| publication.publication).collect(),
-        groups: vec![CatalogGroup {
-            title: "Author matches".to_owned(),
-            page_locator: None,
-            number_of_items: None,
-            navigation: Vec::new(),
-            publications: matches.author_matches.into_iter().map(|publication| publication.publication).collect(),
-        }],
+        groups: vec![
+            CatalogGroup { title: "Author matches".to_owned(), page_locator: None, number_of_items: None, navigation: Vec::new(), publications: matches.author_matches.into_iter().map(|publication| publication.publication).collect() },
+            CatalogGroup {
+                title: "Table of contents matches".to_owned(),
+                page_locator: None,
+                number_of_items: None,
+                navigation: Vec::new(),
+                publications: matches.toc_matches.into_iter().map(|publication| publication.publication).collect(),
+            },
+        ],
         facets: Vec::new(),
         pagination: CatalogPagination::default(),
         search: None,
@@ -371,6 +470,14 @@ impl CatalogServerClient {
 
     pub async fn search_catalog(&self, source_id: &CatalogSourceId, request: &CatalogSearchRequest) -> Result<CatalogSearchResponse, CatalogProviderError> {
         self.post_wire(self.endpoint(&format!("api/opds/sources/{}/search", source_id.as_str()))?, request).await
+    }
+
+    pub async fn recommendations(&self, request: &CatalogRecommendationRequest) -> Result<CatalogRecommendationResponse, CatalogProviderError> {
+        self.post_wire(self.endpoint("api/opds/recommendations")?, request).await
+    }
+
+    pub async fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogProviderError> {
+        self.post_wire(self.endpoint("api/opds/subjects")?, request).await
     }
 
     pub async fn catalog_cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
@@ -430,47 +537,6 @@ impl CatalogServerClient {
     }
 }
 
-fn opds_import_request(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsEndpointId, OpdsPublicationIdentity, OpdsDirectAcquisition), CatalogProviderError> {
-    let endpoint = opds_endpoint_id(&request.source_id)?;
-    let requested_identity = OpdsPublicationIdentity { publication_id: request.publication.edition_id.clone(), work_id: request.publication.work_id.clone() };
-    requested_identity.validate().map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    if catalog.source_url != request.catalog_locator {
-        return Err(CatalogProviderError::new("catalog import does not belong to the verified catalog page"));
-    }
-    let publication = catalog
-        .publications
-        .iter()
-        .chain(catalog.groups.iter().flat_map(|group| group.publications.iter()))
-        .find(|publication| publication.id == requested_identity.publication_id && publication.work_id == requested_identity.work_id)
-        .ok_or_else(|| CatalogProviderError::new("catalog publication is not present on the verified catalog page"))?;
-    let requested_format = opds_book_format(request.book_format);
-    let acquisition = publication
-        .acquisitions
-        .iter()
-        .find_map(|acquisition| match acquisition {
-            OpdsAcquisition::Direct(acquisition)
-                if acquisition.url == request.download_url && acquisition.book_format == requested_format && acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) =>
-            {
-                Some(acquisition.clone())
-            }
-            _ => None,
-        })
-        .ok_or_else(|| CatalogProviderError::new("catalog acquisition is not an importable link on the verified catalog page"))?;
-    Ok((endpoint, requested_identity, acquisition))
-}
-
-fn opds_book_format(format: CatalogBookFormat) -> OpdsBookFormat {
-    match format {
-        CatalogBookFormat::Epub => OpdsBookFormat::Epub,
-        CatalogBookFormat::Pdf => OpdsBookFormat::Pdf,
-        CatalogBookFormat::Mobi => OpdsBookFormat::Mobi,
-        CatalogBookFormat::Fb2 => OpdsBookFormat::Fb2,
-        CatalogBookFormat::Cbz => OpdsBookFormat::Cbz,
-        CatalogBookFormat::WebPub => OpdsBookFormat::WebPub,
-        CatalogBookFormat::M4b => OpdsBookFormat::M4b,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +573,37 @@ mod tests {
         let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en-US"]).unwrap();
 
         assert!(client.sources().iter().any(|source| source.id.as_str() == "opds-litteraturbanken"));
+    }
+
+    #[test]
+    fn supported_sources_apply_the_current_language_filter() {
+        let temporary = tempfile::tempdir().unwrap();
+        let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en"]).unwrap();
+        let sources = client.supported_sources();
+
+        assert!(sources.iter().any(|source| source.id.as_str() == "opds-office-of-the-historian"));
+        assert!(sources.iter().any(|source| source.id.as_str() == "opds-project-gutenberg"));
+        assert!(!sources.iter().any(|source| source.id.as_str() == "opds-ebooks-gratuits"));
+    }
+
+    #[test]
+    fn cached_gutenberg_descriptions_drop_provider_boilerplate() {
+        let mut publication = CatalogPublication {
+            identity: CatalogPublicationIdentity { edition_id: "urn:gutenberg:2465:3".to_owned(), work_id: Some("urn:gutenberg:2465".to_owned()) },
+            title: "Carmen".to_owned(),
+            authors: Vec::new(),
+            languages: vec!["en".to_owned()],
+            description: Some(CatalogDescription::RichHtml {
+                safe_html: r#"<p>This edition has images.</p><p>Title: Carmen</p><p>Note: Wikipedia page about this book: <a href="https://en.wikipedia.org/wiki/Carmen_(novella)">Carmen</a></p><p>Summary: Useful text</p>"#.to_owned(),
+                plain_text: "stale cached text".to_owned(),
+            }),
+            image_url: None,
+            actions: Vec::new(),
+        };
+
+        normalize_project_gutenberg_publication(&mut publication);
+
+        assert_eq!(publication.description, Some(CatalogDescription::RichHtml { safe_html: "<p>Useful text</p>".to_owned(), plain_text: "Useful text".to_owned() }));
     }
 
     #[test]
@@ -599,13 +696,13 @@ mod tests {
         assert!(matches!(publication.actions[3], CatalogPublicationAction::External { purpose: CatalogExternalActionKind::Borrow, .. }));
         let CatalogPublicationAction::Import { request } = &publication.actions[0] else { panic!("expected import action") };
         assert_eq!(request.catalog_locator, catalog.source_url);
-        let (_, identity, acquisition) = opds_import_request(request, &catalog).unwrap();
+        let (identity, acquisition) = validated_opds_import(request, &catalog).unwrap();
         assert_eq!(identity.publication_id, "edition");
         assert_eq!(acquisition.url, "https://downloads.example/book.epub");
         assert_eq!(acquisition.suggested_file_name, "book.epub");
         let mut forged = request.clone();
         forged.download_url = "https://attacker.example/forged.epub".to_owned();
-        assert!(opds_import_request(&forged, &catalog).is_err());
+        assert!(validated_opds_import(&forged, &catalog).is_err());
     }
 
     #[test]
@@ -791,7 +888,10 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_counter = requests.clone();
         let mut jpeg = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(16, 24).write_to(&mut jpeg, ImageOutputFormat::Jpeg(85)).unwrap();
+        // Embedded EPUB thumbnails use the library's 600 px cover contract,
+        // which is intentionally larger than URL covers normalized by the
+        // catalogue cache.
+        DynamicImage::new_rgb8(600, 960).write_to(&mut jpeg, ImageOutputFormat::Jpeg(85)).unwrap();
         let server_bytes = jpeg.into_inner();
         let application = Router::new().route(
             "/api/opds/sources/opds-test/cover",

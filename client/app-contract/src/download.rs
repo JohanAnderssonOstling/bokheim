@@ -22,19 +22,11 @@ impl DownloadProgress {
     pub const ZERO: Self = Self(0.0);
 
     pub fn new(value: f32) -> Result<Self, DownloadProgressError> {
-        if value.is_finite() && (0.0..=1.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(DownloadProgressError)
-        }
+        if value.is_finite() && (0.0..=1.0).contains(&value) { Ok(Self(value)) } else { Err(DownloadProgressError) }
     }
 
     pub fn from_ratio(completed: u64, total: u64) -> Self {
-        if total == 0 {
-            Self::ZERO
-        } else {
-            Self((completed as f32 / total as f32).clamp(0.0, 1.0))
-        }
+        if total == 0 { Self::ZERO } else { Self((completed as f32 / total as f32).clamp(0.0, 1.0)) }
     }
 
     pub const fn value(self) -> f32 {

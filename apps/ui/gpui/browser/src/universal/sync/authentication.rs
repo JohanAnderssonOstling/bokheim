@@ -43,6 +43,7 @@ impl SyncPage {
             return;
         }
         self.flow = flow;
+        self.login_failed = false;
         self.error = None;
         self.message = None;
         cx.notify();
@@ -93,6 +94,7 @@ impl SyncPage {
         self.start_snapshot_operation(
             "Signing in…",
             "Signed in",
+            true,
             move |core| async move {
                 core.login(&email, &password).await.map_err(|error| error.to_string())?;
                 load_cloud_snapshot(&core).await
@@ -112,7 +114,7 @@ impl SyncPage {
         }
         self.start_account_request(
             "Creating account…",
-            "Check your email for a 6-digit verification PIN",
+            "Check your email for a six-digit verification PIN",
             AccountFlow::VerifyEmail,
             move |core| async move { core.request_public_registration(&email, &password).await.map_err(|error| error.to_string()) },
             cx,
@@ -130,9 +132,10 @@ impl SyncPage {
     }
 
     pub(super) fn start_verify_email(&mut self, cx: &mut Context<Self>) {
-        let token = self.authentication.verification_pin.read(cx).value().trim().to_owned();
+        let email = self.authentication.email.read(cx).value().trim().to_owned();
+        let pin = self.authentication.verification_pin.read(cx).value().trim().to_owned();
         let pin_digits = usize::from(self.services.contracts.account.validation.verification_pin_digits);
-        if token.len() != pin_digits || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        if email.is_empty() || pin.len() != pin_digits || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
             self.error = Some(format!("Enter the {pin_digits}-digit verification PIN").into());
             cx.notify();
             return;
@@ -140,8 +143,9 @@ impl SyncPage {
         self.start_snapshot_operation(
             "Verifying email…",
             "Email verified",
+            false,
             move |core| async move {
-                core.verify_email(&token).await.map_err(|error| error.to_string())?;
+                core.verify_email(&email, &pin).await.map_err(|error| error.to_string())?;
                 load_cloud_snapshot(&core).await
             },
             cx,

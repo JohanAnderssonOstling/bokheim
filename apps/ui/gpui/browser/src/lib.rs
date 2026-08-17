@@ -31,7 +31,7 @@ pub use root::BrowserRoot;
 pub use route::{LibraryRoute, Route, UniversalRoute};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
-pub use services::{AppServices, OpenReader, SaveBrowserState};
+pub use services::{AppServices, DesktopUpdate, DesktopUpdater, OpenReader, SaveBrowserState};
 
 actions!(bokheim_browser, [FocusSearch, ShowHome, ShowAuthors, ShowFolders, ShowSubjects, ShowStore, ShowSync, ShowSettings, DismissSettings, FocusPreviousListItem, FocusNextListItem, ActivateAuthor]);
 

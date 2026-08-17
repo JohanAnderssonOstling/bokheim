@@ -37,6 +37,14 @@ if [[ ! -s /etc/bokheim/resend-api-key ]]; then
     echo "missing Resend API key: create /etc/bokheim/resend-api-key before deploying" >&2
     exit 2
 fi
+if [[ ! -s /etc/bokheim/account-token-key ]]; then
+    echo "missing account token key: create /etc/bokheim/account-token-key before deploying" >&2
+    exit 2
+fi
+if [[ ! -s /etc/bokheim/admin-password ]]; then
+    echo "missing administrator password: create /etc/bokheim/admin-password before deploying" >&2
+    exit 2
+fi
 if [[ ! -s /etc/bokheim/test-user-password ]]; then
     echo "missing test-user password: create /etc/bokheim/test-user-password before deploying" >&2
     exit 2

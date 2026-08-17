@@ -1,8 +1,9 @@
 //! Bounded, loopback-only stress workload for the production HTTP and
 //! PostgreSQL synchronization path.
 
-use account_contract::{AuthResponse, LoginRequest, OneTimeTokenRequest, PublicRegistrationRequest};
+use account_contract::{AuthResponse, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest};
 use reqwest::{Client, Url};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
 use std::io::Write;
@@ -42,6 +43,15 @@ struct BlobFixture {
     library_id: LibraryId,
     hash: Arc<str>,
     bytes: Arc<Vec<u8>>,
+}
+
+type CellKey = (String, String, String);
+type ReplicaProjection = BTreeMap<CellKey, (ReplicaId, WireMutation)>;
+
+struct ProjectedReplica {
+    replica_id: ReplicaId,
+    cursor: sync_common::SyncCursor,
+    cells: ReplicaProjection,
 }
 
 fn bounded_env(name: &str, default: usize, maximum: usize) -> Result<usize, AnyError> {
@@ -177,8 +187,8 @@ fn profiled_server_io() -> (u64, u64) {
 async fn login(client: &Client, base: &Url) -> Result<Identity, AnyError> {
     let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required when BOKHEIM_STRESS_TOKEN is not set"))?;
     let password = std::env::var("BOKHEIM_STRESS_PASSWORD").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_PASSWORD is required"))?;
-    let encoded = sync_common::wire::encode(&LoginRequest { email, password })?;
-    let response = client.post(endpoint(base, "api/auth/login")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
+    let encoded = sync_common::transport::encode(&LoginRequest { email, password })?;
+    let response = client.post(endpoint(base, "api/auth/login")?).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).body(encoded).send().await?;
     let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
     Ok(Identity { token: auth.token.into() })
 }
@@ -186,8 +196,8 @@ async fn login(client: &Client, base: &Url) -> Result<Identity, AnyError> {
 async fn register(client: &Client, base: &Url) -> Result<(), AnyError> {
     let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required"))?;
     let password = std::env::var("BOKHEIM_STRESS_PASSWORD").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_PASSWORD is required"))?;
-    let encoded = sync_common::wire::encode(&PublicRegistrationRequest { email, password })?;
-    let response = client.post(endpoint(base, "api/auth/register")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
+    let encoded = sync_common::transport::encode(&PublicRegistrationRequest { email, password })?;
+    let response = client.post(endpoint(base, "api/auth/register")?).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).body(encoded).send().await?;
     if !response.status().is_success() {
         return Err(io::Error::other(format!("registration failed with {}", response.status())).into());
     }
@@ -195,9 +205,10 @@ async fn register(client: &Client, base: &Url) -> Result<(), AnyError> {
 }
 
 async fn verify_email(client: &Client, base: &Url) -> Result<Identity, AnyError> {
-    let token = std::env::var("BOKHEIM_STRESS_VERIFICATION_TOKEN").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_VERIFICATION_TOKEN is required"))?;
-    let encoded = sync_common::wire::encode(&OneTimeTokenRequest { token })?;
-    let response = client.post(endpoint(base, "api/auth/verify-email")?).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE).body(encoded).send().await?;
+    let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required"))?;
+    let pin = std::env::var("BOKHEIM_STRESS_VERIFICATION_PIN").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_VERIFICATION_PIN is required"))?;
+    let encoded = sync_common::transport::encode(&EmailVerificationRequest { email, pin })?;
+    let response = client.post(endpoint(base, "api/auth/verify-email")?).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).body(encoded).send().await?;
     let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
     Ok(Identity { token: auth.token.into() })
 }
@@ -219,31 +230,114 @@ async fn decode_api_response<T: serde::de::DeserializeOwned>(response: reqwest::
     }
     let bytes = response.bytes().await?;
     let wire_bytes = bytes.len();
-    if !sync_common::wire::is_current_media_type(&content_type) {
+    if !sync_common::transport::is_current_media_type(&content_type) {
         return Err(io::Error::other(format!("unsupported stress response content type {content_type}")).into());
     }
-    let decoded = sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_RESPONSE_BYTES)?;
+    let decoded = sync_common::transport::decode(&bytes, sync_common::transport::MAX_DECODED_RESPONSE_BYTES)?;
     Ok((decoded, wire_bytes))
 }
 
 async fn post_api<T: serde::Serialize, R: serde::de::DeserializeOwned>(client: &Client, url: Url, identity: &Identity, value: &T) -> Result<(R, usize, usize), AnyError> {
-    let encoded = sync_common::wire::encode(value)?;
+    let encoded = sync_common::transport::encode(value)?;
     let request_bytes = encoded.len();
-    let request = client.post(url).bearer_auth(identity.token.as_ref()).header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE);
+    let request = client.post(url).bearer_auth(identity.token.as_ref()).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE);
     let (response, response_bytes) = decode_api_response(request.body(encoded).send().await?).await?;
     Ok((response, request_bytes, response_bytes))
 }
 
 /// The server intentionally exposes one atomic exchange endpoint. A pull is
 /// therefore an exchange with no local mutations.
-async fn pull_page(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ReplicaId, cursor: Option<sync_common::LibraryRevision>) -> Result<(PullStateResponse, usize), AnyError> {
+async fn pull_page(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ReplicaId, cursor: sync_common::SyncCursor) -> Result<(PullStateResponse, usize), AnyError> {
     let request = SyncExchangeRequest { library_id, replica_id, mutations: Vec::new(), cursor };
     let (response, _, response_bytes): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
     Ok((response.pull, response_bytes))
 }
 
+fn apply_projection(cells: &mut ReplicaProjection, pull: &PullStateResponse) {
+    for change in &pull.mutations {
+        let mutation = &change.mutation;
+        cells.insert((mutation.kind.clone(), mutation.entity_key.clone(), mutation.entity_subkey.clone()), (change.replica_id, mutation.clone()));
+    }
+}
+
+async fn catch_up_projection(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica: &mut ProjectedReplica) -> Result<(), AnyError> {
+    loop {
+        let (pull, _) = pull_page(client, base, identity, library_id, replica.replica_id, replica.cursor).await?;
+        apply_projection(&mut replica.cells, &pull);
+        replica.cursor = pull.next_cursor;
+        if !pull.has_more {
+            return Ok(());
+        }
+    }
+}
+
+/// Keeps a materialized projection for every logical replica while atomic
+/// reading writes race generic mixed batches, then requires all projections to
+/// equal a fresh server projection after their final pull.
+async fn run_replica_convergence_guard(client: &Client, base: &Url, identity: &Identity, workload: Workload) -> Result<(), AnyError> {
+    let library_id = Uuid::new_v4();
+    create_library(client, base, identity, &library_id).await?;
+    let replica_count = workload.workers.min(16);
+    let rounds = workload.requests_per_worker.min(20);
+    let barrier = Arc::new(Barrier::new(replica_count));
+    let mut tasks = JoinSet::new();
+
+    for worker in 0..replica_count {
+        let client = client.clone();
+        let base = base.clone();
+        let identity = identity.clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            let replica_id = Uuid::new_v4();
+            let mut projected = ProjectedReplica { replica_id, cursor: sync_common::SyncCursor::default(), cells: BTreeMap::new() };
+            let clock = now_ms().saturating_add(worker as u64);
+            barrier.wait().await;
+            for round in 0..rounds {
+                let first_sequence = (round * 2 + 1) as u64;
+                let mut reading = wire_mutation("reading_position", "shared-reading", "", first_sequence, clock)?;
+                reading.value = format!("replica-{worker}-round-{round}").into_bytes();
+                let mutations = if round % 2 == 0 {
+                    vec![reading]
+                } else {
+                    let mut metadata = wire_mutation("directory_name", format!("replica-{worker}"), "", first_sequence + 1, clock)?;
+                    metadata.value = format!("round-{round}").into_bytes();
+                    vec![reading, metadata]
+                };
+                let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor: projected.cursor };
+                let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
+                if !response.push.rejected.is_empty() || response.push.accepted.len() != request.mutations.len() {
+                    return Err::<ProjectedReplica, AnyError>(io::Error::other("convergence exchange did not acknowledge every mutation").into());
+                }
+                apply_projection(&mut projected.cells, &response.pull);
+                projected.cursor = response.pull.next_cursor;
+                if response.pull.has_more {
+                    catch_up_projection(&client, &base, &identity, library_id, &mut projected).await?;
+                }
+            }
+            Ok(projected)
+        });
+    }
+
+    let mut replicas = Vec::with_capacity(replica_count);
+    while let Some(result) = tasks.join_next().await {
+        replicas.push(result.map_err(|error| io::Error::other(format!("convergence worker failed: {error}")))??);
+    }
+    for replica in &mut replicas {
+        catch_up_projection(client, base, identity, library_id, replica).await?;
+    }
+    let mut server = ProjectedReplica { replica_id: Uuid::new_v4(), cursor: sync_common::SyncCursor::default(), cells: BTreeMap::new() };
+    catch_up_projection(client, base, identity, library_id, &mut server).await?;
+    for replica in &replicas {
+        if replica.cells != server.cells {
+            return Err(io::Error::other(format!("replica {} diverged: replica_cells={} server_cells={}", replica.replica_id, replica.cells.len(), server.cells.len())).into());
+        }
+    }
+    println!("replica convergence: replicas={replica_count} rounds={rounds} cells={} status=equal", server.cells.len());
+    Ok(())
+}
+
 async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, book_count: usize, directory_count: usize) -> Result<(), AnyError> {
-    let wire_label = "bincode";
+    let wire_label = "protobuf";
     let library_id = Uuid::new_v4();
     create_library(client, base, identity, &library_id).await?;
     let replica_id = Uuid::new_v4();
@@ -273,7 +367,7 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     let mut push_samples = Vec::new();
     let mut request_bytes = 0_usize;
     for page in mutations.chunks(MAX_PUSH_MUTATIONS) {
-        let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: page.to_vec(), cursor: None };
+        let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: page.to_vec(), cursor: sync_common::SyncCursor::default() };
         let request_started = Instant::now();
         let (response, sent_bytes, _response_bytes): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
         request_bytes += sent_bytes;
@@ -294,7 +388,7 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     );
 
     let pull_started = Instant::now();
-    let mut cursor = None;
+    let mut cursor = sync_common::SyncCursor::default();
     let mut pulled = 0_usize;
     let mut pull_pages = 0_usize;
     let mut response_bytes = 0_usize;
@@ -349,7 +443,7 @@ async fn run_pushes(label: &str, client: &Client, base: &Url, identity: &Identit
             let mut samples = Vec::with_capacity(workload.requests_per_worker);
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: changes(worker, request_index, workload, id_offset, clock), cursor: None };
+                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: changes(worker, request_index, workload, id_offset, clock), cursor: sync_common::SyncCursor::default() };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !response.push.rejected.is_empty() || response.push.accepted.len() != workload.events_per_request {
@@ -389,7 +483,12 @@ async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity:
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
+                let request = SyncExchangeRequest {
+                    library_id: library_id.clone(),
+                    replica_id: replica_id.clone(),
+                    mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
+                    cursor: sync_common::SyncCursor::default(),
+                };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
                 if !response.push.rejected.is_empty() || response.push.accepted.len() != 1 {
@@ -424,10 +523,10 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
         tasks.spawn(async move {
             let replica_id = Uuid::new_v4();
             let content_hash = fixture_content_hash(content_hash_offset + worker as u64 + 1);
-            let mut cursor = None;
+            let mut cursor = sync_common::SyncCursor::default();
             loop {
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), replica_id.clone(), cursor).await?;
-                cursor = pulled.next_cursor.or(cursor);
+                cursor = pulled.next_cursor;
                 if !pulled.has_more {
                     break;
                 }
@@ -481,10 +580,10 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
             let writer_id = Uuid::new_v4();
             let reader_id = Uuid::new_v4();
             let content_hash = fixture_content_hash(content_hash_offset + worker as u64 + 1);
-            let mut cursor = None;
+            let mut cursor = sync_common::SyncCursor::default();
             loop {
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), reader_id.clone(), cursor).await?;
-                cursor = pulled.next_cursor.or(cursor);
+                cursor = pulled.next_cursor;
                 if !pulled.has_more {
                     break;
                 }
@@ -495,7 +594,12 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let push = SyncExchangeRequest { library_id: library_id.clone(), replica_id: writer_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor: None };
+                let push = SyncExchangeRequest {
+                    library_id: library_id.clone(),
+                    replica_id: writer_id.clone(),
+                    mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
+                    cursor: sync_common::SyncCursor::default(),
+                };
                 let (acknowledged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &push).await?;
                 if acknowledged.push.accepted.len() != 1 || !acknowledged.push.rejected.is_empty() {
                     return Err(io::Error::other("remote position writer was not acknowledged exactly once").into());
@@ -523,7 +627,7 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
 
 async fn pull_once(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, replica_id: ReplicaId, expected_events: usize) -> Result<PullSample, AnyError> {
     let started = Instant::now();
-    let mut cursor = None;
+    let mut cursor = sync_common::SyncCursor::default();
     let mut response_bytes = 0_usize;
     let mut pulled_events = 0_usize;
     loop {
@@ -533,7 +637,7 @@ async fn pull_once(client: &Client, base: &Url, identity: &Identity, library_id:
             return Err(io::Error::other("pull returned an empty non-final page").into());
         }
         pulled_events += pulled.mutations.len();
-        cursor = pulled.next_cursor.or(cursor);
+        cursor = pulled.next_cursor;
         if !pulled.has_more {
             break;
         }
@@ -887,6 +991,7 @@ async fn main() -> Result<(), AnyError> {
         run_position_pushes("single-library reading-position push", &client, &base, &identity, std::slice::from_ref(&contended), position_workload, 3_000_000_000).await?;
         let expected_contended_events = if mode == "position" { workload.workers * 2 } else { total_events + workload.workers * 2 };
         let _ = pull_once(&client, &base, &identity, contended, Uuid::new_v4(), expected_contended_events).await?;
+        run_replica_convergence_guard(&client, &base, &identity, workload).await?;
     }
 
     if mode == "full" {

@@ -7,7 +7,7 @@ use gpui_component::Size;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants};
 
-use crate::{BrowserTheme, SPACE_MD, SPACE_SM, TEXT_LG, TOPBAR_ACTION_HEIGHT};
+use crate::{BrowserTheme, SPACE_MD, SPACE_SM, Scrollable, ScrollableElement, TEXT_LG, TOPBAR_ACTION_HEIGHT};
 
 pub fn app_page(font_family: impl Into<SharedString>, font_size_px: u8, theme: BrowserTheme) -> Div {
     div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
@@ -29,8 +29,10 @@ pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedStri
         .into_any_element()
 }
 
-pub fn sidebar(width: f32, theme: BrowserTheme) -> Div {
-    div().w(px(width)).h_full().min_h_0().flex_none().flex().flex_col().gap_0().bg(theme.raised_bg)
+pub fn sidebar(width: f32, theme: BrowserTheme) -> Scrollable<Div> {
+    let mut separator = theme.border;
+    separator.a *= 0.55;
+    div().w(px(width)).h_full().min_h_0().flex_none().flex().flex_col().gap_0().border_r_1().border_color(separator).bg(theme.page_bg).overflow_y_scroll_hidden()
 }
 
 /// Titles are the interface font at a larger size and heavier weight.

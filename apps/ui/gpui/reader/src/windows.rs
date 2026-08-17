@@ -86,7 +86,7 @@ pub fn configure_audio_backend(backend: Arc<dyn crate::NativeAudioBackend>, cx: 
     cx.global_mut::<ReaderServices>().audio = backend;
 }
 
-pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryBackend, cx: &mut App) {
+pub fn open_reader_window(locator: BookLocator, title: String, initial_target: Option<String>, library: LibraryBackend, cx: &mut App) {
     let startup_started = Instant::now();
     startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
     #[cfg(feature = "kobo")]
@@ -144,13 +144,13 @@ pub fn open_reader_window(locator: BookLocator, title: String, library: LibraryB
                 }
             };
             startup_phase!("phase=prepared content_hash={} elapsed_ms={}", locator.content_hash(), startup_started.elapsed().as_millis());
-            open_prepared_reader_window(locator, title, library, prepared, startup_started, cx);
+            open_prepared_reader_window(locator, title, initial_target, library, prepared, startup_started, cx);
         });
     })
     .detach();
 }
 
-fn open_prepared_reader_window(locator: BookLocator, title: String, library: LibraryBackend, prepared: PreparedBook, startup_started: Instant, cx: &mut App) {
+fn open_prepared_reader_window(locator: BookLocator, title: String, initial_target: Option<String>, library: LibraryBackend, prepared: PreparedBook, startup_started: Instant, cx: &mut App) {
     install_close_observer(cx);
     let id = {
         let registry = cx.default_global::<ReaderWindowRegistry>();
@@ -205,7 +205,7 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, library: Lib
                 cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
             }
             PreparedBook::Publication { publication, nav_state } => {
-                let reader = cx.new(|cx| ReaderView::new(PendingReader { id, locator: locator_for_window, title, library: library_for_window, publication, nav_state }, window, cx));
+                let reader = cx.new(|cx| ReaderView::new(PendingReader { id, locator: locator_for_window, title, library: library_for_window, publication, nav_state, initial_target }, window, cx));
                 *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Epub(reader.downgrade()));
                 cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
             }

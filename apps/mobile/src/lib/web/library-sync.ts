@@ -1,5 +1,7 @@
 import { authenticatedWebFetch, WIRE_MEDIA_TYPE } from "./account-client.ts";
 import { getWebDatabase } from "./database.ts";
+import { enrichWebLibraryAuthors, enrichWebLibraryRich } from "./library-database.ts";
+import { hydrateMutationTaxonomy } from "./taxonomy.ts";
 import { decodeSyncExchange, encodeSyncExchange, projectDirectories } from "./wasm-core.ts";
 
 interface OutboxMutation {
@@ -22,8 +24,13 @@ interface ExchangeResponse {
   accepted: string[];
   rejected: Array<[string, string, boolean]>;
   mutations: RemoteMutation[];
-  next_cursor: number | null;
+  next_cursor: SyncCursor;
   has_more: boolean;
+}
+
+interface SyncCursor {
+  state_revision: number | null;
+  reading_revision: number | null;
 }
 
 function remoteVersionWins(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string, mutation: RemoteMutation): boolean {
@@ -81,6 +88,14 @@ async function projectAllDirectories(db: Awaited<ReturnType<typeof getWebDatabas
   const byId = new Map(intents.map((intent) => [intent.id, intent]));
   const names = new Map(projection.names);
   db.exec({ sql: "DELETE FROM directories WHERE library_id=?", bind: [libraryId] });
+  db.exec({ sql: "DELETE FROM web_trash_folders WHERE library_id=?", bind: [libraryId] });
+  for (const intent of intents) {
+    if (intent.lifecycle.value !== "deleted") continue;
+    db.exec({
+      sql: "INSERT INTO web_trash_folders (library_id,directory_id,name,deleted_at) VALUES (?,?,?,?)",
+      bind: [libraryId, intent.id, names.get(intent.id) ?? String(intent.name.value), intent.lifecycle.changed_at],
+    });
+  }
   for (const directoryId of projection.ordered_active) {
     const intent = byId.get(directoryId);
     if (!intent) throw new Error("Shared directory projection returned an unknown directory");
@@ -88,6 +103,18 @@ async function projectAllDirectories(db: Awaited<ReturnType<typeof getWebDatabas
       sql: "INSERT INTO directories (library_id, directory_id, parent_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
       bind: [libraryId, directoryId, String(intent.parent.value), names.get(directoryId) ?? String(intent.name.value), Date.now()],
     });
+  }
+}
+
+export async function reprojectWebDirectories(libraryId: string): Promise<void> {
+  const { db } = await getWebDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    await projectAllDirectories(db, libraryId);
+    db.exec("COMMIT");
+  } catch (reason) {
+    db.exec("ROLLBACK");
+    throw reason;
   }
 }
 
@@ -107,24 +134,56 @@ function metadataFields(metadata: Record<string, unknown>): { title: string; aut
   };
 }
 
-function projectBook(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string, contentHash: string): void {
+function metadataSubjectPaths(metadata: Record<string, unknown>): string[] {
+  const publication = metadata.publication;
+  if (!publication || typeof publication !== "object") return [];
+  const paths = (publication as Record<string, unknown>).subject_paths;
+  return Array.isArray(paths) ? paths.filter((path): path is string => typeof path === "string" && Boolean(path)) : [];
+}
+
+function projectBook(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string, contentHash: string): string | null {
   const cells = syncCellValues(db, libraryId, contentHash);
-  const lifecycle = cells.get("book_lifecycle")?.value as Record<string, unknown> | undefined;
-  const present = lifecycle?.present as Record<string, unknown> | undefined;
-  if (lifecycle !== undefined && !present) {
+  const lifecycle = cells.get("book_lifecycle")?.value;
+  const present = lifecycle && typeof lifecycle === "object" ? (lifecycle as Record<string, unknown>).present as Record<string, unknown> | undefined : undefined;
+  if (lifecycle === "purged") {
+    const storageKey = db.exec({ sql: "SELECT storage_key FROM books WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash], rowMode: 0, returnValue: "resultRows" })[0];
+    db.exec({ sql: "DELETE FROM web_trash_books WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
     db.exec({ sql: "DELETE FROM books WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
-    return;
+    return typeof storageKey === "string" ? storageKey : null;
   }
+  const deleted = lifecycle && typeof lifecycle === "object" && "deleted" in lifecycle;
+  if (deleted) {
+    const existing = db.exec({ sql: "SELECT title,file_name FROM books WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash], rowMode: "array", returnValue: "resultRows" })[0] as [string, string] | undefined;
+    const metadata = (cells.get("metadata")?.value as Record<string, unknown> | undefined) ?? {};
+    const title = existing?.[0] ?? (typeof metadata.title === "string" ? metadata.title : "Untitled");
+    const fileName = existing?.[1] ?? `${title}.epub`;
+    const format = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "epub";
+    db.exec({
+      sql: `INSERT INTO web_trash_books (library_id,content_hash,title,format,deleted_at) VALUES (?,?,?,?,?)
+            ON CONFLICT (library_id,content_hash) DO UPDATE SET title=excluded.title,format=excluded.format,deleted_at=excluded.deleted_at`,
+      bind: [libraryId, contentHash, title, format, cells.get("book_lifecycle")?.changedAt ?? Date.now()],
+    });
+    db.exec({ sql: "DELETE FROM book_placements WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
+    return null;
+  }
+  db.exec({ sql: "DELETE FROM web_trash_books WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
   const lifecycleMetadata = present?.metadata as Record<string, unknown> | undefined;
   const metadata = (cells.get("metadata")?.value as Record<string, unknown> | undefined) ?? lifecycleMetadata ?? {};
   const fields = metadataFields(metadata);
+  const extension = present?.format === "Pdf" ? "pdf" : "epub";
+  const projectedFileName = `${fields.title}.${extension}`;
   const changedAt = Number(present?.added_at ?? cells.get("book_lifecycle")?.changedAt ?? Date.now());
   db.exec({
-    sql: `INSERT INTO books (library_id, content_hash, file_name, title, author, author_id, author_key, added_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    sql: `INSERT INTO books (library_id, content_hash, file_name, title, author, author_id, author_key, description, added_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT (library_id, content_hash) DO UPDATE SET
-            title=excluded.title, author=excluded.author, author_id=excluded.author_id, author_key=excluded.author_key`,
-    bind: [libraryId, contentHash, `${fields.title}.epub`, fields.title, fields.author, fields.authorId, fields.authorKey, changedAt],
+            title=excluded.title, author=excluded.author, author_id=excluded.author_id, author_key=excluded.author_key, description=excluded.description`,
+    bind: [libraryId, contentHash, projectedFileName, fields.title, fields.author, fields.authorId, fields.authorKey, typeof metadata.description === "string" ? metadata.description : "", changedAt],
+  });
+  db.exec({ sql: "DELETE FROM book_subject_paths WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
+  for (const subjectPath of metadataSubjectPaths(metadata)) db.exec({
+    sql: "INSERT INTO book_subject_paths (library_id,content_hash,subject_path) VALUES (?,?,?)",
+    bind: [libraryId, contentHash, subjectPath],
   });
 
   db.exec({ sql: "DELETE FROM book_placements WHERE library_id=? AND content_hash=?", bind: [libraryId, contentHash] });
@@ -138,7 +197,7 @@ function projectBook(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libra
     db.exec({
       sql: `INSERT INTO book_placements (library_id, content_hash, directory_id, file_name, added_at)
             VALUES (?, ?, ?, ?, ?)`,
-      bind: [libraryId, contentHash, directoryId, `${fields.title}.epub`, placementChangedAt],
+      bind: [libraryId, contentHash, directoryId, projectedFileName, placementChangedAt],
     });
   }
 
@@ -151,10 +210,32 @@ function projectBook(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libra
       bind: [libraryId, contentHash, String(value.location), Number(value.progress), reading.changedAt],
     });
   }
+  return null;
 }
 
-function applyProjection(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string, mutation: RemoteMutation): void {
-  if (["book_lifecycle", "metadata", "placement", "reading_position"].includes(mutation.kind)) projectBook(db, libraryId, mutation.entity_key);
+function applyProjection(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string, mutation: RemoteMutation): string | null {
+  return ["book_lifecycle", "metadata", "placement", "reading_position"].includes(mutation.kind) ? projectBook(db, libraryId, mutation.entity_key) : null;
+}
+
+function projectCatalogPublications(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], libraryId: string): void {
+  db.exec({ sql: "DELETE FROM web_catalog_publications WHERE library_id=?", bind: [libraryId] });
+  const rows = db.exec({
+    sql: "SELECT entity_key,value_json FROM web_sync_cells WHERE library_id=? AND kind='catalog_publication' ORDER BY entity_key,entity_subkey",
+    bind: [libraryId], rowMode: "array", returnValue: "resultRows",
+  }) as Array<[string, string]>;
+  for (const [sourceId, json] of rows) {
+    const value = JSON.parse(json) as { publication?: { edition_id?: unknown; work_id?: unknown }; content_hash?: unknown };
+    const editionId = value.publication?.edition_id;
+    const workId = value.publication?.work_id;
+    const contentHash = value.content_hash;
+    if (typeof editionId !== "string" || typeof contentHash !== "string" || (workId !== null && workId !== undefined && typeof workId !== "string")) continue;
+    db.exec({
+      sql: `INSERT INTO web_catalog_publications (library_id,source_id,edition_id,work_id,content_hash)
+            SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM books WHERE library_id=? AND content_hash=?)
+            ON CONFLICT (library_id,source_id,edition_id,work_id) DO UPDATE SET content_hash=excluded.content_hash`,
+      bind: [libraryId, sourceId, editionId, workId ?? "", contentHash, libraryId, contentHash],
+    });
+  }
 }
 
 export async function applyWebSyncExchange(libraryId: string, response: ExchangeResponse): Promise<void> {
@@ -168,9 +249,11 @@ export async function applyWebSyncExchange(libraryId: string, response: Exchange
   }
 
   const { db } = await getWebDatabase();
+  const removedPublicationKeys: string[] = [];
   db.exec("BEGIN IMMEDIATE");
   try {
       let directoriesChanged = false;
+      let catalogPublicationsChanged = false;
       for (const mutation of response.mutations.sort((left, right) => left.revision - right.revision)) {
         if (!remoteVersionWins(db, libraryId, mutation)) continue;
         db.exec({
@@ -183,24 +266,35 @@ export async function applyWebSyncExchange(libraryId: string, response: Exchange
           bind: [libraryId, mutation.kind, mutation.entity_key, mutation.entity_subkey, JSON.stringify(mutation.value), mutation.changed_at, mutation.conflict_rank, mutation.replica_id, mutation.replica_seq, mutation.mutation_id],
         });
         directoriesChanged ||= mutation.kind.startsWith("directory_");
-        applyProjection(db, libraryId, mutation);
+        catalogPublicationsChanged ||= mutation.kind === "catalog_publication" || mutation.kind === "book_lifecycle";
+        const removedPublicationKey = applyProjection(db, libraryId, mutation);
+        if (removedPublicationKey) removedPublicationKeys.push(removedPublicationKey);
       }
       if (directoriesChanged) await projectAllDirectories(db, libraryId);
+      if (catalogPublicationsChanged) projectCatalogPublications(db, libraryId);
       for (const mutationId of completed) db.exec({ sql: "DELETE FROM web_sync_outbox WHERE library_id=? AND mutation_id=?", bind: [libraryId, mutationId] });
       db.exec({
-        sql: "UPDATE web_sync_state SET last_server_revision=?, last_synced_at=? WHERE library_id=?",
-        bind: [response.next_cursor, Date.now(), libraryId],
+        sql: "UPDATE web_sync_state SET last_state_revision=?, last_reading_revision=?, last_synced_at=? WHERE library_id=?",
+        bind: [response.next_cursor.state_revision, response.next_cursor.reading_revision, Date.now(), libraryId],
       });
       db.exec("COMMIT");
   } catch (reason) {
     db.exec("ROLLBACK");
     throw reason;
   }
+  if (removedPublicationKeys.length) {
+    const { removePublication } = await import("./publication-storage.ts");
+    await Promise.all(removedPublicationKeys.map((key) => removePublication(key).catch(() => undefined)));
+  }
   if (permanentRejections.length) throw new Error(`Server rejected synchronization changes: ${permanentRejections.join(", ")}`);
   if (transientRejections.length) throw new Error(`Server deferred ${transientRejections.length} synchronization change(s); they remain queued`);
 }
 
 export async function synchronizeWebLibrary(libraryId: string): Promise<void> {
+  await enrichWebLibraryRich(libraryId, Number.MAX_SAFE_INTEGER, 30_000)
+    .catch((reason) => console.warn("Continuing web library sync without rich metadata enrichment", reason));
+  await enrichWebLibraryAuthors(libraryId, Number.MAX_SAFE_INTEGER, 20_000)
+    .catch((reason) => console.warn("Continuing web library sync without author enrichment", reason));
   const { db } = await getWebDatabase();
   db.exec({ sql: "INSERT INTO web_sync_state (library_id, replica_id) VALUES (?, ?) ON CONFLICT (library_id) DO NOTHING", bind: [libraryId, crypto.randomUUID()] });
   let hasMore = true;
@@ -208,9 +302,10 @@ export async function synchronizeWebLibrary(libraryId: string): Promise<void> {
   while (hasMore) {
     if (++page > 10_000) throw new Error("Synchronization pagination did not terminate");
     const state = db.exec({
-      sql: "SELECT replica_id, last_server_revision FROM web_sync_state WHERE library_id=?",
+      sql: "SELECT replica_id, last_state_revision, last_reading_revision FROM web_sync_state WHERE library_id=?",
       bind: [libraryId], rowMode: "array", returnValue: "resultRows",
-    })[0] as [string, number | null];
+    })[0] as [string, number | null, number | null];
+    const cursor: SyncCursor = { state_revision: state[1], reading_revision: state[2] };
     const rows = db.exec({
       sql: `SELECT mutation_id, kind, entity_key, entity_subkey, value_json, changed_at, replica_seq
             FROM web_sync_outbox WHERE library_id=? ORDER BY replica_seq LIMIT 1000`,
@@ -221,24 +316,74 @@ export async function synchronizeWebLibrary(libraryId: string): Promise<void> {
       entity_subkey: String(row.entity_subkey), value: JSON.parse(String(row.value_json)),
       changed_at: Number(row.changed_at), replica_seq: Number(row.replica_seq),
     }));
-    const body = await encodeSyncExchange({ library_id: libraryId, replica_id: state[0], cursor: state[1], mutations });
+    const body = await encodeSyncExchange({ library_id: libraryId, replica_id: state[0], cursor, mutations });
     const serverResponse = await authenticatedWebFetch("/api/sync/exchange", {
       method: "POST", headers: { "Content-Type": WIRE_MEDIA_TYPE }, body,
     });
     const response = await decodeSyncExchange<ExchangeResponse>(new Uint8Array(await serverResponse.arrayBuffer()), {
-      requested: mutations.map(({ mutation_id }) => mutation_id), cursor: state[1],
+      requested: mutations.map(({ mutation_id }) => mutation_id), cursor,
     });
+    await hydrateMutationTaxonomy(response.mutations)
+      .catch((reason) => console.warn("Continuing synchronization without missing taxonomy detail", reason));
     await applyWebSyncExchange(libraryId, response);
     hasMore = response.has_more || mutations.length === 1000;
   }
 }
 
-export async function synchronizeAllWebLibraries(): Promise<void> {
+async function runAllWebLibrarySynchronization(): Promise<void> {
   const { synchronizeWebLibraryBlobs } = await import("./blob-sync.ts");
   const { db } = await getWebDatabase();
-  const libraryIds = db.exec({ sql: "SELECT library_id FROM web_remote_libraries ORDER BY library_id", rowMode: 0, returnValue: "resultRows" });
+  const libraryIds = db.exec({
+    sql: `SELECT remote.library_id FROM web_remote_libraries remote
+          JOIN web_library_owners owner ON owner.library_id=remote.library_id
+          JOIN web_account_profile profile ON profile.singleton=1 AND profile.user_id=owner.user_id
+          ORDER BY remote.library_id`,
+    rowMode: 0, returnValue: "resultRows",
+  });
   for (const libraryId of libraryIds) {
     await synchronizeWebLibrary(String(libraryId));
     await synchronizeWebLibraryBlobs(String(libraryId));
   }
+}
+
+let synchronizationPass: Promise<void> | undefined;
+let synchronizationRequested = false;
+
+/** Coalesces concurrent callers so SQLite and upload manifests have one writer. */
+export function synchronizeAllWebLibraries(): Promise<void> {
+  synchronizationRequested = true;
+  if (!synchronizationPass) {
+    synchronizationPass = (async () => {
+      while (synchronizationRequested) {
+        synchronizationRequested = false;
+        await runAllWebLibrarySynchronization();
+      }
+    })().finally(() => {
+      synchronizationPass = undefined;
+    });
+  }
+  return synchronizationPass;
+}
+
+export async function synchronizeAllWebLibraryMetadata(): Promise<void> {
+  const { db } = await getWebDatabase();
+  const libraryIds = db.exec({
+    sql: `SELECT remote.library_id FROM web_remote_libraries remote
+          JOIN web_library_owners owner ON owner.library_id=remote.library_id
+          JOIN web_account_profile profile ON profile.singleton=1 AND profile.user_id=owner.user_id
+          ORDER BY remote.library_id`, rowMode: 0, returnValue: "resultRows",
+  });
+  for (const libraryId of libraryIds) await synchronizeWebLibrary(String(libraryId));
+}
+
+export async function synchronizeAllWebLibraryBlobs(): Promise<void> {
+  const { synchronizeWebLibraryBlobs } = await import("./blob-sync.ts");
+  const { db } = await getWebDatabase();
+  const libraryIds = db.exec({
+    sql: `SELECT remote.library_id FROM web_remote_libraries remote
+          JOIN web_library_owners owner ON owner.library_id=remote.library_id
+          JOIN web_account_profile profile ON profile.singleton=1 AND profile.user_id=owner.user_id
+          ORDER BY remote.library_id`, rowMode: 0, returnValue: "resultRows",
+  });
+  for (const libraryId of libraryIds) await synchronizeWebLibraryBlobs(String(libraryId));
 }

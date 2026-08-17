@@ -25,10 +25,23 @@ test("book actions and typed book cards stay shared across both browsing fronten
   assert.match(nativeCard, /ui\.open_reader/);
 });
 
-test("Android publication picker mirrors the shared import contract", () => {
+test("Android publication picker offers every import format and stages off the UI thread", () => {
   const activity = readFileSync(new URL("../../src-tauri/gen/android/app/src/main/java/se/bokheim/reader/MainActivity.kt", import.meta.url), "utf8");
-  for (const extension of FRONTEND_CONTRACT.browsing_content.import_extensions) {
-    assert.match(activity, new RegExp(`"${extension}"`), `Android picker is missing .${extension}`);
-  }
+  assert.match(activity, /type = "\*\/\*"/);
+  assert.match(activity, /Intent\.EXTRA_MIME_TYPES/);
   assert.match(activity, /"application\/pdf"/);
+  assert.match(activity, /"audio\/x-m4b"/);
+  assert.match(activity, /lifecycleScope\.launch/);
+  assert.match(activity, /withContext\(Dispatchers\.IO\) \{ stagePublication\(uri\) \}/);
+  assert.doesNotMatch(activity, /val \(path, name\) = stagePublication\(uri\)/);
+});
+
+test("uncategorized ISBN review renders a windowed queue", () => {
+  const subjects = source("../components/library/SubjectsPage.svelte");
+  const review = source("../components/library/MetadataReviewPanel.svelte");
+  assert.match(subjects, /__uncategorized__/);
+  assert.match(subjects, /MetadataReviewPanel/);
+  assert.match(review, /filteredReviews\.slice\(startIndex, endIndex\)/);
+  assert.match(review, /height: \$\{totalHeight\}px/);
+  assert.match(review, /translateY\(\$\{\(startIndex \+ offset\) \* ROW_STRIDE\}px\)/);
 });

@@ -1,15 +1,35 @@
 //! Pure cover extraction and JPEG thumbnail generation for supported books.
 
-use epub_provider::{EpubProvider, ResourceProvider};
+#[cfg(feature = "publication-extractors")]
+use epub_provider::EpubProvider;
+#[cfg(feature = "epub-page-render")]
+use epub_provider::ResourceProvider;
 use fast_image_resize::images::Image;
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+#[cfg(feature = "epub-page-render")]
+use gpui::{px, size, AppContext as _, Empty, HeadlessAppContext, PlatformTextSystem as _};
+#[cfg(feature = "epub-page-render")]
+use gpui_wgpu::CosmicTextSystem;
+#[cfg(feature = "epub-page-render")]
+use html_view_core::RendererInitialConfig;
+#[cfg(feature = "epub-page-render")]
+use html_view_gpui::HtmlView;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::io::Reader as ImageReader;
 use image::{ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, RgbImage};
+#[cfg(feature = "publication-extractors")]
 use mobi::headers::ExthRecord;
+#[cfg(feature = "publication-extractors")]
 use std::fs::File;
-use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufWriter, Cursor};
+#[cfg(feature = "publication-extractors")]
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(feature = "publication-extractors")]
 use std::path::Path;
+#[cfg(feature = "epub-page-render")]
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "epub-page-render")]
+use std::time::{Duration, Instant};
 
 /// Covers are displayed at `LARGE_BOOK_COVER_WIDTH_PX` *logical* pixels, so the
 /// stored asset has to carry the device pixel ratio too: 200 logical at DPR 3
@@ -20,11 +40,23 @@ use std::path::Path;
 /// skipped whenever the file is present — so libraries scanned before the
 /// change keep their old resolution until those books are rescanned.
 const THUMBNAIL_WIDTH: u32 = 600;
+const MAX_COVER_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_COVER_IMAGE_PIXELS: u64 = 24_000_000;
+const MAX_COVER_IMAGE_DIMENSION: u32 = 20_000;
+const EPUB_FALLBACK_MIN_WIDTH: u32 = 300;
+const EPUB_FALLBACK_MIN_HEIGHT: u32 = 400;
+const EPUB_FALLBACK_MIN_ASPECT_RATIO: f64 = 0.45;
+const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
+#[cfg(feature = "epub-page-render")]
+const EPUB_PAGE_HEIGHT: u32 = 900;
 
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Extracts a publication cover and returns a resized JPEG. Publications with
-/// no cover, and formats without an extractor, return `None`.
+/// Extracts a publication cover and returns a resized JPEG. With
+/// `epub-page-render`, an EPUB without cover art uses a rendering of its first
+/// spine page. Other publications with no cover, and formats without an
+/// extractor, return `None`.
+#[cfg(feature = "publication-extractors")]
 pub fn generate_thumbnail(book_path: &Path) -> ThumbnailResult<Option<Vec<u8>>> {
     let extension = book_path.extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
     let image = match extension.as_str() {
@@ -38,14 +70,106 @@ pub fn generate_thumbnail(book_path: &Path) -> ThumbnailResult<Option<Vec<u8>>> 
     image.map(encode_thumbnail).transpose()
 }
 
-fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
-    let epub = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
-    let Some(image_path) = epub.cover_image_path()? else { return Ok(None) };
-    let format = image_format(&image_path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported EPUB cover image format: {image_path}")))?;
-    let bytes = epub.read_bytes(&image_path)?;
-    Ok(Some(decode_cover_image(&bytes, format)?))
+/// Normalizes an already-extracted cover image to the same resized JPEG used
+/// by publication scanning. This keeps browser/WASM imports on the native
+/// thumbnail contract without requiring a temporary filesystem path.
+pub fn generate_thumbnail_from_image_bytes(bytes: &[u8]) -> ThumbnailResult<Vec<u8>> {
+    let format = image::guess_format(bytes)?;
+    encode_thumbnail(decode_cover_image(bytes, format)?)
 }
 
+#[cfg(feature = "publication-extractors")]
+fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
+    let epub = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
+    if let Some(image_path) = epub.declared_cover_image_path()? {
+        let format = image_format(&image_path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported EPUB cover image format: {image_path}")))?;
+        let bytes = epub.read_bytes(&image_path)?;
+        let image = decode_cover_image(&bytes, format)?;
+        if reasonable_cover_dimensions(image.width(), image.height()) {
+            return Ok(Some(image));
+        }
+    }
+
+    for image_path in epub.image_paths_in_reading_order()? {
+        let Ok(bytes) = epub.read_bytes(&image_path) else { continue };
+        let Ok(format) = image::guess_format(&bytes) else { continue };
+        let Ok((width, height)) = ImageReader::with_format(Cursor::new(&bytes), format).into_dimensions() else { continue };
+        if !reasonable_cover_dimensions(width, height) {
+            continue;
+        }
+        if let Ok(image) = decode_cover_image(&bytes, format) {
+            return Ok(Some(image));
+        }
+    }
+
+    #[cfg(feature = "epub-page-render")]
+    return render_epub_first_page(epub).map(Some);
+
+    #[cfg(not(feature = "epub-page-render"))]
+    Ok(None)
+}
+
+/// Returns whether an image is large enough and sufficiently cover-shaped to
+/// be preferred over another publication-cover source. Catalogue servers use
+/// the same geometry contract for upstream thumbnails and EPUB fallbacks.
+pub fn reasonable_cover_dimensions(width: u32, height: u32) -> bool {
+    if width < EPUB_FALLBACK_MIN_WIDTH || height < EPUB_FALLBACK_MIN_HEIGHT {
+        return false;
+    }
+    let aspect_ratio = f64::from(width) / f64::from(height);
+    (EPUB_FALLBACK_MIN_ASPECT_RATIO..=EPUB_FALLBACK_MAX_ASPECT_RATIO).contains(&aspect_ratio)
+}
+
+/// Renders are serialized because each headless GPUI context owns a GPU-backed
+/// renderer. EPUBs with embedded covers continue through the parallel image
+/// path and never acquire this lock.
+#[cfg(feature = "epub-page-render")]
+fn render_epub_first_page(epub: EpubProvider) -> ThumbnailResult<RgbImage> {
+    static RENDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _render_guard = RENDER_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let document_uris = epub.list_html_candidates("")?;
+    if document_uris.is_empty() {
+        return Err("EPUB contains no readable spine documents to render as a cover".into());
+    }
+
+    let text_system = Arc::new(CosmicTextSystem::new("sans-serif"));
+    if text_system.all_font_names().is_empty() {
+        return Err("no system fonts are available for EPUB cover rendering".into());
+    }
+    let mut context = HeadlessAppContext::with_platform_and_scale_factor(text_system, Arc::new(()), gpui_platform::current_headless_renderer, 1.0);
+    let window = context.open_window(size(px(THUMBNAIL_WIDTH as f32), px(EPUB_PAGE_HEIGHT as f32)), |_, cx| cx.new(|_| Empty))?;
+    let window = window.into();
+    let provider: Arc<dyn html_view_core::ResourceProvider> = Arc::new(epub);
+    let view = context.update_window(window, |_, window, cx| {
+        window.replace_root(cx, move |window, cx| {
+            let config = RendererInitialConfig { font_size: 18.0, column_width: THUMBNAIL_WIDTH as f64, max_column_count: Some(1), ..RendererInitialConfig::default() };
+            HtmlView::from_provider(provider, document_uris, 0, None, config, window, cx)
+        })
+    })?;
+    context.run_until_parked();
+
+    // The initial paint schedules visible resource decoding. Capture subsequent
+    // frames until the page has settled so images are not replaced by their
+    // loading placeholders in the generated cover.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut screenshot = context.capture_screenshot(window)?;
+    while context.update(|cx| view.read(cx).has_pending_resources()) {
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for first-page EPUB resources".into());
+        }
+        context.advance_clock(Duration::from_millis(16));
+        context.run_until_parked();
+        std::thread::yield_now();
+        screenshot = context.capture_screenshot(window)?;
+    }
+
+    let (width, height) = screenshot.dimensions();
+    let rgb = screenshot.pixels().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
+    RgbImage::from_raw(width, height, rgb).ok_or_else(|| "EPUB renderer returned invalid image dimensions".into())
+}
+
+#[cfg(feature = "publication-extractors")]
 fn cbz_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     let source = html_publication::PublicationSource::from_path(path.to_path_buf())?;
     let cover_resource = match &source.layout {
@@ -57,12 +181,14 @@ fn cbz_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     Ok(Some(decode_cover_image(&bytes, image::guess_format(&bytes)?)?))
 }
 
+#[cfg(feature = "publication-extractors")]
 fn m4b_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     let tag = mp4ameta::Tag::read_from_path(path)?;
     let Some(artwork) = tag.artwork() else { return Ok(None) };
     Ok(Some(decode_cover_image(artwork.data, image::guess_format(artwork.data)?)?))
 }
 
+#[cfg(feature = "publication-extractors")]
 fn mobi_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     // Parsing only MobiMetadata avoids reading and decoding the book's text.
     // CoverOffset and ThumbOffset are relative to first_image_index.
@@ -80,7 +206,9 @@ fn mobi_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
         let Some(record_index) = first_image_index.checked_add(relative_index) else { continue };
         attempted.push(record_index);
         if let Some(image) = decode_mobi_image_record(&mut file, records, record_index, file_len)? {
-            return Ok(Some(image));
+            if reasonable_cover_dimensions(image.width(), image.height()) {
+                return Ok(Some(image));
+            }
         }
     }
 
@@ -92,20 +220,27 @@ fn mobi_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
             continue;
         }
         if let Some(image) = decode_mobi_image_record(&mut file, records, record_index, file_len)? {
-            return Ok(Some(image));
+            if reasonable_cover_dimensions(image.width(), image.height()) {
+                return Ok(Some(image));
+            }
         }
     }
 
     Ok(None)
 }
 
+#[cfg(feature = "publication-extractors")]
 fn mobi_image_offset(metadata: &mobi::MobiMetadata, record: ExthRecord) -> Option<usize> {
     let bytes: [u8; 4] = metadata.exth_record(record)?.first()?.as_slice().try_into().ok()?;
     usize::try_from(u32::from_be_bytes(bytes)).ok()
 }
 
+#[cfg(feature = "publication-extractors")]
 fn decode_mobi_image_record(file: &mut File, records: &[mobi::record::PdbRecord], record_index: usize, file_len: u64) -> ThumbnailResult<Option<RgbImage>> {
     let Some((start, len)) = mobi_record_bounds(records, record_index, file_len) else { return Ok(None) };
+    if len > MAX_COVER_IMAGE_BYTES as u64 {
+        return Ok(None);
+    }
     let Ok(len) = usize::try_from(len) else { return Ok(None) };
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = vec![0; len];
@@ -119,13 +254,14 @@ fn decode_mobi_image_record(file: &mut File, records: &[mobi::record::PdbRecord]
     }
 }
 
+#[cfg(feature = "publication-extractors")]
 fn mobi_record_bounds(records: &[mobi::record::PdbRecord], record_index: usize, file_len: u64) -> Option<(u64, u64)> {
     let start = u64::from(records.get(record_index)?.offset);
     let end = records.get(record_index + 1).map_or(file_len, |record| u64::from(record.offset));
     (start < end && end <= file_len).then(|| (start, end - start))
 }
 
-#[cfg(feature = "pdf")]
+#[cfg(all(feature = "publication-extractors", feature = "pdf"))]
 fn pdf_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     let rendered = pdf_reader_core::render_first_page_image(path, 300)?;
     let (rgba, pixel_width, pixel_height) = rendered.into_parts();
@@ -133,7 +269,7 @@ fn pdf_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     Ok(Some(RgbImage::from_raw(pixel_width, pixel_height, rgb).ok_or("PDF renderer returned invalid image dimensions")?))
 }
 
-#[cfg(not(feature = "pdf"))]
+#[cfg(all(feature = "publication-extractors", not(feature = "pdf")))]
 fn pdf_cover(_: &Path) -> ThumbnailResult<Option<RgbImage>> {
     Ok(None)
 }
@@ -161,6 +297,11 @@ fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> ThumbnailResult<Vec<u8>> 
 }
 
 fn decode_cover_image(bytes: &[u8], format: ImageFormat) -> ThumbnailResult<RgbImage> {
+    if bytes.len() > MAX_COVER_IMAGE_BYTES {
+        return Err("cover image exceeds the encoded size limit".into());
+    }
+    let (width, height) = ImageReader::with_format(Cursor::new(bytes), format).into_dimensions()?;
+    validate_cover_image_dimensions(width, height)?;
     if format == ImageFormat::Jpeg {
         let mut decoder = JpegDecoder::new(Cursor::new(bytes))?;
         let (source_width, source_height) = decoder.dimensions();
@@ -173,6 +314,15 @@ fn decode_cover_image(bytes: &[u8], format: ImageFormat) -> ThumbnailResult<RgbI
     Ok(ImageReader::with_format(Cursor::new(bytes), format).decode()?.to_rgb8())
 }
 
+fn validate_cover_image_dimensions(width: u32, height: u32) -> ThumbnailResult<()> {
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or("cover image dimensions overflow")?;
+    if width == 0 || height == 0 || width > MAX_COVER_IMAGE_DIMENSION || height > MAX_COVER_IMAGE_DIMENSION || pixels > MAX_COVER_IMAGE_PIXELS {
+        return Err("cover image exceeds the pixel limit".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "publication-extractors")]
 fn image_format(path: &str) -> Option<ImageFormat> {
     match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
         "jpeg" | "jpg" => Some(ImageFormat::Jpeg),
@@ -183,10 +333,11 @@ fn image_format(path: &str) -> Option<ImageFormat> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "publication-extractors"))]
 mod tests {
     use super::*;
     use mobi::record::PdbRecord;
+    use std::io::Write;
 
     #[test]
     fn reads_big_endian_mobi_image_offset() {
@@ -204,5 +355,88 @@ mod tests {
         assert_eq!(mobi_record_bounds(&records, 1, 250), Some((180, 70)));
         assert_eq!(mobi_record_bounds(&records, 2, 250), None);
         assert_eq!(mobi_record_bounds(&records, 1, 150), None);
+    }
+
+    #[test]
+    fn validates_epub_fallback_image_geometry() {
+        assert!(reasonable_cover_dimensions(300, 400));
+        assert!(reasonable_cover_dimensions(600, 900));
+        assert!(!reasonable_cover_dimensions(299, 600));
+        assert!(!reasonable_cover_dimensions(600, 399));
+        assert!(!reasonable_cover_dimensions(300, 800));
+        assert!(!reasonable_cover_dimensions(800, 600));
+    }
+
+    #[test]
+    fn rejects_cover_images_with_pathological_decoded_dimensions() {
+        assert!(validate_cover_image_dimensions(4_000, 6_000).is_ok());
+        assert!(validate_cover_image_dimensions(4_001, 6_000).is_err());
+        assert!(validate_cover_image_dimensions(1, MAX_COVER_IMAGE_DIMENSION + 1).is_err());
+    }
+
+    #[test]
+    fn uses_first_reasonable_spine_image_when_cover_art_is_absent() {
+        let file = tempfile::Builder::new().suffix(".epub").tempfile().unwrap();
+        let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", deflated).unwrap();
+        archive
+            .write_all(br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#)
+            .unwrap();
+        archive.start_file("EPUB/package.opf", deflated).unwrap();
+        archive
+            .write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Image fallback</dc:title></metadata><manifest><item id="unreferenced" href="images/unreferenced.jpg" media-type="image/jpeg"/><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/><item id="tiny" href="images/tiny.jpg" media-type="image/jpeg"/><item id="candidate" href="images/illustration-1.jpg" media-type="image/jpeg"/></manifest><spine><itemref idref="page"/></spine></package>"#)
+            .unwrap();
+        archive.start_file("EPUB/page.xhtml", deflated).unwrap();
+        archive.write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><img src="images/tiny.jpg"/><img src="images/illustration-1.jpg"/></body></html>"#).unwrap();
+        archive.start_file("EPUB/images/tiny.jpg", deflated).unwrap();
+        archive.write_all(&encode_jpeg(&vec![20; 64 * 64 * 3], 64, 64).unwrap()).unwrap();
+        archive.start_file("EPUB/images/unreferenced.jpg", deflated).unwrap();
+        let unreferenced_pixels = [20, 40, 190].into_iter().cycle().take(400 * 600 * 3).collect::<Vec<_>>();
+        archive.write_all(&encode_jpeg(&unreferenced_pixels, 400, 600).unwrap()).unwrap();
+        archive.start_file("EPUB/images/illustration-1.jpg", deflated).unwrap();
+        let candidate_pixels = [190, 35, 25].into_iter().cycle().take(400 * 600 * 3).collect::<Vec<_>>();
+        archive.write_all(&encode_jpeg(&candidate_pixels, 400, 600).unwrap()).unwrap();
+        archive.finish().unwrap();
+
+        let jpeg = generate_thumbnail(file.path()).unwrap().expect("reasonable image fallback");
+        let rendered = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(rendered.dimensions(), (THUMBNAIL_WIDTH, 900));
+        let center = rendered.get_pixel(THUMBNAIL_WIDTH / 2, 450);
+        assert!(center[0] > 170 && center[1] < 55 && center[2] < 45, "unexpected fallback pixel: {center:?}");
+    }
+
+    #[cfg(feature = "epub-page-render")]
+    #[test]
+    #[ignore = "requires a local WGPU headless renderer"]
+    fn renders_first_epub_page_when_cover_art_is_absent() {
+        let file = tempfile::Builder::new().suffix(".epub").tempfile().unwrap();
+        let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", deflated).unwrap();
+        archive
+            .write_all(br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#)
+            .unwrap();
+        archive.start_file("EPUB/package.opf", deflated).unwrap();
+        archive
+            .write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback Page</dc:title></metadata><manifest><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="page"/></spine></package>"#)
+            .unwrap();
+        archive.start_file("EPUB/page.xhtml", deflated).unwrap();
+        archive
+            .write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><style>body { background: #efe2bb; color: #173a32; text-align: center; padding: 120px 40px; } h1 { font-size: 56px; }</style></head><body><h1>Fallback Page</h1><p>This EPUB intentionally has no cover image.</p></body></html>"#)
+            .unwrap();
+        archive.finish().unwrap();
+
+        let jpeg = generate_thumbnail(file.path()).unwrap().expect("rendered first-page thumbnail");
+        assert_eq!(image::guess_format(&jpeg).unwrap(), ImageFormat::Jpeg);
+        let rendered = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(rendered.dimensions(), (THUMBNAIL_WIDTH, EPUB_PAGE_HEIGHT));
+        assert!(rendered.pixels().filter(|pixel| pixel.0 != [255, 255, 255]).count() > 100_000);
     }
 }

@@ -8,4 +8,4 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-wire = { path = "../wire" }
+wire = { package = "protobuf-wire", path = "../protobuf-wire" }

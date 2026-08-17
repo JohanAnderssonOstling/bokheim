@@ -197,10 +197,10 @@ impl TransferJob {
     fn priority(&self) -> (u8, u8, u64) {
         let origin = if self.origin() == TransferOrigin::UserInitiated { 0 } else { 1 };
         match self {
-            Self::DownloadThumbnail { .. } => (origin, 0, 0),
-            Self::UploadThumbnail { thumbnail_path, .. } => (origin, 0, file_size_or(thumbnail_path, 0)),
-            Self::UploadBlob { local_path, .. } => (origin, 1, file_size_or(local_path, u64::MAX / 2)),
-            Self::DownloadBlob { .. } => (origin, 1, u64::MAX / 2),
+            Self::DownloadThumbnail { .. } => (0, origin, 0),
+            Self::UploadThumbnail { thumbnail_path, .. } => (0, origin, file_size_or(thumbnail_path, 0)),
+            Self::UploadBlob { local_path, .. } => (1, origin, file_size_or(local_path, u64::MAX / 2)),
+            Self::DownloadBlob { .. } => (1, origin, u64::MAX / 2),
         }
     }
 }
@@ -714,13 +714,13 @@ impl TransferWorker {
         if thumbnails.is_empty() {
             return Ok(());
         }
-        let body = sync_common::wire::encode(&ThumbnailBatchUploadRequest { thumbnails })?;
+        let body = sync_common::transport::encode(&ThumbnailBatchUploadRequest { thumbnails })?;
         let response = self
             .http_client
             .put(self.thumbnail_batch_endpoint())
             .bearer_auth(&token)
-            .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
-            .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
+            .header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE)
+            .header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE)
             .body(body)
             .send()
             .await?;
@@ -750,19 +750,19 @@ impl TransferWorker {
         if requested.is_empty() {
             return Ok(());
         }
-        let body = sync_common::wire::encode(&ThumbnailBatchDownloadRequest { content_hashes: requested.keys().cloned().collect() })?;
+        let body = sync_common::transport::encode(&ThumbnailBatchDownloadRequest { content_hashes: requested.keys().cloned().collect() })?;
         let response = self
             .http_client
             .post(self.thumbnail_batch_endpoint())
             .bearer_auth(&token)
-            .header(reqwest::header::ACCEPT, sync_common::wire::MEDIA_TYPE)
-            .header(reqwest::header::CONTENT_TYPE, sync_common::wire::MEDIA_TYPE)
+            .header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE)
+            .header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE)
             .body(body)
             .send()
             .await?;
         let response = self.authenticated_response(response)?;
         let bytes = response.bytes().await?;
-        let response: ThumbnailBatchDownloadResponse = sync_common::wire::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)?;
+        let response: ThumbnailBatchDownloadResponse = sync_common::transport::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)?;
         let mut answered = std::collections::HashSet::new();
         for thumbnail in response.thumbnails {
             let Some(book_hash) = requested.get(&thumbnail.content_hash) else { return Err(permanent("thumbnail batch returned an unrequested hash")) };
@@ -1259,6 +1259,20 @@ mod tests {
         queue.reconcile(jobs);
         assert_eq!(queue.claim_due_batch(true).len(), MAX_THUMBNAIL_BATCH_ENTRIES);
         assert_eq!(queue.claim_due_batch(true).len(), 20 - MAX_THUMBNAIL_BATCH_ENTRIES);
+    }
+
+    #[test]
+    fn thumbnails_are_claimed_before_user_requested_books() {
+        let queue = TransferQueue::default();
+        let thumbnail_hash = fixture_content_hash(1);
+        let book_hash = fixture_content_hash(2);
+        queue.reconcile(vec![
+            TransferJob::DownloadBlob { content_hash: book_hash, placement: BookPlacement::new(book_hash, RelativeBookPath::parse("/book.epub").unwrap()), origin: TransferOrigin::UserInitiated },
+            TransferJob::DownloadThumbnail { thumbnail_hash, book_content_hash: book_hash, origin: TransferOrigin::Background },
+        ]);
+
+        let claimed = queue.claim_due(true).unwrap();
+        assert!(matches!(claimed.job, TransferJob::DownloadThumbnail { .. }));
     }
 
     #[test]

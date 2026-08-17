@@ -1,5 +1,6 @@
 //! PostgreSQL adapter for Bokheim accounts, credentials, and sessions.
 
+mod activity;
 mod crypto;
 mod outbox;
 mod public_registration;
@@ -14,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 
+pub use crypto::AccountTokenKey;
+
 const ACCESS_TOKEN_TTL_HOURS: i64 = 1;
 const REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 const TOKEN_LEN: usize = 43;
@@ -27,6 +30,8 @@ fn internal(error: impl std::fmt::Display) -> AuthError {
 
 pub struct PostgresAccountService {
     pool: PgPool,
+    activity: activity::AccountActivityRecorder,
+    token_protector: crypto::TokenProtector,
     password_permits: Arc<tokio::sync::Semaphore>,
     identity_cache: IdentityCache,
 }
@@ -116,12 +121,19 @@ impl IdentityCache {
 }
 
 impl PostgresAccountService {
-    pub fn new(database: PostgresDatabase) -> Self {
-        Self::with_identity_cache(database, IDENTITY_CACHE_MAX_ENTRIES, IDENTITY_CACHE_TTL)
+    pub fn new(database: PostgresDatabase, token_key: AccountTokenKey) -> Self {
+        Self::with_identity_cache(database, token_key, IDENTITY_CACHE_MAX_ENTRIES, IDENTITY_CACHE_TTL)
     }
 
-    fn with_identity_cache(database: PostgresDatabase, max_entries: usize, ttl: StdDuration) -> Self {
-        Self { pool: database.pool().clone(), password_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_OPERATIONS)), identity_cache: IdentityCache::new(max_entries, ttl) }
+    fn with_identity_cache(database: PostgresDatabase, token_key: AccountTokenKey, max_entries: usize, ttl: StdDuration) -> Self {
+        let pool = database.pool().clone();
+        Self {
+            activity: activity::AccountActivityRecorder::new(pool.clone()),
+            pool,
+            token_protector: crypto::TokenProtector::new(token_key),
+            password_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_OPERATIONS)),
+            identity_cache: IdentityCache::new(max_entries, ttl),
+        }
     }
 
     async fn hash_password(&self, password: String) -> Result<String, AuthError> {
@@ -239,12 +251,19 @@ fn email_taken(error: &sqlx::Error) -> bool {
 
 impl PostgresAccountService {
     pub async fn resolve_token(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
+        self.resolve_token_with_activity(token, true).await
+    }
+
+    async fn resolve_token_with_activity(&self, token: &str, record_activity: bool) -> Result<AuthenticatedUser, AuthError> {
         if !valid_urlsafe_secret(token, TOKEN_LEN) {
             return Err(AuthError::InvalidCredentials);
         }
         let token_hash = crypto::sha256_hex(token.as_bytes());
         let (cached, cache_revision) = self.identity_cache.lookup(&token_hash);
         if let Some(user) = cached {
+            if record_activity {
+                self.activity.record_authenticated(&user.user_id);
+            }
             return Ok(user);
         }
         let row: Option<(String, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
@@ -264,7 +283,14 @@ impl PostgresAccountService {
         };
         let user = AuthenticatedUser { user_id, email };
         self.identity_cache.insert_if_revision(cache_revision, token_hash, user.clone(), session_id, token_expires_at);
+        if record_activity {
+            self.activity.record_authenticated(&user.user_id);
+        }
         Ok(user)
+    }
+
+    pub fn record_sync_activity(&self, user_id: &str) {
+        self.activity.record_sync(user_id);
     }
 }
 
@@ -278,6 +304,14 @@ impl PostgresAccountService {
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
+        self.login_with_admin_requirement(email, password, false).await
+    }
+
+    pub async fn login_admin(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
+        self.login_with_admin_requirement(email, password, true).await
+    }
+
+    async fn login_with_admin_requirement(&self, email: &str, password: &str, require_admin: bool) -> Result<IssuedSession, AuthError> {
         let Ok(email) = normalized_email(email) else {
             self.verify_password_dummy(if valid_password_size(password) { password.to_owned() } else { "invalid-password-size".to_string() }).await?;
             return Err(AuthError::InvalidCredentials);
@@ -286,12 +320,16 @@ impl PostgresAccountService {
             self.verify_password_dummy("invalid-password-size".to_string()).await?;
             return Err(AuthError::InvalidCredentials);
         }
-        let row: Option<(String, String, String)> = sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
-        let Some((user_id, stored_email, password_hash)) = row else {
+        let row: Option<(String, String, String, bool)> =
+            sqlx::query_as("SELECT id, email, password_hash, is_admin FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
+        let Some((user_id, stored_email, password_hash, is_admin)) = row else {
             self.verify_password_dummy(password.to_owned()).await?;
             return Err(AuthError::InvalidCredentials);
         };
         if !self.verify_password(password.to_owned(), password_hash).await? {
+            return Err(AuthError::InvalidCredentials);
+        }
+        if require_admin && !is_admin {
             return Err(AuthError::InvalidCredentials);
         }
         let mut transaction = self.pool.begin().await.map_err(internal)?;
@@ -497,6 +535,24 @@ impl PostgresAccountService {
         self.ensure_configured_user_impl(email, password).await
     }
 
+    pub async fn ensure_configured_admin(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
+        public_registration::validate_password(password)?;
+        let user = self.ensure_configured_user_impl(email, password).await?;
+        sqlx::query("UPDATE users SET is_admin=true WHERE id=$1").bind(&user.user_id).execute(&self.pool).await.map_err(internal)?;
+        Ok(user)
+    }
+
+    pub async fn resolve_admin_token(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
+        // Reading the operations dashboard is administration, not product
+        // engagement, and must not make an otherwise inactive account active.
+        let user = self.resolve_token_with_activity(token, false).await?;
+        let is_admin: bool = sqlx::query_scalar("SELECT is_admin FROM users WHERE id=$1").bind(&user.user_id).fetch_optional(&self.pool).await.map_err(internal)?.unwrap_or(false);
+        if !is_admin {
+            return Err(AuthError::Forbidden);
+        }
+        Ok(user)
+    }
+
     pub async fn request_public_registration(&self, email: &str, password: &str) -> Result<(), AuthError> {
         self.request_public_registration_impl(email, password).await
     }
@@ -505,8 +561,8 @@ impl PostgresAccountService {
         self.resend_verification_impl(email).await
     }
 
-    pub async fn verify_email(&self, token: &str) -> Result<IssuedSession, AuthError> {
-        self.verify_email_impl(token).await
+    pub async fn verify_email(&self, email: &str, pin: &str) -> Result<IssuedSession, AuthError> {
+        self.verify_email_impl(email, pin).await
     }
 
     pub async fn request_password_reset(&self, email: &str) -> Result<(), AuthError> {
@@ -605,7 +661,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!activity_column_exists, "the migrated session schema must not retain unused activity state");
-        let service = PostgresAccountService::new(PostgresDatabase::from_pool(pool.clone()));
+        let service = PostgresAccountService::new(PostgresDatabase::from_pool(pool.clone()), crypto::AccountTokenKey::test_key());
         let user_id = uuid::Uuid::new_v4().to_string();
         let email = format!("auth-test-{}@example.com", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)").bind(&user_id).bind(&email).execute(&pool).await.unwrap();
@@ -645,7 +701,7 @@ mod tests {
     async fn reusing_a_rotated_refresh_token_revokes_its_session_family() {
         let pool = isolated_pool(3).await;
         let database = PostgresDatabase::from_pool(pool.clone());
-        let service = PostgresAccountService::new(database);
+        let service = PostgresAccountService::new(database, crypto::AccountTokenKey::test_key());
         let user_id = uuid::Uuid::new_v4().to_string();
         let email = format!("refresh-reuse-{}@example.com", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)").bind(&user_id).bind(&email).execute(&pool).await.unwrap();
@@ -688,7 +744,7 @@ mod tests {
     async fn expired_consumed_refresh_token_history_is_garbage_collected() {
         let pool = isolated_pool(2).await;
         let database = PostgresDatabase::from_pool(pool.clone());
-        let service = PostgresAccountService::new(database);
+        let service = PostgresAccountService::new(database, crypto::AccountTokenKey::test_key());
         let user_id = uuid::Uuid::new_v4().to_string();
         let email = format!("refresh-gc-{}@example.com", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)").bind(&user_id).bind(&email).execute(&pool).await.unwrap();
@@ -710,7 +766,7 @@ mod tests {
     async fn session_management_is_owned_scoped_and_preserves_the_current_session() {
         let pool = isolated_pool(3).await;
         let database = PostgresDatabase::from_pool(pool.clone());
-        let service = PostgresAccountService::new(database);
+        let service = PostgresAccountService::new(database, crypto::AccountTokenKey::test_key());
         let user_id = uuid::Uuid::new_v4().to_string();
         let other_user_id = uuid::Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2), ($3, $4)")
@@ -769,8 +825,8 @@ mod tests {
     async fn concurrent_refresh_token_use_leaves_no_winning_credentials() {
         let pool = isolated_pool(4).await;
         let database = PostgresDatabase::from_pool(pool.clone());
-        let first_service = PostgresAccountService::new(database.clone());
-        let second_service = PostgresAccountService::new(database);
+        let first_service = PostgresAccountService::new(database.clone(), crypto::AccountTokenKey::test_key());
+        let second_service = PostgresAccountService::new(database, crypto::AccountTokenKey::test_key());
         let user_id = uuid::Uuid::new_v4().to_string();
         let email = format!("refresh-race-{}@example.com", uuid::Uuid::new_v4().simple());
         sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)").bind(&user_id).bind(&email).execute(&pool).await.unwrap();
@@ -799,12 +855,12 @@ mod tests {
     async fn authentication_rate_limits_survive_service_reconstruction() {
         let pool = isolated_pool(2).await;
         let database = PostgresDatabase::from_pool(pool);
-        let service = PostgresAccountService::new(database.clone());
+        let service = PostgresAccountService::new(database.clone(), crypto::AccountTokenKey::test_key());
         let unique = uuid::Uuid::new_v4().to_string();
         for _ in 0..8 {
             service.enforce_rate_limit(AuthAttempt::Login, &unique, &unique).await.unwrap();
         }
-        let reconstructed = PostgresAccountService::new(database);
+        let reconstructed = PostgresAccountService::new(database, crypto::AccountTokenKey::test_key());
         assert!(matches!(reconstructed.enforce_rate_limit(AuthAttempt::Login, &unique, &unique).await, Err(AuthError::RateLimited)));
         reconstructed.clear_subject_rate_limit(AuthAttempt::Login, &unique).await.unwrap();
         reconstructed.enforce_rate_limit(AuthAttempt::Login, &unique, &unique).await.unwrap();

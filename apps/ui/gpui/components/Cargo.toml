@@ -3,6 +3,10 @@ name = "ui-components"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+kobo = []
+
 [dependencies]
 app-contract = { path = "../../../../client/app-contract" }
 gpui.workspace = true

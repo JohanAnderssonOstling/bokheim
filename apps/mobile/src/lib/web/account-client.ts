@@ -4,13 +4,13 @@ import { decodeAccountResponse, encodeAccountRequest } from "./wasm-core.ts";
 
 const API_PREFIX = "/api/auth";
 const SERVER_URL = "https://api.bokheim.se";
-export const WIRE_MEDIA_TYPE = "application/vnd.bokheim+bincode; version=11";
+export const WIRE_MEDIA_TYPE = "application/vnd.bokheim+protobuf; version=13";
 
 const requestKind = {
   login: 1,
   registration: 2,
   email: 3,
-  token: 4,
+  verification: 4,
   resetPassword: 5,
 } as const;
 
@@ -110,11 +110,11 @@ async function recoverCookieProfile(): Promise<StoredWebAccountSession | null> {
   }
 }
 
-export async function authenticatedWebFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function authenticatedWebFetch(path: string, init: RequestInit = {}, allowedStatuses: readonly number[] = []): Promise<Response> {
   if (!await readProfile() && !await recoverCookieProfile()) throw new Error("Sign in to synchronize this library");
   const request = () => {
     const headers = new Headers(init.headers);
-    headers.set("Accept", WIRE_MEDIA_TYPE);
+    if (!headers.has("Accept")) headers.set("Accept", WIRE_MEDIA_TYPE);
     return fetch(path, { ...init, credentials: "same-origin", headers });
   };
   let response: Response | undefined;
@@ -134,7 +134,7 @@ export async function authenticatedWebFetch(path: string, init: RequestInit = {}
     await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
   if (!response) throw new Error("Synchronization request did not complete");
-  return checked(response, "Synchronization server");
+  return allowedStatuses.includes(response.status) ? response : checked(response, "Synchronization server");
 }
 
 export async function getWebAccountSession(): Promise<StoredWebAccountSession | null> {
@@ -158,8 +158,8 @@ export async function resendWebVerification(email: string): Promise<void> {
   await post("resend-verification", requestKind.email, { email });
 }
 
-export async function verifyWebEmail(token: string): Promise<AccountStatus> {
-  return accountStatus(await profileResponse(await post("web/verify-email", requestKind.token, { token })));
+export async function verifyWebEmail(email: string, pin: string): Promise<AccountStatus> {
+  return accountStatus(await profileResponse(await post("web/verify-email", requestKind.verification, { email, pin })));
 }
 
 export async function requestWebPasswordReset(email: string): Promise<void> {

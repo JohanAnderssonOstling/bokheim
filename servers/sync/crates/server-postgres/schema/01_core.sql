@@ -11,7 +11,8 @@ CREATE TABLE users (
     id text PRIMARY KEY,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
     password_hash text,
-    email text
+    email text,
+    is_admin boolean NOT NULL DEFAULT false
 );
 
 CREATE UNIQUE INDEX idx_users_email ON users USING btree (email) WHERE (email IS NOT NULL);

@@ -265,6 +265,39 @@ pub fn set_sync_metadata(conn: &Connection, key: &str, value: &str) -> Result<()
     Ok(())
 }
 
+fn parse_revision(value: Option<String>) -> Result<Option<sync_common::LibraryRevision>, rusqlite::Error> {
+    value
+        .map(|value| {
+            let raw = value.parse::<u64>().map_err(|error| invalid_text_column(0, error.to_string()))?;
+            sync_common::LibraryRevision::new(raw).map_err(|error| invalid_text_column(0, error.to_string()))
+        })
+        .transpose()
+}
+
+/// Reads the partitioned pull cursor, promoting the legacy scalar checkpoint to
+/// both channels until the first successful version-12 exchange persists it.
+pub fn get_pull_cursor(conn: &Connection) -> Result<sync_common::SyncCursor, rusqlite::Error> {
+    let state = get_sync_metadata(conn, "last_pull_state_seq")?;
+    let reading = get_sync_metadata(conn, "last_pull_reading_seq")?;
+    if state.is_none() && reading.is_none() {
+        let legacy = parse_revision(get_sync_metadata(conn, "last_pull_server_seq")?)?;
+        return Ok(sync_common::SyncCursor { state_revision: legacy, reading_revision: legacy });
+    }
+    Ok(sync_common::SyncCursor { state_revision: parse_revision(state)?, reading_revision: parse_revision(reading)? })
+}
+
+pub fn set_pull_cursor(conn: &Connection, cursor: sync_common::SyncCursor) -> Result<(), rusqlite::Error> {
+    for (key, revision) in [("last_pull_state_seq", cursor.state_revision), ("last_pull_reading_seq", cursor.reading_revision)] {
+        if let Some(revision) = revision {
+            set_sync_metadata(conn, key, &revision.get().to_string())?;
+        } else {
+            conn.execute("DELETE FROM sync_metadata WHERE key=?1", [key])?;
+        }
+    }
+    conn.execute("DELETE FROM sync_metadata WHERE key='last_pull_server_seq'", [])?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LibrarySyncDetails {
     pub(crate) has_unsynced_changes: bool,
@@ -283,7 +316,9 @@ pub fn rebind_sync_account(conn: &Connection, user_id: &str) -> Result<(), rusql
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM remote_asset", [])?;
     tx.execute("DELETE FROM sync_metadata WHERE key = 'last_pull_server_seq'", [])?;
+    tx.execute("DELETE FROM sync_metadata WHERE key IN ('last_pull_state_seq','last_pull_reading_seq')", [])?;
     tx.execute("DELETE FROM sync_metadata WHERE key = 'last_successful_sync_at'", [])?;
+    tx.execute("DELETE FROM sync_metadata WHERE key = 'cursor_recovery_pending'", [])?;
     tx.execute("INSERT INTO sync_metadata (key, value) VALUES ('bound_user_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [user_id])?;
     tx.commit()
 }

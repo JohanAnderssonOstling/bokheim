@@ -113,6 +113,15 @@ create table if not exists book_subject(
 );
 create index if not exists idx_book_subject_name on book_subject(name, book_row_id);
 create index if not exists idx_book_subject_authority on book_subject(authority, book_row_id);
+create table if not exists book_subject_code(
+    book_row_id     INTEGER not null,
+    subject_position INTEGER not null,
+    system_id       TEXT not null,
+    code            TEXT not null,
+    primary key(book_row_id, subject_position, system_id, code),
+    foreign key(book_row_id, subject_position) references book_subject(book_row_id, position) on delete cascade
+);
+create index if not exists idx_book_subject_code_lookup on book_subject_code(system_id, code, book_row_id);
 
 -- Controlled taxonomies and disposable automatic assignments. The raw
 -- declarations above remain the evidence and synchronization boundary.
@@ -151,6 +160,98 @@ create table if not exists book_subject_assignment_evidence(
     foreign key(book_row_id, system_id, subject_path) references book_subject_assignment(book_row_id, system_id, subject_path) on delete cascade,
     foreign key(book_row_id, subject_position) references book_subject(book_row_id, position) on delete cascade
 );
+create table if not exists subject_code_mapping(
+    source_system_id TEXT not null,
+    source_code      TEXT not null,
+    unified_path     TEXT not null,
+    mapper_version   INTEGER not null check(mapper_version >= 0),
+    primary key(source_system_id, source_code, unified_path)
+);
+create index if not exists idx_subject_code_mapping_path on subject_code_mapping(unified_path, source_system_id, source_code);
+
+-- The unified taxonomy is a versioned concept graph. Routes are disposable
+-- presentation paths; stable concept IDs own identity and may have several
+-- parent edges/routes without cloning the concept.
+create table if not exists unified_taxonomy_release(
+    singleton       INTEGER primary key check(singleton=1),
+    version         TEXT not null,
+    mapper_version  INTEGER not null check(mapper_version >= 0)
+);
+create table if not exists unified_concept(
+    concept_id      TEXT primary key,
+    preferred_label TEXT not null,
+    description     TEXT,
+    status          TEXT not null check(status in ('active','deprecated','merged')),
+    introduced_version TEXT not null,
+    deprecated_version TEXT
+);
+create table if not exists unified_concept_edge(
+    parent_concept_id TEXT not null references unified_concept(concept_id) on delete cascade,
+    child_concept_id  TEXT not null references unified_concept(concept_id) on delete cascade,
+    relationship      TEXT not null check(relationship in ('broader','related')),
+    sort_order        INTEGER not null default 0,
+    primary key(parent_concept_id, child_concept_id, relationship),
+    check(parent_concept_id <> child_concept_id)
+);
+create index if not exists idx_unified_concept_edge_child on unified_concept_edge(child_concept_id,parent_concept_id);
+create trigger if not exists unified_concept_edge_reject_cycle
+before insert on unified_concept_edge
+when exists(
+    with recursive descendants(concept_id) as (
+        select NEW.child_concept_id
+        union
+        select edge.child_concept_id
+        from unified_concept_edge edge
+        join descendants on edge.parent_concept_id=descendants.concept_id
+    )
+    select 1 from descendants where concept_id=NEW.parent_concept_id
+)
+begin
+    select raise(abort,'unified taxonomy edge would create a cycle');
+end;
+create table if not exists unified_concept_route(
+    path            TEXT primary key,
+    concept_id      TEXT not null references unified_concept(concept_id) on delete cascade,
+    parent_path     TEXT not null,
+    label           TEXT not null
+);
+create index if not exists idx_unified_concept_route_parent on unified_concept_route(parent_path,label,path);
+create index if not exists idx_unified_concept_route_concept on unified_concept_route(concept_id,path);
+create table if not exists source_subject(
+    system_id       TEXT not null,
+    source_version  TEXT not null,
+    code            TEXT not null,
+    official_label  TEXT,
+    primary key(system_id,source_version,code)
+);
+create table if not exists source_concept_mapping(
+    source_system_id TEXT not null,
+    source_version   TEXT not null,
+    source_code      TEXT not null,
+    concept_id       TEXT not null references unified_concept(concept_id) on delete cascade,
+    mapping_type     TEXT not null check(mapping_type in ('exact','broader','narrower','related')),
+    mapper_version   INTEGER not null check(mapper_version >= 0),
+    primary key(source_system_id,source_version,source_code,concept_id),
+    foreign key(source_system_id,source_version,source_code) references source_subject(system_id,source_version,code) on delete cascade
+);
+create index if not exists idx_source_concept_mapping_concept on source_concept_mapping(concept_id,source_system_id,source_code);
+create table if not exists book_unified_concept(
+    book_row_id     INTEGER not null references book(row_id) on delete cascade,
+    concept_id      TEXT not null references unified_concept(concept_id) on delete cascade,
+    mapper_version  INTEGER not null check(mapper_version >= 0),
+    primary key(book_row_id,concept_id)
+);
+create index if not exists idx_book_unified_concept_concept on book_unified_concept(concept_id,book_row_id);
+create table if not exists book_unified_concept_evidence(
+    book_row_id      INTEGER not null,
+    concept_id       TEXT not null,
+    subject_position INTEGER not null,
+    source_system_id TEXT not null,
+    source_code      TEXT not null,
+    primary key(book_row_id,concept_id,subject_position,source_system_id,source_code),
+    foreign key(book_row_id,concept_id) references book_unified_concept(book_row_id,concept_id) on delete cascade,
+    foreign key(book_row_id,subject_position,source_system_id,source_code) references book_subject_code(book_row_id,subject_position,system_id,code) on delete cascade
+);
 
 -- Local bookkeeping for explicit external enrichment. Provider vocabularies
 -- are never cached here; this records only whether one book was attempted.
@@ -165,6 +266,53 @@ create table if not exists external_metadata_attempt(
     primary key(book_row_id, provider_id)
 );
 create index if not exists idx_external_metadata_attempt_status on external_metadata_attempt(provider_id, status, book_row_id);
+create table if not exists external_metadata_candidate(
+    book_row_id     INTEGER not null references book(row_id) on delete cascade,
+    provider_id     TEXT not null,
+    position        INTEGER not null,
+    isbn13          TEXT not null,
+    edition_id      TEXT not null,
+    candidate       BLOB not null,
+    primary key(book_row_id, provider_id, position),
+    foreign key(book_row_id, provider_id) references external_metadata_attempt(book_row_id, provider_id) on delete cascade
+);
+create index if not exists idx_external_metadata_candidate_isbn on external_metadata_candidate(provider_id, isbn13, book_row_id);
+
+-- Local cache of resolved metadata-server entities. Book references are also
+-- projected into synchronized PublicationMetadata; labels and graph edges can
+-- be rebuilt independently on every client from the same snapshot service.
+-- name: create_external_entity_tables &
+create table if not exists external_entity(
+    wikidata_id    TEXT primary key,
+    kind           TEXT not null check(kind in ('place', 'person')),
+    label          TEXT not null,
+    birth_year     INTEGER,
+    death_year     INTEGER,
+    fictional      INTEGER not null default 0 check(fictional in (0, 1)),
+    latitude_e7    INTEGER,
+    longitude_e7   INTEGER
+);
+create table if not exists external_entity_alias(
+    wikidata_id    TEXT not null references external_entity(wikidata_id) on delete cascade,
+    alias          TEXT not null,
+    primary key(wikidata_id, alias)
+);
+create table if not exists external_place_edge(
+    child_id       TEXT not null references external_entity(wikidata_id) on delete cascade,
+    parent_id      TEXT not null references external_entity(wikidata_id) on delete cascade,
+    relation       TEXT not null check(relation in ('parent', 'country')),
+    primary key(child_id, parent_id, relation)
+);
+create index if not exists idx_external_place_edge_parent on external_place_edge(parent_id, child_id);
+create table if not exists book_external_entity(
+    book_row_id    INTEGER not null references book(row_id) on delete cascade,
+    wikidata_id    TEXT not null references external_entity(wikidata_id) on delete cascade,
+    kind           TEXT not null check(kind in ('place', 'person')),
+    evidence_name  TEXT not null,
+    source         TEXT not null check(source in ('exact_edition', 'work')),
+    primary key(book_row_id, wikidata_id, kind, evidence_name)
+);
+create index if not exists idx_book_external_entity_lookup on book_external_entity(kind, wikidata_id, book_row_id);
 create table if not exists book_collection(
     book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),

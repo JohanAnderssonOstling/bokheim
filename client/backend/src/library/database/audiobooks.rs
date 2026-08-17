@@ -1,6 +1,17 @@
 //! Persistence for metadata derived from audiobook files.
 
 use super::*;
+use crate::app::BackendError;
+use crate::library::LibraryBackend;
+use rusqlite::OptionalExtension;
+
+impl LibraryBackend {
+    pub fn audiobook_chapters(&self, content_hash: ContentHash) -> Result<Vec<crate::library::AudiobookChapter>, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        let chapters = conn.query_row("SELECT chapters_json FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()], |row| row.get::<_, String>(0)).optional().map_err(BackendError::operation)?;
+        chapters.map_or_else(|| Ok(Vec::new()), |chapters| serde_json::from_str(&chapters).map_err(BackendError::operation))
+    }
+}
 
 pub fn upsert_audiobook_metadata(conn: &Connection, content_hash: &ContentHash, metadata: &book_metadata::AudiobookMetadata) -> Result<(), rusqlite::Error> {
     let duration_ms = i64::try_from(metadata.duration_ms).map_err(|_| invalid_integer_column(1, "audiobook duration exceeds SQLite integer range"))?;

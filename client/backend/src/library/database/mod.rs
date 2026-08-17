@@ -9,14 +9,17 @@ use crate::{BlobKind, BookPlacement, ContentHash, RelativeBookPath};
 use crate::{EpubCfi, ReadProgress};
 pub(crate) use app_contract::library::BookCardRow;
 use include_sqlite_sql::{impl_sql, include_sql};
+#[cfg(test)]
+use library_model::AuthorAuthority;
 use library_model::AuthorName;
 use library_model::BookFormat;
 #[cfg(test)]
 use library_model::MarcRelatorCode;
-use library_model::{AgentId, AuthorId, BISAC_MATCHER_VERSION, Contributor, PublicationIdentifierScheme, PublicationMetadata, PublisherCredit, bisac_subject_system};
+use library_model::{
+    AgentId, AuthorId, BISAC_MATCHER_VERSION, Contributor, DDC_MATCHER_VERSION, DDC_SYSTEM_ID, DDC_VERSION, ExternalAuthorId, LCC_MATCHER_VERSION, LCC_SYSTEM_ID, LCC_VERSION, PublicationIdentifierScheme, PublicationMetadata,
+    PublicationSubject, PublisherCredit, UNIFIED_MATCHER_VERSION, UNIFIED_SYSTEM_ID, bisac_subject_system, ddc_subject_path, lcc_subject_path,
+};
 use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, DirectoryLifecycleState, PdfAnnotationAnchor, PdfAnnotationRect, ReadingPositionState};
-#[cfg(test)]
-use library_model::{AuthorAuthority, ExternalAuthorId};
 use library_replica::{MutationBody, StateMutation, VersionKey, catalog_publication_state_subkey};
 use rusqlite::functions::{Context as FunctionContext, FunctionFlags};
 use rusqlite::types::Type;
@@ -31,6 +34,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sync_common::{ContentHash as SyncContentHash, DirId, FileName, MutationId, ReplicaId, ReplicaSeq, ServerMutation, UnixMillis};
+use taxonomy_contract::{TaxonomyCode, TaxonomySystem};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -53,7 +57,7 @@ include_sql!("src/library/database/sql/views.sql");
 // uses integer row IDs for every local relationship. Pre-15 databases are
 // intentionally rebuilt by LibraryBackend::open; there is no compatibility
 // representation or mixed-key migration.
-pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 20;
+pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 21;
 
 pub(crate) fn directory_exists(conn: &Connection, directory_id: &str) -> rusqlite::Result<bool> {
     let mut exists = false;
@@ -72,7 +76,11 @@ mod remote_reducer;
 use assets::materialize_dir_components_with_markers;
 use books::read_book_card_row;
 
-pub(crate) use external_metadata::{apply_external_subjects, subject_enrichment_candidates};
+pub(crate) use external_metadata::{
+    AuthorEnrichmentCandidate, EditionIdentityCandidate, RichEnrichmentCandidate, apply_alternative_edition_isbns, apply_author_enrichment, apply_edition_identity, apply_external_subjects, apply_filename_isbn,
+    apply_manual_edition_identity, apply_reviewed_edition_identity, apply_rich_enrichment, author_enrichment_candidates, edition_identity_candidate, edition_identity_candidates, edition_identity_reviews, record_external_metadata_attempt,
+    record_external_metadata_failures, reject_edition_identity_candidates, rich_enrichment_candidates, subject_enrichment_candidates, update_edition_identity_candidate_classifications,
+};
 pub(crate) use remote_reducer::apply_remote_change_in_tx;
 
 fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
@@ -359,6 +367,8 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     conn.create_publication_metadata_projection_tables()?;
     conn.create_subject_taxonomy_tables()?;
     conn.create_external_metadata_attempt_table()?;
+    external_metadata::migrate_legacy_edition_identity_candidates(conn)?;
+    conn.create_external_entity_tables()?;
     seed_subject_systems(conn)?;
     conn.create_catalog_publication_book_table()?;
     conn.drop_catalog_publication_work_index()?;
@@ -395,6 +405,10 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     conn.create_views()?;
     conn.execute_batch(include_str!("sql/triggers.sql"))?;
     conn.set_sync_metadata("change_origin", "local")?;
+    let restored = external_metadata::migrate_automatic_alternative_edition_matches(conn)?;
+    if restored > 0 {
+        log::info!("restored {restored} automatically accepted alternative-edition matches to unresolved review state");
+    }
 
     conn.pragma_update(None, "user_version", LIBRARY_SCHEMA_VERSION)?;
 
@@ -418,7 +432,256 @@ fn seed_subject_systems(conn: &Connection) -> Result<(), rusqlite::Error> {
             insert.execute(rusqlite::params![system.id(), node.path(), node.parent_path().unwrap_or(""), node.name(), node.code(), i32::from(node.code().is_some())])?;
         }
     }
+    transaction.commit()?;
+    seed_ddc_subject_assignments(conn)?;
+    seed_lcc_subject_assignments(conn)?;
+    seed_unified_subject_assignments(conn)
+}
+
+fn seed_ddc_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let stored = conn.query_row("SELECT version,matcher_version FROM subject_system WHERE id=?1", [DDC_SYSTEM_ID], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).ok();
+    if stored.as_ref().is_some_and(|(version, matcher)| version == DDC_VERSION && *matcher == DDC_MATCHER_VERSION) {
+        return Ok(());
+    }
+
+    let declarations = {
+        let mut statement = conn.prepare(
+            "SELECT book_row_id,position,name,code FROM book_subject
+             WHERE LOWER(TRIM(authority))=?1 ORDER BY book_row_id,position",
+        )?;
+        let rows = statement.query_map([DDC_SYSTEM_ID], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute("DELETE FROM subject_system WHERE id=?1", [DDC_SYSTEM_ID])?;
+    transaction.execute("INSERT INTO subject_system(id,version,matcher_version) VALUES(?1,?2,?3)", rusqlite::params![DDC_SYSTEM_ID, DDC_VERSION, DDC_MATCHER_VERSION])?;
+    for (book_row_id, position, name, code) in declarations {
+        let Some(subject_path) = ddc_subject_path(code.as_deref().unwrap_or(&name)) else { continue };
+        let mut path = String::new();
+        let mut parent_path = String::new();
+        for component in subject_path.split(" / ") {
+            if !path.is_empty() {
+                path.push_str(" / ");
+            }
+            path.push_str(component);
+            transaction.execute("INSERT OR IGNORE INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES(?1,?2,?3,?4,NULL,1)", rusqlite::params![DDC_SYSTEM_ID, path, parent_path, component])?;
+            parent_path.clone_from(&path);
+        }
+        transaction.execute("INSERT OR IGNORE INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4)", rusqlite::params![book_row_id, DDC_SYSTEM_ID, subject_path, DDC_MATCHER_VERSION])?;
+        transaction.execute("INSERT OR IGNORE INTO book_subject_assignment_evidence(book_row_id,system_id,subject_path,subject_position) VALUES(?1,?2,?3,?4)", rusqlite::params![book_row_id, DDC_SYSTEM_ID, subject_path, position])?;
+    }
     transaction.commit()
+}
+
+fn seed_lcc_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let stored = conn.query_row("SELECT version,matcher_version FROM subject_system WHERE id=?1", [LCC_SYSTEM_ID], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).ok();
+    if stored.as_ref().is_some_and(|(version, matcher)| version == LCC_VERSION && *matcher == LCC_MATCHER_VERSION) {
+        return Ok(());
+    }
+
+    let declarations = {
+        let mut statement = conn.prepare(
+            "SELECT book_row_id,position,name,code FROM book_subject
+             WHERE LOWER(TRIM(authority))=?1 ORDER BY book_row_id,position",
+        )?;
+        let rows = statement.query_map([LCC_SYSTEM_ID], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute("DELETE FROM subject_system WHERE id=?1", [LCC_SYSTEM_ID])?;
+    transaction.execute("INSERT INTO subject_system(id,version,matcher_version) VALUES(?1,?2,?3)", rusqlite::params![LCC_SYSTEM_ID, LCC_VERSION, LCC_MATCHER_VERSION])?;
+    for (book_row_id, position, name, code) in declarations {
+        let notation = code.as_deref().unwrap_or(&name);
+        let subject_path = lcc_subject_path(notation).unwrap_or_else(|| format!("LCC / Unclassified / {}", notation.split_whitespace().collect::<Vec<_>>().join(" ")));
+        let mut path = String::new();
+        let mut parent_path = String::new();
+        for component in subject_path.split(" / ") {
+            if !path.is_empty() {
+                path.push_str(" / ");
+            }
+            path.push_str(component);
+            transaction.execute("INSERT OR IGNORE INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES(?1,?2,?3,?4,NULL,1)", rusqlite::params![LCC_SYSTEM_ID, path, parent_path, component])?;
+            parent_path.clone_from(&path);
+        }
+        transaction.execute("INSERT OR IGNORE INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4)", rusqlite::params![book_row_id, LCC_SYSTEM_ID, subject_path, LCC_MATCHER_VERSION])?;
+        transaction.execute("INSERT OR IGNORE INTO book_subject_assignment_evidence(book_row_id,system_id,subject_path,subject_position) VALUES(?1,?2,?3,?4)", rusqlite::params![book_row_id, LCC_SYSTEM_ID, subject_path, position])?;
+    }
+    transaction.commit()
+}
+
+fn seed_unified_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let release_id = library_model::unified_taxonomy_release_id();
+    let stored = conn.query_row("SELECT version,matcher_version FROM subject_system WHERE id=?1", [UNIFIED_SYSTEM_ID], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).ok();
+    if stored.as_ref().is_some_and(|(version, matcher)| version == &release_id && *matcher == UNIFIED_MATCHER_VERSION) {
+        return Ok(());
+    }
+
+    let declarations = {
+        let mut statement = conn.prepare("SELECT book_row_id,position,name,source,authority,code FROM book_subject ORDER BY book_row_id,position")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut books = std::collections::BTreeMap::<i64, Vec<(i64, PublicationSubject)>>::new();
+    for (book_row_id, position, name, source, authority, code) in declarations {
+        let subject = PublicationSubject::new(None, &name, &source, authority, code).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        books.entry(book_row_id).or_default().push((position, subject));
+    }
+
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute("DELETE FROM subject_system WHERE id=?1", [UNIFIED_SYSTEM_ID])?;
+    transaction.execute("DELETE FROM subject_code_mapping", [])?;
+    transaction.execute("DELETE FROM book_subject_code", [])?;
+    transaction.execute("DELETE FROM book_unified_concept", [])?;
+    transaction.execute("DELETE FROM source_concept_mapping", [])?;
+    transaction.execute("DELETE FROM source_subject", [])?;
+    transaction.execute("DELETE FROM unified_concept_route", [])?;
+    transaction.execute("DELETE FROM unified_concept_edge", [])?;
+    transaction.execute("DELETE FROM unified_concept", [])?;
+    transaction.execute("DELETE FROM unified_taxonomy_release", [])?;
+    transaction.execute("INSERT INTO unified_taxonomy_release(singleton,version,mapper_version) VALUES(1,?1,?2)", rusqlite::params![release_id.as_str(), UNIFIED_MATCHER_VERSION])?;
+    let routes = library_model::unified_taxonomy_routes();
+    for route in &routes {
+        transaction
+            .execute("INSERT OR IGNORE INTO unified_concept(concept_id,preferred_label,description,status,introduced_version) VALUES(?1,?2,NULL,'active',?3)", rusqlite::params![route.concept_id(), route.label(), release_id.as_str()])?;
+    }
+    for route in &routes {
+        transaction.execute("INSERT INTO unified_concept_route(path,concept_id,parent_path,label) VALUES(?1,?2,?3,?4)", rusqlite::params![route.path(), route.concept_id(), route.parent_path(), route.label()])?;
+        if !route.parent_path().is_empty() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO unified_concept_edge(parent_concept_id,child_concept_id,relationship,sort_order) VALUES(?1,?2,'broader',0)",
+                rusqlite::params![library_model::unified_concept_id(route.parent_path()), route.concept_id()],
+            )?;
+        }
+    }
+    transaction.execute("INSERT INTO subject_system(id,version,matcher_version) VALUES(?1,?2,?3)", rusqlite::params![UNIFIED_SYSTEM_ID, release_id.as_str(), UNIFIED_MATCHER_VERSION])?;
+    for (book_row_id, declarations) in books {
+        let subjects = declarations.iter().map(|(_, subject)| subject.clone()).collect::<Vec<_>>();
+        let positions = declarations.iter().map(|(position, _)| *position).collect::<Vec<_>>();
+        let codes = library_model::project_subject_codes(&subjects);
+        let assignments = library_model::project_unified_subjects(&subjects);
+        for code in &codes {
+            for local_position in code.evidence_positions() {
+                transaction.execute("INSERT OR IGNORE INTO book_subject_code(book_row_id,subject_position,system_id,code) VALUES(?1,?2,?3,?4)", rusqlite::params![book_row_id, positions[*local_position], code.system_id(), code.code()])?;
+            }
+        }
+        for assignment in &assignments {
+            ensure_seeded_subject_nodes(&transaction, assignment.subject_path())?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4)",
+                rusqlite::params![book_row_id, UNIFIED_SYSTEM_ID, assignment.subject_path(), UNIFIED_MATCHER_VERSION],
+            )?;
+            for local_position in assignment.evidence_positions() {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO book_subject_assignment_evidence(book_row_id,system_id,subject_path,subject_position) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![book_row_id, UNIFIED_SYSTEM_ID, assignment.subject_path(), positions[*local_position]],
+                )?;
+            }
+        }
+        for code in &codes {
+            for unified_path in library_model::unified_subject_paths(code.system_id(), code.code()) {
+                let source_version = source_subject_version(code.system_id());
+                let concept_id = library_model::unified_concept_id(&unified_path);
+                transaction.execute("INSERT OR IGNORE INTO source_subject(system_id,source_version,code,official_label) VALUES(?1,?2,?3,NULL)", rusqlite::params![code.system_id(), source_version, code.code()])?;
+                transaction.execute(
+                    "INSERT OR REPLACE INTO source_concept_mapping(source_system_id,source_version,source_code,concept_id,mapping_type,mapper_version) VALUES(?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![code.system_id(), source_version, code.code(), concept_id, source_mapping_type(code.system_id()), UNIFIED_MATCHER_VERSION],
+                )?;
+                transaction.execute("INSERT OR IGNORE INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES(?1,?2,?3)", rusqlite::params![book_row_id, concept_id, UNIFIED_MATCHER_VERSION])?;
+                for local_position in code.evidence_positions() {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO book_unified_concept_evidence(book_row_id,concept_id,subject_position,source_system_id,source_code) VALUES(?1,?2,?3,?4,?5)",
+                        rusqlite::params![book_row_id, concept_id, positions[*local_position], code.system_id(), code.code()],
+                    )?;
+                }
+                transaction.execute(
+                    "INSERT OR REPLACE INTO subject_code_mapping(source_system_id,source_code,unified_path,mapper_version) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![code.system_id(), code.code(), unified_path, UNIFIED_MATCHER_VERSION],
+                )?;
+            }
+        }
+    }
+    transaction.commit()
+}
+
+pub(crate) fn reload_unified_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error> {
+    seed_unified_subject_assignments(conn)
+}
+
+/// Returns every supported external identifier recorded for a book. Exact
+/// local coverage is evaluated against the device taxonomy by BackendContext.
+pub(crate) fn recorded_taxonomy_codes(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<TaxonomyCode>, rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT subject.system_id,subject.code
+         FROM book_subject_code subject
+         JOIN book ON book.row_id=subject.book_row_id
+         WHERE book.content_hash=?1
+         ORDER BY subject.system_id,subject.code",
+    )?;
+    let rows = statement.query_map([content_hash.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut codes = Vec::new();
+    for row in rows {
+        let (system_id, code) = row?;
+        let system = match system_id.as_str() {
+            library_model::BISAC_SYSTEM_ID => TaxonomySystem::Bisac,
+            library_model::DDC_SYSTEM_ID => TaxonomySystem::Ddc,
+            library_model::LCC_SYSTEM_ID => TaxonomySystem::Lcc,
+            _ => continue,
+        };
+        codes.push(TaxonomyCode { system, code });
+    }
+    Ok(codes)
+}
+
+pub(crate) fn recorded_taxonomy_codes_for_library(conn: &Connection) -> Result<Vec<TaxonomyCode>, rusqlite::Error> {
+    let mut statement = conn.prepare("SELECT DISTINCT system_id,code FROM book_subject_code ORDER BY system_id,code")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut codes = Vec::new();
+    for row in rows {
+        let (system_id, code) = row?;
+        let system = match system_id.as_str() {
+            library_model::BISAC_SYSTEM_ID => TaxonomySystem::Bisac,
+            library_model::DDC_SYSTEM_ID => TaxonomySystem::Ddc,
+            library_model::LCC_SYSTEM_ID => TaxonomySystem::Lcc,
+            _ => continue,
+        };
+        codes.push(TaxonomyCode { system, code });
+    }
+    Ok(codes)
+}
+
+fn source_subject_version(system_id: &str) -> &'static str {
+    match system_id {
+        library_model::BISAC_SYSTEM_ID => library_model::BISAC_VERSION,
+        library_model::DDC_SYSTEM_ID => library_model::DDC_VERSION,
+        library_model::LCC_SYSTEM_ID => library_model::LCC_VERSION,
+        _ => "external",
+    }
+}
+
+fn source_mapping_type(system_id: &str) -> &'static str {
+    match system_id {
+        library_model::BISAC_SYSTEM_ID => "exact",
+        library_model::DDC_SYSTEM_ID | library_model::LCC_SYSTEM_ID => "broader",
+        _ => "related",
+    }
+}
+
+fn ensure_seeded_subject_nodes(transaction: &Transaction<'_>, subject_path: &str) -> Result<(), rusqlite::Error> {
+    let mut path = String::new();
+    let mut parent_path = String::new();
+    for component in subject_path.split(" / ") {
+        if !path.is_empty() {
+            path.push_str(" / ");
+        }
+        path.push_str(component);
+        transaction.execute("INSERT OR IGNORE INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES(?1,?2,?3,?4,NULL,1)", rusqlite::params![UNIFIED_SYSTEM_ID, path, parent_path, component])?;
+        parent_path.clone_from(&path);
+    }
+    Ok(())
 }
 
 pub fn get_or_create_replica_id(db: &Connection) -> Result<ReplicaId, rusqlite::Error> {
@@ -445,7 +708,7 @@ pub(crate) use browse::{get_book_ancestor_dir_ids, get_descendant_content_hashes
 mod catalog;
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
 pub(crate) use browse::{KnownDirectory, KnownDirectoryState, get_known_directories_for_scan, get_known_directory_scan_state, is_book_file_tombstoned};
-pub(crate) use catalog::{owned_catalog_publications, record_catalog_publication};
+pub(crate) use catalog::{catalog_recommendation_request, catalog_subject_recommendation_request, owned_catalog_publications, record_catalog_publication};
 
 /// Local and remote asset state, paths, and durable download intent.
 pub(crate) mod assets;
@@ -464,7 +727,8 @@ pub(crate) use reading::{update_pdf_reading_page, update_reading_position};
 /// Synchronization outbox, scan generations, tombstones, and filesystem work.
 pub(crate) mod sync_state;
 pub(crate) use sync_state::{
-    LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_sync_metadata, next_scan_id, rebind_sync_account, set_sync_metadata, state_inventory,
+    LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata, next_scan_id, rebind_sync_account, set_pull_cursor,
+    set_sync_metadata, state_inventory,
 };
 #[cfg(test)]
 pub(crate) use sync_state::{OutboxReadError, OutboxRow, decode_outbox_row};

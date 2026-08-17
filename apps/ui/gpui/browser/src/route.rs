@@ -8,31 +8,9 @@
 //! for a route it actually owns, so route hosts are exhaustive matches rather
 //! than fallible lookups.
 
-/// A page scoped to the selected library.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LibraryRoute {
-    Home,
-    Authors,
-    #[default]
-    Folders,
-    Subjects,
-    Trash,
-}
-
-impl LibraryRoute {
-    pub const ALL: &'static [Self] = &[Self::Home, Self::Authors, Self::Folders, Self::Subjects, Self::Trash];
-}
-
-/// A page whose lifetime is independent of the selected library.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UniversalRoute {
-    #[default]
-    Store,
-    Sync,
-    Settings,
-}
+/// Native names for the route identities owned by the shared frontend
+/// contract. GPUI still owns route hosting; it no longer owns a duplicate list.
+pub use app_contract::{LibraryFeature as LibraryRoute, UniversalFeature as UniversalRoute};
 
 /// The currently displayed page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -1,6 +1,6 @@
-//! One author in the index, as a retained entity.
+//! One author card in the index, as a retained entity.
 //!
-//! The row draws the covers of the author's most recently read books, so it
+//! The card draws the covers of the author's most recently read books, so it
 //! owns their thumbnail reads the way a book card owns its own. Keeping the
 //! row retained is what stops a scroll from re-reading the same JPEGs.
 
@@ -100,30 +100,50 @@ impl AuthorRowView {
 }
 
 impl Render for AuthorRowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self._cover_tasks.is_empty() && !self.author.cover_hashes().is_empty() && self.covers.iter().all(|cover| matches!(cover, CoverState::Pending)) {
             self.load_covers(cx);
         }
         let theme = components::browser_theme(cx);
         let author_id = self.author.id();
 
-        // One frame per book the author actually has: a second slot for a book
-        // that does not exist would draw an absence. The container keeps its
-        // full width regardless, so the names still line up down the list.
-        let covers = self.covers.iter().map(|cover| match cover {
-            CoverState::Loaded(image) => components::author_row_cover_frame().child(components::author_row_cover_image(image.clone(), theme)).into_any_element(),
-            // The book is there; its thumbnail is not, or not yet.
-            CoverState::Pending => components::author_row_cover_frame().into_any_element(),
-            CoverState::Missing => components::author_row_missing_cover(theme).into_any_element(),
+        let viewport_width = f32::from(window.viewport_size().width);
+        let visible_cover_limit = if viewport_width <= 480.0 {
+            1
+        } else if viewport_width <= 700.0 {
+            2
+        } else {
+            components::AUTHOR_ROW_COVER_COUNT
+        };
+        let cover_count = self.author.cover_hashes().len().min(visible_cover_limit);
+        let covers = self.covers.iter().zip(self.author.cover_hashes()).take(cover_count).enumerate().map(|(index, (cover, content_hash))| {
+            let title = self.author.cover_titles().get(index).cloned().unwrap_or_else(|| "Untitled".to_owned());
+            let frame = match cover {
+                CoverState::Loaded(image) => components::author_row_cover_frame().child(components::author_row_cover_image(image.clone(), theme)),
+                // The book is there; its thumbnail is not, or not yet.
+                CoverState::Pending => components::author_row_cover_frame(),
+                CoverState::Missing => components::author_row_missing_cover(title, theme),
+            };
+            let ui = self.ui.clone();
+            let content_hash = content_hash.clone();
+            frame
+                .id(format!("author-{author_id}-book-{index}"))
+                .cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    ui.open_detail(content_hash.clone(), cx);
+                })
+                .into_any_element()
         });
 
         let activate = self.select.clone();
         let click = self.select.clone();
-        components::author_list_row(format!("author-{author_id}"), self.selected, theme)
+        components::author_list_row(format!("author-{author_id}"), cover_count, self.selected, theme)
             .tab_index(self.tab_index)
             .key_context("BrowserAuthorList")
-            .child(components::author_row_covers().children(covers))
-            .child(components::author_list_identity().child(components::author_list_name(SharedString::from(self.author.name().as_str().to_owned()))))
+            .child(components::author_list_name(SharedString::from(self.author.name().as_str().to_owned())))
+            .child(components::author_row_covers(cover_count).children(covers))
             .on_action(move |_: &ActivateAuthor, _, cx| activate(author_id, cx))
             .on_click(move |_, _, cx| click(author_id, cx))
     }

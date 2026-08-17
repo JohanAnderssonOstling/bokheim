@@ -9,7 +9,7 @@ CREATE TABLE account_email_outbox (
     id text PRIMARY KEY,
     recipient text NOT NULL,
     message_kind text NOT NULL,
-    token text NOT NULL,
+    token_ciphertext text NOT NULL,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
     available_at timestamp with time zone NOT NULL DEFAULT now(),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -86,7 +86,7 @@ CREATE TABLE pending_registration (
     id text PRIMARY KEY,
     email text NOT NULL UNIQUE,
     password_hash text NOT NULL,
-    verification_hash text NOT NULL UNIQUE,
+    verification_hash text NOT NULL,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
     expires_at timestamp with time zone NOT NULL,
     last_sent_at timestamp with time zone NOT NULL DEFAULT now()

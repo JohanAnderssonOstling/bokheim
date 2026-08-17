@@ -16,6 +16,10 @@
     onopen,
     ondownload,
     onremove,
+    ontrash,
+    oncopytofolder,
+    onmovetofolder,
+    onremovefromfolder,
   }: {
     book: BookCardData;
     libraryId: string;
@@ -25,9 +29,14 @@
     onopen: (book: BookCardData) => void | Promise<void>;
     ondownload: (book: BookCardData) => void | Promise<void>;
     onremove: (book: BookCardData) => void | Promise<void>;
+    ontrash: (book: BookCardData) => void | Promise<void>;
+    oncopytofolder?: (book: BookCardData) => void | Promise<void>;
+    onmovetofolder?: (book: BookCardData) => void | Promise<void>;
+    onremovefromfolder?: (book: BookCardData) => void | Promise<void>;
   } = $props();
 
   let coverUrl = $state("");
+  let thumbnailResolved = $state(false);
   let coverElement = $state<HTMLElement>();
   let thumbnailStarted = false;
   const title = $derived(book.title || "Untitled");
@@ -47,8 +56,12 @@
   async function loadThumbnail() {
     if (thumbnailStarted) return;
     thumbnailStarted = true;
-    const url = await getThumbnailUrl(libraryId, book.content_hash);
-    if (url) coverUrl = url;
+    try {
+      const url = await getThumbnailUrl(libraryId, book.content_hash);
+      if (url) coverUrl = url;
+    } finally {
+      thumbnailResolved = true;
+    }
   }
 
   onMount(() => {
@@ -70,35 +83,32 @@
 </script>
 
 <div class="book-card" class:detailed={detailed}>
-  <button class="book-open" class:detailed={detailed} type="button" disabled={opening} aria-label={`Read ${title}`} onclick={() => onopen(book)}>
-    {#if detailed}
-      <span class="book-details">
-        <span class="book-meta">
-          <strong>{title}</strong>
-          <span>{book.author || "Unknown author"}</span>
-        </span>
-        <span class="book-description">{description}</span>
-      </span>
-    {:else}
-      <span class="book-cover" aria-hidden="true" bind:this={coverElement}>
-        {#if coverUrl}
-          <img src={coverUrl} alt="" loading="lazy" decoding="async" />
-        {:else}
-          <svg viewBox="0 0 24 24"><path d="M5 3.5h12a2 2 0 0 1 2 2V21H7a2 2 0 0 1-2-2.5zm0 15A2.5 2.5 0 0 1 7.5 16H19"></path></svg>
-        {/if}
-      </span>
-      <span class="card-copy">
-        <strong>{title}</strong>
-        <span>{book.author || "Unknown author"}</span>
-      </span>
-    {/if}
-    {#if (book.progress ?? 0) > 0}
-      <span class="progress-track" aria-label={`${Math.round(progress)}% read`}>
-        <i style={`width: ${progress}%`}></i>
-      </span>
-    {/if}
+  <button class="cover-button" class:detailed type="button" disabled={opening} aria-label={`Open details for ${title}`} onclick={() => onopen(book)}>
+    <span class="book-cover" class:detailed class:missing={thumbnailResolved && !coverUrl} aria-hidden="true" bind:this={coverElement}>
+      {#if coverUrl}
+        <img src={coverUrl} alt="" loading="lazy" decoding="async" />
+      {:else if thumbnailResolved}
+        <svg viewBox="0 0 24 24"><path d="M5 3.5h12a2 2 0 0 1 2 2V21H7a2 2 0 0 1-2-2.5zm0 15A2.5 2.5 0 0 1 7.5 16H19"></path></svg>
+        <small>{book.audiobook ? "Audiobook" : "No cover"}</small>
+      {/if}
+    </span>
     {#if opening}<span class="opening">Opening…</span>{/if}
   </button>
+  <span class={detailed ? "book-details" : "card-copy"}>
+    <span class="book-meta">
+      <strong>{title}</strong>
+      <span>{book.author || "Unknown author"}</span>
+    </span>
+    {#if detailed}<span class="book-description">{description}</span>{/if}
+    <span class="progress-slot">
+      {#if (book.progress ?? 0) > 0}
+        <span class="progress-track" aria-label={`${Math.round(progress)}% read`}>
+          <i style={`width: ${progress}%`}></i>
+        </span>
+      {/if}
+    </span>
+  </span>
+  {#if detailed}<button class="wide-open" type="button" disabled={opening} onclick={() => onopen(book)}>{BOOK_ACTIONS_CONTRACT.open_label}</button>{/if}
   <details class="book-actions" use:managedMenu>
     <summary aria-label={`${BOOK_ACTIONS_CONTRACT.menu_label} for ${title}`} title={BOOK_ACTIONS_CONTRACT.menu_label}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.25"></circle><circle cx="12" cy="12" r="1.25"></circle><circle cx="12" cy="19" r="1.25"></circle></svg>
@@ -110,6 +120,10 @@
       {:else if !isWebApp}
         <button type="button" role="menuitem" disabled={downloading} onclick={(event) => { closeMenu(event); return ondownload(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"></path></svg><span>{downloading ? BOOK_ACTIONS_CONTRACT.download_in_progress_label : BOOK_ACTIONS_CONTRACT.download_label}</span></button>
       {/if}
+      {#if oncopytofolder}<button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return oncopytofolder?.(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg><span>Copy to folder…</span></button>{/if}
+      {#if onmovetofolder}<button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return onmovetofolder?.(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"></path></svg><span>Move to folder…</span></button>{/if}
+      {#if onremovefromfolder}<button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return onremovefromfolder?.(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12h8"></path></svg><span>Remove from folder</span></button>{/if}
+      <button class="danger" type="button" role="menuitem" onclick={(event) => { closeMenu(event); return ontrash(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 14h10l1-14M10 11v6m4-6v6"></path></svg><span>Move to Trash</span></button>
     </div>
   </details>
 </div>
@@ -117,50 +131,53 @@
 <style>
   button { font: inherit; -webkit-tap-highlight-color: transparent; }
   svg { display: block; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
-  .book-card { position: relative; display: grid; width: 100%; min-width: 0; color: inherit; }
-  .book-card.detailed { width: 100%; }
-  .book-open { display: grid; width: 100%; min-width: 0; padding: 0; border: 0; color: inherit; text-align: left; background: transparent; cursor: pointer; }
-  .book-open:active { transform: scale(.985); }
-  .book-open:disabled { opacity: .58; }
-  .book-open.detailed { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: .85rem; min-height: 6.5rem; padding: .75rem .85rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
-  .book-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: .35rem; min-width: 0; align-content: start; }
-  .book-meta { display: grid; gap: .18rem; min-width: 0; }
+  .book-card { position: relative; display: flex; flex-direction: column; gap: var(--book-card-cover-content-gap); width: 100%; min-width: 0; color: inherit; }
+  .book-card.detailed { display: grid; grid-template-columns: 100px minmax(0, 1fr) auto; align-items: start; gap: 14px; width: 100%; height: 178px; padding: 9px 14px; border-bottom: 1px solid var(--color-border); }
+  .book-card.detailed:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
+  .cover-button { position: relative; display: grid; width: 100%; min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
+  .cover-button:active { transform: scale(.985); }
+  .cover-button:disabled { opacity: .58; }
+  .cover-button.detailed { width: 100px; height: 160px; }
+  .book-details { display: flex; flex-direction: column; gap: 5px; min-width: 0; max-width: 640px; height: 160px; align-content: start; }
+  .book-meta { display: grid; gap: var(--book-card-text-gap); min-width: 0; }
   .book-meta strong, .book-meta span { overflow: hidden; text-overflow: ellipsis; }
-  .book-meta strong { display: -webkit-box; min-height: 2em; line-height: 1.15; font-size: .9rem; font-weight: 750; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-  .book-meta span { color: var(--color-subtle-text); font-size: .7rem; }
-  .book-description { display: -webkit-box; min-height: 1.9em; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; color: var(--color-subtle-text); font-size: .74rem; line-height: 1.32; }
-  .book-cover { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: .69; overflow: hidden; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: var(--color-surface-bg); box-shadow: 0 .35rem .9rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); }
-  .book-cover img { width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
-  .book-cover > svg { width: 2rem; height: 2rem; }
-  .card-copy { display: grid; gap: .18rem; min-width: 0; padding: .55rem .15rem 0; }
+  .book-meta strong { height: 22px; font-size: var(--book-card-title-size); font-weight: var(--book-card-title-weight); line-height: 22px; white-space: nowrap; }
+  .book-meta span { height: 20px; color: var(--color-subtle-text); font-size: var(--book-card-author-size); line-height: 20px; white-space: nowrap; }
+  .book-description { display: -webkit-box; height: 84px; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; color: var(--color-subtle-text); font-size: .8125rem; line-height: 1.4; }
+  .book-cover { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; width: 100%; aspect-ratio: 5 / 8; overflow: hidden; color: var(--color-subtle-text); }
+  .book-cover.detailed { width: 100px; height: 160px; aspect-ratio: auto; }
+  .book-cover.missing { justify-content: center; gap: 5px; border: 1px solid var(--color-border); background: var(--color-active-highlight); }
+  .book-cover img { display: block; width: auto; max-width: 100%; height: auto; max-height: 100%; border: 1px solid var(--color-border); object-fit: contain; box-shadow: 0 4px 12px color-mix(in srgb, var(--color-box-shadow) 40%, transparent); }
+  .book-cover > svg { width: 24px; height: 24px; }
+  .book-cover > small { font-size: .75rem; }
+  .card-copy { display: grid; gap: var(--book-card-text-gap); min-width: 0; }
   .card-copy strong, .card-copy > span:not(.progress-track) { overflow: hidden; text-overflow: ellipsis; }
-  .card-copy strong { display: -webkit-box; min-height: 2.3em; font-size: .84rem; font-weight: 720; line-height: 1.15; white-space: normal; line-clamp: 2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-  .card-copy > span:not(.progress-track) { white-space: nowrap; }
-  .card-copy > span:not(.progress-track) { color: var(--color-subtle-text); font-size: .69rem; }
-  .progress-track { display: block; width: 70%; height: .2rem; margin-top: .3rem; overflow: hidden; border-radius: 99px; background: var(--color-border); }
-  .progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--color-accent); }
-  .opening { position: absolute; inset: auto .45rem 3.8rem; padding: .35rem; border-radius: var(--radius-sm); color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .68rem; font-weight: 750; }
-  .book-actions { position: absolute; z-index: 4; top: .45rem; right: .45rem; }
-  .book-actions summary { display: grid; place-items: center; width: 2.35rem; height: 2.35rem; padding: 0; border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); border-radius: 50%; color: var(--color-ink-text); background: color-mix(in srgb, var(--color-raised-bg) 92%, transparent); box-shadow: 0 .2rem .7rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); cursor: pointer; list-style: none; backdrop-filter: blur(10px); }
+  .card-copy strong { display: -webkit-box; height: var(--book-card-title-block-height); font-size: var(--book-card-title-size); font-weight: var(--book-card-title-weight); line-height: var(--book-card-title-line-height); white-space: normal; line-clamp: var(--book-card-title-lines); -webkit-box-orient: vertical; -webkit-line-clamp: var(--book-card-title-lines); }
+  .card-copy .book-meta span { height: var(--book-card-author-block-height); color: var(--color-subtle-text); font-size: var(--book-card-author-size); line-height: var(--book-card-author-line-height); white-space: nowrap; }
+  .progress-slot { display: flex; align-items: start; width: 100%; height: var(--book-card-progress-height); padding-top: 6px; }
+  .progress-track { display: block; width: 100%; height: 4px; overflow: hidden; border-radius: 0; background: var(--color-border); }
+  .progress-track i { display: block; height: 100%; border-radius: 0; background: var(--color-accent); }
+  .opening { position: absolute; right: 9px; bottom: 9px; left: 9px; padding: 5px; border-radius: 0; color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .75rem; font-weight: 600; }
+  .wide-open { display: none; align-items: center; justify-content: center; height: 40px; padding: 0 11px; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-accent); background: var(--color-raised-bg); font-size: .8125rem; font-weight: 600; cursor: pointer; }
+  .book-actions { position: absolute; z-index: 4; top: 5px; right: 5px; }
+  .book-actions summary { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 55%, transparent); box-shadow: none; cursor: pointer; list-style: none; }
   .book-actions summary::-webkit-details-marker { display: none; }
-  .book-actions summary svg { width: 1.15rem; height: 1.15rem; fill: currentColor; stroke: none; }
-  .book-actions[open] summary { color: var(--color-raised-bg); background: var(--color-accent); }
-  .book-menu { position: absolute; top: calc(100% + .35rem); right: 0; display: grid; width: max-content; min-width: 11.5rem; padding: .35rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); box-shadow: 0 .8rem 2rem var(--color-box-shadow); }
-  .book-menu button { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr); align-items: center; gap: .55rem; min-height: 2.45rem; padding: .55rem .7rem; border: 0; border-radius: calc(var(--radius-sm) - .15rem); color: var(--color-ink-text); background: transparent; text-align: left; font-size: .76rem; font-weight: 650; cursor: pointer; }
-  .book-menu button svg { width: 1.05rem; height: 1.05rem; }
+  .book-actions summary svg { width: 18px; height: 18px; fill: currentColor; stroke: none; filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--color-ink-text) 85%, transparent)); }
+  .book-actions summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+  .book-actions[open] summary { color: var(--color-accent); background: var(--color-raised-bg); }
+  .book-menu { position: absolute; top: calc(100% + 5px); right: 0; display: grid; width: max-content; min-width: 184px; padding: 5px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 13px 32px var(--color-box-shadow); }
+  .book-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 40px; padding: 9px 11px; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .75rem; font-weight: 600; cursor: pointer; }
+  .book-menu button svg { width: 17px; height: 17px; }
   .book-menu button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .book-menu button:disabled { color: var(--color-border); cursor: default; }
   .book-menu button.danger { color: var(--color-danger-text); }
   @media (min-width: 45rem) {
     .book-card { width: var(--book-cover-width); height: var(--book-card-height); }
-    .book-card.detailed { width: 100%; height: auto; }
-    .book-open { width: var(--book-cover-width); }
-    .book-open.detailed { width: 100%; min-height: 5.8rem; }
-    .book-cover { width: var(--book-cover-width); height: var(--book-cover-height); aspect-ratio: auto; border-radius: 8px; }
-    .card-copy strong { font-size: 17px; }
-    .card-copy > span:not(.progress-track) { font-size: 15px; }
-    .book-meta strong { font-size: 1rem; }
-    .book-meta span { font-size: .78rem; }
-    .book-description { font-size: .82rem; }
+    .book-card.detailed { width: 100%; height: 178px; }
+    .cover-button { width: var(--book-cover-width); }
+    .cover-button.detailed { width: 100px; }
+    .book-cover { width: var(--book-cover-width); height: var(--book-cover-height); aspect-ratio: auto; border-radius: 0; }
+    .book-cover.detailed { width: 100px; height: 160px; }
   }
+  @media (min-width: 940px) { .wide-open { display: inline-flex; } .book-card.detailed .book-actions { top: 55px; right: 14px; } }
 </style>

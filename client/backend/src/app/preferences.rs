@@ -117,6 +117,16 @@ mod tests {
     }
 
     #[test]
+    fn catalogue_language_is_persisted() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
+        assert_eq!(context.load_browsing_preferences().unwrap().included_catalog_languages(), ["en"]);
+        let updated = context.apply_browsing_preference_patch(BrowsingPreferencePatch::IncludedCatalogLanguages(vec!["sv".to_owned()])).unwrap();
+        assert_eq!(updated.included_catalog_languages(), ["sv"]);
+        assert_eq!(context.load_browsing_preferences().unwrap(), updated);
+    }
+
+    #[test]
     fn interface_font_is_the_single_closed_persisted_ui_font() {
         let directory = tempfile::tempdir().unwrap();
         let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
@@ -144,6 +154,7 @@ mod tests {
         assert_eq!(preferences.theme(), ApplicationTheme::LibrarySerif);
         assert_eq!(preferences.interface_font(), UiFontFamily::SansSerif);
         assert_eq!(preferences.ui_font_size_px(), UI_FONT_SIZE_DEFAULT);
+        assert_eq!(preferences.included_catalog_languages(), ["en"]);
     }
 
     #[test]
@@ -183,7 +194,9 @@ mod tests {
         let preferences: ReaderPreferences = serde_json::from_str(r#"{"font_size_px":24.0}"#).unwrap();
         assert_eq!(preferences.font_size_px(), 24.0);
         assert_eq!(preferences.max_line_width_px(), 600.0);
-        assert_eq!(preferences.pdf_page_layout(), PdfPageLayout::Automatic);
+        assert_eq!(preferences.pdf_zoom_mode(), PdfZoomMode::FitWidth);
+        assert_eq!(preferences.pdf_page_count(), 1);
+        assert_eq!(preferences.pdf_zoom(), 1.0);
         assert!(preferences.pdf_trim_margins());
     }
 
@@ -253,14 +266,16 @@ mod tests {
     fn reader_capabilities_make_renderer_specific_support_explicit() {
         let native = ReaderCapabilities::for_engine(ReaderEngine::Native);
         let foliate = ReaderCapabilities::for_engine(ReaderEngine::Foliate);
-        assert!(native.supports(ReaderPreferenceKey::PdfPageLayout));
+        assert!(native.supports(ReaderPreferenceKey::PdfZoomMode));
+        assert!(native.supports(ReaderPreferenceKey::PdfPageCount));
+        assert!(native.supports(ReaderPreferenceKey::PdfZoom));
         assert!(native.supports(ReaderPreferenceKey::PdfTrimMargins));
         assert!(native.supports(ReaderPreferenceKey::LineHeight));
         assert!(native.supports(ReaderPreferenceKey::FontFamily));
         assert!(native.supports(ReaderPreferenceKey::TextAlignment));
         assert!(!native.supports(ReaderPreferenceKey::Hyphenation));
         assert!(native.supports(ReaderPreferenceKey::MaxColumnCount));
-        assert!(!foliate.supports(ReaderPreferenceKey::PdfPageLayout));
+        assert!(!foliate.supports(ReaderPreferenceKey::PdfZoomMode));
         assert!(!foliate.supports(ReaderPreferenceKey::PdfTrimMargins));
         assert!(foliate.supports(ReaderPreferenceKey::Hyphenation));
     }
@@ -280,18 +295,28 @@ mod tests {
         assert_eq!(options.flows.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFlow::Paginated, ReaderFlow::Scrolled]);
         assert_eq!(options.font_families.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFontFamily::Publisher, ReaderFontFamily::Serif, ReaderFontFamily::SansSerif]);
         assert_eq!(options.text_alignments.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderTextAlignment::Publisher, ReaderTextAlignment::Start, ReaderTextAlignment::Justify]);
-        assert_eq!(options.pdf_page_layouts.iter().map(|option| option.value).collect::<Vec<_>>(), vec![PdfPageLayout::Single, PdfPageLayout::Spread, PdfPageLayout::Automatic]);
+        assert_eq!(options.pdf_zoom_modes.iter().map(|option| option.value).collect::<Vec<_>>(), vec![PdfZoomMode::FitWidth, PdfZoomMode::Fixed, PdfZoomMode::FitHeight]);
     }
 
     #[test]
-    fn pdf_page_layout_patch_is_persisted_by_the_shared_backend() {
+    fn pdf_layout_patches_are_persisted_by_the_shared_backend() {
         let directory = tempfile::tempdir().unwrap();
         let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
 
-        let updated = context.apply_reader_preference_patch(ReaderPreferencePatch::PdfPageLayout(PdfPageLayout::Spread)).unwrap();
+        let updated = context.apply_reader_preference_patch(ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight)).unwrap();
+        assert_eq!(updated.pdf_zoom_mode(), PdfZoomMode::FitHeight);
 
-        assert_eq!(updated.pdf_page_layout(), PdfPageLayout::Spread);
-        assert_eq!(context.load_reader_preferences().unwrap().pdf_page_layout(), PdfPageLayout::Spread);
+        // Each mode keeps the value it holds fixed, so switching between them
+        // restores what was set rather than starting over.
+        context.apply_reader_preference_patch(ReaderPreferencePatch::PdfPageCount(4)).unwrap();
+        let updated = context.apply_reader_preference_patch(ReaderPreferencePatch::PdfZoom(2.5)).unwrap();
+        assert_eq!(updated.pdf_page_count(), 4);
+        assert_eq!(updated.pdf_zoom(), 2.5);
+
+        let reloaded = context.load_reader_preferences().unwrap();
+        assert_eq!(reloaded.pdf_zoom_mode(), PdfZoomMode::FitHeight);
+        assert_eq!(reloaded.pdf_page_count(), 4);
+        assert_eq!(reloaded.pdf_zoom(), 2.5);
     }
 
     #[test]

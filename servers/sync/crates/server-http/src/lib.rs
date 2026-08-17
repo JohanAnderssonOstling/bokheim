@@ -1,16 +1,20 @@
 //! Axum transport adapter for the synchronization server.
 
 mod account;
+mod admin;
 mod assets;
 mod bandwidth;
 mod extract;
 mod notifications;
+mod operations;
 mod state;
 mod sync;
+mod traffic;
 
 use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
+    middleware,
     routing::{delete, get, head, post},
     Router,
 };
@@ -26,10 +30,14 @@ use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
 
 pub use bandwidth::TransferLimits;
 pub use notifications::NotificationConfig;
+pub use operations::OperationalServices;
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = server_asset_store::MAX_BOOK_UPLOAD_DURATION;
 const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_IN_FLIGHT_THUMBNAIL_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_MAX_IN_FLIGHT_THUMBNAIL_BYTES_PER_ACCOUNT: usize = 256 * 1024 * 1024;
+const MAX_CONFIGURED_IN_FLIGHT_THUMBNAIL_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Coalesces concurrent readiness requests and briefly reuses their result.
 ///
@@ -69,11 +77,21 @@ impl Readiness {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestLimits {
     max_in_flight: usize,
+    max_thumbnail_uploads: usize,
+    max_thumbnail_uploads_per_account: usize,
+    max_in_flight_thumbnail_bytes: usize,
+    max_in_flight_thumbnail_bytes_per_account: usize,
 }
 
 impl Default for RequestLimits {
     fn default() -> Self {
-        Self { max_in_flight: 512 }
+        Self {
+            max_in_flight: 512,
+            max_thumbnail_uploads: 16,
+            max_thumbnail_uploads_per_account: 4,
+            max_in_flight_thumbnail_bytes: DEFAULT_MAX_IN_FLIGHT_THUMBNAIL_BYTES,
+            max_in_flight_thumbnail_bytes_per_account: DEFAULT_MAX_IN_FLIGHT_THUMBNAIL_BYTES_PER_ACCOUNT,
+        }
     }
 }
 
@@ -81,7 +99,11 @@ impl RequestLimits {
     pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let max_in_flight = parse_bounded("BOKHEIM_MAX_IN_FLIGHT_REQUESTS", defaults.max_in_flight, 1, 4096)?;
-        Ok(Self { max_in_flight })
+        let max_thumbnail_uploads = parse_bounded("BOKHEIM_MAX_THUMBNAIL_UPLOADS", defaults.max_thumbnail_uploads, 1, 256)?;
+        let max_thumbnail_uploads_per_account = parse_bounded("BOKHEIM_MAX_THUMBNAIL_UPLOADS_PER_ACCOUNT", defaults.max_thumbnail_uploads_per_account, 1, max_thumbnail_uploads)?;
+        let max_in_flight_thumbnail_bytes = parse_bounded("BOKHEIM_MAX_IN_FLIGHT_THUMBNAIL_BYTES", defaults.max_in_flight_thumbnail_bytes, 1, MAX_CONFIGURED_IN_FLIGHT_THUMBNAIL_BYTES)?;
+        let max_in_flight_thumbnail_bytes_per_account = parse_bounded("BOKHEIM_MAX_IN_FLIGHT_THUMBNAIL_BYTES_PER_ACCOUNT", defaults.max_in_flight_thumbnail_bytes_per_account, 1, max_in_flight_thumbnail_bytes)?;
+        Ok(Self { max_in_flight, max_thumbnail_uploads, max_thumbnail_uploads_per_account, max_in_flight_thumbnail_bytes, max_in_flight_thumbnail_bytes_per_account })
     }
 
     pub fn apply(self, router: Router) -> Router {
@@ -102,10 +124,12 @@ fn parse_bounded<T: std::str::FromStr + PartialOrd + Copy + std::fmt::Display>(n
 }
 
 pub fn router_with_operational_limits(
-    account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits, notification_config: NotificationConfig,
+    database: PostgresDatabase, account_routes: Router, account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits,
+    request_limits: RequestLimits, notification_config: NotificationConfig, operational_services: OperationalServices, client_address_source: server_account::ClientAddressSource,
 ) -> Router {
-    let state = AppState::new(account, sync, assets, readiness, transfer_limits, notification_config);
-    Router::new()
+    let traffic = traffic::TrafficRecorder::new(database.clone(), client_address_source);
+    let state = AppState::new(database, account, sync, assets, readiness, transfer_limits, request_limits, notification_config, operational_services, traffic.clone());
+    let routes = Router::new()
         .route("/api/live", get(live))
         .route("/api/ready", get(ready))
         .route("/api/health", get(ready))
@@ -121,8 +145,15 @@ pub fn router_with_operational_limits(
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
         .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail))
         .route("/api/libraries/:library_id/thumbnail-batch", post(assets::post_thumbnail_batch).put(assets::put_thumbnail_batch).layer(DefaultBodyLimit::max(sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)))
+        .route("/api/admin/overview", get(admin::overview))
+        .route("/api/admin/traffic", get(admin::traffic))
+        .route("/api/admin/requests", get(admin::requests))
+        .route("/api/admin/engagement", get(admin::engagement))
+        .route("/api/admin/services", get(admin::services))
+        .route("/api/admin/login", post(admin::login).layer(DefaultBodyLimit::max(16 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .with_state(state)
+        .with_state(state);
+    request_limits.apply(account_routes.merge(routes)).layer(middleware::from_fn_with_state(traffic, traffic::record_traffic))
 }
 
 async fn live() -> (StatusCode, &'static str) {

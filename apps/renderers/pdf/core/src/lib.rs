@@ -261,21 +261,34 @@ impl PdfDocumentSession {
     }
 
     pub fn search(&self, query: &str) -> PdfResult<Vec<PdfSearchHit>> {
+        (0..self.info.page_count()).try_fold(Vec::new(), |mut hits, page_index| {
+            hits.extend(self.search_page(page_index, query)?);
+            Ok(hits)
+        })
+    }
+
+    /// Searches a single page.
+    ///
+    /// Scanning a long document takes long enough to matter, and the session
+    /// is behind the same lock that page rendering needs, so readers search a
+    /// chunk of pages at a time rather than holding the session for the whole
+    /// document.
+    pub fn search_page(&self, page_index: usize, query: &str) -> PdfResult<Vec<PdfSearchHit>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
-        self.document.pages().iter().enumerate().try_fold(Vec::new(), |mut hits, (page_index, page)| {
-            let page_width = page.width().value.max(1.0);
-            let page_height = page.height().value.max(1.0);
-            let text = page.text().map_err(|error| PdfError::new(format!("extracting text from page {}: {error}", page_index + 1)))?;
-            let search = text.search(query, &PdfSearchOptions::new()).map_err(|error| PdfError::new(format!("searching page {}: {error}", page_index + 1)))?;
-            search.iter(PdfSearchDirection::SearchForward).for_each(|segments| {
-                segments.iter().for_each(|segment| {
-                    hits.push(PdfSearchHit { page_index, bounds: normalized_pdf_bounds(segment.bounds(), page_width, page_height) });
-                });
+        let page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
+        let page_width = page.width().value.max(1.0);
+        let page_height = page.height().value.max(1.0);
+        let text = page.text().map_err(|error| PdfError::new(format!("extracting text from page {}: {error}", page_index + 1)))?;
+        let search = text.search(query, &PdfSearchOptions::new()).map_err(|error| PdfError::new(format!("searching page {}: {error}", page_index + 1)))?;
+        let mut hits = Vec::new();
+        search.iter(PdfSearchDirection::SearchForward).for_each(|segments| {
+            segments.iter().for_each(|segment| {
+                hits.push(PdfSearchHit { page_index, bounds: normalized_pdf_bounds(segment.bounds(), page_width, page_height) });
             });
-            Ok(hits)
-        })
+        });
+        Ok(hits)
     }
 }
 

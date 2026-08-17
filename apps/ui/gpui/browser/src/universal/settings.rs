@@ -6,29 +6,43 @@
 
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, TransferPreferencePatch};
 use gpui::prelude::*;
-use gpui::{div, Context, Entity, IntoElement, Render, SharedString, Window};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Window, div};
+use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::group_box::{GroupBox, GroupBoxVariants};
 use gpui_component::switch::Switch;
 use ui_components as components;
 
-use crate::services::AppServices;
+use crate::services::{AppServices, DesktopUpdate};
 use crate::stores::Preferences;
+
+enum DesktopUpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(DesktopUpdate),
+    Installing { version: String },
+    ReadyToRestart { version: String },
+    Failed(String),
+}
 
 pub(crate) struct SettingsPage {
     services: AppServices,
     preferences: Entity<Preferences>,
     error: Option<SharedString>,
+    desktop_update: DesktopUpdateState,
     #[cfg(feature = "kobo")]
     kobo_auto_rotate: bool,
 }
 
 impl SettingsPage {
     pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, _cx: &mut Context<Self>) -> Self {
+        let desktop_update = services.desktop_updater.as_ref().and_then(|updater| updater.available_update()).map(DesktopUpdateState::Available).unwrap_or(DesktopUpdateState::Idle);
         Self {
             services,
             preferences,
             error: None,
+            desktop_update,
             #[cfg(feature = "kobo")]
             kobo_auto_rotate,
         }
@@ -57,6 +71,61 @@ impl SettingsPage {
             });
         })
         .detach();
+    }
+
+    fn check_desktop_update(&mut self, cx: &mut Context<Self>) {
+        let Some(updater) = self.services.desktop_updater.clone() else { return };
+        self.desktop_update = DesktopUpdateState::Checking;
+        cx.notify();
+        let result = updater.check();
+        cx.spawn(async move |page, cx| {
+            let outcome = result.recv().await.unwrap_or_else(|_| Err("The desktop update worker stopped unexpectedly".to_owned()));
+            let _ = page.update(cx, |page, cx| {
+                page.desktop_update = match outcome {
+                    Ok(Some(update)) => {
+                        updater.set_available_update(Some(update.clone()));
+                        DesktopUpdateState::Available(update)
+                    }
+                    Ok(None) => {
+                        updater.set_available_update(None);
+                        DesktopUpdateState::UpToDate
+                    }
+                    Err(error) => DesktopUpdateState::Failed(error),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn install_desktop_update(&mut self, update: DesktopUpdate, cx: &mut Context<Self>) {
+        let Some(updater) = self.services.desktop_updater.clone() else { return };
+        let version = update.version.clone();
+        self.desktop_update = DesktopUpdateState::Installing { version: version.clone() };
+        cx.notify();
+        let result = updater.install(update);
+        cx.spawn(async move |page, cx| {
+            let outcome = result.recv().await.unwrap_or_else(|_| Err("The desktop update worker stopped unexpectedly".to_owned()));
+            let _ = page.update(cx, |page, cx| {
+                page.desktop_update = match outcome {
+                    Ok(()) => DesktopUpdateState::ReadyToRestart { version },
+                    Err(error) => DesktopUpdateState::Failed(error),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn restart_after_desktop_update(&mut self, cx: &mut Context<Self>) {
+        let Some(updater) = self.services.desktop_updater.clone() else { return };
+        match updater.restart() {
+            Ok(()) => cx.quit(),
+            Err(error) => {
+                self.desktop_update = DesktopUpdateState::Failed(error);
+                cx.notify();
+            }
+        }
     }
 
     #[cfg(feature = "kobo")]
@@ -224,6 +293,49 @@ impl Render for SettingsPage {
                 }),
                 theme,
             )));
+        }
+
+        if let Some(updater) = self.services.desktop_updater.as_ref() {
+            let current_version = updater.current_version().to_owned();
+            let (description, control) = match &self.desktop_update {
+                DesktopUpdateState::Idle => {
+                    let action = entity.clone();
+                    (
+                        format!("Version {current_version}. Updates are available only for this directly downloaded AppImage."),
+                        components::secondary_action_button("check-desktop-update", "Check for updates", IconName::Redo2, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.check_desktop_update(cx))),
+                    )
+                }
+                DesktopUpdateState::Checking => (format!("Checking GitHub Releases from version {current_version}…"), components::secondary_action_button("checking-desktop-update", "Checking…", IconName::Redo2, true)),
+                DesktopUpdateState::UpToDate => {
+                    let action = entity.clone();
+                    (
+                        format!("Version {current_version} is current."),
+                        components::secondary_action_button("recheck-desktop-update", "Check again", IconName::Redo2, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.check_desktop_update(cx))),
+                    )
+                }
+                DesktopUpdateState::Available(update) => {
+                    let available = update.clone();
+                    let action = entity.clone();
+                    (
+                        format!("{} is available. The download is verified before the current AppImage is replaced.", update.release_name),
+                        components::secondary_action_button("install-desktop-update", format!("Install {}", update.version), IconName::ArrowRight, false)
+                            .on_click(move |_, _, cx| action.update(cx, |page, cx| page.install_desktop_update(available.clone(), cx))),
+                    )
+                }
+                DesktopUpdateState::Installing { version } => (format!("Downloading and verifying Bokheim {version}…"), components::secondary_action_button("installing-desktop-update", "Installing…", IconName::ArrowRight, true)),
+                DesktopUpdateState::ReadyToRestart { version } => {
+                    let action = entity.clone();
+                    (
+                        format!("Bokheim {version} is installed. The previous AppImage remains beside it as a backup."),
+                        components::secondary_action_button("restart-desktop-update", "Restart Bokheim", IconName::ArrowRight, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.restart_after_desktop_update(cx))),
+                    )
+                }
+                DesktopUpdateState::Failed(error) => {
+                    let action = entity.clone();
+                    (format!("Update failed: {error}"), components::secondary_action_button("retry-desktop-update", "Try again", IconName::Redo2, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.check_desktop_update(cx))))
+                }
+            };
+            sections = sections.child(components::browser_settings_fieldset("Updates", theme).child(components::browser_settings_row("Bokheim updates", description, control, theme)));
         }
 
         #[cfg(feature = "kobo")]

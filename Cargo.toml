@@ -20,9 +20,13 @@ members = [
     "shared/account-contract",
     "shared/catalog-core",
     "client/catalog-client",
+    "client/metadata-client",
+    "client/taxonomy-client",
     "shared/protocol-test-support",
     "shared/wire",
+    "shared/protobuf-wire",
     "shared/metadata-contract",
+    "shared/taxonomy-contract",
     "apps/mobile/src-tauri",
     "shared/sync-common",
     "apps/renderers/html",
@@ -41,7 +45,8 @@ members = [
     "apps/ui/gpui/components",
     "apps/ui/gpui/runtime",
     "servers/opds-cache",
-    "servers/metadata"
+    "servers/metadata",
+    "servers/taxonomy"
 ]
 exclude = ["servers/sync"]
 

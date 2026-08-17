@@ -5,7 +5,7 @@ use gpui::{
 };
 use image::{Frame, RgbaImage};
 use pdf_reader_core::{
-    FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthViewport, NormalizedRect, PageRenderKey, PdfDocumentInfo, PdfDocumentSession, PdfPageTextLayout, PdfSearchHit, PdfTextSelection, PixelCrop, ReaderInteractionStyle,
+    FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthViewport, NormalizedRect, PageRenderKey, PdfDocumentInfo, PdfDocumentSession, PdfPageTextLayout, PdfResult, PdfSearchHit, PdfTextSelection, PixelCrop, ReaderInteractionStyle,
     SelectionGranularity, SelectionOptions, crop_normalized_rect,
 };
 use smallvec::SmallVec;
@@ -16,29 +16,50 @@ use std::sync::{Arc, Mutex};
 use ui_components as components;
 
 const DISPLAY_CACHE_BUDGET: usize = 128 * 1024 * 1024;
-const DEFAULT_RENDER_WIDTH: u16 = 1400;
-const AUTO_SPREAD_MIN_WIDTH: f32 = 1080.0;
+const RENDER_WIDTH_BUCKET: f32 = 256.0;
+const SEARCH_PAGE_CHUNK: usize = 16;
+const LINE_SCROLL_HEIGHT: f32 = 16.0;
+const MIN_ZOOM: f32 = 0.05;
+/// US Letter, used only until the real page size is known.
+const DEFAULT_PAGE_WIDTH_POINTS: f32 = 612.0;
+const DEFAULT_PAGE_HEIGHT_POINTS: f32 = 792.0;
 const FIT_WIDTH_SURFACE_PADDING: f32 = 0.0;
 const FIT_WIDTH_COLUMN_GAP: f32 = 1.0;
+const PDF_PAGE_BOUNDARY_GAP: f32 = 1.0;
 const DEFAULT_AVAILABLE_WIDTH: f32 = 948.0;
 const DEFAULT_AVAILABLE_HEIGHT: f32 = 800.0;
 pub const MIN_VISIBLE_PAGE_COUNT: usize = 1;
 pub const MAX_VISIBLE_PAGE_COUNT: usize = 6;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PdfPageLayout {
-    Single,
-    Spread,
-    #[default]
-    Automatic,
+/// How large a page is drawn.
+///
+/// All three modes settle the same quantity — `zoom`, in pixels per PDF point —
+/// and differ only in which end is held fixed. Because margin trimming and
+/// mixed page sizes change a page's effective width, the page count these
+/// derive is a property of the page being read, not of the document.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PdfZoomMode {
+    /// You choose how many pages sit side by side; the zoom follows.
+    FitWidth { columns: usize },
+    /// You choose the zoom; the number of pages that fit follows.
+    Fixed { zoom: f32 },
+    /// A whole page's height fills the viewport; the zoom, and then the number
+    /// of pages that fit, follow.
+    FitHeight,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PdfFitMode {
-    #[default]
-    FitWidth,
-    FitPage,
-    Custom,
+impl Default for PdfZoomMode {
+    fn default() -> Self {
+        Self::FitWidth { columns: 1 }
+    }
+}
+
+/// A [`PdfZoomMode`] resolved against the viewport and the page being read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedLayout {
+    columns: usize,
+    column_width: f32,
+    zoom: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,14 +113,13 @@ pub struct PdfView {
     fit_width_plan: FitWidthPlan,
     current_page: usize,
     current_page_column: u32,
-    target_width: u16,
-    display_scale: f32,
-    fit_mode: PdfFitMode,
+    zoom_mode: PdfZoomMode,
+    /// Device pixels per logical pixel, sampled from the window each frame so
+    /// pages are rastered at the resolution they are actually painted at.
+    device_pixel_ratio: f32,
     available_width: f32,
     available_height: f32,
-    page_layout: PdfPageLayout,
     trim_margins: bool,
-    visible_page_count: usize,
     load_generation: u64,
     render_generation: u64,
     pending_render: Option<(u64, Vec<PageRenderKey>)>,
@@ -138,6 +158,7 @@ struct DisplayPage {
 }
 
 struct DisplayPageCache {
+    base_byte_budget: usize,
     byte_budget: usize,
     byte_len: usize,
     pages: HashMap<PageRenderKey, Arc<DisplayPage>>,
@@ -194,14 +215,11 @@ impl PdfView {
             fit_width_plan: FitWidthPlan::default(),
             current_page: initial_page,
             current_page_column: 0,
-            target_width: DEFAULT_RENDER_WIDTH,
-            display_scale: 1.0,
-            fit_mode: PdfFitMode::FitWidth,
+            zoom_mode: PdfZoomMode::default(),
+            device_pixel_ratio: 1.0,
             available_width: DEFAULT_AVAILABLE_WIDTH,
             available_height: DEFAULT_AVAILABLE_HEIGHT,
-            page_layout: PdfPageLayout::Automatic,
             trim_margins: true,
-            visible_page_count: 1,
             load_generation: 1,
             render_generation: 0,
             pending_render: None,
@@ -241,30 +259,14 @@ impl PdfView {
         self.info.as_ref().map(PdfDocumentInfo::page_count).unwrap_or(0)
     }
 
-    pub fn page_layout(&self) -> PdfPageLayout {
-        self.page_layout
-    }
-
-    pub fn set_page_layout(&mut self, page_layout: PdfPageLayout, cx: &mut Context<Self>) {
-        if self.page_layout == page_layout {
-            return;
-        }
-        self.page_layout = page_layout;
-        let count = resolve_page_count(page_layout, self.available_width);
-        self.apply_visible_page_count(count, cx);
-    }
-
+    /// How many pages currently sit side by side. Chosen directly in
+    /// [`PdfZoomMode::FitWidth`] and derived from the zoom otherwise.
     pub fn visible_page_count(&self) -> usize {
-        self.visible_page_count
+        self.resolve_layout().columns
     }
 
     pub fn set_visible_page_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        self.page_layout = match count {
-            1 => PdfPageLayout::Single,
-            2 => PdfPageLayout::Spread,
-            _ => PdfPageLayout::Automatic,
-        };
-        self.apply_visible_page_count(count.clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT), cx);
+        self.set_zoom_mode(PdfZoomMode::FitWidth { columns: count.clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT) }, cx);
     }
 
     pub fn set_available_width(&mut self, available_width: f32, cx: &mut Context<Self>) {
@@ -275,10 +277,6 @@ impl PdfView {
             self.restore_page_position(page_position);
             self.request_current_pages(cx);
             cx.notify();
-        }
-        if self.page_layout == PdfPageLayout::Automatic && self.visible_page_count <= 2 {
-            let count = resolve_page_count(self.page_layout, available_width);
-            self.apply_visible_page_count(count, cx);
         }
     }
 
@@ -323,15 +321,25 @@ impl PdfView {
     }
 
     pub fn next_page(&mut self, cx: &mut Context<Self>) {
-        let target = self.flow_offset + self.page_display_height();
+        let target = self.keyboard_page_target(true);
         self.clear_selection();
         self.set_flow_offset(target, cx);
     }
 
     pub fn previous_page(&mut self, cx: &mut Context<Self>) {
-        let target = self.flow_offset - self.page_display_height();
+        let target = self.keyboard_page_target(false);
         self.clear_selection();
         self.set_flow_offset(target, cx);
+    }
+
+    fn keyboard_page_target(&self, forward: bool) -> f32 {
+        let stride = self.flow_column_height();
+        let unsnapped = if forward { self.flow_offset + stride } else { self.flow_offset - stride };
+        if self.zoom_mode == PdfZoomMode::FitHeight {
+            return unsnapped;
+        }
+        let offsets = self.atomic_flow_offsets();
+        if forward { forward_page_snap_offset(self.flow_offset, unsnapped, &offsets).unwrap_or(unsnapped) } else { backward_page_snap_offset(self.flow_offset, unsnapped, &offsets).unwrap_or(unsnapped) }
     }
 
     pub fn next_item(&mut self, cx: &mut Context<Self>) {
@@ -363,72 +371,50 @@ impl PdfView {
         self.request_current_pages(cx);
     }
 
-    pub fn set_render_width(&mut self, target_width: u16, cx: &mut Context<Self>) {
-        let target_width = PageRenderKey::new(0, target_width).target_width();
-        if self.target_width == target_width {
-            return;
-        }
-        self.target_width = target_width;
-        self.request_current_pages(cx);
+    /// The width every page is rastered at, in device pixels.
+    ///
+    /// A column is painted `page_display_width()` wide, so rastering at a fixed
+    /// width both blurs wide columns and wastes most of the buffer on narrow
+    /// ones — six columns of a spread are a fraction of the width of one, but
+    /// used to cost the same memory and render time per page. The result is
+    /// rounded up to a bucket so that dragging a window edge or stepping the
+    /// zoom keeps hitting the same cached pages.
+    fn render_target_width(&self) -> u16 {
+        let device_width = self.page_display_width() * self.device_pixel_ratio.max(1.0);
+        let bucketed = (device_width / RENDER_WIDTH_BUCKET).ceil() * RENDER_WIDTH_BUCKET;
+        PageRenderKey::new(0, bucketed.clamp(0.0, u16::MAX as f32) as u16).target_width()
     }
 
-    pub fn display_scale(&self) -> f32 {
-        self.display_scale
+    pub fn zoom_mode(&self) -> PdfZoomMode {
+        self.zoom_mode
     }
 
-    pub fn fit_mode(&self) -> PdfFitMode {
-        self.fit_mode
+    /// The zoom every mode resolves to, in pixels per PDF point.
+    pub fn zoom(&self) -> f32 {
+        self.resolve_layout().zoom
     }
 
-    pub fn set_fit_mode(&mut self, fit_mode: PdfFitMode, cx: &mut Context<Self>) {
-        if self.fit_mode == fit_mode && (self.display_scale - 1.0).abs() < f32::EPSILON {
-            return;
-        }
-        let page_position = self.current_page_position();
-        self.fit_mode = fit_mode;
-        self.display_scale = 1.0;
-        self.target_width = DEFAULT_RENDER_WIDTH;
-        self.rebuild_fit_width_plan();
-        self.restore_page_position(page_position);
-        self.request_current_pages(cx);
-        cx.notify();
-    }
-
-    pub fn set_display_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
-        let scale = scale.clamp(0.5, 2.5);
-        if (self.display_scale - scale).abs() < f32::EPSILON {
+    pub fn set_zoom_mode(&mut self, zoom_mode: PdfZoomMode, cx: &mut Context<Self>) {
+        if self.zoom_mode == zoom_mode {
             return;
         }
         let page_position = self.current_page_position();
-        self.fit_mode = PdfFitMode::Custom;
-        self.display_scale = scale;
-        self.rebuild_fit_width_plan();
-        self.restore_page_position(page_position);
-        let render_width = (DEFAULT_RENDER_WIDTH as f32 * scale).round() as u16;
-        let previous_render_width = self.target_width;
-        self.set_render_width(render_width, cx);
-        if self.target_width == previous_render_width {
-            self.request_current_pages(cx);
-        }
-        cx.notify();
-    }
-
-    pub fn change_display_scale(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.set_display_scale(self.display_scale + delta, cx);
-    }
-
-    fn apply_visible_page_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        let count = count.clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT);
-        if self.visible_page_count == count {
-            return;
-        }
-        let page_position = self.current_page_position();
-        self.visible_page_count = count;
+        self.zoom_mode = zoom_mode;
         self.rebuild_fit_width_plan();
         self.restore_page_position(page_position);
         self.clear_selection();
         self.request_current_pages(cx);
         cx.notify();
+    }
+
+    /// Switches to a fixed zoom, letting the page count fall out of it.
+    pub fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(MIN_ZOOM, self.width_fit_zoom(MIN_VISIBLE_PAGE_COUNT));
+        self.set_zoom_mode(PdfZoomMode::Fixed { zoom }, cx);
+    }
+
+    pub fn change_zoom(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.set_zoom(self.zoom() + delta, cx);
     }
 
     pub fn set_interaction_style(&mut self, style: ReaderInteractionStyle, cx: &mut Context<Self>) {
@@ -464,38 +450,80 @@ impl PdfView {
             return;
         };
         self.search_in_flight = true;
-        let work = cx.background_executor().spawn(async move { session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).search(&query) });
+        self.search_hits.clear();
+        self.active_search_hit = None;
+        self.pending_search_scroll = None;
+        let page_count = self.page_count();
         cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update(cx, |this, cx| {
-                this.search_in_flight = false;
-                if this.search_generation == generation {
-                    match result {
-                        Ok(hits) => {
-                            this.search_hits = hits;
-                            this.active_search_hit = (!this.search_hits.is_empty()).then_some(0);
-                            if let Some(hit) = this.search_hits.first() {
-                                this.pending_search_scroll = Some((hit.page_index(), hit.bounds()));
-                                this.current_page = hit.page_index();
-                                this.current_page_column = 0;
-                                this.reset_page_scroll();
-                                this.clear_selection();
-                                this.request_current_pages(cx);
-                            }
-                            cx.emit(PdfViewEvent::SearchChanged { current: usize::from(!this.search_hits.is_empty()), total: this.search_hits.len() });
-                        }
-                        Err(error) => {
-                            this.error = Some(error.to_string());
-                        }
-                    }
+            let mut page_index = 0;
+            while page_index < page_count {
+                let last = (page_index + SEARCH_PAGE_CHUNK).min(page_count);
+                let session = session.clone();
+                let query = query.clone();
+                let chunk = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let session = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        (page_index..last).try_fold(Vec::new(), |mut hits, page| {
+                            hits.extend(session.search_page(page, &query)?);
+                            Ok::<_, pdf_reader_core::PdfError>(hits)
+                        })
+                    })
+                    .await;
+                if !this.update(cx, |this, cx| this.apply_search_chunk(generation, chunk, cx)).unwrap_or(false) {
+                    break;
                 }
-                if let Some((next_generation, next_query)) = this.pending_search.take().filter(|(next_generation, _)| *next_generation == this.search_generation) {
-                    this.start_search(next_generation, next_query, cx);
-                }
-                cx.notify();
-            });
+                page_index = last;
+            }
+            let _ = this.update(cx, |this, cx| this.finish_search(generation, cx));
         })
         .detach();
+    }
+
+    /// Folds one chunk of hits in, reporting whether the search that produced
+    /// them is still the one the reader is waiting for.
+    fn apply_search_chunk(&mut self, generation: u64, chunk: PdfResult<Vec<PdfSearchHit>>, cx: &mut Context<Self>) -> bool {
+        if self.search_generation != generation {
+            return false;
+        }
+        let hits = match chunk {
+            Ok(hits) => hits,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return false;
+            }
+        };
+        if hits.is_empty() {
+            return true;
+        }
+        let first_chunk_with_hits = self.search_hits.is_empty();
+        self.search_hits.extend(hits);
+        // Jump to the first match as soon as it is known, rather than after the
+        // whole document has been scanned.
+        if first_chunk_with_hits && let Some(hit) = self.search_hits.first().copied() {
+            self.active_search_hit = Some(0);
+            self.pending_search_scroll = Some((hit.page_index(), hit.bounds()));
+            self.current_page = hit.page_index();
+            self.current_page_column = 0;
+            self.reset_page_scroll();
+            self.clear_selection();
+            self.request_current_pages(cx);
+        }
+        cx.emit(PdfViewEvent::SearchChanged { current: usize::from(!self.search_hits.is_empty()), total: self.search_hits.len() });
+        cx.notify();
+        true
+    }
+
+    fn finish_search(&mut self, generation: u64, cx: &mut Context<Self>) {
+        self.search_in_flight = false;
+        if self.search_generation == generation {
+            cx.emit(PdfViewEvent::SearchChanged { current: usize::from(!self.search_hits.is_empty()), total: self.search_hits.len() });
+        }
+        if let Some((next_generation, next_query)) = self.pending_search.take().filter(|(next_generation, _)| *next_generation == self.search_generation) {
+            self.start_search(next_generation, next_query, cx);
+        }
+        cx.notify();
     }
 
     pub fn navigate_search(&mut self, step: i8, cx: &mut Context<Self>) {
@@ -640,7 +668,7 @@ impl PdfView {
                 page_indices.push(column.page_index());
             }
         }
-        page_indices.into_iter().map(|page_index| PageRenderKey::with_margin_trim(page_index, self.target_width, self.trim_margins)).collect()
+        page_indices.into_iter().map(|page_index| PageRenderKey::with_margin_trim(page_index, self.render_target_width(), self.trim_margins)).collect()
     }
 
     fn cached_pages(&mut self, keys: &[PageRenderKey]) -> Option<Vec<(usize, Arc<DisplayPage>)>> {
@@ -709,6 +737,7 @@ impl PdfView {
                                         visible_pages.push((key.page_index(), page));
                                     }
                                 }
+                                this.display_cache.reserve(visible_pages.iter().map(|(_, page)| page.byte_len).sum());
                                 for (key, page) in converted_pages {
                                     this.display_cache.insert(key, page);
                                 }
@@ -761,6 +790,8 @@ impl PdfView {
     }
 
     fn sync_flow_scroll_target(&mut self, delta_y: f32, cx: &mut Context<Self>) {
+        // Wheel/trackpad input remains continuous by design. Only discrete
+        // keyboard navigation snaps to line and page-fragment boundaries.
         self.set_flow_offset(self.flow_offset - delta_y, cx);
     }
 
@@ -822,15 +853,37 @@ impl PdfView {
             .and_then(|(page, anchor, active)| page.text_layout.select_with_options(anchor, active, SelectionOptions::default().with_granularity(self.selection_granularity)));
     }
 
+    /// The page the layout is measured against.
+    ///
+    /// Trimming changes a page's effective size, so this follows the page being
+    /// read rather than the document, and the page count changes with it.
+    fn reference_page_size(&self) -> (f32, f32) {
+        self.effective_page_sizes
+            .get(&(self.current_page, self.trim_margins))
+            .copied()
+            .or_else(|| self.info.as_ref()?.page(self.current_page).map(|page| (page.width_points(), page.height_points())))
+            .filter(|(width, height)| width.is_finite() && height.is_finite() && *width > 0.0 && *height > 0.0)
+            .unwrap_or((DEFAULT_PAGE_WIDTH_POINTS, DEFAULT_PAGE_HEIGHT_POINTS))
+    }
+
+    fn width_fit_zoom(&self, columns: usize) -> f32 {
+        width_fit_zoom(columns, self.available_width, self.reference_page_size().0)
+    }
+
+    fn resolve_layout(&self) -> ResolvedLayout {
+        resolve_layout(self.zoom_mode, self.available_width, self.page_display_height(), self.reference_page_size())
+    }
+
     fn page_display_width(&self) -> f32 {
-        let column_count = self.visible_page_count as f32;
-        let gaps = (column_count - 1.0) * FIT_WIDTH_COLUMN_GAP;
-        let usable_width = (self.available_width - FIT_WIDTH_SURFACE_PADDING * 2.0 - gaps).max(1.0);
-        (usable_width / column_count * self.display_scale).max(1.0)
+        self.resolve_layout().column_width
     }
 
     fn page_display_height(&self) -> f32 {
         (self.available_height - FIT_WIDTH_SURFACE_PADDING * 2.0).max(1.0)
+    }
+
+    fn flow_column_height(&self) -> f32 {
+        fit_page_flow_column_height(self.zoom_mode, self.visible_page_count(), self.page_display_height(), self.fit_width_plan.columns())
     }
 
     fn rebuild_fit_width_plan(&mut self) {
@@ -851,13 +904,31 @@ impl PdfView {
                 FitWidthPage::new(page_index, width, height)
             })
             .collect::<Vec<_>>();
-        self.fit_width_plan = match self.fit_mode {
-            PdfFitMode::FitPage => FitWidthPlan::fit_page(pages, viewport),
-            PdfFitMode::FitWidth | PdfFitMode::Custom => {
-                let pages = pages.iter().copied().map(|page| (page, self.page_break_avoidance.get(&(page.page_index(), self.trim_margins)).map(AsRef::as_ref).unwrap_or(&[])));
-                FitWidthPlan::new_avoiding_breaks(pages, viewport).unwrap_or_default()
-            }
+        self.fit_width_plan = match self.zoom_mode {
+            PdfZoomMode::FitHeight => FitWidthPlan::fit_page(pages, viewport),
+            PdfZoomMode::FitWidth { .. } | PdfZoomMode::Fixed { .. } => self.wrapped_plan(&pages, viewport),
         };
+    }
+
+    /// Wraps every page into fit-width columns, degrading instead of leaving
+    /// the reader with nothing to show.
+    ///
+    /// The planner rejects a whole document over one unplannable page, and an
+    /// empty plan renders no columns, so the reader would sit on "Rendering PDF
+    /// page…" forever. A rejected page costs break avoidance first, then
+    /// wrapping altogether, and only ever the layout — never the document.
+    fn wrapped_plan(&self, pages: &[FitWidthPage], viewport: FitWidthViewport) -> FitWidthPlan {
+        let with_bands = pages.iter().copied().map(|page| (page, self.page_break_avoidance.get(&(page.page_index(), self.trim_margins)).map(AsRef::as_ref).unwrap_or(&[])));
+        match FitWidthPlan::new_avoiding_breaks_with_page_gap(with_bands, viewport, PDF_PAGE_BOUNDARY_GAP) {
+            Ok(plan) => plan,
+            Err(error) => {
+                log::warn!("planning PDF fit-width columns: {error}; retrying without break avoidance");
+                FitWidthPlan::new(pages.iter().copied(), viewport).unwrap_or_else(|error| {
+                    log::warn!("planning PDF fit-width columns: {error}; falling back to whole pages");
+                    FitWidthPlan::fit_page(pages.iter().copied(), viewport)
+                })
+            }
+        }
     }
 
     fn page_column_count(&self, page_index: usize) -> usize {
@@ -895,7 +966,7 @@ impl PdfView {
         let Some(total) = self.display_column_count() else {
             return Vec::new();
         };
-        let visible = visible_flow_indices(self.flow_base_index(), total, self.visible_page_count);
+        let visible = visible_flow_indices(self.flow_base_index(), total, self.visible_page_count());
         self.fit_width_plan.columns().iter().copied().filter(|column| visible.contains(&column.display_column_index())).collect()
     }
 
@@ -903,7 +974,7 @@ impl PdfView {
         let Some(total) = self.display_column_count() else { return Vec::new() };
         let first_visible = self.flow_base_index().min(total.saturating_sub(1));
         let first = first_visible.saturating_sub(1);
-        let last = (first_visible + self.visible_page_count.max(1)).min(total.saturating_sub(1));
+        let last = (first_visible + self.visible_page_count().max(1)).min(total.saturating_sub(1));
         self.fit_width_plan.columns().iter().copied().filter(|column| first <= column.display_column_index() && column.display_column_index() <= last).collect()
     }
 
@@ -912,27 +983,34 @@ impl PdfView {
     }
 
     fn flow_base_index(&self) -> usize {
-        split_flow_offset(self.flow_offset, self.page_display_height()).0
+        split_flow_offset(self.flow_offset, self.flow_column_height()).0
     }
 
     fn flow_remainder(&self) -> f32 {
-        split_flow_offset(self.flow_offset, self.page_display_height()).1
+        split_flow_offset(self.flow_offset, self.flow_column_height()).1
     }
 
     fn max_flow_offset(&self) -> f32 {
         let total = self.display_column_count().unwrap_or(0);
-        total.saturating_sub(self.visible_page_count.max(1)) as f32 * self.page_display_height()
+        total.saturating_sub(self.visible_page_count().max(1)) as f32 * self.flow_column_height()
     }
 
     fn column_offset_within_display(&self, target: FitWidthColumn) -> f32 {
-        if self.fit_mode == PdfFitMode::FitPage {
-            return ((self.page_display_height() - target.display_height()) * 0.5).max(0.0);
+        if self.zoom_mode == PdfZoomMode::FitHeight {
+            return ((self.flow_column_height() - target.display_height()) * 0.5).max(0.0);
         }
-        self.fit_width_plan.columns().iter().take_while(|column| column.flow_index() != target.flow_index()).filter(|column| column.display_column_index() == target.display_column_index()).map(|column| column.display_height()).sum()
+        self.fit_width_plan
+            .columns()
+            .iter()
+            .take_while(|column| column.flow_index() != target.flow_index())
+            .filter(|column| column.display_column_index() == target.display_column_index())
+            .map(|column| column.leading_page_gap() + column.display_height())
+            .sum::<f32>()
+            + target.leading_page_gap()
     }
 
     fn flow_offset_for_column(&self, column: FitWidthColumn, column_y: f32) -> f32 {
-        column.display_column_index() as f32 * self.page_display_height() + self.column_offset_within_display(column) + column_y.clamp(0.0, 1.0) * column.display_height()
+        column.display_column_index() as f32 * self.flow_column_height() + self.column_offset_within_display(column) + column_y.clamp(0.0, 1.0) * column.display_height()
     }
 
     fn flow_offset_for_page_y(&self, page_index: usize, display_y: f32) -> Option<f32> {
@@ -974,6 +1052,7 @@ impl PdfView {
 
     fn atomic_flow_offsets(&self) -> Vec<f32> {
         let mut offsets = vec![0.0, self.max_flow_offset()];
+        offsets.extend(self.fit_width_plan.columns().iter().copied().map(|column| self.flow_offset_for_column(column, 0.0)));
         for (&(page_index, trim_margins), bands) in &self.page_break_avoidance {
             if trim_margins != self.trim_margins {
                 continue;
@@ -1006,13 +1085,45 @@ impl PdfView {
     }
 }
 
-fn resolve_page_count(page_layout: PdfPageLayout, available_width: f32) -> usize {
-    match page_layout {
-        PdfPageLayout::Single => 1,
-        PdfPageLayout::Spread => 2,
-        PdfPageLayout::Automatic if available_width >= AUTO_SPREAD_MIN_WIDTH => 2,
-        PdfPageLayout::Automatic => 1,
-    }
+/// The zoom at which `columns` pages fill the viewport width.
+fn width_fit_zoom(columns: usize, available_width: f32, page_width: f32) -> f32 {
+    let columns = columns.max(1) as f32;
+    let gaps = (columns - 1.0) * FIT_WIDTH_COLUMN_GAP;
+    let usable_width = (available_width - FIT_WIDTH_SURFACE_PADDING * 2.0 - gaps).max(1.0);
+    (usable_width / columns / page_width.max(f32::MIN_POSITIVE)).max(f32::MIN_POSITIVE)
+}
+
+/// How many columns of `column_width` fit across the viewport.
+fn columns_that_fit(column_width: f32, available_width: f32) -> usize {
+    let usable_width = (available_width - FIT_WIDTH_SURFACE_PADDING * 2.0).max(1.0);
+    let columns = ((usable_width + FIT_WIDTH_COLUMN_GAP) / (column_width.max(f32::MIN_POSITIVE) + FIT_WIDTH_COLUMN_GAP)).floor();
+    (columns.max(1.0) as usize).clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT)
+}
+
+/// Settles a [`PdfZoomMode`] into the zoom, column width and column count the
+/// layout runs on.
+///
+/// One page filling the width is the ceiling in every mode: pages are only ever
+/// split downwards, so anything wider would hang off the side with no way to
+/// reach it.
+fn resolve_layout(zoom_mode: PdfZoomMode, available_width: f32, available_height: f32, page_size: (f32, f32)) -> ResolvedLayout {
+    let (page_width, page_height) = page_size;
+    let widest_zoom = width_fit_zoom(MIN_VISIBLE_PAGE_COUNT, available_width, page_width);
+    let (columns, zoom) = match zoom_mode {
+        PdfZoomMode::FitWidth { columns } => {
+            let columns = columns.clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT);
+            (columns, width_fit_zoom(columns, available_width, page_width))
+        }
+        PdfZoomMode::Fixed { zoom } => {
+            let zoom = zoom.clamp(MIN_ZOOM, widest_zoom);
+            (columns_that_fit(page_width * zoom, available_width), zoom)
+        }
+        PdfZoomMode::FitHeight => {
+            let zoom = (available_height / page_height.max(f32::MIN_POSITIVE)).clamp(MIN_ZOOM, widest_zoom);
+            (columns_that_fit(page_width * zoom, available_width), zoom)
+        }
+    };
+    ResolvedLayout { columns, column_width: (page_width * zoom).max(1.0), zoom }
 }
 
 fn visible_flow_indices(current: usize, total: usize, page_count: usize) -> Vec<usize> {
@@ -1034,12 +1145,29 @@ fn split_flow_offset(offset: f32, column_height: f32) -> (usize, f32) {
     ((offset / column_height).floor() as usize, offset.rem_euclid(column_height))
 }
 
+fn fit_page_flow_column_height(zoom_mode: PdfZoomMode, visible_page_count: usize, viewport_height: f32, columns: &[FitWidthColumn]) -> f32 {
+    let viewport_height = viewport_height.max(1.0);
+    if zoom_mode != PdfZoomMode::FitHeight || visible_page_count <= 1 {
+        return viewport_height;
+    }
+    let tallest_page = columns.iter().copied().map(FitWidthColumn::display_height).fold(0.0, f32::max);
+    if tallest_page <= 0.0 { viewport_height } else { (tallest_page + PDF_PAGE_BOUNDARY_GAP).min(viewport_height) }
+}
+
 fn next_snap_offset(current: f32, offsets: &[f32]) -> Option<f32> {
     offsets.iter().copied().find(|offset| *offset > current + 0.5)
 }
 
 fn previous_snap_offset(current: f32, offsets: &[f32]) -> Option<f32> {
     offsets.iter().copied().rev().find(|offset| *offset < current - 0.5)
+}
+
+fn forward_page_snap_offset(current: f32, target: f32, offsets: &[f32]) -> Option<f32> {
+    offsets.iter().copied().take_while(|offset| *offset <= target + 0.5).filter(|offset| *offset > current + 0.5).last().or_else(|| next_snap_offset(current, offsets))
+}
+
+fn backward_page_snap_offset(current: f32, target: f32, offsets: &[f32]) -> Option<f32> {
+    offsets.iter().copied().find(|offset| *offset >= target - 0.5 && *offset < current - 0.5).or_else(|| previous_snap_offset(current, offsets))
 }
 
 impl DisplayPage {
@@ -1062,7 +1190,17 @@ impl DisplayPage {
 
 impl DisplayPageCache {
     fn new(byte_budget: usize) -> Self {
-        Self { byte_budget, byte_len: 0, pages: HashMap::new(), recency: VecDeque::new() }
+        Self { base_byte_budget: byte_budget, byte_budget, byte_len: 0, pages: HashMap::new(), recency: VecDeque::new() }
+    }
+
+    /// Raises the budget for as long as one render window needs more than it.
+    ///
+    /// A window that does not fit evicts the very pages it is about to ask for
+    /// again, and the re-request renders and evicts in turn — the reader would
+    /// render forever without ever painting. Holding the window is always
+    /// cheaper than that loop.
+    fn reserve(&mut self, window_bytes: usize) {
+        self.byte_budget = self.base_byte_budget.max(window_bytes);
     }
 
     fn get(&mut self, key: PageRenderKey) -> Option<Arc<DisplayPage>> {
@@ -1249,8 +1387,9 @@ impl Element for PdfPageElement {
 }
 
 impl Render for PdfView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
+        self.device_pixel_ratio = window.scale_factor();
         if self.pages.is_empty() {
             return match self.error.clone() {
                 Some(message) => components::reader_document_message(message, theme).into_any_element(),
@@ -1260,13 +1399,16 @@ impl Render for PdfView {
         }
         let view = cx.entity();
         let column_width = self.page_display_width();
-        let column_height = self.page_display_height();
+        let column_height = self.flow_column_height();
         let base_index = self.flow_base_index();
         let remainder = self.flow_remainder();
         let total = self.display_column_count().unwrap_or(0);
         let build_logical_column = |display_column_index: usize, instance_index: usize| {
             let mut fragments = Vec::new();
             for column in self.fit_width_plan.columns().iter().copied().filter(|column| column.display_column_index() == display_column_index) {
+                if column.leading_page_gap() > 0.0 {
+                    fragments.push(div().h(px(column.leading_page_gap())).flex_shrink_0().bg(theme.page_bg).into_any_element());
+                }
                 let page_index = column.page_index();
                 let element = self
                     .pages
@@ -1308,11 +1450,11 @@ impl Render for PdfView {
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
-                .when(self.fit_mode == PdfFitMode::FitPage, |column| column.items_center().justify_center())
+                .when(self.zoom_mode == PdfZoomMode::FitHeight, |column| column.items_center().justify_center())
                 .children(fragments)
         };
         let mut screen_columns = Vec::new();
-        for slot_index in 0..self.visible_page_count.max(1) {
+        for slot_index in 0..self.visible_page_count().max(1) {
             if !screen_columns.is_empty() {
                 screen_columns.push(div().w(px(FIT_WIDTH_COLUMN_GAP)).h_full().flex_shrink_0().bg(theme.border).into_any_element());
             }
@@ -1331,16 +1473,11 @@ impl Render for PdfView {
         let wheel_target = cx.entity();
         components::reader_pdf_scroll_surface(&self.scroll_handle, theme, cx)
             .on_scroll_wheel(move |event, _, cx| {
-                let flow_delta = match event.delta {
-                    ScrollDelta::Pixels(delta) => {
-                        let vertical = f32::from(delta.y);
-                        if vertical != 0.0 { vertical } else { f32::from(delta.x) }
-                    }
-                    ScrollDelta::Lines(delta) => {
-                        let vertical = delta.y * 16.0;
-                        if vertical != 0.0 { vertical } else { delta.x * 16.0 }
-                    }
+                let (vertical, horizontal) = match event.delta {
+                    ScrollDelta::Pixels(delta) => (f32::from(delta.y), f32::from(delta.x)),
+                    ScrollDelta::Lines(delta) => (delta.y * LINE_SCROLL_HEIGHT, delta.x * LINE_SCROLL_HEIGHT),
                 };
+                let flow_delta = if vertical != 0.0 { vertical } else { horizontal };
                 if flow_delta != 0.0 {
                     wheel_target.update(cx, |view, cx| view.sync_flow_scroll_target(flow_delta, cx));
                     cx.stop_propagation();
@@ -1412,6 +1549,16 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_page_navigation_stops_at_atomic_boundaries_near_the_viewport_step() {
+        let offsets = [0.0, 120.0, 185.0, 430.0, 610.0];
+
+        assert_eq!(forward_page_snap_offset(0.0, 200.0, &offsets), Some(185.0));
+        assert_eq!(forward_page_snap_offset(185.0, 385.0, &offsets), Some(430.0));
+        assert_eq!(backward_page_snap_offset(430.0, 230.0, &offsets), Some(185.0));
+        assert_eq!(backward_page_snap_offset(610.0, 410.0, &offsets), Some(430.0));
+    }
+
+    #[test]
     fn annotation_hit_testing_uses_column_normalized_coordinates() {
         let rect = NormalizedRect::new(0.2, 0.3, 0.4, 0.2);
         assert!(normalized_rect_contains(rect, (0.2, 0.3)));
@@ -1421,11 +1568,52 @@ mod tests {
     }
 
     #[test]
-    fn automatic_layout_uses_the_available_reader_width() {
-        assert_eq!(resolve_page_count(PdfPageLayout::Automatic, AUTO_SPREAD_MIN_WIDTH - 1.0), 1);
-        assert_eq!(resolve_page_count(PdfPageLayout::Automatic, AUTO_SPREAD_MIN_WIDTH), 2);
-        assert_eq!(resolve_page_count(PdfPageLayout::Single, AUTO_SPREAD_MIN_WIDTH * 2.0), 1);
-        assert_eq!(resolve_page_count(PdfPageLayout::Spread, 200.0), 2);
+    fn a_fixed_zoom_decides_how_many_pages_fit_across() {
+        // Just under half the viewport, since two columns also cost a gap.
+        assert_eq!(columns_that_fit(499.0, 1_000.0), 2);
+        assert_eq!(columns_that_fit(500.0, 1_000.0), 1, "two of these plus the gap overflow by a pixel");
+        assert_eq!(columns_that_fit(332.0, 1_000.0), 3);
+        assert_eq!(columns_that_fit(1_000.0, 1_000.0), 1);
+        assert_eq!(columns_that_fit(4_000.0, 1_000.0), 1, "a page wider than the viewport still occupies one column");
+    }
+
+    #[test]
+    fn fit_width_and_fixed_zoom_are_two_ends_of_one_quantity() {
+        let fitted = resolve_layout(PdfZoomMode::FitWidth { columns: 2 }, 1_000.0, 800.0, (500.0, 700.0));
+        assert_eq!(fitted.columns, 2);
+
+        // Feeding that zoom back in as a fixed zoom must reproduce the layout
+        // it came from.
+        let fixed = resolve_layout(PdfZoomMode::Fixed { zoom: fitted.zoom }, 1_000.0, 800.0, (500.0, 700.0));
+        assert_eq!(fixed.columns, 2);
+        assert!((fixed.column_width - fitted.column_width).abs() < 0.001);
+    }
+
+    #[test]
+    fn fit_height_takes_its_zoom_from_the_page_height() {
+        let layout = resolve_layout(PdfZoomMode::FitHeight, 1_000.0, 800.0, (490.0, 800.0));
+        assert!((layout.zoom - 1.0).abs() < 0.001, "an 800pt page in 800px of height is one pixel per point");
+        assert_eq!(layout.columns, 2, "at that zoom two 490px pages fit across 1000px");
+    }
+
+    #[test]
+    fn no_mode_lets_a_page_grow_wider_than_the_viewport() {
+        for mode in [PdfZoomMode::FitHeight, PdfZoomMode::Fixed { zoom: 99.0 }, PdfZoomMode::FitWidth { columns: 1 }] {
+            let layout = resolve_layout(mode, 400.0, 5_000.0, (500.0, 700.0));
+            assert!(layout.column_width <= 400.0 + 0.001, "{mode:?} produced a {}px column in a 400px viewport", layout.column_width);
+        }
+    }
+
+    #[test]
+    fn fit_page_spreads_use_the_fitted_page_height_as_the_vertical_stride() {
+        let viewport = FitWidthViewport::new(400.0, 1_600.0).expect("viewport");
+        let page = FitWidthPage::new(0, 600.0, 800.0).expect("page");
+        let plan = FitWidthPlan::fit_page([page], viewport);
+        let fitted_height = plan.columns()[0].display_height();
+
+        assert!((fit_page_flow_column_height(PdfZoomMode::FitHeight, 2, 1_600.0, plan.columns()) - (fitted_height + PDF_PAGE_BOUNDARY_GAP)).abs() < 0.001);
+        assert_eq!(fit_page_flow_column_height(PdfZoomMode::FitHeight, 1, 1_600.0, plan.columns()), 1_600.0);
+        assert_eq!(fit_page_flow_column_height(PdfZoomMode::FitWidth { columns: 2 }, 2, 1_600.0, plan.columns()), 1_600.0);
     }
 
     #[test]

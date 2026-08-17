@@ -119,29 +119,27 @@ eligible_books(book_row_id, downloaded) AS (
     WHERE book.deleted_at IS NULL
       AND book.hidden_at IS NULL
     GROUP BY book.row_id
-),
-assignment_ancestors(book_row_id, downloaded, system_id, path) AS (
-    SELECT assignment.book_row_id, eligible.downloaded, assignment.system_id, assignment.subject_path
-    FROM book_subject_assignment assignment
-    JOIN eligible_books eligible ON eligible.book_row_id = assignment.book_row_id
+), descendants(root_path,path,concept_id) AS (
+    SELECT route.path,route.path,route.concept_id
+    FROM unified_concept_route route
+    WHERE route.parent_path=:parent_path
     UNION ALL
-    SELECT ancestors.book_row_id, ancestors.downloaded, ancestors.system_id, node.parent_path
-    FROM assignment_ancestors ancestors
-    JOIN subject_node node
-      ON node.system_id = ancestors.system_id
-     AND node.path = ancestors.path
-    WHERE node.parent_path <> ''
+    SELECT descendants.root_path,child.path,child.concept_id
+    FROM descendants
+    JOIN unified_concept_route child ON child.parent_path=descendants.path
 )
 SELECT
     root.path,
-    root.name,
-    COUNT(DISTINCT ancestors.book_row_id) AS book_count,
-    COUNT(DISTINCT CASE WHEN ancestors.downloaded = 1 THEN ancestors.book_row_id END) AS downloaded_book_count
-FROM subject_node root
-JOIN assignment_ancestors ancestors ON ancestors.system_id = root.system_id AND ancestors.path = root.path
-WHERE root.parent_path = :parent_path
-GROUP BY root.path, root.name
-ORDER BY LOWER(root.name), root.path;
+    root.label,
+    COUNT(DISTINCT eligible.book_row_id) AS book_count,
+    COUNT(DISTINCT CASE WHEN eligible.downloaded = 1 THEN eligible.book_row_id END) AS downloaded_book_count
+FROM unified_concept_route root
+LEFT JOIN descendants ON descendants.root_path=root.path
+LEFT JOIN book_unified_concept assignment ON assignment.concept_id=descendants.concept_id
+LEFT JOIN eligible_books eligible ON eligible.book_row_id=assignment.book_row_id
+WHERE root.parent_path=:parent_path
+GROUP BY root.path,root.label
+ORDER BY LOWER(root.label),root.path;
 
 -- name: get_uncategorized_subject_counts?
 SELECT
@@ -153,10 +151,10 @@ SELECT
 FROM book
 WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
   AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL)
-  AND NOT EXISTS(SELECT 1 FROM book_subject_assignment assignment WHERE assignment.book_row_id=book.row_id);
+  AND NOT EXISTS(SELECT 1 FROM book_subject subject WHERE subject.book_row_id=book.row_id)
+  AND NOT EXISTS(SELECT 1 FROM book_external_entity entity WHERE entity.book_row_id=book.row_id);
 
 -- name: get_other_subject_system_counts?
--- param: system_id: &str
 SELECT
     COUNT(DISTINCT book.row_id),
     COUNT(DISTINCT CASE WHEN EXISTS(
@@ -166,11 +164,14 @@ SELECT
 FROM book
 WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
   AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL)
+  AND NOT EXISTS(
+      SELECT 1 FROM book_subject_assignment unified
+      WHERE unified.book_row_id=book.row_id AND unified.system_id='unified'
+  )
   AND EXISTS(
       SELECT 1 FROM book_subject subject
       WHERE subject.book_row_id=book.row_id
-        AND NULLIF(TRIM(subject.authority), '') IS NOT NULL
-        AND LOWER(TRIM(subject.authority)) NOT IN (LOWER(:system_id), 'lcsh', 'lcgft', 'lcc', 'ddc')
+        AND LOWER(COALESCE(TRIM(subject.authority), '')) NOT IN ('wikidata-place', 'wikidata-person')
   );
 
 -- name: get_book_cards_in_subject?
@@ -178,10 +179,12 @@ WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
 -- param: downloaded_only: i32
 SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
 FROM book_cards card
-JOIN book_subject_assignment assignment ON assignment.book_row_id=card.book_row_id
-WHERE assignment.subject_path=:subject_path
+JOIN book_unified_concept assignment ON assignment.book_row_id=card.book_row_id
+JOIN unified_concept_route route ON route.concept_id=assignment.concept_id
+WHERE route.path=:subject_path
   AND (:downloaded_only=0 OR card.downloaded)
 ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 
@@ -189,27 +192,32 @@ ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 -- param: downloaded_only: i32
 SELECT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
 FROM book_cards card
 WHERE NOT EXISTS(
-    SELECT 1 FROM book_subject_assignment assignment
-    WHERE assignment.book_row_id=card.book_row_id
+    SELECT 1 FROM book_subject subject
+    WHERE subject.book_row_id=card.book_row_id
 )
+  AND NOT EXISTS(SELECT 1 FROM book_external_entity entity WHERE entity.book_row_id=card.book_row_id)
   AND (:downloaded_only=0 OR card.downloaded)
 ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 
 -- name: get_other_subject_system_book_cards?
--- param: system_id: &str
 -- param: downloaded_only: i32
 SELECT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
 FROM book_cards card
-WHERE EXISTS(
+WHERE NOT EXISTS(
+    SELECT 1 FROM book_subject_assignment unified
+    WHERE unified.book_row_id=card.book_row_id AND unified.system_id='unified'
+)
+  AND EXISTS(
     SELECT 1 FROM book_subject subject
     WHERE subject.book_row_id=card.book_row_id
-      AND NULLIF(TRIM(subject.authority), '') IS NOT NULL
-      AND LOWER(TRIM(subject.authority)) NOT IN (LOWER(:system_id), 'lcsh', 'lcgft', 'lcc', 'ddc')
+      AND LOWER(COALESCE(TRIM(subject.authority), '')) NOT IN ('wikidata-place', 'wikidata-person')
 )
   AND (:downloaded_only=0 OR card.downloaded)
 ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
@@ -218,7 +226,8 @@ ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 -- param: normalized_query: &str
 -- param: downloaded_only: i32
 SELECT content_hash, title, author, description, progress, downloaded, download_requested,
-       audiobook, audiobook_duration_ms, audiobook_chapter_count
+       audiobook, audiobook_duration_ms, audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=book_cards.book_row_id), 0)
 FROM book_cards
 WHERE instr(normalize_search_text(COALESCE(title, '')), :normalized_query) > 0
   AND (:downloaded_only = 0 OR downloaded)
@@ -228,7 +237,8 @@ ORDER BY normalize_search_text(COALESCE(title, '')), content_hash;
 -- param: normalized_query: &str
 -- param: downloaded_only: i32
 SELECT content_hash, title, author, description, progress, downloaded, download_requested,
-       audiobook, audiobook_duration_ms, audiobook_chapter_count
+       audiobook, audiobook_duration_ms, audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=book_cards.book_row_id), 0)
 FROM book_cards
 WHERE instr(normalize_search_text(COALESCE(author, '')), :normalized_query) > 0
   AND instr(normalize_search_text(COALESCE(title, '')), :normalized_query) = 0
@@ -240,7 +250,8 @@ ORDER BY normalize_search_text(COALESCE(title, '')), content_hash;
 -- param: downloaded_only: i32
 SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
 FROM book_cards card
 JOIN book_dir placement ON placement.book_row_id = card.book_row_id
 WHERE placement.dir_id = :dir_id AND placement.deleted_at IS NULL
@@ -255,7 +266,8 @@ ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 -- otherwise appear twice in the grid.
 SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
 FROM book_cards card
 JOIN author_credit credit ON credit.book_row_id = card.book_row_id
 JOIN author_identity identity ON identity.id = credit.author_identity_id
@@ -285,16 +297,119 @@ ORDER BY book.content_hash;
 
 -- name: get_descendant_subject_content_hashes?
 -- param: subject_path: &str
+WITH RECURSIVE routes(path,concept_id) AS (
+    SELECT path,concept_id FROM unified_concept_route WHERE path=:subject_path
+    UNION ALL
+    SELECT child.path,child.concept_id
+    FROM routes parent
+    JOIN unified_concept_route child ON child.parent_path=parent.path
+)
 SELECT DISTINCT book.content_hash
-FROM book_subject_assignment assignment
+FROM routes
+JOIN book_unified_concept assignment ON assignment.concept_id=routes.concept_id
 JOIN book ON book.row_id = assignment.book_row_id
-WHERE (assignment.subject_path = :subject_path OR assignment.subject_path LIKE :subject_path || ' / %')
-  AND book.deleted_at IS NULL
+WHERE book.deleted_at IS NULL
   AND book.hidden_at IS NULL
   AND EXISTS(
       SELECT 1 FROM book_dir placement
       WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
   )
+ORDER BY book.content_hash;
+
+-- name: get_external_place_roots?
+WITH RECURSIVE roots(wikidata_id) AS (
+    SELECT entity.wikidata_id FROM external_entity entity
+    WHERE entity.kind='place' AND NOT EXISTS(SELECT 1 FROM external_place_edge edge WHERE edge.child_id=entity.wikidata_id)
+), reachable(wikidata_id) AS (
+    SELECT wikidata_id FROM roots
+    UNION
+    SELECT edge.child_id FROM external_place_edge edge JOIN reachable parent ON edge.parent_id=parent.wikidata_id
+), visible_roots(wikidata_id) AS (
+    SELECT wikidata_id FROM roots
+    UNION
+    -- A cyclic component has no structural root. Surface its directly used
+    -- nodes at the top so malformed Wikidata edges cannot hide library books.
+    SELECT DISTINCT reference.wikidata_id FROM book_external_entity reference
+    WHERE reference.kind='place' AND reference.wikidata_id NOT IN (SELECT wikidata_id FROM reachable)
+)
+SELECT entity.wikidata_id, entity.label
+FROM visible_roots
+JOIN external_entity entity ON entity.wikidata_id=visible_roots.wikidata_id
+WHERE EXISTS(
+    WITH RECURSIVE descendants(wikidata_id) AS (
+        SELECT entity.wikidata_id
+        UNION
+        SELECT edge.child_id FROM external_place_edge edge JOIN descendants parent ON edge.parent_id=parent.wikidata_id
+    )
+    SELECT 1 FROM descendants JOIN book_external_entity reference ON reference.wikidata_id=descendants.wikidata_id WHERE reference.kind='place'
+)
+ORDER BY LOWER(entity.label), entity.wikidata_id;
+
+-- name: get_external_place_children?
+-- param: parent_id: &str
+SELECT DISTINCT entity.wikidata_id, entity.label
+FROM external_place_edge edge
+JOIN external_entity entity ON entity.wikidata_id=edge.child_id AND entity.kind='place'
+WHERE edge.parent_id=:parent_id
+ORDER BY LOWER(entity.label), entity.wikidata_id;
+
+-- name: get_external_people?
+SELECT entity.wikidata_id, entity.label
+FROM external_entity entity
+WHERE entity.kind='person'
+  AND EXISTS(SELECT 1 FROM book_external_entity reference WHERE reference.wikidata_id=entity.wikidata_id AND reference.kind='person')
+ORDER BY LOWER(entity.label), entity.wikidata_id;
+
+-- name: get_external_places?
+SELECT entity.wikidata_id, entity.label
+FROM external_entity entity
+WHERE entity.kind='place'
+  AND EXISTS(SELECT 1 FROM book_external_entity reference WHERE reference.wikidata_id=entity.wikidata_id AND reference.kind='place')
+ORDER BY LOWER(entity.label), entity.wikidata_id;
+
+-- name: get_external_entity_book_counts?
+-- param: wikidata_id: &str
+-- param: recursive_places: i32
+WITH RECURSIVE descendants(wikidata_id) AS (
+    SELECT :wikidata_id
+    UNION
+    SELECT edge.child_id
+    FROM external_place_edge edge
+    JOIN descendants parent ON :recursive_places=1 AND edge.parent_id=parent.wikidata_id
+)
+SELECT COUNT(DISTINCT reference.book_row_id),
+       COUNT(DISTINCT CASE WHEN card.downloaded THEN reference.book_row_id END)
+FROM descendants
+JOIN book_external_entity reference ON reference.wikidata_id=descendants.wikidata_id
+JOIN book_cards card ON card.book_row_id=reference.book_row_id;
+
+-- name: get_book_cards_for_external_entity?
+-- param: wikidata_id: &str
+-- param: downloaded_only: i32
+SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
+       card.downloaded, card.download_requested, card.audiobook,
+       card.audiobook_duration_ms, card.audiobook_chapter_count,
+       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
+FROM book_cards card
+JOIN book_external_entity reference ON reference.book_row_id=card.book_row_id
+WHERE reference.wikidata_id=:wikidata_id
+  AND (:downloaded_only=0 OR card.downloaded)
+ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
+
+-- name: get_descendant_external_place_content_hashes?
+-- param: wikidata_id: &str
+WITH RECURSIVE descendants(wikidata_id) AS (
+    SELECT :wikidata_id
+    UNION
+    SELECT edge.child_id
+    FROM external_place_edge edge
+    JOIN descendants parent ON edge.parent_id=parent.wikidata_id
+)
+SELECT DISTINCT book.content_hash
+FROM descendants
+JOIN book_external_entity reference ON reference.wikidata_id=descendants.wikidata_id AND reference.kind='place'
+JOIN book ON book.row_id=reference.book_row_id
+WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
 ORDER BY book.content_hash;
 
 -- name: get_folder_download_counts?
@@ -382,9 +497,9 @@ WITH credited AS (
     -- One book credited twice to the same identity is still one cover.
     GROUP BY author_identity.stable_id, card.content_hash
 )
-SELECT author_id, content_hash
+SELECT author_id, content_hash, title
 FROM (
-    SELECT author_id, content_hash,
+    SELECT author_id, content_hash, title,
            ROW_NUMBER() OVER (
                PARTITION BY author_id
                ORDER BY COALESCE(read_at, 0) DESC, LOWER(COALESCE(title, '')), content_hash

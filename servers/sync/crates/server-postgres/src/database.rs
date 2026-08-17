@@ -79,10 +79,17 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
 /// against a fresh, empty schema. Files are applied in filename order --
 /// `01_core.sql` before the domain files that reference it.
 pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    const SCHEMA_FILES: &[&str] = &[include_str!("../schema/01_core.sql"), include_str!("../schema/02_accounts.sql"), include_str!("../schema/03_sync.sql"), include_str!("../schema/04_assets.sql")];
+    const SCHEMA_FILES: &[&str] = &[include_str!("../schema/01_core.sql"), include_str!("../schema/02_accounts.sql"), include_str!("../schema/03_sync.sql"), include_str!("../schema/04_assets.sql"), include_str!("../schema/05_admin.sql")];
     for file in SCHEMA_FILES {
         sqlx::raw_sql(file).execute(database.pool()).await?;
     }
+    Ok(())
+}
+
+/// Upgrades an existing production database without recreating or deleting
+/// user data. The embedded SQL is transactional, serialized, and idempotent.
+pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(include_str!("../schema/upgrade_20260817.sql")).execute(database.pool()).await?;
     Ok(())
 }
 

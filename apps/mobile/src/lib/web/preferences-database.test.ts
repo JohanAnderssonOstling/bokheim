@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FRONTEND_CONTRACT } from "../bindings.ts";
-import { getWebReaderPreferences, updateWebReaderPreference } from "./preferences-database.ts";
+import { getWebBrowsingPreferences, getWebReaderPreferences, updateWebBrowsingPreference, updateWebReaderPreference } from "./preferences-database.ts";
 
 test("reader preferences start at contract defaults and persist patches", async () => {
   assert.deepEqual(await getWebReaderPreferences(), FRONTEND_CONTRACT.reader_preferences.defaults);
@@ -28,4 +28,12 @@ test("invalid reader preferences are rejected without changing the saved value",
     /invalid type|integer/,
   );
   assert.deepEqual(await getWebReaderPreferences(), before);
+});
+
+test("browsing preferences use shared validation and persist", async () => {
+  assert.deepEqual(await getWebBrowsingPreferences(), FRONTEND_CONTRACT.browsing_preferences.defaults);
+  assert.equal((await updateWebBrowsingPreference({ preference: "library_view", value: "detailed" })).library_view, "detailed");
+  assert.equal((await getWebBrowsingPreferences()).library_view, "detailed");
+  await assert.rejects(updateWebBrowsingPreference({ preference: "ui_font_size_px", value: 255 }), /range|invalid/);
+  assert.equal((await getWebBrowsingPreferences()).library_view, "detailed");
 });

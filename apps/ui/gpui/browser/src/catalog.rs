@@ -6,20 +6,27 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::app::executor::BackendTask;
-use epub_svelte_lib::catalog::{CatalogDescription, CatalogImportRequest, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSource, CatalogSourceId};
+use epub_svelte_lib::catalog::{CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSource, CatalogSourceId};
 use gpui::prelude::*;
-use gpui::{AnyElement, AppContext, Context, Div, Entity, FontWeight, Image, ImageFormat, IntoElement, Render, SharedString, Task, Window, div, img, px};
+use gpui::{AnyElement, AppContext, Context, Entity, FontWeight, Image, ImageFormat, IntoElement, Render, SharedString, Task, Window, div, img, px};
 use gpui_component::IconName;
-use html::parse::{HtmlFragmentContext, HtmlParserOptions, HtmlSyntaxNode, parse_html_fragment};
+use gpui_component::WindowExt;
+use gpui_component::dialog::DialogButtonProps;
+use gpui_component::text::TextView;
 use ui_components as components;
-use ui_components::ScrollableElement;
 
 use crate::services::AppServices;
 
 const STORE_GRID_GAP: f32 = 16.0;
+const MAX_COVER_RETRIES: u8 = 5;
+
+pub(crate) fn catalog_grid_unit_width(publication_min_width_px: u16) -> f32 {
+    ((publication_min_width_px as f32 - STORE_GRID_GAP) / 2.0).max(components::BOOK_COVER_WIDTH + 2.0)
+}
 
 /// Identifies one edition within one source, for ownership and import errors.
 pub(crate) fn ownership_key(source_id: &CatalogSourceId, edition_id: &str) -> String {
@@ -30,14 +37,13 @@ pub(crate) type CatalogImport = Rc<dyn Fn(CatalogImportRequest) -> Result<Backen
 
 #[derive(Clone)]
 pub(crate) struct CatalogCardServices {
-    core: epub_svelte_lib::app::AppBackend,
     import: CatalogImport,
-    contracts: Arc<FrontendContract>,
+    app: AppServices,
 }
 
 impl CatalogCardServices {
     pub(crate) fn new(services: &AppServices, import: CatalogImport) -> Self {
-        Self { core: services.backend.clone(), import, contracts: services.contracts.clone() }
+        Self { import, app: services.clone() }
     }
 
     pub(crate) fn group<P: 'static>(&self, source: &CatalogSource, publications: &[CatalogPublication], owned: &HashSet<CatalogPublicationKey>, show_source: bool, cx: &mut Context<P>) -> CatalogCardGroup {
@@ -58,25 +64,33 @@ impl CatalogCardServices {
             }
             let services = self.clone();
             let source = source.clone();
+            let expanded = publication.image_url.is_some() && has_description_excerpt(publication.description.as_ref());
             let publication = publication.clone();
-            cards.push(cx.new(|_| CatalogPublicationCardView::new(source, publication, show_source, services)));
+            let card = cx.new(|cx| CatalogPublicationCardView::new(source, publication, show_source, services, cx));
+            cards.push(CatalogCardItem { card, span: if expanded { 2 } else { 1 } });
         }
-        CatalogCardGroup { cards, contracts: self.contracts.clone() }
+        CatalogCardGroup { cards, contracts: self.app.contracts.clone() }
     }
 
     fn load_cover(&self, source_id: CatalogSourceId, image_url: String) -> BackendTask<Result<Vec<u8>, String>> {
-        self.core.spawn(move |core| async move { core.catalog_cover(&source_id, &image_url).await.map_err(|error| error.to_string()) })
+        self.app.backend.spawn(move |core| async move { core.catalog_cover(&source_id, &image_url).await.map_err(|error| error.to_string()) })
     }
 
     pub(crate) fn empty_group(&self) -> CatalogCardGroup {
-        CatalogCardGroup { cards: Vec::new(), contracts: self.contracts.clone() }
+        CatalogCardGroup { cards: Vec::new(), contracts: self.app.contracts.clone() }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct CatalogCardGroup {
-    cards: Vec<Entity<CatalogPublicationCardView>>,
+    cards: Vec<CatalogCardItem>,
     contracts: Arc<FrontendContract>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CatalogCardItem {
+    pub(crate) card: Entity<CatalogPublicationCardView>,
+    pub(crate) span: usize,
 }
 
 impl CatalogCardGroup {
@@ -88,53 +102,117 @@ impl CatalogCardGroup {
         self.cards.len()
     }
 
-    pub(crate) fn cards(&self) -> &[Entity<CatalogPublicationCardView>] {
-        &self.cards
+    pub(crate) fn packed_rows(&self, units: usize) -> Vec<Vec<CatalogCardItem>> {
+        pack_card_rows(&self.cards, units)
     }
 
     pub(crate) fn append(&mut self, mut other: CatalogCardGroup) {
         self.cards.append(&mut other.cards);
     }
 
-    pub(crate) fn grid(&self, width: f32, columns: usize) -> AnyElement {
+    pub(crate) fn grid(&self, columns: usize) -> AnyElement {
         let contract = &self.contracts.store;
-        let card_width = ((width - STORE_GRID_GAP * columns.saturating_sub(1) as f32) / columns as f32).max(contract.publication_min_width_px as f32);
-        div().w_full().flex().flex_row().flex_wrap().gap(px(STORE_GRID_GAP)).children(self.cards.iter().cloned().map(|card| div().w(px(card_width)).h(px(contract.publication_height_px as f32)).flex_none().child(card))).into_any_element()
+        let unit_width = catalog_grid_unit_width(contract.publication_min_width_px);
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(STORE_GRID_GAP))
+            .children(self.packed_rows(columns).into_iter().map(|row| {
+                let cards = row.into_iter().map(|item| (item.card, item.span)).collect::<Vec<_>>();
+                crate::virtual_grid::fixed_spanned_entity_row(&cards, columns, unit_width, contract.publication_height_px as f32, STORE_GRID_GAP)
+            }))
+            .into_any_element()
     }
 }
 
+fn pack_card_rows(cards: &[CatalogCardItem], units: usize) -> Vec<Vec<CatalogCardItem>> {
+    let units = units.max(1);
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut occupied = 0usize;
+    for item in cards {
+        let span = item.span.min(units);
+        if occupied > 0 && occupied + span > units {
+            rows.push(std::mem::take(&mut row));
+            occupied = 0;
+        }
+        let mut item = item.clone();
+        item.span = span;
+        occupied += span;
+        row.push(item);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
 pub(crate) struct CatalogPublicationCardView {
-    source: CatalogSource,
-    publication: CatalogPublication,
+    action: Option<CatalogPublicationAction>,
+    presentation: CatalogCardPresentation,
+    cover: Option<Entity<CatalogCoverView>>,
     show_source: bool,
     services: CatalogCardServices,
-    cover: Option<Arc<Image>>,
-    cover_task: Option<Task<()>>,
     import_task: Option<Task<()>>,
     import_error: Option<SharedString>,
     imported: bool,
 }
 
+struct CatalogCardPresentation {
+    element_id: SharedString,
+    title: SharedString,
+    authors: SharedString,
+    description: Option<SharedString>,
+    details: Option<CatalogDescriptionBody>,
+    source_title: SharedString,
+}
+
+#[derive(Clone)]
+enum CatalogDescriptionBody {
+    PlainText(SharedString),
+    RichHtml(SharedString),
+}
+
 impl CatalogPublicationCardView {
-    fn new(source: CatalogSource, publication: CatalogPublication, show_source: bool, services: CatalogCardServices) -> Self {
-        Self { source, publication, show_source, services, cover: None, cover_task: None, import_task: None, import_error: None, imported: false }
+    fn new(source: CatalogSource, publication: CatalogPublication, show_source: bool, services: CatalogCardServices, cx: &mut Context<Self>) -> Self {
+        let action = publication_action(&source, &publication);
+        let format_label = action.as_ref().and_then(action_format).map(|format| SharedString::from(format.label()));
+        let title = SharedString::from(publication.title.clone());
+        let (description, details) = description_presentation(publication.description.as_ref());
+        let cover = publication.image_url.clone().map(|image_url| {
+            let cover_services = services.clone();
+            let source_id = source.id.clone();
+            let source_title: SharedString = source.title.clone().into();
+            let initial: SharedString = title.chars().next().unwrap_or('?').to_string().into();
+            let cover_format = format_label.clone();
+            cx.new(|_| CatalogCoverView { source_id, image_url, source_title, initial, format_label: cover_format, show_source, services: cover_services, image: None, task: None, attempted: false, retries: 0 })
+        });
+        let presentation = CatalogCardPresentation {
+            element_id: format!("catalog-publication-{}", ownership_key(&source.id, &publication.identity.edition_id)).into(),
+            authors: if publication.authors.is_empty() { "Unknown author".into() } else { publication.authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>().join(", ").into() },
+            description: description.map(SharedString::from),
+            details,
+            source_title: source.title.clone().into(),
+            title,
+        };
+        Self { action, presentation, cover, show_source, services, import_task: None, import_error: None, imported: false }
     }
 
-    fn load_cover(&mut self, cx: &mut Context<Self>) {
-        let Some(image_url) = self.publication.image_url.clone() else { return };
-        let operation = self.services.load_cover(self.source.id.clone(), image_url);
-        self.cover_task = Some(cx.spawn(async move |card, cx| {
-            let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
-            let _ = card.update(cx, |card, cx| {
-                card.cover_task.take();
-                match result {
-                    Ok(bytes) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => card.cover = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes))),
-                    Ok(_) => log::warn!("catalogue cover was not normalized JPEG"),
-                    Err(error) => log::warn!("failed to load catalogue cover: {error}"),
-                }
-                cx.notify();
+    fn show_details(&self, cx: &mut Context<Self>) {
+        let Some(description) = self.presentation.details.clone() else { return };
+        let title = self.presentation.title.clone();
+        let authors = self.presentation.authors.clone();
+        let text_view_id: SharedString = format!("{}/description", self.presentation.element_id).into();
+        self.services.app.with_window(cx, move |window, cx| {
+            window.open_dialog(cx, move |dialog, _, cx| {
+                let content = div().w_full().flex().flex_col().gap(px(14.0)).child(div().text_color(components::browser_theme(cx).text_muted).child(authors.clone())).child(match description.clone() {
+                    CatalogDescriptionBody::PlainText(text) => div().line_height(gpui::relative(1.45)).child(text).into_any_element(),
+                    CatalogDescriptionBody::RichHtml(html) => TextView::html(text_view_id.clone(), html).selectable(true).into_any_element(),
+                });
+                dialog.title(title.clone()).w(px(600.0)).max_h(px(640.0)).child(content).button_props(DialogButtonProps::default().ok_text("Close"))
             });
-        }));
+        });
     }
 
     fn import(&mut self, request: CatalogImportRequest, cx: &mut Context<Self>) {
@@ -164,31 +242,85 @@ impl CatalogPublicationCardView {
     }
 }
 
-impl Render for CatalogPublicationCardView {
+struct CatalogCoverView {
+    source_id: CatalogSourceId,
+    image_url: String,
+    source_title: SharedString,
+    initial: SharedString,
+    format_label: Option<SharedString>,
+    show_source: bool,
+    services: CatalogCardServices,
+    image: Option<Arc<Image>>,
+    task: Option<Task<()>>,
+    attempted: bool,
+    retries: u8,
+}
+
+impl CatalogCoverView {
+    fn load(&mut self, cx: &mut Context<Self>) {
+        let operation = self.services.load_cover(self.source_id.clone(), self.image_url.clone());
+        self.task = Some(cx.spawn(async move |cover, cx| {
+            let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
+            let _ = cover.update(cx, |cover, cx| {
+                cover.task.take();
+                match result {
+                    Ok(bytes) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => cover.image = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes))),
+                    Ok(_) => log::warn!("catalogue cover was not normalized JPEG"),
+                    Err(error) => {
+                        log::warn!("failed to load catalogue cover: {error}");
+                        if cover.retries < MAX_COVER_RETRIES {
+                            let delay = Duration::from_secs(2_u64.pow(u32::from(cover.retries)).min(30));
+                            cover.retries += 1;
+                            let timer = cx.background_executor().timer(delay);
+                            cover.task = Some(cx.spawn(async move |cover, cx| {
+                                timer.await;
+                                let _ = cover.update(cx, |cover, cx| {
+                                    cover.task.take();
+                                    cover.attempted = false;
+                                    cx.notify();
+                                });
+                            }));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+}
+
+impl Render for CatalogCoverView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.cover.is_none() && self.cover_task.is_none() && self.publication.image_url.is_some() {
-            self.load_cover(cx);
+        if !self.attempted {
+            self.attempted = true;
+            self.load(cx);
         }
         let theme = components::browser_theme(cx);
-        let contract = &self.services.contracts.store;
-        let title = self.publication.title.clone();
-        let authors = if self.publication.authors.is_empty() { "Unknown author".to_owned() } else { self.publication.authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>().join(", ") };
-        let cover_missing = self.cover.is_none();
-        let show_source = self.show_source;
-        let source_title = self.source.title.clone();
-        let cover = div()
-            .w(px(components::BOOK_COVER_WIDTH))
-            .h(px(components::BOOK_COVER_HEIGHT))
-            .flex_none()
-            .relative()
-            .overflow_hidden()
-            .rounded(px(0.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_alt)
-            .when_some(self.cover.clone(), |cover, image| cover.child(img(image).size_full().object_fit(gpui::ObjectFit::Cover)))
-            .when(cover_missing, |cover| cover.flex().items_center().justify_center().text_size(gpui::rems(24.0 / 16.0)).font_weight(FontWeight::BOLD).child(title.chars().next().unwrap_or('?').to_string()))
-            .when(show_source, |cover| {
+        let mut frame = div().w_full().relative().overflow_hidden().rounded(px(0.0)).border_1().border_color(theme.border).bg(theme.surface_alt);
+        if let Some(image) = self.image.clone() {
+            frame = frame.h_auto().max_h_full().child(img(image).w_full().h_auto().max_h_full().object_fit(gpui::ObjectFit::Contain));
+        } else {
+            frame = frame.h_full().flex().items_center().justify_center().text_size(gpui::rems(24.0 / 16.0)).font_weight(FontWeight::BOLD).child(self.initial.clone());
+        }
+        frame = frame
+            .when_some(self.format_label.clone(), |cover, format| {
+                cover.child(
+                    div()
+                        .absolute()
+                        .top(px(7.0))
+                        .right(px(7.0))
+                        .bg(theme.raised_bg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(px(components::RADIUS_SM))
+                        .px(px(7.0))
+                        .py(px(3.0))
+                        .text_size(gpui::rems(10.0 / 16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format),
+                )
+            })
+            .when(self.show_source, |cover| {
                 cover.child(
                     div()
                         .absolute()
@@ -196,43 +328,31 @@ impl Render for CatalogPublicationCardView {
                         .right(px(6.0))
                         .bottom(px(6.0))
                         .overflow_hidden()
-                        .rounded(px(0.0))
                         .bg(theme.raised_bg)
                         .px(px(6.0))
                         .py(px(3.0))
                         .line_clamp(1)
                         .text_size(gpui::rems(10.0 / 16.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(source_title),
+                        .child(self.source_title.clone()),
                 )
             });
+        div().w(px(components::BOOK_COVER_WIDTH)).h(px(components::BOOK_COVER_HEIGHT)).flex_none().flex().flex_col().items_center().justify_end().child(frame)
+    }
+}
 
-        let identity = div()
-            .w(px(components::BOOK_COVER_WIDTH))
-            .h(px(contract.publication_height_px as f32))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .child(cover)
-            .child(div().w_full().h(px(42.0)).mt(px(9.0)).px(px(2.0)).line_clamp(2).text_size(gpui::rems(17.0 / 16.0)).line_height(gpui::relative(1.15)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().w_full().h(px(22.0)).px(px(2.0)).line_clamp(1).text_size(gpui::rems(15.0 / 16.0)).text_color(theme.text_muted).child(authors));
+impl Render for CatalogPublicationCardView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = components::browser_theme(cx);
+        let contract = &self.services.app.contracts.store;
+        let title = self.presentation.title.clone();
+        let authors = self.presentation.authors.clone();
+        let has_cover = self.cover.is_some();
+        let has_description = self.presentation.description.is_some();
+        let show_source = self.show_source;
+        let source_title = self.presentation.source_title.clone();
 
-        let mut detail = div().flex_1().min_w_0().h_full().min_h_0().py(px(16.0)).pr(px(16.0)).flex().flex_col().gap(px(10.0));
-        detail = detail.child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .pr(px(contract.description_scrollbar_width_px as f32))
-                .overflow_y_scrollbar()
-                .text_size(gpui::rems(13.0 / 16.0))
-                .text_color(theme.text_muted)
-                .child(rich_description(self.publication.description.as_ref(), theme)),
-        );
-        if let Some(error) = &self.import_error {
-            detail = detail.child(div().max_h(px(48.0)).overflow_y_scrollbar().text_size(gpui::rems(11.0 / 16.0)).text_color(theme.danger).child(error.clone()));
-        }
-
-        if let Some(action) = publication_action(&self.source, &self.publication) {
+        let mut publication_action = self.action.clone().map(|action| {
             let importing = self.import_task.is_some();
             let label = if self.imported {
                 "Added".into()
@@ -245,18 +365,85 @@ impl Render for CatalogPublicationCardView {
                     CatalogPublicationAction::External { .. } => contract.open_label.clone(),
                 }
             };
-            let button = match action {
+            let action_id = format!("{}/action", self.presentation.element_id);
+            match action {
                 CatalogPublicationAction::Import { request } => {
                     let card = cx.entity();
-                    components::primary_action_button("catalog-add", label, IconName::Plus, importing || self.imported).on_click(move |_, _, cx| card.update(cx, |card, cx| card.import(request.clone(), cx)))
+                    components::primary_action_button(action_id, label, IconName::Plus, importing || self.imported)
+                        .h(px(30.0))
+                        .px(px(9.0))
+                        .rounded(px(components::RADIUS_SM))
+                        .on_click(move |_, _, cx| card.update(cx, |card, cx| card.import(request.clone(), cx)))
+                        .into_any_element()
                 }
-                CatalogPublicationAction::External { url, .. } => components::secondary_action_button("catalog-open", label, IconName::ExternalLink, false).on_click(move |_, _, cx| cx.open_url(&url)),
-            };
-            detail = detail.child(div().flex().justify_end().child(button));
+                CatalogPublicationAction::External { url, .. } => {
+                    components::secondary_action_button(action_id, label, IconName::ExternalLink, false).h(px(30.0)).px(px(9.0)).rounded(px(components::RADIUS_SM)).on_click(move |_, _, cx| cx.open_url(&url)).into_any_element()
+                }
+            }
+        });
+
+        let cover_action = if has_cover { publication_action.take() } else { None };
+        let identity = self.cover.clone().map(|cover| {
+            div()
+                .w(px(components::BOOK_COVER_WIDTH))
+                .h(px(contract.publication_height_px as f32))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .w(px(components::BOOK_COVER_WIDTH))
+                        .h(px(components::BOOK_COVER_HEIGHT))
+                        .flex_none()
+                        .relative()
+                        .child(cover)
+                        .when_some(cover_action, |cover, action| cover.child(div().absolute().top(px(7.0)).left(px(7.0)).child(action))),
+                )
+                .child(div().w_full().h(px(42.0)).mt(px(9.0)).px(px(2.0)).line_clamp(2).text_size(gpui::rems(17.0 / 16.0)).line_height(gpui::relative(1.15)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+                .child(div().w_full().h(px(22.0)).px(px(2.0)).line_clamp(1).text_size(gpui::rems(15.0 / 16.0)).text_color(theme.text_muted).child(authors.clone()))
+        });
+
+        let mut detail = div().flex_1().min_w_0().h_full().min_h_0().py(px(16.0)).pr(px(16.0)).flex().flex_col().gap(px(10.0));
+        if !has_cover {
+            let mut metadata = div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .pb(px(10.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().line_clamp(2).text_size(gpui::rems(17.0 / 16.0)).line_height(gpui::relative(1.15)).font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(div().line_clamp(1).text_size(gpui::rems(15.0 / 16.0)).text_color(theme.text_muted).child(authors));
+            if show_source {
+                metadata = metadata.child(div().line_clamp(1).text_size(gpui::rems(11.0 / 16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.accent).child(source_title));
+            }
+            detail = detail.pl(px(16.0)).child(metadata);
+        }
+        if let Some(description) = self.presentation.description.clone() {
+            detail = detail.child(div().flex_1().min_h_0().overflow_hidden().line_clamp(12).line_height(gpui::relative(1.35)).text_size(gpui::rems(13.0 / 16.0)).text_color(theme.text_muted).child(description));
+        }
+        if let Some(error) = &self.import_error {
+            detail = detail.child(div().h(px(32.0)).flex_none().overflow_hidden().line_clamp(2).text_size(gpui::rems(11.0 / 16.0)).text_color(theme.danger).child(error.clone()));
         }
 
+        let mut actions = div().flex().justify_end().gap(px(8.0));
+        if self.presentation.details.is_some() {
+            let card = cx.entity();
+            actions = actions.child(components::secondary_action_button("catalog-details", "Details", IconName::BookOpen, false).on_click(move |_, _, cx| card.update(cx, |card, cx| card.show_details(cx))));
+        }
+        if let Some(action) = publication_action {
+            actions = actions.child(action);
+        }
+        if self.presentation.details.is_some() || (!has_cover && self.action.is_some()) {
+            detail = detail.child(actions);
+        }
+
+        let detail = (has_description || !has_cover).then_some(detail);
+
         div()
-            .id(format!("catalog-publication-{}", ownership_key(&self.source.id, &self.publication.identity.edition_id)))
+            .id(self.presentation.element_id.clone())
             .w_full()
             .h(px(contract.publication_height_px as f32))
             .flex_none()
@@ -267,9 +454,16 @@ impl Render for CatalogPublicationCardView {
             .border_1()
             .border_color(theme.border)
             .bg(theme.raised_bg)
-            .child(identity)
-            .child(detail)
+            .when_some(identity, |card, identity| card.child(identity))
+            .when_some(detail, |card, detail| card.child(detail))
             .into_any_element()
+    }
+}
+
+fn action_format(action: &CatalogPublicationAction) -> Option<CatalogBookFormat> {
+    match action {
+        CatalogPublicationAction::Import { request } => Some(request.book_format),
+        CatalogPublicationAction::External { available_formats, .. } => available_formats.first().copied(),
     }
 }
 
@@ -291,39 +485,33 @@ pub(crate) fn publication_action(source: &CatalogSource, publication: &CatalogPu
     )
 }
 
-fn rich_description(description: Option<&CatalogDescription>, theme: components::BrowserTheme) -> Div {
-    let Some(description) = description else {
-        return div().flex().flex_col().child("No description available.");
-    };
-    let CatalogDescription::RichHtml { safe_html, .. } = description else {
-        let CatalogDescription::PlainText { text } = description else { unreachable!() };
-        return div().flex().flex_col().child(text.clone());
-    };
-    let parsed = parse_html_fragment(safe_html, &HtmlFragmentContext::html("div"), HtmlParserOptions::default());
-    let mut content = div().w_full().flex().flex_col().gap(px(7.0));
-    for node in parsed.syntax_tree().nodes {
-        let HtmlSyntaxNode::Element(element) = node else {
-            let text = syntax_text(std::slice::from_ref(&node));
-            if !text.is_empty() {
-                content = content.child(div().child(text));
-            }
-            continue;
-        };
-        let text = syntax_text(&element.children);
-        if text.is_empty() {
-            continue;
-        }
-        let block = match element.local_name.as_str() {
-            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => div().text_color(theme.text).font_weight(FontWeight::SEMIBOLD).child(text),
-            "blockquote" => div().pl(px(9.0)).border_l_2().border_color(theme.border).child(text),
-            "ul" => div().pl(px(8.0)).child(format!("• {text}")),
-            "ol" => div().pl(px(8.0)).child(format!("1. {text}")),
-            "pre" | "code" => div().p(px(7.0)).rounded(px(0.0)).bg(theme.surface_alt).child(text),
-            _ => div().child(text),
-        };
-        content = content.child(block);
+fn has_description_excerpt(description: Option<&CatalogDescription>) -> bool {
+    match description {
+        Some(CatalogDescription::PlainText { text }) => !text.trim().is_empty(),
+        Some(CatalogDescription::RichHtml { plain_text, .. }) => !plain_text.trim().is_empty(),
+        None => false,
     }
-    content
+}
+
+fn description_presentation(description: Option<&CatalogDescription>) -> (Option<String>, Option<CatalogDescriptionBody>) {
+    let Some(description) = description else {
+        return (None, None);
+    };
+    let CatalogDescription::RichHtml { safe_html, plain_text } = description else {
+        let CatalogDescription::PlainText { text } = description else { unreachable!() };
+        let details = (!text.trim().is_empty()).then(|| CatalogDescriptionBody::PlainText(text.clone().into()));
+        let excerpt = (!text.trim().is_empty()).then(|| text.clone());
+        return (excerpt, details);
+    };
+    let excerpt = (!plain_text.trim().is_empty()).then(|| plain_text.clone());
+    let details = if !safe_html.trim().is_empty() {
+        Some(CatalogDescriptionBody::RichHtml(safe_html.clone().into()))
+    } else if !plain_text.trim().is_empty() {
+        Some(CatalogDescriptionBody::PlainText(plain_text.clone().into()))
+    } else {
+        None
+    };
+    (excerpt, details)
 }
 
 #[cfg(test)]
@@ -372,17 +560,26 @@ mod tests {
 
         assert_ne!(ownership_key(&left, "edition"), ownership_key(&right, "edition"));
     }
-}
 
-fn syntax_text(nodes: &[HtmlSyntaxNode]) -> String {
-    let mut text = String::new();
-    for node in nodes {
-        match node {
-            HtmlSyntaxNode::Text(value) => text.push_str(value),
-            HtmlSyntaxNode::Element(element) => text.push_str(&syntax_text(&element.children)),
-            HtmlSyntaxNode::TemplateContents(children) => text.push_str(&syntax_text(children)),
-            _ => {}
-        }
+    #[test]
+    fn rich_catalogue_descriptions_use_the_precomputed_plain_text() {
+        let description = CatalogDescription::RichHtml { safe_html: "<p>expensive markup</p>".to_owned(), plain_text: "Ready to render".to_owned() };
+        let (excerpt, details) = description_presentation(Some(&description));
+        assert_eq!(excerpt.as_deref(), Some("Ready to render"));
+        assert!(matches!(details, Some(CatalogDescriptionBody::RichHtml(html)) if html == "<p>expensive markup</p>"));
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+
+    #[test]
+    fn missing_descriptions_have_no_placeholder_excerpt() {
+        let (excerpt, details) = description_presentation(None);
+        assert!(excerpt.is_none());
+        assert!(details.is_none());
+    }
+
+    #[test]
+    fn empty_sanitized_markup_falls_back_to_plain_details() {
+        let description = CatalogDescription::RichHtml { safe_html: String::new(), plain_text: "Still readable".to_owned() };
+        let (_, details) = description_presentation(Some(&description));
+        assert!(matches!(details, Some(CatalogDescriptionBody::PlainText(text)) if text == "Still readable"));
+    }
 }

@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(not(feature = "kobo"))]
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -27,11 +30,45 @@ pub(crate) use epub_svelte_lib::library::{
 pub(crate) struct LibraryContext {
     app: AppServices,
     pub(crate) library: LibraryBackend,
+    open_detail: Option<Rc<dyn Fn(ContentHash, &mut App)>>,
+    toc_cache: Arc<std::sync::Mutex<HashMap<String, Vec<app_contract::library::BookTocEntry>>>>,
 }
 
 impl LibraryContext {
     pub(crate) fn new(app: AppServices, library: LibraryBackend) -> Self {
-        Self { app, library }
+        Self { app, library, open_detail: None, toc_cache: Arc::new(std::sync::Mutex::new(HashMap::new())) }
+    }
+
+    pub(crate) fn set_open_detail(&mut self, open_detail: Rc<dyn Fn(ContentHash, &mut App)>) {
+        self.open_detail = Some(open_detail);
+    }
+
+    pub(crate) fn open_detail(&self, content_hash: ContentHash, cx: &mut App) {
+        if let Some(open) = &self.open_detail {
+            open(content_hash, cx);
+        }
+    }
+
+    pub(crate) fn load_book_detail(&self, content_hash: ContentHash) -> impl Future<Output = Result<epub_svelte_lib::library::BookDetail, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.book_detail_summary(content_hash));
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn load_book_toc(&self, content_hash: ContentHash) -> impl Future<Output = Result<Vec<app_contract::library::BookTocEntry>, String>> + 'static {
+        let library = self.library.clone();
+        let cache = self.toc_cache.clone();
+        async move {
+            let key = content_hash.to_string();
+            if let Some(toc) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+                return Ok(toc);
+            }
+            let operation = library.spawn_blocking(move |library| library.book_toc(content_hash));
+            let toc = operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(key, toc.clone());
+            }
+            Ok(toc)
+        }
     }
 
     pub(crate) fn contracts(&self) -> &Arc<FrontendContract> {
@@ -43,6 +80,11 @@ impl LibraryContext {
     /// `LibraryDisplayChanged` rather than being re-read here.
     pub(crate) fn library_view(&self) -> app_contract::preferences::LibraryView {
         self.app.backend.browsing_preferences().map(|preferences| preferences.library_view()).unwrap_or_default()
+    }
+
+    pub(crate) fn sync_server_connected(&self) -> bool {
+        let network = self.app.backend.network_status();
+        self.app.backend.account_status().map(|status| status.signed_in()).unwrap_or(false) && network.connected && network.validated != Some(false)
     }
 
     pub(crate) fn catalog_cards(&self) -> CatalogCardServices {
@@ -57,12 +99,26 @@ impl LibraryContext {
 
     pub(crate) fn open_reader(&self, content_hash: ContentHash, title: String, cx: &mut App) {
         let locator = BookLocator::new(self.library.id().clone(), content_hash);
-        (self.app.open_reader)(locator, title, cx);
+        (self.app.open_reader)(locator, title, None, cx);
+    }
+
+    pub(crate) fn open_reader_at(&self, content_hash: ContentHash, title: String, target: String, cx: &mut App) {
+        let locator = BookLocator::new(self.library.id().clone(), content_hash);
+        (self.app.open_reader)(locator, title, Some(target), cx);
     }
 
     pub(crate) fn load_cover(&self, content_hash: ContentHash) -> impl Future<Output = Result<Option<Vec<u8>>, String>> + 'static {
         let operation = self.library.load_thumbnail(content_hash);
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    pub(crate) fn reveal_local_book(&self, content_hash: ContentHash) -> impl Future<Output = Result<(), String>> + Send + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.local_book_path(content_hash));
+        async move {
+            let path = operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?.ok_or_else(|| "This book is not stored on this device".to_owned())?;
+            reveal_in_file_manager(&path)
+        }
     }
 
     pub(crate) fn load_home(&self, limit: i32) -> impl Future<Output = Result<HomeBrowseRows, String>> + 'static {
@@ -80,26 +136,78 @@ impl LibraryContext {
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 
-    pub(crate) fn load_folder(&self, folder_id: DirId) -> impl Future<Output = Result<FolderBrowseRows, String>> + 'static {
-        let operation = self.library.spawn_blocking(move |library| library.folder(&folder_id));
+    pub(crate) fn load_folder(&self, folder_id: DirId, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<FolderBrowseRows, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.folder_filtered(&folder_id, file_type));
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 
-    pub(crate) fn load_subjects(&self, subject_path: Option<String>) -> impl Future<Output = Result<SubjectBrowseRows, String>> + 'static {
-        let operation = self.library.spawn_blocking(move |library| library.subjects(subject_path.as_deref()));
+    pub(crate) fn load_subjects(&self, subject_path: Option<String>, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<SubjectBrowseRows, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.subjects_filtered(subject_path.as_deref(), file_type));
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn reload_unified_taxonomy(&self) -> impl Future<Output = Result<String, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.reload_unified_taxonomy());
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn load_edition_identity_reviews(&self) -> impl Future<Output = Result<Vec<epub_svelte_lib::library::EditionIdentityReview>, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.edition_identity_reviews());
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn refresh_edition_identity_candidate_classifications(&self) -> impl Future<Output = Result<usize, String>> + 'static {
+        let operation = self.library.spawn(move |library| async move { library.refresh_edition_identity_candidate_classifications().await.map_err(|error| error.to_string()) });
+        async move { operation.await.map_err(|error| error.to_string())? }
+    }
+
+    pub(crate) fn select_edition_identity_candidate(&self, content_hash: ContentHash, edition_id: String, isbn13: String) -> impl Future<Output = Result<bool, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.select_edition_identity_candidate(content_hash, &edition_id, &isbn13));
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn apply_manual_edition_identity(&self, content_hash: ContentHash, isbn: String) -> impl Future<Output = Result<bool, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.apply_manual_edition_identity(content_hash, &isbn));
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn reject_edition_identity_candidates(&self, content_hash: ContentHash) -> impl Future<Output = Result<(), String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.reject_edition_identity_candidates(content_hash));
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
+    pub(crate) fn retry_failed_edition_identities(&self) -> impl Future<Output = Result<usize, String>> + 'static {
+        let operation = self.library.spawn(move |library| async move { library.retry_failed_edition_identities().await.map_err(|error| error.to_string()) });
+        async move { operation.await.map_err(|error| error.to_string())? }
+    }
+
+    pub(crate) fn load_subject_recommendations(
+        &self, subject_path: Option<String>, limit: u32,
+    ) -> impl Future<Output = Result<(epub_svelte_lib::catalog::CatalogRecommendationResponse, Vec<epub_svelte_lib::catalog::CatalogSource>), String>> + 'static {
+        let sources = self.app.backend.catalog_sources();
+        let operation = self.library.spawn(move |library| async move {
+            match subject_path {
+                Some(path) => library.catalog_subject_recommendations(&path, limit).await,
+                None => library.catalog_recommendations(limit).await,
+            }
+            .map_err(|error| error.to_string())
+        });
+        async move {
+            let recommendations = operation.await.map_err(|error| error.to_string())??;
+            Ok((recommendations, sources))
+        }
     }
 
     /// Every book beneath `folder_id`, not just the ones placed directly in it.
-    pub(crate) fn search_folder(&self, folder_id: DirId, query: String) -> impl Future<Output = Result<SearchBrowseRows, String>> + 'static {
-        let operation = self.library.spawn_blocking(move |library| library.search_folder(&folder_id, &query));
+    pub(crate) fn search_folder(&self, folder_id: DirId, query: String, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<SearchBrowseRows, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.search_folder_filtered(&folder_id, &query, file_type));
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 
     /// Every book under `subject_path` and its narrower subjects. `None` is the
     /// whole library, which is what the root of the Subjects page shows.
-    pub(crate) fn search_subject(&self, subject_path: Option<String>, query: String) -> impl Future<Output = Result<SearchBrowseRows, String>> + 'static {
-        let operation = self.library.spawn_blocking(move |library| library.search_subject(subject_path.as_deref(), &query));
+    pub(crate) fn search_subject(&self, subject_path: Option<String>, query: String, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<SearchBrowseRows, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.search_subject_filtered(subject_path.as_deref(), &query, file_type));
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 
@@ -233,4 +341,21 @@ impl LibraryContext {
     pub(crate) fn import_catalog_book(&self, request: CatalogImportRequest) -> Result<BackendTask<Result<(), String>>, String> {
         Ok(self.library.spawn(move |library| async move { library.import_catalog_book(ROOT_DIR_ID, &request).await.map(|_| ()).map_err(|error| error.to_string()) }))
     }
+}
+
+#[cfg(all(not(feature = "kobo"), target_os = "macos"))]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    Command::new("open").arg("-R").arg(path).spawn().map(|_| ()).map_err(|error| format!("Could not show the book in Finder: {error}"))
+}
+
+#[cfg(all(not(feature = "kobo"), target_os = "windows"))]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    let selection = format!("/select,{}", path.display());
+    Command::new("explorer.exe").arg(selection).spawn().map(|_| ()).map_err(|error| format!("Could not show the book in File Explorer: {error}"))
+}
+
+#[cfg(all(not(feature = "kobo"), not(any(target_os = "macos", target_os = "windows"))))]
+fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    let directory = path.parent().ok_or_else(|| "The book has no containing folder".to_owned())?;
+    Command::new("xdg-open").arg(directory).spawn().map(|_| ()).map_err(|error| format!("Could not open the book's folder: {error}"))
 }

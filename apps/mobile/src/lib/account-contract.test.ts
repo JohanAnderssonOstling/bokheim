@@ -12,6 +12,7 @@ test("account and settings semantics are shared across both frontends", () => {
   assert.equal(settings.navigation_label, "Settings");
   assert.equal(account.validation.password_min_characters, 12);
   assert.equal(account.validation.verification_pin_digits, 6);
+  assert.equal(account.validation.one_time_token_bytes, 43);
   assert.deepEqual(new Set(account.sync_states.map(({ state }) => state)), new Set(["local_only", "synced", "sign_in_required", "different_account", "remote_missing"]));
   assert.deepEqual(new Set(settings.network_transports.map(({ transport }) => transport)), new Set(["offline", "wifi", "cellular", "ethernet", "vpn", "other", "unknown"]));
 
@@ -23,8 +24,13 @@ test("account and settings semantics are shared across both frontends", () => {
   assert.match(source("../components/shell/ServerAccountDialog.svelte"), /AccountAccessForms/);
   assert.doesNotMatch(sharedAccessForm, /Already have a verification PIN/);
   assert.match(sharedAccessForm, /PinEntry/);
-  assert.match(source("../components/auth/PinEntry.svelte"), /placeholder="Verification pin"/);
+  assert.match(source("../components/auth/PinEntry.svelte"), /inputmode="numeric"/);
+  assert.match(sharedAccessForm, /onverifyemail\(cleanEmail, cleanToken\)/);
+  assert.match(sharedAccessForm, /verification PIN/);
   assert.doesNotMatch(sharedAccessForm, /Email for resend/);
+  assert.doesNotMatch(sharedAccessForm, /<nav aria-label="Account action">/);
+  assert.match(sharedAccessForm, /loginFailed = !\(await onlogin/);
+  assert.match(sharedAccessForm, /loginFailed && ACCOUNT_CONTRACT\.capabilities\.password_recovery/);
 
   const nativeAccount = ["authentication.rs", "account.rs"]
     .map((file) => source(`../../../ui/gpui/browser/src/universal/sync/${file}`))
@@ -33,7 +39,10 @@ test("account and settings semantics are shared across both frontends", () => {
     assert.match(nativeAccount, new RegExp(`\\b${operation}\\b`));
   }
   assert.doesNotMatch(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /account-have-verification/);
+  assert.match(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /OtpInput/);
   assert.doesNotMatch(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /Email for resend/);
+  assert.doesNotMatch(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /account-flow-sign-in/);
+  assert.match(source("../../../ui/gpui/browser/src/universal/sync/view.rs"), /self\.login_failed && contract\.capabilities\.password_recovery/);
 
   const accountPage = source("../components/shell/ServerAccountDialog.svelte");
   for (const hidden of ["Sessions", "Current session", "Other session", "onrevokesession", "onrevokeothersessions"]) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { chooseLibraryName, ddcSubjectPath, lccSubjectPath, selectFolderDestinations } from "./wasm-core.ts";
 
 interface CoreExports extends WebAssembly.Exports {
   memory: WebAssembly.Memory;
@@ -42,4 +43,38 @@ test("the raw Rust WASM ABI uses shared catalog normalization", async () => {
   } finally {
     core.bokheim_dealloc(pointer, length);
   }
+});
+
+test("the mobile WASM bridge applies the shared folder destination policy", async () => {
+  const destinations = [
+    { id: "root", path: "Library" },
+    { id: "parent", path: "Shelf" },
+    { id: "source", path: "Shelf / Child" },
+    { id: "nested", path: "Shelf / Child / Nested" },
+    { id: "other", path: "Other" },
+  ];
+  assert.deepEqual(
+    await selectFolderDestinations(destinations, {
+      kind: "move_folder", source_parent_id: "parent", source_path: "Shelf / Child",
+    }),
+    [destinations[0], destinations[4]],
+  );
+});
+
+test("the mobile WASM bridge uses native collision suffixes", async () => {
+  assert.equal(await chooseLibraryName("folder", "Shelf", ["shelf", "Shelf 2"]), "Shelf 3");
+  assert.equal(await chooseLibraryName("file", "Book.epub", ["book.epub", "Book 2.epub"]), "Book 3.epub");
+});
+
+test("the mobile WASM bridge resolves coarse DDC hierarchy captions", async () => {
+  assert.equal(await ddcSubjectPath("515.33"), "DDC / Science / Mathematics / Analysis / 515.33");
+  assert.equal(await ddcSubjectPath("not-ddc"), null);
+});
+
+test("the mobile WASM bridge resolves coarse LCC outline captions", async () => {
+  assert.equal(
+    await lccSubjectPath("QA76.73.R3"),
+    "LCC / Science / Mathematics / Calculating machines / Electronic computers. Computer science / QA76.73.R3",
+  );
+  assert.equal(await lccSubjectPath("Incun. 1494 .H46"), null);
 });

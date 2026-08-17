@@ -3,6 +3,7 @@ use crate::library::database as db;
 use crate::library::database::{get_book_dirs_by_local_fingerprint, get_tombstoned_book_file_keys, insert_book, insert_local_book_dir, mark_known_book_dirs_seen, upsert_dir};
 use crate::library::generate_content_hash_blake3;
 use crate::library::generate_thumbnail_for_sync;
+use crate::library::thumbnail_needs_repair;
 #[cfg(test)]
 use crate::APP_HIDDEN_LIBRARY_DB_PATH;
 use crate::{ContentHash, DirId, APP_HIDDEN_DIR};
@@ -447,6 +448,11 @@ impl LibraryScanner {
                         // row look stale to this scan's cleanup pass. Accumulate
                         // these observations so one UPDATE marks the whole batch.
                         pending_seen_placements.push((known.dir_id, known.file_name, file_hash));
+                        match thumbnail_needs_repair(&state.context, &state.library_root, &known.content_hash) {
+                            Ok(true) => Self::queue_thumbnail_repair(state, ThumbnailTask { content_hash: known.content_hash, book_path: entry.path().to_path_buf() }),
+                            Ok(false) => {}
+                            Err(error) => log::warn!("Scanner: cannot inspect thumbnail state for {}: {error}", entry.path().display()),
+                        }
                         continue;
                     }
                     Some(_) => true,
@@ -516,6 +522,14 @@ impl LibraryScanner {
             }
         }
         true
+    }
+
+    fn queue_thumbnail_repair(state: &Arc<ScannerState>, task: ThumbnailTask) {
+        let content_hash = task.content_hash.clone();
+        let inserted = state.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(content_hash.clone());
+        if inserted && state.thumbnail_queue.send(ThumbnailWork::Generate(task)).is_err() {
+            state.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&content_hash);
+        }
     }
 
     fn wait_for_hash_jobs(state: &Arc<ScannerState>) -> bool {
@@ -651,11 +665,7 @@ impl LibraryScanner {
             state.hash_persist_failed.store(true, Ordering::Release);
         } else {
             for task in thumbnails {
-                let content_hash = task.content_hash.clone();
-                state.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(content_hash.clone());
-                if state.thumbnail_queue.send(ThumbnailWork::Generate(task)).is_err() {
-                    state.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&content_hash);
-                }
+                Self::queue_thumbnail_repair(state, task);
             }
         }
 

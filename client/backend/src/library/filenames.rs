@@ -62,11 +62,7 @@ fn sanitize_stem(value: &str) -> String {
         }
     }
     let output = output.trim().trim_end_matches('.').trim().to_owned();
-    if is_reserved(&output) {
-        String::new()
-    } else {
-        output
-    }
+    if is_reserved(&output) { String::new() } else { output }
 }
 
 fn is_reserved(value: &str) -> bool {
@@ -89,14 +85,6 @@ pub(crate) fn validate_component(value: &str) -> Result<String, String> {
         return Err(format!("name must not exceed {MAX_FILE_NAME_BYTES} UTF-8 bytes"));
     }
     Ok(value.to_owned())
-}
-
-pub(crate) fn numbered_name(base: &str, number: usize) -> String {
-    let path = std::path::Path::new(base);
-    match (path.file_stem().and_then(|value| value.to_str()), path.extension().and_then(|value| value.to_str())) {
-        (Some(stem), Some(extension)) => format!("{stem} {number}.{extension}"),
-        _ => format!("{base} {number}"),
-    }
 }
 
 fn cap(stem: &str, extension: &str) -> String {

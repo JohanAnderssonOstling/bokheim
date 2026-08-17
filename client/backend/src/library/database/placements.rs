@@ -97,6 +97,7 @@ pub(crate) fn create_local_directory(conn: &mut Connection, library_root: &Path,
 #[cfg(any(test, all(feature = "scanner", not(target_os = "android"))))]
 #[derive(Clone)]
 pub struct BookDir {
+    pub content_hash: ContentHash,
     pub dir_id: DirId,
     pub file_name: FileName,
     pub description_missing: bool,
@@ -109,7 +110,7 @@ pub fn get_book_dirs_by_local_fingerprint(conn: &Connection) -> Result<HashMap<u
         let Ok(fingerprint) = row.get::<_, String>(0)?.parse::<u64>() else { return Ok(()) };
         let dir_id = parse_uuid_column(row.get::<_, String>(2)?, 2)?;
         let file_name = row.get::<_, String>(3)?;
-        result.entry(fingerprint).or_insert(BookDir { dir_id, file_name, description_missing: row.get(5)? });
+        result.entry(fingerprint).or_insert(BookDir { content_hash: ContentHash::new(&row.get::<_, String>(1)?), dir_id, file_name, description_missing: row.get(5)? });
         Ok(())
     })?;
     Ok(result)

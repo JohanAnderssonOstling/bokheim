@@ -1,11 +1,11 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, FontWeight, SharedString, Stateful};
+use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, Scrollable, ScrollableElement, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT,
+    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT,
     TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
@@ -13,14 +13,13 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
     let label = label.into();
     Button::new(id)
         .ghost()
-        .selected(selected)
         .w_full()
-        .min_h(px(64.0))
+        .min_h(px(crate::NAV_RAIL_ITEM_MIN_HEIGHT))
         .py(px(SPACE_SM))
         .p_0()
         .rounded(px(RADIUS_MD))
         .text_color(if selected { theme.accent } else { theme.text_muted })
-        .when(selected, |button| button.bg(theme.accent).text_color(theme.surface_alt).border_1().border_color(theme.accent))
+        .when(selected, |button| button.bg(theme.accent_soft).text_color(theme.accent))
         .tooltip(label.clone())
         .child(
             div()
@@ -30,9 +29,9 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(SPACE_XS))
-                .child(Icon::new(icon).large())
-                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).child(label)),
+                .gap(px(crate::NAV_RAIL_ICON_LABEL_GAP))
+                .child(Icon::new(icon).size(gpui::rems(crate::NAV_RAIL_ICON_SIZE / 16.0)))
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(crate::NAV_RAIL_LABEL_SIZE / 16.0)).font_weight(crate::NAV_RAIL_LABEL_WEIGHT).child(label)),
         )
 }
 
@@ -44,7 +43,24 @@ pub fn nav_rail_divider(theme: BrowserTheme) -> Div {
 }
 
 pub fn home_navigation_icon() -> Icon {
-    Icon::empty().path("icons/bokheim-home.svg")
+    navigation_icon(app_contract::NavigationIcon::House)
+}
+
+/// The GPUI rendering of the cross-frontend navigation icon contract.
+pub fn navigation_icon(icon: app_contract::NavigationIcon) -> Icon {
+    let path = match icon {
+        app_contract::NavigationIcon::House => "icons/navigation/house.svg",
+        app_contract::NavigationIcon::BookOpen => "icons/navigation/book-open.svg",
+        app_contract::NavigationIcon::Folder => "icons/navigation/folder.svg",
+        app_contract::NavigationIcon::Asterisk => "icons/navigation/asterisk.svg",
+        app_contract::NavigationIcon::Tags => "icons/navigation/tags.svg",
+        app_contract::NavigationIcon::User => "icons/navigation/user.svg",
+        app_contract::NavigationIcon::Trash2 => "icons/navigation/trash-2.svg",
+        app_contract::NavigationIcon::Building2 => "icons/navigation/building-2.svg",
+        app_contract::NavigationIcon::CircleUser => "icons/navigation/circle-user.svg",
+        app_contract::NavigationIcon::Settings => "icons/navigation/settings.svg",
+    };
+    Icon::empty().path(path)
 }
 
 pub fn browser_search_box() -> Div {
@@ -68,12 +84,21 @@ pub fn library_section_content() -> Div {
     div().flex_1().min_w_0().min_h_0().flex().flex_col()
 }
 
-pub fn library_switcher_group() -> Div {
-    div().relative().w_full().min_h(px(72.0)).flex_none().flex().items_center().gap(px(SPACE_SM))
+pub fn library_switcher_group(theme: BrowserTheme) -> Div {
+    div().relative().w_full().min_h(px(72.0)).flex_none().flex().items_center().gap(px(SPACE_SM)).border_b_1().border_color(theme.border)
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
-    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).bg(theme.surface)
+    let mut separator = theme.border;
+    separator.a *= 0.55;
+    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).border_b_1().border_color(separator).bg(theme.surface)
+}
+
+/// Two-line hierarchy header used when controls belong beneath the path.
+pub fn browser_stacked_topbar(theme: BrowserTheme) -> Div {
+    let mut separator = theme.border;
+    separator.a *= 0.55;
+    div().w_full().flex_none().flex().flex_col().gap(px(SPACE_XS)).px(px(CONTENT_PADDING)).py(px(SPACE_XS)).border_b_1().border_color(separator).bg(theme.surface)
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -123,19 +148,20 @@ pub fn browser_actionable_empty(title: impl Into<SharedString>, description: imp
         .child(div().mt(px(SPACE_XS)).child(actions))
 }
 
-pub fn library_switcher_trigger(label: impl Into<SharedString>) -> Button {
+pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let label = label.into();
-    Button::new("library-switcher-trigger")
-        .ghost()
-        .w_full()
-        .min_h(px(64.0))
-        .py(px(SPACE_SM))
-        .px_0()
-        .overflow_hidden()
-        .text_size(gpui::rems(TEXT_XS / 16.0))
-        .font_weight(FontWeight::BOLD)
-        .tooltip(label.clone())
-        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+    Button::new("library-switcher-trigger").ghost().w_full().h(px(72.0)).min_h(px(72.0)).p_0().overflow_hidden().text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::BOLD).text_color(theme.accent).tooltip(label.clone()).child(
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_XXS))
+            .child(navigation_icon(app_contract::NavigationIcon::BookOpen).large())
+            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label)),
+    )
 }
 
 pub fn library_switcher_panel() -> Div {
@@ -200,7 +226,7 @@ pub fn library_switcher_row(library: impl IntoElement, delete: impl IntoElement)
 
 pub fn library_switcher_delete_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let label = label.into();
-    Button::new(id).icon(Icon::empty().path("icons/bokheim-trash.svg")).secondary().outline().small().flex_none().w(px(40.0)).h(px(40.0)).border_color(theme.border).bg(theme.surface).tooltip(format!("Delete {label}"))
+    Button::new(id).icon(navigation_icon(app_contract::NavigationIcon::Trash2)).secondary().outline().small().flex_none().w(px(40.0)).h(px(40.0)).border_color(theme.border).bg(theme.surface).tooltip(format!("Delete {label}"))
 }
 
 pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
@@ -213,7 +239,7 @@ pub fn topbar_icon_action_button(id: impl Into<ElementId>, label: impl Into<Shar
 }
 
 fn browser_action_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id).label(label).icon(icon).secondary().outline().border_color(theme.border).text_color(theme.accent).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::BOLD)
+    Button::new(id).label(label).icon(icon).secondary().outline().border_color(theme.border).text_color(theme.accent).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
 }
 
 pub fn browser_settings_page() -> Scrollable<Div> {
@@ -278,7 +304,7 @@ pub fn browser_settings_chip_button(id: impl Into<ElementId>, label: impl Into<S
         .ghost()
         .h(px(32.0))
         .px(px(SPACE_SM))
-        .rounded_full()
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(if checked { theme.accent } else { theme.border })
         .bg(if checked { theme.accent_soft } else { theme.surface })

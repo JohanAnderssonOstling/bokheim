@@ -1,4 +1,5 @@
 use crate::account::LibrarySyncState;
+use crate::library::LibraryFileTypeFilter;
 use crate::preferences::{BrowsingPreferencesContract, ReaderPreferencesContract, WebPreferenceProfilesContract};
 use crate::transfer::NetworkTransport;
 use account_contract::{EMAIL_MAX_BYTES, EMAIL_VERIFICATION_PIN_DIGITS, ONE_TIME_TOKEN_BYTES, PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
@@ -11,11 +12,21 @@ pub const BREADCRUMB_ITEM_MAX_CHARACTERS: u8 = 24;
 
 pub const LARGE_VIEWPORT_BREAKPOINT_PX: u16 = 720;
 pub const LARGE_SIDEBAR_WIDTH_PX: u16 = 96;
+pub const NAVIGATION_LABEL_SIZE_PX: u8 = 12;
+pub const NAVIGATION_LABEL_WEIGHT: u16 = 600;
+pub const NAVIGATION_ICON_SIZE_PX: u8 = 24;
+pub const NAVIGATION_ICON_LABEL_GAP_PX: u8 = 5;
+pub const NAVIGATION_ITEM_MIN_HEIGHT_PX: u8 = 64;
+pub const NAVIGATION_TOUCH_ITEM_MIN_HEIGHT_PX: u8 = 56;
 pub const LARGE_TOPBAR_HEIGHT_PX: u16 = 64;
 pub const LARGE_TOPBAR_ACTION_HEIGHT_PX: u16 = 40;
+pub const TOPBAR_ACTION_LABEL_WEIGHT: u16 = 600;
 pub const LARGE_TOPBAR_ACTION_GAP_PX: u16 = 10;
 pub const LARGE_TOPBAR_ACTION_HORIZONTAL_PADDING_PX: u16 = 11;
 pub const LARGE_CONTENT_PADDING_PX: u16 = 18;
+/// Shared interface surfaces and controls use square corners. Truly circular
+/// status indicators may opt out because their shape carries meaning.
+pub const SURFACE_CORNER_RADIUS_PX: u8 = 0;
 /// Covers are 1:1.6, the ratio most trade publications sit closest to.
 pub const LARGE_BOOK_COVER_WIDTH_PX: u16 = 200;
 pub const LARGE_BOOK_COVER_HEIGHT_PX: u16 = 320;
@@ -23,17 +34,45 @@ pub const LARGE_BOOK_COVER_HEIGHT_PX: u16 = 320;
 /// 320 cover + 14 + 42 title + 5 + 22 author + 5 + 16 progress.
 pub const LARGE_BOOK_CARD_HEIGHT_PX: u16 = 424;
 pub const LARGE_BOOK_GRID_COLUMN_GAP_PX: u16 = 28;
+pub const BOOK_CARD_TITLE_SIZE_PX: u8 = 17;
+pub const BOOK_CARD_TITLE_WEIGHT: u16 = 600;
+pub const BOOK_CARD_TITLE_LINE_HEIGHT_PX: u8 = 21;
+pub const BOOK_CARD_TITLE_LINES: u8 = 2;
+pub const BOOK_CARD_AUTHOR_SIZE_PX: u8 = 15;
+pub const BOOK_CARD_AUTHOR_LINE_HEIGHT_PX: u8 = 22;
+pub const BOOK_CARD_COVER_CONTENT_GAP_PX: u8 = 14;
+pub const BOOK_CARD_TEXT_GAP_PX: u8 = 5;
+pub const BOOK_CARD_PROGRESS_HEIGHT_PX: u8 = 16;
+pub const BOOK_GRID_ROW_TRAILING_SPACE_PX: u8 = 6;
+pub const CAROUSEL_TITLE_SIZE_PX: u8 = 21;
+pub const CAROUSEL_TITLE_WEIGHT: u16 = 600;
+pub const CAROUSEL_SECTION_GAP_PX: u8 = 28;
+pub const CAROUSEL_CONTENT_GAP_PX: u8 = 14;
+pub const CAROUSEL_CONTROL_GAP_PX: u8 = 5;
+pub const CAROUSEL_ARROW_SIZE_PX: u8 = 34;
 
-/// An author's row in the index shows the covers of their most recently read
-/// books instead of an initial in a disc. Two of them at the 1:1.6 cover ratio
-/// need 77px of height, which is what sets the row: 77 + 2 × 5 padding leaves
-/// the 88px both frontends draw. The list is otherwise unbroken — no letter
-/// headings — because it is a uniform virtual list.
-pub const AUTHOR_ROW_COVER_COUNT: u8 = 2;
-pub const AUTHOR_ROW_COVER_WIDTH_PX: u16 = 48;
-pub const AUTHOR_ROW_COVER_HEIGHT_PX: u16 = 77;
-pub const AUTHOR_ROW_HEIGHT_PX: u16 = 88;
-pub const LARGE_BOOK_GRID_ROW_HEIGHT_PX: u16 = LARGE_BOOK_CARD_HEIGHT_PX + 6;
+/// Author cards reuse the regular book-cover geometry. Their width is derived
+/// from the one-to-three books they contain, while every card keeps the same
+/// height: 14 padding + 42 name + 14 gap + 320 covers + 14 padding.
+pub const AUTHOR_ROW_COVER_COUNT: u8 = 3;
+pub const AUTHOR_ROW_COVER_WIDTH_PX: u16 = LARGE_BOOK_COVER_WIDTH_PX;
+pub const AUTHOR_ROW_COVER_HEIGHT_PX: u16 = LARGE_BOOK_COVER_HEIGHT_PX;
+pub const AUTHOR_ROW_HEIGHT_PX: u16 = 404;
+pub const AUTHOR_ROW_COVER_GAP_PX: u8 = 14;
+pub const AUTHOR_ROW_CONTENT_GAP_PX: u8 = 14;
+pub const AUTHOR_ROW_HORIZONTAL_PADDING_PX: u8 = 14;
+pub const AUTHOR_ROW_LABEL_SIZE_PX: u8 = BOOK_CARD_TITLE_SIZE_PX;
+pub const LARGE_BOOK_GRID_ROW_HEIGHT_PX: u16 = LARGE_BOOK_CARD_HEIGHT_PX + BOOK_GRID_ROW_TRAILING_SPACE_PX as u16;
+
+/// Folder and subject navigation share one visual geometry across frontends.
+/// Pointer-first layouts keep the compact row; touch-first layouts use the
+/// larger minimum without changing the label, icon, or grid rhythm.
+pub const HIERARCHY_CELL_HEIGHT_PX: u16 = 40;
+pub const HIERARCHY_TOUCH_CELL_MIN_HEIGHT_PX: u16 = 56;
+pub const HIERARCHY_CELL_MIN_WIDTH_PX: u16 = 240;
+pub const HIERARCHY_CELL_GAP_PX: u8 = 4;
+pub const HIERARCHY_ICON_SIZE_PX: u8 = 22;
+pub const HIERARCHY_LABEL_SIZE_PX: u8 = 18;
 
 /// The detailed book row — cover art beside the text, rather than under it.
 ///
@@ -56,6 +95,10 @@ pub const DETAILED_ROW_DESCRIPTION_LINES: u8 = 4;
 /// beside the text instead of below it. Phones never reach this, including in
 /// landscape, which is the correct outcome there.
 pub const DETAILED_ROW_ACTIONS_BREAKPOINT_PX: u16 = 940;
+/// Fixed height for every item in the three metadata-review modes. Keeping
+/// ambiguous, no-match, and failed items identical prevents the virtual lists
+/// in the two frontends from changing density when a status tab is selected.
+pub const METADATA_REVIEW_ITEM_HEIGHT_PX: u16 = DETAILED_ROW_HEIGHT_PX * 2 + 20;
 pub const STORE_MAX_WIDTH_PX: u16 = 1248;
 pub const STORE_CATALOG_TWO_COLUMN_BREAKPOINT_PX: u16 = 720;
 pub const STORE_CATALOG_THREE_COLUMN_BREAKPOINT_PX: u16 = 1152;
@@ -69,20 +112,44 @@ pub const READER_SETTINGS_OVERLAY_PADDING_PX: u8 = 16;
 pub const READER_SETTINGS_OVERLAY_GAP_PX: u8 = 13;
 pub const READER_SETTINGS_OVERLAY_MIN_COLUMN_WIDTH_PX: u16 = 176;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
 pub struct BrowsingLayoutContract {
     pub large_viewport_breakpoint_px: u16,
     pub sidebar_width_px: u16,
+    pub navigation_label_size_px: u8,
+    pub navigation_label_weight: u16,
+    pub navigation_icon_size_px: u8,
+    pub navigation_icon_label_gap_px: u8,
+    pub navigation_item_min_height_px: u8,
+    pub navigation_touch_item_min_height_px: u8,
     pub topbar_height_px: u16,
     pub topbar_action_height_px: u16,
+    pub topbar_action_label_weight: u16,
     pub topbar_action_gap_px: u16,
     pub topbar_action_horizontal_padding_px: u16,
     pub content_padding_px: u16,
+    pub surface_corner_radius_px: u8,
     pub book_cover_width_px: u16,
     pub book_cover_height_px: u16,
     pub book_card_height_px: u16,
     pub book_grid_column_gap_px: u16,
     pub book_grid_row_height_px: u16,
+    pub book_card_title_size_px: u8,
+    pub book_card_title_weight: u16,
+    pub book_card_title_line_height_px: u8,
+    pub book_card_title_lines: u8,
+    pub book_card_author_size_px: u8,
+    pub book_card_author_line_height_px: u8,
+    pub book_card_cover_content_gap_px: u8,
+    pub book_card_text_gap_px: u8,
+    pub book_card_progress_height_px: u8,
+    pub book_grid_row_trailing_space_px: u8,
+    pub carousel_title_size_px: u8,
+    pub carousel_title_weight: u16,
+    pub carousel_section_gap_px: u8,
+    pub carousel_content_gap_px: u8,
+    pub carousel_control_gap_px: u8,
+    pub carousel_arrow_size_px: u8,
     pub detailed_row_thumbnail_width_px: u16,
     pub detailed_row_thumbnail_height_px: u16,
     pub detailed_row_height_px: u16,
@@ -93,6 +160,16 @@ pub struct BrowsingLayoutContract {
     pub author_row_cover_width_px: u16,
     pub author_row_cover_height_px: u16,
     pub author_row_height_px: u16,
+    pub author_row_cover_gap_px: u8,
+    pub author_row_content_gap_px: u8,
+    pub author_row_horizontal_padding_px: u8,
+    pub author_row_label_size_px: u8,
+    pub hierarchy_cell_height_px: u16,
+    pub hierarchy_touch_cell_min_height_px: u16,
+    pub hierarchy_cell_min_width_px: u16,
+    pub hierarchy_cell_gap_px: u8,
+    pub hierarchy_icon_size_px: u8,
+    pub hierarchy_label_size_px: u8,
 }
 
 impl Default for BrowsingLayoutContract {
@@ -100,16 +177,40 @@ impl Default for BrowsingLayoutContract {
         Self {
             large_viewport_breakpoint_px: LARGE_VIEWPORT_BREAKPOINT_PX,
             sidebar_width_px: LARGE_SIDEBAR_WIDTH_PX,
+            navigation_label_size_px: NAVIGATION_LABEL_SIZE_PX,
+            navigation_label_weight: NAVIGATION_LABEL_WEIGHT,
+            navigation_icon_size_px: NAVIGATION_ICON_SIZE_PX,
+            navigation_icon_label_gap_px: NAVIGATION_ICON_LABEL_GAP_PX,
+            navigation_item_min_height_px: NAVIGATION_ITEM_MIN_HEIGHT_PX,
+            navigation_touch_item_min_height_px: NAVIGATION_TOUCH_ITEM_MIN_HEIGHT_PX,
             topbar_height_px: LARGE_TOPBAR_HEIGHT_PX,
             topbar_action_height_px: LARGE_TOPBAR_ACTION_HEIGHT_PX,
+            topbar_action_label_weight: TOPBAR_ACTION_LABEL_WEIGHT,
             topbar_action_gap_px: LARGE_TOPBAR_ACTION_GAP_PX,
             topbar_action_horizontal_padding_px: LARGE_TOPBAR_ACTION_HORIZONTAL_PADDING_PX,
             content_padding_px: LARGE_CONTENT_PADDING_PX,
+            surface_corner_radius_px: SURFACE_CORNER_RADIUS_PX,
             book_cover_width_px: LARGE_BOOK_COVER_WIDTH_PX,
             book_cover_height_px: LARGE_BOOK_COVER_HEIGHT_PX,
             book_card_height_px: LARGE_BOOK_CARD_HEIGHT_PX,
             book_grid_column_gap_px: LARGE_BOOK_GRID_COLUMN_GAP_PX,
             book_grid_row_height_px: LARGE_BOOK_GRID_ROW_HEIGHT_PX,
+            book_card_title_size_px: BOOK_CARD_TITLE_SIZE_PX,
+            book_card_title_weight: BOOK_CARD_TITLE_WEIGHT,
+            book_card_title_line_height_px: BOOK_CARD_TITLE_LINE_HEIGHT_PX,
+            book_card_title_lines: BOOK_CARD_TITLE_LINES,
+            book_card_author_size_px: BOOK_CARD_AUTHOR_SIZE_PX,
+            book_card_author_line_height_px: BOOK_CARD_AUTHOR_LINE_HEIGHT_PX,
+            book_card_cover_content_gap_px: BOOK_CARD_COVER_CONTENT_GAP_PX,
+            book_card_text_gap_px: BOOK_CARD_TEXT_GAP_PX,
+            book_card_progress_height_px: BOOK_CARD_PROGRESS_HEIGHT_PX,
+            book_grid_row_trailing_space_px: BOOK_GRID_ROW_TRAILING_SPACE_PX,
+            carousel_title_size_px: CAROUSEL_TITLE_SIZE_PX,
+            carousel_title_weight: CAROUSEL_TITLE_WEIGHT,
+            carousel_section_gap_px: CAROUSEL_SECTION_GAP_PX,
+            carousel_content_gap_px: CAROUSEL_CONTENT_GAP_PX,
+            carousel_control_gap_px: CAROUSEL_CONTROL_GAP_PX,
+            carousel_arrow_size_px: CAROUSEL_ARROW_SIZE_PX,
             detailed_row_thumbnail_width_px: DETAILED_ROW_THUMBNAIL_WIDTH_PX,
             detailed_row_thumbnail_height_px: DETAILED_ROW_THUMBNAIL_HEIGHT_PX,
             detailed_row_height_px: DETAILED_ROW_HEIGHT_PX,
@@ -120,11 +221,21 @@ impl Default for BrowsingLayoutContract {
             author_row_cover_width_px: AUTHOR_ROW_COVER_WIDTH_PX,
             author_row_cover_height_px: AUTHOR_ROW_COVER_HEIGHT_PX,
             author_row_height_px: AUTHOR_ROW_HEIGHT_PX,
+            author_row_cover_gap_px: AUTHOR_ROW_COVER_GAP_PX,
+            author_row_content_gap_px: AUTHOR_ROW_CONTENT_GAP_PX,
+            author_row_horizontal_padding_px: AUTHOR_ROW_HORIZONTAL_PADDING_PX,
+            author_row_label_size_px: AUTHOR_ROW_LABEL_SIZE_PX,
+            hierarchy_cell_height_px: HIERARCHY_CELL_HEIGHT_PX,
+            hierarchy_touch_cell_min_height_px: HIERARCHY_TOUCH_CELL_MIN_HEIGHT_PX,
+            hierarchy_cell_min_width_px: HIERARCHY_CELL_MIN_WIDTH_PX,
+            hierarchy_cell_gap_px: HIERARCHY_CELL_GAP_PX,
+            hierarchy_icon_size_px: HIERARCHY_ICON_SIZE_PX,
+            hierarchy_label_size_px: HIERARCHY_LABEL_SIZE_PX,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ReaderSettingsPresentation {
     ContextualOverlay,
@@ -275,7 +386,14 @@ pub struct BrowsingContentContract {
     pub home_book_limit: u8,
     pub finished_progress_threshold: u8,
     pub import_extensions: Vec<String>,
+    pub file_type_filters: Vec<LibraryFileTypeFilterDefinition>,
     pub semantic_link_relations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+pub struct LibraryFileTypeFilterDefinition {
+    pub value: LibraryFileTypeFilter,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
@@ -313,6 +431,7 @@ impl Default for BrowsingContentContract {
             home_book_limit: 20,
             finished_progress_threshold: 98,
             import_extensions: BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect(),
+            file_type_filters: LibraryFileTypeFilter::ALL.into_iter().map(|value| LibraryFileTypeFilterDefinition { value, label: value.label().to_owned() }).collect(),
             semantic_link_relations: SEMANTIC_LINK_RELATIONS.into_iter().map(str::to_owned).collect(),
         }
     }
@@ -531,7 +650,7 @@ impl Default for SettingsContract {
 /// scope, so that a library-scoped destination cannot be listed among the
 /// app-scoped ones by mistake. This mirrors the `LibraryRoute`/`UniversalRoute`
 /// split the desktop frontend already makes one layer down.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryFeature {
     Home,
@@ -543,7 +662,27 @@ pub enum LibraryFeature {
     Trash,
 }
 
+/// Semantic navigation artwork shared by every frontend. Renderers translate
+/// these names into their native icon implementation; the contract owns the
+/// choice so desktop and mobile cannot assign different symbols to one route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationIcon {
+    House,
+    BookOpen,
+    Folder,
+    Asterisk,
+    Tags,
+    User,
+    Trash2,
+    Building2,
+    CircleUser,
+    Settings,
+}
+
 impl LibraryFeature {
+    pub const ALL: &'static [Self] = &LIBRARY_FEATURES;
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
@@ -553,10 +692,26 @@ impl LibraryFeature {
             Self::Trash => "Trash",
         }
     }
+
+    pub const fn icon(self) -> NavigationIcon {
+        match self {
+            Self::Home => NavigationIcon::House,
+            Self::Folders => NavigationIcon::Folder,
+            Self::Subjects => NavigationIcon::Tags,
+            Self::Authors => NavigationIcon::User,
+            Self::Trash => NavigationIcon::Trash2,
+        }
+    }
+}
+
+impl Default for LibraryFeature {
+    fn default() -> Self {
+        Self::Folders
+    }
 }
 
 /// A destination that outlives the selected library.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum UniversalFeature {
     Store,
@@ -565,12 +720,28 @@ pub enum UniversalFeature {
 }
 
 impl UniversalFeature {
+    pub const ALL: &'static [Self] = &UNIVERSAL_FEATURES;
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Store => "Store",
             Self::Account => "Account",
             Self::Settings => "Settings",
         }
+    }
+
+    pub const fn icon(self) -> NavigationIcon {
+        match self {
+            Self::Store => NavigationIcon::Building2,
+            Self::Account => NavigationIcon::CircleUser,
+            Self::Settings => NavigationIcon::Settings,
+        }
+    }
+}
+
+impl Default for UniversalFeature {
+    fn default() -> Self {
+        Self::Store
     }
 }
 
@@ -589,16 +760,34 @@ impl UniversalFeature {
 pub const LIBRARY_FEATURES: [LibraryFeature; 5] = [LibraryFeature::Home, LibraryFeature::Folders, LibraryFeature::Subjects, LibraryFeature::Authors, LibraryFeature::Trash];
 pub const UNIVERSAL_FEATURES: [UniversalFeature; 3] = [UniversalFeature::Store, UniversalFeature::Account, UniversalFeature::Settings];
 
+/// Cross-frontend browser-session behavior. The serialized representation is
+/// platform-owned, while these rules are shared so switching frontends does
+/// not change what "resume browsing" means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
+pub struct BrowserSessionContract {
+    pub default_library_route: LibraryFeature,
+    pub restore_places_per_library: bool,
+    pub persist_universal_routes: bool,
+}
+
+impl Default for BrowserSessionContract {
+    fn default() -> Self {
+        Self { default_library_route: LibraryFeature::Folders, restore_places_per_library: true, persist_universal_routes: false }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
 pub struct LibraryFeatureDefinition {
     pub id: LibraryFeature,
     pub label: String,
+    pub icon: NavigationIcon,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
 pub struct UniversalFeatureDefinition {
     pub id: UniversalFeature,
     pub label: String,
+    pub icon: NavigationIcon,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
@@ -691,6 +880,7 @@ impl Default for ReaderNavigationContract {
 pub struct FrontendContract {
     pub navigation: Vec<LibraryFeatureDefinition>,
     pub app_navigation: Vec<UniversalFeatureDefinition>,
+    pub browser_session: BrowserSessionContract,
     pub browsing_layout: BrowsingLayoutContract,
     pub library_actions: LibraryActionsContract,
     pub store: StoreContract,
@@ -708,11 +898,12 @@ pub struct FrontendContract {
 
 impl Default for FrontendContract {
     fn default() -> Self {
-        let navigation = LIBRARY_FEATURES.into_iter().map(|id| LibraryFeatureDefinition { id, label: id.label().to_string() }).collect();
-        let app_navigation = UNIVERSAL_FEATURES.into_iter().map(|id| UniversalFeatureDefinition { id, label: id.label().to_string() }).collect();
+        let navigation = LIBRARY_FEATURES.into_iter().map(|id| LibraryFeatureDefinition { id, label: id.label().to_string(), icon: id.icon() }).collect();
+        let app_navigation = UNIVERSAL_FEATURES.into_iter().map(|id| UniversalFeatureDefinition { id, label: id.label().to_string(), icon: id.icon() }).collect();
         Self {
             navigation,
             app_navigation,
+            browser_session: BrowserSessionContract::default(),
             browsing_layout: BrowsingLayoutContract::default(),
             library_actions: LibraryActionsContract::default(),
             store: StoreContract::default(),
@@ -747,7 +938,15 @@ mod tests {
         let contract = FrontendContract::default();
         assert_eq!(contract.app_navigation.iter().map(|feature| feature.id).collect::<Vec<_>>(), UNIVERSAL_FEATURES.to_vec());
         assert!(contract.app_navigation.iter().all(|feature| feature.label == feature.id.label()));
+        assert!(contract.app_navigation.iter().all(|feature| feature.icon == feature.id.icon()));
         assert_eq!(contract.app_navigation.len(), UNIVERSAL_FEATURES.len(), "every app destination must appear in navigation exactly once");
+    }
+
+    #[test]
+    fn navigation_contract_owns_every_destination_icon() {
+        let contract = FrontendContract::default();
+        assert!(contract.navigation.iter().all(|feature| feature.icon == feature.id.icon()));
+        assert!(contract.app_navigation.iter().all(|feature| feature.icon == feature.id.icon()));
     }
 
     /// The rail draws the two lists as two groups. If a destination could sit
@@ -756,7 +955,15 @@ mod tests {
     /// counts that go with them.
     #[test]
     fn the_two_navigation_groups_cover_every_destination() {
-        assert_eq!(LIBRARY_FEATURES.len() + UNIVERSAL_FEATURES.len(), 7, "the rail draws seven destinations");
+        assert_eq!(LIBRARY_FEATURES.len() + UNIVERSAL_FEATURES.len(), 8, "the rail draws eight destinations");
+    }
+
+    #[test]
+    fn browser_session_semantics_match_the_native_browser() {
+        let contract = FrontendContract::default().browser_session;
+        assert_eq!(contract.default_library_route, LibraryFeature::Folders);
+        assert!(contract.restore_places_per_library);
+        assert!(!contract.persist_universal_routes);
     }
 
     /// The card's declared height has to equal what its children actually
@@ -764,12 +971,16 @@ mod tests {
     #[test]
     fn the_book_card_height_is_the_sum_of_its_children() {
         const COVER: u16 = LARGE_BOOK_COVER_HEIGHT_PX;
-        const TEXT_GAP: u16 = 14;
-        const TITLE: u16 = 42;
-        const ROW_GAP: u16 = 5;
-        const AUTHOR: u16 = 22;
-        const PROGRESS: u16 = 16;
+        const TEXT_GAP: u16 = BOOK_CARD_COVER_CONTENT_GAP_PX as u16;
+        const TITLE: u16 = BOOK_CARD_TITLE_LINE_HEIGHT_PX as u16 * BOOK_CARD_TITLE_LINES as u16;
+        const ROW_GAP: u16 = BOOK_CARD_TEXT_GAP_PX as u16;
+        const AUTHOR: u16 = BOOK_CARD_AUTHOR_LINE_HEIGHT_PX as u16;
+        const PROGRESS: u16 = BOOK_CARD_PROGRESS_HEIGHT_PX as u16;
         assert_eq!(LARGE_BOOK_CARD_HEIGHT_PX, COVER + TEXT_GAP + TITLE + ROW_GAP + AUTHOR + ROW_GAP + PROGRESS);
+        assert_eq!(LARGE_BOOK_GRID_ROW_HEIGHT_PX, LARGE_BOOK_CARD_HEIGHT_PX + BOOK_GRID_ROW_TRAILING_SPACE_PX as u16);
+        let layout = FrontendContract::default().browsing_layout;
+        assert_eq!(layout.book_card_title_lines, 2);
+        assert_eq!(layout.book_card_title_weight, 600);
     }
 
     /// The row is virtualized on a fixed height, so the thumbnail must fit
@@ -798,8 +1009,21 @@ mod tests {
     }
 
     #[test]
+    fn metadata_review_modes_share_one_fixed_item_height() {
+        assert_eq!(METADATA_REVIEW_ITEM_HEIGHT_PX, 376);
+    }
+
+    #[test]
     fn book_covers_are_the_declared_aspect_ratio() {
         assert_eq!(f64::from(LARGE_BOOK_COVER_HEIGHT_PX) / f64::from(LARGE_BOOK_COVER_WIDTH_PX), 1.6);
+    }
+
+    #[test]
+    fn author_cards_reuse_regular_book_covers() {
+        assert_eq!(AUTHOR_ROW_COVER_COUNT, 3);
+        assert_eq!(AUTHOR_ROW_COVER_WIDTH_PX, LARGE_BOOK_COVER_WIDTH_PX);
+        assert_eq!(AUTHOR_ROW_COVER_HEIGHT_PX, LARGE_BOOK_COVER_HEIGHT_PX);
+        assert_eq!(AUTHOR_ROW_HEIGHT_PX, AUTHOR_ROW_HORIZONTAL_PADDING_PX as u16 * 2 + BOOK_CARD_TITLE_LINE_HEIGHT_PX as u16 * BOOK_CARD_TITLE_LINES as u16 + AUTHOR_ROW_CONTENT_GAP_PX as u16 + AUTHOR_ROW_COVER_HEIGHT_PX);
     }
 
     #[test]
@@ -810,6 +1034,54 @@ mod tests {
         assert_eq!(contract.search_result_limit, 100);
         assert!(contract.import_extensions.iter().any(|extension| extension == "pdf"));
         assert!(contract.semantic_link_relations.iter().any(|relation| relation == "related to"));
+    }
+
+    #[test]
+    fn hierarchy_geometry_distinguishes_pointer_and_touch_density() {
+        let layout = FrontendContract::default().browsing_layout;
+        assert_eq!(layout.hierarchy_cell_height_px, 40);
+        assert_eq!(layout.hierarchy_touch_cell_min_height_px, 56);
+        assert_eq!(layout.hierarchy_cell_min_width_px, 240);
+        assert_eq!(layout.hierarchy_cell_gap_px, 4);
+        assert_eq!(layout.hierarchy_icon_size_px, 22);
+        assert_eq!(layout.hierarchy_label_size_px, 18);
+    }
+
+    #[test]
+    fn shared_surfaces_use_square_corners() {
+        assert_eq!(FrontendContract::default().browsing_layout.surface_corner_radius_px, 0);
+    }
+
+    #[test]
+    fn topbar_actions_use_semibold_labels() {
+        assert_eq!(FrontendContract::default().browsing_layout.topbar_action_label_weight, 600);
+    }
+
+    #[test]
+    fn navigation_labels_share_a_readable_responsive_size() {
+        assert_eq!(FrontendContract::default().browsing_layout.navigation_label_size_px, 12);
+    }
+
+    #[test]
+    fn navigation_labels_share_semibold_weight() {
+        assert_eq!(FrontendContract::default().browsing_layout.navigation_label_weight, 600);
+    }
+
+    #[test]
+    fn navigation_icons_share_one_responsive_size() {
+        assert_eq!(FrontendContract::default().browsing_layout.navigation_icon_size_px, 24);
+    }
+
+    #[test]
+    fn navigation_icons_and_labels_share_one_gap() {
+        assert_eq!(FrontendContract::default().browsing_layout.navigation_icon_label_gap_px, 5);
+    }
+
+    #[test]
+    fn navigation_heights_are_minimums_for_pointer_and_touch_layouts() {
+        let layout = FrontendContract::default().browsing_layout;
+        assert_eq!(layout.navigation_item_min_height_px, 64);
+        assert_eq!(layout.navigation_touch_item_min_height_px, 56);
     }
 
     #[test]

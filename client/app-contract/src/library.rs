@@ -5,6 +5,56 @@ use specta::Type;
 use std::cmp::Reverse;
 use sync_common::{ContentHash, DirId, LibraryId};
 
+/// Limits hierarchical library browsing to one broad publication family.
+/// `Book` intentionally means every supported reading format except PDF and
+/// M4B, which have dedicated filters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryFileTypeFilter {
+    #[default]
+    All,
+    Book,
+    Pdf,
+    Audiobook,
+}
+
+impl LibraryFileTypeFilter {
+    pub const ALL: [Self; 4] = [Self::All, Self::Book, Self::Pdf, Self::Audiobook];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Book => "Books",
+            Self::Pdf => "PDF",
+            Self::Audiobook => "Audiobooks",
+        }
+    }
+
+    pub fn matches_extension(self, extension: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Pdf => extension.eq_ignore_ascii_case("pdf"),
+            Self::Audiobook => extension.eq_ignore_ascii_case("m4b"),
+            Self::Book => !extension.eq_ignore_ascii_case("pdf") && !extension.eq_ignore_ascii_case("m4b"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod file_type_filter_tests {
+    use super::LibraryFileTypeFilter;
+
+    #[test]
+    fn broad_book_filter_excludes_dedicated_pdf_and_audiobook_formats() {
+        assert!(LibraryFileTypeFilter::Book.matches_extension("epub"));
+        assert!(LibraryFileTypeFilter::Book.matches_extension("cbz"));
+        assert!(!LibraryFileTypeFilter::Book.matches_extension("pdf"));
+        assert!(!LibraryFileTypeFilter::Book.matches_extension("m4b"));
+        assert!(LibraryFileTypeFilter::Pdf.matches_extension("PDF"));
+        assert!(LibraryFileTypeFilter::Audiobook.matches_extension("M4B"));
+    }
+}
+
 /// The complete, stable destination for a book import.
 /// Frontends must choose both identities before starting an asynchronous
 /// download. The backend still verifies their relationship against the live
@@ -56,10 +106,15 @@ pub struct AuthorSummary {
     pub sort_name: String,
     #[specta(type = specta_typescript::Number)]
     pub book_count: usize,
-    /// Covers for the author's row, most recently read first, capped at
+    /// Books displayed on the author's card, most recently read first. Each
+    /// content hash identifies both its cover thumbnail and its detail page,
+    /// capped at
     /// [`crate::frontend::AUTHOR_ROW_COVER_COUNT`].
     #[specta(type = Vec<String>)]
     pub cover_hashes: Vec<ContentHash>,
+    /// Titles parallel to `cover_hashes`, used when a displayed book has no
+    /// cover artwork. Both vectors are produced by the same ordered query.
+    pub cover_titles: Vec<String>,
 }
 
 /// Everything a browsing card renders for one book.
@@ -78,6 +133,53 @@ pub struct BookCardRow {
     pub audiobook_duration_ms: Option<u64>,
     #[specta(type = Option<specta_typescript::Number>)]
     pub audiobook_chapter_count: Option<usize>,
+    /// Milliseconds since the Unix epoch when this book entered the library.
+    /// Legacy rows without a timestamp use zero and sort after dated books.
+    #[specta(type = specta_typescript::Number)]
+    pub added_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct AudiobookChapter {
+    pub title: String,
+    #[specta(type = specta_typescript::Number)]
+    pub start_ms: u64,
+    #[specta(type = specta_typescript::Number)]
+    pub end_ms: u64,
+}
+
+/// One credited author on a book. Only `aut` contributor roles are projected
+/// here; editors, translators and narrators remain contributor metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+pub struct BookDetailAuthor {
+    #[specta(type = String)]
+    pub id: AuthorId,
+    pub name: String,
+}
+
+/// A reader target in the publication's own hierarchical navigation model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BookTocEntry {
+    pub title: String,
+    pub target: String,
+    pub children: Vec<BookTocEntry>,
+}
+
+/// Complete initial payload for a book detail screen. Related books are kept
+/// in the same response for native callers; browser workers may still resolve
+/// the command independently from route rendering.
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+pub struct BookDetail {
+    pub book: BookCardRow,
+    /// One live placement that can act as the source for copy/move actions.
+    /// A detail screen is not itself scoped to a folder.
+    pub source_directory_id: Option<String>,
+    pub authors: Vec<BookDetailAuthor>,
+    /// Canonical full paths. Frontends display their leaf and use the complete
+    /// value for navigation and accessible names.
+    pub subject_paths: Vec<String>,
+    pub toc: Vec<BookTocEntry>,
+    pub related: Vec<BookCardRow>,
 }
 
 /// One library search with title matches kept ahead of distinct author-only
@@ -139,10 +241,11 @@ impl AuthorSummary {
     /// `sort_name` is the stored filing form, if the source had one. An empty
     /// or absent one resolves to the display name here, once, so that every
     /// caller filing, grouping or sorting by it gets the same answer.
-    pub fn try_new(id: AuthorId, name: String, sort_name: Option<String>, book_count: usize, cover_hashes: Vec<ContentHash>) -> Result<Self, AuthorNameError> {
+    pub fn try_new(id: AuthorId, name: String, sort_name: Option<String>, book_count: usize, cover_hashes: Vec<ContentHash>, cover_titles: Vec<String>) -> Result<Self, AuthorNameError> {
         let name = AuthorName::parse(&name)?;
         let sort_name = sort_name.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).unwrap_or_else(|| name.as_str().to_owned());
-        Ok(Self { id, name, sort_name, book_count, cover_hashes })
+        let cover_titles = cover_hashes.iter().enumerate().map(|(index, _)| cover_titles.get(index).map(|title| title.trim()).filter(|title| !title.is_empty()).unwrap_or("Untitled").to_owned()).collect();
+        Ok(Self { id, name, sort_name, book_count, cover_hashes, cover_titles })
     }
     pub fn id(&self) -> AuthorId {
         self.id
@@ -158,6 +261,9 @@ impl AuthorSummary {
     }
     pub fn cover_hashes(&self) -> &[ContentHash] {
         &self.cover_hashes
+    }
+    pub fn cover_titles(&self) -> &[String] {
+        &self.cover_titles
     }
 }
 
@@ -195,7 +301,7 @@ mod tests {
     #[test]
     fn authors_file_under_their_sort_name_not_their_display_name() {
         let id = agent_id_from_migration_seed(b"Kerstin Ekman");
-        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), Some("Ekman, Kerstin".to_owned()), 9, Vec::new()).unwrap();
+        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), Some("Ekman, Kerstin".to_owned()), 9, Vec::new(), Vec::new()).unwrap();
 
         assert_eq!(author.name().as_str(), "Kerstin Ekman", "the display name is what the reader sees");
         assert_eq!(author.sort_name(), "Ekman, Kerstin");
@@ -204,8 +310,8 @@ mod tests {
     #[test]
     fn a_missing_sort_name_falls_back_to_the_display_name() {
         let id = agent_id_from_migration_seed(b"Susanna Clarke");
-        let blank = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), Some("   ".to_owned()), 2, Vec::new()).unwrap();
-        let absent = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), None, 2, Vec::new()).unwrap();
+        let blank = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), Some("   ".to_owned()), 2, Vec::new(), Vec::new()).unwrap();
+        let absent = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), None, 2, Vec::new(), Vec::new()).unwrap();
 
         assert_eq!(blank.sort_name(), "Susanna Clarke");
         assert_eq!(absent.sort_name(), "Susanna Clarke");
@@ -213,7 +319,7 @@ mod tests {
 
     #[test]
     fn sorting_by_name_orders_by_the_filing_form() {
-        let author = |display: &str, sort: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), Some(sort.to_owned()), 1, Vec::new()).unwrap();
+        let author = |display: &str, sort: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), Some(sort.to_owned()), 1, Vec::new(), Vec::new()).unwrap();
         let mut authors = vec![author("Kerstin Ekman", "Ekman, Kerstin"), author("Susanna Clarke", "Clarke, Susanna"), author("Peter Englund", "Englund, Peter")];
 
         AuthorSort::Name.sort(&mut authors);
@@ -225,8 +331,8 @@ mod tests {
     fn author_summary_exposes_identity_independently_from_display_name() {
         let first_id = agent_id_from_migration_seed(b"first Alex Smith");
         let second_id = agent_id_from_migration_seed(b"second Alex Smith");
-        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), None, 1, Vec::new()).unwrap();
-        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), None, 2, Vec::new()).unwrap();
+        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), None, 1, Vec::new(), Vec::new()).unwrap();
+        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), None, 2, Vec::new(), Vec::new()).unwrap();
 
         assert_eq!(first.name(), second.name());
         assert_ne!(first.id(), second.id());

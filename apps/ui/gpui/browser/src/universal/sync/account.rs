@@ -86,7 +86,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    pub(super) fn start_snapshot_operation<F, Fut>(&mut self, progress: &'static str, success: &'static str, operation: F, cx: &mut Context<Self>)
+    pub(super) fn start_snapshot_operation<F, Fut>(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: F, cx: &mut Context<Self>)
     where
         F: FnOnce(AppBackend) -> Fut,
         Fut: Future<Output = Result<CloudSnapshot, String>> + Send + 'static,
@@ -96,6 +96,9 @@ impl SyncPage {
         }
         self.busy = true;
         self.account_action_busy = true;
+        if reveal_password_reset_on_error {
+            self.login_failed = false;
+        }
         self.error = None;
         self.message = Some(progress.into());
         cx.notify();
@@ -103,8 +106,14 @@ impl SyncPage {
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = page.update(cx, |page, cx| match result {
-                Ok(snapshot) => page.apply_snapshot(snapshot, Some(success), cx),
-                Err(error) => page.apply_error(error, cx),
+                Ok(snapshot) => {
+                    page.login_failed = false;
+                    page.apply_snapshot(snapshot, Some(success), cx);
+                }
+                Err(error) => {
+                    page.login_failed = reveal_password_reset_on_error;
+                    page.apply_error(error, cx);
+                }
             });
         }));
     }
@@ -113,6 +122,7 @@ impl SyncPage {
         self.start_snapshot_operation(
             "Signing out…",
             "Signed out",
+            false,
             |core| async move {
                 core.logout().await.map_err(|error| error.to_string())?;
                 load_cloud_snapshot(&core).await

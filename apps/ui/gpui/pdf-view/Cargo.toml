@@ -8,6 +8,7 @@ publish = false
 ui-components = { path = "../components" }
 gpui.workspace = true
 image = { version = "0.25", default-features = false }
+log = "0.4"
 pdf-reader-core = { path = "../../../renderers/pdf/core" }
 smallvec = "1"
 

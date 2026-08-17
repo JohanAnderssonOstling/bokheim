@@ -1,5 +1,5 @@
 [Unit]
-Description=Bokheim Open Library classification server
+Description=Bokheim Open Library metadata server
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=2min
@@ -13,6 +13,8 @@ ExecStart=/usr/local/bin/metadata-server
 Environment=BOKHEIM_METADATA_BIND=127.0.0.1:8091
 Environment=BOKHEIM_METADATA_DATABASE=/home/johan/data/openlibrary/current.sqlite
 Environment=RUST_LOG=info
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=35s

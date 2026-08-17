@@ -2,21 +2,23 @@ use atom_syndication::{Entry as AtomEntry, Feed, Link as AtomLink, TextType};
 use futures_util::StreamExt;
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
-use reqwest::{Client, RequestBuilder, Response, Url};
+use reqwest::{Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uri_template::{HashValues, UriTemplate};
 
 mod litteraturbanken;
+mod outbound;
 mod registry;
 
+pub use outbound::{send_get as send_outbound_get, OutboundHttpError, OutboundNetworkPolicy};
 pub use registry::{CatalogRegistry, CatalogSource, CATALOG_REGISTRY_SCHEMA_VERSION};
 
 const MAX_CATALOG_BYTES: u64 = 24 * 1024 * 1024;
@@ -26,6 +28,13 @@ const MAX_SEARCH_DESCRIPTION_BYTES: u64 = 1024 * 1024;
 // synchronized storage itself is governed by the user's account quota.
 const MAX_OPDS_DOWNLOAD_BYTES: u64 = 1_000_000_000;
 const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const EPUB_RANGE_TAIL_BYTES: u64 = 65_557;
+const MAX_EPUB_RANGE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_EPUB_CENTRAL_DIRECTORY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_EPUB_CONTAINER_BYTES: u64 = 256 * 1024;
+const MAX_EPUB_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_EPUB_NAVIGATION_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_EPUB_COVER_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_CUSTOM_ENDPOINTS: usize = 64;
 const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
 const PDF_MEDIA_TYPE: &str = "application/pdf";
@@ -73,10 +82,7 @@ pub struct OpdsEndpoint {
 pub fn built_in_opds_endpoints() -> Vec<OpdsEndpoint> {
     vec![
         open_endpoint("project-gutenberg", "Project Gutenberg", "A large multilingual collection of free ebooks, with browsing and catalog search.", &["Multilingual"], "https://www.gutenberg.org/ebooks/search.opds/"),
-        open_endpoint("open-library", "Open Library", "A multilingual Open Library and Internet Archive catalog with public-domain downloads and library lending links.", &["Multilingual"], "https://openlibrary.org/opds/"),
         open_endpoint("unglue-it", "Unglue.it", "Open and Creative Commons ebooks collected by the Free Ebook Foundation.", &["Multilingual"], "https://unglue.it/api/opds/"),
-        open_endpoint("textos-info", "textos.info", "A Spanish-language catalog of freely available literature.", &["Spanish"], "https://www.textos.info/catalogo.atom"),
-        open_endpoint("ebooks-gratuits", "Ebooks Gratuits", "French-language public-domain and freely distributed ebooks.", &["French"], "https://www.ebooksgratuits.com/opds/index.php"),
         open_endpoint("office-of-the-historian", "Office of the Historian", "The official Foreign Relations of the United States ebook collection.", &["English"], "https://history.state.gov/api/v1/catalog"),
         open_endpoint("gallica", "Gallica", "Public-domain publications from the Bibliothèque nationale de France.", &["French"], "https://gallica.bnf.fr/opds"),
         open_endpoint(
@@ -637,6 +643,7 @@ pub enum OpdsError {
     TimedOut,
     HttpStatus(reqwest::StatusCode),
     ResponseTooLarge { limit: u64 },
+    RangeUnsupported,
     UnsupportedCatalogFormat,
     InvalidCatalog(String),
     NonFreeAcquisition,
@@ -655,6 +662,7 @@ impl fmt::Display for OpdsError {
             Self::TimedOut => formatter.write_str("OPDS server did not respond before the timeout"),
             Self::HttpStatus(status) => write!(formatter, "OPDS server returned HTTP {status}"),
             Self::ResponseTooLarge { limit } => write!(formatter, "OPDS response exceeds the {limit}-byte limit"),
+            Self::RangeUnsupported => formatter.write_str("OPDS acquisition origin does not support reliable byte ranges"),
             Self::UnsupportedCatalogFormat => formatter.write_str("response is neither an OPDS 1.2 Atom feed nor an OPDS 2.0 JSON feed"),
             Self::InvalidCatalog(error) => write!(formatter, "invalid OPDS catalog: {error}"),
             Self::NonFreeAcquisition => formatter.write_str("only unpriced direct open-access or generic EPUB/PDF acquisitions can be imported"),
@@ -709,7 +717,7 @@ impl OpdsFetchProfile {
 
 #[derive(Clone)]
 pub struct OpdsClient {
-    http: Client,
+    outbound_policy: OutboundNetworkPolicy,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -726,8 +734,13 @@ pub enum OpdsConditionalCatalog {
 
 impl OpdsClient {
     pub fn new() -> Result<Self, OpdsError> {
-        let http = Client::builder().connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::limited(10)).user_agent(format!("Bokheim/{} OPDS", env!("CARGO_PKG_VERSION"))).build()?;
-        Ok(Self { http })
+        Ok(Self { outbound_policy: OutboundNetworkPolicy::AllowPrivate })
+    }
+
+    /// Creates the client used by Internet-facing services. Every DNS result
+    /// and redirect hop must remain on publicly routed address space.
+    pub fn new_public_only() -> Result<Self, OpdsError> {
+        Ok(Self { outbound_policy: OutboundNetworkPolicy::PublicOnly })
     }
 
     pub async fn fetch_catalog(&self, url: &str) -> Result<OpdsCatalog, OpdsError> {
@@ -771,7 +784,7 @@ impl OpdsClient {
             OpdsSearch::UriTemplate { base_url, template } => (parse_http_url(base_url)?, template.clone()),
             OpdsSearch::OpenSearchDescription { url } => {
                 let description_url = parse_http_url(url)?;
-                let response = self.send(self.request(description_url.clone())).await?;
+                let response = self.send(description_url.clone(), reqwest::header::HeaderMap::new()).await?;
                 let final_url = validated_response_url(&response)?;
                 let bytes = read_bounded(response, MAX_SEARCH_DESCRIPTION_BYTES).await?;
                 (final_url, parse_open_search_template(&bytes)?)
@@ -783,31 +796,41 @@ impl OpdsClient {
     }
 
     pub async fn download_book(&self, acquisition: &OpdsDirectAcquisition, temporary_directory: &Path) -> Result<DownloadedOpdsBook, OpdsError> {
+        self.download_book_with_limit(acquisition, temporary_directory, MAX_OPDS_DOWNLOAD_BYTES).await
+    }
+
+    /// Downloads an acquisition with a caller-specific bound no larger than
+    /// the normal import limit. Catalogue crawlers use this to avoid acquiring
+    /// unusually large books merely to inspect their package metadata.
+    pub async fn download_book_with_limit(&self, acquisition: &OpdsDirectAcquisition, temporary_directory: &Path, byte_limit: u64) -> Result<DownloadedOpdsBook, OpdsError> {
         if !is_importable_acquisition(acquisition) {
             return Err(OpdsError::NonFreeAcquisition);
         }
+        let byte_limit = byte_limit.min(MAX_OPDS_DOWNLOAD_BYTES);
         let url = parse_http_url(&acquisition.url)?;
-        let request = self.request(url.clone()).header(reqwest::header::ACCEPT, acquisition.book_format.media_type());
-        let response = self.send(litteraturbanken::download_request(request, &url)).await?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static(acquisition.book_format.media_type()));
+        litteraturbanken::decorate_download_headers(&mut headers, &url);
+        let response = self.send(url.clone(), headers).await?;
         let _ = validated_response_url(&response)?;
         let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(normalized_media_type);
         if media_type.as_deref().is_some_and(|value| !acquisition.book_format.accepts_media_type(value) && !matches!(value, "application/octet-stream" | "application/zip" | "binary/octet-stream")) {
             return Err(OpdsError::UnsupportedBookResponse(media_type));
         }
-        if response.content_length().is_some_and(|length| length > MAX_OPDS_DOWNLOAD_BYTES) {
-            return Err(OpdsError::ResponseTooLarge { limit: MAX_OPDS_DOWNLOAD_BYTES });
+        if response.content_length().is_some_and(|length| length > byte_limit) {
+            return Err(OpdsError::ResponseTooLarge { limit: byte_limit });
         }
         tokio::fs::create_dir_all(temporary_directory).await?;
         let path = temporary_directory.join(format!("opds-{}.{}", uuid::Uuid::new_v4(), acquisition.book_format.extension()));
-        let guard = DownloadedOpdsBook { path, file_name: acquisition.suggested_file_name.clone() };
+        let mut guard = DownloadedOpdsBook { path, file_name: acquisition.suggested_file_name.clone(), transferred_bytes: 0, metadata_only: false };
         let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&guard.path).await?;
         let mut stream = response.bytes_stream();
         let mut downloaded = 0_u64;
         while let Some(chunk) = tokio::time::timeout(NETWORK_IDLE_TIMEOUT, stream.next()).await.map_err(|_| OpdsError::TimedOut)? {
             let chunk = chunk?;
-            downloaded = downloaded.checked_add(chunk.len() as u64).ok_or(OpdsError::ResponseTooLarge { limit: MAX_OPDS_DOWNLOAD_BYTES })?;
-            if downloaded > MAX_OPDS_DOWNLOAD_BYTES {
-                return Err(OpdsError::ResponseTooLarge { limit: MAX_OPDS_DOWNLOAD_BYTES });
+            downloaded = downloaded.checked_add(chunk.len() as u64).ok_or(OpdsError::ResponseTooLarge { limit: byte_limit })?;
+            if downloaded > byte_limit {
+                return Err(OpdsError::ResponseTooLarge { limit: byte_limit });
             }
             file.write_all(&chunk).await?;
         }
@@ -815,9 +838,166 @@ impl OpdsClient {
             return Err(OpdsError::InvalidCatalog("book acquisition returned an empty response".to_owned()));
         }
         file.flush().await?;
-        file.sync_all().await?;
         drop(file);
+        guard.transferred_bytes = downloaded;
         Ok(guard)
+    }
+
+    /// Materializes a sparse EPUB containing only the ZIP directory, package
+    /// metadata, navigation document, and (when requested) declared cover.
+    /// Callers must fall back to [`Self::download_book_with_limit`] when the
+    /// origin does not honor byte ranges or the archive uses unsupported ZIP64
+    /// metadata. The returned file remains readable by the normal EPUB parser.
+    pub async fn download_epub_metadata_with_limit(&self, acquisition: &OpdsDirectAcquisition, temporary_directory: &Path, byte_limit: u64, include_cover: bool) -> Result<DownloadedOpdsBook, OpdsError> {
+        if !is_importable_acquisition(acquisition) {
+            return Err(OpdsError::NonFreeAcquisition);
+        }
+        if acquisition.book_format != OpdsBookFormat::Epub {
+            return Err(OpdsError::InvalidCatalog("ranged package inspection is only available for EPUB acquisitions".to_owned()));
+        }
+        let byte_limit = byte_limit.min(MAX_OPDS_DOWNLOAD_BYTES);
+        let requested_url = parse_http_url(&acquisition.url)?;
+        let first = self.fetch_book_range(&requested_url, acquisition, format!("bytes=-{EPUB_RANGE_TAIL_BYTES}"), None, None, EPUB_RANGE_TAIL_BYTES).await?;
+        if first.total_length == 0 || first.total_length > byte_limit {
+            return Err(OpdsError::ResponseTooLarge { limit: byte_limit });
+        }
+        let (central_offset, central_size) = epub_central_directory_bounds(&first.bytes, first.start, first.total_length)?;
+        if central_size > MAX_EPUB_CENTRAL_DIRECTORY_BYTES {
+            return Err(OpdsError::ResponseTooLarge { limit: MAX_EPUB_CENTRAL_DIRECTORY_BYTES });
+        }
+
+        tokio::fs::create_dir_all(temporary_directory).await?;
+        let path = temporary_directory.join(format!("opds-{}.epub", uuid::Uuid::new_v4()));
+        let mut guard = DownloadedOpdsBook { path, file_name: acquisition.suggested_file_name.clone(), transferred_bytes: 0, metadata_only: true };
+        let file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&guard.path).await?;
+        file.set_len(first.total_length).await?;
+        drop(file);
+        write_sparse_range(&guard.path, first.start, &first.bytes).await?;
+
+        let mut transferred_bytes = first.bytes.len() as u64;
+        let central = self.fetch_book_range(&first.final_url, acquisition, inclusive_range_header(central_offset, central_size)?, first.validator.as_deref(), Some(first.total_length), central_size).await?;
+        transferred_bytes = checked_range_budget(transferred_bytes, central.bytes.len() as u64)?;
+        write_sparse_range(&guard.path, central.start, &central.bytes).await?;
+        let entries = parse_epub_central_directory(&central.bytes, central_offset)?;
+
+        let container_name = "META-INF/container.xml";
+        transferred_bytes = self.materialize_epub_entry(&first.final_url, acquisition, first.validator.as_deref(), first.total_length, &guard.path, &entries, container_name, MAX_EPUB_CONTAINER_BYTES, transferred_bytes).await?;
+        let container = read_epub_entry(&guard.path, container_name, MAX_EPUB_CONTAINER_BYTES)?;
+        let package_name = epub_package_path(&container)?;
+        transferred_bytes = self.materialize_epub_entry(&first.final_url, acquisition, first.validator.as_deref(), first.total_length, &guard.path, &entries, &package_name, MAX_EPUB_PACKAGE_BYTES, transferred_bytes).await?;
+        let package = read_epub_entry(&guard.path, &package_name, MAX_EPUB_PACKAGE_BYTES)?;
+        let related = epub_package_related_entries(&package_name, &package)?;
+        for navigation in related.navigation {
+            transferred_bytes = self.materialize_epub_entry(&first.final_url, acquisition, first.validator.as_deref(), first.total_length, &guard.path, &entries, &navigation, MAX_EPUB_NAVIGATION_BYTES, transferred_bytes).await?;
+        }
+        if include_cover {
+            let cover = related.cover.ok_or_else(|| OpdsError::InvalidCatalog("EPUB has no directly declared cover suitable for ranged extraction".to_owned()))?;
+            transferred_bytes = self.materialize_epub_entry(&first.final_url, acquisition, first.validator.as_deref(), first.total_length, &guard.path, &entries, &cover, MAX_EPUB_COVER_BYTES, transferred_bytes).await?;
+        }
+        guard.transferred_bytes = transferred_bytes;
+        Ok(guard)
+    }
+
+    async fn materialize_epub_entry(
+        &self, url: &Url, acquisition: &OpdsDirectAcquisition, validator: Option<&str>, total_length: u64, path: &Path, entries: &HashMap<String, RemoteZipEntry>, name: &str, uncompressed_limit: u64, transferred_bytes: u64,
+    ) -> Result<u64, OpdsError> {
+        let entry = entries.get(name).ok_or_else(|| OpdsError::InvalidCatalog(format!("EPUB ZIP entry is missing: {name}")))?;
+        if entry.encrypted {
+            return Err(OpdsError::InvalidCatalog(format!("EPUB ZIP entry is encrypted: {name}")));
+        }
+        if entry.uncompressed_size > uncompressed_limit {
+            return Err(OpdsError::ResponseTooLarge { limit: uncompressed_limit });
+        }
+        let header = self.fetch_book_range(url, acquisition, format!("bytes={}-{}", entry.header_start, entry.header_start.saturating_add(29)), validator, Some(total_length), 30).await?;
+        if header.bytes.len() != 30 || header.bytes.get(..4) != Some(b"PK\x03\x04".as_slice()) {
+            return Err(OpdsError::InvalidCatalog(format!("EPUB ZIP local header is invalid: {name}")));
+        }
+        let name_length = little_u16(&header.bytes, 26)? as u64;
+        let extra_length = little_u16(&header.bytes, 28)? as u64;
+        let range_size = 30_u64
+            .checked_add(name_length)
+            .and_then(|value| value.checked_add(extra_length))
+            .and_then(|value| value.checked_add(entry.compressed_size))
+            .ok_or_else(|| OpdsError::InvalidCatalog("EPUB ZIP entry range overflowed".to_owned()))?;
+        if entry.header_start.checked_add(range_size).is_none_or(|end| end > total_length) {
+            return Err(OpdsError::InvalidCatalog(format!("EPUB ZIP entry exceeds the archive: {name}")));
+        }
+        let transferred_bytes = checked_range_budget(transferred_bytes, header.bytes.len() as u64)?;
+        let transferred_bytes = checked_range_budget(transferred_bytes, range_size)?;
+        self.fetch_book_range_to_file(url, acquisition, inclusive_range_header(entry.header_start, range_size)?, validator, total_length, entry.header_start, range_size, path).await?;
+        Ok(transferred_bytes)
+    }
+
+    async fn fetch_book_range(&self, url: &Url, acquisition: &OpdsDirectAcquisition, range: String, validator: Option<&str>, expected_total: Option<u64>, response_limit: u64) -> Result<OpdsBookRange, OpdsError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static(EPUB_MEDIA_TYPE));
+        headers.insert(reqwest::header::ACCEPT_ENCODING, reqwest::header::HeaderValue::from_static("identity"));
+        headers.insert(reqwest::header::RANGE, reqwest::header::HeaderValue::from_str(&range).map_err(|_| OpdsError::InvalidCatalog("invalid EPUB byte range".to_owned()))?);
+        if let Some(validator) = validator {
+            headers.insert(reqwest::header::IF_RANGE, reqwest::header::HeaderValue::from_str(validator).map_err(|_| OpdsError::InvalidCatalog("invalid EPUB range validator".to_owned()))?);
+        }
+        litteraturbanken::decorate_download_headers(&mut headers, url);
+        let response = self.send(url.clone(), headers).await?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(OpdsError::RangeUnsupported);
+        }
+        let final_url = validated_response_url(&response)?;
+        let content_range = response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|value| value.to_str().ok()).ok_or_else(|| OpdsError::InvalidCatalog("EPUB range response omitted Content-Range".to_owned()))?;
+        let (start, end, total_length) = parse_content_range(content_range)?;
+        if expected_total.is_some_and(|expected| expected != total_length) {
+            return Err(OpdsError::InvalidCatalog("EPUB changed during ranged metadata extraction".to_owned()));
+        }
+        let validator = response.headers().get(reqwest::header::ETAG).or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED)).and_then(|value| value.to_str().ok()).map(str::to_owned);
+        let expected_length = end.checked_sub(start).and_then(|value| value.checked_add(1)).ok_or_else(|| OpdsError::InvalidCatalog("invalid EPUB response range".to_owned()))?;
+        if expected_length > response_limit {
+            return Err(OpdsError::ResponseTooLarge { limit: response_limit });
+        }
+        let bytes = read_bounded(response, response_limit).await?;
+        if bytes.len() as u64 != expected_length {
+            return Err(OpdsError::InvalidCatalog("EPUB range response length did not match Content-Range".to_owned()));
+        }
+        let _ = acquisition;
+        Ok(OpdsBookRange { final_url, start, total_length, validator, bytes })
+    }
+
+    async fn fetch_book_range_to_file(&self, url: &Url, acquisition: &OpdsDirectAcquisition, range: String, validator: Option<&str>, expected_total: u64, expected_start: u64, response_limit: u64, path: &Path) -> Result<(), OpdsError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static(EPUB_MEDIA_TYPE));
+        headers.insert(reqwest::header::ACCEPT_ENCODING, reqwest::header::HeaderValue::from_static("identity"));
+        headers.insert(reqwest::header::RANGE, reqwest::header::HeaderValue::from_str(&range).map_err(|_| OpdsError::InvalidCatalog("invalid EPUB byte range".to_owned()))?);
+        if let Some(validator) = validator {
+            headers.insert(reqwest::header::IF_RANGE, reqwest::header::HeaderValue::from_str(validator).map_err(|_| OpdsError::InvalidCatalog("invalid EPUB range validator".to_owned()))?);
+        }
+        litteraturbanken::decorate_download_headers(&mut headers, url);
+        let response = self.send(url.clone(), headers).await?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(OpdsError::RangeUnsupported);
+        }
+        let _ = validated_response_url(&response)?;
+        let content_range = response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|value| value.to_str().ok()).ok_or_else(|| OpdsError::InvalidCatalog("EPUB range response omitted Content-Range".to_owned()))?;
+        let (start, end, total_length) = parse_content_range(content_range)?;
+        let expected_length = end.checked_sub(start).and_then(|value| value.checked_add(1)).ok_or_else(|| OpdsError::InvalidCatalog("invalid EPUB response range".to_owned()))?;
+        if start != expected_start || total_length != expected_total || expected_length != response_limit {
+            return Err(OpdsError::InvalidCatalog("EPUB entry range response did not match the requested archive bytes".to_owned()));
+        }
+        let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut stream = response.bytes_stream();
+        let mut written = 0_u64;
+        while let Some(chunk) = tokio::time::timeout(NETWORK_IDLE_TIMEOUT, stream.next()).await.map_err(|_| OpdsError::TimedOut)? {
+            let chunk = chunk?;
+            written = written.checked_add(chunk.len() as u64).ok_or(OpdsError::ResponseTooLarge { limit: response_limit })?;
+            if written > response_limit {
+                return Err(OpdsError::ResponseTooLarge { limit: response_limit });
+            }
+            file.write_all(&chunk).await?;
+        }
+        if written != response_limit {
+            return Err(OpdsError::InvalidCatalog("EPUB entry range response ended early".to_owned()));
+        }
+        file.flush().await?;
+        let _ = acquisition;
+        Ok(())
     }
 
     /// Downloads a catalog acquisition into memory for clients that own their
@@ -829,8 +1009,10 @@ impl OpdsClient {
             return Err(OpdsError::NonFreeAcquisition);
         }
         let url = parse_http_url(&acquisition.url)?;
-        let request = self.request(url.clone()).header(reqwest::header::ACCEPT, acquisition.book_format.media_type());
-        let response = self.send(litteraturbanken::download_request(request, &url)).await?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::ACCEPT, reqwest::header::HeaderValue::from_static(acquisition.book_format.media_type()));
+        litteraturbanken::decorate_download_headers(&mut headers, &url);
+        let response = self.send(url.clone(), headers).await?;
         let _ = validated_response_url(&response)?;
         let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).map(normalized_media_type);
         if media_type.as_deref().is_some_and(|value| !acquisition.book_format.accepts_media_type(value) && !matches!(value, "application/octet-stream" | "application/zip" | "binary/octet-stream")) {
@@ -845,7 +1027,7 @@ impl OpdsClient {
 
     async fn fetch_catalog_url(&self, url: Url, byte_limit: u64) -> Result<OpdsCatalog, OpdsError> {
         if litteraturbanken::is_catalog_url(&url) {
-            return litteraturbanken::fetch_catalog(&self.http, url, byte_limit).await;
+            return litteraturbanken::fetch_catalog(self.outbound_policy, url, byte_limit).await;
         }
         let started = Instant::now();
         let (result, mut profile) = self.fetch_catalog_url_profiled(url, byte_limit).await;
@@ -857,21 +1039,25 @@ impl OpdsClient {
 
     async fn fetch_catalog_url_conditional(&self, url: Url, byte_limit: u64, validators: &OpdsHttpValidators) -> Result<OpdsConditionalCatalog, OpdsError> {
         if litteraturbanken::is_catalog_url(&url) {
-            let catalog = litteraturbanken::fetch_catalog(&self.http, url, byte_limit).await?;
+            let catalog = litteraturbanken::fetch_catalog(self.outbound_policy, url, byte_limit).await?;
             return Ok(OpdsConditionalCatalog::Modified { catalog, validators: OpdsHttpValidators::default() });
         }
         let mut url = url;
         for discovery_attempt in 0..=1 {
-            let mut request = self.request(url).header(reqwest::header::ACCEPT, format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2"));
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_str(&format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2")).expect("static OPDS Accept value is valid"),
+            );
             if discovery_attempt == 0 {
                 if let Some(etag) = validators.etag.as_deref() {
-                    request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+                    headers.insert(reqwest::header::IF_NONE_MATCH, reqwest::header::HeaderValue::from_str(etag).map_err(|_| OpdsError::InvalidCatalog("cached ETag is not a valid HTTP header value".to_owned()))?);
                 }
                 if let Some(last_modified) = validators.last_modified.as_deref() {
-                    request = request.header(reqwest::header::IF_MODIFIED_SINCE, last_modified);
+                    headers.insert(reqwest::header::IF_MODIFIED_SINCE, reqwest::header::HeaderValue::from_str(last_modified).map_err(|_| OpdsError::InvalidCatalog("cached Last-Modified value is not a valid HTTP header value".to_owned()))?);
                 }
             }
-            let response = tokio::time::timeout(NETWORK_IDLE_TIMEOUT, request.send()).await.map_err(|_| OpdsError::TimedOut)??;
+            let response = self.get(url, headers).await?;
             if response.status() == reqwest::StatusCode::NOT_MODIFIED {
                 return Ok(OpdsConditionalCatalog::NotModified);
             }
@@ -898,7 +1084,12 @@ impl OpdsClient {
         for discovery_attempt in 0..=1 {
             profile.http_fetches += 1;
             let headers_started = Instant::now();
-            let response = self.send(self.request(url).header(reqwest::header::ACCEPT, format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2"))).await;
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_str(&format!("{OPDS_2_MEDIA_TYPE}, application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9, text/html;q=0.2")).expect("static OPDS Accept value is valid"),
+            );
+            let response = self.send(url, headers).await;
             profile.response_headers += headers_started.elapsed();
             let response = match response {
                 Ok(response) => response,
@@ -936,12 +1127,12 @@ impl OpdsClient {
         (Err(OpdsError::UnsupportedCatalogFormat), profile)
     }
 
-    fn request(&self, url: Url) -> RequestBuilder {
-        self.http.get(url)
+    async fn get(&self, url: Url, headers: reqwest::header::HeaderMap) -> Result<Response, OpdsError> {
+        outbound::send_get(url, headers, self.outbound_policy, &format!("Bokheim/{} OPDS", env!("CARGO_PKG_VERSION")), Duration::from_secs(10), NETWORK_IDLE_TIMEOUT).await.map_err(|error| OpdsError::InvalidUrl(error.to_string()))
     }
 
-    async fn send(&self, request: RequestBuilder) -> Result<Response, OpdsError> {
-        let response = tokio::time::timeout(NETWORK_IDLE_TIMEOUT, request.send()).await.map_err(|_| OpdsError::TimedOut)??;
+    async fn send(&self, url: Url, headers: reqwest::header::HeaderMap) -> Result<Response, OpdsError> {
+        let response = self.get(url, headers).await?;
         if !response.status().is_success() {
             return Err(OpdsError::HttpStatus(response.status()));
         }
@@ -971,6 +1162,7 @@ fn opds_error_kind(error: &OpdsError) -> &'static str {
         OpdsError::TimedOut => "timeout",
         OpdsError::HttpStatus(_) => "http_error",
         OpdsError::ResponseTooLarge { .. } => "response_too_large",
+        OpdsError::RangeUnsupported => "range_unsupported",
         OpdsError::UnsupportedCatalogFormat => "unsupported_catalog_format",
         OpdsError::InvalidCatalog(_) => "invalid_catalog",
         OpdsError::NonFreeAcquisition => "non_free_acquisition",
@@ -994,9 +1186,261 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
+struct OpdsBookRange {
+    final_url: Url,
+    start: u64,
+    total_length: u64,
+    validator: Option<String>,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct RemoteZipEntry {
+    header_start: u64,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    encrypted: bool,
+}
+
+struct EpubRelatedEntries {
+    navigation: Vec<String>,
+    cover: Option<String>,
+}
+
+fn little_u16(bytes: &[u8], offset: usize) -> Result<u16, OpdsError> {
+    let value = bytes.get(offset..offset + 2).ok_or_else(|| OpdsError::InvalidCatalog("truncated EPUB ZIP metadata".to_owned()))?;
+    Ok(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn little_u32(bytes: &[u8], offset: usize) -> Result<u32, OpdsError> {
+    let value = bytes.get(offset..offset + 4).ok_or_else(|| OpdsError::InvalidCatalog("truncated EPUB ZIP metadata".to_owned()))?;
+    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn parse_content_range(value: &str) -> Result<(u64, u64, u64), OpdsError> {
+    let value = value.strip_prefix("bytes ").ok_or_else(|| OpdsError::InvalidCatalog("invalid EPUB Content-Range unit".to_owned()))?;
+    let (range, total) = value.split_once('/').ok_or_else(|| OpdsError::InvalidCatalog("invalid EPUB Content-Range".to_owned()))?;
+    let (start, end) = range.split_once('-').ok_or_else(|| OpdsError::InvalidCatalog("invalid EPUB Content-Range bounds".to_owned()))?;
+    let start = start.parse::<u64>().map_err(|_| OpdsError::InvalidCatalog("invalid EPUB Content-Range start".to_owned()))?;
+    let end = end.parse::<u64>().map_err(|_| OpdsError::InvalidCatalog("invalid EPUB Content-Range end".to_owned()))?;
+    let total = total.parse::<u64>().map_err(|_| OpdsError::InvalidCatalog("invalid EPUB Content-Range total".to_owned()))?;
+    if start > end || end >= total {
+        return Err(OpdsError::InvalidCatalog("inconsistent EPUB Content-Range".to_owned()));
+    }
+    Ok((start, end, total))
+}
+
+fn inclusive_range_header(start: u64, size: u64) -> Result<String, OpdsError> {
+    let end = start.checked_add(size).and_then(|value| value.checked_sub(1)).ok_or_else(|| OpdsError::InvalidCatalog("EPUB byte range overflowed".to_owned()))?;
+    Ok(format!("bytes={start}-{end}"))
+}
+
+fn checked_range_budget(current: u64, additional: u64) -> Result<u64, OpdsError> {
+    let total = current.checked_add(additional).ok_or(OpdsError::ResponseTooLarge { limit: MAX_EPUB_RANGE_BYTES })?;
+    if total > MAX_EPUB_RANGE_BYTES {
+        return Err(OpdsError::ResponseTooLarge { limit: MAX_EPUB_RANGE_BYTES });
+    }
+    Ok(total)
+}
+
+fn epub_central_directory_bounds(tail: &[u8], tail_start: u64, total_length: u64) -> Result<(u64, u64), OpdsError> {
+    let position = tail.windows(4).rposition(|window| window == b"PK\x05\x06").ok_or_else(|| OpdsError::InvalidCatalog("EPUB ZIP end record was not found".to_owned()))?;
+    if little_u16(tail, position + 4)? != 0 || little_u16(tail, position + 6)? != 0 {
+        return Err(OpdsError::InvalidCatalog("multi-disk EPUB ZIP archives are unsupported".to_owned()));
+    }
+    let entries = little_u16(tail, position + 10)?;
+    let central_size = little_u32(tail, position + 12)?;
+    let central_offset = little_u32(tail, position + 16)?;
+    if entries == u16::MAX || central_size == u32::MAX || central_offset == u32::MAX {
+        return Err(OpdsError::InvalidCatalog("ZIP64 EPUB metadata requires a full-download fallback".to_owned()));
+    }
+    let comment_length = little_u16(tail, position + 20)? as usize;
+    if position + 22 + comment_length > tail.len() || tail_start + position as u64 + 22 + comment_length as u64 > total_length {
+        return Err(OpdsError::InvalidCatalog("truncated EPUB ZIP end record".to_owned()));
+    }
+    let central_offset = central_offset as u64;
+    let central_size = central_size as u64;
+    if central_offset.checked_add(central_size).is_none_or(|end| end > total_length) {
+        return Err(OpdsError::InvalidCatalog("EPUB ZIP directory exceeds the archive".to_owned()));
+    }
+    Ok((central_offset, central_size))
+}
+
+fn parse_epub_central_directory(bytes: &[u8], central_offset: u64) -> Result<HashMap<String, RemoteZipEntry>, OpdsError> {
+    let mut entries = HashMap::new();
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        if bytes.len() - cursor < 46 || bytes.get(cursor..cursor + 4) != Some(b"PK\x01\x02".as_slice()) {
+            return Err(OpdsError::InvalidCatalog(format!("invalid EPUB ZIP directory at byte {}", central_offset + cursor as u64)));
+        }
+        let flags = little_u16(bytes, cursor + 8)?;
+        let compressed_size = little_u32(bytes, cursor + 20)?;
+        let uncompressed_size = little_u32(bytes, cursor + 24)?;
+        let name_length = little_u16(bytes, cursor + 28)? as usize;
+        let extra_length = little_u16(bytes, cursor + 30)? as usize;
+        let comment_length = little_u16(bytes, cursor + 32)? as usize;
+        let header_start = little_u32(bytes, cursor + 42)?;
+        if compressed_size == u32::MAX || uncompressed_size == u32::MAX || header_start == u32::MAX {
+            return Err(OpdsError::InvalidCatalog("ZIP64 EPUB entries require a full-download fallback".to_owned()));
+        }
+        let record_length = 46_usize
+            .checked_add(name_length)
+            .and_then(|value| value.checked_add(extra_length))
+            .and_then(|value| value.checked_add(comment_length))
+            .ok_or_else(|| OpdsError::InvalidCatalog("EPUB ZIP directory length overflowed".to_owned()))?;
+        let name_bytes = bytes.get(cursor + 46..cursor + 46 + name_length).ok_or_else(|| OpdsError::InvalidCatalog("truncated EPUB ZIP file name".to_owned()))?;
+        let name = String::from_utf8_lossy(name_bytes).into_owned();
+        entries.insert(name, RemoteZipEntry { header_start: header_start as u64, compressed_size: compressed_size as u64, uncompressed_size: uncompressed_size as u64, encrypted: flags & 1 != 0 });
+        cursor = cursor.checked_add(record_length).ok_or_else(|| OpdsError::InvalidCatalog("EPUB ZIP directory cursor overflowed".to_owned()))?;
+    }
+    Ok(entries)
+}
+
+async fn write_sparse_range(path: &Path, start: u64, bytes: &[u8]) -> Result<(), OpdsError> {
+    let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    Ok(())
+}
+
+fn read_epub_entry(path: &Path, name: &str, limit: u64) -> Result<Vec<u8>, OpdsError> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| OpdsError::InvalidCatalog(error.to_string()))?;
+    let entry = archive.by_name(name).map_err(|error| OpdsError::InvalidCatalog(error.to_string()))?;
+    if entry.size() > limit {
+        return Err(OpdsError::ResponseTooLarge { limit });
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(OpdsError::ResponseTooLarge { limit });
+    }
+    Ok(bytes)
+}
+
+fn epub_xml_attribute(decoder: quick_xml::encoding::Decoder, event: &quick_xml::events::BytesStart<'_>, suffix: &[u8]) -> Option<String> {
+    event
+        .attributes()
+        .flatten()
+        .find(|attribute| attribute.key.as_ref().ends_with(suffix))
+        .map(|attribute| attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder).map_or_else(|_| String::from_utf8_lossy(&attribute.value).into_owned(), std::borrow::Cow::into_owned))
+}
+
+fn epub_package_path(container: &[u8]) -> Result<String, OpdsError> {
+    let mut reader = Reader::from_reader(container);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event) | Event::Empty(event)) if event.name().as_ref().ends_with(b"rootfile") => {
+                let path = epub_xml_attribute(reader.decoder(), &event, b"full-path").and_then(|value| normalize_epub_entry_path("", &value));
+                return path.ok_or_else(|| OpdsError::InvalidCatalog("EPUB container has no valid package path".to_owned()));
+            }
+            Ok(Event::Eof) => return Err(OpdsError::InvalidCatalog("EPUB container has no package document".to_owned())),
+            Err(error) => return Err(OpdsError::InvalidCatalog(error.to_string())),
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn normalize_epub_entry_path(base: &str, href: &str) -> Option<String> {
+    let href = href.split(['#', '?']).next().unwrap_or_default();
+    let href = urlencoding::decode(href).ok()?;
+    let joined = if href.starts_with('/') {
+        href.trim_start_matches('/').to_owned()
+    } else if base.is_empty() {
+        href.into_owned()
+    } else {
+        format!("{base}/{href}")
+    };
+    let mut components = Vec::new();
+    for component in joined.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
+}
+
+fn epub_package_related_entries(package_name: &str, package: &[u8]) -> Result<EpubRelatedEntries, OpdsError> {
+    #[derive(Clone)]
+    struct Item {
+        id: String,
+        path: String,
+        media_type: String,
+        properties: String,
+    }
+    let base = package_name.rsplit_once('/').map(|(base, _)| base).unwrap_or("");
+    let mut reader = Reader::from_reader(package);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut items = Vec::<Item>::new();
+    let mut cover_id = None;
+    let mut spine_toc_id = None;
+    let mut guide_cover = None;
+    let mut in_guide = false;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event) | Event::Empty(event)) => {
+                let name = event.name();
+                if name.as_ref().ends_with(b"guide") {
+                    in_guide = true;
+                } else if name.as_ref().ends_with(b"item") {
+                    if let (Some(id), Some(href)) = (epub_xml_attribute(reader.decoder(), &event, b"id"), epub_xml_attribute(reader.decoder(), &event, b"href")) {
+                        if let Some(path) = normalize_epub_entry_path(base, &href) {
+                            items.push(Item {
+                                id,
+                                path,
+                                media_type: epub_xml_attribute(reader.decoder(), &event, b"media-type").unwrap_or_default(),
+                                properties: epub_xml_attribute(reader.decoder(), &event, b"properties").unwrap_or_default(),
+                            });
+                        }
+                    }
+                } else if name.as_ref().ends_with(b"meta") && epub_xml_attribute(reader.decoder(), &event, b"name").as_deref() == Some("cover") {
+                    cover_id = epub_xml_attribute(reader.decoder(), &event, b"content");
+                } else if name.as_ref().ends_with(b"spine") {
+                    spine_toc_id = epub_xml_attribute(reader.decoder(), &event, b"toc");
+                } else if in_guide && name.as_ref().ends_with(b"reference") && epub_xml_attribute(reader.decoder(), &event, b"type").is_some_and(|value| value.split_whitespace().any(|value| value.eq_ignore_ascii_case("cover"))) {
+                    guide_cover = epub_xml_attribute(reader.decoder(), &event, b"href").and_then(|href| normalize_epub_entry_path(base, &href));
+                }
+            }
+            Ok(Event::End(event)) if event.name().as_ref().ends_with(b"guide") => in_guide = false,
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(OpdsError::InvalidCatalog(error.to_string())),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let mut navigation = Vec::new();
+    for item in &items {
+        if item.properties.split_whitespace().any(|property| property == "nav") || item.media_type == "application/x-dtbncx+xml" || spine_toc_id.as_deref() == Some(item.id.as_str()) {
+            if !navigation.contains(&item.path) {
+                navigation.push(item.path.clone());
+            }
+        }
+    }
+    let is_image = |item: &&Item| item.media_type.starts_with("image/");
+    let cover = items
+        .iter()
+        .find(|item| item.properties.split_whitespace().any(|property| property == "cover-image") && item.media_type.starts_with("image/"))
+        .or_else(|| cover_id.as_deref().and_then(|id| items.iter().find(|item| item.id == id)).filter(is_image))
+        .map(|item| item.path.clone())
+        .or_else(|| guide_cover.filter(|path| items.iter().any(|item| &item.path == path && item.media_type.starts_with("image/"))))
+        .or_else(|| items.iter().find(|item| item.media_type.starts_with("image/") && (item.id.to_ascii_lowercase().contains("cover") || item.path.to_ascii_lowercase().contains("cover"))).map(|item| item.path.clone()));
+    Ok(EpubRelatedEntries { navigation, cover })
+}
+
 pub struct DownloadedOpdsBook {
     path: PathBuf,
     file_name: String,
+    transferred_bytes: u64,
+    metadata_only: bool,
 }
 
 impl DownloadedOpdsBook {
@@ -1006,6 +1450,17 @@ impl DownloadedOpdsBook {
 
     pub fn file_name(&self) -> &str {
         &self.file_name
+    }
+
+    /// Bytes transferred over HTTP. A sparse metadata-only EPUB can have a
+    /// much larger logical file length while occupying only these fetched
+    /// archive ranges on disk.
+    pub fn transferred_bytes(&self) -> u64 {
+        self.transferred_bytes
+    }
+
+    pub fn is_metadata_only(&self) -> bool {
+        self.metadata_only
     }
 }
 
@@ -1067,7 +1522,6 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
         let acquisitions =
             acquisition_links.into_iter().enumerate().filter_map(|(link_index, link)| acquisition_from_atom(&base_url, link, &title, acquisition_details.get(entry_index).and_then(|links| links.get(link_index)))).collect::<Vec<_>>();
         let image_url = entry.links.iter().filter(|link| is_image_relation(&link.rel)).find_map(|link| resolve_url(&base_url, &link.href).ok()).map(|url| url.to_string());
-        let description = atom_description(entry);
         let preferred_download = preferred_download(&acquisitions);
         let authors = entry
             .authors
@@ -1082,6 +1536,7 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
             .collect::<Vec<_>>();
         let self_url = relation_url_atom(&base_url, &entry.links, "self");
         let id = stable_publication_id(Some(&entry.id), self_url.as_deref(), &acquisitions, &base_url, &title, &authors);
+        let description = atom_description(entry).and_then(|description| normalize_project_gutenberg_description(&id, description));
         let languages = atom_publication_languages(entry);
         publications.push(OpdsPublication { work_id: work_id_from_publication_id(&id), id, title, authors, languages, description, image_url, preferred_download, acquisitions });
     }
@@ -1361,6 +1816,100 @@ fn atom_description(entry: &AtomEntry) -> Option<OpdsDescription> {
         _ => DescriptionFormat::PlainText,
     };
     typed_description(value, format)
+}
+
+fn normalize_project_gutenberg_description(id: &str, description: OpdsDescription) -> Option<OpdsDescription> {
+    if !id.starts_with("urn:gutenberg:") {
+        return Some(description);
+    }
+    match description {
+        OpdsDescription::PlainText { text } => compact_description_whitespace(&strip_project_gutenberg_plain_text(&text)).map(|text| OpdsDescription::PlainText { text }),
+        OpdsDescription::Html { markup, .. } => typed_description(&strip_project_gutenberg_description_markup(&markup), DescriptionFormat::Html),
+        OpdsDescription::Xhtml { markup, .. } => typed_description(&strip_project_gutenberg_description_markup(&markup), DescriptionFormat::Xhtml),
+    }
+}
+
+/// Removes Project Gutenberg's edition, duplicate-title, and Wikipedia-note
+/// paragraphs while preserving the useful description that follows them.
+pub fn strip_project_gutenberg_description_markup(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut first_paragraph = None;
+    let mut summary = None;
+    let mut summary_search = 0;
+    while let Some(relative_start) = lower[summary_search..].find("<p") {
+        let start = summary_search + relative_start;
+        let boundary = lower.as_bytes().get(start + 2).copied();
+        if !matches!(boundary, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')) {
+            summary_search = start + 2;
+            continue;
+        }
+        first_paragraph.get_or_insert(start);
+        let Some(relative_close) = lower[start..].find("</p>") else { break };
+        let end = start + relative_close + "</p>".len();
+        let paragraph = &value[start..end];
+        let text = html::parse::plain_text_from_fragment(paragraph);
+        if text.trim_start().to_ascii_lowercase().starts_with("summary:") {
+            summary = lower[start..end].find("summary:").map(|marker| (start, end, start + marker));
+            break;
+        }
+        summary_search = end;
+    }
+    if let (Some(first_paragraph), Some((summary_start, _, marker_start))) = (first_paragraph, summary) {
+        let marker_end = marker_start + "summary:".len();
+        let mut result = String::with_capacity(value.len());
+        result.push_str(&value[..first_paragraph]);
+        result.push_str(&value[summary_start..marker_start]);
+        result.push_str(value[marker_end..].trim_start());
+        return result;
+    }
+
+    let mut result = String::with_capacity(value.len());
+    let mut copied_through = 0;
+    let mut search_from = 0;
+
+    while let Some(relative_start) = lower[search_from..].find("<p") {
+        let start = search_from + relative_start;
+        let boundary = lower.as_bytes().get(start + 2).copied();
+        if !matches!(boundary, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')) {
+            search_from = start + 2;
+            continue;
+        }
+        let Some(relative_close) = lower[start..].find("</p>") else { break };
+        let end = start + relative_close + "</p>".len();
+        let paragraph = &value[start..end];
+        let text = html::parse::plain_text_from_fragment(paragraph);
+        if is_project_gutenberg_boilerplate(&text) {
+            result.push_str(&value[copied_through..start]);
+            copied_through = end;
+        }
+        search_from = end;
+    }
+    result.push_str(&value[copied_through..]);
+    result
+}
+
+/// Returns cleaned rich markup together with its matching display text.
+pub fn project_gutenberg_description_parts(value: &str) -> Option<(String, String)> {
+    let markup = strip_project_gutenberg_description_markup(value);
+    let plain_text = compact_description_whitespace(&html::parse::plain_text_from_fragment(&markup))?;
+    Some((markup, plain_text))
+}
+
+pub fn strip_project_gutenberg_plain_text(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if let Some(summary) = lower.find("summary:") {
+        return value[summary + "summary:".len()..].trim().to_owned();
+    }
+    value.lines().filter(|line| !is_project_gutenberg_boilerplate(line)).collect::<Vec<_>>().join("\n")
+}
+
+fn is_project_gutenberg_boilerplate(value: &str) -> bool {
+    let text = value.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    matches!(text.as_str(), "this edition has images." | "this edition had all images removed.")
+        || text.starts_with("title:")
+        || text.starts_with("credits:")
+        || text.starts_with("note: wikipedia page about this book:")
+        || (text.starts_with("note: this title is also available as ebook") || text.starts_with("this title is also available as ebook"))
 }
 
 #[derive(Clone, Copy)]
@@ -1915,6 +2464,73 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    fn ranged_test_epub() -> Vec<u8> {
+        use std::io::Write as _;
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", deflated).unwrap();
+        archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
+        archive.start_file("OEBPS/content.opf", deflated).unwrap();
+        archive
+            .write_all(
+                br#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Ranged</dc:title></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="cover" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/><item id="body" href="body.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="body"/></spine></package>"#,
+            )
+            .unwrap();
+        archive.start_file("OEBPS/nav.xhtml", deflated).unwrap();
+        archive.write_all(br#"<html><body><nav epub:type="toc"><ol><li><a href="body.xhtml">Chapter</a></li></ol></nav></body></html>"#).unwrap();
+        archive.start_file("OEBPS/cover.jpg", stored).unwrap();
+        archive.write_all(b"small-cover-placeholder").unwrap();
+        archive.start_file("OEBPS/body.xhtml", stored).unwrap();
+        archive.write_all(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn ranged_epub_download_materializes_only_metadata_navigation_and_cover() {
+        let epub = Arc::new(ranged_test_epub());
+        let response_epub = epub.clone();
+        let application = Router::new().route(
+            "/book.epub",
+            get(move |headers: HeaderMap| {
+                let epub = response_epub.clone();
+                async move {
+                    let range = headers.get(header::RANGE).and_then(|value| value.to_str().ok()).unwrap();
+                    let (start, end) = if let Some(suffix) = range.strip_prefix("bytes=-") {
+                        let suffix = suffix.parse::<usize>().unwrap().min(epub.len());
+                        (epub.len() - suffix, epub.len() - 1)
+                    } else {
+                        let bounds = range.strip_prefix("bytes=").unwrap();
+                        let (start, end) = bounds.split_once('-').unwrap();
+                        (start.parse::<usize>().unwrap(), end.parse::<usize>().unwrap())
+                    };
+                    Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header(header::CONTENT_TYPE, EPUB_MEDIA_TYPE)
+                        .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{}", epub.len()))
+                        .header(header::ETAG, "\"stable\"")
+                        .body(Body::from(epub[start..=end].to_vec()))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
+        let temporary = tempfile::tempdir().unwrap();
+        let acquisition = OpdsDirectAcquisition { url: format!("http://{address}/book.epub"), kind: OpdsAcquisitionKind::OpenAccess, book_format: OpdsBookFormat::Epub, suggested_file_name: "book.epub".to_owned(), price: None };
+        let downloaded = OpdsClient::new().unwrap().download_epub_metadata_with_limit(&acquisition, temporary.path(), 8 * 1024 * 1024, true).await.unwrap();
+        assert!(downloaded.is_metadata_only());
+        assert!(downloaded.transferred_bytes() < epub.len() as u64 / 2);
+        assert_eq!(read_epub_entry(downloaded.path(), "META-INF/container.xml", MAX_EPUB_CONTAINER_BYTES).unwrap(), br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        assert!(read_epub_entry(downloaded.path(), "OEBPS/content.opf", MAX_EPUB_PACKAGE_BYTES).is_ok());
+        assert!(read_epub_entry(downloaded.path(), "OEBPS/nav.xhtml", MAX_EPUB_NAVIGATION_BYTES).is_ok());
+        assert_eq!(read_epub_entry(downloaded.path(), "OEBPS/cover.jpg", MAX_EPUB_COVER_BYTES).unwrap(), b"small-cover-placeholder");
+        server.abort();
+    }
+
     const OPDS_1: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <id>catalog</id><title>Test catalog</title><updated>2024-01-01T00:00:00Z</updated>
@@ -1933,11 +2549,12 @@ mod tests {
     #[test]
     fn built_in_endpoints_are_complete_and_safe() {
         let endpoints = built_in_opds_endpoints();
-        assert_eq!(endpoints.len(), 8);
+        assert_eq!(endpoints.len(), 5);
         assert_eq!(endpoints.iter().map(|endpoint| endpoint.id.as_str()).collect::<HashSet<_>>().len(), endpoints.len());
         assert!(endpoints.iter().all(|endpoint| !endpoint.title.trim().is_empty() && !endpoint.description.trim().is_empty() && !endpoint.languages.is_empty()));
-        let open_library = endpoints.iter().find(|endpoint| endpoint.id.as_str() == "open-library").unwrap();
-        assert_eq!(open_library.url, "https://openlibrary.org/opds/");
+        assert!(endpoints.iter().all(|endpoint| endpoint.id.as_str() != "open-library"));
+        assert!(endpoints.iter().all(|endpoint| !matches!(endpoint.id.as_str(), "chitanka" | "ebooks-gratuits")));
+        assert!(endpoints.iter().all(|endpoint| endpoint.languages.iter().any(|language| matches!(language.as_str(), "Multilingual" | "English" | "Swedish" | "French"))));
         assert!(endpoints.iter().all(|endpoint| parse_http_url(&endpoint.url).is_ok()));
     }
 
@@ -2025,16 +2642,24 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_gutenberg_editions_to_one_work_and_preserves_description_markup() {
+    fn normalizes_gutenberg_editions_and_removes_provider_boilerplate() {
         let feed = OPDS_1
             .replace("<id>book-1</id>", "<id>urn:gutenberg:2465:3</id>")
-            .replace("<summary>A summary</summary>", r#"<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>This edition has images.</p><p>Title: Carmen</p></div></content>"#);
+            .replace("<summary>A summary</summary>", r#"<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>This edition has images.</p><p>Title: Carmen</p><p>Note: Wikipedia page about this book: <a href="https://en.wikipedia.org/wiki/Carmen_(novella)">Carmen</a></p><p>Credits: A useful credit</p><p>Summary: A useful summary</p></div></content>"#);
         let catalog = parse_catalog(Url::parse("https://example.com/catalog/root.xml").unwrap(), Some("application/atom+xml"), feed.as_bytes()).unwrap();
         assert_eq!(catalog.publications[0].work_id.as_deref(), Some("urn:gutenberg:2465"));
         let description = catalog.publications[0].description.as_ref().unwrap();
-        assert_eq!(description.plain_text(), "This edition has images. Title: Carmen");
+        assert_eq!(description.plain_text(), "A useful summary");
         assert!(matches!(description, OpdsDescription::Xhtml { .. }));
-        assert!(description.markup().is_some_and(|markup| markup.contains("This edition has images.")));
+        assert!(description.markup().is_some_and(|markup| markup.contains("A useful summary")));
+        assert!(description.markup().is_some_and(|markup| !markup.contains("Credits:")));
+        assert!(description.markup().is_some_and(|markup| !markup.contains("Wikipedia")));
+    }
+
+    #[test]
+    fn removes_gutenberg_credits_and_ebook_notes_when_summary_is_missing() {
+        let markup = r#"<div><p>Note: This title is also available as eBook #123.</p><p>Credits: Produced by Somebody</p><p>Language: English</p></div>"#;
+        assert_eq!(strip_project_gutenberg_description_markup(markup), "<div><p>Language: English</p></div>");
     }
 
     #[test]
@@ -2232,7 +2857,7 @@ mod tests {
         save_registry_cache(&curated_path, &registry_from_endpoints(2, &[project_gutenberg])).unwrap();
 
         let mut store = OpdsEndpointStore::load(curated_path.clone(), custom_path.clone());
-        assert!(store.endpoints().iter().any(|endpoint| endpoint.id.as_str() == "open-library"));
+        assert!(store.endpoints().iter().any(|endpoint| endpoint.id.as_str() == "litteraturbanken"));
         let custom = store.add_custom_endpoint("Local books", "http://127.0.0.1:8080/opds").unwrap();
         assert!(custom.id.as_str().starts_with("custom-"));
         assert!(store.add_custom_endpoint("Duplicate", "http://127.0.0.1:8080/opds").unwrap_err().to_string().contains("already configured"));

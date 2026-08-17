@@ -29,11 +29,30 @@ owning AS (
       ON charge.user_id = $1
      AND charge.content_hash = referenced.content_hash
     GROUP BY referenced.content_hash
+), book_usage AS (
+    SELECT owning.library_id AS library_id,
+           COALESCE(SUM(object.size_bytes), 0)::BIGINT AS used_bytes
+    FROM owning
+    JOIN blob_object AS object
+      ON object.content_hash = owning.content_hash
+    GROUP BY owning.library_id
+), thumbnail_usage AS (
+    SELECT charge.library_id,
+           COALESCE(SUM(charge.size_bytes), 0)::BIGINT AS used_bytes
+    FROM user_thumbnail_charge AS charge
+    JOIN libraries AS library
+      ON library.id = charge.library_id
+     AND library.user_id = charge.user_id
+     AND library.deleted_at IS NULL
+    WHERE charge.user_id = $1
+    GROUP BY charge.library_id
+), combined AS (
+    SELECT library_id, used_bytes FROM book_usage
+    UNION ALL
+    SELECT library_id, used_bytes FROM thumbnail_usage
 )
-SELECT owning.library_id AS library_id,
-       COALESCE(SUM(object.size_bytes), 0)::BIGINT AS used_bytes
-FROM owning
-JOIN blob_object AS object
-  ON object.content_hash = owning.content_hash
-GROUP BY owning.library_id
-ORDER BY owning.library_id;
+SELECT library_id,
+       SUM(used_bytes)::BIGINT AS used_bytes
+FROM combined
+GROUP BY library_id
+ORDER BY library_id;

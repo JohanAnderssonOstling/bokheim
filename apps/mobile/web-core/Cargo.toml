@@ -14,14 +14,17 @@ account-contract = { path = "../../../shared/account-contract" }
 app-contract = { path = "../../../client/app-contract", default-features = false }
 blake3 = "1"
 catalog-model = { path = "../../../shared/catalog-model" }
+catalog-contract = { path = "../../../shared/catalog-contract" }
 epub_provider = { path = "../../renderers/html/epub_provider", default-features = false }
 library-replica = { path = "../../../client/library-replica", default-features = false }
 library-model = { path = "../../../client/library-model", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sync-common = { path = "../../../shared/sync-common", default-features = false }
+taxonomy-contract = { path = "../../../shared/taxonomy-contract" }
+thumbnail = { path = "../../../client/thumbnail", default-features = false }
 uuid = { version = "1", default-features = false, features = ["serde"] }
-wire = { path = "../../../shared/wire" }
+wire = { package = "protobuf-wire", path = "../../../shared/protobuf-wire" }
 
 [profile.release]
 lto = true

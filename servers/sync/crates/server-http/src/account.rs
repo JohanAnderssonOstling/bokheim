@@ -1,4 +1,4 @@
-use crate::extract::{AuthUser, asset_error};
+use crate::extract::{asset_error, AuthUser};
 use crate::state::AppState;
 use account_contract::{LibraryStorageUsage, LibraryStorageUsageResponse, StorageUsageResponse};
 use axum::extract::State;

@@ -4,8 +4,23 @@ use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+const MAX_CONTAINER_XML_BYTES: u64 = 1024 * 1024;
+const MAX_PACKAGE_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MARKUP_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BINARY_RESOURCE_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 65_536;
+
 #[cfg(feature = "html-resource-provider")]
-pub use html::resources::{ResourceProvider, TocEntry};
+pub use html::resources::ResourceProvider;
+
+/// Publication navigation entry, available even in lightweight builds that
+/// do not link the HTML renderer (for example the browser metadata WASM).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TocEntry {
+    pub title: String,
+    pub link: String,
+    pub children: Vec<TocEntry>,
+}
 
 mod definitions;
 pub use definitions::{CreatorRole, IdentifierScheme, parse_creator_role, parse_identifier_scheme};
@@ -146,13 +161,17 @@ impl EpubProvider {
         R: Read + Seek + Send + 'static,
     {
         let mut archive = zip::ZipArchive::new(Box::new(reader) as Box<dyn ReadSeekSend>).map_err(io::Error::other)?;
+        if archive.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB archive contains too many entries"));
+        }
 
         // Read and parse container.xml to get OPF path
         let container_xml = {
             let mut entry = archive.by_name("META-INF/container.xml").map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))?;
-            let mut bytes = Vec::with_capacity(entry.size() as usize);
-            use std::io::Read;
-            entry.read_to_end(&mut bytes)?;
+            if entry.size() > MAX_CONTAINER_XML_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB container.xml exceeds the size limit"));
+            }
+            let bytes = read_bounded_entry(&mut entry, MAX_CONTAINER_XML_BYTES, "EPUB container.xml")?;
             String::from_utf8_lossy(&bytes).into_owned()
         };
         let opf_path = Self::parse_container_opf_path(&container_xml).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Missing OPF path in container.xml"))?;
@@ -160,9 +179,10 @@ impl EpubProvider {
         // Read OPF XML
         let opf_xml = {
             let mut entry = archive.by_name(&opf_path).map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))?;
-            let mut bytes = Vec::with_capacity(entry.size() as usize);
-            use std::io::Read;
-            entry.read_to_end(&mut bytes)?;
+            if entry.size() > MAX_PACKAGE_DOCUMENT_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "EPUB package document exceeds the size limit"));
+            }
+            let bytes = read_bounded_entry(&mut entry, MAX_PACKAGE_DOCUMENT_BYTES, "EPUB package document")?;
             String::from_utf8_lossy(&bytes).into_owned()
         };
 
@@ -178,6 +198,13 @@ impl EpubProvider {
 
     pub fn metadata(&self) -> io::Result<EpubMetadata> {
         Ok(parse_opf_metadata(&self.opf_xml))
+    }
+
+    /// Archive-relative package-document path declared by container.xml.
+    /// Bibliographic inspection may use its file name as weak identifier
+    /// evidence, but only after validating the identifier itself.
+    pub fn package_document_path(&self) -> &str {
+        &self.opf_path
     }
 
     pub fn media_overlay_cues(&self) -> io::Result<Vec<MediaOverlayCue>> {
@@ -212,12 +239,70 @@ impl EpubProvider {
         Ok(Some(normalize_epub_path(&resolved)))
     }
 
+    /// Resolves only package-declared and cover-named artwork. Unlike
+    /// [`Self::cover_image_path`], this does not guess from arbitrary spine or
+    /// manifest images, allowing callers to apply their own geometry checks.
+    pub fn declared_cover_image_path(&self) -> io::Result<Option<String>> {
+        let Some(href) = self.find_declared_cover_href() else {
+            return Ok(None);
+        };
+        let direct = normalize_epub_path(&href);
+        if self.exists(&direct) {
+            return Ok(Some(direct));
+        }
+
+        let resolved = resolve_href(&self.opf_dir, &href);
+        Ok(Some(normalize_epub_path(&resolved)))
+    }
+
+    /// Returns image resources in reading order for cover fallback heuristics.
+    /// Images referenced by spine documents come first, in DOM order, followed
+    /// by any remaining manifest images in package order.
+    pub fn image_paths_in_reading_order(&self) -> io::Result<Vec<String>> {
+        let manifest = self.get_or_parse_manifest();
+        let mut paths = Vec::new();
+        let mut seen = HashSet::new();
+
+        for idref in &manifest.spine {
+            let Some(item) = manifest.items.iter().find(|item| &item.id == idref) else { continue };
+            if !is_manifest_item_html(item) {
+                if is_manifest_item_image(item) {
+                    let path = normalize_epub_path(&resolve_href(&self.opf_dir, &item.href));
+                    if seen.insert(path.clone()) {
+                        paths.push(path);
+                    }
+                }
+                continue;
+            }
+            let document_path = normalize_epub_path(&resolve_href(&self.opf_dir, &item.href));
+            let document = match self.read_entry_string(&document_path) {
+                Ok(document) => document,
+                Err(_) => continue,
+            };
+            for href in parse_image_hrefs_from_html(&document) {
+                let path = resolve_toc_href(&document_path, &href);
+                if seen.insert(path.clone()) {
+                    paths.push(path);
+                }
+            }
+        }
+
+        for item in &manifest.items {
+            if !is_manifest_item_image(item) {
+                continue;
+            }
+            let path = normalize_epub_path(&resolve_href(&self.opf_dir, &item.href));
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
     pub fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
         let mut archive = self.archive.lock().unwrap();
         let mut entry = archive.by_name(uri).map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))?;
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        read_bounded_entry(&mut entry, MAX_BINARY_RESOURCE_BYTES, "EPUB resource")
     }
 
     pub fn exists(&self, uri: &str) -> bool {
@@ -228,7 +313,7 @@ impl EpubProvider {
         archive.by_name(uri).is_ok()
     }
 
-    fn find_cover_href(&self) -> Option<String> {
+    fn find_declared_cover_href(&self) -> Option<String> {
         let manifest = self.get_or_parse_manifest();
 
         // Look for cover-image property
@@ -267,19 +352,6 @@ impl EpubProvider {
             return Some(guide_href);
         }
 
-        // Check first spine item, often coverpage/cover html in EPUB2 files.
-        if let Some(first_spine_idref) = parse_opf_first_spine_idref(&self.opf_xml)
-            && let Some(item) = manifest.items.iter().find(|item| item.id == first_spine_idref)
-        {
-            if is_manifest_item_html(item) {
-                if let Some(found) = self.find_cover_from_html(&item.href) {
-                    return Some(found);
-                }
-            } else if is_manifest_item_image(item) {
-                return Some(item.href.clone());
-            }
-        }
-
         // Fallback: try parsing likely cover HTML pages.
         for item in &manifest.items {
             let lower_href = item.href.to_ascii_lowercase();
@@ -301,12 +373,31 @@ impl EpubProvider {
             }
         }
 
-        // Last resort: pick the best likely front-cover image from the manifest.
-        if let Some(best) = pick_best_cover_image_item(&manifest.items) {
-            return Some(best.href.clone());
+        None
+    }
+
+    fn find_cover_href(&self) -> Option<String> {
+        if let Some(href) = self.find_declared_cover_href() {
+            return Some(href);
         }
 
-        None
+        let manifest = self.get_or_parse_manifest();
+        // Preserve the broad legacy API's conventional EPUB2 fallback. More
+        // selective consumers use declared_cover_image_path followed by the
+        // dimension-checked reading-order candidates.
+        if let Some(first_spine_idref) = manifest.spine.first()
+            && let Some(item) = manifest.items.iter().find(|item| &item.id == first_spine_idref)
+        {
+            if is_manifest_item_html(item) {
+                if let Some(found) = self.find_cover_from_html(&item.href) {
+                    return Some(found);
+                }
+            } else if is_manifest_item_image(item) {
+                return Some(item.href.clone());
+            }
+        }
+
+        pick_best_cover_image_item(&manifest.items).map(|item| item.href.clone())
     }
 
     fn find_cover_from_html(&self, html_href: &str) -> Option<String> {
@@ -328,7 +419,6 @@ impl EpubProvider {
         })
     }
 
-    #[cfg(feature = "html-resource-provider")]
     pub fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
         let manifest = self.get_or_parse_manifest();
 
@@ -377,9 +467,7 @@ impl EpubProvider {
     fn read_entry_string(&self, name: &str) -> io::Result<String> {
         let mut archive = self.archive.lock().unwrap();
         let mut entry = archive.by_name(name).map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))?;
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        use std::io::Read;
-        entry.read_to_end(&mut bytes)?;
+        let bytes = read_bounded_entry(&mut entry, MAX_MARKUP_RESOURCE_BYTES, "EPUB markup resource")?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -480,7 +568,6 @@ impl EpubProvider {
         ParsedManifest { items, spine, nav_href, ncx_href }
     }
 
-    #[cfg(feature = "html-resource-provider")]
     fn parse_nav_toc(nav_xml: &str) -> Option<Vec<TocEntry>> {
         let mut reader = quick_xml::Reader::from_str(nav_xml);
         reader.trim_text(true);
@@ -571,7 +658,6 @@ impl EpubProvider {
         if root.is_empty() { None } else { Some(root) }
     }
 
-    #[cfg(feature = "html-resource-provider")]
     fn parse_ncx_toc(ncx_xml: &str) -> Option<Vec<TocEntry>> {
         let mut reader = quick_xml::Reader::from_str(ncx_xml);
         reader.trim_text(true);
@@ -661,6 +747,16 @@ impl EpubProvider {
     }
 }
 
+fn read_bounded_entry(reader: &mut impl Read, declared_limit: u64, label: &str) -> io::Result<Vec<u8>> {
+    let capacity = usize::try_from(declared_limit.min(256 * 1024)).unwrap_or(256 * 1024);
+    let mut bytes = Vec::with_capacity(capacity);
+    reader.take(declared_limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > declared_limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{label} exceeds the size limit")));
+    }
+    Ok(bytes)
+}
+
 #[cfg(feature = "html-resource-provider")]
 impl ResourceProvider for EpubProvider {
     fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
@@ -691,9 +787,14 @@ impl ResourceProvider for EpubProvider {
         Ok(candidates)
     }
 
-    fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
-        EpubProvider::toc(self)
+    fn toc(&self) -> io::Result<Option<Vec<html::resources::TocEntry>>> {
+        EpubProvider::toc(self).map(|entries| entries.map(|entries| entries.into_iter().map(renderer_toc_entry).collect()))
     }
+}
+
+#[cfg(feature = "html-resource-provider")]
+fn renderer_toc_entry(entry: TocEntry) -> html::resources::TocEntry {
+    html::resources::TocEntry { title: entry.title, link: entry.link, children: entry.children.into_iter().map(renderer_toc_entry).collect() }
 }
 
 fn referenced_resources(base: &str, bytes: &[u8]) -> Vec<String> {
@@ -771,7 +872,6 @@ fn resolve_href(base_dir: &str, href: &str) -> String {
     if base_dir.is_empty() { href.to_string() } else { format!("{}/{}", base_dir.trim_end_matches('/'), href) }
 }
 
-#[cfg(feature = "html-resource-provider")]
 fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
     for entry in entries {
         entry.link = publication_root_href(resolve_toc_href(base_path, entry.link.as_str()));
@@ -782,7 +882,6 @@ fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
 /// TOC entries are resolved relative to the nav/NCX document when they are
 /// parsed. Mark the resulting archive path as root-relative so opening it does
 /// not resolve it a second time against whichever spine document is visible.
-#[cfg(feature = "html-resource-provider")]
 fn publication_root_href(href: String) -> String {
     if href.is_empty() || href.starts_with('/') || href.split('#').next().is_some_and(|path| path.contains(':')) { href } else { format!("/{href}") }
 }
@@ -938,7 +1037,10 @@ fn compact_whitespace(text: &str) -> String {
 
 fn infer_identifier_scheme(value: &str) -> IdentifierScheme {
     let value = value.trim().to_ascii_lowercase();
-    if value.starts_with("urn:isbn:") || value.starts_with("isbn:") {
+    let compact = value.chars().filter(|character| !character.is_ascii_whitespace() && *character != '-').collect::<String>();
+    let looks_like_bare_isbn = (compact.len() == 13 && compact.bytes().all(|byte| byte.is_ascii_digit()))
+        || (compact.len() == 10 && compact.bytes().take(9).all(|byte| byte.is_ascii_digit()) && (compact.as_bytes()[9].is_ascii_digit() || compact.as_bytes()[9] == b'x'));
+    if value.starts_with("urn:isbn:") || value.starts_with("isbn:") || looks_like_bare_isbn {
         IdentifierScheme::ISBN
     } else if value.starts_with("urn:uuid:") || value.starts_with("uuid:") {
         IdentifierScheme::UUID
@@ -1414,41 +1516,15 @@ fn parse_opf_guide_cover_href(opf_xml: &str) -> Option<String> {
     None
 }
 
-fn parse_opf_first_spine_idref(opf_xml: &str) -> Option<String> {
-    let mut reader = quick_xml::Reader::from_str(opf_xml);
-    reader.trim_text(true);
-    let mut buf = Vec::new();
-    let mut in_spine = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
-                let name = e.name();
-                if name.as_ref().ends_with(b"spine") {
-                    in_spine = true;
-                } else if in_spine
-                    && name.as_ref().ends_with(b"itemref")
-                    && let Some(idref) = read_xml_attr(e.attributes(), b"idref")
-                {
-                    return Some(idref);
-                }
-            }
-            Ok(quick_xml::events::Event::End(e)) if e.name().as_ref().ends_with(b"spine") => {
-                break;
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    None
+fn parse_first_image_href_from_html(html: &str) -> Option<String> {
+    parse_image_hrefs_from_html(html).into_iter().next()
 }
 
-fn parse_first_image_href_from_html(html: &str) -> Option<String> {
+fn parse_image_hrefs_from_html(html: &str) -> Vec<String> {
     let mut reader = quick_xml::Reader::from_str(html);
     reader.trim_text(true);
     let mut buf = Vec::new();
+    let mut images = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -1456,12 +1532,12 @@ fn parse_first_image_href_from_html(html: &str) -> Option<String> {
                 let tag = e.name();
                 if tag.as_ref().ends_with(b"img") {
                     if let Some(src) = read_xml_attr(e.attributes(), b"src") {
-                        return Some(src);
+                        images.push(src);
                     }
                 } else if tag.as_ref().ends_with(b"image")
                     && let Some(href) = read_xml_attr(e.attributes(), b"href").or_else(|| read_xml_attr(e.attributes(), b"xlink:href"))
                 {
-                    return Some(href);
+                    images.push(href);
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
@@ -1470,7 +1546,7 @@ fn parse_first_image_href_from_html(html: &str) -> Option<String> {
         }
         buf.clear();
     }
-    None
+    images
 }
 
 fn is_manifest_item_html(item: &ManifestItem) -> bool {
@@ -1528,11 +1604,7 @@ fn pick_best_cover_image_item(items: &[ManifestItem]) -> Option<&ManifestItem> {
             score -= 25;
         }
 
-        if let Some((_, best_score)) = best {
-            if score > best_score {
-                best = Some((item, score));
-            }
-        } else {
+        if best.is_none_or(|(_, best_score)| score > best_score) {
             best = Some((item, score));
         }
     }
@@ -1545,6 +1617,14 @@ mod tests {
 
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn bounded_entry_reader_rejects_more_than_the_limit() {
+        let mut input = std::io::Cursor::new(vec![7_u8; 17]);
+        let error = read_bounded_entry(&mut input, 16, "test resource").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("size limit"));
+    }
 
     #[test]
     fn smil_media_overlay_cues_resolve_paths_and_clock_values() {

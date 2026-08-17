@@ -9,12 +9,20 @@ workspace = true
 
 [dependencies]
 axum = "0.7"
+bzip2 = "0.6"
 flate2 = "1"
+library-model = { path = "../../client/library-model" }
 metadata-contract = { path = "../../shared/metadata-contract" }
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
+rayon = "1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-normalization.workspace = true
 
+[dev-dependencies]
+tempfile = "3"

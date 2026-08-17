@@ -5,11 +5,66 @@ use crate::app::BackendError;
 use crate::library::{AuthorSort, AuthorSummary, LibraryAuthorsView, LibraryBackend, LibraryFolderEntry, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectEntry, LibrarySubjectView, SubjectPath};
 use app_contract::catalog::{CatalogAuthorDiscoveryRequest, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme};
 use app_contract::library::FolderSort;
+use app_contract::library::{BookDetail, BookDetailAuthor, BookTocEntry, LibraryFileTypeFilter};
+use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
 const MAX_AUTHOR_DISCOVERY_IDENTIFIERS: usize = 2;
 pub const UNCATEGORIZED_SUBJECT_PATH: &str = "__uncategorized__";
 pub const OTHER_SUBJECT_SYSTEMS_PATH: &str = "__other_subject_systems__";
+pub const PLACES_SUBJECT_PATH: &str = "__places__";
+pub const PEOPLE_SUBJECT_PATH: &str = "__people__";
+
+struct FileTypeScope {
+    filter: LibraryFileTypeFilter,
+    matching: HashSet<ContentHash>,
+    downloaded: HashSet<ContentHash>,
+}
+
+impl FileTypeScope {
+    fn load(conn: &Connection, filter: LibraryFileTypeFilter) -> Result<Self, rusqlite::Error> {
+        let mut matching = HashSet::new();
+        let mut downloaded = HashSet::new();
+        let mut statement = conn.prepare(
+            "SELECT book.content_hash,book.format,MAX(placement.is_downloaded)
+             FROM book JOIN book_dir placement ON placement.book_row_id=book.row_id AND placement.deleted_at IS NULL
+             WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
+             GROUP BY book.row_id,book.content_hash,book.format",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?;
+        for row in rows {
+            let (hash, format, is_downloaded) = row?;
+            if filter.matches_extension(&format) {
+                let hash = ContentHash::new(&hash);
+                if is_downloaded {
+                    downloaded.insert(hash.clone());
+                }
+                matching.insert(hash);
+            }
+        }
+        Ok(Self { filter, matching, downloaded })
+    }
+
+    fn is_all(&self) -> bool {
+        self.filter == LibraryFileTypeFilter::All
+    }
+
+    fn retain_books(&self, books: &mut Vec<BookCardRow>) {
+        if !self.is_all() {
+            books.retain(|book| self.matching.contains(&book.content_hash));
+        }
+    }
+
+    fn counts(&self, hashes: impl IntoIterator<Item = ContentHash>) -> (usize, usize) {
+        let hashes = hashes.into_iter().collect::<HashSet<_>>();
+        (hashes.intersection(&self.matching).count(), hashes.intersection(&self.downloaded).count())
+    }
+
+    fn card_counts(&self, mut books: Vec<BookCardRow>) -> (usize, usize) {
+        self.retain_books(&mut books);
+        (books.len(), books.iter().filter(|book| book.downloaded).count())
+    }
+}
 
 fn catalog_search_identifier(scheme: &str, value: String) -> Option<CatalogPublicationIdentifier> {
     let scheme = match scheme {
@@ -28,6 +83,81 @@ fn catalog_search_identifier(scheme: &str, value: String) -> Option<CatalogPubli
 }
 
 impl LibraryBackend {
+    pub fn book_detail(&self, content_hash: ContentHash) -> Result<BookDetail, BackendError> {
+        let mut detail = self.book_detail_summary(content_hash.clone())?;
+        detail.toc = self.book_toc(content_hash)?;
+        Ok(detail)
+    }
+
+    pub fn book_detail_summary(&self, content_hash: ContentHash) -> Result<BookDetail, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        let mut book = None;
+        conn.query_row(
+            "SELECT content_hash,title,author,description,progress,downloaded,download_requested,audiobook,audiobook_duration_ms,audiobook_chapter_count FROM book_cards WHERE content_hash=?1 AND EXISTS (SELECT 1 FROM book_dir WHERE book_row_id=book_cards.book_row_id AND deleted_at IS NULL)",
+            [content_hash.as_str()],
+            |row| super::books::read_book_card_row(row),
+        ).map(|value| book = Some(value)).map_err(BackendError::operation)?;
+        let book = book.ok_or_else(|| BackendError::operation("The book does not exist"))?;
+        let source_directory_id = conn
+            .query_row("SELECT dir_id FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND deleted_at IS NULL ORDER BY dir_id LIMIT 1", [content_hash.as_str()], |row| row.get::<_, String>(0))
+            .optional()
+            .map_err(BackendError::operation)?;
+
+        let mut authors = Vec::new();
+        let mut statement = conn.prepare(
+            "SELECT identity.stable_id,credit.credited_name FROM author_credit credit JOIN author_identity identity ON identity.id=credit.author_identity_id WHERE credit.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY credit.position"
+        ).map_err(BackendError::operation)?;
+        let rows = statement
+            .query_map([content_hash.as_str()], |row| {
+                let id: String = row.get(0)?;
+                Ok(BookDetailAuthor { id: AuthorId::parse_str(&id).map_err(|error| invalid_text_column(0, error.to_string()))?, name: row.get(1)? })
+            })
+            .map_err(BackendError::operation)?;
+        for row in rows {
+            authors.push(row.map_err(BackendError::operation)?);
+        }
+
+        let mut subject_paths = Vec::new();
+        let mut subjects = conn
+            .prepare("SELECT DISTINCT route.path FROM book_unified_concept assignment JOIN unified_concept_route route ON route.concept_id=assignment.concept_id WHERE assignment.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY route.path COLLATE NOCASE,route.path")
+            .map_err(BackendError::operation)?;
+        let rows = subjects.query_map([content_hash.as_str()], |row| row.get::<_, String>(0)).map_err(BackendError::operation)?;
+        for row in rows {
+            subject_paths.push(row.map_err(BackendError::operation)?);
+        }
+
+        let author_ids = authors.iter().map(|author| author.id.to_string()).collect::<Vec<_>>();
+        let mut related = Vec::new();
+        if !author_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", author_ids.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT DISTINCT card.content_hash,card.title,card.author,card.description,card.progress,card.downloaded,card.download_requested,card.audiobook,card.audiobook_duration_ms,card.audiobook_chapter_count FROM book_cards card JOIN author_credit credit ON credit.book_row_id=card.book_row_id JOIN author_identity identity ON identity.id=credit.author_identity_id WHERE identity.stable_id IN ({placeholders}) AND card.content_hash<>? AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=card.book_row_id AND placement.deleted_at IS NULL) ORDER BY LOWER(card.title),card.title,card.content_hash LIMIT 12"
+            );
+            let mut values = author_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            values.push(content_hash.as_str());
+            let mut statement = conn.prepare(&sql).map_err(BackendError::operation)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values), super::books::read_book_card_row).map_err(BackendError::operation)?;
+            for row in rows {
+                related.push(row.map_err(BackendError::operation)?);
+            }
+        }
+        drop(subjects);
+        drop(statement);
+        drop(conn);
+
+        Ok(BookDetail { book, source_directory_id, authors, subject_paths, toc: Vec::new(), related })
+    }
+
+    pub fn book_toc(&self, content_hash: ContentHash) -> Result<Vec<BookTocEntry>, BackendError> {
+        let toc = if self.is_epub(content_hash.clone())? {
+            let resolved = self.resolve_book_for_reader(content_hash)?;
+            epub_provider::EpubProvider::try_from_reader(resolved.reader).and_then(|provider| provider.toc()).ok().flatten().unwrap_or_default().into_iter().map(convert_toc_entry).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(toc)
+    }
+
     pub fn home(&self, limit: i32) -> Result<LibraryHomeView, BackendError> {
         let downloaded_only = self.app()?.downloaded_books_only()?;
         // The same threshold both frontends split the returned list with, so
@@ -57,24 +187,46 @@ impl LibraryBackend {
     }
 
     pub fn search_folder(&self, directory_id: &DirId, query: &str) -> Result<LibrarySearchResult, BackendError> {
+        self.search_folder_filtered(directory_id, query, LibraryFileTypeFilter::All)
+    }
+
+    pub fn search_folder_filtered(&self, directory_id: &DirId, query: &str, file_type: LibraryFileTypeFilter) -> Result<LibrarySearchResult, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         let mut result = search_book_cards_scoped(&conn, query, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
-        let allowed = get_descendant_content_hashes(&conn, &directory_id.to_string()).map_err(BackendError::operation)?.into_iter().collect::<HashSet<_>>();
+        let scope = FileTypeScope::load(&conn, file_type).map_err(BackendError::operation)?;
+        let allowed = get_descendant_content_hashes(&conn, &directory_id.to_string()).map_err(BackendError::operation)?.into_iter().filter(|hash| scope.matching.contains(hash)).collect::<HashSet<_>>();
         retain_search_results(&mut result, &allowed);
         Ok(result)
     }
 
     pub fn search_subject(&self, subject_path: Option<&str>, query: &str) -> Result<LibrarySearchResult, BackendError> {
-        let Some(subject_path) = subject_path else { return self.search(query) };
+        self.search_subject_filtered(subject_path, query, LibraryFileTypeFilter::All)
+    }
+
+    pub fn search_subject_filtered(&self, subject_path: Option<&str>, query: &str, file_type: LibraryFileTypeFilter) -> Result<LibrarySearchResult, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         let mut result = search_book_cards_scoped(&conn, query, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
-        let allowed = if subject_path == UNCATEGORIZED_SUBJECT_PATH {
+        let scope = FileTypeScope::load(&conn, file_type).map_err(BackendError::operation)?;
+        let Some(subject_path) = subject_path else {
+            retain_search_results(&mut result, &scope.matching);
+            return Ok(result);
+        };
+        let mut allowed: HashSet<ContentHash> = if subject_path == PLACES_SUBJECT_PATH {
+            external_kind_hashes(&conn, "place").map_err(BackendError::operation)?.into_iter().collect()
+        } else if subject_path == PEOPLE_SUBJECT_PATH {
+            external_kind_hashes(&conn, "person").map_err(BackendError::operation)?.into_iter().collect()
+        } else if let Some(wikidata_id) = external_path_id(subject_path, PLACES_SUBJECT_PATH) {
+            get_external_entity_content_hashes(&conn, wikidata_id).map_err(BackendError::operation)?.into_iter().collect()
+        } else if let Some(wikidata_id) = external_path_id(subject_path, PEOPLE_SUBJECT_PATH) {
+            get_external_entity_content_hashes(&conn, wikidata_id).map_err(BackendError::operation)?.into_iter().collect()
+        } else if subject_path == UNCATEGORIZED_SUBJECT_PATH {
             get_uncategorized_book_cards_scoped(&conn, false).map_err(BackendError::operation)?.into_iter().map(|book| book.content_hash).collect()
         } else if subject_path == OTHER_SUBJECT_SYSTEMS_PATH {
             get_other_subject_system_book_cards_scoped(&conn, false).map_err(BackendError::operation)?.into_iter().map(|book| book.content_hash).collect()
         } else {
             get_descendant_subject_content_hashes(&conn, subject_path).map_err(BackendError::operation)?.into_iter().collect()
         };
+        allowed.retain(|hash| scope.matching.contains(hash));
         retain_search_results(&mut result, &allowed);
         Ok(result)
     }
@@ -89,7 +241,10 @@ impl LibraryBackend {
         let mut authors = get_authors_scoped(&conn, downloaded_only)
             .map_err(BackendError::operation)?
             .into_iter()
-            .map(|(id, name, sort_name, book_count)| AuthorSummary::try_new(id, name, sort_name, book_count, covers.remove(&id).unwrap_or_default()).map_err(BackendError::operation))
+            .map(|(id, name, sort_name, book_count)| {
+                let (cover_hashes, cover_titles) = covers.remove(&id).unwrap_or_default().into_iter().unzip();
+                AuthorSummary::try_new(id, name, sort_name, book_count, cover_hashes, cover_titles).map_err(BackendError::operation)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         sort.sort(&mut authors);
         let books = selected.map(|author_id| get_book_cards_by_author_scoped(&conn, author_id, downloaded_only).map_err(BackendError::operation)).transpose()?;
@@ -118,45 +273,99 @@ impl LibraryBackend {
     }
 
     pub fn folder(&self, directory_id: &DirId) -> Result<LibraryFolderView, BackendError> {
+        self.folder_filtered(directory_id, LibraryFileTypeFilter::All)
+    }
+
+    pub fn folder_filtered(&self, directory_id: &DirId, file_type: LibraryFileTypeFilter) -> Result<LibraryFolderView, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
+        let scope = FileTypeScope::load(&conn, file_type).map_err(BackendError::operation)?;
         let directory_id = directory_id.to_string();
         let mut directories = get_child_directories(&conn, &directory_id).map_err(BackendError::operation)?;
         FolderSort::Name.sort(&mut directories);
-        let books = get_book_cards_in_dir_scoped(&conn, &directory_id, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
-        let directories = directories
-            .into_iter()
-            .map(|directory| LibraryFolderEntry { id: *directory.id(), name: directory.name().as_str().to_owned(), book_count: directory.book_count(), downloaded_book_count: directory.downloaded_book_count() })
-            .collect();
+        let mut books = get_book_cards_in_dir_scoped(&conn, &directory_id, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
+        scope.retain_books(&mut books);
+        let mut filtered = Vec::with_capacity(directories.len());
+        for directory in directories {
+            let (book_count, downloaded_book_count) =
+                if scope.is_all() { (directory.book_count(), directory.downloaded_book_count()) } else { scope.counts(get_descendant_content_hashes(&conn, &directory.id().to_string()).map_err(BackendError::operation)?) };
+            if scope.is_all() || book_count > 0 {
+                filtered.push(LibraryFolderEntry { id: *directory.id(), name: directory.name().as_str().to_owned(), book_count, downloaded_book_count });
+            }
+        }
+        let directories = filtered;
         Ok(LibraryFolderView { children: directories, books })
     }
 
     pub fn subjects(&self, subject_path: Option<&str>) -> Result<LibrarySubjectView, BackendError> {
+        self.subjects_filtered(subject_path, LibraryFileTypeFilter::All)
+    }
+
+    pub fn subjects_filtered(&self, subject_path: Option<&str>, file_type: LibraryFileTypeFilter) -> Result<LibrarySubjectView, BackendError> {
         let downloaded_only = self.app()?.downloaded_books_only()?;
         let conn = self.db.get().map_err(BackendError::operation)?;
+        let scope = FileTypeScope::load(&conn, file_type).map_err(BackendError::operation)?;
         if subject_path == Some(UNCATEGORIZED_SUBJECT_PATH) {
-            let books = get_uncategorized_book_cards_scoped(&conn, downloaded_only).map_err(BackendError::operation)?;
+            let mut books = get_uncategorized_book_cards_scoped(&conn, downloaded_only).map_err(BackendError::operation)?;
+            scope.retain_books(&mut books);
             return Ok(LibrarySubjectView { children: Vec::new(), books });
         }
         if subject_path == Some(OTHER_SUBJECT_SYSTEMS_PATH) {
-            let books = get_other_subject_system_book_cards_scoped(&conn, downloaded_only).map_err(BackendError::operation)?;
+            let mut books = get_other_subject_system_book_cards_scoped(&conn, downloaded_only).map_err(BackendError::operation)?;
+            scope.retain_books(&mut books);
             return Ok(LibrarySubjectView { children: Vec::new(), books });
+        }
+        if subject_path.is_some_and(|path| path == PLACES_SUBJECT_PATH || path.starts_with(&format!("{PLACES_SUBJECT_PATH}/"))) {
+            return external_places(&conn, subject_path.expect("checked above"), downloaded_only, &scope).map_err(BackendError::operation);
+        }
+        if subject_path.is_some_and(|path| path == PEOPLE_SUBJECT_PATH || path.starts_with(&format!("{PEOPLE_SUBJECT_PATH}/"))) {
+            return external_people(&conn, subject_path.expect("checked above"), downloaded_only, &scope).map_err(BackendError::operation);
         }
         let parent_path = subject_path.unwrap_or("");
         let mut subjects = get_subject_children(&conn, parent_path).map_err(BackendError::operation)?;
-        if subject_path.is_none() {
-            let (book_count, downloaded_book_count) = get_uncategorized_counts(&conn).map_err(BackendError::operation)?;
-            if book_count > 0 {
-                subjects.push(LibrarySubjectEntry { id: SubjectPath::new(UNCATEGORIZED_SUBJECT_PATH), name: "Uncategorized".to_owned(), book_count, downloaded_book_count });
+        if !scope.is_all() {
+            let mut filtered = Vec::with_capacity(subjects.len());
+            for mut subject in subjects {
+                let (book_count, downloaded_book_count) = scope.counts(get_descendant_subject_content_hashes(&conn, subject.id.as_str()).map_err(BackendError::operation)?);
+                if book_count > 0 {
+                    subject.book_count = book_count;
+                    subject.downloaded_book_count = downloaded_book_count;
+                    filtered.push(subject);
+                }
             }
-            let (book_count, downloaded_book_count) = get_other_subject_system_counts(&conn).map_err(BackendError::operation)?;
-            if book_count > 0 {
-                subjects.push(LibrarySubjectEntry { id: SubjectPath::new(OTHER_SUBJECT_SYSTEMS_PATH), name: "Other subject systems".to_owned(), book_count, downloaded_book_count });
+            subjects = filtered;
+        }
+        if subject_path.is_none() {
+            let special = [(PLACES_SUBJECT_PATH, "Places", external_kind_hashes(&conn, "place").map_err(BackendError::operation)?), (PEOPLE_SUBJECT_PATH, "Persons", external_kind_hashes(&conn, "person").map_err(BackendError::operation)?)];
+            for (id, name, hashes) in special {
+                let (book_count, downloaded_book_count) = if scope.is_all() { external_kind_counts(&conn, if id == PLACES_SUBJECT_PATH { "place" } else { "person" }).map_err(BackendError::operation)? } else { scope.counts(hashes) };
+                if scope.is_all() || book_count > 0 {
+                    subjects.push(LibrarySubjectEntry { id: SubjectPath::new(id), name: name.to_owned(), book_count, downloaded_book_count });
+                }
+            }
+            let specials = [
+                (UNCATEGORIZED_SUBJECT_PATH, "Uncategorized", scope.card_counts(get_uncategorized_book_cards_scoped(&conn, false).map_err(BackendError::operation)?)),
+                (OTHER_SUBJECT_SYSTEMS_PATH, "Other subject systems", scope.card_counts(get_other_subject_system_book_cards_scoped(&conn, false).map_err(BackendError::operation)?)),
+            ];
+            for (id, name, (book_count, downloaded_book_count)) in specials {
+                if scope.is_all() || book_count > 0 {
+                    subjects.push(LibrarySubjectEntry { id: SubjectPath::new(id), name: name.to_owned(), book_count, downloaded_book_count });
+                }
             }
         }
-        subjects.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()).then_with(|| left.id.as_str().cmp(right.id.as_str())));
-        let books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
+        subjects.sort_by(|left, right| {
+            library_model::unified_subject_sort_order(left.id.as_str())
+                .cmp(&library_model::unified_subject_sort_order(right.id.as_str()))
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+        });
+        let mut books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
+        scope.retain_books(&mut books);
         Ok(LibrarySubjectView { children: subjects, books })
     }
+}
+
+fn convert_toc_entry(entry: epub_provider::TocEntry) -> BookTocEntry {
+    BookTocEntry { title: entry.title, target: entry.link, children: entry.children.into_iter().map(convert_toc_entry).collect() }
 }
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
 #[derive(Clone)]
@@ -177,8 +386,11 @@ fn read_known_directory_state(row: &rusqlite::Row<'_>, live_column: usize, path_
     if !live {
         return Ok(KnownDirectoryState::Deleted);
     }
-    let raw_path: String = row.get(path_column)?;
-    let path = if raw_path.is_empty() { None } else { Some(RelativeDirPath::parse(&raw_path).map_err(|error| invalid_text_column(path_column, error.to_string()))?) };
+    let raw_path: Option<String> = row.get(path_column)?;
+    let path = match raw_path.as_deref() {
+        None | Some("") => None,
+        Some(raw_path) => Some(RelativeDirPath::parse(raw_path).map_err(|error| invalid_text_column(path_column, error.to_string()))?),
+    };
     Ok(KnownDirectoryState::Live(path))
 }
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
@@ -261,7 +473,7 @@ pub(super) fn get_uncategorized_counts(conn: &Connection) -> Result<(usize, usiz
 
 pub(super) fn get_other_subject_system_counts(conn: &Connection) -> Result<(usize, usize), rusqlite::Error> {
     let mut counts = (0, 0);
-    conn.get_other_subject_system_counts(library_model::BISAC_SYSTEM_ID, |row| {
+    conn.get_other_subject_system_counts(|row| {
         let total = row.get::<_, i64>(0)?;
         let downloaded = row.get::<_, i64>(1)?;
         counts = (
@@ -293,7 +505,7 @@ pub(super) fn get_uncategorized_book_cards_scoped(conn: &Connection, downloaded_
 
 pub(super) fn get_other_subject_system_book_cards_scoped(conn: &Connection, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     let mut cards = Vec::new();
-    conn.get_other_subject_system_book_cards(library_model::BISAC_SYSTEM_ID, i32::from(downloaded_only), |row| {
+    conn.get_other_subject_system_book_cards(i32::from(downloaded_only), |row| {
         cards.push(read_book_card_row(row)?);
         Ok(())
     })?;
@@ -316,6 +528,106 @@ pub(super) fn get_descendant_subject_content_hashes(conn: &Connection, subject_p
         Ok(())
     })?;
     Ok(content_hashes)
+}
+
+fn external_path_id<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    path.strip_prefix(root)?.strip_prefix('/')?.rsplit('/').next().filter(|id| {
+        (id.starts_with('Q') && id[1..].bytes().all(|byte| byte.is_ascii_digit())) || (["OLP-", "OLR-"].iter().any(|prefix| id.starts_with(prefix)) && id[4..].len() % 2 == 0 && id[4..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
+}
+
+fn external_kind_counts(conn: &Connection, kind: &str) -> Result<(usize, usize), rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT reference.book_row_id),COUNT(DISTINCT CASE WHEN card.downloaded THEN reference.book_row_id END)
+         FROM book_external_entity reference JOIN book_cards card ON card.book_row_id=reference.book_row_id WHERE reference.kind=?1",
+        [kind],
+        |row| {
+            let total = usize::try_from(row.get::<_, i64>(0)?).map_err(|_| invalid_integer_column(0, "external entity book count must not be negative"))?;
+            let downloaded = usize::try_from(row.get::<_, i64>(1)?).map_err(|_| invalid_integer_column(1, "external entity downloaded count must not be negative"))?;
+            Ok((total, downloaded))
+        },
+    )
+}
+
+fn external_entity_counts(conn: &Connection, wikidata_id: &str, recursive_places: bool) -> Result<(usize, usize), rusqlite::Error> {
+    let mut counts = (0, 0);
+    conn.get_external_entity_book_counts(wikidata_id, i32::from(recursive_places), |row| {
+        counts = (
+            usize::try_from(row.get::<_, i64>(0)?).map_err(|_| invalid_integer_column(0, "external entity book count must not be negative"))?,
+            usize::try_from(row.get::<_, i64>(1)?).map_err(|_| invalid_integer_column(1, "external entity downloaded count must not be negative"))?,
+        );
+        Ok(())
+    })?;
+    Ok(counts)
+}
+
+fn external_entity_books(conn: &Connection, wikidata_id: &str, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
+    let mut books = Vec::new();
+    conn.get_book_cards_for_external_entity(wikidata_id, i32::from(downloaded_only), |row| {
+        books.push(read_book_card_row(row)?);
+        Ok(())
+    })?;
+    Ok(books)
+}
+
+fn external_places(conn: &Connection, path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<LibrarySubjectView, rusqlite::Error> {
+    if let Some(wikidata_id) = external_path_id(path, PLACES_SUBJECT_PATH) {
+        let mut books = external_entity_books(conn, wikidata_id, downloaded_only)?;
+        scope.retain_books(&mut books);
+        return Ok(LibrarySubjectView { children: Vec::new(), books });
+    }
+    let mut raw_places = Vec::<(String, String)>::new();
+    conn.get_external_places(|row| {
+        raw_places.push((row.get(0)?, row.get(1)?));
+        Ok(())
+    })?;
+    let mut children = Vec::new();
+    for (wikidata_id, name) in raw_places {
+        let (book_count, downloaded_book_count) = if scope.is_all() { external_entity_counts(conn, &wikidata_id, false)? } else { scope.counts(get_external_entity_content_hashes(conn, &wikidata_id)?) };
+        if scope.is_all() || book_count > 0 {
+            children.push(LibrarySubjectEntry { id: SubjectPath::new(format!("{PLACES_SUBJECT_PATH}/{wikidata_id}")), name, book_count, downloaded_book_count });
+        }
+    }
+    Ok(LibrarySubjectView { children, books: Vec::new() })
+}
+
+fn external_people(conn: &Connection, path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<LibrarySubjectView, rusqlite::Error> {
+    if let Some(wikidata_id) = external_path_id(path, PEOPLE_SUBJECT_PATH) {
+        let mut books = external_entity_books(conn, wikidata_id, downloaded_only)?;
+        scope.retain_books(&mut books);
+        return Ok(LibrarySubjectView { children: Vec::new(), books });
+    }
+    let mut raw_people = Vec::<(String, String)>::new();
+    conn.get_external_people(|row| {
+        raw_people.push((row.get(0)?, row.get(1)?));
+        Ok(())
+    })?;
+    let mut children = Vec::new();
+    for (wikidata_id, name) in raw_people {
+        let (book_count, downloaded_book_count) = if scope.is_all() { external_entity_counts(conn, &wikidata_id, false)? } else { scope.counts(get_external_entity_content_hashes(conn, &wikidata_id)?) };
+        if scope.is_all() || book_count > 0 {
+            children.push(LibrarySubjectEntry { id: SubjectPath::new(format!("{PEOPLE_SUBJECT_PATH}/{wikidata_id}")), name, book_count, downloaded_book_count });
+        }
+    }
+    Ok(LibrarySubjectView { children, books: Vec::new() })
+}
+
+fn get_external_entity_content_hashes(conn: &Connection, wikidata_id: &str) -> Result<Vec<ContentHash>, rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT book.content_hash FROM book_external_entity reference JOIN book ON book.row_id=reference.book_row_id
+         WHERE reference.wikidata_id=?1 AND book.deleted_at IS NULL AND book.hidden_at IS NULL ORDER BY book.content_hash",
+    )?;
+    let hashes = statement.query_map([wikidata_id], |row| row.get::<_, String>(0))?.map(|value| value.map(|value| ContentHash::new(&value))).collect();
+    hashes
+}
+
+fn external_kind_hashes(conn: &Connection, kind: &str) -> Result<Vec<ContentHash>, rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT book.content_hash FROM book_external_entity reference JOIN book ON book.row_id=reference.book_row_id
+         WHERE reference.kind=?1 AND book.deleted_at IS NULL AND book.hidden_at IS NULL ORDER BY book.content_hash",
+    )?;
+    let hashes = statement.query_map([kind], |row| row.get::<_, String>(0))?.map(|value| value.map(|value| ContentHash::new(&value))).collect();
+    hashes
 }
 pub fn get_folder_download_counts(conn: &Connection, dir_id: &str) -> Result<(usize, usize), rusqlite::Error> {
     let mut counts = (0, 0);
@@ -395,13 +707,14 @@ pub(super) fn get_authors_scoped(conn: &Connection, downloaded_only: bool) -> Re
 
 /// The covers each author's row shows, keyed by author, in the order the row
 /// draws them.
-pub(super) fn get_author_cover_hashes_scoped(conn: &Connection, downloaded_only: bool, per_author: i32) -> Result<HashMap<AuthorId, Vec<ContentHash>>, rusqlite::Error> {
-    let mut covers: HashMap<AuthorId, Vec<ContentHash>> = HashMap::new();
+pub(super) fn get_author_cover_hashes_scoped(conn: &Connection, downloaded_only: bool, per_author: i32) -> Result<HashMap<AuthorId, Vec<(ContentHash, String)>>, rusqlite::Error> {
+    let mut covers: HashMap<AuthorId, Vec<(ContentHash, String)>> = HashMap::new();
     conn.get_author_cover_hashes(i32::from(downloaded_only), per_author, |row| {
         let raw_id: String = row.get(0)?;
         let id = AgentId::parse_str(&raw_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
         let raw_hash: String = row.get(1)?;
-        covers.entry(id).or_default().push(ContentHash::new(&raw_hash));
+        let title: String = row.get(2)?;
+        covers.entry(id).or_default().push((ContentHash::new(&raw_hash), title));
         Ok(())
     })?;
     Ok(covers)

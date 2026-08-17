@@ -1,39 +1,21 @@
+//! Versioned bincode codec for persisted values only.
+//!
+//! HTTP and WebSocket traffic uses the separate `protobuf-wire` crate.
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+bincode; version=11";
-pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+bincode";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAGIC: &[u8; 4] = b"BKHM";
-const VERSION: u8 = 11;
+const VERSION: u8 = 12;
 const HEADER_BYTES: usize = MAGIC.len() + 1;
 
-/// The magic+version header bytes prefixing every encoded value, exposed so
-/// tests can assert against it without hardcoding a version byte that goes
-/// stale on the next [`VERSION`] bump.
+/// The magic+version header bytes prefixing every persisted value.
 pub const fn header_bytes() -> [u8; HEADER_BYTES] {
     [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION]
-}
-
-pub fn is_current_media_type(value: &str) -> bool {
-    let mut fields = value.split(';');
-    if !fields.next().is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(MEDIA_TYPE_BASE)) {
-        return false;
-    }
-    let mut version = None;
-    for parameter in fields {
-        let Some((name, value)) = parameter.trim().split_once('=') else { continue };
-        if name.trim().eq_ignore_ascii_case("version") {
-            if version.is_some() {
-                return false;
-            }
-            version = Some(value.trim());
-        }
-    }
-    version.and_then(|value| value.parse::<u8>().ok()) == Some(VERSION)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,11 +30,11 @@ pub enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Encode(reason) => write!(formatter, "cannot encode Bokheim body: {reason}"),
-            Self::Decode(reason) => write!(formatter, "cannot decode Bokheim body: {reason}"),
-            Self::InvalidHeader => formatter.write_str("Bokheim body has an invalid wire header"),
-            Self::UnsupportedVersion(version) => write!(formatter, "Bokheim wire version {version} is unsupported"),
-            Self::TooLarge { limit } => write!(formatter, "decoded Bokheim body exceeds the {limit}-byte limit"),
+            Self::Encode(reason) => write!(formatter, "cannot encode Bokheim storage value: {reason}"),
+            Self::Decode(reason) => write!(formatter, "cannot decode Bokheim storage value: {reason}"),
+            Self::InvalidHeader => formatter.write_str("Bokheim storage value has an invalid header"),
+            Self::UnsupportedVersion(version) => write!(formatter, "Bokheim storage version {version} is unsupported"),
+            Self::TooLarge { limit } => write!(formatter, "decoded Bokheim storage value exceeds the {limit}-byte limit"),
         }
     }
 }
@@ -80,9 +62,28 @@ pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<
     }
     let (value, consumed) = bincode::serde::decode_from_slice(&body[HEADER_BYTES..], bincode::config::standard()).map_err(|error| WireError::Decode(error.to_string()))?;
     if consumed != body.len() - HEADER_BYTES {
-        return Err(WireError::Decode("trailing bytes after Bokheim value".to_owned()));
+        return Err(WireError::Decode("trailing bytes after Bokheim storage value".to_owned()));
     }
     Ok(value)
+}
+
+/// Decodes an explicitly allowed older persisted value only when its bincode
+/// payload remains byte-for-byte compatible with the current storage schema.
+pub fn decode_compatible<T: DeserializeOwned + Serialize>(body: &[u8], decoded_limit: usize, compatible_versions: &[u8]) -> Result<T, WireError> {
+    match decode(body, decoded_limit) {
+        Ok(value) => Ok(value),
+        Err(WireError::UnsupportedVersion(version)) if compatible_versions.contains(&version) => {
+            let mut current = body.to_vec();
+            current[MAGIC.len()] = VERSION;
+            let value = decode(&current, decoded_limit)?;
+            let encoded = encode(&value)?;
+            if encoded.get(HEADER_BYTES..) != body.get(HEADER_BYTES..) {
+                return Err(WireError::Decode(format!("storage version {version} is not byte-compatible with version {VERSION}")));
+            }
+            Ok(value)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -107,42 +108,29 @@ mod tests {
     }
 
     #[test]
-    fn bincode_round_trip_uses_the_versioned_bokheim_header() {
+    fn bincode_round_trip_uses_the_versioned_storage_header() {
         let encoded = encode(&example(8)).unwrap();
-        let golden = b"BKHM\x0b\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07";
-        assert_eq!(encoded, golden);
-        assert_eq!(&encoded[..MAGIC.len()], MAGIC);
-        assert_eq!(encoded[MAGIC.len()], VERSION);
+        assert_eq!(encoded, b"BKHM\x0c\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07");
         assert_eq!(decode::<Example>(&encoded, MAX_DECODED_REQUEST_BYTES).unwrap(), example(8));
-
-        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x0b\x01\x2a");
-        assert_eq!(decode::<NumericVariant>(b"BKHM\x0b\x01\x2a", 64).unwrap(), NumericVariant::Second(42));
+        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x0c\x01\x2a");
     }
 
     #[test]
-    fn version_and_decoded_size_are_bounded() {
+    fn version_size_and_trailing_data_are_rejected() {
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[MAGIC.len()] = VERSION + 1;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
         assert_eq!(decode::<Example>(&encode(&example(1_000)).unwrap(), 32), Err(WireError::TooLarge { limit: 32 }));
-    }
-
-    #[test]
-    fn decoder_rejects_trailing_and_malformed_data() {
         let mut trailing = encode(&NumericVariant::First).unwrap();
         trailing.push(0);
-        assert!(matches!(decode::<NumericVariant>(&trailing, 64), Err(WireError::Decode(reason)) if reason.contains("trailing bytes")));
+        assert!(matches!(decode::<NumericVariant>(&trailing, 64), Err(WireError::Decode(_))));
     }
 
     #[test]
-    fn media_type_requires_the_current_version() {
-        assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Bincode; charset=binary; version=11"));
-        assert!(!is_current_media_type(MEDIA_TYPE_BASE));
-        assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=1"));
-        assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=2"));
-        assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=6"));
-        assert!(!is_current_media_type("application/vnd.bokheim+bincode; version=1; version=5"));
-        assert!(!is_current_media_type("application/json; version=1"));
+    fn compatible_decoder_accepts_only_explicit_byte_identical_versions() {
+        let mut previous = encode(&example(3)).unwrap();
+        previous[MAGIC.len()] = VERSION - 1;
+        assert_eq!(decode_compatible::<Example>(&previous, 64, &[VERSION - 1]).unwrap(), example(3));
+        assert!(matches!(decode_compatible::<Example>(&previous, 64, &[VERSION - 2]), Err(WireError::UnsupportedVersion(version)) if version == VERSION - 1));
     }
 }

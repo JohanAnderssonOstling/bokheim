@@ -120,7 +120,8 @@ impl LibrarySwitcherView {
 impl Render for LibrarySwitcherView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let emitter = cx.entity();
-        components::library_switcher_group().child(components::library_switcher_trigger(self.active_library_name(cx)).on_click(move |_, _, cx| {
+        let theme = components::browser_theme(cx);
+        components::library_switcher_group(theme).child(components::library_switcher_trigger(self.active_library_name(cx), theme).on_click(move |_, _, cx| {
             emitter.update(cx, |switcher, cx| {
                 if !switcher.open {
                     switcher.open = true;

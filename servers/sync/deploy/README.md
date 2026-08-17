@@ -26,23 +26,32 @@ sudo /tmp/bokheim-deploy.ABC123/deploy-sudo.sh
 `deploy-sudo.sh` takes no arguments. It validates the staged artifacts and
 credentials before stopping services or replacing the database.
 
-The script builds `sync-server` and `catalog-server`, transfers the
-release artifacts over SSH, and runs `install-staged.sh` with `sudo` on the
-host. The staged installer deliberately drops and recreates only the local
-`bokheim` PostgreSQL database before migrating and restarting; book and
-thumbnail files remain on disk. It refuses the destructive step unless the
-database credential matches the expected local database exactly. The script
-defaults to `192.168.1.68`; override the SSH account when needed:
+The script builds `sync-server`, `catalog-server`, and `metadata-server`,
+transfers the release artifacts and service units over SSH, and invokes a fixed
+root-owned activation helper. A complete Open Library snapshot must already be
+available at `/home/johan/data/openlibrary/current.sqlite`; see
+`../../metadata/README.md`. The
+helper deliberately drops and recreates only the local `bokheim` PostgreSQL
+database before migrating and restarting; book and thumbnail files remain on
+disk. It refuses the destructive step unless the database credential matches
+the expected local database exactly. The script defaults to `192.168.1.68`;
+override the SSH account when needed:
 
 ```sh
 BOKHEIM_DEPLOY_USER=johan servers/sync/deploy/deploy-remote.sh
 ```
 
-The remote account must have SSH access and passwordless `sudo` (or an
-interactive sudo configuration; the installer allocates a TTY for a remote
-sudo password prompt. Do not prefix the local command with `sudo`. The script
-does not provision a new host, modify Caddy, replace credentials, or delete
-asset files; it does replace the `bokheim` database as described above.
+Provision the fixed activation helper once on the host:
+
+```sh
+sudo servers/sync/deploy/provision-server-deploy.sh johan
+```
+
+Reconnect SSH afterward. The provisioner grants passwordless sudo only for
+`/usr/local/sbin/bokheim-deploy-servers`; staged shell scripts are never run as
+root. Routine deployments then need only the SSH key. The script does not
+modify Caddy, replace credentials, or delete asset files; it does replace the
+`bokheim` database as described above.
 
 This deployment exposes only Caddy to the Internet. The Rust server accepts
 requests through `/run/bokheim/sync.sock`, whose filesystem permissions allow
@@ -107,12 +116,37 @@ sudo chmod 0600 /etc/bokheim/database-url
 sudo chown root:root /etc/bokheim/database-url
 ```
 
-The service loads only this database credential. It does not create a built-in
-administrator account or read an administrator password.
+The database credential does not create a built-in administrator account or
+contain an administrator password.
+
+Create a separate persistent 32-byte key for account PIN, password-reset, and
+mail-outbox protection. Do not replace this key while pending registrations,
+password resets, or mail rows exist:
+
+```sh
+openssl rand -base64 32 | sudo tee /etc/bokheim/account-token-key >/dev/null
+sudo chmod 0600 /etc/bokheim/account-token-key
+sudo chown root:root /etc/bokheim/account-token-key
+```
+
+The service receives it through the read-only `account_token_key` systemd
+credential; it is not stored in PostgreSQL.
+
+After the non-destructive sync deployer has been provisioned, configure the
+administrator password and activate a staged sync release without putting the
+password in shell history:
+
+```sh
+servers/sync/deploy/configure-admin-and-deploy-sync.sh
+```
 
 The built-in defaults use 32 maximum and 2 warm PostgreSQL connections,
-16 staged books/4 GiB globally, and 4 staged books/2 GiB per account. Override
-`BOKHEIM_DATABASE_*` or `BOKHEIM_MAX_STAGED_*` in a systemd drop-in only after
+16 staged books/4 GiB globally, 4 staged books/2 GiB per account, and at most
+16 concurrent thumbnail uploads globally/4 per account, with additional
+declared-byte ceilings of 512 MiB globally/256 MiB per account. Thumbnail
+uploads have a two-minute total deadline. Override `BOKHEIM_DATABASE_*`,
+`BOKHEIM_MAX_STAGED_*`, `BOKHEIM_MAX_THUMBNAIL_UPLOADS*`, or
+`BOKHEIM_MAX_IN_FLIGHT_THUMBNAIL_BYTES*` in a systemd drop-in only after
 measuring production saturation; a larger database pool consumes more
 PostgreSQL memory.
 
@@ -141,7 +175,7 @@ the sync HTTP listener remain local-only.
 ## Configured test account
 
 The checked-in service configures `test@bokheim.se` at startup with a 1000 GB
-book quota. Store its password in a second protected credential:
+storage quota. Store its password in a second protected credential:
 
 ```sh
 sudo install -o root -g root -m 0600 test-user-password /etc/bokheim/test-user-password
@@ -153,6 +187,34 @@ Change `BOKHEIM_TEST_USER_EMAIL` in the unit to use a different identifier.
 Changing the credential rotates the password at the next
 restart and revokes that account's existing sessions; an unchanged password
 preserves sessions.
+
+## Administrator dashboard
+
+The checked-in service configures a separate `admin@bokheim.se` account for
+the read-only dashboard at `https://app.bokheim.se/admin/`. Its static source
+lives in `apps/admin-web` and is not compiled into the mobile/reader app. Install a strong,
+unique password in its own credential before deployment:
+
+```sh
+sudo install -o root -g root -m 0600 admin-password /etc/bokheim/admin-password
+```
+
+Change `BOKHEIM_ADMIN_EMAIL` in the unit if another address is required. The
+administrator password must satisfy the public account password policy. On
+startup, an unchanged password preserves sessions; changing the credential
+rotates the password and revokes existing administrator sessions. Do not reuse
+the test-account, database, Resend, or account-token credentials.
+
+Dashboard traffic history is aggregated by minute and retained for 90 days.
+A separate incident-response log retains exact trusted client IP addresses and
+bounded request metadata for seven days. It contains no raw paths, account
+identifiers, query strings, request headers, or bodies. The first read of each dashboard
+resource by an administrator in an hour is append-audited, and the audit table
+rejects updates and deletion.
+
+Unique-account figures count successful authenticated token use and are shown
+for 24-hour, 7-day, 30-day, and all-time windows. Activity updates are batched
+and stored as one row per account rather than one row per request.
 
 ## Install service configuration
 
@@ -181,7 +243,8 @@ sudo systemctl enable caddy.service
 sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
 curl --fail https://catalogs.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+bincode; version=11' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
+curl --fail https://meta.bokheim.se/health
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=13' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production
@@ -197,8 +260,29 @@ cannot amplify into repeated durable writes on the asset volume.
 Run the complete deployment gate after DNS and certificate issuance settle:
 
 ```sh
-sudo servers/sync/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se
+sudo servers/sync/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se meta.bokheim.se
 ```
+
+## Deploy the web reader
+
+Point `app.bokheim.se` at the same host as `api.bokheim.se`, then provision the
+deployment account once on the host:
+
+```sh
+sudo servers/sync/deploy/provision-web-deploy.sh johan
+```
+
+Reconnect SSH so the new group membership applies. Future static application
+deployments need no root access and do not restart either Rust service,
+PostgreSQL, or Caddy:
+
+```sh
+servers/sync/deploy/deploy-web-remote.sh
+```
+
+The installer atomically switches `/usr/local/share/bokheim-web/current` and
+rolls back if the public application cannot be fetched. Caddy follows that
+symlink and proxies same-origin `/api/*` requests to the sync Unix socket.
 
 It verifies both services, the Caddy configuration, Unix-socket permissions,
 HTTP-to-HTTPS redirection, the HTTPS health response, HSTS, certificate validity,
@@ -233,6 +317,17 @@ service. Reload Caddy configuration without downtime:
 sudo systemctl restart bokheim-sync.service
 sudo systemctl reload caddy.service
 ```
+
+To validate, install, reload, and verify an updated Caddyfile in one step, copy
+the deployment directory to the server and run:
+
+```bash
+sudo ./install-caddy-config.sh
+```
+
+The installer retains the previous `/etc/caddy/Caddyfile` as a timestamped
+backup and restores it automatically if the reload or metadata health check
+fails. It reloads only Caddy and does not restart the Bokheim services.
 
 ## No backups: the database is disposable
 

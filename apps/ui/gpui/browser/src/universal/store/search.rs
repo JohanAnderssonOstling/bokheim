@@ -1,7 +1,7 @@
 //! Runs catalogue-wide and selected-source searches as Store mode transitions.
 
 use epub_svelte_lib::catalog::{CatalogLinkTarget, CatalogSearchQuery, CatalogWideSearchOutcome};
-use gpui::Context;
+use gpui::{Context, Window};
 
 use super::{StoreMode, StorePage};
 
@@ -65,18 +65,20 @@ impl StorePage {
         }
         let source = current.source.clone();
         let levels = current.levels.clone();
+        self.enrichment_refresh_task.take();
         self.loading = true;
         self.error = None;
         let source_id = source.id.clone();
         let cached_source_id = source_id.clone();
         let cached_query = query.clone();
+        let installed_query = query.clone();
         let cached = self.library.spawn(move |library| async move { library.cached_search_catalog(&cached_source_id, &cached_query).await.map_err(|error| error.to_string()) });
         let refresh = self.library.spawn(move |library| async move { library.search_catalog(&source_id, &search, CatalogSearchQuery { query, title: None, author: None }).await.map_err(|error| error.to_string()) });
         self.task = Some(cx.spawn(async move |view, cx| {
             let cached = cached.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = view.update(cx, |view, cx| {
                 if let Ok(page_view) = cached {
-                    view.install_catalog_search(source.clone(), page_view, levels.clone(), cx);
+                    view.install_catalog_search(source.clone(), page_view, levels.clone(), installed_query.clone(), cx);
                 }
                 cx.notify();
             });
@@ -84,7 +86,7 @@ impl StorePage {
             let _ = view.update(cx, |view, cx| {
                 view.loading = false;
                 if let Ok(page_view) = refreshed {
-                    view.install_catalog_search(source, page_view, levels, cx);
+                    view.install_catalog_search(source, page_view, levels, installed_query, cx);
                 }
                 cx.notify();
             });
@@ -149,15 +151,27 @@ impl StorePage {
             }
         }
 
-        self.mode = StoreMode::WideSearch(super::WideSearchView { query: search_view.result.query, sections, statuses });
+        self.set_mode(StoreMode::WideSearch(super::WideSearchView { query: search_view.result.query, sections, statuses }));
     }
 
-    fn install_catalog_search(&mut self, source: epub_svelte_lib::catalog::CatalogSource, page_view: epub_svelte_lib::app::CatalogPageView, mut levels: Vec<(String, String)>, cx: &mut Context<Self>) {
+    fn install_catalog_search(&mut self, source: epub_svelte_lib::catalog::CatalogSource, page_view: epub_svelte_lib::app::CatalogPageView, mut levels: Vec<(String, String)>, query: String, cx: &mut Context<Self>) {
         let page = page_view.page;
         levels.truncate(1);
         levels.push((page.title.clone(), page.locator.clone()));
-        let page = self.build_catalogue_view(source, page, page_view.owned_publications, levels, Some("Title matches".to_owned()), cx);
-        self.mode = StoreMode::Catalogue(page);
+        let page = self.build_catalogue_view(source, page, page_view.owned_publications, levels, Some("Title matches".to_owned()), Some(query), cx);
+        self.set_mode(StoreMode::Catalogue(page));
+    }
+
+    /// Returns to the level the search started from, which `install_catalog_search`
+    /// kept as the first breadcrumb level.
+    pub(super) fn clear_search_within_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let StoreMode::Catalogue(current) = &self.mode else { return };
+        let Some((_, locator)) = current.levels.first().cloned() else { return };
+        self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.load_page(Some(locator), cx);
     }
 }
 

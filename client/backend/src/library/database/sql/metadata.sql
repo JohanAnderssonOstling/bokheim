@@ -7,8 +7,8 @@
 -- param: publication_metadata: &[u8]
 -- param: added_at: i64
 -- param: format: &str
-INSERT INTO book(content_hash,title,description,description_scanned,publication_metadata,added_at,format,deleted_at)
-VALUES(:id,:title,:description,1,:publication_metadata,:added_at,:format,NULL)
+INSERT INTO book(content_hash,title,description,description_scanned,publication_metadata,added_at,format,deleted_at,purged_at)
+VALUES(:id,:title,:description,1,:publication_metadata,:added_at,:format,NULL,NULL)
 ON CONFLICT(content_hash) DO UPDATE SET
     title=excluded.title,
     format=excluded.format,
@@ -17,7 +17,8 @@ ON CONFLICT(content_hash) DO UPDATE SET
     publication_metadata=excluded.publication_metadata,
     -- Metadata backfills must not make an existing book look newly added.
     added_at=COALESCE(book.added_at, excluded.added_at),
-    deleted_at=NULL;
+    deleted_at=NULL,
+    purged_at=NULL;
 
 -- name: clear_book_publishers!
 -- param: content_hash: &str

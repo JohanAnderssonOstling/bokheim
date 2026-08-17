@@ -145,12 +145,18 @@ done
 server_target=${BOKHEIM_STRESS_TARGET_DIR:-$repo_root/servers/sync/target}
 cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml" --bin sync-server --example sync_stress --target-dir "$server_target"
 
+DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
+"$server_target/release/sync-server" migrate
+
 stress_email="server-stress@example.com"
 stress_password="server-stress-user-password"
 mkdir -p "$stress_tmp/assets/books" "$stress_tmp/assets/thumbnails"
 DATABASE_URL="postgres://postgres@127.0.0.1:$postgres_port/$database_name" \
 SYNC_SERVER_ADDR="127.0.0.1:$server_port" \
 BOKHEIM_ASSETS_DIR="$stress_tmp/assets" \
+BOKHEIM_ACCOUNT_TOKEN_KEY="WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=" \
+BOKHEIM_TEST_USER_EMAIL="$stress_email" \
+BOKHEIM_TEST_USER_PASSWORD="$stress_password" \
 RUST_LOG=warn \
 "$server_target/release/sync-server" >"$stress_tmp/server.log" 2>&1 &
 server_pid=$!
@@ -171,19 +177,10 @@ if [[ "$ready" != 1 ]]; then
     exit 1
 fi
 
-BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
-BOKHEIM_STRESS_EMAIL="$stress_email" \
-BOKHEIM_STRESS_PASSWORD="$stress_password" \
-BOKHEIM_STRESS_MODE=register \
-"$server_target/release/examples/sync_stress"
-verification_token=$(psql -h 127.0.0.1 -p "$postgres_port" -U postgres -d "$database_name" -Atc "SELECT token FROM account_email_outbox WHERE recipient = '$stress_email' AND message_kind = 'verify_email'")
-if [[ -z "$verification_token" ]]; then
-    echo "failed to obtain the stress account verification token" >&2
-    exit 1
-fi
 verification_response=$(BOKHEIM_STRESS_URL="http://127.0.0.1:$server_port/" \
-    BOKHEIM_STRESS_VERIFICATION_TOKEN="$verification_token" \
-    BOKHEIM_STRESS_MODE=verify \
+    BOKHEIM_STRESS_EMAIL="$stress_email" \
+    BOKHEIM_STRESS_PASSWORD="$stress_password" \
+    BOKHEIM_STRESS_MODE=token \
     "$server_target/release/examples/sync_stress")
 shared_token=$(sed -n 's/^BOKHEIM_STRESS_TOKEN=//p' <<<"$verification_response")
 if [[ -z "$shared_token" ]]; then

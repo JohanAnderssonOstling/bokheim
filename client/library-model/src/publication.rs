@@ -346,6 +346,24 @@ impl<'de> Deserialize<'de> for PublicationDate {
     }
 }
 
+/// Returns a publication year only when the supplied date evidence contains
+/// exactly one plausible four-digit year.
+pub fn unique_publication_year<'a>(values: impl Iterator<Item = &'a str>) -> Option<i32> {
+    let mut years = std::collections::BTreeSet::new();
+    for value in values {
+        for run in value.split(|character: char| !character.is_ascii_digit()) {
+            if run.len() == 4 {
+                if let Ok(year) = run.parse::<i32>() {
+                    if (1000..=2100).contains(&year) {
+                        years.insert(year);
+                    }
+                }
+            }
+        }
+    }
+    (years.len() == 1).then(|| *years.first().expect("one publication year exists"))
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PublicationSubject {
     id: Option<String>,
@@ -600,6 +618,16 @@ pub struct PublicationMetadata {
     pub coverage: Vec<String>,
     #[serde(default)]
     pub properties: Vec<PublicationProperty>,
+}
+
+/// One entry in a publication's own hierarchical navigation document. It is
+/// shared by library ingestion and catalogue inspection; UI contracts only
+/// project it at their process boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationTocEntry {
+    pub title: String,
+    pub target: String,
+    pub children: Vec<PublicationTocEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

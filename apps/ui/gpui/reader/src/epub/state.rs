@@ -60,10 +60,11 @@ impl ReaderView {
         let load_publication = publication.clone();
         let callback_scheduled_at = Instant::now();
         let nav_state = pending.nav_state.clone();
+        let initial_target = pending.initial_target.clone();
         startup_phase!("phase=loading_frame_wait_begin");
         cx.on_next_frame(window, move |this, window, cx| {
             startup_phase!("phase=loading_frame_rendered queue_ms={}", callback_scheduled_at.elapsed().as_millis());
-            this.finish_load(generation, Ok(load_publication), nav_state.as_deref(), window, cx);
+            this.finish_load(generation, Ok(load_publication), nav_state.as_deref(), initial_target.as_deref(), window, cx);
         });
 
         let bounds_subscription = crate::shell::geometry::observe(window, cx);
@@ -121,7 +122,7 @@ impl ReaderView {
         reader
     }
 
-    fn finish_load(&mut self, generation: u64, result: Result<Arc<crate::publication::NativePublication>, String>, nav_state: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_load(&mut self, generation: u64, result: Result<Arc<crate::publication::NativePublication>, String>, nav_state: Option<&str>, initial_target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let finish_started = Instant::now();
         startup_phase!("phase=finish_load_begin");
         if generation != self.load_generation {
@@ -154,6 +155,11 @@ impl ReaderView {
         };
         let renderer_started = Instant::now();
         let renderer = cx.new(|cx| HtmlView::from_provider(provider, documents, start_index, nav_state, initial_config, window, cx));
+        if let Some(target) = initial_target {
+            renderer.update(cx, |renderer, cx| {
+                renderer.navigate_to_href(target, cx);
+            });
+        }
         startup_phase!("phase=renderer_entity_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), renderer_started.elapsed().as_millis());
         self.renderer_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, event: &RendererEvent, window, cx| {
             this.handle_renderer_event(event, window, cx);

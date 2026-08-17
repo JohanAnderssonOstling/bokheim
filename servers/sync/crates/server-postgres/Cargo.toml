@@ -16,4 +16,6 @@ tokio = { version = "1", features = ["io-util"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+blake3 = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

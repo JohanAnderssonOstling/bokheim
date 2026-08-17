@@ -10,19 +10,21 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::tab::TabBar;
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use pdf_reader_core::{NormalizedRect, PdfOutlineEntry};
-use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfAnnotationOverlay, PdfAnnotationStyle, PdfFitMode, PdfView, PdfViewEvent};
+use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfAnnotationOverlay, PdfAnnotationStyle, PdfView, PdfViewEvent, PdfZoomMode};
 use ui_components as components;
 
 use crate::epub::ReaderWindowId;
 use crate::epub::marks::MarksState;
 use crate::invalidation::Component;
 use crate::pdf::toc::{PdfTocState, nest_pdf_outline, pdf_toc_tree_items};
-use crate::settings::{ReaderPreferences, ReaderSettings};
+use crate::settings::{PdfZoomModePreference, ReaderPreferences, ReaderSettings};
 use crate::shell::chrome;
 use crate::shell::persistence::{self, PositionWriter};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ToggleSearch, ToggleToc};
 
 const PDF_READER_TOOLBAR_HEIGHT: f32 = 58.0;
+/// One zoom step, in pixels per PDF point.
+const ZOOM_STEP: f32 = 0.1;
 const PDF_ANNOTATION_POPUP_WIDTH: f32 = 360.0;
 const PDF_ANNOTATION_POPUP_MAX_HEIGHT: f32 = 420.0;
 const PDF_ANNOTATION_POPUP_INSET: f32 = 12.0;
@@ -103,7 +105,7 @@ impl PdfReaderView {
     pub(crate) fn new(pending: PendingPdfReader, window: &mut Window, cx: &mut Context<Self>) -> Self {
         #[cfg(debug_assertions)]
         crate::invalidation::initialize_performance_measurements();
-        let visible_page_count = ReaderSettings::preferences(cx).pdf_page_count as usize;
+        let zoom_mode = stored_zoom_mode(ReaderSettings::preferences(cx));
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
         let library = pending.library.clone();
         let content_hash = pending.locator.content_hash();
@@ -117,7 +119,7 @@ impl PdfReaderView {
         });
         let pdf = cx.new(|cx| {
             let mut pdf = PdfView::from_reader(pending.book.path, pending.book.reader, pending.initial_page, window, cx);
-            pdf.set_visible_page_count(visible_page_count, cx);
+            pdf.set_zoom_mode(zoom_mode, cx);
             pdf.set_trim_margins(trim_margins, cx);
             pdf.set_annotations(annotation_overlays(&annotations), cx);
             pdf
@@ -277,28 +279,33 @@ impl PdfReaderView {
         crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
     }
 
-    fn adjust_scale(&self, delta: f32, cx: &mut Context<Self>) {
-        self.pdf.update(cx, |pdf, cx| {
-            pdf.change_display_scale(delta, cx);
+    /// Nudges the zoom, which also switches the layout to the mode where the
+    /// zoom is what is held fixed and the page count follows.
+    fn adjust_zoom(&self, delta: f32, cx: &mut Context<Self>) {
+        self.pdf.update(cx, |pdf, cx| pdf.change_zoom(delta, cx));
+        let zoom = self.pdf.read(cx).zoom();
+        ReaderSettings::update(cx, |preferences| {
+            preferences.pdf_zoom_mode = PdfZoomModePreference::Fixed;
+            preferences.pdf_zoom = zoom;
         });
+        crate::invalidation::notify(cx, Component::PdfShell, "zoom_changed");
     }
 
-    fn set_fit_mode(&self, fit_mode: PdfFitMode, cx: &mut Context<Self>) {
-        self.pdf.update(cx, |pdf, cx| pdf.set_fit_mode(fit_mode, cx));
-        crate::invalidation::notify(cx, Component::PdfShell, "fit_mode_changed");
+    fn set_zoom_mode(&self, zoom_mode: PdfZoomMode, cx: &mut Context<Self>) {
+        self.pdf.update(cx, |pdf, cx| pdf.set_zoom_mode(zoom_mode, cx));
+        ReaderSettings::update(cx, |preferences| store_zoom_mode(zoom_mode, preferences));
+        crate::invalidation::notify(cx, Component::PdfShell, "zoom_mode_changed");
     }
 
+    /// Sets the page count, which also switches the layout to the mode where
+    /// the count is what is held fixed and the zoom follows.
     fn adjust_visible_page_count(&self, delta: isize, cx: &mut Context<Self>) {
         let current = self.pdf.read(cx).visible_page_count();
         let next = current.saturating_add_signed(delta).clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT);
         if current == next {
             return;
         }
-        ReaderSettings::update(cx, |preferences| preferences.pdf_page_count = next as u8);
-        self.pdf.update(cx, |pdf, cx| {
-            pdf.set_visible_page_count(next, cx);
-        });
-        crate::invalidation::notify(cx, Component::PdfShell, "page_count_changed");
+        self.set_zoom_mode(PdfZoomMode::FitWidth { columns: next }, cx);
     }
 
     fn set_trim_margins(&self, trim_margins: bool, cx: &mut Context<Self>) {
@@ -313,15 +320,14 @@ impl PdfReaderView {
 
     fn reset_appearance(&self, cx: &mut Context<Self>) {
         let defaults = ReaderPreferences::default();
-        let current_scale = self.pdf.read(cx).display_scale();
         ReaderSettings::update(cx, |preferences| {
             preferences.pdf_page_count = defaults.pdf_page_count;
             preferences.pdf_trim_margins = defaults.pdf_trim_margins;
+            preferences.pdf_zoom_mode = defaults.pdf_zoom_mode;
+            preferences.pdf_zoom = defaults.pdf_zoom;
         });
         self.pdf.update(cx, |pdf, cx| {
-            pdf.set_fit_mode(PdfFitMode::FitPage, cx);
-            pdf.change_display_scale(1.0 - current_scale, cx);
-            pdf.set_visible_page_count(usize::from(defaults.pdf_page_count), cx);
+            pdf.set_zoom_mode(stored_zoom_mode(&defaults), cx);
             pdf.set_trim_margins(defaults.pdf_trim_margins, cx);
         });
         crate::invalidation::notify(cx, Component::PdfShell, "appearance_reset");
@@ -629,19 +635,13 @@ impl PdfReaderView {
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
-        let scale = self.pdf.read(cx).display_scale();
-        let fit_mode = self.pdf.read(cx).fit_mode();
+        let zoom = self.pdf.read(cx).zoom();
+        let zoom_mode = self.pdf.read(cx).zoom_mode();
         let visible_page_count = self.pdf.read(cx).visible_page_count();
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
         components::reader_settings_dropdown(theme)
             .child(
                 components::reader_settings_section("Page layout", theme)
-                    .child(components::reader_setting_row("Pages").child(components::reader_stepper_group(
-                        components::reader_stepper_button("pdf-pages-decrease", "−", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
-                        visible_page_count.to_string(),
-                        components::reader_stepper_button("pdf-pages-increase", "+", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
-                        theme,
-                    )))
                     .child(components::reader_setting_row("Margins").child(components::reader_choice_button_group(
                         "pdf-margin-group",
                         [
@@ -649,19 +649,36 @@ impl PdfReaderView {
                             components::reader_choice_button("pdf-margin-auto", "Auto", trim_margins).on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(true, cx))),
                         ],
                     )))
-                    .child(components::reader_setting_row("Fit").child(components::reader_choice_button_group(
-                        "pdf-fit-group",
-                        [
-                            components::reader_choice_button("pdf-fit-width", "Fit width", fit_mode == PdfFitMode::FitWidth).on_click(cx.listener(|this, _, _, cx| this.set_fit_mode(PdfFitMode::FitWidth, cx))),
-                            components::reader_choice_button("pdf-fit-page", "Fit page", fit_mode == PdfFitMode::FitPage).on_click(cx.listener(|this, _, _, cx| this.set_fit_mode(PdfFitMode::FitPage, cx))),
-                        ],
-                    )))
-                    .child(components::reader_setting_row("Zoom").child(components::reader_stepper_group(
-                        components::reader_stepper_button("pdf-zoom-out", "−", theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_scale(-0.1, cx))),
-                        format!("{:.0}%", scale * 100.0),
-                        components::reader_stepper_button("pdf-zoom-in", "+", theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_scale(0.1, cx))),
-                        theme,
-                    ))),
+                    .child(
+                        components::reader_setting_row("Fit").child(components::reader_choice_button_group(
+                            "pdf-fit-group",
+                            [
+                                components::reader_choice_button("pdf-fit-width", "Fit width", matches!(zoom_mode, PdfZoomMode::FitWidth { .. }))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::FitWidth { columns: visible_page_count }, cx))),
+                                components::reader_choice_button("pdf-fit-zoom", "Zoom", matches!(zoom_mode, PdfZoomMode::Fixed { .. })).on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::Fixed { zoom }, cx))),
+                                components::reader_choice_button("pdf-fit-height", "Fit height", zoom_mode == PdfZoomMode::FitHeight).on_click(cx.listener(|this, _, _, cx| this.set_zoom_mode(PdfZoomMode::FitHeight, cx))),
+                            ],
+                        )),
+                    )
+                    // Only the value the mode holds fixed is adjustable; the
+                    // other one is derived from it, and fit height derives
+                    // both.
+                    .children(matches!(zoom_mode, PdfZoomMode::FitWidth { .. }).then(|| {
+                        components::reader_setting_row("Pages").child(components::reader_stepper_group(
+                            components::reader_stepper_button("pdf-pages-decrease", "−", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
+                            visible_page_count.to_string(),
+                            components::reader_stepper_button("pdf-pages-increase", "+", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
+                            theme,
+                        ))
+                    }))
+                    .children(matches!(zoom_mode, PdfZoomMode::Fixed { .. }).then(|| {
+                        components::reader_setting_row("Zoom").child(components::reader_stepper_group(
+                            components::reader_stepper_button("pdf-zoom-out", "−", theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
+                            format!("{:.0}%", zoom * 100.0),
+                            components::reader_stepper_button("pdf-zoom-in", "+", theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
+                            theme,
+                        ))
+                    })),
             )
             .into_any_element()
     }
@@ -740,11 +757,11 @@ impl PdfReaderView {
     }
 
     fn on_increase_scale(&mut self, _: &IncreaseScale, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_scale(0.1, cx);
+        self.adjust_zoom(ZOOM_STEP, cx);
     }
 
     fn on_decrease_scale(&mut self, _: &DecreaseScale, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_scale(-0.1, cx);
+        self.adjust_zoom(-ZOOM_STEP, cx);
     }
 }
 
@@ -889,6 +906,31 @@ fn pdf_page_from_cfi(value: &str) -> Option<usize> {
     let digits = value[start + 3..].chars().take_while(char::is_ascii_digit).collect::<String>();
     let step = digits.parse::<usize>().ok()?;
     step.checked_div(2)?.checked_sub(1)
+}
+
+/// Rebuilds the layout mode from what was persisted.
+fn stored_zoom_mode(preferences: &ReaderPreferences) -> PdfZoomMode {
+    match preferences.pdf_zoom_mode {
+        PdfZoomModePreference::FitWidth => PdfZoomMode::FitWidth { columns: usize::from(preferences.pdf_page_count).clamp(MIN_VISIBLE_PAGE_COUNT, MAX_VISIBLE_PAGE_COUNT) },
+        PdfZoomModePreference::Fixed => PdfZoomMode::Fixed { zoom: preferences.pdf_zoom },
+        PdfZoomModePreference::FitHeight => PdfZoomMode::FitHeight,
+    }
+}
+
+/// Records a layout mode, keeping the page count and zoom that the other modes
+/// will be restored with.
+fn store_zoom_mode(zoom_mode: PdfZoomMode, preferences: &mut ReaderPreferences) {
+    match zoom_mode {
+        PdfZoomMode::FitWidth { columns } => {
+            preferences.pdf_zoom_mode = PdfZoomModePreference::FitWidth;
+            preferences.pdf_page_count = columns as u8;
+        }
+        PdfZoomMode::Fixed { zoom } => {
+            preferences.pdf_zoom_mode = PdfZoomModePreference::Fixed;
+            preferences.pdf_zoom = zoom;
+        }
+        PdfZoomMode::FitHeight => preferences.pdf_zoom_mode = PdfZoomModePreference::FitHeight,
+    }
 }
 
 fn annotation_overlays(annotations: &[ReaderAnnotation]) -> Vec<PdfAnnotationOverlay> {

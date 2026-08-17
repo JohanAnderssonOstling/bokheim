@@ -3,4 +3,4 @@ FROM sync_state
 WHERE library_id = $1
   AND kind = 'book_lifecycle'
   AND entity_key = $2
-  AND entity_subkey = ''
+  AND entity_subkey = $3

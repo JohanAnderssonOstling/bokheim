@@ -23,6 +23,7 @@ pub(super) fn read_book_card_row(row: &rusqlite::Row<'_>) -> Result<BookCardRow,
         audiobook: row.get(7)?,
         audiobook_duration_ms: duration_ms.and_then(|value| u64::try_from(value).ok()),
         audiobook_chapter_count: chapter_count.and_then(|value| usize::try_from(value).ok()),
+        added_at: row.get(10).unwrap_or_default(),
     })
 }
 

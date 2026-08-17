@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use epub_svelte_lib::library::BookCardRow;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, px, size, uniform_list};
+use gpui::{AnyElement, Context, Entity, Render, SharedString, Window, container_query, div, px, size, uniform_list};
 use gpui_component::{VirtualListScrollHandle, h_virtual_list};
 use ui_components as components;
 
@@ -70,6 +70,16 @@ impl BookGrid {
         self.cards.is_empty()
     }
 
+    /// Reorders retained cards without rebuilding their views or reloading covers.
+    pub(crate) fn sort_by<P: 'static>(&mut self, mut compare: impl FnMut(&BookCardRow, &BookCardRow) -> std::cmp::Ordering, cx: &mut Context<P>) {
+        let previous_order = self.cards.iter().map(|entry| entry.book.content_hash.clone()).collect::<Vec<_>>();
+        self.cards.sort_by(|left, right| compare(&left.book, &right.book));
+        if previous_order != self.cards.iter().map(|entry| entry.book.content_hash.clone()).collect::<Vec<_>>() {
+            self.all_views = Rc::new(self.cards.iter().map(|entry| entry.view.clone()).collect());
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_management<P: 'static>(&mut self, management: Option<BookManagement>, cx: &mut Context<P>) {
         self.management = management.clone();
         for entry in &self.cards {
@@ -77,25 +87,53 @@ impl BookGrid {
         }
     }
 
-    /// Renders all retained cards in a viewport-owned virtualized grid.
-    pub(crate) fn render_virtualized(&self, list_id: impl Into<SharedString>, window: &Window) -> AnyElement {
-        let width = (f32::from(window.viewport_size().width) - components::nav_rail_width(f32::from(window.rem_size())) - components::CONTENT_PADDING * 2.0).max(components::BOOK_COVER_WIDTH);
-        self.render_virtual_at_width(list_id.into(), width, f32::from(window.rem_size()))
+    /// Renders all retained cards in a parent-sized virtualized grid.
+    pub(crate) fn render_virtualized<P: Render + 'static>(&self, list_id: impl Into<SharedString>, window: &mut Window, cx: &mut Context<P>) -> AnyElement {
+        let list_id = list_id.into();
+        if self.library_view == LibraryView::Detailed {
+            return self.render_virtual_rows(list_id);
+        }
+        let _ = cx;
+        let rem_size = f32::from(window.rem_size());
+        let card_views = self.all_views.clone();
+        let query = container_query(move |size, _, _| {
+            let width = f32::from(size.width);
+            let capacity = virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
+            let (columns, item_width) = virtual_grid::grid_geometry(width, capacity, card_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
+            let row_height = components::book_grid_row_height_for_cover_width(item_width, rem_size);
+            let row_count = virtual_grid::row_count(card_views.len(), columns);
+            let cards = card_views.clone();
+            let list = uniform_list(list_id.clone(), row_count, move |range, _, _| {
+                range
+                    .map(|row| {
+                        let range = virtual_grid::row_range(row, columns, cards.len());
+                        virtual_grid::flexible_entity_row(&cards, range, columns, item_width, row_height, components::BOOK_GRID_GAP)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // A container query lays its result out as a root. `virtual_list`
+            // sizes itself with `flex_1`, which only has meaning inside a flex
+            // parent; returned bare here, its viewport can collapse to zero.
+            // Keep that sizing boundary inside the query so folder pages show
+            // the same retained cards that static subject grids already show.
+            div().size_full().flex().flex_col().child(components::virtual_list(list))
+        });
+        div().w_full().flex_1().min_h_0().child(query).into_any_element()
     }
 
     /// Renders every retained card into normal document flow. This is for
     /// bounded collections inside an outer scrolling page, where pretending
     /// the full-height grid is virtualized only adds machinery.
-    pub(crate) fn render_static(&self, width: f32, window: &Window) -> AnyElement {
-        let row_height = components::book_grid_row_height(f32::from(window.rem_size()));
-        let columns = virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
-        let (gap, inset) = virtual_grid::even_spacing(width, columns, components::BOOK_COVER_WIDTH, components::CONTENT_PADDING);
+    pub(crate) fn render_static<P: Render + 'static>(&self, grid_id: impl Into<SharedString>, window: &mut Window, cx: &mut Context<P>) -> AnyElement {
+        let responsive = virtual_grid::ResponsiveColumns::for_element(grid_id.into(), virtual_grid::ColumnPolicy::MinimumItemWidth { width: components::BOOK_COVER_WIDTH, gap: components::BOOK_GRID_GAP }, window, cx);
+        let (columns, item_width) = responsive.geometry(self.all_views.len(), components::BOOK_COVER_WIDTH, cx);
+        let row_height = components::book_grid_row_height_for_cover_width(item_width, f32::from(window.rem_size()));
         let card_views = self.all_views.clone();
         let rows = (0..virtual_grid::row_count(card_views.len(), columns)).map(|row| {
             let range = virtual_grid::row_range(row, columns, card_views.len());
-            virtual_grid::evenly_spaced_entity_row(&card_views, range, components::BOOK_COVER_WIDTH, row_height, gap, inset)
+            virtual_grid::flexible_entity_row(&card_views, range, columns, item_width, row_height, components::BOOK_GRID_GAP)
         });
-        div().w_full().flex().flex_col().children(rows).into_any_element()
+        responsive.track(div().w_full().flex().flex_col().children(rows)).into_any_element()
     }
 
     /// The horizontal row. `scroll` is the caller's, so the arrows beside the
@@ -104,28 +142,10 @@ impl BookGrid {
         let cards = self.all_views.clone();
         let row_height = components::book_grid_row_height(f32::from(window.rem_size()));
         let item_sizes = Rc::new(vec![size(px(components::BOOK_COVER_WIDTH + components::BOOK_GRID_GAP), px(row_height)); cards.len()]);
-        h_virtual_list(cx.entity(), list_id, item_sizes, move |_, range, _, _| range.map(|index| cards[index].clone()).collect::<Vec<_>>()).track_scroll(scroll).h(px(row_height)).into_any_element()
-    }
-
-    fn render_virtual_at_width(&self, list_id: SharedString, width: f32, rem_size: f32) -> AnyElement {
-        if self.library_view == LibraryView::Detailed {
-            return self.render_virtual_rows(list_id);
-        }
-        let columns = virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
-        let (gap, inset) = virtual_grid::even_spacing(width, columns, components::BOOK_COVER_WIDTH, components::CONTENT_PADDING);
-        let row_height = components::book_grid_row_height(rem_size);
-        let card_views = self.all_views.clone();
-        let row_count = virtual_grid::row_count(card_views.len(), columns);
-        let list = uniform_list(list_id, row_count, move |range, _, _cx| {
-            range
-                .map(|row| {
-                    let range = virtual_grid::row_range(row, columns, card_views.len());
-                    virtual_grid::evenly_spaced_entity_row(&card_views, range, components::BOOK_COVER_WIDTH, row_height, gap, inset)
-                })
-                .collect::<Vec<_>>()
-        });
-
-        components::virtual_list(list).into_any_element()
+        h_virtual_list(cx.entity(), list_id, item_sizes, move |_, range, _, _| range.map(|index| div().w(px(components::BOOK_COVER_WIDTH)).flex_none().child(cards[index].clone())).collect::<Vec<_>>())
+            .track_scroll(scroll)
+            .h(px(row_height))
+            .into_any_element()
     }
 
     /// One card per row, so the virtual list indexes cards directly and the

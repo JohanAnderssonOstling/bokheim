@@ -7,7 +7,7 @@ WITH input AS (
 ), reduced AS (
     SELECT DISTINCT ON (kind, entity_key, entity_subkey) *
     FROM input
-    ORDER BY kind, entity_key, entity_subkey, changed_at DESC, version_rank DESC, replica_seq DESC, event_id DESC
+    ORDER BY kind, entity_key, entity_subkey, changed_at DESC, version_rank DESC, replica_seq DESC, event_id COLLATE "C" DESC
 )
 INSERT INTO {{TABLE}}(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
 SELECT $1,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,$12,replica_seq,version_rank,event_id

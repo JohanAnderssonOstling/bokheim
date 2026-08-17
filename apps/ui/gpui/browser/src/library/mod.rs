@@ -16,6 +16,7 @@ use epub_svelte_lib::LibraryBackend;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
 use gpui::{AnyElement, AppContext, Context, Entity, EventEmitter, IntoElement, Render, Subscription, Window};
 
+mod detail;
 mod host;
 mod pages;
 mod services;
@@ -23,6 +24,7 @@ mod setup;
 mod title_filter;
 mod widgets;
 
+use self::detail::BookDetailPage;
 use self::pages::authors::AuthorsPage;
 use self::pages::folders::{FoldersPage, FoldersPageEvent};
 use self::pages::home::HomePage;
@@ -74,15 +76,53 @@ pub(crate) struct LibraryRoot {
     /// Routes whose retained page has not seen a library change since it was
     /// last refreshed. Drained on display, never for the visible page.
     stale: HashSet<LibraryRoute>,
+    detail: Option<Entity<BookDetailPage>>,
 }
 
 impl EventEmitter<LibraryRootEvent> for LibraryRoot {}
 
 impl LibraryRoot {
-    pub(crate) fn new(context: LibraryContext, route: LibraryRoute, folder_path: Vec<FolderCrumb>, subject_path: Vec<SubjectCrumb>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut root = Self { context, folder_path, subject_path, route, pages: HashMap::new(), stale: HashSet::new() };
+    pub(crate) fn new(mut context: LibraryContext, route: LibraryRoute, folder_path: Vec<FolderCrumb>, subject_path: Vec<SubjectCrumb>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let target = cx.entity().downgrade();
+        context.set_open_detail(std::rc::Rc::new(move |content_hash, cx| {
+            let _ = target.update(cx, |root, cx| root.open_detail(content_hash, cx));
+        }));
+        let mut root = Self { context, folder_path, subject_path, route, pages: HashMap::new(), stale: HashSet::new(), detail: None };
         root.show(route, window, cx);
         root
+    }
+
+    fn open_detail(&mut self, content_hash: epub_svelte_lib::ContentHash, cx: &mut Context<Self>) {
+        let context = self.context.clone();
+        let target = cx.entity().downgrade();
+        self.detail = Some(cx.new(|cx| {
+            BookDetailPage::new(
+                context,
+                content_hash,
+                std::rc::Rc::new(move |cx| {
+                    let _ = target.update(cx, |root, cx| {
+                        root.detail = None;
+                        cx.notify();
+                    });
+                }),
+                cx,
+            )
+        }));
+        cx.notify();
+    }
+
+    /// Drops the transient book-detail surface and everything it owns.
+    ///
+    /// Retained browse pages survive ordinary navigation, but details do not:
+    /// their HTML renderer and background tasks belong only to the currently
+    /// visible book. Sidebar navigation must therefore destroy this entity
+    /// even when the selected sidebar route is already `self.route`.
+    pub(crate) fn dismiss_detail(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.detail.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
     }
 
     pub(crate) fn folder_path(&self) -> Vec<FolderCrumb> {
@@ -147,6 +187,7 @@ impl LibraryRoot {
                         root.folder_path = path.clone();
                         cx.emit(LibraryRootEvent::FolderPathChanged);
                     }
+                    FoldersPageEvent::ContentsChanged => {}
                 });
                 LibraryPage::Folders { page, _subscription: subscription }
             }
@@ -222,6 +263,6 @@ impl LibraryRoot {
 
 impl Render for LibraryRoot {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.pages.get(&self.route).map(LibraryPage::element).unwrap_or_else(|| gpui::div().into_any_element())
+        self.detail.clone().map(|detail| detail.into_any_element()).unwrap_or_else(|| self.pages.get(&self.route).map(LibraryPage::element).unwrap_or_else(|| gpui::div().into_any_element()))
     }
 }

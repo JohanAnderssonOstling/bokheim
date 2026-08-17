@@ -3,6 +3,7 @@
 //! Holds the typed book presentation, owns its cover request, and opens its
 //! reader directly. Collection mutations are intentionally not exposed here.
 
+use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -18,7 +19,24 @@ use ui_components as components;
 use app_contract::preferences::LibraryView;
 
 use crate::library::services::LibraryContext;
-use crate::library::widgets::CoverInvalidationRegistry;
+use crate::library::widgets::{CoverInvalidationRegistry, LibraryDrag, LibraryDragPreview};
+
+#[derive(Clone)]
+pub(crate) struct LoadedCover {
+    pub image: Arc<Image>,
+    pub aspect_ratio: f32,
+}
+
+pub(crate) fn loaded_cover_from_jpeg(bytes: Vec<u8>) -> Option<LoadedCover> {
+    if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return None;
+    }
+    let (width, height) = image::io::Reader::with_format(Cursor::new(bytes.as_slice()), image::ImageFormat::Jpeg).into_dimensions().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(LoadedCover { image: Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)), aspect_ratio: width as f32 / height as f32 })
+}
 
 #[derive(Clone)]
 pub(crate) enum BookManagementAction {
@@ -33,6 +51,7 @@ pub(crate) enum BookManagementAction {
 #[derive(Clone)]
 pub(crate) struct BookManagement {
     pub on_action: Rc<dyn Fn(BookManagementAction, &mut gpui::App)>,
+    pub source_id: epub_svelte_lib::DirId,
 }
 
 /// What is known about this book's cover art.
@@ -44,7 +63,7 @@ pub(crate) struct BookManagement {
 #[derive(Clone)]
 enum CoverState {
     Pending,
-    Loaded(Arc<Image>),
+    Loaded(LoadedCover),
     Missing,
 }
 
@@ -99,7 +118,26 @@ impl BookCardView {
         cx.notify();
     }
 
-    fn menu(management: BookManagement, downloaded: bool, hash: epub_svelte_lib::ContentHash, mut menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>) -> PopupMenu {
+    fn menu(_ui: LibraryContext, management: Option<BookManagement>, downloaded: bool, hash: epub_svelte_lib::ContentHash, mut menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>) -> PopupMenu {
+        #[cfg(not(feature = "kobo"))]
+        if downloaded {
+            let reveal_hash = hash.clone();
+            menu = menu.item(PopupMenuItem::new("Show in folder").on_click(move |_, _, cx| {
+                let reveal = _ui.reveal_local_book(reveal_hash.clone());
+                cx.background_spawn(async move {
+                    if let Err(error) = reveal.await {
+                        log::error!("failed to show local book in file manager: {error}");
+                    }
+                })
+                .detach();
+            }));
+        }
+
+        let Some(management) = management else { return menu };
+        #[cfg(not(feature = "kobo"))]
+        if downloaded {
+            menu = menu.separator();
+        }
         let callback = management.on_action.clone();
         let download_action = if downloaded { BookManagementAction::RemoveDownload(hash.clone()) } else { BookManagementAction::Download(hash.clone()) };
         let download_label = if downloaded { "Remove download" } else { "Download" };
@@ -145,12 +183,14 @@ impl BookCardView {
                     return;
                 }
                 match result {
-                    Ok(Some(bytes)) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => {
-                        view.cover = CoverState::Loaded(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
-                    }
-                    Ok(Some(_)) => {
-                        log::error!("thumbnail for book {content_hash} is not JPEG");
-                        view.cover = CoverState::Missing;
+                    Ok(Some(bytes)) => {
+                        let Some(cover) = loaded_cover_from_jpeg(bytes) else {
+                            log::error!("thumbnail for book {content_hash} is not a readable JPEG");
+                            view.cover = CoverState::Missing;
+                            cx.notify();
+                            return;
+                        };
+                        view.cover = CoverState::Loaded(cover);
                     }
                     Ok(None) => view.cover = CoverState::Missing,
                     Err(error) => {
@@ -178,12 +218,13 @@ impl BookCardView {
             let title = book.title.clone();
             let ui = self.ui.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
-                ui.open_reader(content_hash.clone(), title.clone(), cx);
+                let _ = &title;
+                ui.open_detail(content_hash.clone(), cx);
             }
         };
 
         let cover_frame = match cover {
-            CoverState::Loaded(image) => components::book_row_cover(theme).child(components::book_row_cover_image(image)),
+            CoverState::Loaded(cover) => components::book_row_cover(theme).child(components::book_row_cover_image(cover.image)),
             // The empty mat is the loading state: nothing to animate, and it
             // occupies exactly the space the art will.
             CoverState::Pending => components::book_row_cover(theme),
@@ -195,9 +236,7 @@ impl BookCardView {
             text = text.child(components::book_row_description(theme).child(book.description.clone()));
         }
         if let Some(progress) = progress {
-            text = text.child(
-                div().w(px(components::DETAILED_ROW_TEXT_MEASURE * 0.5)).h(px(16.0)).flex_none().child(Progress::new(format!("book-row-progress-{}", book.content_hash)).value(progress).color(theme.accent).with_size(Size::XSmall).w_full()),
-            );
+            text = text.child(div().w_full().h(px(16.0)).flex_none().child(Progress::new(format!("book-row-progress-{}", book.content_hash)).value(progress).color(theme.accent).with_size(Size::XSmall).w_full()));
         }
 
         // Actions only earn their place once the row is wide enough to hold
@@ -208,7 +247,7 @@ impl BookCardView {
             components::book_row_actions().child(components::topbar_action_button(format!("book-row-open-{}", book.content_hash), labels.open_label.clone(), gpui_component::IconName::BookOpen, theme).on_click(open.clone()))
         });
 
-        let row = components::book_row(format!("book-row-{}", book.content_hash), theme)
+        let mut row = components::book_row(format!("book-row-{}", book.content_hash), theme)
             .child(div().flex_none().id(format!("book-row-cover-{}", book.content_hash)).child(cover_frame).on_click(open))
             .child(text)
             .child(div().flex_1().min_w_0())
@@ -216,7 +255,14 @@ impl BookCardView {
         if let Some(management) = self.management.clone() {
             let downloaded = self.book.downloaded;
             let hash = self.book.content_hash.clone();
-            row.context_menu(move |menu, window, cx| Self::menu(management.clone(), downloaded, hash.clone(), menu, window, cx)).into_any_element()
+            let drag = LibraryDrag::Book { content_hash: hash.clone(), source_id: management.source_id, title: self.book.title.clone() };
+            row = row.cursor_move().on_drag(drag, |item, _, _, cx| cx.new(|_| LibraryDragPreview::new(item.clone())));
+            let ui = self.ui.clone();
+            row.context_menu(move |menu, window, cx| Self::menu(ui.clone(), Some(management.clone()), downloaded, hash.clone(), menu, window, cx)).into_any_element()
+        } else if cfg!(not(feature = "kobo")) && self.book.downloaded {
+            let hash = self.book.content_hash.clone();
+            let ui = self.ui.clone();
+            row.context_menu(move |menu, window, cx| Self::menu(ui.clone(), None, true, hash.clone(), menu, window, cx)).into_any_element()
         } else {
             row.into_any_element()
         }
@@ -243,7 +289,8 @@ impl Render for BookCardView {
             let title = book.title.clone();
             let ui = self.ui.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
-                ui.open_reader(content_hash.clone(), title.clone(), cx);
+                let _ = &title;
+                ui.open_detail(content_hash.clone(), cx);
             }
         };
 
@@ -252,26 +299,34 @@ impl Render for BookCardView {
         let cover_frame = components::book_cover_frame()
             .id(cover_id)
             .child(match cover {
-                CoverState::Loaded(image) => components::book_cover(theme).child(components::book_cover_image(image, theme)),
+                CoverState::Loaded(cover) => components::book_cover(theme).child(components::book_cover_image(cover.image, cover.aspect_ratio, theme)),
                 CoverState::Pending => components::book_cover(theme),
                 CoverState::Missing => components::missing_book_cover(if book.audiobook { "Audiobook" } else { "No cover" }, theme),
             })
-            .when(book.audiobook, |frame| frame.child(Tag::primary().rounded_full().with_size(Size::Small).child("AUDIOBOOK").absolute().left(gpui::px(8.0)).bottom(gpui::px(8.0))))
+            .when(book.audiobook, |frame| frame.child(Tag::primary().rounded(px(components::RADIUS_SM)).with_size(Size::Small).child("AUDIOBOOK").absolute().left(gpui::px(8.0)).bottom(gpui::px(8.0))))
             .on_click(open);
 
         let progress = div()
-            .w(px(components::BOOK_COVER_WIDTH))
+            .w_full()
+            .min_w(px(components::BOOK_COVER_WIDTH))
             .h(px(components::BOOK_CARD_PROGRESS_HEIGHT))
             .flex_none()
             .pt(px(6.0))
-            .when_some(progress, |track, progress| track.child(Progress::new(progress_id).value(progress).color(theme.accent).with_size(Size::XSmall).w(px(components::BOOK_COVER_WIDTH * 0.7))));
+            .when_some(progress, |track, progress| track.child(Progress::new(progress_id).value(progress).color(theme.accent).with_size(Size::XSmall).w_full()));
 
-        let card =
+        let mut card =
             components::book_card(element_id).child(cover_frame).child(components::book_card_text().child(components::book_card_title().child(book.title)).child(components::book_card_author(theme).child(author.to_owned())).child(progress));
         if let Some(management) = self.management.clone() {
             let downloaded = self.book.downloaded;
             let hash = self.book.content_hash.clone();
-            card.context_menu(move |menu, window, cx| Self::menu(management.clone(), downloaded, hash.clone(), menu, window, cx)).into_any_element()
+            let drag = LibraryDrag::Book { content_hash: hash.clone(), source_id: management.source_id, title: self.book.title.clone() };
+            card = card.cursor_move().on_drag(drag, |item, _, _, cx| cx.new(|_| LibraryDragPreview::new(item.clone())));
+            let ui = self.ui.clone();
+            card.context_menu(move |menu, window, cx| Self::menu(ui.clone(), Some(management.clone()), downloaded, hash.clone(), menu, window, cx)).into_any_element()
+        } else if cfg!(not(feature = "kobo")) && self.book.downloaded {
+            let hash = self.book.content_hash.clone();
+            let ui = self.ui.clone();
+            card.context_menu(move |menu, window, cx| Self::menu(ui.clone(), None, true, hash.clone(), menu, window, cx)).into_any_element()
         } else {
             card.into_any_element()
         }

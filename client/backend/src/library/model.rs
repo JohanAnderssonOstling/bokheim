@@ -301,9 +301,9 @@ mod tests {
     #[test]
     fn author_name_sort_is_case_insensitive_and_deterministic() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), None, 3, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 1, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), None, 2, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), None, 3, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 1, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
         ];
 
         AuthorSort::Name.sort(&mut authors);
@@ -314,9 +314,9 @@ mod tests {
     #[test]
     fn author_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), None, 2, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 7, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), None, 2, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 7, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
         ];
 
         AuthorSort::BookCount.sort(&mut authors);

@@ -12,9 +12,10 @@ mod model;
 mod open;
 mod operations;
 
+pub use app_contract::library::{AudiobookChapter, BookDetail, BookDetailAuthor, BookTocEntry, LibraryFileTypeFilter};
 #[cfg(all(feature = "scanner", not(target_os = "android")))]
-pub(crate) use covers::generate_thumbnail_for_sync;
-pub use enrichment::{MissingSubjectsBook, SubjectEnrichmentOutcome, SubjectEnrichmentStatus};
+pub(crate) use covers::{generate_thumbnail_for_sync, thumbnail_needs_repair};
+pub use enrichment::{EditionIdentityReview, EditionIdentityReviewCandidate, EditionIdentityReviewStatus, MissingSubjectsBook, SubjectEnrichmentOutcome, SubjectEnrichmentStatus};
 pub use handle::{
     LibraryAuthorsView, LibraryBackend, LibraryFolderDestination, LibraryFolderEntry, LibraryFolderView, LibraryHierarchyEntry, LibraryHierarchyView, LibraryHomeView, LibrarySubjectEntry, LibrarySubjectView, LibraryTrashView, SubjectPath,
     TrashedBook, TrashedFolder,

@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1236,6 +1242,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1573,6 +1588,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1703,6 +1727,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "535d180e0ecab6268a3e718bb9fd44db66bbbc256257165fc699dadf70d16fe7"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prost"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.113",
+]
+
+[[package]]
+name = "protobuf-wire"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde",
+ "serde-value",
 ]
 
 [[package]]
@@ -2248,6 +2304,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-value"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
+dependencies = [
+ "ordered-float",
+ "serde",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2314,6 +2380,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "rand 0.8.6",
+ "ring",
  "server-postgres",
  "server-wire-http",
  "sha2",
@@ -2345,27 +2412,34 @@ version = "0.1.0"
 dependencies = [
  "account-contract",
  "axum",
+ "chrono",
  "futures-util",
+ "protobuf-wire",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
  "server-account",
  "server-asset-store",
  "server-postgres",
  "server-wire-http",
+ "sqlx",
  "sync-common",
  "tokio",
  "tokio-util",
  "tower",
  "tower-http",
  "tracing",
- "wire",
 ]
 
 [[package]]
 name = "server-postgres"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "server-asset-store",
  "sqlx",
  "sync-common",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "uuid",
@@ -2376,10 +2450,10 @@ name = "server-wire-http"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "protobuf-wire",
  "serde",
  "tokio",
  "tracing",
- "wire",
 ]
 
 [[package]]
@@ -2790,6 +2864,7 @@ name = "sync-common"
 version = "0.1.0"
 dependencies = [
  "content-address",
+ "protobuf-wire",
  "serde",
  "uuid",
  "wire",
@@ -2805,6 +2880,7 @@ dependencies = [
  "axum-server",
  "blake3",
  "futures-util",
+ "protobuf-wire",
  "protocol-test-support",
  "reqwest 0.12.28",
  "reqwest 0.13.4",
@@ -2815,6 +2891,7 @@ dependencies = [
  "server-asset-store",
  "server-http",
  "server-postgres",
+ "sqlx",
  "sync-common",
  "tempfile",
  "tokio",
@@ -2822,7 +2899,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "wire",
  "zip",
 ]
 

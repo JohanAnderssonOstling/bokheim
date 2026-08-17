@@ -5,17 +5,35 @@ edition = "2021"
 publish = false
 
 [features]
-default = []
+default = ["publication-extractors"]
+epub-page-render = [
+    "publication-extractors",
+    "dep:gpui",
+    "dep:gpui_platform",
+    "dep:gpui_wgpu",
+    "dep:html-view-core",
+    "dep:html-view-gpui",
+]
 pdf = ["dep:pdf-reader-core"]
+publication-extractors = ["dep:epub_provider", "dep:html-publication", "dep:mobi", "dep:mp4ameta"]
 
 [dependencies]
-epub_provider = { path = "../../apps/renderers/html/epub_provider" }
+epub_provider = { path = "../../apps/renderers/html/epub_provider", optional = true }
 fast_image_resize = { version = "5.2.0", features = ["image"] }
-html-publication = { path = "../../apps/renderers/html/crates/html-publication" }
+gpui = { workspace = true, optional = true, features = ["test-support"] }
+gpui_platform = { workspace = true, optional = true, features = ["test-support"] }
+gpui_wgpu = { path = "../../../GPUI-Fork/crates/gpui_wgpu", optional = true, features = ["font-kit", "test-support"] }
+html-publication = { path = "../../apps/renderers/html/crates/html-publication", optional = true }
+html-view-core = { workspace = true, optional = true }
+html-view-gpui = { path = "../../apps/renderers/html/crates/html-view-gpui", optional = true }
 image = { version = "0.24.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-mobi.workspace = true
-mp4ameta = "0.13.0"
+mobi = { workspace = true, optional = true }
+mp4ameta = { version = "0.13.0", optional = true }
 pdf-reader-core = { path = "../../apps/renderers/pdf/core", optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+zip.workspace = true

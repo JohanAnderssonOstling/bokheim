@@ -8,6 +8,20 @@ declare global {
       setVolumePageTurningEnabled: (enabled: boolean) => void;
       setReaderImmersiveEnabled?: (enabled: boolean) => void;
       pickEpub?: (requestId: string) => void;
+      isNativeAudiobookAvailable?: () => boolean;
+      getAudiobookState?: () => string;
+      openAudiobook?: (key: string, libraryId: string, contentHash: string, sourcePath: string, title: string, author: string, initialPositionMs: number) => void;
+      toggleAudiobookPlayback?: () => void;
+      seekAudiobookTo?: (positionMs: number) => void;
+      seekAudiobookBy?: (offsetMs: number) => void;
+      setAudiobookPlaybackRate?: (rate: number) => void;
+      closeAudiobook?: () => void;
+      isIgnoringBatteryOptimizations?: () => boolean;
+      openBatteryOptimizationSettings?: () => void;
+      isApkUpdaterAvailable?: () => boolean;
+      checkForApkUpdate?: (force: boolean) => void;
+      downloadAndInstallApk?: (url: string, sha256: string, fileName: string) => void;
+      openApkInstallSettings?: () => void;
     };
   }
 }

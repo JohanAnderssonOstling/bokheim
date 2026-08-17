@@ -7,9 +7,16 @@ import { APP_NAME_LOWER } from "./application-name";
 import { BROWSING_CONTENT_CONTRACT } from "./types";
 
 const EPUB_MIME = "application/epub+zip";
+const PDF_MIME = "application/pdf";
 const BOOK_EXTENSIONS: readonly string[] = BROWSING_CONTENT_CONTRACT.import_extensions;
 const ANDROID_PICKED_EVENT = `${APP_NAME_LOWER}-epub-picked`;
 const browserImports = new Map<string, File>();
+
+export function stageBrowserImport(file: File): string {
+  const token = `browser-upload:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  browserImports.set(token, file);
+  return token;
+}
 
 export function takeBrowserImport(token: string): File | undefined {
   const file = browserImports.get(token);
@@ -45,6 +52,7 @@ function fileNameFromPath(path: string) {
 function publicationMime(name: string) {
   const extension = name.split(".").at(-1)?.toLocaleLowerCase();
   if (extension === "epub") return EPUB_MIME;
+  if (extension === "pdf") return PDF_MIME;
   if (extension === "fb2") return "application/x-fictionbook+xml";
   if (extension === "cbz") return "application/vnd.comicbook+zip";
   if (extension === "webpub") return "application/webpub+zip";
@@ -58,20 +66,14 @@ function pickInBrowser(_importFormats: boolean): Promise<PickedEpub | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    // The browser backend currently supports the EPUB reader path only.
-    // Native imports retain the broader format list below.
-    input.accept = `.epub,${EPUB_MIME}`;
+    input.accept = `.epub,.pdf,${EPUB_MIME},${PDF_MIME}`;
     input.addEventListener("change", () => {
       const file = input.files?.[0];
       resolve(file
         ? {
             name: file.name,
             asFile: async () => file,
-            asImportPath: async () => {
-              const token = `browser-upload:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-              browserImports.set(token, file);
-              return token;
-            },
+            asImportPath: async () => stageBrowserImport(file),
             dispose: async () => undefined,
           }
         : null);
@@ -83,8 +85,8 @@ function pickInBrowser(_importFormats: boolean): Promise<PickedEpub | null> {
 
 function pickOnAndroid(): Promise<PickedEpub | null> {
   return new Promise((resolve, reject) => {
-    const pick = window.BokheimAndroid?.pickEpub;
-    if (!pick) {
+    const bridge = window.BokheimAndroid;
+    if (!bridge?.pickEpub) {
       reject(new Error("The Android EPUB picker is unavailable."));
       return;
     }
@@ -113,7 +115,10 @@ function pickOnAndroid(): Promise<PickedEpub | null> {
     };
     window.addEventListener(ANDROID_PICKED_EVENT, listener);
     try {
-      pick(requestId);
+      // Android WebView bridge methods must be called on the injected object.
+      // Extracting the function loses that receiver and WebView rejects it as
+      // a method invocation on a non-injected object.
+      bridge.pickEpub(requestId);
     } catch (error) {
       window.removeEventListener(ANDROID_PICKED_EVENT, listener);
       reject(error);

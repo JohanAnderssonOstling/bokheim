@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 axum = "0.7"
-wire = { path = "../../../../shared/wire" }
+wire = { package = "protobuf-wire", path = "../../../../shared/protobuf-wire" }
 serde = "1"
 tracing = "0.1"
 

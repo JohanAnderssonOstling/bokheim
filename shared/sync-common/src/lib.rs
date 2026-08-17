@@ -8,6 +8,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 pub mod api;
+pub use protobuf_wire as transport;
 pub use wire;
 pub mod mutation_ids;
 pub use mutation_ids::{MutationId, MutationIdError};
@@ -102,6 +103,16 @@ macro_rules! sequence_type {
 sequence_type!(ReplicaSeq);
 sequence_type!(LibraryRevision);
 
+/// A checkpoint over independently paged synchronization channels.
+/// A component advances only after that channel has been inspected.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncCursor {
+    #[serde(default, deserialize_with = "deserialize_library_cursor")]
+    pub state_revision: Option<LibraryRevision>,
+    #[serde(default, deserialize_with = "deserialize_library_cursor")]
+    pub reading_revision: Option<LibraryRevision>,
+}
+
 /// Opaque mutation envelope transported and persisted by the sync service.
 /// The service does not decode `value`; clients own each kind's domain schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,7 +182,7 @@ impl MutationRejectionReason {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PullStateResponse {
     pub mutations: Vec<ServerMutation>,
-    pub next_cursor: Option<LibraryRevision>,
+    pub next_cursor: SyncCursor,
     pub has_more: bool,
 }
 
@@ -179,8 +190,8 @@ pub struct PullStateResponse {
 pub struct PullStateQuery {
     pub library_id: LibraryId,
     pub replica_id: ReplicaId,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_library_cursor")]
-    pub cursor: Option<LibraryRevision>,
+    #[serde(default)]
+    pub cursor: SyncCursor,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,8 +200,8 @@ pub struct SyncExchangeRequest {
     pub replica_id: ReplicaId,
     #[serde(default)]
     pub mutations: Vec<WireMutation>,
-    #[serde(default, deserialize_with = "deserialize_library_cursor")]
-    pub cursor: Option<LibraryRevision>,
+    #[serde(default)]
+    pub cursor: SyncCursor,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -235,7 +246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_identifiers_use_their_canonical_strings_in_json_and_bincode() {
+    fn protocol_identifiers_use_their_canonical_strings_in_json_and_bincode_storage() {
         let content_hash = ContentHash::new(&"a".repeat(64));
         let mutation_id = MutationId::parse("12345678-1234-5678-9234-567812345678").unwrap();
 
@@ -244,6 +255,18 @@ mod tests {
 
         assert_eq!(wire::encode(&content_hash).unwrap(), wire::encode(&content_hash.as_str()).unwrap());
         assert_eq!(wire::encode(&mutation_id).unwrap(), wire::encode(&mutation_id.to_string()).unwrap());
+    }
+
+    #[test]
+    fn transport_and_storage_codecs_are_not_interchangeable() {
+        let value = ContentHash::new(&"a".repeat(64));
+        let stored = wire::encode(&value).unwrap();
+        let transported = transport::encode(&value).unwrap();
+
+        assert!(stored.starts_with(b"BKHM"));
+        assert!(!transported.starts_with(b"BKHM"));
+        assert!(wire::decode::<ContentHash>(&transported, 1024).is_err());
+        assert!(transport::decode::<ContentHash>(&stored, 1024).is_err());
     }
 
     #[test]

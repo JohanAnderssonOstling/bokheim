@@ -1,11 +1,11 @@
 use crate::ServerUrl;
-use account_contract::{AuthResponse, EmailRequest, LoginRequest, MeResponse, OneTimeTokenRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, StorageUsageResponse};
+use account_contract::{AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, MeResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, StorageUsageResponse};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sync_common::api::assets::{validate_blob_manifest_response, BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::{DeleteLibraryResponse, LibrarySummary, UpsertLibraryRequest};
-use sync_common::wire;
-use sync_common::{LibraryId, LibraryRevision, ReplicaId, StateInventoryRequest, StateInventoryResponse, SyncExchangeRequest, SyncExchangeResponse};
+use sync_common::transport as wire;
+use sync_common::{LibraryId, ReplicaId, StateInventoryRequest, StateInventoryResponse, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
 
 #[derive(Clone)]
 pub struct Session {
@@ -62,6 +62,10 @@ impl AuthError {
 
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::UNAUTHORIZED)
+    }
+
+    pub fn is_cursor_rejected(&self) -> bool {
+        matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::GONE)
     }
 
     pub fn is_authentication_failure(&self) -> bool {
@@ -252,8 +256,8 @@ pub async fn resend_verification(server_url: &ServerUrl, email: &str) -> Result<
     send_api_status(reqwest::Client::builder().build()?.post(server_url.endpoint("api/auth/resend-verification")), &EmailRequest { email: email.to_owned() }).await
 }
 
-pub async fn verify_email(server_url: &ServerUrl, token: &str) -> Result<Session, AuthError> {
-    let body = post_auth(server_url.endpoint("api/auth/verify-email"), &OneTimeTokenRequest { token: token.to_owned() }).await?;
+pub async fn verify_email(server_url: &ServerUrl, email: &str, pin: &str) -> Result<Session, AuthError> {
+    let body = post_auth(server_url.endpoint("api/auth/verify-email"), &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await?;
     session_from_response(server_url.clone(), body)
 }
 
@@ -348,9 +352,7 @@ pub async fn negotiate_blobs(client: &reqwest::Client, session: &Session, librar
     Ok(response)
 }
 
-pub async fn exchange_changes(
-    client: &reqwest::Client, session: &Session, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::WireMutation>, cursor: Option<LibraryRevision>,
-) -> Result<SyncExchangeResponse, AuthError> {
+pub async fn exchange_changes(client: &reqwest::Client, session: &Session, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::WireMutation>, cursor: SyncCursor) -> Result<SyncExchangeResponse, AuthError> {
     let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor };
     post_api(client, session, "api/sync/exchange", &request).await
 }
@@ -399,6 +401,14 @@ mod tests {
     use sync_common::{PullStateResponse, PushMutationsResponse};
     use test_support::fixture_content_hash;
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn gone_is_recognized_only_as_a_rejected_sync_cursor() {
+        let gone = AuthError::BadStatus(reqwest::StatusCode::GONE, String::new());
+        let conflict = AuthError::BadStatus(reqwest::StatusCode::CONFLICT, String::new());
+        assert!(gone.is_cursor_rejected());
+        assert!(!conflict.is_cursor_rejected());
+    }
 
     #[tokio::test]
     async fn account_storage_usage_uses_the_authenticated_binary_endpoint() {
@@ -528,15 +538,15 @@ mod tests {
                 let binary = binary.clone();
                 async move {
                     assert!(headers.get(header::CONTENT_ENCODING).is_none());
-                    binary.store(headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with(sync_common::wire::MEDIA_TYPE_BASE)), Ordering::SeqCst);
-                    let request: SyncExchangeRequest = sync_common::wire::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+                    binary.store(headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with(sync_common::transport::MEDIA_TYPE_BASE)), Ordering::SeqCst);
+                    let request: SyncExchangeRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
                     let response = SyncExchangeResponse {
                         push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-                        pull: PullStateResponse { mutations: Vec::new(), next_cursor: None, has_more: false },
+                        pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
                     };
-                    let encoded = sync_common::wire::encode(&response).unwrap();
+                    let encoded = sync_common::transport::encode(&response).unwrap();
                     let mut response = encoded.into_response();
-                    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(sync_common::wire::MEDIA_TYPE));
+                    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(sync_common::transport::MEDIA_TYPE));
                     response
                 }
             }),
@@ -546,7 +556,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mutations = sync_mutations(100);
 
-        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), mutations, None).await.unwrap();
+        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), mutations, SyncCursor::default()).await.unwrap();
 
         assert!(observed_binary.load(Ordering::SeqCst));
         assert_eq!(response.push.accepted.len(), 100);
@@ -575,7 +585,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), sync_mutations(1), None).await;
+        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), sync_mutations(1), SyncCursor::default()).await;
 
         assert!(matches!(response, Err(AuthError::BadStatus(reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE, _))));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -586,13 +596,15 @@ mod tests {
     async fn sync_client_rejects_a_successful_json_response() {
         let app = Router::new().route(
             "/api/sync/exchange",
-            post(|| async { Json(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: PullStateResponse { mutations: Vec::new(), next_cursor: None, has_more: false } }) }),
+            post(|| async {
+                Json(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false } })
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), Vec::new(), None).await;
+        let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), Vec::new(), SyncCursor::default()).await;
 
         assert!(matches!(response, Err(AuthError::InvalidData(message)) if message.contains("unsupported API response content type: application/json")));
         server.abort();

@@ -81,4 +81,5 @@ pub(crate) struct PendingReader {
     pub(crate) library: LibraryBackend,
     pub(crate) publication: Arc<crate::publication::NativePublication>,
     pub(crate) nav_state: Option<String>,
+    pub(crate) initial_target: Option<String>,
 }

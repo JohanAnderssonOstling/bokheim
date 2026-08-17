@@ -1,12 +1,11 @@
 //! Transport-independent validation for synchronization pages.
 
-use crate::{LibraryRevision, MutationId, MutationRejectionReason, PullStateResponse, PushMutationsResponse};
+use crate::{mutation_kind, LibraryRevision, MutationId, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor};
 use std::collections::HashSet;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResponseError {
     InvalidAcknowledgments(String),
-    TransientRejection { mutation_ids: Vec<MutationId> },
     PermanentRejection { mutation_id: MutationId, reason: MutationRejectionReason },
 }
 
@@ -14,7 +13,6 @@ impl std::fmt::Display for PushResponseError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidAcknowledgments(reason) => write!(formatter, "invalid mutation acknowledgement response: {reason}"),
-            Self::TransientRejection { mutation_ids } => write!(formatter, "server deferred {} synchronization mutation(s)", mutation_ids.len()),
             Self::PermanentRejection { mutation_id, reason } => write!(formatter, "server permanently rejected mutation {mutation_id}: {reason:?}"),
         }
     }
@@ -33,25 +31,35 @@ impl std::fmt::Display for PullBatchError {
 
 impl std::error::Error for PullBatchError {}
 
-pub fn validate_pull_batch(response: &PullStateResponse, cursor: Option<LibraryRevision>) -> Result<(), PullBatchError> {
-    let starting_revision = cursor.map(LibraryRevision::get).unwrap_or(0);
-    let mut previous_revision = starting_revision;
+fn revision(value: Option<LibraryRevision>) -> u64 {
+    value.map(LibraryRevision::get).unwrap_or(0)
+}
+
+pub fn validate_pull_batch(response: &PullStateResponse, cursor: SyncCursor) -> Result<(), PullBatchError> {
+    let starting_state = revision(cursor.state_revision);
+    let starting_reading = revision(cursor.reading_revision);
+    let mut observed_state = starting_state;
+    let mut observed_reading = starting_reading;
+    let mut previous_revision = 0;
     for mutation in &response.mutations {
         let revision = mutation.revision.get();
-        if revision <= previous_revision {
-            return Err(PullBatchError(format!("library revision {revision} does not follow {previous_revision}")));
+        let channel_cursor = if mutation.mutation.kind == mutation_kind::READING_POSITION { &mut observed_reading } else { &mut observed_state };
+        if revision <= *channel_cursor || revision <= previous_revision {
+            return Err(PullBatchError(format!("library revision {revision} does not advance its channel or response order")));
         }
+        *channel_cursor = revision;
         previous_revision = revision;
     }
-    let next = response.next_cursor.map(LibraryRevision::get).unwrap_or(0);
-    if next < previous_revision || next < starting_revision {
-        return Err(PullBatchError(format!("next cursor {next} precedes observed revision {previous_revision}")));
+    let next_state = revision(response.next_cursor.state_revision);
+    let next_reading = revision(response.next_cursor.reading_revision);
+    if next_state < observed_state || next_reading < observed_reading {
+        return Err(PullBatchError("next cursor precedes an observed channel revision".into()));
     }
     if response.has_more && response.mutations.is_empty() {
         return Err(PullBatchError("a non-final page cannot be empty".into()));
     }
-    if response.has_more && next != previous_revision {
-        return Err(PullBatchError("a non-final page cursor must equal its final mutation revision".into()));
+    if response.has_more && (next_state != observed_state || next_reading != observed_reading) {
+        return Err(PullBatchError("a non-final page cursor must equal the observed per-channel revisions".into()));
     }
     Ok(())
 }
@@ -59,7 +67,7 @@ pub fn validate_pull_batch(response: &PullStateResponse, cursor: Option<LibraryR
 #[derive(Debug, PartialEq, Eq)]
 pub struct ValidatedPushResponse {
     pub accepted: Vec<MutationId>,
-    pub transient_rejections: Vec<MutationId>,
+    pub transient_rejections: Vec<(MutationId, MutationRejectionReason)>,
     pub permanent_rejections: Vec<(MutationId, MutationRejectionReason)>,
 }
 
@@ -87,7 +95,7 @@ pub fn validate_push_response(requested: &[MutationId], response: &PushMutations
             return Err(PushResponseError::InvalidAcknowledgments(format!("server accounted for mutation {} more than once", rejection.mutation_id)));
         }
         if rejection.reason.is_transient() {
-            transient_rejections.push(rejection.mutation_id);
+            transient_rejections.push((rejection.mutation_id, rejection.reason));
         } else {
             permanent_rejections.push((rejection.mutation_id, rejection.reason));
         }
@@ -101,6 +109,24 @@ pub fn validate_push_response(requested: &[MutationId], response: &PushMutations
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn server_mutation(kind: &str, revision: u64) -> crate::ServerMutation {
+        crate::ServerMutation {
+            mutation: crate::WireMutation {
+                mutation_id: MutationId::new(),
+                kind: kind.to_owned(),
+                entity_key: "key".to_owned(),
+                entity_subkey: String::new(),
+                value: Vec::new(),
+                conflict_rank: 0,
+                blob_reference: None,
+                changed_at: 1,
+                replica_seq: crate::ReplicaSeq::new(1).unwrap(),
+            },
+            replica_id: crate::ReplicaId::nil(),
+            revision: LibraryRevision::new(revision).unwrap(),
+        }
+    }
 
     #[test]
     fn identity_acknowledgements_do_not_depend_on_sequence_prefixes() {
@@ -128,14 +154,25 @@ mod tests {
 
         let validated = validate_push_response(&[accepted, transient, first_permanent, second_permanent], &response).unwrap();
         assert_eq!(validated.accepted, vec![accepted]);
-        assert_eq!(validated.transient_rejections, vec![transient]);
+        assert_eq!(validated.transient_rejections, vec![(transient, MutationRejectionReason::MissingDependency)]);
         assert_eq!(validated.permanent_rejections, vec![(first_permanent, MutationRejectionReason::InvalidPayload), (second_permanent, MutationRejectionReason::InvalidPayload),]);
     }
 
     #[test]
     fn final_cursor_may_advance_past_the_last_returned_state() {
-        let response = PullStateResponse { mutations: Vec::new(), next_cursor: LibraryRevision::new(10).ok(), has_more: false };
-        validate_pull_batch(&response, LibraryRevision::new(5).ok()).unwrap();
+        let response = PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(7).ok() }, has_more: false };
+        validate_pull_batch(&response, SyncCursor { state_revision: LibraryRevision::new(5).ok(), reading_revision: None }).unwrap();
         let _ = "replica".to_owned();
+    }
+
+    #[test]
+    fn reading_progress_does_not_consume_the_state_channel() {
+        let response = PullStateResponse {
+            mutations: vec![server_mutation(mutation_kind::READING_POSITION, 22)],
+            next_cursor: SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(22).ok() },
+            has_more: true,
+        };
+        validate_pull_batch(&response, SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(20).ok() }).unwrap();
+        assert_eq!(response.next_cursor.state_revision.unwrap().get(), 10);
     }
 }

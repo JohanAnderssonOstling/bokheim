@@ -8,19 +8,14 @@ const REGISTRATION_TTL_HOURS: i64 = 24;
 const PASSWORD_RESET_TTL_MINUTES: i64 = 60;
 const RESEND_COOLDOWN_SECONDS: i64 = 60;
 
-async fn queue_email(transaction: &mut Transaction<'_, Postgres>, recipient: &str, kind: &str, token: &str) -> Result<(), AuthError> {
-    sqlx::query("INSERT INTO account_email_outbox(id, recipient, message_kind, token) VALUES ($1, $2, $3, $4)")
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(recipient)
-        .bind(kind)
-        .bind(token)
-        .execute(&mut **transaction)
-        .await
-        .map_err(internal)?;
+async fn queue_email(service: &PostgresAccountService, transaction: &mut Transaction<'_, Postgres>, recipient: &str, kind: &str, token: &str) -> Result<(), AuthError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let token_ciphertext = service.token_protector.encrypt_outbox_token(&id, recipient, kind, token)?;
+    sqlx::query("INSERT INTO account_email_outbox(id, recipient, message_kind, token_ciphertext) VALUES ($1, $2, $3, $4)").bind(id).bind(recipient).bind(kind).bind(token_ciphertext).execute(&mut **transaction).await.map_err(internal)?;
     Ok(())
 }
 
-fn validate_password(password: &str) -> Result<(), AuthError> {
+pub(super) fn validate_password(password: &str) -> Result<(), AuthError> {
     if password.chars().count() < PASSWORD_MIN_CHARACTERS || password.is_empty() || password.len() > PASSWORD_MAX_BYTES {
         return Err(AuthError::InvalidPassword { min_characters: PASSWORD_MIN_CHARACTERS, max_bytes: PASSWORD_MAX_BYTES });
     }
@@ -77,7 +72,7 @@ impl PostgresAccountService {
         // Hash before conflict checks so accepted responses do not expose
         // email existence through the dominant work factor.
         let password_hash = self.hash_password(password.to_owned()).await?;
-        let (token, token_hash) = crypto::mint_verification_pin();
+        let (token, token_hash) = crypto::mint_verification_pin(&self.token_protector, &email);
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         sqlx::query("DELETE FROM pending_registration WHERE expires_at <= now()").execute(&mut *transaction).await.map_err(internal)?;
         let conflict: bool = sqlx::query_scalar(
@@ -107,7 +102,7 @@ impl PostgresAccountService {
         if let Err(error) = inserted {
             return if email_taken(&error) { Ok(()) } else { Err(internal(error)) };
         }
-        queue_email(&mut transaction, &email, "verify_email", &token).await?;
+        queue_email(self, &mut transaction, &email, "verify_email", &token).await?;
         transaction.commit().await.map_err(internal)
     }
 
@@ -124,7 +119,7 @@ impl PostgresAccountService {
             transaction.commit().await.map_err(internal)?;
             return Ok(());
         }
-        let (token, token_hash) = crypto::mint_verification_pin();
+        let (token, token_hash) = crypto::mint_verification_pin(&self.token_protector, &email);
         sqlx::query(
             "UPDATE pending_registration
              SET verification_hash=$2, expires_at=$3, last_sent_at=now()
@@ -137,22 +132,24 @@ impl PostgresAccountService {
         .await
         .map_err(internal)?;
         sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='verify_email' AND claimed_by IS NULL").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
-        queue_email(&mut transaction, &email, "verify_email", &token).await?;
+        queue_email(self, &mut transaction, &email, "verify_email", &token).await?;
         transaction.commit().await.map_err(internal)
     }
 
-    pub(super) async fn verify_email_impl(&self, token: &str) -> Result<IssuedSession, AuthError> {
-        if !super::valid_verification_pin(token) {
+    pub(super) async fn verify_email_impl(&self, email: &str, pin: &str) -> Result<IssuedSession, AuthError> {
+        let email = normalized_email(email)?;
+        if !super::valid_verification_pin(pin) {
             return Err(AuthError::InvalidOneTimeToken);
         }
-        let token_hash = crypto::sha256_hex(token.as_bytes());
+        let token_hash = self.token_protector.verification_hash(&email, pin);
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         let pending: Option<(String, String, String)> = sqlx::query_as(
             "SELECT id, email, password_hash
              FROM pending_registration
-             WHERE verification_hash=$1 AND expires_at > now()
+             WHERE email=$1 AND verification_hash=$2 AND expires_at > now()
              FOR UPDATE",
         )
+        .bind(&email)
         .bind(token_hash)
         .fetch_optional(&mut *transaction)
         .await
@@ -185,7 +182,7 @@ impl PostgresAccountService {
             transaction.commit().await.map_err(internal)?;
             return Ok(());
         }
-        let (token, token_hash) = crypto::mint_token();
+        let (token, token_hash) = crypto::mint_password_reset_token(&self.token_protector);
         sqlx::query(
             "INSERT INTO password_reset(user_id, token_hash, requested_at, expires_at)
              VALUES ($1, $2, now(), $3)
@@ -198,7 +195,7 @@ impl PostgresAccountService {
         .await
         .map_err(internal)?;
         sqlx::query("DELETE FROM account_email_outbox WHERE recipient=$1 AND message_kind='reset_password' AND claimed_by IS NULL").bind(&email).execute(&mut *transaction).await.map_err(internal)?;
-        queue_email(&mut transaction, &email, "reset_password", &token).await?;
+        queue_email(self, &mut transaction, &email, "reset_password", &token).await?;
         transaction.commit().await.map_err(internal)
     }
 
@@ -208,7 +205,7 @@ impl PostgresAccountService {
         }
         validate_password(new_password)?;
         let password_hash = self.hash_password(new_password.to_owned()).await?;
-        let token_hash = crypto::sha256_hex(token.as_bytes());
+        let token_hash = self.token_protector.password_reset_hash(token);
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         let reset: Option<(String, String)> = sqlx::query_as(
             "SELECT password_reset.user_id, users.email

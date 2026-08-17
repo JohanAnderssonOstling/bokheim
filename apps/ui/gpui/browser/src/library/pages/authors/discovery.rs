@@ -105,16 +105,14 @@ impl AuthorDiscoveryView {
 impl Render for AuthorDiscoveryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let page_width = (f32::from(window.viewport_size().width) - components::nav_rail_width(f32::from(window.rem_size()))).min(components::AUTHOR_PAGE_MAX_WIDTH);
-        let width = (page_width * 2.0 / 3.0 - components::CONTENT_PADDING * 2.0).max(components::BOOK_COVER_WIDTH);
         let contract = &self.ui.contracts().store;
-        let columns = if width >= contract.publication_three_column_breakpoint_px as f32 {
-            3
-        } else if width >= contract.publication_two_column_breakpoint_px as f32 {
-            2
-        } else {
-            1
-        };
+        let responsive = crate::virtual_grid::ResponsiveColumns::for_element(
+            "author-discovery-grid",
+            crate::virtual_grid::ColumnPolicy::MinimumItemWidth { width: crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px), gap: 16.0 },
+            window,
+            cx,
+        );
+        let columns = responsive.columns(cx);
 
         let entity = cx.entity();
         let mut section =
@@ -137,8 +135,8 @@ impl Render for AuthorDiscoveryView {
         }
 
         for group in groups {
-            section = section.child(components::section_header(group.source.title.clone(), format!("{} results", group.count), theme)).child(group.cards.grid(width, columns));
+            section = section.child(components::section_header(group.source.title.clone(), format!("{} results", group.count), theme)).child(group.cards.grid(columns));
         }
-        section
+        responsive.track(section)
     }
 }

@@ -8,7 +8,12 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use epub_svelte_lib::app::preferences::{PdfPageLayout, ReaderFontFamily, ReaderTextAlignment};
+use epub_svelte_lib::app::preferences::{ReaderFontFamily, ReaderTextAlignment};
+
+/// The shared, synchronized description of how a PDF's layout is decided. The
+/// reader carries `pdf_page_count` and `pdf_zoom` alongside it, so each mode
+/// keeps the value it holds fixed.
+pub use epub_svelte_lib::app::preferences::PdfZoomMode as PdfZoomModePreference;
 use gpui::{App, Global};
 use ui_runtime::BlockingWorker;
 
@@ -32,12 +37,18 @@ pub struct ReaderPreferences {
     /// by the native reader, which derives its column count from the viewport.
     #[serde(default = "default_max_column_count")]
     pub max_column_count: u8,
-    #[serde(default)]
-    pub pdf_page_layout: PdfPageLayout,
     #[serde(default = "default_pdf_page_count")]
     pub pdf_page_count: u8,
     #[serde(default = "default_pdf_trim_margins")]
     pub pdf_trim_margins: bool,
+    /// Which end of the PDF layout the reader holds fixed. `pdf_page_count`
+    /// carries the page count for [`PdfZoomModePreference::FitWidth`], and
+    /// `pdf_zoom` the zoom for [`PdfZoomModePreference::Fixed`].
+    #[serde(default)]
+    pub pdf_zoom_mode: PdfZoomModePreference,
+    /// Pixels per PDF point.
+    #[serde(default = "default_pdf_zoom")]
+    pub pdf_zoom: f32,
 }
 
 impl Default for ReaderPreferences {
@@ -52,9 +63,10 @@ impl Default for ReaderPreferences {
             text_alignment: ReaderTextAlignment::default(),
             line_height: default_line_height(),
             max_column_count: default_max_column_count(),
-            pdf_page_layout: PdfPageLayout::Automatic,
             pdf_page_count: default_pdf_page_count(),
             pdf_trim_margins: default_pdf_trim_margins(),
+            pdf_zoom_mode: PdfZoomModePreference::default(),
+            pdf_zoom: default_pdf_zoom(),
         }
     }
 }
@@ -65,6 +77,10 @@ fn default_toc_visible() -> bool {
 
 fn default_pdf_trim_margins() -> bool {
     true
+}
+
+fn default_pdf_zoom() -> f32 {
+    1.0
 }
 
 fn default_pdf_page_count() -> u8 {

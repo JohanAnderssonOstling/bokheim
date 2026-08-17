@@ -2,80 +2,45 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { inspectPublication } from "./publication-metadata.ts";
+import { storedZip } from "./test-epub.ts";
 
-function crc32(bytes: Uint8Array): number {
-  let value = 0xffffffff;
-  for (const byte of bytes) {
-    value ^= byte;
-    for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (0xedb88320 & -(value & 1));
-  }
-  return (value ^ 0xffffffff) >>> 0;
-}
-
-function storedZip(files: Record<string, string>): Uint8Array {
-  const encoder = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let offset = 0;
-  const record = (size: number, write: (view: DataView) => void) => {
-    const bytes = new Uint8Array(size);
-    write(new DataView(bytes.buffer));
-    return bytes;
-  };
-  for (const [name, contents] of Object.entries(files)) {
-    const nameBytes = encoder.encode(name);
-    const data = encoder.encode(contents);
-    const checksum = crc32(data);
-    const local = record(30, (view) => {
-      view.setUint32(0, 0x04034b50, true);
-      view.setUint16(4, 20, true);
-      view.setUint32(14, checksum, true);
-      view.setUint32(18, data.length, true);
-      view.setUint32(22, data.length, true);
-      view.setUint16(26, nameBytes.length, true);
-    });
-    const directory = record(46, (view) => {
-      view.setUint32(0, 0x02014b50, true);
-      view.setUint16(4, 20, true);
-      view.setUint16(6, 20, true);
-      view.setUint32(16, checksum, true);
-      view.setUint32(20, data.length, true);
-      view.setUint32(24, data.length, true);
-      view.setUint16(28, nameBytes.length, true);
-      view.setUint32(42, offset, true);
-    });
-    chunks.push(local, nameBytes, data);
-    central.push(directory, nameBytes);
-    offset += local.length + nameBytes.length + data.length;
-  }
-  const centralSize = central.reduce((sum, bytes) => sum + bytes.length, 0);
-  const end = record(22, (view) => {
-    view.setUint32(0, 0x06054b50, true);
-    view.setUint16(8, Object.keys(files).length, true);
-    view.setUint16(10, Object.keys(files).length, true);
-    view.setUint32(12, centralSize, true);
-    view.setUint32(16, offset, true);
-  });
-  const result = new Uint8Array(offset + centralSize + end.length);
-  let cursor = 0;
-  for (const bytes of [...chunks, ...central, end]) {
-    result.set(bytes, cursor);
-    cursor += bytes.length;
-  }
-  return result;
-}
+const tinyPng = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
 
 test("the shared Rust EPUB provider inspects a real archive", async () => {
   const bytes = storedZip({
     mimetype: "application/epub+zip",
     "META-INF/container.xml": '<container><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
-    "OPS/book.opf": '<package><metadata><dc:title>Archive Title</dc:title><dc:creator>Archive Author</dc:creator></metadata><manifest><item id="cover" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest></package>',
-    "OPS/images/cover.jpg": "cover bytes",
+    "OPS/book.opf": '<package><metadata><dc:title>Archive Title</dc:title><dc:creator>Archive Author</dc:creator><dc:identifier>9780306406157</dc:identifier><dc:description>Archive description</dc:description><dc:subject>History</dc:subject><dc:subject>United States</dc:subject><dc:subject>20th Century</dc:subject></metadata><manifest><item id="cover" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest></package>',
+    "OPS/images/cover.jpg": tinyPng,
   });
   const file = new File([bytes], "archive.epub", { type: "application/epub+zip" });
-  assert.deepEqual(await inspectPublication(file, file.name, bytes), {
+  const metadata = await inspectPublication(file, file.name, bytes);
+  const { cover, ...fields } = metadata;
+  assert.deepEqual(fields, {
     title: "Archive Title",
     author: "Archive Author",
-    cover: new TextEncoder().encode("cover bytes"),
+    description: "Archive description",
+    subjects: ["History", "United States", "20th Century"],
+    subject_paths: [
+      "Humanities / History",
+      "Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century",
+    ],
+    isbns: ["9780306406157"],
+    toc: [],
   });
+  assert.equal(cover?.[0], 0xff);
+  assert.equal(cover?.[1], 0xd8);
+  assert.equal(cover?.at(-2), 0xff);
+  assert.equal(cover?.at(-1), 0xd9);
+});
+
+test("the web publication boundary accepts PDF documents", async () => {
+  const bytes = new TextEncoder().encode("%PDF-1.7\n%%EOF");
+  const metadata = await inspectPublication(new File([bytes], "book.pdf", { type: "application/pdf" }), "book.pdf", bytes);
+  assert.deepEqual(metadata, { title: null, author: null, description: null, subjects: [], subject_paths: [], isbns: [], cover: null, toc: [] });
+});
+
+test("the web publication boundary rejects files with a false PDF extension", async () => {
+  const bytes = new TextEncoder().encode("not a PDF");
+  await assert.rejects(inspectPublication(new File([bytes], "book.pdf"), "book.pdf", bytes), /not a valid PDF/);
 });

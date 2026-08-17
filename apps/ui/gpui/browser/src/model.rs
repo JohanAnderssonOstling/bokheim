@@ -1,7 +1,6 @@
 //! Presentation records shared across pages.
 
-use std::collections::HashMap;
-
+#[cfg(test)]
 use crate::route::LibraryRoute;
 use epub_svelte_lib::LibraryId;
 
@@ -23,15 +22,7 @@ pub(crate) enum AccountFlow {
 /// Held per library rather than once globally: switching library and switching
 /// back is the primary flow of a multi-library app, and a single slot means the
 /// library you return to has forgotten where you were.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LibraryPlace {
-    #[serde(default)]
-    pub route: LibraryRoute,
-    #[serde(default)]
-    pub folder_path: Vec<FolderCrumb>,
-    #[serde(default)]
-    pub subject_path: Vec<SubjectCrumb>,
-}
+pub type LibraryPlace = app_contract::LibraryPlace<FolderCrumb, SubjectCrumb>;
 
 /// Where the browser reopens after a restart.
 ///
@@ -43,22 +34,11 @@ pub struct LibraryPlace {
 /// position — the old flat fields are unknown to serde now and are ignored,
 /// which leaves the rest of the session (reader preferences, window geometry)
 /// intact. That is why `SESSION_VERSION` is deliberately not bumped for this.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BrowserSession {
-    pub active_library_id: Option<LibraryId>,
-    #[serde(default)]
-    pub places: HashMap<LibraryId, LibraryPlace>,
-}
-
-impl BrowserSession {
-    pub(crate) fn place(&self, library_id: &LibraryId) -> LibraryPlace {
-        self.places.get(library_id).cloned().unwrap_or_default()
-    }
-}
+pub type BrowserSession = app_contract::BrowserSession<LibraryId, FolderCrumb, SubjectCrumb>;
 
 /// Forgets libraries that are no longer in the catalogue, so the serialized map
 /// does not accumulate entries for libraries that were removed.
-pub(crate) fn retain_library_places(places: &mut HashMap<LibraryId, LibraryPlace>, present: impl Fn(&LibraryId) -> bool) {
+pub(crate) fn retain_library_places(places: &mut std::collections::HashMap<LibraryId, LibraryPlace>, present: impl Fn(&LibraryId) -> bool) {
     places.retain(|library_id, _| present(library_id));
 }
 

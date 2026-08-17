@@ -548,6 +548,10 @@ impl HtmlView {
         self.renderer.resolve_href(href)
     }
 
+    pub fn navigate_to_href(&mut self, href: &str, _cx: &mut Context<Self>) -> bool {
+        self.renderer.navigate_to_href(href)
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }

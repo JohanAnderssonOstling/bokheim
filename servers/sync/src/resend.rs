@@ -45,7 +45,7 @@ impl ResendEmailSender {
 
     fn content(email: &QueuedAccountEmail) -> EmailContent {
         let (subject, introduction) = match email.kind {
-            AccountEmailKind::VerifyEmail => ("Verify your Bokheim account", "Enter this 6-digit PIN in Bokheim to finish creating your account:"),
+            AccountEmailKind::VerifyEmail => ("Verify your Bokheim account", "Enter this six-digit verification PIN in Bokheim to finish creating your account:"),
             AccountEmailKind::ResetPassword => ("Reset your Bokheim password", "Enter this password-reset token in Bokheim:"),
         };
         let text = format!("{introduction}\n\n{}\n\nIf you did not request this, you can ignore this email.", email.token);
@@ -104,7 +104,7 @@ mod tests {
         let email = QueuedAccountEmail { id: "email-id".to_owned(), recipient: "reader@example.com".to_owned(), kind: AccountEmailKind::VerifyEmail, token: "012345".to_owned() };
         let content = ResendEmailSender::content(&email);
         assert_eq!(content.subject, "Verify your Bokheim account");
-        assert!(content.text.contains("6-digit PIN"));
+        assert!(content.text.contains("verification PIN"));
         assert!(content.text.contains("012345"));
         assert!(content.html.contains("012345"));
     }

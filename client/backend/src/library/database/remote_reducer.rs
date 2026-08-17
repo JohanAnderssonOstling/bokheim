@@ -1,6 +1,6 @@
 use super::*;
 use library_model::{BookFormat, DirectoryLifecycleState};
-use library_replica::{project_directories, DirectoryIntent};
+use library_replica::{DirectoryIntent, project_directories};
 
 /// Applies one remote change. Returns the placement to delete locally when the
 /// change was a removal that won the LWW gate; `None` otherwise.
@@ -334,6 +334,7 @@ fn apply_remote_book_purged(tx: &Transaction, content_hash: ContentHash, changed
         "book_subject_assignment_evidence",
         "book_subject_assignment",
         "book_subject",
+        "book_external_entity",
         "external_metadata_attempt",
         "book_collection",
         "book_publication_date",

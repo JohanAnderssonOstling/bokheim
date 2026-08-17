@@ -9,6 +9,7 @@ random-ids = ["uuid/v4"]
 
 [dependencies]
 content-address = { path = "../content-address" }
+protobuf-wire = { path = "../protobuf-wire" }
 wire = { path = "../wire" }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v5", "serde"] }

@@ -3,7 +3,6 @@ use super::*;
 use library_model::Contributor;
 #[cfg(test)]
 use library_model::MarcRelatorCode;
-#[cfg(test)]
 use rusqlite::OptionalExtension;
 /// Inserts a newly scanned book with its final initial metadata in one write.
 /// The book lifecycle trigger can therefore publish title and ordered contributors without a
@@ -72,6 +71,7 @@ fn replace_publication_metadata_projections(transaction: &Transaction, content_h
     transaction.clear_book_languages(&id)?;
     transaction.clear_book_subject_assignments(&id)?;
     transaction.clear_book_subjects(&id)?;
+    transaction.execute("DELETE FROM book_unified_concept WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [&id])?;
     transaction.clear_book_collections(&id)?;
     transaction.clear_book_publication_dates(&id)?;
     transaction.clear_book_publication_values(&id)?;
@@ -100,15 +100,57 @@ fn replace_publication_metadata_projections(transaction: &Transaction, content_h
     for (position, subject) in metadata.subjects.iter().enumerate() {
         transaction.insert_book_subject(&id, position as i64, subject.name(), subject.source(), subject.authority(), subject.code())?;
     }
-    for assignment in library_model::match_bisac_subjects(&metadata.subjects) {
-        transaction.insert_book_subject_assignment(&id, library_model::BISAC_SYSTEM_ID, assignment.node_path(), library_model::BISAC_MATCHER_VERSION)?;
-        for position in assignment.evidence_positions() {
-            transaction.insert_book_subject_assignment_evidence(&id, library_model::BISAC_SYSTEM_ID, assignment.node_path(), *position as i64)?;
+    let subject_codes = library_model::project_subject_codes(&metadata.subjects);
+    for classification in &subject_codes {
+        for position in classification.evidence_positions() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO book_subject_code(book_row_id,subject_position,system_id,code)
+                 VALUES((SELECT row_id FROM book WHERE content_hash=?1),?2,?3,?4)",
+                rusqlite::params![id, *position as i64, classification.system_id(), classification.code()],
+            )?;
         }
     }
-    for (position, subject) in metadata.subjects.iter().enumerate() {
-        let Some((system_id, authority_label)) = external_navigation_system(subject.authority()) else { continue };
-        insert_external_subject_assignment(transaction, &id, system_id, authority_label, subject.name(), position as i64)?;
+    for assignment in library_model::project_subjects(&metadata.subjects) {
+        if assignment.system_id() != library_model::BISAC_SYSTEM_ID {
+            ensure_external_subject_nodes(transaction, assignment.system_id(), assignment.subject_path(), assignment.matcher_version())?;
+        }
+        transaction.insert_book_subject_assignment(&id, assignment.system_id(), assignment.subject_path(), assignment.matcher_version())?;
+        for position in assignment.evidence_positions() {
+            transaction.insert_book_subject_assignment_evidence(&id, assignment.system_id(), assignment.subject_path(), *position as i64)?;
+        }
+    }
+    let unified_assignments = library_model::project_unified_subjects(&metadata.subjects);
+    for assignment in &unified_assignments {
+        ensure_external_subject_nodes(transaction, assignment.system_id(), assignment.subject_path(), assignment.matcher_version())?;
+        transaction.insert_book_subject_assignment(&id, assignment.system_id(), assignment.subject_path(), assignment.matcher_version())?;
+        for position in assignment.evidence_positions() {
+            transaction.insert_book_subject_assignment_evidence(&id, assignment.system_id(), assignment.subject_path(), *position as i64)?;
+        }
+    }
+    for classification in &subject_codes {
+        for unified_path in library_model::unified_subject_paths(classification.system_id(), classification.code()) {
+            let source_version = source_subject_version(classification.system_id());
+            let concept_id = library_model::unified_concept_id(&unified_path);
+            transaction.execute("INSERT OR IGNORE INTO source_subject(system_id,source_version,code,official_label) VALUES(?1,?2,?3,NULL)", rusqlite::params![classification.system_id(), source_version, classification.code()])?;
+            transaction.execute(
+                "INSERT OR REPLACE INTO source_concept_mapping(source_system_id,source_version,source_code,concept_id,mapping_type,mapper_version) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![classification.system_id(), source_version, classification.code(), concept_id, source_mapping_type(classification.system_id()), library_model::UNIFIED_MATCHER_VERSION],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES((SELECT row_id FROM book WHERE content_hash=?1),?2,?3)",
+                rusqlite::params![id, concept_id, library_model::UNIFIED_MATCHER_VERSION],
+            )?;
+            for position in classification.evidence_positions() {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO book_unified_concept_evidence(book_row_id,concept_id,subject_position,source_system_id,source_code) VALUES((SELECT row_id FROM book WHERE content_hash=?1),?2,?3,?4,?5)",
+                    rusqlite::params![id, concept_id, *position as i64, classification.system_id(), classification.code()],
+                )?;
+            }
+            transaction.execute(
+                "INSERT OR REPLACE INTO subject_code_mapping(source_system_id,source_code,unified_path,mapper_version) VALUES(?1,?2,?3,?4)",
+                rusqlite::params![classification.system_id(), classification.code(), unified_path, library_model::UNIFIED_MATCHER_VERSION],
+            )?;
+        }
     }
     for (position, collection) in metadata.collections.iter().enumerate() {
         transaction.insert_book_collection(&id, position as i64, collection.name(), collection.collection_type(), collection.position())?;
@@ -133,22 +175,8 @@ fn replace_publication_metadata_projections(transaction: &Transaction, content_h
     Ok(())
 }
 
-fn external_navigation_system(authority: Option<&str>) -> Option<(&'static str, &'static str)> {
-    match authority?.trim().to_ascii_lowercase().as_str() {
-        "lcsh" => Some(("lcsh", "LCSH")),
-        "lcgft" => Some(("lcgft", "LCGFT")),
-        "lcc" => Some(("lcc", "LCC")),
-        "ddc" => Some(("ddc", "DDC")),
-        _ => None,
-    }
-}
-
-fn insert_external_subject_assignment(transaction: &Transaction, content_hash: &str, system_id: &str, authority_label: &str, subject_path: &str, evidence_position: i64) -> Result<(), rusqlite::Error> {
-    let subject_components = subject_path.split('/').map(str::trim).filter(|component| !component.is_empty()).collect::<Vec<_>>();
-    if subject_components.is_empty() {
-        return Ok(());
-    }
-    let components = ["LCC", authority_label].into_iter().chain(subject_components).collect::<Vec<_>>();
+fn ensure_external_subject_nodes(transaction: &Transaction, system_id: &str, subject_path: &str, matcher_version: i64) -> Result<(), rusqlite::Error> {
+    let components = subject_path.split(" / ").map(str::trim).filter(|component| !component.is_empty()).collect::<Vec<_>>();
     transaction.execute("INSERT OR IGNORE INTO subject_system(id,version,matcher_version) VALUES(?1,'external',1)", [system_id])?;
     let mut path = String::new();
     let mut parent_path = String::new();
@@ -160,12 +188,7 @@ fn insert_external_subject_assignment(transaction: &Transaction, content_hash: &
         transaction.execute("INSERT OR IGNORE INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES(?1,?2,?3,?4,NULL,1)", rusqlite::params![system_id, path, parent_path, component])?;
         parent_path.clone_from(&path);
     }
-    transaction
-        .execute("INSERT OR IGNORE INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version) VALUES((SELECT row_id FROM book WHERE content_hash=?1),?2,?3,1)", rusqlite::params![content_hash, system_id, path])?;
-    transaction.execute(
-        "INSERT OR IGNORE INTO book_subject_assignment_evidence(book_row_id,system_id,subject_path,subject_position) VALUES((SELECT row_id FROM book WHERE content_hash=?1),?2,?3,?4)",
-        rusqlite::params![content_hash, system_id, path, evidence_position],
-    )?;
+    transaction.execute("UPDATE subject_system SET matcher_version=MAX(matcher_version,?2) WHERE id=?1", rusqlite::params![system_id, matcher_version])?;
     Ok(())
 }
 #[cfg(test)]
@@ -180,7 +203,6 @@ pub struct AuthorCreditIdentity {
 /// Reidentifies one author-role (`role = "aut"`) book_contributor row. Kept
 /// scoped to authors, matching the existing product behavior: the reidentify
 /// UI does not yet operate on translators/editors/etc.
-#[cfg(test)]
 fn reidentify_book_credit(transaction: &Transaction, content_hash: ContentHash, position: usize, identity_local_id: i64, _author_id: AuthorId) -> Result<(), rusqlite::Error> {
     transaction.execute(
         "UPDATE book_contributor SET author_identity_id=?1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2) AND position=?3 AND role=X'617574'",
@@ -214,11 +236,10 @@ pub fn split_book_author(transaction: &Transaction, content_hash: ContentHash, p
 /// name can resolve to different identities, while spelling variants carrying
 /// the same authority id converge on one identity. Scoped to author-role
 /// (`"aut"`) rows.
-#[cfg(test)]
 pub fn resolve_book_author_identity(transaction: &Transaction, content_hash: ContentHash, position: usize, preferred_name: &str, external_id: &ExternalAuthorId) -> Result<AuthorId, rusqlite::Error> {
     let preferred_name = AuthorName::parse(preferred_name).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let position = i64::try_from(position).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let (current_local_id, current_stable_id, current_is_provisional): (i64, String, bool) = transaction.query_row(
+    let (current_local_id, _current_stable_id, current_is_provisional): (i64, String, bool) = transaction.query_row(
         "SELECT author_identity.id, author_identity.stable_id, author_identity.is_provisional
          FROM book_contributor JOIN author_identity ON author_identity.id=book_contributor.author_identity_id
          WHERE book_contributor.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND book_contributor.position=?2 AND book_contributor.role=X'617574'",
@@ -234,16 +255,22 @@ pub fn resolve_book_author_identity(transaction: &Transaction, content_hash: Con
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let authority_stable_id = library_model::agent_id_from_migration_seed(format!("external-author:{}:{}", external_id.authority().as_str(), external_id.value()).as_bytes());
+    let stable_identity = transaction.query_row("SELECT id,stable_id FROM author_identity WHERE stable_id=?1", [authority_stable_id.to_string()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).optional()?;
+    let current_credit_count: i64 = transaction.query_row("SELECT COUNT(*) FROM book_contributor WHERE author_identity_id=?1", [current_local_id], |row| row.get(0))?;
     let (target_local_id, target_stable_id) = match existing {
         Some(identity) => identity,
-        None if current_is_provisional => (current_local_id, current_stable_id),
+        None if stable_identity.is_some() => stable_identity.expect("checked above"),
+        None if current_is_provisional && current_credit_count == 1 => {
+            transaction.execute("UPDATE author_identity SET stable_id=?1 WHERE id=?2", rusqlite::params![authority_stable_id.to_string(), current_local_id])?;
+            (current_local_id, authority_stable_id.to_string())
+        }
         None => {
-            let split_id = AgentId::new_v4();
             transaction.execute(
                 "INSERT INTO author_identity(stable_id, preferred_name, normalized_name, is_provisional, created_at) VALUES(?1, ?2, ?3, 0, ?4)",
-                rusqlite::params![split_id.to_string(), preferred_name.as_str(), preferred_name.match_key().as_str(), unix_millis()?],
+                rusqlite::params![authority_stable_id.to_string(), preferred_name.as_str(), preferred_name.match_key().as_str(), unix_millis()?],
             )?;
-            (transaction.last_insert_rowid(), split_id.to_string())
+            (transaction.last_insert_rowid(), authority_stable_id.to_string())
         }
     };
     let target_author_id = AgentId::parse_str(&target_stable_id).map_err(|error| invalid_text_column(2, error.to_string()))?;
@@ -252,8 +279,11 @@ pub fn resolve_book_author_identity(transaction: &Transaction, content_hash: Con
         "INSERT OR IGNORE INTO author_external_identifier(author_identity_id, authority, external_id, verified_at) VALUES(?1, ?2, ?3, ?4)",
         rusqlite::params![target_local_id, external_id.authority().as_str(), external_id.value(), unix_millis()?],
     )?;
+    // Update even when the local row is unchanged. The contributor trigger
+    // refreshes the already-queued metadata mutation with the authority-derived
+    // stable id before the first upload.
+    reidentify_book_credit(transaction, content_hash, usize::try_from(position).map_err(|_| invalid_integer_column(0, "author position must not be negative"))?, target_local_id, target_author_id)?;
     if target_local_id != current_local_id {
-        reidentify_book_credit(transaction, content_hash, usize::try_from(position).map_err(|_| invalid_integer_column(0, "author position must not be negative"))?, target_local_id, target_author_id)?;
         transaction.execute(
             "DELETE FROM author_identity
              WHERE id=?1 AND is_provisional=1

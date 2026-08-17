@@ -1,9 +1,10 @@
 use crate::sync::LibraryUpsertOutcome;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
 use sync_common::StateCell;
-use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, UnixMillis, WireMutation, MAX_PULL_CHANGES};
+use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, SyncCursor, UnixMillis, WireMutation, MAX_PULL_CHANGES};
 
 const FETCH_PAGE_SQL: &str = include_str!("sql/sync/fetch_page.sql");
 const FETCH_READING_POSITION_PAGE_SQL: &str = include_str!("sql/sync/fetch_reading_position_page.sql");
@@ -84,9 +85,36 @@ pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
     change.kind == sync_common::mutation_kind::READING_POSITION
 }
 
+#[derive(Debug)]
+struct StoredLifecycleReference {
+    present: bool,
+    content_hash: Option<String>,
+    changed_at: i64,
+    version_rank: i16,
+    replica_id: String,
+    replica_seq: i64,
+    event_id: String,
+}
+
+fn decode_lifecycle_reference(row: PgRow) -> Result<StoredLifecycleReference, sqlx::Error> {
+    Ok(StoredLifecycleReference {
+        present: row.try_get("present").map_err(decode_err)?,
+        content_hash: row.try_get("content_hash").map_err(decode_err)?,
+        changed_at: row.try_get("changed_at").map_err(decode_err)?,
+        version_rank: row.try_get("version_rank").map_err(decode_err)?,
+        replica_id: row.try_get("replica_id").map_err(decode_err)?,
+        replica_seq: row.try_get("replica_seq").map_err(decode_err)?,
+        event_id: row.try_get("event_id").map_err(decode_err)?,
+    })
+}
+
+fn lifecycle_batch_order(change: &WireMutation) -> (UnixMillis, u8, u64, MutationId) {
+    (change.changed_at, change.conflict_rank, change.replica_seq.get(), change.mutation_id)
+}
+
 /// Stores opaque wire rows. The only routing knowledge is that reading state
 /// belongs to the hot table; cold kinds need no server-side enum arm.
-pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
+pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
     let now = server_now_ms();
     let (accepted, rejected): (Vec<_>, Vec<_>) = changes.iter().partition(|change| storage_rejection(change, now).is_none());
     let rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
@@ -94,24 +122,36 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
     // The server reads only declared lifecycle facts. It never decodes the
     // opaque value to maintain quota references.
     let mut lifecycle_deltas = Vec::new();
+    let mut lifecycle_winners = HashMap::<(&str, &str, &str), &WireMutation>::new();
     for change in accepted.iter().copied().filter(|change| change.kind == sync_common::mutation_kind::BOOK_LIFECYCLE) {
-        let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql")).bind(library_id.to_string()).bind(&change.entity_key).fetch_optional(&mut **tx).await?;
-        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, replica_id.to_string(), change.replica_seq.get() as i64, change.mutation_id.to_string());
-        let wins = existing.as_ref().is_none_or(|row| {
-            incoming
-                > (
-                    row.try_get::<i64, _>("changed_at").unwrap_or_default(),
-                    row.try_get::<i16, _>("version_rank").unwrap_or_default(),
-                    row.try_get::<String, _>("replica_id").unwrap_or_default(),
-                    row.try_get::<i64, _>("replica_seq").unwrap_or_default(),
-                    row.try_get::<String, _>("event_id").unwrap_or_default(),
-                )
-        });
+        let cell = (change.kind.as_str(), change.entity_key.as_str(), change.entity_subkey.as_str());
+        lifecycle_winners
+            .entry(cell)
+            .and_modify(|winner| {
+                if lifecycle_batch_order(change) > lifecycle_batch_order(winner) {
+                    *winner = change;
+                }
+            })
+            .or_insert(change);
+    }
+    let incoming_replica_id = replica_id.to_string();
+    for change in lifecycle_winners.into_values() {
+        let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql"))
+            .bind(library_id.to_string())
+            .bind(&change.entity_key)
+            .bind(&change.entity_subkey)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(decode_lifecycle_reference)
+            .transpose()?;
+        let incoming_event_id = change.mutation_id.to_string();
+        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, incoming_replica_id.as_str(), change.replica_seq.get() as i64, incoming_event_id.as_str());
+        let wins = existing.as_ref().is_none_or(|stored| incoming > (stored.changed_at, stored.version_rank, stored.replica_id.as_str(), stored.replica_seq, stored.event_id.as_str()));
         if !wins {
             continue;
         }
-        if existing.as_ref().is_some_and(|row| row.try_get::<bool, _>("present").unwrap_or(false)) {
-            if let Some(hash) = existing.as_ref().and_then(|row| row.try_get::<Option<String>, _>("content_hash").ok().flatten()) {
+        if existing.as_ref().is_some_and(|stored| stored.present) {
+            if let Some(hash) = existing.as_ref().and_then(|stored| stored.content_hash.as_ref()) {
                 lifecycle_deltas.push((ContentHash::new(&hash), -1));
             }
         }
@@ -119,7 +159,7 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, _user_id:
             lifecycle_deltas.push((hash, 1));
         }
     }
-    crate::assets::apply_lifecycle_reference_deltas(tx, _user_id, lifecycle_deltas).await?;
+    crate::assets::apply_lifecycle_reference_deltas(tx, user_id, lifecycle_deltas).await?;
 
     for (table, rows) in [
         ("sync_state", accepted.iter().copied().filter(|change| change.kind != sync_common::mutation_kind::READING_POSITION).collect::<Vec<_>>()),
@@ -169,6 +209,7 @@ pub(super) enum FetchChangesError {
 }
 pub(super) struct FetchChangesPage {
     pub changes: Vec<ServerMutation>,
+    pub next_cursor: SyncCursor,
     pub has_more: bool,
 }
 pub(super) enum FetchChangesResult {
@@ -184,15 +225,37 @@ fn millis(value: i64) -> Result<UnixMillis, sqlx::Error> {
     u64::try_from(value).map_err(|_| sqlx::Error::Decode("negative Unix-millisecond timestamp".into()))
 }
 
-fn cursor(value: Option<LibraryRevision>) -> i64 {
+fn revision(value: Option<LibraryRevision>) -> i64 {
     value.map(|revision| i64::try_from(revision.get()).unwrap_or(i64::MAX)).unwrap_or(0)
 }
 
-fn cursor_is_ahead(value: Option<LibraryRevision>, current_revision: i64) -> bool {
-    cursor(value) > current_revision
+#[derive(Clone, Copy, Debug)]
+struct PullHeads {
+    reading: i64,
+    state: i64,
 }
-async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, statement: &str, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
-    let rows = sqlx::query(statement).bind(library.to_string()).bind(cursor(since)).bind((MAX_PULL_CHANGES + 1) as i64).fetch_all(executor).await?;
+
+fn cursor_is_ahead(cursor: SyncCursor, heads: PullHeads) -> bool {
+    revision(cursor.reading_revision) > heads.reading || revision(cursor.state_revision) > heads.state
+}
+
+fn protocol_revision(value: i64) -> Result<Option<LibraryRevision>, FetchChangesError> {
+    if value == 0 {
+        Ok(None)
+    } else {
+        LibraryRevision::new(u64::try_from(value).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: value, reason: "negative channel revision" })?)
+            .map(Some)
+            .map_err(|_| FetchChangesError::CorruptStoredEvent { revision: value, reason: "invalid channel revision" })
+    }
+}
+
+fn head_cursor(heads: PullHeads) -> Result<SyncCursor, FetchChangesError> {
+    Ok(SyncCursor { state_revision: protocol_revision(heads.state)?, reading_revision: protocol_revision(heads.reading)? })
+}
+
+async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, statement: &str, library: &LibraryId, since: SyncCursor, heads: PullHeads) -> Result<FetchChangesPage, FetchChangesError> {
+    let rows =
+        sqlx::query(statement).bind(library.to_string()).bind(revision(since.state_revision)).bind(revision(since.reading_revision)).bind(heads.state).bind(heads.reading).bind((MAX_PULL_CHANGES + 1) as i64).fetch_all(executor).await?;
     let mut changes = Vec::with_capacity(rows.len());
     for row in rows {
         let raw: i64 = row.try_get("server_seq")?;
@@ -224,11 +287,22 @@ async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(ex
     }
     let has_more = changes.len() > MAX_PULL_CHANGES;
     changes.truncate(MAX_PULL_CHANGES);
-    Ok(FetchChangesPage { changes, has_more })
+    let mut next_cursor = since;
+    for change in &changes {
+        if change.mutation.kind == sync_common::mutation_kind::READING_POSITION {
+            next_cursor.reading_revision = Some(change.revision);
+        } else {
+            next_cursor.state_revision = Some(change.revision);
+        }
+    }
+    if !has_more {
+        next_cursor = head_cursor(heads)?;
+    }
+    Ok(FetchChangesPage { changes, next_cursor, has_more })
 }
 
-async fn fetch_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
-    fetch_projected_page(executor, FETCH_PAGE_SQL, library, since).await
+async fn fetch_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, library: &LibraryId, since: SyncCursor, heads: PullHeads) -> Result<FetchChangesPage, FetchChangesError> {
+    fetch_projected_page(executor, FETCH_PAGE_SQL, library, since, heads).await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,47 +312,55 @@ enum PullRoute {
     Full,
 }
 
-fn pull_route(since: Option<LibraryRevision>, reading_revision: i64, other_revision: i64) -> PullRoute {
-    let since = cursor(since);
-    if reading_revision <= since && other_revision <= since {
+fn pull_route(since: SyncCursor, heads: PullHeads) -> PullRoute {
+    let reading_since = revision(since.reading_revision);
+    let state_since = revision(since.state_revision);
+    if heads.reading <= reading_since && heads.state <= state_since {
         PullRoute::Empty
-    } else if other_revision <= since {
+    } else if heads.state <= state_since {
         PullRoute::ReadingOnly
     } else {
         PullRoute::Full
     }
 }
 
-async fn fetch_reading_position_page(pool: &PgPool, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
-    fetch_projected_page(pool, FETCH_READING_POSITION_PAGE_SQL, library, since).await
+async fn fetch_reading_position_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, library: &LibraryId, since: SyncCursor, heads: PullHeads) -> Result<FetchChangesPage, FetchChangesError> {
+    fetch_projected_page(executor, FETCH_READING_POSITION_PAGE_SQL, library, since, heads).await
 }
 
-pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId, _replica_id: &ReplicaId, since: Option<LibraryRevision>) -> Result<FetchChangesResult, FetchChangesError> {
+pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId, _replica_id: &ReplicaId, since: SyncCursor) -> Result<FetchChangesResult, FetchChangesError> {
     let library_str = library.to_string();
     let heads = sqlx::query_as::<_, (i64, i64)>(include_str!("sql/sync/get_pull_heads.sql")).bind(library_str).bind(user).fetch_optional(pool).await?;
     let Some((reading_revision, other_revision)) = heads else { return Ok(FetchChangesResult::Unauthorized) };
-    if cursor_is_ahead(since, std::cmp::max(reading_revision, other_revision)) {
+    let heads = PullHeads { reading: reading_revision, state: other_revision };
+    if cursor_is_ahead(since, heads) {
         return Err(FetchChangesError::CursorAhead);
     }
-    let page = match pull_route(since, reading_revision, other_revision) {
-        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), has_more: false },
-        PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since).await?,
-        PullRoute::Full => fetch_page(pool, library, since).await?,
+    let page = match pull_route(since, heads) {
+        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false },
+        PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since, heads).await?,
+        PullRoute::Full => fetch_page(pool, library, since, heads).await?,
     };
     Ok(FetchChangesResult::Page(page))
 }
 
-pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: Option<LibraryRevision>) -> Result<(), FetchChangesError> {
+pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: SyncCursor) -> Result<(), FetchChangesError> {
     let library_str = library.to_string();
-    let current: i64 = sqlx::query_scalar(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library_str).fetch_one(&mut **tx).await?;
-    if cursor_is_ahead(since, current) {
+    let (reading, state) = sqlx::query_as(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library_str).fetch_one(&mut **tx).await?;
+    if cursor_is_ahead(since, PullHeads { reading, state }) {
         return Err(FetchChangesError::CursorAhead);
     }
     Ok(())
 }
 
-pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: Option<LibraryRevision>) -> Result<FetchChangesPage, FetchChangesError> {
-    fetch_page(&mut **tx, library, since).await
+pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: SyncCursor) -> Result<FetchChangesPage, FetchChangesError> {
+    let (reading, state) = sqlx::query_as(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
+    let heads = PullHeads { reading, state };
+    match pull_route(since, heads) {
+        PullRoute::Empty => Ok(FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false }),
+        PullRoute::ReadingOnly => fetch_reading_position_page(&mut **tx, library, since, heads).await,
+        PullRoute::Full => fetch_page(&mut **tx, library, since, heads).await,
+    }
 }
 
 pub(super) enum AtomicSingletonExchange {
@@ -286,12 +368,13 @@ pub(super) enum AtomicSingletonExchange {
     CursorAhead,
     Handled(FetchChangesPage),
 }
-pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, library: &LibraryId, replica_id: &ReplicaId, change: &WireMutation, since: Option<LibraryRevision>) -> Result<AtomicSingletonExchange, FetchChangesError> {
+pub(super) async fn exchange_authorized_singleton(
+    tx: &mut Transaction<'_, Postgres>, user_id: &str, library: &LibraryId, replica_id: &ReplicaId, change: &WireMutation, since: SyncCursor,
+) -> Result<AtomicSingletonExchange, FetchChangesError> {
     if change.kind != sync_common::mutation_kind::READING_POSITION {
         unreachable!()
     }
     let library_str = library.to_string();
-    let since_cursor = cursor(since);
     let row = sqlx::query(include_str!("sql/sync/exchange_authorized_reading_position.sql"))
         .bind(library_str)
         .bind(user_id)
@@ -306,8 +389,9 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
         .bind(change.replica_seq.get() as i64)
         .bind(change.conflict_rank as i16)
         .bind(change.mutation_id.to_string())
-        .bind(since_cursor)
-        .fetch_one(pool)
+        .bind(revision(since.state_revision))
+        .bind(revision(since.reading_revision))
+        .fetch_one(&mut **tx)
         .await?;
     if !row.try_get::<Option<bool>, _>("authorized")?.unwrap_or(false) {
         return Ok(AtomicSingletonExchange::Unauthorized);
@@ -317,30 +401,40 @@ pub(super) async fn exchange_authorized_singleton(pool: &PgPool, user_id: &str, 
     }
 
     let changed_revision = row.try_get::<Option<i64>, _>("server_seq")?;
+    let prior_reading = row.try_get::<Option<i64>, _>("reading_revision")?.unwrap_or(0);
+    let prior_other = row.try_get::<Option<i64>, _>("other_revision")?.unwrap_or(0);
     if row.try_get::<Option<bool>, _>("caught_up")?.unwrap_or(false) {
         let changes = if let Some(raw) = changed_revision {
             vec![ServerMutation { mutation: change.clone(), replica_id: replica_id.clone(), revision: LibraryRevision::new(raw as u64).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid revision" })? }]
         } else {
             Vec::new()
         };
-        return Ok(AtomicSingletonExchange::Handled(FetchChangesPage { changes, has_more: false }));
+        let heads = PullHeads { reading: changed_revision.map_or(prior_reading, |revision| std::cmp::max(prior_reading, revision)), state: prior_other };
+        return Ok(AtomicSingletonExchange::Handled(FetchChangesPage { changes, next_cursor: head_cursor(heads)?, has_more: false }));
     }
 
-    let prior_reading = row.try_get::<Option<i64>, _>("reading_revision")?.unwrap_or(0);
-    let prior_other = row.try_get::<Option<i64>, _>("other_revision")?.unwrap_or(0);
     let reading_after_write = changed_revision.map_or(prior_reading, |revision| std::cmp::max(prior_reading, revision));
-    let page = match pull_route(since, reading_after_write, prior_other) {
-        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), has_more: false },
-        PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since).await?,
-        PullRoute::Full => fetch_page(pool, library, since).await?,
+    let heads = PullHeads { reading: reading_after_write, state: prior_other };
+    let page = match pull_route(since, heads) {
+        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false },
+        PullRoute::ReadingOnly => fetch_reading_position_page(&mut **tx, library, since, heads).await?,
+        PullRoute::Full => fetch_page(&mut **tx, library, since, heads).await?,
     };
     Ok(AtomicSingletonExchange::Handled(page))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_is_ahead, missing_state_cells, pull_route, storage_rejection, PullRoute};
-    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, StateCell, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
+    use super::{cursor_is_ahead, decode_lifecycle_reference, missing_state_cells, pull_route, storage_rejection, PullHeads, PullRoute};
+    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, StateCell, SyncCursor, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
+
+    fn cursor(state: u64, reading: u64) -> SyncCursor {
+        SyncCursor { state_revision: LibraryRevision::new(state).ok(), reading_revision: LibraryRevision::new(reading).ok() }
+    }
+
+    fn heads(state: i64, reading: i64) -> PullHeads {
+        PullHeads { state, reading }
+    }
 
     fn reading_mutation(changed_at: u64) -> WireMutation {
         WireMutation {
@@ -357,21 +451,22 @@ mod tests {
     }
 
     #[test]
-    fn pull_routing_preserves_the_global_cursor_boundary() {
-        let cursor = LibraryRevision::new(10).ok();
-        assert_eq!(pull_route(cursor, 10, 10), PullRoute::Empty);
-        assert_eq!(pull_route(cursor, 11, 10), PullRoute::ReadingOnly);
-        assert_eq!(pull_route(cursor, 10, 11), PullRoute::Full);
-        assert_eq!(pull_route(cursor, 12, 11), PullRoute::Full);
-        assert_eq!(pull_route(None, 1, 0), PullRoute::ReadingOnly);
-        assert_eq!(pull_route(None, 0, 1), PullRoute::Full);
+    fn pull_routing_advances_channels_independently() {
+        assert_eq!(pull_route(cursor(10, 10), heads(10, 10)), PullRoute::Empty);
+        assert_eq!(pull_route(cursor(10, 10), heads(10, 11)), PullRoute::ReadingOnly);
+        assert_eq!(pull_route(cursor(10, 10), heads(11, 10)), PullRoute::Full);
+        assert_eq!(pull_route(cursor(10, 12), heads(11, 12)), PullRoute::Full);
+        assert_eq!(pull_route(SyncCursor::default(), heads(0, 1)), PullRoute::ReadingOnly);
+        assert_eq!(pull_route(SyncCursor::default(), heads(1, 0)), PullRoute::Full);
+        assert_eq!(pull_route(cursor(10, 22), heads(21, 22)), PullRoute::Full, "advancing reading must not consume unseen state");
     }
 
     #[test]
     fn a_cursor_may_equal_but_never_exceed_the_server_head() {
-        assert!(!cursor_is_ahead(None, 0));
-        assert!(!cursor_is_ahead(LibraryRevision::new(10).ok(), 10));
-        assert!(cursor_is_ahead(LibraryRevision::new(11).ok(), 10));
+        assert!(!cursor_is_ahead(SyncCursor::default(), heads(0, 0)));
+        assert!(!cursor_is_ahead(cursor(10, 10), heads(10, 10)));
+        assert!(cursor_is_ahead(cursor(11, 10), heads(10, 10)));
+        assert!(cursor_is_ahead(cursor(10, 11), heads(10, 10)));
     }
 
     #[test]
@@ -390,6 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn inventory_returns_only_state_cells_absent_from_both_server_tables() {
         let Some(pool) = crate::test_support::isolated_pool("state_inventory", 2).await else { return };
         let user_id = uuid::Uuid::new_v4().to_string();
@@ -407,5 +503,22 @@ mod tests {
         ];
 
         assert_eq!(missing_state_cells(&pool, &library_id, &cells).await.unwrap(), vec![cells[2].clone()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn malformed_lifecycle_reference_metadata_is_not_defaulted() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_decode", 2).await else { return };
+        let row = sqlx::query(
+            "SELECT TRUE AS present, NULL::text AS content_hash,
+                    'not-a-timestamp'::text AS changed_at, 0::smallint AS version_rank,
+                    'replica'::text AS replica_id, 1::bigint AS replica_seq,
+                    'event'::text AS event_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(matches!(decode_lifecycle_reference(row), Err(sqlx::Error::Decode(_))), "invalid persisted winner metadata must abort accounting instead of becoming a default value");
     }
 }

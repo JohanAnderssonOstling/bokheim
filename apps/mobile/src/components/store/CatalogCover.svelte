@@ -35,5 +35,5 @@
 
 <style>
   .catalog-cover { display: grid; width: 100%; height: 100%; place-items: center; }
-  .catalog-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .catalog-cover img { width: 100%; height: 100%; object-fit: contain; object-position: center top; }
 </style>

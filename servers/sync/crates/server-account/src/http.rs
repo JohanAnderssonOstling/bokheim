@@ -3,12 +3,16 @@
 use crate::core::AuthAttempt;
 use crate::postgres::PostgresAccountService;
 use account_contract::{
-    AuthResponse, EmailRequest, LoginRequest, MeResponse, OneTimeTokenRequest, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
+    AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, MeResponse, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse, SessionSummary,
 };
 use axum::async_trait;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, State};
-use axum::http::{header::{CACHE_CONTROL, SET_COOKIE}, request::Parts, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{
+    header::{CACHE_CONTROL, SET_COOKIE},
+    request::Parts,
+    HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
@@ -18,6 +22,7 @@ use std::sync::Arc;
 const MAX_AUTH_BODY_BYTES: usize = 16 * 1024;
 const GENERIC_ACCOUNT_RESPONSE_FLOOR: std::time::Duration = std::time::Duration::from_millis(300);
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 const WEB_ACCESS_COOKIE: &str = "__Host-bokheim_access";
 const WEB_REFRESH_COOKIE: &str = "__Host-bokheim_refresh";
@@ -108,17 +113,37 @@ pub fn require_same_origin_web_request(method: &Method, headers: &HeaderMap) -> 
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return Ok(());
     }
-    (headers.get(&SEC_FETCH_SITE).and_then(|value| value.to_str().ok()) == Some("same-origin")).then_some(()).ok_or(StatusCode::FORBIDDEN)
+    match headers.get(&SEC_FETCH_SITE).and_then(|value| value.to_str().ok()) {
+        Some("same-origin") => Ok(()),
+        Some(_) => Err(StatusCode::FORBIDDEN),
+        None => exact_origin_matches_request(headers).then_some(()).ok_or(StatusCode::FORBIDDEN),
+    }
 }
 
-fn append_session_cookies(response: &mut Response, issued: &crate::core::IssuedSession) -> Result<(), StatusCode> {
+fn exact_origin_matches_request(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|value| value.to_str().ok()).and_then(|value| value.parse::<axum::http::Uri>().ok()) else {
+        return false;
+    };
+    let Some(scheme) = origin.scheme_str().filter(|scheme| matches!(*scheme, "http" | "https")) else {
+        return false;
+    };
+    let Some(authority) = origin.authority().map(|authority| authority.as_str()) else {
+        return false;
+    };
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let forwarded_scheme = headers.get(&X_FORWARDED_PROTO).and_then(|value| value.to_str().ok());
+    authority.eq_ignore_ascii_case(host) && forwarded_scheme.is_none_or(|forwarded| forwarded == scheme)
+}
+
+pub fn append_web_session_cookies(response: &mut Response, issued: &crate::core::IssuedSession) -> Result<(), StatusCode> {
     let now = chrono::Utc::now();
     let access_age = (issued.expires_at - now).num_seconds().max(0);
     let refresh_age = (issued.refresh_expires_at - now).num_seconds().max(0);
-    for value in [
-        format!("{WEB_ACCESS_COOKIE}={}; Path=/; Max-Age={access_age}; Secure; HttpOnly; SameSite=Lax", issued.token),
-        format!("{WEB_REFRESH_COOKIE}={}; Path=/; Max-Age={refresh_age}; Secure; HttpOnly; SameSite=Lax", issued.refresh_token),
-    ] {
+    for value in
+        [format!("{WEB_ACCESS_COOKIE}={}; Path=/; Max-Age={access_age}; Secure; HttpOnly; SameSite=Lax", issued.token), format!("{WEB_REFRESH_COOKIE}={}; Path=/; Max-Age={refresh_age}; Secure; HttpOnly; SameSite=Lax", issued.refresh_token)]
+    {
         response.headers_mut().append(SET_COOKIE, HeaderValue::from_str(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
     }
     Ok(())
@@ -133,12 +158,12 @@ fn expire_session_cookies(response: &mut Response) {
 fn web_session_response(headers: &HeaderMap, issued: crate::core::IssuedSession) -> Result<Response, StatusCode> {
     let profile = MeResponse { user_id: issued.user.user_id.clone(), email: issued.user.email.clone() };
     let mut response = server_wire_http::response(headers, profile)?;
-    append_session_cookies(&mut response, &issued)?;
+    append_web_session_cookies(&mut response, &issued)?;
     response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 
-fn client_address(source: ClientAddressSource, headers: &HeaderMap, remote: Option<ConnectInfo<SocketAddr>>) -> Result<IpAddr, StatusCode> {
+pub fn client_address(source: ClientAddressSource, headers: &HeaderMap, remote: Option<ConnectInfo<SocketAddr>>) -> Result<IpAddr, StatusCode> {
     match source {
         ClientAddressSource::DirectPeer => remote.map(|ConnectInfo(address)| address.ip()).ok_or(StatusCode::INTERNAL_SERVER_ERROR),
         ClientAddressSource::TrustedForwardedFor => {
@@ -238,19 +263,21 @@ async fn post_resend_verification(State(state): State<AccountState>, headers: He
 }
 
 async fn post_verify_email(State(state): State<AccountState>, headers: HeaderMap, remote: Option<ConnectInfo<SocketAddr>>, body: Bytes) -> Result<Response, StatusCode> {
-    let request: OneTimeTokenRequest = server_wire_http::decode_request(&headers, &body, MAX_AUTH_BODY_BYTES)?;
+    let request: EmailVerificationRequest = server_wire_http::decode_request(&headers, &body, MAX_AUTH_BODY_BYTES)?;
     let address = client_address(state.client_address_source, &headers, remote)?.to_string();
-    state.accounts.enforce_rate_limit(AuthAttempt::VerifyEmail, &address, "verification").await.map_err(auth_error)?;
-    let issued = state.accounts.verify_email(&request.token).await.map_err(auth_error)?;
+    state.accounts.enforce_rate_limit(AuthAttempt::VerifyEmail, &address, &request.email).await.map_err(auth_error)?;
+    let issued = state.accounts.verify_email(&request.email, &request.pin).await.map_err(auth_error)?;
+    state.accounts.clear_subject_rate_limit(AuthAttempt::VerifyEmail, &request.email).await.map_err(auth_error)?;
     server_wire_http::response(&headers, auth_response(issued))
 }
 
 async fn post_web_verify_email(State(state): State<AccountState>, headers: HeaderMap, remote: Option<ConnectInfo<SocketAddr>>, body: Bytes) -> Result<Response, StatusCode> {
     require_same_origin_web_request(&Method::POST, &headers)?;
-    let request: OneTimeTokenRequest = server_wire_http::decode_request(&headers, &body, MAX_AUTH_BODY_BYTES)?;
+    let request: EmailVerificationRequest = server_wire_http::decode_request(&headers, &body, MAX_AUTH_BODY_BYTES)?;
     let address = client_address(state.client_address_source, &headers, remote)?.to_string();
-    state.accounts.enforce_rate_limit(AuthAttempt::VerifyEmail, &address, "verification").await.map_err(auth_error)?;
-    let issued = state.accounts.verify_email(&request.token).await.map_err(auth_error)?;
+    state.accounts.enforce_rate_limit(AuthAttempt::VerifyEmail, &address, &request.email).await.map_err(auth_error)?;
+    let issued = state.accounts.verify_email(&request.email, &request.pin).await.map_err(auth_error)?;
+    state.accounts.clear_subject_rate_limit(AuthAttempt::VerifyEmail, &request.email).await.map_err(auth_error)?;
     web_session_response(&headers, issued)
 }
 
@@ -333,6 +360,13 @@ mod tests {
         assert_eq!(require_same_origin_web_request(&Method::DELETE, &headers), Err(StatusCode::FORBIDDEN));
         headers.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
         assert_eq!(require_same_origin_web_request(&Method::PUT, &headers), Ok(()));
+        headers.remove(SEC_FETCH_SITE);
+        headers.insert(axum::http::header::ORIGIN, HeaderValue::from_static("https://app.bokheim.se"));
+        headers.insert(axum::http::header::HOST, HeaderValue::from_static("app.bokheim.se"));
+        headers.insert(X_FORWARDED_PROTO, HeaderValue::from_static("https"));
+        assert_eq!(require_same_origin_web_request(&Method::POST, &headers), Ok(()));
+        headers.insert(axum::http::header::ORIGIN, HeaderValue::from_static("https://attacker.example"));
+        assert_eq!(require_same_origin_web_request(&Method::POST, &headers), Err(StatusCode::FORBIDDEN));
         assert_eq!(require_same_origin_web_request(&Method::GET, &HeaderMap::new()), Ok(()));
     }
 }

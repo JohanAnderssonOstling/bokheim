@@ -11,4 +11,4 @@ pub mod postgres;
 
 pub use core::{AccountEmailKind, AccountEmailSender, AccountSession, AuthAttempt, AuthError, AuthenticatedUser, IssuedSession, QueuedAccountEmail, SessionRevocation};
 pub use http::{auth_error, ClientAddressSource};
-pub use postgres::PostgresAccountService;
+pub use postgres::{AccountTokenKey, PostgresAccountService};

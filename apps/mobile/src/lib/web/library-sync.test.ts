@@ -3,11 +3,16 @@ import test from "node:test";
 
 import { getWebDatabase } from "./database.ts";
 import { applyWebSyncExchange } from "./library-sync.ts";
+import { getOwnedWebCatalogPublications, getWebLibraryTrash } from "./library-database.ts";
 
 const libraryId = "716571ff-991e-4d33-9378-ff1452b4f176";
 const replicaId = "c7b1e537-e3d7-4075-a17a-b7a1b80e9cf6";
 const rootId = "00000000-0000-0000-0000-000000000000";
 const contentHash = "a".repeat(64);
+
+function cursor(revision: number) {
+  return { state_revision: revision, reading_revision: revision };
+}
 
 function mutation(kind: string, entityKey: string, value: unknown, revision: number, entitySubkey = "") {
   return {
@@ -36,7 +41,7 @@ test("pulled EPUB state converges through shared directory projection", async ()
     mutation("placement", contentHash, { present: true, origin_folder_id: null }, 9, firstDirectory),
     mutation("reading_position", contentHash, { location: "epubcfi(/6/4)", progress: 25 }, 10),
   ];
-  await applyWebSyncExchange(libraryId, { accepted: [], rejected: [], mutations, next_cursor: 10, has_more: false });
+  await applyWebSyncExchange(libraryId, { accepted: [], rejected: [], mutations, next_cursor: cursor(10), has_more: false });
 
   const directories = db.exec({ sql: "SELECT name FROM directories WHERE library_id=? ORDER BY name COLLATE NOCASE", bind: [libraryId], rowMode: 0, returnValue: "resultRows" });
   assert.deepEqual(directories, ["shelf", "shelf 2"]);
@@ -46,6 +51,57 @@ test("pulled EPUB state converges through shared directory projection", async ()
 
   const deletion = mutation("book_lifecycle", contentHash, { deleted: { origin_folder_id: null } }, 11);
   deletion.conflict_rank = 1;
-  await applyWebSyncExchange(libraryId, { accepted: [], rejected: [], mutations: [deletion], next_cursor: 11, has_more: false });
-  assert.equal(db.exec({ sql: "SELECT count(*) FROM books WHERE library_id=?", bind: [libraryId], rowMode: 0, returnValue: "resultRows" })[0], 0);
+  await applyWebSyncExchange(libraryId, { accepted: [], rejected: [], mutations: [deletion], next_cursor: cursor(11), has_more: false });
+  assert.deepEqual((await getWebLibraryTrash(libraryId)).books.map(({ title }) => title), ["Shared Book"]);
+
+  const restored = mutation("book_lifecycle", contentHash, { present: { metadata, added_at: 70, format: "Epub" } }, 12);
+  await applyWebSyncExchange(libraryId, { accepted: [], rejected: [], mutations: [restored], next_cursor: cursor(12), has_more: false });
+  assert.deepEqual((await getWebLibraryTrash(libraryId)).books, []);
+  assert.equal(db.exec({ sql: "SELECT count(*) FROM books WHERE library_id=?", bind: [libraryId], rowMode: 0, returnValue: "resultRows" })[0], 1);
+});
+
+test("pulled catalogue ownership is projected after its book", async () => {
+  const syncedLibraryId = "826571ff-991e-4d33-9378-ff1452b4f176";
+  const syncedContentHash = "b".repeat(64);
+  const { db } = await getWebDatabase();
+  db.exec({ sql: "INSERT INTO libraries (library_id, library_name, created_at) VALUES (?, 'Catalogue sync', ?)", bind: [syncedLibraryId, Date.now()] });
+  db.exec({ sql: "INSERT INTO web_sync_state (library_id, replica_id) VALUES (?, ?)", bind: [syncedLibraryId, crypto.randomUUID()] });
+
+  const metadata = { title: "Shared catalogue book", contributors: [], description: "", publication: {} };
+  await applyWebSyncExchange(syncedLibraryId, {
+    accepted: [], rejected: [], next_cursor: cursor(2), has_more: false,
+    mutations: [
+      mutation("book_lifecycle", syncedContentHash, { present: { metadata, added_at: 10, format: "Epub" } }, 1),
+      mutation("catalog_publication", "litteraturbanken", {
+        publication: { edition_id: "lb-edition-1", work_id: "lb-work-1" },
+        content_hash: syncedContentHash,
+      }, 2, "lb-edition-1"),
+    ],
+  });
+
+  assert.deepEqual(await getOwnedWebCatalogPublications(syncedLibraryId), [{
+    source_id: "litteraturbanken",
+    publication: { edition_id: "lb-edition-1", work_id: "lb-work-1" },
+  }]);
+  assert.equal(db.exec({
+    sql: "SELECT content_hash FROM web_catalog_publications WHERE library_id=? AND source_id=? AND edition_id=?",
+    bind: [syncedLibraryId, "litteraturbanken", "lb-edition-1"], rowMode: 0, returnValue: "resultRows",
+  })[0], syncedContentHash);
+});
+
+test("pulled PDF state keeps a PDF filename", async () => {
+  const pdfLibraryId = "926571ff-991e-4d33-9378-ff1452b4f176";
+  const pdfContentHash = "c".repeat(64);
+  const { db } = await getWebDatabase();
+  db.exec({ sql: "INSERT INTO libraries (library_id, library_name, created_at) VALUES (?, 'PDF sync', ?)", bind: [pdfLibraryId, Date.now()] });
+  db.exec({ sql: "INSERT INTO web_sync_state (library_id, replica_id) VALUES (?, ?)", bind: [pdfLibraryId, crypto.randomUUID()] });
+  const metadata = { title: "Shared PDF", contributors: [], description: "", publication: {} };
+  await applyWebSyncExchange(pdfLibraryId, {
+    accepted: [], rejected: [], next_cursor: cursor(1), has_more: false,
+    mutations: [mutation("book_lifecycle", pdfContentHash, { present: { metadata, added_at: 10, format: "Pdf" } }, 1)],
+  });
+  assert.equal(db.exec({
+    sql: "SELECT file_name FROM books WHERE library_id=? AND content_hash=?",
+    bind: [pdfLibraryId, pdfContentHash], rowMode: 0, returnValue: "resultRows",
+  })[0], "Shared PDF.pdf");
 });

@@ -33,7 +33,7 @@ impl CatalogLanguageFilter {
 
     pub fn source_is_multilingual(&self, source: &CatalogSource) -> bool {
         let languages = source.languages.iter().filter_map(|language| canonical_language(language)).collect::<Vec<_>>();
-        languages.iter().any(|language| language == "mul") || languages.iter().filter(|language| language.as_str() != "und").take(2).count() > 1
+        languages.is_empty() || languages.iter().any(|language| language == "mul" || language == "und") || languages.iter().take(2).count() > 1
     }
 
     pub fn publication_supported(&self, publication: &CatalogPublication) -> bool {
@@ -181,6 +181,28 @@ mod tests {
         };
         filter.filter_page(&source, &mut page);
         assert_eq!(page.publications.len(), 1);
+    }
+
+    #[test]
+    fn sources_without_language_metadata_filter_each_publication() {
+        let filter = CatalogLanguageFilter::new(["en", "sv"]);
+        let source = source(&[]);
+        let mut page = CatalogPage {
+            source_id: source.id.clone(),
+            freshness: CatalogFreshness::Current,
+            title: "Books".to_owned(),
+            locator: "https://example.com/opds".to_owned(),
+            navigation: Vec::new(),
+            publications: vec![publication(&["en"]), publication(&["sv-SE"]), publication(&["fr"]), publication(&[])],
+            groups: Vec::new(),
+            facets: Vec::new(),
+            pagination: CatalogPagination::default(),
+            search: None,
+        };
+        filter.filter_page(&source, &mut page);
+        assert_eq!(page.publications.len(), 2);
+        assert_eq!(page.publications[0].languages, ["en"]);
+        assert_eq!(page.publications[1].languages, ["sv-SE"]);
     }
 
     #[test]

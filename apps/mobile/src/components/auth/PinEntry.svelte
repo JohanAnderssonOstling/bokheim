@@ -45,7 +45,7 @@
   .pin-entry { position: relative; display: grid; width: 100%; min-width: 0; height: 2.65rem; grid-template-columns: repeat(var(--pin-length), minmax(0, 1fr)); gap: .3rem; }
   .native-input { position: absolute; z-index: 2; inset: 0; box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; outline: 0; color: transparent; background: transparent; caret-color: transparent; -webkit-text-fill-color: transparent; }
   .native-input::placeholder { color: transparent; }
-  .pin-cell { display: grid; min-width: 0; height: 2.65rem; place-items: center; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); font-size: .9rem; font-weight: 750; }
+  .pin-cell { display: grid; min-width: 0; height: 2.65rem; place-items: center; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); font-size: .9rem; font-weight: 750; }
   .pin-cell.active { border-color: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent); }
   .native-input:disabled ~ .pin-cell { opacity: .55; }
 </style>

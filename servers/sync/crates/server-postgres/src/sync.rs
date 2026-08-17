@@ -1,5 +1,6 @@
 use crate::{assets, sync_store, PostgresDatabase};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::HashSet;
 use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
 use sync_common::{PullStateQuery, PullStateResponse, PushMutationsResponse, StateInventoryRequest, StateInventoryResponse, SyncExchangeRequest, SyncExchangeResponse};
 
@@ -54,11 +55,25 @@ impl PostgresSyncRepository {
 
     async fn exchange_atomic_singleton(&self, user_id: &str, request: &SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError> {
         let change = &request.mutations[0];
+        // Acquire the shared library lock in its own statement. Under READ
+        // COMMITTED, the following statement then gets a fresh snapshot after
+        // any prior writer commits, before either path allocates server_seq.
         for attempt in 0..2 {
-            match sync_store::exchange_authorized_singleton(&self.pool, user_id, &request.library_id, &request.replica_id, change, request.cursor).await.map_err(fetch_error)? {
-                sync_store::AtomicSingletonExchange::Handled(page) => return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: vec![change.mutation_id], rejected: Vec::new() }, pull: pull_response(page, request.cursor) }),
+            let mut transaction = self.pool.begin().await.map_err(internal)?;
+            if !self.authorize_owned_library(&mut transaction, user_id, &request.library_id).await? {
+                transaction.rollback().await.map_err(internal)?;
+                if attempt == 0 {
+                    self.ensure_compatible_library_binding(user_id, &request.library_id).await?;
+                    continue;
+                }
+                return Err(SyncError::LibraryOwnershipConflict);
+            }
+            match sync_store::exchange_authorized_singleton(&mut transaction, user_id, &request.library_id, &request.replica_id, change, request.cursor).await.map_err(fetch_error)? {
+                sync_store::AtomicSingletonExchange::Handled(page) => {
+                    transaction.commit().await.map_err(internal)?;
+                    return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: vec![change.mutation_id], rejected: Vec::new() }, pull: pull_response(page) });
+                }
                 sync_store::AtomicSingletonExchange::CursorAhead => return Err(SyncError::CursorAhead),
-                sync_store::AtomicSingletonExchange::Unauthorized if attempt == 0 => self.ensure_compatible_library_binding(user_id, &request.library_id).await?,
                 sync_store::AtomicSingletonExchange::Unauthorized => return Err(SyncError::LibraryOwnershipConflict),
             }
         }
@@ -66,9 +81,8 @@ impl PostgresSyncRepository {
     }
 }
 
-fn pull_response(page: sync_store::FetchChangesPage, current_cursor: Option<sync_common::LibraryRevision>) -> PullStateResponse {
-    let next_cursor = page.changes.last().map(|mutation| mutation.revision).or(current_cursor);
-    PullStateResponse { mutations: page.changes, next_cursor, has_more: page.has_more }
+fn pull_response(page: sync_store::FetchChangesPage) -> PullStateResponse {
+    PullStateResponse { mutations: page.changes, next_cursor: page.next_cursor, has_more: page.has_more }
 }
 
 fn internal(error: impl std::fmt::Display) -> SyncError {
@@ -80,14 +94,6 @@ fn fetch_error(error: sync_store::FetchChangesError) -> SyncError {
         sync_store::FetchChangesError::CursorAhead => SyncError::CursorAhead,
         other => internal(other),
     }
-}
-
-fn is_serialization_failure(error: &sqlx::Error) -> bool {
-    error.as_database_error().and_then(|database| database.code()).as_deref() == Some("40001")
-}
-
-fn is_fetch_serialization_failure(error: &sync_store::FetchChangesError) -> bool {
-    matches!(error, sync_store::FetchChangesError::Database(database) if is_serialization_failure(database))
 }
 
 impl PostgresSyncRepository {
@@ -135,8 +141,19 @@ impl PostgresSyncRepository {
         sqlx::query("UPDATE libraries SET deleted_at=now(), name='Deleted library' WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL").bind(&library_id).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
 
         // Release unfinished upload quota before deleting its reservations.
-        let reserved: i64 =
-            sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM book_upload_reservation WHERE library_id=$1 AND user_id=$2").bind(&library_id).bind(user_id).fetch_one(&mut *transaction).await.map_err(internal)?;
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT
+             FROM (
+                 SELECT size_bytes FROM book_upload_reservation WHERE library_id=$1 AND user_id=$2
+                 UNION ALL
+                 SELECT size_bytes FROM thumbnail_upload_reservation WHERE library_id=$1 AND user_id=$2
+             ) AS reservations",
+        )
+        .bind(&library_id)
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(internal)?;
         if reserved > 0 {
             sqlx::query("UPDATE user_storage_account SET reserved_bytes=GREATEST(reserved_bytes-$2, 0) WHERE user_id=$1").bind(user_id).bind(reserved).execute(&mut *transaction).await.map_err(internal)?;
         }
@@ -147,6 +164,7 @@ impl PostgresSyncRepository {
             .map_err(internal)?;
         assets::apply_lifecycle_reference_deltas(&mut transaction, user_id, lifecycle_hashes.into_iter().map(|hash| (sync_common::ContentHash::new(&hash), -1))).await.map_err(internal)?;
         sqlx::query("DELETE FROM book_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
+        sqlx::query("DELETE FROM thumbnail_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_reading_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_library_revision WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
@@ -158,7 +176,7 @@ impl PostgresSyncRepository {
         for attempt in 0..2 {
             let fetched = sync_store::fetch_changes(&self.pool, user_id, &query.library_id, &query.replica_id, query.cursor).await.map_err(fetch_error)?;
             match fetched {
-                sync_store::FetchChangesResult::Page(page) => return Ok(pull_response(page, query.cursor)),
+                sync_store::FetchChangesResult::Page(page) => return Ok(pull_response(page)),
                 sync_store::FetchChangesResult::Unauthorized if attempt == 0 => self.ensure_compatible_library_binding(user_id, &query.library_id).await?,
                 sync_store::FetchChangesResult::Unauthorized => return Err(SyncError::LibraryOwnershipConflict),
             }
@@ -167,6 +185,13 @@ impl PostgresSyncRepository {
     }
 
     pub async fn exchange(&self, user_id: &str, request: &SyncExchangeRequest) -> Result<SyncExchangeResponse, SyncError> {
+        if request.mutations.len() > sync_common::MAX_PUSH_MUTATIONS {
+            return Err(SyncError::TooManyMutations);
+        }
+        let mut identities = HashSet::with_capacity(request.mutations.len());
+        if !request.mutations.iter().all(|mutation| identities.insert(mutation.mutation_id)) {
+            return Err(SyncError::AmbiguousMutationIdentity);
+        }
         if request.mutations.is_empty() {
             let query = PullStateQuery { library_id: request.library_id.clone(), replica_id: request.replica_id.clone(), cursor: request.cursor };
             return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: self.load_changes(user_id, &query).await? });
@@ -177,9 +202,8 @@ impl PostgresSyncRepository {
             return self.exchange_atomic_singleton(user_id, request).await;
         }
 
-        for attempt in 0..3 {
+        for attempt in 0..2 {
             let mut transaction = self.pool.begin().await.map_err(internal)?;
-            sqlx::query(include_str!("sql/sync/set_serializable.sql")).execute(&mut *transaction).await.map_err(internal)?;
             if !self.authorize_owned_library(&mut transaction, user_id, &request.library_id).await? {
                 transaction.rollback().await.map_err(internal)?;
                 if attempt == 0 {
@@ -188,36 +212,11 @@ impl PostgresSyncRepository {
                 }
                 return Err(SyncError::LibraryOwnershipConflict);
             }
-            if let Err(error) = sync_store::validate_owned_cursor(&mut transaction, &request.library_id, request.cursor).await {
-                if attempt < 2 && is_fetch_serialization_failure(&error) {
-                    let _ = transaction.rollback().await;
-                    continue;
-                }
-                return Err(fetch_error(error));
-            }
-            let inserted = match sync_store::insert_changes(&mut transaction, user_id, &request.library_id, &request.replica_id, &request.mutations).await {
-                Ok(inserted) => inserted,
-                Err(error) if attempt < 2 && is_serialization_failure(&error) => {
-                    let _ = transaction.rollback().await;
-                    continue;
-                }
-                Err(error) => return Err(internal(error)),
-            };
-            let page = match sync_store::fetch_owned_changes(&mut transaction, &request.library_id, request.cursor).await {
-                Ok(page) => page,
-                Err(error) if attempt < 2 && is_fetch_serialization_failure(&error) => {
-                    let _ = transaction.rollback().await;
-                    continue;
-                }
-                Err(error) => return Err(fetch_error(error)),
-            };
-            if let Err(error) = transaction.commit().await {
-                if attempt < 2 && is_serialization_failure(&error) {
-                    continue;
-                }
-                return Err(internal(error));
-            }
-            return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: inserted.accepted, rejected: inserted.rejected }, pull: pull_response(page, request.cursor) });
+            sync_store::validate_owned_cursor(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;
+            let inserted = sync_store::insert_changes(&mut transaction, user_id, &request.library_id, &request.replica_id, &request.mutations).await.map_err(internal)?;
+            let page = sync_store::fetch_owned_changes(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;
+            transaction.commit().await.map_err(internal)?;
+            return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: inserted.accepted, rejected: inserted.rejected }, pull: pull_response(page) });
         }
         unreachable!("transactional exchange binding retry must return")
     }
@@ -225,10 +224,260 @@ impl PostgresSyncRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::PostgresSyncRepository;
+    use super::{PostgresSyncRepository, SyncError};
     use crate::sync_store;
+    use sqlx::PgPool;
     use sync_common::api::libraries::UpsertLibraryRequest;
-    use sync_common::{MutationId, ReplicaSeq, WireMutation};
+    use sync_common::{DeclaredBlobReference, MutationId, ReplicaSeq, SyncCursor, SyncExchangeRequest, WireMutation};
+
+    /// A user with one owned library, the minimum an exchange needs.
+    async fn seed_account(pool: &PgPool) -> (String, sync_common::LibraryId) {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let library_id = sync_common::LibraryId::new_v4();
+        sqlx::query("INSERT INTO users(id, email) VALUES($1, $2)").bind(&user_id).bind(format!("{user_id}@example.com")).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO libraries(id, user_id, name) VALUES($1, $2, 'Books')").bind(library_id.to_string()).bind(&user_id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO user_storage_account(user_id, quota_bytes) VALUES($1, 1000)").bind(&user_id).execute(pool).await.unwrap();
+        (user_id, library_id)
+    }
+
+    fn wire_mutation(kind: &str, entity_key: &str, changed_at: u64, replica_seq: u64) -> WireMutation {
+        WireMutation {
+            mutation_id: MutationId::new(),
+            kind: kind.to_owned(),
+            entity_key: entity_key.to_owned(),
+            entity_subkey: String::new(),
+            value: Vec::new(),
+            conflict_rank: 0,
+            blob_reference: None,
+            changed_at,
+            replica_seq: ReplicaSeq::new(replica_seq).unwrap(),
+        }
+    }
+
+    fn exchange_request(library_id: sync_common::LibraryId, mutations: Vec<WireMutation>) -> SyncExchangeRequest {
+        SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations, cursor: SyncCursor::default() }
+    }
+
+    /// The client pages its outbox by `MAX_PUSH_MUTATIONS`, but nothing on the
+    /// wire obliges it to. The service must impose its own published bound
+    /// rather than admitting an arbitrarily large single transaction.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn exchange_refuses_a_push_page_beyond_the_published_maximum() {
+        let Some(pool) = crate::test_support::isolated_pool("push_limit", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let mutations = (1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 1).map(|sequence| wire_mutation("directory_name", &format!("dir-{sequence}"), 1, sequence)).collect::<Vec<_>>();
+        let error = repository.exchange(&user_id, &exchange_request(library_id, mutations)).await.err();
+
+        assert!(matches!(error, Some(SyncError::TooManyMutations)), "a batch past MAX_PUSH_MUTATIONS must be refused, got {error:?}");
+    }
+
+    /// Mutation identity is the acknowledgement key on both sides, so a batch
+    /// that reuses one identity is uninterpretable. It must be refused as a
+    /// client error, not collide inside `UNIQUE (library_id, event_id)` and
+    /// fail the whole batch as an internal fault.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn exchange_refuses_a_batch_that_reuses_one_mutation_identity() {
+        let Some(pool) = crate::test_support::isolated_pool("ambiguous_identity", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let shared_identity = MutationId::new();
+        let mut first = wire_mutation("directory_name", "dir-a", 1, 1);
+        let mut second = wire_mutation("directory_name", "dir-b", 1, 2);
+        first.mutation_id = shared_identity;
+        second.mutation_id = shared_identity;
+        let error = repository.exchange(&user_id, &exchange_request(library_id, vec![first, second])).await.err();
+
+        assert!(matches!(error, Some(SyncError::AmbiguousMutationIdentity)), "a reused mutation identity must be a client error, got {error:?}");
+    }
+
+    /// The delta loop in `insert_changes` evaluates every lifecycle mutation
+    /// against the stored row independently, while `upsert_state_batch`
+    /// collapses them to one winner. Both must agree on which mutation was
+    /// applied, or blob references drift from the state they account for.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn repeated_lifecycle_mutations_for_one_book_charge_only_the_winning_reference() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_delta", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+        let (original, superseded, winner) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+
+        for hash in [&original, &superseded, &winner] {
+            sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(hash).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
+             VALUES($1,'book_lifecycle','book','',''::bytea,TRUE,$2,1,$3,1,0,$4)",
+        )
+        .bind(library_id.to_string())
+        .bind(&original)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Both target the same cell and both beat the stored row. Only the
+        // later one survives the batch's DISTINCT ON.
+        let mut earlier = wire_mutation("book_lifecycle", "book", 10, 1);
+        let mut later = wire_mutation("book_lifecycle", "book", 20, 2);
+        earlier.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&superseded)) });
+        later.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&winner)) });
+        repository.exchange(&user_id, &exchange_request(library_id, vec![earlier, later])).await.expect("a batch repeating one cell must apply cleanly");
+
+        let stored: String = sqlx::query_scalar("SELECT content_hash FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, winner, "the later mutation owns the cell");
+
+        let reference = |hash: String| {
+            let pool = pool.clone();
+            let user_id = user_id.clone();
+            async move { sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(reference_count), 0)::BIGINT FROM user_blob_reference WHERE user_id=$1 AND content_hash=$2").bind(user_id).bind(hash).fetch_one(&pool).await.unwrap() }
+        };
+        assert_eq!(reference(winner.clone()).await, 1, "the applied hash is charged exactly once");
+        assert_eq!(reference(superseded.clone()).await, 0, "a hash that never reached storage is never charged");
+        assert_eq!(reference(original.clone()).await, 0, "the replaced hash is released exactly once");
+    }
+
+    /// Lifecycle accounting must inspect the exact logical cell that the
+    /// mutation will update. A non-empty subkey is unusual for today's client,
+    /// but it is legal on the wire and must not make the ledger compare against
+    /// the unrelated empty-subkey row.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn lifecycle_accounting_uses_the_mutations_entity_subkey() {
+        let Some(pool) = crate::test_support::isolated_pool("lifecycle_subkey", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+        let (original, replacement) = ("d".repeat(64), "e".repeat(64));
+
+        for hash in [&original, &replacement] {
+            sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(hash).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
+             VALUES($1,'book_lifecycle','book','edition-a',''::bytea,TRUE,$2,1,$3,1,0,$4)",
+        )
+        .bind(library_id.to_string())
+        .bind(&original)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut replacement_mutation = wire_mutation("book_lifecycle", "book", 10, 2);
+        replacement_mutation.entity_subkey = "edition-a".to_owned();
+        replacement_mutation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&replacement)) });
+        repository.exchange(&user_id, &exchange_request(library_id, vec![replacement_mutation])).await.expect("the targeted lifecycle cell is replaced");
+
+        let reference_count = |hash: String| {
+            let pool = pool.clone();
+            let user_id = user_id.clone();
+            async move { sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(reference_count), 0)::BIGINT FROM user_blob_reference WHERE user_id=$1 AND content_hash=$2").bind(user_id).bind(hash).fetch_one(&pool).await.unwrap() }
+        };
+        assert_eq!(reference_count(original).await, 0, "the reference held by the targeted subkey is released");
+        assert_eq!(reference_count(replacement).await, 1, "the replacement reference is charged once");
+    }
+
+    /// A published head must never cover an uncommitted lower sequence. If it
+    /// does, a reader can persist the newer cursor and permanently skip the
+    /// earlier mutation when its transaction eventually commits.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_committed_reading_head_never_skips_an_in_flight_lower_sequence() {
+        let Some(pool) = crate::test_support::isolated_pool("reading_head_gap", 6).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        const DELAY_LOCK: i64 = 7_341_991;
+        sqlx::query(
+            "CREATE FUNCTION delay_selected_reading_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF NEW.entity_key = 'slow-a' THEN PERFORM pg_advisory_lock(7341991); END IF;
+                 RETURN NEW;
+             END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER delay_selected_reading_insert BEFORE INSERT ON sync_reading_state FOR EACH ROW EXECUTE FUNCTION delay_selected_reading_insert()").execute(&pool).await.unwrap();
+        let mut delay_connection = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)").bind(DELAY_LOCK).execute(&mut *delay_connection).await.unwrap();
+        let sequence_before = sqlx::query_as::<_, (i64, bool)>("SELECT last_value, is_called FROM sync_server_sequence").fetch_one(&pool).await.unwrap();
+
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+        let mut slow_a = wire_mutation(sync_common::mutation_kind::READING_POSITION, "slow-a", 10, 1);
+        let mut slow_b = wire_mutation(sync_common::mutation_kind::READING_POSITION, "slow-b", 10, 2);
+        slow_a.value = b"slow-a".to_vec();
+        slow_b.value = b"slow-b".to_vec();
+        let batch_repository = repository.clone();
+        let batch_user = user_id.clone();
+        let batch_request = exchange_request(library_id, vec![slow_a, slow_b]);
+        let batch = tokio::spawn(async move { batch_repository.exchange(&batch_user, &batch_request).await });
+
+        let mut lower_sequence_allocated = false;
+        for _ in 0..100 {
+            let sequence_after = sqlx::query_as::<_, (i64, bool)>("SELECT last_value, is_called FROM sync_server_sequence").fetch_one(&pool).await.unwrap();
+            if sequence_after.0 > sequence_before.0 || (!sequence_before.1 && sequence_after.1) {
+                lower_sequence_allocated = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(lower_sequence_allocated, "the delayed batch must allocate its lower sequence before the racing singleton");
+
+        let fast = wire_mutation(sync_common::mutation_kind::READING_POSITION, "fast", 20, 1);
+        let fast_repository = repository.clone();
+        let fast_user = user_id.clone();
+        let fast_request = exchange_request(library_id, vec![fast]);
+        let mut fast_exchange = tokio::spawn(async move { fast_repository.exchange(&fast_user, &fast_request).await });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut fast_exchange).await.is_err(), "the singleton must wait for the lower-sequence transaction");
+
+        assert!(sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)").bind(DELAY_LOCK).fetch_one(&mut *delay_connection).await.unwrap());
+        batch.await.unwrap().expect("the delayed batch eventually commits");
+        let fast_response = fast_exchange.await.unwrap().expect("the singleton commits after the lower sequences");
+        let delivered_with_head = fast_response.pull.mutations.iter().map(|change| change.mutation.entity_key.as_str()).collect::<Vec<_>>();
+        assert!(
+            delivered_with_head.contains(&"slow-a") && delivered_with_head.contains(&"slow-b") && delivered_with_head.contains(&"fast"),
+            "the response that advertises the head must include every lower sequence; got {delivered_with_head:?}"
+        );
+        let reader_cursor = fast_response.pull.next_cursor;
+
+        let after_gap =
+            repository.exchange(&user_id, &SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: Vec::new(), cursor: reader_cursor }).await.expect("the reader continues from the published cursor");
+        assert!(after_gap.pull.mutations.is_empty(), "nothing committed at or below the advertised head may appear later");
+    }
+
+    /// A server whose state has regressed (a restore from an older backup)
+    /// leaves every device holding a cursor the server can no longer honour.
+    /// The service must say so distinctly rather than silently replaying.
+    #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
+    async fn a_regressed_library_head_reports_the_stale_client_cursor() {
+        let Some(pool) = crate::test_support::isolated_pool("cursor_ahead", 2).await else { return };
+        let (user_id, library_id) = seed_account(&pool).await;
+        let repository = PostgresSyncRepository { pool: pool.clone() };
+
+        let published = repository.exchange(&user_id, &exchange_request(library_id, vec![wire_mutation("directory_name", "dir-a", 1, 1)])).await.expect("publish one mutation");
+        let cursor = published.pull.next_cursor;
+        assert!(cursor.state_revision.is_some(), "the published mutation advances the state channel");
+
+        // Restore-from-backup: the library's rows and its head both regress.
+        sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(library_id.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM sync_library_revision WHERE library_id=$1").bind(library_id.to_string()).execute(&pool).await.unwrap();
+
+        let request = SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: Vec::new(), cursor };
+        let error = repository.exchange(&user_id, &request).await.err();
+
+        assert!(matches!(error, Some(SyncError::CursorAhead)), "a cursor past the regressed head must be reported distinctly, got {error:?}");
+    }
 
     #[test]
     fn opaque_wire_fixture_has_no_domain_payload() {
@@ -247,6 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn deleting_library_keeps_blob_object_and_releases_library_quota_state() {
         let Some(pool) = crate::test_support::isolated_pool("delete_library", 2).await else { return };
         let user_id = uuid::Uuid::new_v4().to_string();
@@ -254,7 +504,7 @@ mod tests {
         let hash = "a".repeat(64);
         sqlx::query("INSERT INTO users(id, email) VALUES($1, $2)").bind(&user_id).bind(format!("{user_id}@example.com")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO libraries(id, user_id, name) VALUES($1, $2, 'Books')").bind(library_id.to_string()).bind(&user_id).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO user_storage_account(user_id, quota_bytes, used_bytes, reserved_bytes) VALUES($1, 100, 10, 5)").bind(&user_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_storage_account(user_id, quota_bytes, used_bytes, reserved_bytes) VALUES($1, 100, 17, 11)").bind(&user_id).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(&hash).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&hash).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&hash).execute(&pool).await.unwrap();
@@ -274,6 +524,15 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO user_thumbnail_charge(user_id, library_id, content_hash, size_bytes) VALUES($1, $2, $3, 7)").bind(&user_id).bind(library_id.to_string()).bind("c".repeat(64)).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO thumbnail_upload_reservation(id, user_id, library_id, content_hash, size_bytes, expires_at) VALUES($1, $2, $3, $4, 6, now() + interval '1 hour')")
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&user_id)
+            .bind(library_id.to_string())
+            .bind("d".repeat(64))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let repository = PostgresSyncRepository { pool: pool.clone() };
         assert!(repository.delete_library(&user_id, &library_id).await.unwrap());
@@ -285,11 +544,13 @@ mod tests {
         assert!(repository.list_libraries(&user_id).await.unwrap().is_empty());
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_state WHERE library_id=$1").bind(library_id.to_string()).fetch_one(&pool).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM book_upload_reservation WHERE library_id=$1").bind(library_id.to_string()).fetch_one(&pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM thumbnail_upload_reservation WHERE library_id=$1").bind(library_id.to_string()).fetch_one(&pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_thumbnail_charge WHERE user_id=$1 AND library_id=$2").bind(&user_id).bind(library_id.to_string()).fetch_one(&pool).await.unwrap(), 1);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM blob_object WHERE content_hash=$1").bind(&hash).fetch_one(&pool).await.unwrap(), 1);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_blob_charge WHERE user_id=$1 AND content_hash=$2").bind(&user_id).bind(&hash).fetch_one(&pool).await.unwrap(), 0);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_blob_reference WHERE user_id=$1 AND content_hash=$2").bind(&user_id).bind(&hash).fetch_one(&pool).await.unwrap(), 0);
         let usage = sqlx::query_as::<_, (i64, i64)>("SELECT used_bytes, reserved_bytes FROM user_storage_account WHERE user_id=$1").bind(&user_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(usage, (0, 0));
+        assert_eq!(usage, (7, 0));
 
         let stale_upsert = repository.upsert_library(&user_id, &UpsertLibraryRequest { library_id, library_name: "Recreated stale copy".to_owned() }).await.unwrap();
         assert!(stale_upsert.is_none(), "a deleted UUID cannot be recreated by a stale device");

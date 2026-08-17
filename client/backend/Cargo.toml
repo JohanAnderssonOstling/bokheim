@@ -25,7 +25,7 @@ path = "tests/blake3_hash_benchmark.rs"
 
 [features]
 default = ["desktop"]
-desktop = ["watcher", "pdf"]
+desktop = ["watcher", "pdf", "thumbnail/epub-page-render"]
 scanner = []
 watcher = ["scanner", "dep:notify"]
 pdf = ["dep:pdf-reader-core", "thumbnail/pdf"]
@@ -37,7 +37,11 @@ library-registry = { path = "../library-registry" }
 remote-reader = { path = "../remote-reader" }
 app-contract = { path = "../app-contract" }
 catalog-client = { path = "../catalog-client" }
+metadata-client = { path = "../metadata-client" }
+taxonomy-client = { path = "../taxonomy-client" }
 library-model = { path = "../library-model" }
+metadata-contract = { path = "../../shared/metadata-contract" }
+taxonomy-contract = { path = "../../shared/taxonomy-contract" }
 library-replica = { path = "../library-replica" }
 sync-client = { path = "../sync-client" }
 thumbnail = { path = "../thumbnail" }
@@ -50,6 +54,7 @@ include-sqlite-sql = "0.2.1"
 walkdir = "2.5.0"
 uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
+roxmltree = "0.20"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 r2d2 = "0.8"
@@ -57,6 +62,7 @@ r2d2_sqlite = "0.31"
 notify = { version = "6.1", optional = true }
 futures-util = "0.3"
 html-publication = { path = "../../apps/renderers/html/crates/html-publication" }
+epub_provider = { path = "../../apps/renderers/html/epub_provider" }
 crossbeam-channel = "0.5"
 sync-common = { path = "../../shared/sync-common" }
 urlencoding = "2"
@@ -69,7 +75,6 @@ specta-typescript = "0.0.12"
 [dev-dependencies]
 test-support = { path = "../test-support" }
 axum = "0.7"
-epub_provider = { path = "../../apps/renderers/html/epub_provider" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 lopdf = { version = "0.44", default-features = false }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }

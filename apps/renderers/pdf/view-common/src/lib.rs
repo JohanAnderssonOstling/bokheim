@@ -258,6 +258,7 @@ pub struct FitWidthColumn {
     page_rect: NormalizedRect,
     display_width: f32,
     display_height: f32,
+    leading_page_gap: f32,
 }
 
 impl FitWidthColumn {
@@ -291,6 +292,12 @@ impl FitWidthColumn {
 
     pub const fn display_height(self) -> f32 {
         self.display_height
+    }
+
+    /// Vertical space before this fragment caused by a real PDF page boundary.
+    /// Internal fit-width slice boundaries always return zero.
+    pub const fn leading_page_gap(self) -> f32 {
+        self.leading_page_gap
     }
 
     pub fn page_point_to_column(self, point: (f32, f32)) -> Option<(f32, f32)> {
@@ -344,11 +351,23 @@ impl FitWidthPlan {
     /// Builds a fit-width plan while moving slice boundaries away from text
     /// lines, images, and other caller-provided protected vertical bands.
     pub fn new_avoiding_breaks<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport) -> Result<Self, FitWidthPlanError> {
+        Self::new_avoiding_breaks_with_page_gap(pages, viewport, 0.0)
+    }
+
+    /// Builds a fit-width plan with vertical spacing at real PDF page
+    /// boundaries. The gap is never inserted between slices of one page.
+    pub fn new_avoiding_breaks_with_page_gap<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, page_gap: f32) -> Result<Self, FitWidthPlanError> {
         let mut columns = Vec::new();
         let mut display_column_index = 0;
         let mut used_display_height = 0.0;
         for (page, protected_bands) in pages {
-            append_fit_width_columns(&mut columns, page, viewport, protected_bands, &mut display_column_index, &mut used_display_height)?;
+            let leading_page_gap = if columns.is_empty() || !page_gap.is_finite() { 0.0 } else { page_gap.max(0.0).min((viewport.column_height - f32::EPSILON).max(0.0)) };
+            if leading_page_gap > 0.0 && used_display_height + leading_page_gap > viewport.column_height {
+                display_column_index += 1;
+                used_display_height = 0.0;
+            }
+            used_display_height += leading_page_gap;
+            append_fit_width_columns(&mut columns, page, viewport, protected_bands, leading_page_gap, &mut display_column_index, &mut used_display_height)?;
         }
         Ok(Self { columns })
     }
@@ -368,6 +387,7 @@ impl FitWidthPlan {
                 page_rect: NormalizedRect::new(0.0, 0.0, 1.0, 1.0),
                 display_width,
                 display_height,
+                leading_page_gap: 0.0,
             });
         }
         Self { columns }
@@ -387,8 +407,9 @@ impl FitWidthPlan {
 }
 
 fn append_fit_width_columns(
-    columns: &mut Vec<FitWidthColumn>, page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], display_column_index: &mut usize, used_display_height: &mut f32,
+    columns: &mut Vec<FitWidthColumn>, page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, display_column_index: &mut usize, used_display_height: &mut f32,
 ) -> Result<(), FitWidthPlanError> {
+    let mut leading_page_gap = leading_page_gap;
     let scaled_page_height = (page.height as f64 / page.width as f64 * viewport.column_width as f64) as f32;
     let estimated_columns = (scaled_page_height / viewport.column_height).ceil().max(1.0);
     if estimated_columns > MAX_FIT_WIDTH_COLUMNS_PER_PAGE as f32 {
@@ -402,6 +423,7 @@ fn append_fit_width_columns(
         if available_height <= f32::EPSILON {
             *display_column_index += 1;
             *used_display_height = 0.0;
+            leading_page_gap = 0.0;
             continue;
         }
         let ideal_bottom = (top + available_height / scaled_page_height).min(1.0);
@@ -413,9 +435,13 @@ fn append_fit_width_columns(
         if *used_display_height > 0.0 && display_height > available_height + 0.5 {
             *display_column_index += 1;
             *used_display_height = 0.0;
+            // The unused tail of the preceding display column already
+            // represents the real-page boundary gap.
+            leading_page_gap = 0.0;
             continue;
         }
-        segments.push((top, bottom, display_height, *display_column_index));
+        let segment_leading_gap = if segments.is_empty() { leading_page_gap } else { 0.0 };
+        segments.push((top, bottom, display_height, segment_leading_gap, *display_column_index));
         *used_display_height += display_height;
         top = bottom.min(1.0);
         if segments.len() > MAX_FIT_WIDTH_COLUMNS_PER_PAGE as usize {
@@ -428,7 +454,7 @@ fn append_fit_width_columns(
     }
 
     let page_column_count = segments.len() as u32;
-    for (page_column_index, (top, bottom, display_height, segment_display_column)) in segments.into_iter().enumerate() {
+    for (page_column_index, (top, bottom, display_height, leading_page_gap, segment_display_column)) in segments.into_iter().enumerate() {
         columns.push(FitWidthColumn {
             flow_index: columns.len(),
             display_column_index: segment_display_column,
@@ -438,6 +464,7 @@ fn append_fit_width_columns(
             page_rect: NormalizedRect::new(0.0, top, 1.0, bottom - top),
             display_width: viewport.column_width,
             display_height,
+            leading_page_gap,
         });
     }
     Ok(())
@@ -447,14 +474,19 @@ fn safe_slice_boundary(top: f32, ideal_bottom: f32, protected_bands: &[(f32, f32
     if ideal_bottom >= 1.0 {
         return 1.0;
     }
-    let Some((protected_top, protected_bottom)) =
+    let Some((protected_top, _)) =
         protected_bands.iter().copied().map(|(top, bottom)| (top.clamp(0.0, 1.0), bottom.clamp(0.0, 1.0))).find(|(protected_top, protected_bottom)| *protected_top < ideal_bottom && ideal_bottom < *protected_bottom)
     else {
         return ideal_bottom;
     };
+    // Never move the boundary below `ideal_bottom`. The column has only
+    // `ideal_bottom - top` of room left, and a taller slice is clipped by the
+    // reader and then stepped over, taking its overflow with it. Moving the
+    // boundary up carries the whole band into the next column; when there is
+    // too little above it to be worth a column, the band is split instead.
     let before = protected_top - top;
     let ideal_height = ideal_bottom - top;
-    if before >= ideal_height * 0.5 { protected_top } else { protected_bottom.max(top + f32::EPSILON) }
+    if before >= ideal_height * 0.5 { protected_top } else { ideal_bottom }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1034,6 +1066,18 @@ mod tests {
     }
 
     #[test]
+    fn fit_width_adds_vertical_gap_only_at_real_page_boundaries() {
+        let pages = [FitWidthPage::new(0, 600.0, 900.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let pages = pages.iter().copied().map(|page| (page, &[][..]));
+        let plan = FitWidthPlan::new_avoiding_breaks_with_page_gap(pages, viewport, 12.0).expect("fit-width plan");
+
+        assert_eq!(plan.columns().iter().map(|column| column.leading_page_gap()).collect::<Vec<_>>(), vec![0.0, 0.0, 12.0, 0.0]);
+        assert_eq!(plan.columns()[1].display_column_index(), plan.columns()[2].display_column_index());
+        assert!((plan.columns()[2].display_height() - 138.0).abs() < 0.001);
+    }
+
+    #[test]
     fn fit_width_moves_a_slice_boundary_before_protected_content() {
         let page = FitWidthPage::new(0, 600.0, 1_200.0).expect("valid page");
         let viewport = FitWidthViewport::new(300.0, 300.0).expect("valid viewport");
@@ -1042,6 +1086,26 @@ mod tests {
         assert_eq!(plan.columns().len(), 3);
         assert!((plan.columns()[0].page_rect().bottom() - 0.48).abs() < 0.0001);
         assert!((plan.columns()[1].page_rect().top() - 0.48).abs() < 0.0001);
+    }
+
+    #[test]
+    fn a_slice_never_grows_taller_than_the_column_that_holds_it() {
+        // The reader paints one logical column per viewport height and steps
+        // the flow by that fixed stride, so a taller slice is clipped and the
+        // rest of it cannot be scrolled to. A protected band wider than the
+        // column has to be split rather than kept whole.
+        let page = FitWidthPage::new(0, 600.0, 850.0).expect("A4-ish page");
+        let viewport = FitWidthViewport::new(948.0, 800.0).expect("viewport");
+        let scanned_sheet = [(0.0, 1.0)];
+
+        let plan = FitWidthPlan::new_avoiding_breaks([(page, scanned_sheet.as_slice())], viewport).expect("fit-width plan");
+
+        assert!(
+            plan.columns().iter().all(|column| column.display_height() <= viewport.column_height() + 0.5),
+            "a full-page image must be split across columns, got heights {:?}",
+            plan.columns().iter().map(|column| column.display_height()).collect::<Vec<_>>()
+        );
+        assert!((plan.columns().last().expect("at least one column").page_rect().bottom() - 1.0).abs() < 0.0001, "the slices must still cover the whole page");
     }
 
     #[test]

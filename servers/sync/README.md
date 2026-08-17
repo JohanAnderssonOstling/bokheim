@@ -64,8 +64,17 @@ rows, uses each row ID as Resend's idempotency key, removes successful sends,
 and retries failures without logging recipients or one-time tokens. If neither
 setting is present, the server starts but leaves account emails queued.
 
+`BOKHEIM_ACCOUNT_TOKEN_KEY` or the `account_token_key` systemd credential is
+always required and must contain a base64-encoded 32-byte key. The key is kept
+separate from PostgreSQL: verification PINs and password-reset tokens use
+domain-separated HMAC-SHA256 verifiers, while recoverable outbox values use
+authenticated ChaCha20-Poly1305 encryption bound to the row ID, recipient, and
+message kind. Successful delivery deletes the outbox row.
+
 Registration reserves the canonical email and username for 24 hours and stores
-only an Argon2 password hash plus a hash of the verification token. Verification
+only an Argon2 password hash plus a keyed hash of a six-digit verification PIN. PIN redemption
+is scoped to the normalized email address and persistently limited to five attempts per
+address per hour, in addition to the network limit. Verification
 is single-use and creates a one-hour access token plus a 90-day rotating refresh
 session. Password-reset tokens live for one hour, are single-use, and revoke all
 sessions when consumed. Registration,
@@ -77,11 +86,52 @@ return the same `202 Accepted` response. Disposable-domain policy rejection and
 malformed email/password inputs return `400` because they reveal no account
 existence.
 
+## Administrator dashboard
+
+The dedicated administrator web application is deployed separately from the
+mobile/reader frontend and exposed at `/admin`. Configure it
+with `BOKHEIM_ADMIN_EMAIL` and either `BOKHEIM_ADMIN_PASSWORD` or the
+`admin_password` systemd credential. Administrator status is stored explicitly
+on the account and checked from PostgreSQL on every dashboard request; the
+ordinary configured test account is not an administrator.
+
+The dashboard stores 90 days of minute aggregates containing only bounded
+route categories, HTTP method and status class, counts, declared transfer
+bytes, and latency totals. For incident response, a separate request log keeps
+the exact trusted client IP, bounded route category, method, status class,
+declared bytes, and latency for seven days. Neither store contains raw paths,
+account or email identifiers, headers, tokens, query strings, or bodies. Dashboard reads are
+persistently rate-limited. The first read of each dashboard resource by an
+administrator in an hour is appended to a database-enforced immutable audit
+log. Browser reads require the secure session cookie and
+`Sec-Fetch-Site: same-origin`; bearer authentication remains available for
+trusted operational clients. Admin responses are the only JSON API in this
+service; synchronization and account contracts remain versioned binary wire
+messages.
+
+`GET /api/admin/services` collects bounded JSON operational snapshots from the
+local catalogue and metadata services for the same authenticated dashboard.
+The default targets are `http://127.0.0.1:8090/` and
+`http://127.0.0.1:8091/`. `BOKHEIM_ADMIN_CATALOG_URL` and
+`BOKHEIM_ADMIN_METADATA_URL` may override them with literal loopback HTTP base
+URLs, or an empty value may disable a section. Redirects, non-loopback targets,
+credentials, queries, responses over 1 MiB, and requests exceeding five seconds
+are rejected. The browser never connects to either internal service directly.
+
+Successful authenticated token use is batched into one lifetime activity row
+per account and one aggregate row per active account per UTC day. The dashboard
+reports daily, weekly, and monthly active accounts; new verified accounts;
+first-time and returning accounts; and whether active accounts used sync or
+only authenticated. It also exposes a 30-day aggregate history without account
+identities. Daily account rows expire after 90 days, and administrator-dashboard
+reads do not count as engagement. Registrations that have not been verified and
+failed authentication attempts do not count as account use.
+
 For development deployments, `BOKHEIM_TEST_USER_EMAIL` together with either
 `BOKHEIM_TEST_USER_PASSWORD` or the `test_user_password` systemd credential
 upserts a verified account at startup. The configured password is validated by
 the normal account policy. Deployment assigns that account a fixed 1000 GB
-book quota; password changes revoke its existing sessions.
+storage quota; password changes revoke its existing sessions.
 
 ## Authentication lookup cache
 
@@ -102,15 +152,23 @@ service-level invalidations are immediate. Before horizontally running multiple
 server processes, add shared invalidation delivery (for example PostgreSQL
 `LISTEN`/`NOTIFY`) or accept the bounded 30-second cross-process cache window.
 
-## Book quota and transfer fairness
+## Asset quota and transfer fairness
 
-Book blobs use a PostgreSQL quota ledger. Physical files remain globally
-deduplicated by content hash, while each user is charged once for every unique
-book hash referenced anywhere in that user's libraries. Metadata and thumbnails
-do not consume book quota. New accounts receive a 5 GiB quota lazily.
+Book blobs and thumbnails share a PostgreSQL account quota ledger. Physical book
+files remain globally deduplicated by content hash, while each user is charged
+once for every unique book hash referenced anywhere in that user's libraries.
+Thumbnails are physically and financially scoped to the account and are charged
+once per unique thumbnail hash. Metadata does not consume storage quota. New
+accounts receive a 5 GiB quota lazily.
+
+Global deduplication is not an authorization capability. A stored book can be
+claimed or downloaded only when the authenticated account already owns it or
+has a synchronized lifecycle reference to its hash. An unreferenced manifest
+entry is reported as requiring upload whether or not another account has stored
+the same hash; the upload path verifies the complete BLAKE3-matching body.
 
 Uploads require an exact `Content-Length`. The server reserves that many bytes
-before storage, validates the completed book, then atomically converts the
+before storage, validates the completed asset, then atomically converts the
 reservation into used bytes. Failed and abandoned reservations are released;
 removing the user's final synchronized reference refunds the charge.
 Synchronized values are canonical PostgreSQL state, not a JSONB event archive.
@@ -154,13 +212,16 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+bincode; version=11` representation. The wire body
-starts with a Bokheim magic/version header and uses positional bincode fields
+`application/vnd.bokheim+protobuf; version=13` representation. The wire body
+is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
 unsupported media types, missing version negotiation, unsupported versions, and
 compressed bodies fail before application logic runs. Raw book and thumbnail
 endpoints continue to transfer their exact validated bytes.
+Opaque mutation `value` fields remain versioned bincode storage values; the
+PostgreSQL relay stores those bytes without interpreting them. Transport and
+storage versions therefore evolve independently.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
 Pull pages may cut across directory dependencies. SQLite clients therefore
@@ -199,8 +260,13 @@ BOKHEIM_DATABASE_IDLE_TIMEOUT_SECONDS=600
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS=16
 BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT=4
 BOKHEIM_MAX_IN_FLIGHT_REQUESTS=512
+BOKHEIM_MAX_THUMBNAIL_UPLOADS=16
+BOKHEIM_MAX_THUMBNAIL_UPLOADS_PER_ACCOUNT=4
+BOKHEIM_MAX_IN_FLIGHT_THUMBNAIL_BYTES=536870912
+BOKHEIM_MAX_IN_FLIGHT_THUMBNAIL_BYTES_PER_ACCOUNT=268435456
 BOKHEIM_NOTIFICATION_HEARTBEAT_SECS=60
 BOKHEIM_NOTIFICATION_TIMEOUT_SECS=150
+BOKHEIM_NOTIFICATION_AUTH_REVALIDATION_SECS=30
 BOKHEIM_MAX_NOTIFICATION_CONNECTIONS=100000
 BOKHEIM_MAX_NOTIFICATION_CONNECTIONS_PER_ACCOUNT=16
 ```
@@ -211,6 +277,12 @@ seconds–24 hours. Staged uploads are
 bounded both by count and declared bytes before temporary files are created;
 the defaults allow 16 files/4 GiB globally and 4 files/2 GiB per account.
 Capacity exhaustion returns HTTP 429 before the asset store reads the body.
+Thumbnail uploads, including batches, have separate count and declared-byte
+ceilings: 16 requests/512 MiB globally and 4 requests/256 MiB per account.
+They return HTTP 429 without reading the body when any ceiling is exhausted
+and have a two-minute total deadline. Exact `Content-Length` is required so
+the complete request can be charged to the in-flight byte budget before it is
+read. Book uploads retain their two-hour deadline.
 Defaults are intended
 for the current single-process deployment; raise them only after measuring
 PostgreSQL, CPU, memory, and disk saturation together.
@@ -218,6 +290,14 @@ The HTTP ceiling includes requests executing handlers and requests waiting for
 downstream capacity. Its default of 512 absorbs short reconnect bursts, while
 the outer request deadline bounds time spent waiting. It does not increase
 steady-state database throughput.
+
+Notification WebSockets revalidate their access token every 30 seconds and
+before sending account notifications or heartbeat pings. Expired, logged-out,
+reset, or revoked sessions are closed. Browser connections authenticated by
+the secure access-token cookie must supply an HTTP(S) `Origin` whose authority
+exactly matches `Host` (and whose scheme matches Caddy's
+`X-Forwarded-Proto`). Native clients authenticate with a bearer token and do
+not need an `Origin` header. The revalidation interval accepts 5–300 seconds.
 
 ## Asset storage configuration
 
@@ -287,4 +367,4 @@ size can be changed with `BOKHEIM_STRESS_WORKERS`,
 by `BOKHEIM_STRESS_BLOB_BYTES`. All values are bounded, and the workload binary
 refuses non-loopback URLs so it cannot accidentally load-test the public service.
 
-`BOKHEIM_STRESS_MODE=ingest` uses the production bincode sync transport.
+`BOKHEIM_STRESS_MODE=ingest` uses the production protobuf sync transport.

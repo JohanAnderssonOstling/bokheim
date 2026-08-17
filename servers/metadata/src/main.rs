@@ -1,4 +1,4 @@
-use metadata_server::{app, import_snapshot, MetadataService};
+use metadata_server::{add_popularity_to_snapshot, app, import_rich_snapshot_with_popularity, import_snapshot, import_snapshot_with_popularity, MetadataService};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -11,11 +11,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fmt().with_env_filter(EnvFilter::from_default_env()).init();
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if arguments.first().is_some_and(|argument| argument == "import") {
-        if arguments.len() < 4 || arguments.len() > 5 {
+        if arguments.len() < 5 || arguments.len() > 6 {
             return Err(invalid_usage().into());
         }
-        let limit = arguments.get(4).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
-        import_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), limit)?;
+        let limit = arguments.get(5).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        import_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), Path::new(&arguments[4]), limit)?;
+        return Ok(());
+    }
+    if arguments.first().is_some_and(|argument| argument == "import-rich") {
+        if arguments.len() < 8 || arguments.len() > 9 {
+            return Err(invalid_usage().into());
+        }
+        let limit = arguments.get(8).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        import_rich_snapshot_with_popularity(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), Path::new(&arguments[4]), Path::new(&arguments[5]), Path::new(&arguments[6]), Path::new(&arguments[7]), limit)?;
+        return Ok(());
+    }
+    if arguments.first().is_some_and(|argument| argument == "import-popularity") {
+        if arguments.len() < 7 || arguments.len() > 8 {
+            return Err(invalid_usage().into());
+        }
+        let limit = arguments.get(7).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        import_snapshot_with_popularity(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), Path::new(&arguments[4]), Path::new(&arguments[5]), Path::new(&arguments[6]), limit)?;
+        return Ok(());
+    }
+    if arguments.first().is_some_and(|argument| argument == "add-popularity") {
+        if arguments.len() < 5 || arguments.len() > 6 {
+            return Err(invalid_usage().into());
+        }
+        let limit = arguments.get(5).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        add_popularity_to_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), Path::new(&arguments[4]), limit)?;
         return Ok(());
     }
     if !arguments.is_empty() {
@@ -35,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn invalid_usage() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, "usage: metadata-server import EDITIONS.txt.gz WORKS.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server  # configured with BOKHEIM_METADATA_DATABASE")
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "usage: metadata-server import EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-popularity EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server add-popularity SOURCE.sqlite RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-rich EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz WIKIDATA.json.bz2 RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server  # configured with BOKHEIM_METADATA_DATABASE",
+    )
 }
 
 async fn shutdown_signal() {

@@ -1,0 +1,1111 @@
+level,code,label
+main,000,"Computer science, information & general works"
+main,100,Philosophy & psychology
+main,200,Religion
+main,300,Social sciences
+main,400,Language
+main,500,Science
+main,600,Technology
+main,700,Arts & recreation
+main,800,Literature
+main,900,History & geography
+division,000,"Computer science, knowledge & systems"
+division,010,Bibliographies
+division,020,Library & information sciences
+division,030,Encyclopedias & books of facts
+division,040,[Unassigned]
+division,050,"Magazines, journals & serials"
+division,060,"Associations, organizations & museums"
+division,070,"News media, journalism & publishing"
+division,080,General collections
+division,090,Manuscripts & rare books
+division,100,Philosophy
+division,110,Metaphysics
+division,120,Epistemology
+division,130,Parapsychology & occultism
+division,140,Philosophical schools of thought
+division,150,Psychology
+division,160,Philosophical logic
+division,170,Ethics
+division,180,"Ancient, medieval & eastern philosophy"
+division,190,Modern western philosophy
+division,200,Religion
+division,210,Philosophy & theory of religion
+division,220,The Bible
+division,230,Christianity
+division,240,Christian practice & observance
+division,250,Christian pastoral practice & religious orders
+division,260,"Christian organization, social work & worship"
+division,270,History of Christianity
+division,280,Christian denominations
+division,290,Other religions
+division,300,"Social sciences, sociology & anthropology"
+division,310,Statistics
+division,320,Political science
+division,330,Economics
+division,340,Law
+division,350,Public administration & military science
+division,360,Social problems & social services
+division,370,Education
+division,380,"Commerce, communications & transportation"
+division,390,"Customs, etiquette & folklore"
+division,400,Language
+division,410,Linguistics
+division,420,English & Old English languages
+division,430,German & related languages
+division,440,French & related languages
+division,450,"Italian, Romanian & related languages"
+division,460,"Spanish, Portuguese, Galician"
+division,470,Latin & Italic languages
+division,480,Classical & modern Greek languages
+division,490,Other languages
+division,500,Science
+division,510,Mathematics
+division,520,Astronomy
+division,530,Physics
+division,540,Chemistry
+division,550,Earth sciences & geology
+division,560,Fossils & prehistoric life
+division,570,Biology
+division,580,Plants (Botany)
+division,590,Animals (Zoology)
+division,600,Technology
+division,610,Medicine & health
+division,620,Engineering
+division,630,Agriculture
+division,640,Home & family management
+division,650,Management & public relations
+division,660,Chemical engineering
+division,670,Manufacturing
+division,680,Manufacture for specific uses
+division,690,Construction of buildings
+division,700,Arts
+division,710,Area planning & landscape architecture
+division,720,Architecture
+division,730,"Sculpture, ceramics & metalwork"
+division,740,Design & related arts
+division,750,Painting
+division,760,Printmaking & prints
+division,770,"Photography, computer art, film, video"
+division,780,Music
+division,790,"Sports, games & entertainment"
+division,800,"Literature, rhetoric & criticism"
+division,810,American literature in English
+division,820,English & Old English literatures
+division,830,German & related literatures
+division,840,French & related literatures
+division,850,"Italian, Romanian & related literatures"
+division,860,"Spanish, Portuguese, Galician literatures"
+division,870,Latin & Italic literatures
+division,880,Classical & modern Greek literatures
+division,890,Other literatures
+division,900,History
+division,910,Geography & travel
+division,920,Biography & genealogy
+division,930,History of ancient world (to ca. 499)
+division,940,History of Europe
+division,950,History of Asia
+division,960,History of Africa
+division,970,History of North America
+division,980,History of South America
+division,990,History of other areas
+section,000,"Computer science, information, general works"
+section,001,Knowledge
+section,002,The book
+section,003,Systems
+section,004,Computer science
+section,005,"Computer programming, programs, & data"
+section,006,Special computer methods
+section,007,[Unassigned]
+section,008,[Unassigned]
+section,009,[Unassigned]
+section,010,Bibliography
+section,011,Bibliographies and catalogs
+section,012,Bibliographies and catalogs of individuals
+section,013,[Unassigned]
+section,014,Of anonymous & pseudonymous works
+section,015,Of works from specific places
+section,016,Of works on specific subjects
+section,017,General subject catalogs
+section,018,[Unassigned]
+section,019,[Unassigned]
+section,020,Library and information sciences
+section,021,Relationships of libraries and archives
+section,022,Administration of physical plant
+section,023,Personnel management
+section,024,[Unassigned]
+section,025,Operations of libraries and archives
+section,026,Libraries and archives devoted to specific subjects
+section,027,General libraries and archives
+section,028,Reading and use of other information media
+section,029,[Unassigned]
+section,030,General encyclopedic works
+section,031,General encyclopedic works in American English
+section,032,General encyclopedic works in English
+section,033,Encyclopedias in other Germanic languages
+section,034,"Encyclopedias in French, Occitan & Catalan"
+section,035,"Encyclopedias in Italian, Romanian & related languages"
+section,036,"Encyclopedias in Spanish, Portuguese & Galician"
+section,037,General encyclopedic works in Slavic languages
+section,038,General encyclopedic works in Scandinavian languages
+section,039,General encyclopedic works in other languages
+section,040,[Unassigned]
+section,041,[Unassigned]
+section,042,[Unassigned]
+section,043,[Unassigned]
+section,044,[Unassigned]
+section,045,[Unassigned]
+section,046,[Unassigned]
+section,047,[Unassigned]
+section,048,[Unassigned]
+section,049,[Unassigned]
+section,050,General serial publications
+section,051,General serial publications in American English
+section,052,General serial publications in English
+section,053,Serials in other Germanic languages
+section,054,"Serials in French, Occitan & Catalan"
+section,055,"Serials in Italian, Romanian & related languages"
+section,056,"Serials in Spanish, Portuguese & Galician"
+section,057,General serial publications in Slavic languages
+section,058,Serials in Scandinavian languages
+section,059,General serial publications in other languages
+section,060,General organizations & museum science
+section,061,General organizations in North America
+section,062,General organizations in British Isles
+section,063,General organizations in Germany; in Central Europe
+section,064,General organizations in France and Monaco
+section,065,General organizations in Italy
+section,066,General organizations in Spain
+section,067,General organizations in Russia; in Eastern Europe
+section,068,General organizations in other geographic areas
+section,069,Museology (Museum science)
+section,070,"Documentary, educational, news media; journalism"
+section,071,Journalism and newspapers in North America
+section,072,Journalism and newspapers in British Isles
+section,073,Journalism and newspapers in Germany
+section,074,Journalism and newspapers in France and Monaco
+section,075,Journalism and newspapers in Italy
+section,076,Journalism and newspapers in Spain
+section,077,Journalism and newspapers in Russia
+section,078,Journalism and newspapers in Scandinavia
+section,079,Newspapers in other geographic areas
+section,080,General collections
+section,081,General collections in American English
+section,082,General collections in English
+section,083,General collections in other Germanic languages
+section,084,"General collections in French, Occitan & Catalan"
+section,085,"Collections in Italian, Romanian & related languages"
+section,086,"Collections in Spanish, Portuguese & Galician"
+section,087,General collections in Slavic languages
+section,088,General collections in Scandinavian languages
+section,089,General collections in other languages
+section,090,Manuscripts and rare books
+section,091,Manuscripts
+section,092,Block books
+section,093,Incunabula
+section,094,Printed books
+section,095,Books notable for bindings
+section,096,Books notable for illustrations and materials
+section,097,Books notable for ownership or origin
+section,098,"Prohibited works, forgeries, hoaxes"
+section,099,Books notable for format
+section,100,Philosophy & psychology
+section,101,Theory of philosophy
+section,102,Miscellany of philosophy
+section,103,Dictionaries & encyclopedias
+section,104,[Unassigned]
+section,105,Serial publications of philosophy
+section,106,Organizations & management
+section,107,"Education, research & related topics"
+section,108,Groups of people
+section,109,History and collected biography
+section,110,Metaphysics
+section,111,Ontology
+section,112,[Unassigned]
+section,113,Cosmology (Philosophy of nature)
+section,114,Space
+section,115,Time
+section,116,Change
+section,117,Structure
+section,118,Force and energy
+section,119,Number and quantity
+section,120,"Epistemology, causation, humankind"
+section,121,Epistemology (Theory of knowledge)
+section,122,Causation
+section,123,Determinism and indeterminism
+section,124,Teleology
+section,125,[Unassigned]
+section,126,The self
+section,127,The unconscious and the subconscious
+section,128,Humankind
+section,129,Origin and destiny of individual souls
+section,130,Parapsychology and occultism
+section,131,Parapsychological and occult methods
+section,132,[Unassigned]
+section,133,Specific topics in parapsychology & occultism
+section,134,[Unassigned]
+section,135,Dreams and mysteries
+section,136,[Unassigned]
+section,137,Divinatory graphology
+section,138,Physiognomy
+section,139,Phrenology
+section,140,Specific philosophical schools
+section,141,Idealism and related systems
+section,142,Critical philosophy
+section,143,Bergsonism and intuitionism
+section,144,Humanism and related systems
+section,145,Sensationalism
+section,146,Naturalism and related systems
+section,147,Pantheism and related systems
+section,148,"Eclecticism, liberalism, & traditionalism"
+section,149,Other philosophical systems and doctrines
+section,150,Psychology
+section,151,[Unassigned]
+section,152,"Perception, movement, emotions & drives"
+section,153,Conscious mental processes & intelligence
+section,154,Subconscious & altered states
+section,155,Differential & developmental psychology
+section,156,Comparative psychology
+section,157,[Unassigned]
+section,158,Applied psychology
+section,159,[Unassigned]
+section,160,Philosophical logic
+section,161,Induction
+section,162,Deduction
+section,163,[Unassigned]
+section,164,[Unassigned]
+section,165,Fallacies and sources of error
+section,166,Syllogisms
+section,167,Hypotheses
+section,168,Argument and persuasion
+section,169,Analogy
+section,170,Ethics (Moral philosophy)
+section,171,Ethical systems
+section,172,Political ethics
+section,173,Ethics of family relationships
+section,174,Occupational ethics
+section,175,Ethics of recreation & leisure
+section,176,Ethics of sex & reproduction
+section,177,Ethics of social relations
+section,178,Ethics of consumption
+section,179,Other ethical norms
+section,180,"Ancient, medieval & eastern philosophy"
+section,181,Eastern philosophy
+section,182,Pre-Socratic Greek philosophies
+section,183,"Sophistic, Socratic, related philosophies"
+section,184,Platonic philosophy
+section,185,Aristotelian philosophy
+section,186,Skeptic and Neoplatonic philosophies
+section,187,Epicurean philosophy
+section,188,Stoic philosophy
+section,189,Medieval western philosophy
+section,190,Modern western philosophy
+section,191,Philosophy of United States and Canada
+section,192,Philosophy of British Isles
+section,193,Philosophy of Germany and Austria
+section,194,Philosophy of France
+section,195,Philosophy of Italy
+section,196,Philosophy of Spain and Portugal
+section,197,Philosophy of Russia
+section,198,Philosophy of Scandinavia and Finland
+section,199,Philosophy of other geographic areas
+section,200,Religion
+section,201,Religious mythology & social theology
+section,202,Doctrines
+section,203,Public worship and other practices
+section,204,"Religious experience, life, practice"
+section,205,Religious ethics
+section,206,Leaders and organization
+section,207,Missions and religious education
+section,208,Sources
+section,209,Sects and reform movements
+section,210,Philosophy and theory of religion
+section,211,Concepts of God
+section,212,"Existence, knowability & attributes of God"
+section,213,Creation
+section,214,Theodicy
+section,215,Science and religion
+section,216,[Unassigned]
+section,217,[Unassigned]
+section,218,Humankind
+section,219,[Unassigned]
+section,220,Bible
+section,221,Old Testament (Tanakh)
+section,222,Historical books of Old Testament
+section,223,Poetic books of Old Testament
+section,224,Prophetic books of Old Testament
+section,225,New Testament
+section,226,Gospels and Acts
+section,227,Epistles
+section,228,Revelation (Apocalypse)
+section,229,Apocrypha and pseudepigrapha
+section,230,Christianity
+section,231,God
+section,232,Jesus Christ and his family
+section,233,Humankind
+section,234,Salvation and grace
+section,235,Spiritual beings
+section,236,Eschatology
+section,237,[Unassigned]
+section,238,Creeds & catechisms
+section,239,Apologetics and polemics
+section,240,Christian moral and devotional theology
+section,241,Christian ethics
+section,242,Devotional literature
+section,243,Evangelistic writings for individuals
+section,244,[Unassigned]
+section,245,[Unassigned]
+section,246,Use of art in Christianity
+section,247,Church furnishings and related articles
+section,248,"Christian experience, practice, life"
+section,249,Christian observances in family life
+section,250,Local Christian church and religious orders
+section,251,Preaching (Homiletics)
+section,252,Texts of sermons
+section,253,Pastoral work (Pastoral theology)
+section,254,Local church administration
+section,255,Religious congregations and orders
+section,256,[Unassigned]
+section,257,[Unassigned]
+section,258,[Unassigned]
+section,259,Pastoral care of families & groups of people
+section,260,Christian social and ecclesiastical theology
+section,261,Social theology and interreligious relations
+section,262,Ecclesiology
+section,263,"Days, times, places of religious observance"
+section,264,Public worship
+section,265,"Sacraments, other rites and acts"
+section,266,Missions
+section,267,Associations for religious work
+section,268,Religious education
+section,269,Spiritual renewal
+section,270,"History, geographic treatment, biography"
+section,271,Religious orders in church history
+section,272,Persecutions in general church history
+section,273,Doctrinal controversies & heresies
+section,274,History of Christianity in Europe
+section,275,History of Christianity in Asia
+section,276,History of Christianity in Africa
+section,277,History of Christianity in North America
+section,278,History of Christianity in South America
+section,279,History of Christianity in other areas
+section,280,Denominations & sects of Christian church
+section,281,Early church and Eastern churches
+section,282,Roman Catholic Church
+section,283,Anglican churches
+section,284,Protestants of Continental origin
+section,285,"Presbyterian, Reformed & Congregational"
+section,286,"Baptist, Restoration & Adventist"
+section,287,Methodist and related churches
+section,288,[Unassigned]
+section,289,Other denominations and sects
+section,290,Other religions
+section,291,[Unassigned]
+section,292,Classical religion (Greek & Roman religion)
+section,293,Germanic religion
+section,294,Religions of Indic origin
+section,295,"Zoroastrianism (Mazdaism, Parseeism)"
+section,296,Judaism
+section,297,"Islam, Babism & Bahai Faith"
+section,298,(Optional number)
+section,299,Religions not provided for elsewhere
+section,300,Social sciences
+section,301,Sociology and anthropology
+section,302,Social interaction
+section,303,Social processes
+section,304,Factors affecting social behavior
+section,305,Groups of people
+section,306,Culture and institutions
+section,307,Communities
+section,308,[Unassigned]
+section,309,[Unassigned]
+section,310,Collections of general statistics
+section,311,[Unassigned]
+section,312,[Unassigned]
+section,313,[Unassigned]
+section,314,General statistics of Europe
+section,315,General statistics of Asia
+section,316,General statistics of Africa
+section,317,General statistics of North America
+section,318,General statistics of South America
+section,319,General statistics of other areas
+section,320,Political science (Politics and government)
+section,321,Systems of governments and states
+section,322,Relation of state to organized groups
+section,323,Civil and political rights
+section,324,The political process
+section,325,International migration and colonization
+section,326,Slavery and emancipation
+section,327,International relations
+section,328,The legislative process
+section,329,[Unassigned]
+section,330,Economics
+section,331,Labor economics
+section,332,Financial economics
+section,333,Economics of land and energy
+section,334,Cooperatives
+section,335,Socialism and related systems
+section,336,Public finance
+section,337,International economics
+section,338,Production
+section,339,Macroeconomics and related topics
+section,340,Law
+section,341,Law of nations
+section,342,Constitutional and administrative law
+section,343,"Military, tax, trade & industrial law"
+section,344,"Labor, social, education & cultural law"
+section,345,Criminal law
+section,346,Private law
+section,347,Procedure and courts
+section,348,"Laws, regulations, cases"
+section,349,Law of specific jurisdictions & areas
+section,350,Public administration and military science
+section,351,Public administration
+section,352,General considerations of public administration
+section,353,Specific fields of public administration
+section,354,Administration of economy & environment
+section,355,Military science
+section,356,Foot forces & warfare
+section,357,Mounted forces & warfare
+section,358,Air & other specialized forces
+section,359,Naval forces and warfare
+section,360,Social problems and services; associations
+section,361,Social problems and services
+section,362,Social problems and services to groups
+section,363,Other social problems and services
+section,364,Criminology
+section,365,Penal and related institutions
+section,366,Secret associations and societies
+section,367,General clubs
+section,368,Insurance
+section,369,Associations
+section,370,Education
+section,371,Schools and their activities; special education
+section,372,Primary education (Elementary education)
+section,373,Secondary education
+section,374,Adult education
+section,375,Curricula
+section,376,[Unassigned]
+section,377,[Unassigned]
+section,378,Higher education (Tertiary education)
+section,379,Public policy issues in education
+section,380,"Commerce, communications, transportation"
+section,381,Commerce (Trade)
+section,382,International commerce (Foreign trade)
+section,383,Postal communication
+section,384,Communications
+section,385,Railroad transportation
+section,386,Inland waterway and ferry transportation
+section,387,"Water, air, space transportation"
+section,388,Transportation
+section,389,Metrology and standardization
+section,390,"Customs, etiquette, folklore"
+section,391,Costume and personal appearance
+section,392,Customs of life cycle and domestic life
+section,393,Death customs
+section,394,General customs
+section,395,Etiquette (Manners)
+section,396,[Unassigned]
+section,397,[Unassigned]
+section,398,Folklore
+section,399,Customs of war and diplomacy
+section,400,Language
+section,401,Philosophy and theory; international languages
+section,402,Miscellany
+section,403,Dictionaries & encyclopedias
+section,404,Special topics of language
+section,405,Serial publications
+section,406,Organizations and management
+section,407,"Education, research, related topics"
+section,408,Groups of people
+section,409,Geographic treatment and biography
+section,410,Linguistics
+section,411,Writing systems
+section,412,Etymology
+section,413,Dictionaries
+section,414,Phonology & phonetics
+section,415,Grammar
+section,416,[Unassigned]
+section,417,Dialectology and historical linguistics
+section,418,Applied linguistics
+section,419,Sign languages
+section,420,English & Old English (Anglo-Saxon)
+section,421,"Writing system, phonology, phonetics"
+section,422,Etymology of standard English
+section,423,Dictionaries of standard English
+section,424,[Unassigned]
+section,425,Grammar of standard English
+section,426,[Unassigned]
+section,427,English language variations
+section,428,Standard English usage
+section,429,Old English (Anglo-Saxon)
+section,430,German and related languages
+section,431,"Writing system, phonology, phonetics"
+section,432,Etymology of standard German
+section,433,Dictionaries of standard German
+section,434,[Unassigned]
+section,435,Grammar of standard German
+section,436,[Unassigned]
+section,437,German language variations
+section,438,Standard German usage
+section,439,Other Germanic languages
+section,440,French & related Romance languages
+section,441,"Writing system, phonology, phonetics"
+section,442,Etymology of standard French
+section,443,Dictionaries of standard French
+section,444,[Unassigned]
+section,445,Grammar of standard French
+section,446,[Unassigned]
+section,447,French language variations
+section,448,Standard French usage
+section,449,"Occitan, Catalan, Franco-Provençal"
+section,450,"Italian, Romanian & related languages"
+section,451,"Writing system, phonology, phonetics"
+section,452,Etymology of standard Italian
+section,453,Dictionaries of standard Italian
+section,454,[Unassigned]
+section,455,Grammar of standard Italian
+section,456,[Unassigned]
+section,457,Italian language variations
+section,458,Standard Italian usage
+section,459,"Romanian, Rhaetian, Sardinian, Corsican"
+section,460,"Spanish, Portuguese, Galician"
+section,461,"Writing system, phonology, phonetics"
+section,462,Etymology of standard Spanish
+section,463,Dictionaries of standard Spanish
+section,464,[Unassigned]
+section,465,Grammar of standard Spanish
+section,466,[Unassigned]
+section,467,Spanish language variations
+section,468,Standard Spanish usage
+section,469,Portuguese
+section,470,Latin and related Italic languages
+section,471,"Writing system, phonology, phonetics"
+section,472,Etymology of classical Latin
+section,473,Dictionaries of classical Latin
+section,474,[Unassigned]
+section,475,Grammar of classical Latin
+section,476,[Unassigned]
+section,477,"Old, postclassical, Vulgar Latin"
+section,478,Classical Latin usage
+section,479,Other Italic languages
+section,480,Classical Greek; Hellenic languages
+section,481,"Writing system, phonology, phonetics"
+section,482,Etymology of classical Greek
+section,483,Dictionaries of classical Greek
+section,484,[Unassigned]
+section,485,Grammar of classical Greek
+section,486,[Unassigned]
+section,487,Preclassical and postclassical Greek
+section,488,Classical Greek usage
+section,489,Other Hellenic languages
+section,490,Other languages
+section,491,East Indo-European and Celtic languages
+section,492,Afro-Asiatic languages
+section,493,Non-Semitic Afro-Asiatic languages
+section,494,"Altaic, Uralic, Hyperborean & Dravidian"
+section,495,Languages of east and southeast Asia
+section,496,African languages
+section,497,North American native languages
+section,498,South American native languages
+section,499,Austronesian & other languages
+section,500,Natural sciences and mathematics
+section,501,Philosophy and theory
+section,502,Miscellany
+section,503,Dictionaries & encyclopedias
+section,504,[Unassigned]
+section,505,Serial publications
+section,506,Organizations and management
+section,507,"Education, research, related topics"
+section,508,Natural history
+section,509,"History, geographic treatment, biography"
+section,510,Mathematics
+section,511,General principles of mathematics
+section,512,Algebra
+section,513,Arithmetic
+section,514,Topology
+section,515,Analysis
+section,516,Geometry
+section,517,[Unassigned]
+section,518,Numerical analysis
+section,519,Probabilities and applied mathematics
+section,520,Astronomy and allied sciences
+section,521,Celestial mechanics
+section,522,"Techniques, equipment & materials"
+section,523,Specific celestial bodies and phenomena
+section,524,[Unassigned]
+section,525,Earth (Astronomical geography)
+section,526,Mathematical geography
+section,527,Celestial navigation
+section,528,Ephemerides
+section,529,Chronology
+section,530,Physics
+section,531,Classical mechanics
+section,532,Fluid mechanics
+section,533,Pneumatics (Gas mechanics)
+section,534,Sound and related vibrations
+section,535,Light and related radiation
+section,536,Heat
+section,537,Electricity and electronics
+section,538,Magnetism
+section,539,Modern physics
+section,540,Chemistry and allied sciences
+section,541,Physical chemistry
+section,542,"Techniques, equipment & materials"
+section,543,Analytical chemistry
+section,544,[Unassigned]
+section,545,[Unassigned]
+section,546,Inorganic chemistry
+section,547,Organic chemistry
+section,548,Crystallography
+section,549,Mineralogy
+section,550,Earth sciences
+section,551,"Geology, hydrology, meteorology"
+section,552,Petrology
+section,553,Economic geology
+section,554,Earth sciences of Europe
+section,555,Earth sciences of Asia
+section,556,Earth sciences of Africa
+section,557,Earth sciences of North America
+section,558,Earth sciences of South America
+section,559,Earth sciences of other areas
+section,560,Paleontology
+section,561,Paleobotany; fossil microorganisms
+section,562,Fossil invertebrates
+section,563,Fossil marine & seashore invertebrates
+section,564,Fossil Mollusca & Molluscoidea
+section,565,Fossil Arthropoda
+section,566,Fossil Chordata
+section,567,Fossil cold-blooded vertebrates
+section,568,Fossil Aves (birds)
+section,569,Fossil Mammalia
+section,570,Biology
+section,571,Physiology & related subjects
+section,572,Biochemistry
+section,573,Specific physiological systems in animals
+section,574,[Unassigned]
+section,575,Specific parts of & systems in plants
+section,576,Genetics and evolution
+section,577,Ecology
+section,578,Natural history of organisms
+section,579,"Microorganisms, fungi & algae"
+section,580,Plants
+section,581,Specific topics in natural history of plants
+section,582,Plants noted for characteristics & flowers
+section,583,Eudicots and Ceratophyllales
+section,584,"Monocots, Chloranthales, magnoliids"
+section,585,Pinophyta
+section,586,Cryptogamia
+section,587,Pteridophyta
+section,588,Bryophyta
+section,589,[Unassigned]
+section,590,Animals
+section,591,Specific topics in natural history of animals
+section,592,Invertebrates
+section,593,Marine & seashore invertebrates
+section,594,Mollusca and Molluscoidea
+section,595,Arthropoda
+section,596,Chordata
+section,597,Cold-blooded vertebrates
+section,598,Aves
+section,599,Mammalia
+section,600,Technology (Applied sciences)
+section,601,Philosophy and theory
+section,602,Miscellany
+section,603,"Dictionaries, encyclopedias, concordances"
+section,604,"Technical drawing, hazardous materials"
+section,605,Serial publications
+section,606,Organizations
+section,607,"Education, research, related topics"
+section,608,Patents
+section,609,"History, geographic treatment, biography"
+section,610,Medicine and health
+section,611,"Human anatomy, cytology, histology"
+section,612,Human physiology
+section,613,Personal health & safety
+section,614,Forensic medicine; incidence of disease
+section,615,Pharmacology and therapeutics
+section,616,Diseases
+section,617,Surgery & related medical specialties
+section,618,"Gynecology, obstetrics, pediatrics, geriatrics"
+section,619,[Unassigned]
+section,620,Engineering and allied operations
+section,621,Applied physics
+section,622,Mining and related operations
+section,623,Military and nautical engineering
+section,624,Civil engineering
+section,625,Engineering of railroads and roads
+section,626,[Unassigned]
+section,627,Hydraulic engineering
+section,628,Environmental & sanitary engineering
+section,629,Other branches of engineering
+section,630,Agriculture and related technologies
+section,631,"Techniques, equipment & materials"
+section,632,"Plant injuries, diseases, pests"
+section,633,Field and plantation crops
+section,634,"Orchards, fruits, forestry"
+section,635,Garden crops (Horticulture)
+section,636,Animal husbandry
+section,637,Processing dairy and related products
+section,638,Insect culture
+section,639,"Hunting, fishing & conservation"
+section,640,Home and family management
+section,641,Food and drink
+section,642,Meals and table service
+section,643,Housing and household equipment
+section,644,Household utilities
+section,645,Household furnishings
+section,646,"Sewing, clothing & personal living"
+section,647,Management of public households
+section,648,Housekeeping
+section,649,Child rearing & home care of people
+section,650,Management and auxiliary services
+section,651,Office services
+section,652,Processes of written communication
+section,653,Shorthand
+section,654,[Unassigned]
+section,655,[Unassigned]
+section,656,[Unassigned]
+section,657,Accounting
+section,658,General management
+section,659,Advertising and public relations
+section,660,Chemical engineering
+section,661,Technology of industrial chemicals
+section,662,"Explosives, fuels & related products"
+section,663,Beverage technology
+section,664,Food technology
+section,665,"Industrial oils, fats, waxes & gases"
+section,666,Ceramic & allied technologies
+section,667,"Cleaning, color & coating technologies"
+section,668,Technology of other organic products
+section,669,Metallurgy
+section,670,Manufacturing
+section,671,Metalworking & primary metal products
+section,672,"Iron, steel, other iron alloys"
+section,673,Nonferrous metals
+section,674,"Lumber processing, wood products, cork"
+section,675,Leather and fur processing
+section,676,Pulp and paper technology
+section,677,Textiles
+section,678,Elastomers and elastomer products
+section,679,Other products of specific materials
+section,680,Manufacture of products for specific uses
+section,681,Precision instruments and other devices
+section,682,Small forge work (Blacksmithing)
+section,683,"Hardware, weapons & household appliances"
+section,684,Furnishings and home workshops
+section,685,"Leather, fur goods & related products"
+section,686,Printing and related activities
+section,687,Clothing and accessories
+section,688,Other final products & packaging
+section,689,[Unassigned]
+section,690,Construction of buildings
+section,691,Building materials
+section,692,Auxiliary construction practices
+section,693,Specific materials & purposes
+section,694,Wood construction
+section,695,Roof covering
+section,696,Utilities
+section,697,"Heating, ventilating & air-conditioning"
+section,698,Detail finishing
+section,699,[Unassigned]
+section,700,The arts
+section,701,Philosophy of fine & decorative arts
+section,702,Miscellany of fine and decorative arts
+section,703,Dictionaries of fine & decorative arts
+section,704,Special topics in fine and decorative arts
+section,705,Serial publications of fine & decorative arts
+section,706,Organizations & management
+section,707,"Education, research & related topics"
+section,708,"Galleries, museums & private collections"
+section,709,"History, geographic treatment, biography"
+section,710,Area planning and landscape architecture Area
+section,711,Area planning (Civic art)
+section,712,Landscape architecture (Landscape design)
+section,713,Landscape architecture of trafficways
+section,714,Water features in landscape architecture
+section,715,Woody plants in landscape architecture
+section,716,Herbaceous plants in landscape architecture
+section,717,Structures in landscape architecture
+section,718,Landscape design of cemeteries
+section,719,Natural landscapes
+section,720,Architecture
+section,721,Architectural materials and structure
+section,722,Architecture from earliest times to ca. 300
+section,723,Architecture from ca. 300 to 1399
+section,724,Architecture from 1400
+section,725,Public structures
+section,726,Buildings for religious and related purposes
+section,727,Buildings for education & research
+section,728,Residential and related buildings
+section,729,Design & decoration
+section,730,Sculpture and related arts
+section,731,"Processes, forms, subjects of sculpture"
+section,732,Sculpture to ca. 500
+section,733,"Greek, Etruscan, Roman sculpture"
+section,734,Sculpture from ca. 500 to 1399
+section,735,Sculpture from 1400
+section,736,Carving and carvings
+section,737,Numismatics and sigillography
+section,738,Ceramic arts
+section,739,Art metalwork
+section,740,Design and related arts
+section,741,Drawing and drawings
+section,742,Perspective in drawing
+section,743,Drawing and drawings by subject
+section,744,"Communication design, visual design, graphic design"
+section,745,Decorative arts
+section,746,Textile arts
+section,747,Interior decoration
+section,748,Glass
+section,749,Furniture and accessories
+section,750,Painting and paintings
+section,751,"Techniques, equipment, materials & forms"
+section,752,Color
+section,753,"Symbolism, allegory, mythology, legend"
+section,754,Genre paintings
+section,755,Religion
+section,756,[Unassigned]
+section,757,Human figures
+section,758,"Nature, cityscapes & other subjects"
+section,759,"History, geographic treatment, biography"
+section,760,Printmaking & prints
+section,761,Relief processes (Block printing)
+section,762,[Unassigned]
+section,763,Lithographic processes
+section,764,Chromolithography and serigraphy
+section,765,Metal engraving
+section,766,"Mezzotinting, aquatinting, related processes"
+section,767,Etching and drypoint
+section,768,[Unassigned]
+section,769,Prints
+section,770,"Photography, computer art, cinematography"
+section,771,"Techniques, equipment & materials"
+section,772,Metallic salt processes
+section,773,Pigment processes of printing
+section,774,Holography
+section,775,[Unassigned]
+section,776,Computer art (Digital art)
+section,777,Cinematography and videography
+section,778,Specific fields & kinds of photography
+section,779,Photographic images
+section,780,Music
+section,781,General principles and musical forms
+section,782,Vocal music
+section,783,Music for single voices
+section,784,Instruments & instrumental ensembles
+section,785,Ensembles with one instrument per part
+section,786,Keyboard & other instruments
+section,787,Stringed instruments (Chordophones)
+section,788,Wind instruments (Aerophones)
+section,789,(Optional number)
+section,790,Recreational and performing arts
+section,791,Public performances
+section,792,Stage presentations
+section,793,Indoor games and amusements
+section,794,Indoor games of skill
+section,795,Games of chance
+section,796,Athletic and outdoor sports and games
+section,797,Aquatic and air sports
+section,798,Equestrian sports and animal racing
+section,799,"Fishing, hunting, shooting"
+section,800,Literature (Belles-lettres) and rhetoric
+section,801,Philosophy and theory
+section,802,Miscellany
+section,803,Dictionaries & encyclopedias
+section,804,[Unassigned]
+section,805,Serial publications
+section,806,Organizations and management
+section,807,"Education, research, related topics"
+section,808,Rhetoric & collections of literature
+section,809,"History, description & criticism"
+section,810,American literature in English
+section,811,American poetry in English
+section,812,American drama in English
+section,813,American fiction in English
+section,814,American essays in English
+section,815,American speeches in English
+section,816,American letters in English
+section,817,American humor and satire in English
+section,818,American miscellaneous writings
+section,819,(Optional number)
+section,820,English & Old English literatures
+section,821,English poetry
+section,822,English drama
+section,823,English fiction
+section,824,English essays
+section,825,English speeches
+section,826,English letters
+section,827,English humor and satire
+section,828,English miscellaneous writings
+section,829,Old English (Anglo-Saxon) literature
+section,830,German & related literatures
+section,831,German poetry
+section,832,German drama
+section,833,German fiction
+section,834,German essays
+section,835,German speeches
+section,836,German letters
+section,837,German humor and satire
+section,838,German miscellaneous writings
+section,839,Other Germanic literatures
+section,840,French and related literatures
+section,841,French poetry
+section,842,French drama
+section,843,French fiction
+section,844,French essays
+section,845,French speeches
+section,846,French letters
+section,847,French humor and satire
+section,848,French miscellaneous writings
+section,849,Occitan & Catalan literatures
+section,850,"Italian, Romanian & related literatures"
+section,851,Italian poetry
+section,852,Italian drama
+section,853,Italian fiction
+section,854,Italian essays
+section,855,Italian speeches
+section,856,Italian letters
+section,857,Italian humor and satire
+section,858,Italian miscellaneous writings
+section,859,Romanian & related literatures
+section,860,Spanish & Portuguese literatures
+section,861,Spanish poetry
+section,862,Spanish drama
+section,863,Spanish fiction
+section,864,Spanish essays
+section,865,Spanish speeches
+section,866,Spanish letters
+section,867,Spanish humor and satire
+section,868,Spanish miscellaneous writings
+section,869,Portuguese and Galician literatures
+section,870,Latin & related Italic literatures
+section,871,Latin poetry
+section,872,Latin dramatic poetry and drama
+section,873,Latin epic poetry and fiction
+section,874,Latin lyric poetry
+section,875,Latin speeches
+section,876,Latin letters
+section,877,Latin humor and satire
+section,878,Latin miscellaneous writings
+section,879,Literatures of other Italic languages
+section,880,Classical Greek & Hellenic literatures
+section,881,Classical Greek poetry
+section,882,Classical Greek dramatic poetry & drama
+section,883,Classical Greek epic poetry and fiction
+section,884,Classical Greek lyric poetry
+section,885,Classical Greek speeches
+section,886,Classical Greek letters
+section,887,Classical Greek humor and satire
+section,888,Classical Greek miscellaneous writings
+section,889,Modern Greek literature
+section,890,Literatures of other languages
+section,891,East Indo-European and Celtic literatures
+section,892,Afro-Asiatic literatures
+section,893,Non-Semitic Afro-Asiatic literatures
+section,894,"Altaic, Uralic, Hyperborean & Dravidian"
+section,895,Literatures of East and Southeast Asia
+section,896,African literatures
+section,897,North American native literatures
+section,898,South American native literatures
+section,899,Austronesian & other literatures
+section,900,History & geography
+section,901,Philosophy and theory of history
+section,902,Miscellany of history
+section,903,Dictionaries & encyclopedias
+section,904,Collected accounts of events
+section,905,Serial publications of history
+section,906,Organizations & management
+section,907,"Education, research & related topics"
+section,908,Groups of people
+section,909,World history
+section,910,Geography and travel
+section,911,Historical geography
+section,912,Maps and plans of surface of earth
+section,913,Geography of and travel in ancient world
+section,914,Geography of and travel in Europe
+section,915,Geography of and travel in Asia
+section,916,Geography of and travel in Africa
+section,917,Geography of & travel in North America
+section,918,Geography of & travel in South America
+section,919,Geography of and travel in other areas
+section,920,"Biography, genealogy, insignia"
+section,921,(Optional number)
+section,922,(Optional number)
+section,923,(Optional number)
+section,924,(Optional number)
+section,925,(Optional number)
+section,926,(Optional number)
+section,927,(Optional number)
+section,928,(Optional number)
+section,929,"Genealogy, names & insignia"
+section,930,History of ancient world to ca. 499
+section,931,China to 420
+section,932,Egypt to 640
+section,933,Palestine to 70
+section,934,India to 647
+section,935,Mesopotamia & Iranian Plateau to 637
+section,936,Europe north & west of Italy to ca. 499
+section,937,Italy & adjacent territories to 476
+section,938,Greece to 323
+section,939,Other parts of ancient world
+section,940,History of Europe
+section,941,British Isles
+section,942,England and Wales
+section,943,Germany and central Europe
+section,944,France and Monaco
+section,945,"Italy, San Marino, Vatican City, Malta"
+section,946,"Spain, Andorra, Gibraltar, Portugal"
+section,947,Russia and east Europe
+section,948,Scandinavia and Finland
+section,949,Other parts of Europe
+section,950,History of Asia
+section,951,China and adjacent areas
+section,952,Japan
+section,953,Arabian Peninsula and adjacent areas
+section,954,India & south Asia
+section,955,Iran
+section,956,Middle East (Near East)
+section,957,Siberia (Asiatic Russia)
+section,958,Central Asia
+section,959,Southeast Asia
+section,960,History of Africa
+section,961,Tunisia and Libya
+section,962,"Egypt, Sudan, South Sudan"
+section,963,Ethiopia and Eritrea
+section,964,"Morocco, Ceuta, Melilla, Western Sahara"
+section,965,Algeria
+section,966,West Africa and offshore islands
+section,967,Central Africa and offshore islands
+section,968,South Africa & southern Africa
+section,969,South Indian Ocean islands
+section,970,History of North America
+section,971,Canada
+section,972,"Mexico, Central America, West Indies"
+section,973,United States
+section,974,Northeastern United States
+section,975,Southeastern United States
+section,976,South central United States
+section,977,North central United States
+section,978,Western United States
+section,979,Great Basin & Pacific Slope region
+section,980,History of South America
+section,981,Brazil
+section,982,Argentina
+section,983,Chile
+section,984,Bolivia
+section,985,Peru
+section,986,Colombia and Ecuador
+section,987,Venezuela
+section,988,Guiana
+section,989,Paraguay and Uruguay
+section,990,History of other areas
+section,991,[Unassigned]
+section,992,[Unassigned]
+section,993,New Zealand
+section,994,Australia
+section,995,New Guinea & Melanesia
+section,996,Polynesia & Pacific Ocean islands
+section,997,Atlantic Ocean islands
+section,998,Arctic islands and Antarctica
+section,999,Extraterrestrial worlds

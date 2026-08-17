@@ -86,8 +86,8 @@ pub async fn resend_verification(email: &str) -> Result<(), AuthError> {
     sync_client::resend_verification(&crate::api_server_url(), email).await
 }
 
-pub async fn verify_email(token: &str) -> Result<Session, AuthError> {
-    sync_client::verify_email(&crate::api_server_url(), token).await
+pub async fn verify_email(email: &str, pin: &str) -> Result<Session, AuthError> {
+    sync_client::verify_email(&crate::api_server_url(), email, pin).await
 }
 
 pub async fn request_password_reset(email: &str) -> Result<(), AuthError> {
@@ -174,8 +174,8 @@ pub fn request_public_registration_blocking(email: &str, password: &str) -> Resu
 pub fn resend_verification_blocking(email: &str) -> Result<(), AuthError> {
     blocking_runtime()?.block_on(resend_verification(email))
 }
-pub fn verify_email_blocking(token: &str) -> Result<Session, AuthError> {
-    blocking_runtime()?.block_on(verify_email(token))
+pub fn verify_email_blocking(email: &str, pin: &str) -> Result<Session, AuthError> {
+    blocking_runtime()?.block_on(verify_email(email, pin))
 }
 pub fn request_password_reset_blocking(email: &str) -> Result<(), AuthError> {
     blocking_runtime()?.block_on(request_password_reset(email))

@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { cpSync, createReadStream, readFileSync, statSync } from "node:fs";
+import { extname, join, normalize } from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
 const webApiProxy = process.env.BOKHEIM_WEB_API_PROXY ?? "https://api.bokheim.se";
@@ -60,34 +61,66 @@ const crossOriginIsolation = {
   },
 };
 
-// Foliate's PDF adapter expects its demo asset tree to be served verbatim and
-// cannot be bundled by Vite. PDF remains handled by the app's existing PDF
-// reader; only the direct MOBI/FB2/CBZ adapters are enabled here.
-const foliateWithoutPdf = {
-  name: "foliate-without-pdf",
-  enforce: "pre",
-  resolveId(source, importer) {
-    if (source === "./pdf.js" && importer?.endsWith("/src/vendor/foliate-js/view.js")) {
-      return "\0virtual:foliate-pdf-adapter-disabled";
-    }
-    return null;
-  },
-  load(id) {
-    if (id === "\0virtual:foliate-pdf-adapter-disabled") {
-      return `export const makePDF = async () => { throw new Error("PDF files must be opened in the PDF reader") }`;
-    }
-    return null;
-  },
+const pdfjsSource = fileURLToPath(new URL("./src/vendor/foliate-js/vendor/pdfjs", import.meta.url));
+const pdfMimeTypes = {
+  ".css": "text/css; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".bcmap": "application/octet-stream",
+  ".pfb": "application/octet-stream",
+  ".ttf": "font/ttf",
 };
+
+// PDF.js resolves its worker, CMaps, standard fonts, and layer styles by URL.
+// Keep that asset tree stable in both Vite development and the static build.
+const pdfjsAssets = (() => {
+  let outputDirectory = "";
+  let isSsrBuild = false;
+  return {
+    name: "pdfjs-assets",
+    configResolved(config) {
+      outputDirectory = config.build.outDir;
+      isSsrBuild = Boolean(config.build.ssr);
+    },
+    configureServer(server) {
+      server.middlewares.use("/pdfjs", (request, response, next) => {
+        const relative = normalize(decodeURIComponent(request.url?.split("?", 1)[0] ?? ""))
+          .replace(/^[/\\]+/, "")
+          .replace(/^(\.\.[/\\])+/, "");
+        const path = join(pdfjsSource, relative);
+        try {
+          if (!path.startsWith(pdfjsSource) || !statSync(path).isFile()) return next();
+          response.setHeader("Content-Type", pdfMimeTypes[extname(path)] ?? "application/octet-stream");
+          createReadStream(path).pipe(response);
+        } catch {
+          next();
+        }
+      });
+    },
+    closeBundle() {
+      if (!isSsrBuild && outputDirectory) {
+        cpSync(pdfjsSource, join(outputDirectory, "pdfjs"), {
+          recursive: true,
+          filter: (source) => !source.endsWith(".map") && source !== join(pdfjsSource, "pdf.mjs"),
+        });
+      }
+    },
+  };
+})();
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sharedDesign, crossOriginIsolation, foliateWithoutPdf, sveltekit()],
+  plugins: [sharedDesign, crossOriginIsolation, pdfjsAssets, sveltekit()],
 
   // SQLite ships its own WASM loader and must remain outside Vite's dependency
   // pre-bundle so the same module can initialize inside the backend worker.
   optimizeDeps: {
     exclude: ["@sqlite.org/sqlite-wasm"],
+  },
+
+  // The browser backend is launched as a module worker and PDF.js remains a
+  // lazy chunk there for catalogue PDF cover rendering.
+  worker: {
+    format: "es",
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

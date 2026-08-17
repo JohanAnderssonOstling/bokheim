@@ -135,7 +135,7 @@
 
 <style>
   .scrim { position: fixed; z-index: 90; inset: 0; display: grid; place-items: end center; padding: 1rem; background: var(--color-overlay-scrim); }
-  .dialog { width: min(100%, 34rem); max-height: min(90dvh, 48rem); margin: 0; padding: 1rem; overflow-y: auto; border: 1px solid var(--color-border); border-radius: var(--radius-lg); color: var(--color-ink-text); background: var(--color-raised-bg); box-shadow: 0 1.5rem 4rem var(--color-box-shadow); }
+  .dialog { width: min(100%, 34rem); max-height: min(90dvh, 48rem); margin: 0; padding: 1rem; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); box-shadow: 0 1.5rem 4rem var(--color-box-shadow); }
   header, .relationship-row, .target-search { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
   header { align-items: start; margin-bottom: 1.1rem; }
   header small { color: var(--color-accent); font-size: .68rem; font-weight: 800; }
@@ -144,16 +144,16 @@
   h3 { margin-bottom: .55rem; color: var(--color-subtle-text); font-size: .72rem; }
   section + section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--color-border); }
   button, input, select { font: inherit; }
-  .close { width: 2.3rem; height: 2.3rem; border: 0; border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; font-size: 1.4rem; cursor: pointer; }
+  .close { width: 2.3rem; height: 2.3rem; border: 0; border-radius: 0; color: var(--color-subtle-text); background: transparent; font-size: 1.4rem; cursor: pointer; }
   .relationship-list, form { display: grid; gap: .55rem; }
-  .relationship-row { min-height: 3.4rem; padding: .65rem .75rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-bg); }
+  .relationship-row { min-height: 3.4rem; padding: .65rem .75rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-surface-bg); }
   .relationship-row span { display: grid; min-width: 0; gap: .15rem; }
   .relationship-row strong { font-size: .8rem; }
   .relationship-row small, .empty { color: var(--color-subtle-text); font-size: .7rem; overflow-wrap: anywhere; }
   .relationship-row button { border: 0; color: var(--color-danger-text); background: transparent; font-size: .72rem; font-weight: 750; cursor: pointer; }
-  input, select { width: 100%; min-height: 2.7rem; padding: .6rem .7rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: inherit; background: var(--color-surface-bg); }
+  input, select { width: 100%; min-height: 2.7rem; padding: .6rem .7rem; border: 1px solid var(--color-border); border-radius: 0; color: inherit; background: var(--color-surface-bg); }
   .target-search input { min-width: 0; }
-  .target-search button, .primary { min-height: 2.7rem; padding: .6rem .85rem; border: 0; border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
+  .target-search button, .primary { min-height: 2.7rem; padding: .6rem .85rem; border: 0; border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .error { margin-top: .65rem; color: var(--color-danger-text); font-size: .72rem; }
   @media (min-width: 45rem) { .scrim { place-items: center; } }

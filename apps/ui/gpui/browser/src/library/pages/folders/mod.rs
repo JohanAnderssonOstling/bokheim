@@ -1,27 +1,28 @@
 //! Physical directory browsing and folder mutations.
 
 use epub_svelte_lib::library::LibraryFolderDestination;
-use epub_svelte_lib::{ContentHash, DirId, ROOT_DIR_ID};
+use epub_svelte_lib::{ContentHash, DirId, FolderDestinationPolicy, ROOT_DIR_ID};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement, MouseButton, Render, Subscription, Window, div, px};
+use gpui::{AnyElement, App, AppContext, Context, Entity, EventEmitter, ExternalPaths, Focusable, IntoElement, MouseButton, Render, Subscription, WeakEntity, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, Icon, IconName, Sizable, WindowExt};
 use std::rc::Rc;
 use ui_components as components;
 use ui_components::ScrollableElement as BokheimScrollableElement;
 
-use super::hierarchy::{HierarchyCrumb, HierarchyState};
+use super::hierarchy::{HierarchyCrumb, HierarchySplits, HierarchyState};
 use crate::library::services::{LatestRequest, LibraryContext};
-use crate::library::widgets::{BookManagement, BookManagementAction};
+use crate::library::widgets::{BookManagement, BookManagementAction, LibraryDrag};
 use crate::model::FolderCrumb;
 
 #[derive(Clone)]
 pub(crate) enum FoldersPageEvent {
     PathChanged(Vec<FolderCrumb>),
+    ContentsChanged,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,13 @@ enum FolderPickerOperation {
 }
 
 impl FolderPickerOperation {
+    fn destination_policy(&self) -> FolderDestinationPolicy {
+        match self {
+            Self::CopyBook { source_id, .. } | Self::MoveBook { source_id, .. } => FolderDestinationPolicy::Book { source_id: source_id.to_string() },
+            Self::MoveFolder { source_parent_id, source_path, .. } => FolderDestinationPolicy::MoveFolder { source_parent_id: source_parent_id.to_string(), source_path: source_path.clone() },
+        }
+    }
+
     fn action_label(&self) -> &'static str {
         match self {
             Self::CopyBook { .. } => "Copy",
@@ -40,17 +48,11 @@ impl FolderPickerOperation {
     }
 
     fn can_select(&self, destination: &LibraryFolderDestination) -> bool {
-        match self {
-            Self::CopyBook { source_id, .. } | Self::MoveBook { source_id, .. } => destination.id != *source_id,
-            Self::MoveFolder { source_parent_id, source_path, .. } => destination.id != *source_parent_id && destination.path != *source_path && !destination.path.starts_with(&format!("{source_path} / ")),
-        }
+        self.destination_policy().can_select(&destination.id.to_string(), &destination.path)
     }
 
     fn visible(&self, destination: &LibraryFolderDestination) -> bool {
-        match self {
-            Self::MoveFolder { source_path, .. } => destination.path != *source_path && !destination.path.starts_with(&format!("{source_path} / ")),
-            _ => true,
-        }
+        self.destination_policy().is_visible(&destination.path)
     }
 }
 
@@ -75,12 +77,17 @@ pub(crate) struct FoldersPage {
     folder_picker: Option<FolderPickerState>,
     rename_editor: Option<FolderRenameEditor>,
     rename_subscription: Option<Subscription>,
+    splits: HierarchySplits<FoldersPage>,
 }
 
 impl EventEmitter<FoldersPageEvent> for FoldersPage {}
 
 impl FoldersPage {
     pub(crate) fn new(ui: LibraryContext, path: Vec<FolderCrumb>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_pane(ui, path, None, 0, window, cx)
+    }
+
+    fn new_pane(ui: LibraryContext, path: Vec<FolderCrumb>, split_root: Option<WeakEntity<FoldersPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, |page: &mut Self, cx| page.search(cx), window, cx);
         Self {
             hierarchy,
@@ -92,6 +99,7 @@ impl FoldersPage {
             folder_picker: None,
             rename_editor: None,
             rename_subscription: None,
+            splits: HierarchySplits::new(split_root, pane_id),
         }
     }
 
@@ -108,18 +116,22 @@ impl FoldersPage {
 
     pub(crate) fn set_library_view(&mut self, library_view: app_contract::preferences::LibraryView, cx: &mut Context<Self>) {
         self.hierarchy.set_library_view(library_view, cx);
+        for split in self.splits.pages() {
+            split.update(cx, |page, cx| page.set_library_view(library_view, cx));
+        }
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let folder_id = self.folder_id();
+        let file_type = self.hierarchy.file_type();
         let generation = self.refresh_request.begin();
-        let load = self.ui.load_folder(folder_id);
+        let load = self.ui.load_folder(folder_id, file_type);
         let load_destinations = self.ui.folder_destinations();
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             let destinations = load_destinations.await;
             let _ = page.update(cx, |page, cx| {
-                if !page.refresh_request.is_current(generation) || page.folder_id() != folder_id {
+                if !page.refresh_request.is_current(generation) || page.folder_id() != folder_id || page.hierarchy.file_type() != file_type {
                     return;
                 }
                 match result {
@@ -140,6 +152,45 @@ impl FoldersPage {
             });
         });
         self.refresh_request.install(task);
+        for split in self.splits.pages() {
+            split.update(cx, |page, cx| page.refresh(cx));
+        }
+    }
+
+    fn request_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(root) = self.splits.root() {
+            let _ = root.update(cx, |root, cx| root.add_split(window, cx));
+            return;
+        }
+        self.add_split(window, cx);
+    }
+
+    fn add_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane_id = self.splits.next_pane_id();
+        let ui = self.ui.clone();
+        let root = cx.entity().downgrade();
+        let split_page = cx.new(|cx| Self::new_pane(ui, Vec::new(), Some(root), pane_id, window, cx));
+        let subscription = cx.subscribe(&split_page, |page: &mut Self, _, event: &FoldersPageEvent, cx| {
+            if matches!(event, FoldersPageEvent::ContentsChanged) {
+                page.refresh(cx);
+            }
+        });
+        split_page.update(cx, |page, cx| page.refresh(cx));
+        self.splits.push(pane_id, split_page, vec![subscription]);
+        cx.notify();
+    }
+
+    fn request_close_split(&self, cx: &mut Context<Self>) {
+        let Some(root) = self.splits.root() else { return };
+        let pane_id = self.splits.pane_id();
+        let _ = root.update(cx, |root, cx| root.close_split(pane_id, cx));
+    }
+
+    fn close_split(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        if !self.splits.close(pane_id) {
+            return;
+        }
+        cx.notify();
     }
 
     /// Searches every book beneath this folder, debounced, and drops answers a
@@ -152,12 +203,13 @@ impl FoldersPage {
         }
         let generation = self.hierarchy.begin_search();
         let folder_id = self.folder_id();
+        let file_type = self.hierarchy.file_type();
         let ui = self.ui.clone();
         let debounce = std::time::Duration::from_millis(u64::from(ui.contracts().browsing_content.search_debounce_ms));
         let timer = cx.background_executor().timer(debounce);
         let task = cx.spawn(async move |page, cx| {
             timer.await;
-            let result = ui.search_folder(folder_id, query).await;
+            let result = ui.search_folder(folder_id, query, file_type).await;
             let _ = page.update(cx, |page, cx| {
                 if !page.hierarchy.is_current_search(generation) {
                     return;
@@ -179,6 +231,12 @@ impl FoldersPage {
 
     pub(crate) fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.hierarchy.focus_search(window, cx);
+    }
+
+    fn set_file_type(&mut self, file_type: epub_svelte_lib::library::LibraryFileTypeFilter, cx: &mut Context<Self>) {
+        if self.hierarchy.set_file_type(file_type, cx) {
+            self.refresh(cx);
+        }
     }
 
     fn choose_book_to_add(&mut self, cx: &mut Context<Self>) {
@@ -232,7 +290,7 @@ impl FoldersPage {
         let on_action = Rc::new(move |action, cx: &mut App| {
             page.update(cx, |page, cx| page.handle_book_action(source_id, action, cx));
         });
-        self.hierarchy.set_book_management(Some(BookManagement { on_action }), cx);
+        self.hierarchy.set_book_management(Some(BookManagement { on_action, source_id }), cx);
     }
 
     fn handle_book_action(&mut self, source_id: DirId, action: BookManagementAction, cx: &mut Context<Self>) {
@@ -262,7 +320,10 @@ impl FoldersPage {
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
-                Ok(()) => page.refresh(cx),
+                Ok(()) => {
+                    page.refresh(cx);
+                    cx.emit(FoldersPageEvent::ContentsChanged);
+                }
                 Err(error) => page.hierarchy.set_error(format!("Could not {action}: {error}"), cx),
             });
         })
@@ -491,8 +552,75 @@ impl FoldersPage {
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
-                Ok(_) => page.refresh(cx),
+                Ok(_) => {
+                    page.refresh(cx);
+                    cx.emit(FoldersPageEvent::ContentsChanged);
+                }
                 Err(error) => page.hierarchy.set_error(format!("Could not move folder: {error}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    fn can_drop_into(&self, drag: &LibraryDrag, destination_id: DirId) -> bool {
+        match drag {
+            LibraryDrag::Book { source_id, .. } => *source_id != destination_id,
+            LibraryDrag::Folder { source_parent_id, source_path, .. } => {
+                let Some(destination) = self.destinations.iter().find(|destination| destination.id == destination_id) else {
+                    return false;
+                };
+                FolderDestinationPolicy::MoveFolder { source_parent_id: source_parent_id.to_string(), source_path: source_path.clone() }.can_select(&destination.id.to_string(), &destination.path)
+            }
+        }
+    }
+
+    fn drop_into(&mut self, drag: LibraryDrag, destination_id: DirId, cx: &mut Context<Self>) {
+        if !self.can_drop_into(&drag, destination_id) {
+            return;
+        }
+        match drag {
+            LibraryDrag::Book { content_hash, source_id, .. } => {
+                let operation = self.ui.move_book_to_folder(content_hash, source_id, destination_id);
+                self.run_book_operation(async move { operation.await.map(|_| ()) }, "move book", cx);
+            }
+            LibraryDrag::Folder { folder_id, .. } => self.move_folder(folder_id, destination_id, cx),
+        }
+    }
+
+    fn can_import_external(&self, paths: &ExternalPaths) -> bool {
+        let extensions = &self.ui.contracts().browsing_content.import_extensions;
+        !paths.paths().is_empty()
+            && paths.paths().iter().all(|path| path.is_file() && path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extensions.iter().any(|supported| supported.eq_ignore_ascii_case(extension))))
+    }
+
+    fn import_external(&mut self, paths: ExternalPaths, destination_id: DirId, cx: &mut Context<Self>) {
+        if !self.can_import_external(&paths) {
+            self.hierarchy.set_error("Only supported book files can be dropped into a folder", cx);
+            return;
+        }
+        let ui = self.ui.clone();
+        let paths = paths.paths().to_vec();
+        cx.spawn(async move |page, cx| {
+            let mut imported = 0usize;
+            let mut failures = Vec::new();
+            for path in paths {
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()).map(str::to_owned) else {
+                    failures.push(format!("{} has no valid file name", path.display()));
+                    continue;
+                };
+                match ui.import_book(destination_id, path, file_name.clone()).await {
+                    Ok(()) => imported += 1,
+                    Err(error) => failures.push(format!("{file_name}: {error}")),
+                }
+            }
+            let _ = page.update(cx, |page, cx| {
+                if imported > 0 {
+                    page.refresh(cx);
+                    cx.emit(FoldersPageEvent::ContentsChanged);
+                }
+                if !failures.is_empty() {
+                    page.hierarchy.set_error(format!("Could not import {}", failures.join("; ")), cx);
+                }
             });
         })
         .detach();
@@ -506,29 +634,16 @@ impl FoldersPage {
         self.open_folder_picker(FolderPickerOperation::MoveFolder { folder_id, source_parent_id: self.folder_id(), source_path }, cx);
     }
 
-    fn confirm_trash_folder(&self, folder: FolderCrumb, cx: &mut Context<Self>) {
-        let page = cx.entity();
-        self.ui.with_window(cx, move |window, cx| {
-            window.open_dialog(cx, move |dialog, _, _| {
-                let page = page.clone();
-                dialog
-                    .title(format!("Move “{}” to Trash?", folder.name))
-                    .child("The folder and its placements will be removed. Books with no other folder placement will also move to Trash.")
-                    .button_props(DialogButtonProps::default().ok_text("Move to Trash").show_cancel(true))
-                    .on_ok(move |_, _, cx| {
-                        page.update(cx, |page, cx| page.trash_folder(folder.id, cx));
-                        true
-                    })
-            });
-        });
-    }
-
     fn trash_folder(&mut self, folder_id: DirId, cx: &mut Context<Self>) {
+        log::info!("moving folder to trash: {folder_id}");
         let operation = self.ui.move_folder_to_trash(folder_id);
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
-                Ok(()) => page.refresh(cx),
+                Ok(()) => {
+                    page.refresh(cx);
+                    cx.emit(FoldersPageEvent::ContentsChanged);
+                }
                 Err(error) => page.hierarchy.set_error(format!("Could not move folder to Trash: {error}"), cx),
             });
         })
@@ -571,11 +686,11 @@ impl FoldersPage {
         .detach();
     }
 
-    fn render_download_action(folder: &FolderCrumb, page: Entity<Self>, download_label: String, cx: &mut Context<Self>) -> AnyElement {
+    fn render_download_action(folder: &FolderCrumb, page: Entity<Self>, download_label: String, show_completion: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let folder_id = folder.id;
         let downloaded = folder.hierarchy_downloaded_book_count();
-        let action = components::hierarchy_download_action(format!("download-folder-{folder_id}"), downloaded, folder.book_count, download_label, theme);
+        let action = components::hierarchy_download_action(format!("download-folder-{folder_id}"), downloaded, folder.book_count, download_label, show_completion, theme);
         if folder.book_count > 0 && downloaded >= folder.book_count {
             return action.into_any_element();
         }
@@ -592,39 +707,43 @@ impl FoldersPage {
     fn render_empty(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let contracts = self.ui.contracts();
-        let page = cx.entity();
-        let actions = components::browser_topbar_right().child(components::topbar_action_button("empty-add-book", contracts.library_actions.add_book_label.clone(), gpui_component::IconName::BookOpen, theme).on_click(move |_, _, cx| {
-            page.update(cx, |page, cx| page.choose_book_to_add(cx));
-        }));
-        let (title, description) = if self.hierarchy.path().is_empty() {
-            (&contracts.browsing_states.empty_library_title, &contracts.browsing_states.empty_library_description)
+        let file_type = self.hierarchy.file_type();
+        let (title, description) = if file_type != epub_svelte_lib::library::LibraryFileTypeFilter::All {
+            let label = file_type.label().to_lowercase();
+            (format!("No {label} here"), format!("This folder and its subfolders contain no {label}."))
+        } else if self.hierarchy.path().is_empty() {
+            (contracts.browsing_states.empty_library_title.clone(), contracts.browsing_states.empty_library_description.clone())
         } else {
-            (&contracts.browsing_states.empty_folder_title, &contracts.browsing_states.empty_folder_description)
+            (contracts.browsing_states.empty_folder_title.clone(), contracts.browsing_states.empty_folder_description.clone())
         };
-        components::browser_actionable_empty(title.clone(), description.clone(), actions, theme).into_any_element()
+        components::browser_actionable_empty(title, description, components::browser_topbar_right(), theme).into_any_element()
     }
 
     fn header_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = components::browser_theme(cx);
-        let actions = self.ui.contracts().library_actions.clone();
-        let add_page = cx.entity();
-        let folder_page = add_page.clone();
-        components::browser_topbar_right()
-            .child(components::topbar_icon_action_button("add-book", actions.add_book_label, gpui_component::IconName::BookOpen, theme).on_click(move |_, _, cx| {
-                add_page.update(cx, |page, cx| page.choose_book_to_add(cx));
-            }))
-            .child(components::topbar_icon_action_button("new-folder", actions.new_folder_label, gpui_component::IconName::Plus, theme).on_click(move |_, _, cx| {
-                folder_page.update(cx, |page, cx| page.show_new_folder_dialog(cx));
-            }))
+        let page = cx.entity();
+        self.splits.actions("folder", page, |page, window, cx| page.update(cx, |page, cx| page.request_split(window, cx)), |page, cx| page.update(cx, |page, cx| page.request_close_split(cx)), cx)
     }
 }
 
 impl Render for FoldersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = components::browser_theme(cx);
         let empty = self.render_empty(cx);
-        let actions = self.header_actions(cx);
+        let breadcrumb_actions = self.header_actions(cx);
+        let selected_file_type = self.hierarchy.file_type();
+        let filter_page = cx.entity();
+        let file_type_control = components::catalog_dropdown_button("folder-file-type", selected_file_type.label(), false, false, theme).h(gpui::px(components::TOPBAR_ACTION_HEIGHT)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+            epub_svelte_lib::library::LibraryFileTypeFilter::ALL.into_iter().fold(menu, |menu, file_type| {
+                let page = filter_page.clone();
+                menu.item(PopupMenuItem::new(file_type.label()).checked(file_type == selected_file_type).on_click(move |_, _, cx| {
+                    page.update(cx, |page, cx| page.set_file_type(file_type, cx));
+                }))
+            })
+        });
+        let control_actions = components::browser_topbar_right().child(file_type_control);
         let folder_actions = self.ui.contracts().library_actions.clone();
-        let child_action = Rc::new(move |folder: &FolderCrumb, page: Entity<Self>, cx: &mut Context<Self>| Self::render_download_action(folder, page, folder_actions.download_folder_label.clone(), cx));
+        let show_download_completion = self.ui.sync_server_connected();
+        let child_action = Rc::new(move |folder: &FolderCrumb, page: Entity<Self>, cx: &mut Context<Self>| Self::render_download_action(folder, page, folder_actions.download_folder_label.clone(), show_download_completion, cx));
         let child_menu = Rc::new(move |menu: PopupMenu, folder: FolderCrumb, page: Entity<Self>, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
             let folder_id = folder.id;
             let downloaded = folder.hierarchy_downloaded_book_count();
@@ -648,31 +767,91 @@ impl Render for FoldersPage {
             menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| rename_page.update(cx, |page, cx| page.start_inline_rename(rename_folder.clone(), window, cx))))
                 .item(PopupMenuItem::new("Move to folder…").on_click(move |_, _, cx| move_page.update(cx, |page, cx| page.show_move_folder_picker(folder.id, cx))))
                 .separator()
-                .item(PopupMenuItem::new("Move to Trash").on_click(move |_, _, cx| trash_page.update(cx, |page, cx| page.confirm_trash_folder(trash_folder.clone(), cx))))
+                .item(PopupMenuItem::new("Move to Trash").on_click(move |_, _, cx| trash_page.update(cx, |page, cx| page.trash_folder(trash_folder.id, cx))))
         });
         let rename_editor = self.rename_editor.as_ref().map(|editor| (editor.folder_id, editor.input.clone()));
         let child_override = Rc::new(move |folder: &FolderCrumb, page: Entity<Self>, width: f32, cx: &mut Context<Self>| {
             let (folder_id, input) = rename_editor.as_ref()?;
             (*folder_id == folder.id).then(|| Self::render_inline_rename(*folder_id, input.clone(), width, page, cx))
         });
+        let source_parent_id = self.folder_id();
+        let paths = self.destinations.iter().map(|destination| (destination.id, destination.path.clone())).collect::<std::collections::HashMap<_, _>>();
+        let child_drag = Rc::new(move |folder: &FolderCrumb| LibraryDrag::Folder { folder_id: folder.id, source_parent_id, source_path: paths.get(&folder.id).cloned().unwrap_or_else(|| folder.name.clone()), name: folder.name.clone() });
+        let child_can_drop = Rc::new(move |folder: &FolderCrumb, drag: &LibraryDrag, page: Entity<Self>, cx: &mut App| page.read(cx).can_drop_into(drag, folder.id));
+        let child_drop = Rc::new(move |folder: &FolderCrumb, drag: &LibraryDrag, page: Entity<Self>, cx: &mut App| {
+            let destination_id = folder.id;
+            let drag = drag.clone();
+            page.update(cx, |page, cx| page.drop_into(drag, destination_id, cx));
+        });
         let hierarchy = self.hierarchy.render(
             "Library",
+            app_contract::LibraryFeature::Folders.icon(),
             "folder-button",
             "folder-books",
             self.ui.contracts().browsing_states.retry_label.clone().into(),
             self.ui.contracts().browsing_states.searching_label.clone().into(),
-            actions,
+            breadcrumb_actions,
+            control_actions,
             empty,
             cx.entity(),
             |page, path, window, cx| page.set_path(path, window, cx),
+            |page, sort, cx| page.hierarchy.set_sort(sort, cx),
             |page, cx| page.refresh(cx),
             Some(child_action),
             Some(child_menu),
             Some(child_override),
+            true,
+            None,
+            None,
+            Some(child_drag),
+            Some(child_can_drop),
+            Some(child_drop),
             window,
             cx,
         );
         let picker = self.render_folder_picker(cx);
-        components::hierarchy_page_host(hierarchy).children(picker)
+        let menu_page = cx.entity();
+        let can_drop_page = menu_page.clone();
+        let drop_page = menu_page.clone();
+        let external_drop_page = menu_page.clone();
+        let destination_id = self.folder_id();
+        let labels = self.ui.contracts().library_actions.clone();
+        let is_secondary = self.splits.is_secondary();
+        // Keep the page menu on a background hitbox rather than wrapping the
+        // whole hierarchy. That lets book and folder context menus remain the
+        // sole target when the pointer is over an item.
+        let background = div()
+            .absolute()
+            .size_full()
+            .can_drop(move |value, _, cx| {
+                value.downcast_ref::<LibraryDrag>().is_some_and(|drag| can_drop_page.read(cx).can_drop_into(drag, destination_id))
+                    || value.downcast_ref::<ExternalPaths>().is_some_and(|paths| can_drop_page.read(cx).can_import_external(paths))
+            })
+            .drag_over::<LibraryDrag>(move |style, _, _, cx| style.bg(components::browser_theme(cx).accent_soft))
+            .drag_over::<ExternalPaths>(move |style, _, _, cx| style.bg(components::browser_theme(cx).accent_soft))
+            .on_drop(move |drag: &LibraryDrag, _, cx| {
+                let drag = drag.clone();
+                drop_page.update(cx, |page, cx| page.drop_into(drag, destination_id, cx));
+            })
+            .on_drop(move |paths: &ExternalPaths, _, cx| {
+                let paths = paths.clone();
+                external_drop_page.update(cx, |page, cx| page.import_external(paths, destination_id, cx));
+            });
+        let background_menu = background.context_menu(move |menu, _, _| {
+            let add_page = menu_page.clone();
+            let folder_page = menu_page.clone();
+            let mut menu = menu
+                .item(PopupMenuItem::new(labels.add_book_label.clone()).on_click(move |_, _, cx| add_page.update(cx, |page, cx| page.choose_book_to_add(cx))))
+                .item(PopupMenuItem::new(labels.new_folder_label.clone()).on_click(move |_, _, cx| folder_page.update(cx, |page, cx| page.show_new_folder_dialog(cx))));
+            let split_page = menu_page.clone();
+            menu = menu.separator().item(PopupMenuItem::new("Add split").on_click(move |_, window, cx| split_page.update(cx, |page, cx| page.request_split(window, cx))));
+            if is_secondary {
+                let close_page = menu_page.clone();
+                menu = menu.item(PopupMenuItem::new("Close this split").on_click(move |_, _, cx| close_page.update(cx, |page, cx| page.request_close_split(cx))));
+            }
+            menu
+        });
+        let pane = components::hierarchy_page_host(background_menu).child(hierarchy).children(picker);
+        self.splits.render(pane.into_any_element(), window, cx)
     }
 }

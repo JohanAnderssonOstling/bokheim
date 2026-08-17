@@ -7,7 +7,7 @@
 //! selected-library root observes only availability-policy changes.
 
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, TransferPreferencePatch, TransferPreferences};
-use gpui::{px, App, Context, EventEmitter, SharedString};
+use gpui::{App, Context, EventEmitter, SharedString, px};
 use gpui_component::{Theme, ThemeTokens};
 
 use crate::services::AppServices;
@@ -195,10 +195,13 @@ pub(crate) fn apply_browsing_appearance(preferences: BrowsingPreferences, cx: &m
     colors.sidebar_primary_foreground = raised;
     colors.title_bar = surface;
     colors.title_bar_border = border;
-    colors.danger = danger_bg;
-    colors.danger_foreground = danger;
-    colors.warning = warning_bg;
-    colors.warning_foreground = warning;
+    // gpui-component treats the semantic colour itself as the readable
+    // foreground for alerts and derives a soft background from it.  The old
+    // assignment inverted these roles, rendering the pale tint as alert text.
+    colors.danger = danger;
+    colors.danger_foreground = danger_bg;
+    colors.warning = warning;
+    colors.warning_foreground = warning_bg;
     colors.ring = accent;
     application_theme.tokens = ThemeTokens::from(application_theme.colors);
     cx.refresh_windows();

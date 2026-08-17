@@ -124,6 +124,15 @@ impl LibraryHost {
         }
     }
 
+    /// Dismisses a transient book detail before application-level navigation
+    /// decides whether the destination route itself changed.
+    pub(crate) fn dismiss_detail(&mut self, cx: &mut Context<Self>) -> bool {
+        match &self.hosted {
+            HostedLibrary::Active { root, .. } => root.clone().update(cx, |root, cx| root.dismiss_detail(cx)),
+            HostedLibrary::Empty => false,
+        }
+    }
+
     /// Selects the backend library, publishes the passive state and replaces
     /// the library-scoped UI as one controller operation.
     pub(crate) fn activate_library(&mut self, library_id: LibraryId, window: &mut Window, cx: &mut Context<Self>) -> Result<bool, String> {

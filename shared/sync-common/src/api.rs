@@ -165,8 +165,8 @@ mod tests {
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let encoded = crate::wire::encode(value).unwrap();
-        crate::wire::decode(&encoded, crate::wire::MAX_DECODED_REQUEST_BYTES).unwrap()
+        let encoded = crate::transport::encode(value).unwrap();
+        crate::transport::decode(&encoded, crate::transport::MAX_DECODED_REQUEST_BYTES).unwrap()
     }
 
     fn hash(character: char) -> ContentHash {
@@ -206,8 +206,8 @@ mod tests {
         let request = assets::ThumbnailBatchUploadRequest { thumbnails: vec![thumbnail.clone()] };
         assert_eq!(round_trip(&request), request);
         let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail], missing: vec![hash('e')] };
-        let encoded = crate::wire::encode(&response).unwrap();
-        assert_eq!(crate::wire::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).unwrap(), response);
+        let encoded = crate::transport::encode(&response).unwrap();
+        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).unwrap(), response);
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
     fn notification_contract_is_granular_without_carrying_state() {
         let message = notifications::NotificationMessage::LibraryChanged { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap() };
         assert_eq!(round_trip(&message), message);
-        let expected: Vec<u8> = crate::wire::header_bytes().into_iter().chain([0x02]).collect();
-        assert_eq!(crate::wire::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap(), expected);
+        let encoded = crate::transport::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap();
+        assert_eq!(crate::transport::decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::CatalogueChanged);
     }
 }

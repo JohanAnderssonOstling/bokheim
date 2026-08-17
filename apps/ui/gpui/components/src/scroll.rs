@@ -68,6 +68,11 @@ pub trait ScrollableElement: InteractiveElement + Styled + ParentElement + Eleme
         Scrollable::new(self, ScrollbarAxis::Vertical)
     }
 
+    /// Adds vertical scrolling without drawing a bar inside the surface.
+    fn overflow_y_scroll_hidden(self) -> Scrollable<Self> {
+        Scrollable::hidden(self, ScrollbarAxis::Vertical)
+    }
+
     /// Adds a vertical scrollbar with a stable identity supplied by the
     /// caller. This is useful for repeated scroll surfaces rendered from the
     /// same source location, such as the columns in a folder picker.
@@ -82,6 +87,7 @@ pub struct Scrollable<E: InteractiveElement + Styled + ParentElement + Element> 
     id: ElementId,
     element: E,
     axis: ScrollbarAxis,
+    show_scrollbar: bool,
 }
 
 impl<E> Scrollable<E>
@@ -90,11 +96,16 @@ where
 {
     #[track_caller]
     fn new(element: E, axis: ScrollbarAxis) -> Self {
-        Self { id: ElementId::CodeLocation(*Location::caller()), element, axis }
+        Self { id: ElementId::CodeLocation(*Location::caller()), element, axis, show_scrollbar: true }
+    }
+
+    #[track_caller]
+    fn hidden(element: E, axis: ScrollbarAxis) -> Self {
+        Self { id: ElementId::CodeLocation(*Location::caller()), element, axis, show_scrollbar: false }
     }
 
     fn with_id(element: E, axis: ScrollbarAxis, id: ElementId) -> Self {
-        Self { id, element, axis }
+        Self { id, element, axis, show_scrollbar: true }
     }
 }
 
@@ -151,7 +162,8 @@ where
             })
             .child(content);
 
-        div().id(self.id.clone()).size_full().refine_style(&root_style).relative().on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).child(Scrollbar::new(&scroll_handle).id((self.id, "scrollbar")).axis(self.axis))
+        let scrollbar = self.show_scrollbar.then(|| Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(self.axis));
+        div().id(self.id).size_full().refine_style(&root_style).relative().on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
     }
 }
 
@@ -239,7 +251,6 @@ impl RenderOnce for SizedVirtualList {
 pub fn sized_virtual_list(list: gpui_component::VirtualList) -> SizedVirtualList {
     SizedVirtualList::new(list)
 }
-
 
 impl ScrollableElement for Div {}
 impl<E> ScrollableElement for Stateful<E>

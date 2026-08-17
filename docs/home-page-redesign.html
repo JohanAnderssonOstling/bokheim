@@ -1,0 +1,415 @@
+<title>Bokheim — Home page redesign directions</title>
+<style>
+  :root {
+    --bg: #efece2;
+    --surface: #fdfbf3;
+    --sunk: #e7e3d6;
+    --text: #1d2723;
+    --dim: #4a5852;
+    --faint: #7d8a83;
+    --line: #ddd7c6;
+    --soft: #e6e1d2;
+    --accent: #2f6a52;
+    --accent-ink: #fff;
+    --warn: #b0801f;
+    --bad: #a2402f;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+      --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+      --warn: #cfa53f; --bad: #d0705c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+    --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+    --warn: #cfa53f; --bad: #d0705c;
+  }
+  :root[data-theme="light"] {
+    --bg: #efece2; --surface: #fdfbf3; --sunk: #e7e3d6; --text: #1d2723; --dim: #4a5852;
+    --faint: #7d8a83; --line: #ddd7c6; --soft: #e6e1d2; --accent: #2f6a52; --accent-ink: #fff;
+    --warn: #b0801f; --bad: #a2402f;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 0.9375rem; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 62rem; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1rem, 3vw, 2rem) 4rem; display: flex; flex-direction: column; gap: 2.25rem; }
+
+  h1 { font-family: var(--serif); font-size: 1.75rem; font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+  h2 { font-family: var(--serif); font-size: 1.1875rem; font-weight: 600; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+  p { max-width: 74ch; }
+  code { font-family: var(--mono); font-size: 0.84em; color: var(--dim); }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header { display: flex; flex-direction: column; gap: 0.5rem; }
+  header .eyebrow { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint); }
+  header p { color: var(--dim); }
+  header .series { font-size: 0.8125rem; color: var(--faint); }
+
+  section { display: flex; flex-direction: column; gap: 0.9rem; }
+
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; background: var(--surface); border: 1px solid var(--line); }
+  th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; background: var(--sunk); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+  tbody th { font-weight: 650; white-space: nowrap; }
+  td.where { font-family: var(--mono); font-size: 0.76rem; color: var(--faint); white-space: nowrap; }
+  .defect { color: var(--bad); font-weight: 700; }
+  .mark { font-family: var(--mono); }
+  .mark.y { color: var(--accent); }
+  .mark.n { color: var(--faint); }
+  table.compare { min-width: 44rem; }
+  table.findings { min-width: 40rem; }
+
+  /* frame furniture — every mockup is one 1000×700 window at 55% */
+  .frame { border: 1px solid var(--line); background: var(--bg); display: grid; grid-template-columns: 3.3rem minmax(0, 1fr); }
+  .rail { background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 0.35rem; padding: 0.4rem 0; font-size: 0.55rem; color: var(--faint); text-align: center; }
+  .rail i { font-style: normal; font-size: 0.85rem; color: var(--dim); display: block; line-height: 1.1; }
+  .rail .on { color: var(--accent); font-weight: 700; }
+  .rail .on i { color: var(--accent); }
+  .rail .sp { flex: 1; }
+  .rail hr { border: 0; border-top: 1px solid var(--line); width: 60%; margin: 0.15rem 0; }
+  .stage { padding: 0.62rem; display: flex; flex-direction: column; gap: 0.62rem; height: 24.2rem; overflow: hidden; position: relative; }
+  .cut { position: absolute; left: 0; right: 0; bottom: 0; height: 1.6rem; background: linear-gradient(to bottom, transparent, var(--bg)); pointer-events: none; }
+  .cut::after { content: "fold — 700 px window"; position: absolute; right: 0.5rem; bottom: 0.1rem; font-family: var(--mono); font-size: 0.55rem; color: var(--faint); }
+
+  .secttl { font-size: 0.72rem; font-weight: 650; }
+  .secttl .n { font-family: var(--mono); font-weight: 400; color: var(--faint); font-size: 0.66rem; margin-left: 0.35rem; }
+  .secttl .more { float: right; font-size: 0.64rem; color: var(--accent); font-weight: 500; }
+  .gap-lg { height: 0.62rem; }
+
+  /* book cards: 200×320 at 55% ≈ 6.9rem × 11rem; drawn at 6.9rem wide */
+  .rowx { display: flex; gap: 0.97rem; }
+  .rowx.clip { overflow: hidden; }
+  .bk { width: 6.9rem; flex: none; display: flex; flex-direction: column; gap: 0.3rem; }
+  .bk .cv { width: 6.9rem; height: 11rem; background: linear-gradient(158deg, var(--sunk), var(--surface)); border: 1px solid var(--soft); position: relative; }
+  .bk .cv .tag { position: absolute; left: 0.25rem; bottom: 0.25rem; font-family: var(--mono); font-size: 0.45rem; background: var(--accent); color: var(--accent-ink); padding: 0 0.25rem; border-radius: 999px; }
+  .bk .t { font-size: 0.62rem; font-weight: 650; line-height: 1.25; height: 1.55rem; overflow: hidden; }
+  .bk .a { font-size: 0.56rem; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bk .pr { height: 0.2rem; background: var(--soft); }
+  .bk .pr span { display: block; height: 100%; background: var(--accent); }
+  .bk.sm { width: 4.6rem; }
+  .bk.sm .cv { width: 4.6rem; height: 7.35rem; }
+  .bk.sm .t { font-size: 0.55rem; height: 1.35rem; }
+  .bk.sm .a { font-size: 0.5rem; }
+  .peek { width: 2.2rem; flex: none; opacity: 0.4; }
+  .peek .cv { width: 2.2rem; }
+
+  /* hero */
+  .hero { display: grid; grid-template-columns: 5.4rem minmax(0, 1fr); gap: 0.7rem; background: var(--surface); border: 1px solid var(--line); padding: 0.6rem; }
+  .hero .cv { width: 5.4rem; height: 8.64rem; background: linear-gradient(158deg, var(--sunk), var(--bg)); border: 1px solid var(--soft); }
+  .hero .meta { display: flex; flex-direction: column; gap: 0.28rem; min-width: 0; }
+  .hero .kick { font-family: var(--mono); font-size: 0.55rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+  .hero h4 { font-family: var(--serif); font-size: 0.95rem; font-weight: 600; line-height: 1.15; }
+  .hero .by { font-size: 0.62rem; color: var(--dim); }
+  .hero .bar { height: 0.28rem; background: var(--soft); max-width: 20rem; }
+  .hero .bar span { display: block; height: 100%; background: var(--accent); }
+  .hero .st { font-size: 0.58rem; color: var(--faint); font-family: var(--mono); }
+  .hero .btns { display: flex; gap: 0.3rem; margin-top: 0.1rem; }
+  .btn { font-size: 0.6rem; padding: 0.2rem 0.55rem; border: 1px solid var(--line); background: var(--bg); color: var(--dim); }
+  .btn.pri { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+  /* C: feed rows */
+  .daybar { display: flex; align-items: baseline; gap: 0.5rem; font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+  .daybar .ln { flex: 1; height: 1px; background: var(--line); }
+  .feedrow { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) auto; gap: 0.55rem; align-items: center; background: var(--surface); border: 1px solid var(--line); padding: 0.35rem 0.45rem; }
+  .feedrow .cv { width: 3.4rem; height: 5.44rem; background: linear-gradient(158deg, var(--sunk), var(--bg)); border: 1px solid var(--soft); }
+  .feedrow .t { font-size: 0.68rem; font-weight: 650; }
+  .feedrow .a { font-size: 0.58rem; color: var(--faint); }
+  .feedrow .d { font-size: 0.58rem; color: var(--dim); margin-top: 0.2rem; line-height: 1.35; max-height: 2.4rem; overflow: hidden; }
+  .why { font-family: var(--mono); font-size: 0.52rem; padding: 0.05rem 0.3rem; border: 1px solid var(--line); color: var(--faint); white-space: nowrap; }
+  .why.read { color: var(--accent); border-color: var(--accent); }
+
+  /* D: panel */
+  .split { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); gap: 0.62rem; height: 100%; min-height: 0; }
+  .panel { background: var(--surface); border: 1px solid var(--line); padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .stat { display: flex; justify-content: space-between; font-size: 0.6rem; color: var(--dim); }
+  .stat b { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
+  .panel h5 { font-family: var(--mono); font-size: 0.55rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; }
+  .miniq { display: flex; gap: 0.3rem; align-items: center; font-size: 0.6rem; color: var(--dim); }
+  .miniq .sw { width: 1.1rem; height: 1.76rem; background: linear-gradient(158deg, var(--sunk), var(--bg)); border: 1px solid var(--soft); flex: none; }
+  .wrapgrid { display: flex; flex-wrap: wrap; gap: 0.6rem; align-content: flex-start; }
+
+  .dirs { display: flex; flex-direction: column; gap: 1.75rem; }
+  .dir { display: flex; flex-direction: column; gap: 0.5rem; }
+  .dir > .cap { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
+  .dir > .note { font-size: 0.8125rem; color: var(--dim); max-width: 74ch; }
+  .deskwrap { overflow-x: auto; }
+  .desk { min-width: 34.4rem; }
+
+  ol { padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.25rem; color: var(--dim); max-width: 74ch; }
+  .rec { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--surface); padding: 0.8rem 1rem; }
+  .rec p { margin-bottom: 0.5rem; }
+  ul.questions { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.875rem; color: var(--dim); }
+  ul.questions li { border-left: 2px solid var(--warn); padding-left: 0.7rem; }
+  ul.questions b { color: var(--text); }
+  footer { color: var(--faint); font-size: 0.78rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Bokheim · desktop gpui · library / home</div>
+    <h1>The landing page that never says where you left off</h1>
+    <p>Home is three horizontal carousels of identical 200×320 cards, drawn by <code>HomePage::render</code> into <code>home_page()</code>. It opens the app, and it is the only library page with no header, no counts and no state — while the one thing a reader almost always wants from it, <em>resume the book I was reading</em>, is a card indistinguishable from the nineteen beside it.</p>
+    <p class="series">Third in the series. Follows the <a href="#">hierarchy page redesign</a> (<code>docs/hierarchy-page-redesign.html</code>).</p>
+  </header>
+
+  <section>
+    <h2>Current</h2>
+    <div class="deskwrap"><div class="frame desk">
+      <nav class="rail">
+        <span class="on"><i>⌂</i>Home</span><span><i>▤</i>Folders</span><span><i>#</i>Subjects</span><span><i>✎</i>Authors</span><span><i>🗑</i>Trash</span>
+        <span class="sp"></span><hr><span><i>▦</i>Store</span><span><i>⇅</i>Sync</span><span><i>⚙</i>Settings</span>
+      </nav>
+      <div class="stage">
+        <div class="secttl">Recently read</div>
+        <div class="rowx clip">
+          <div class="bk"><div class="cv"></div><div class="t">Det stora kriget</div><div class="a">Peter Englund</div><div class="pr"><span style="width:38%"></span></div></div>
+          <div class="bk"><div class="cv"></div><div class="t">Seeing Like a State</div><div class="a">James C. Scott</div><div class="pr"><span style="width:12%"></span></div></div>
+          <div class="bk"><div class="cv"></div><div class="t">The Anatomy of Fascism</div><div class="a">Robert O. Paxton</div><div class="pr"><span style="width:71%"></span></div></div>
+          <div class="bk peek"><div class="cv"></div><div class="t">&nbsp;</div></div>
+        </div>
+        <div class="secttl">Finished</div>
+        <div class="rowx clip">
+          <div class="bk"><div class="cv"></div><div class="t">Kris i befolkningsfrågan</div><div class="a">Alva Myrdal</div><div class="pr"><span style="width:100%"></span></div></div>
+          <div class="bk"><div class="cv"></div><div class="t">The Dawn of Everything</div><div class="a">David Graeber</div><div class="pr"><span style="width:100%"></span></div></div>
+          <div class="bk"><div class="cv"></div><div class="t">Piranesi</div><div class="a">Susanna Clarke</div><div class="pr"><span style="width:100%"></span></div></div>
+          <div class="bk peek"><div class="cv"></div><div class="t">&nbsp;</div></div>
+        </div>
+        <div class="cut"></div>
+      </div>
+    </div></div>
+    <p>Three sections at 3 covers visible each, of up to 20; the third, <em>Recently added</em>, begins below the fold. The horizontal lists are <code>h_virtual_list</code> with no arrows, no scrollbar and no edge fade — the peeking fourth cover is the only hint they scroll.</p>
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+    <div class="scroll">
+      <table class="findings">
+        <thead><tr><th>What</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><td><span class="defect">Defect.</span> One <code>LIMIT 20</code> feeds two sections. <code>install</code> fetches 20 recently-read rows and splits them by the 98&nbsp;% threshold, so a reader who just finished twenty books gets an empty <em>Recently read</em> — the section the page exists for. The sections need independent limits, or independent queries.</td><td class="where">home.rs:72–89<br>book_access.sql:3</td></tr>
+          <tr><td><span class="defect">Defect.</span> Section title and its carousel are separated by <code>SPACE_LG</code>, and sections from each other by <code>SPACE_LG</code> — the same 18&nbsp;px. Nothing binds a heading to the row it names except order.</td><td class="where">library.rs:100–106</td></tr>
+          <tr><td>Every <em>Finished</em> card carries a 100&nbsp;% progress bar. The section heading already said it; the bar is the same ink on every card, carrying no difference.</td><td class="where">home.rs:34–36<br>book_card.rs:283</td></tr>
+          <tr><td>Resume is not privileged. The book you had open five minutes ago is the leftmost of twenty identical cards, and needs the same click as any other.</td><td class="where">home.rs:99–108</td></tr>
+          <tr><td>Empty sections are skipped silently, so the page's shape depends on data: a fresh library shows one row, an old one three, and neither states which is which.</td><td class="where">home.rs:100–102</td></tr>
+          <tr><td>Home is alone in having no header row — no title, no book count, no search, no scan or sync state. Every other library page carries a breadcrumb and a search box.</td><td class="where">home.rs:97<br>hierarchy.rs</td></tr>
+          <tr><td>Carousels have no keyboard or pointer affordance: no arrows, no visible scrollbar, no page-by-row keys. On a mouse without horizontal wheel, cards 4–20 are unreachable.</td><td class="where">book_grid.rs:104–109</td></tr>
+          <tr><td>Home's grids get no <code>BookManagement</code>, so right-click does nothing here while it opens a menu on Folders, Subjects and Authors.</td><td class="where">book_grid.rs:42–44</td></tr>
+          <tr><td>Section titles are hard-coded English <code>SharedString</code>s, while the empty, loading and retry copy on the same page comes from <code>browsing_states</code>.</td><td class="where">home.rs:37</td></tr>
+          <tr><td>No timestamps reach the page. <code>reading_position.changed_at</code> and <code>book.added_at</code> both order the queries but neither is carried in <code>BookCardRow</code>, so Home cannot say "yesterday" or group by day.</td><td class="where">library.rs:59–73<br>book_access.sql:14,26</td></tr>
+          <tr><td><code>audiobook_duration_ms</code> and <code>audiobook_chapter_count</code> are selected, carried through the contract, and rendered by nothing anywhere in <code>apps/</code>. An audiobook on Home is a cover with a pill on it.</td><td class="where">library.rs:70–72</td></tr>
+          <tr><td>Vertical cost: 25&nbsp;px title + 18 + 430&nbsp;px row = 473&nbsp;px per section. A 700&nbsp;px window shows one section and a third of the next, whatever it holds.</td><td class="where">frontend.rs:23–25</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Directions</h2>
+    <p>All four assume the two defects above are fixed regardless of choice — independent limits per section, and the heading bound to its own body. They differ in what Home <em>is</em>: a shelf, a resume screen, a log, or a console.</p>
+    <div class="dirs">
+
+      <div class="dir">
+        <div class="cap">A · Resume hero, then rails</div>
+        <div class="deskwrap"><div class="frame desk">
+          <nav class="rail">
+            <span class="on"><i>⌂</i>Home</span><span><i>▤</i>Folders</span><span><i>#</i>Subjects</span><span><i>✎</i>Authors</span><span><i>🗑</i>Trash</span>
+            <span class="sp"></span><hr><span><i>▦</i>Store</span><span><i>⇅</i>Sync</span><span><i>⚙</i>Settings</span>
+          </nav>
+          <div class="stage">
+            <div class="hero">
+              <div class="cv"></div>
+              <div class="meta">
+                <div class="kick">Continue reading</div>
+                <h4>Det stora kriget</h4>
+                <div class="by">Peter Englund</div>
+                <div class="bar"><span style="width:38%"></span></div>
+                <div class="st">38 % · chapter 7 of 19 · last opened yesterday</div>
+                <div class="btns"><span class="btn pri">Continue</span><span class="btn">Details</span></div>
+              </div>
+            </div>
+            <div class="secttl">In progress <span class="n">7</span><span class="more">See all →</span></div>
+            <div class="rowx clip" style="margin-top:-0.28rem">
+              <div class="bk sm"><div class="cv"></div><div class="t">Seeing Like a State</div><div class="a">James C. Scott</div><div class="pr"><span style="width:12%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">The Anatomy of Fascism</div><div class="a">R. O. Paxton</div><div class="pr"><span style="width:71%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Bruksvallarna</div><div class="a">Kerstin Ekman</div><div class="pr"><span style="width:44%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Sapiens</div><div class="a">Y. N. Harari</div><div class="pr"><span style="width:9%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Middlemarch</div><div class="a">George Eliot</div><div class="pr"><span style="width:63%"></span></div></div>
+              <div class="bk sm peek"><div class="cv"></div><div class="t">&nbsp;</div></div>
+            </div>
+            <div class="secttl">Recently added <span class="n">20</span><span class="more">See all →</span></div>
+            <div class="rowx clip" style="margin-top:-0.28rem">
+              <div class="bk sm"><div class="cv"><span class="tag">AUDIO</span></div><div class="t">Röde Orm</div><div class="a">Frans G. Bengtsson</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">The Peripheral</div><div class="a">William Gibson</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Klara and the Sun</div><div class="a">Kazuo Ishiguro</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Vägen till Jerusalem</div><div class="a">Jan Guillou</div></div>
+              <div class="bk sm peek"><div class="cv"></div><div class="t">&nbsp;</div></div>
+            </div>
+            <div class="cut"></div>
+          </div>
+        </div></div>
+        <p class="note">One book gets the treatment it earns: cover, position, and a primary button, sized so the click target is the whole card. The rails below drop to 130&nbsp;px covers, which is what buys three sections above the fold instead of one and a half — and the smaller card is legitimate here, because the hero carries the reading you were doing and these are alternatives to it. <em>Finished</em> stops being a section: a finished book is not a thing you return to weekly, and it moves behind <em>See all</em> on the in-progress list. Progress bars appear only where progress is between 0 and 100.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">B · Shelves — no horizontal scroll anywhere</div>
+        <div class="deskwrap"><div class="frame desk">
+          <nav class="rail">
+            <span class="on"><i>⌂</i>Home</span><span><i>▤</i>Folders</span><span><i>#</i>Subjects</span><span><i>✎</i>Authors</span><span><i>🗑</i>Trash</span>
+            <span class="sp"></span><hr><span><i>▦</i>Store</span><span><i>⇅</i>Sync</span><span><i>⚙</i>Settings</span>
+          </nav>
+          <div class="stage">
+            <div class="secttl">Reading <span class="n">3 of 7</span><span class="more">Show all →</span></div>
+            <div class="wrapgrid" style="margin-top:-0.28rem">
+              <div class="bk sm"><div class="cv"></div><div class="t">Det stora kriget</div><div class="a">Peter Englund</div><div class="pr"><span style="width:38%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Seeing Like a State</div><div class="a">James C. Scott</div><div class="pr"><span style="width:12%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">The Anatomy of Fascism</div><div class="a">R. O. Paxton</div><div class="pr"><span style="width:71%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Bruksvallarna</div><div class="a">Kerstin Ekman</div><div class="pr"><span style="width:44%"></span></div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Sapiens</div><div class="a">Y. N. Harari</div><div class="pr"><span style="width:9%"></span></div></div>
+            </div>
+            <div class="secttl">Recently added <span class="n">5 of 20</span><span class="more">Show all →</span></div>
+            <div class="wrapgrid" style="margin-top:-0.28rem">
+              <div class="bk sm"><div class="cv"><span class="tag">AUDIO</span></div><div class="t">Röde Orm</div><div class="a">F. G. Bengtsson</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">The Peripheral</div><div class="a">William Gibson</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Klara and the Sun</div><div class="a">Kazuo Ishiguro</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Vägen till Jerusalem</div><div class="a">Jan Guillou</div></div>
+              <div class="bk sm"><div class="cv"></div><div class="t">Bomber Mafia</div><div class="a">M. Gladwell</div></div>
+            </div>
+            <div class="cut"></div>
+          </div>
+        </div></div>
+        <p class="note">The smallest change with the largest reach: each section becomes a wrapping row capped at one row's worth, filling however many columns the window gives, with the count stating what is hidden and <em>Show all</em> going to the page that already lists them. Nothing scrolls sideways, so the unreachable cards 4–20 problem disappears rather than being papered over with arrows. Resume is still just the first card — this direction improves reach, not intent.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">C · One dated feed</div>
+        <div class="deskwrap"><div class="frame desk">
+          <nav class="rail">
+            <span class="on"><i>⌂</i>Home</span><span><i>▤</i>Folders</span><span><i>#</i>Subjects</span><span><i>✎</i>Authors</span><span><i>🗑</i>Trash</span>
+            <span class="sp"></span><hr><span><i>▦</i>Store</span><span><i>⇅</i>Sync</span><span><i>⚙</i>Settings</span>
+          </nav>
+          <div class="stage" style="gap:0.45rem">
+            <div class="daybar"><span>Today</span><span class="ln"></span></div>
+            <div class="feedrow">
+              <div class="cv"></div>
+              <div><div class="t">Det stora kriget</div><div class="a">Peter Englund</div><div class="d">Ett krig sett inifrån, genom nitton människors ögon — dagböcker, brev och rapporter från fronterna 1914–1918.</div></div>
+              <div style="display:flex;flex-direction:column;gap:0.25rem;align-items:flex-end"><span class="why read">read · 38 %</span><span class="btn pri">Continue</span></div>
+            </div>
+            <div class="feedrow">
+              <div class="cv"></div>
+              <div><div class="t">Röde Orm</div><div class="a">Frans G. Bengtsson</div><div class="d">Audiobook · 18 h 42 m · 44 chapters. Imported from <code>/böcker/ljud</code>.</div></div>
+              <div><span class="why">added</span></div>
+            </div>
+            <div class="daybar"><span>Earlier this week</span><span class="ln"></span></div>
+            <div class="feedrow">
+              <div class="cv"></div>
+              <div><div class="t">The Anatomy of Fascism</div><div class="a">Robert O. Paxton</div><div class="d">A comparative account of fascism as a set of practices rather than a doctrine.</div></div>
+              <div style="display:flex;flex-direction:column;gap:0.25rem;align-items:flex-end"><span class="why read">read · 71 %</span><span class="btn">Continue</span></div>
+            </div>
+            <div class="cut"></div>
+          </div>
+        </div></div>
+        <p class="note">Reading and importing are both things that happened at a time, so they merge into one list ordered by that time, with a tag saying which. This is the only direction that uses the description, the audiobook duration and the chapter count — the three fields the payload already carries and nothing renders — and the only one that answers "what changed since I was last here". It needs the timestamps in <code>BookCardRow</code>, and it gives up cover-wall browsing entirely: four rows above the fold against B's ten covers.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">D · Console — reading rail beside the new arrivals</div>
+        <div class="deskwrap"><div class="frame desk">
+          <nav class="rail">
+            <span class="on"><i>⌂</i>Home</span><span><i>▤</i>Folders</span><span><i>#</i>Subjects</span><span><i>✎</i>Authors</span><span><i>🗑</i>Trash</span>
+            <span class="sp"></span><hr><span><i>▦</i>Store</span><span><i>⇅</i>Sync</span><span><i>⚙</i>Settings</span>
+          </nav>
+          <div class="stage">
+            <div class="split">
+              <div class="panel">
+                <div class="hero" style="grid-template-columns:3.4rem minmax(0,1fr);border:0;background:none;padding:0">
+                  <div class="cv" style="width:3.4rem;height:5.44rem"></div>
+                  <div class="meta"><div class="kick">Continue</div><h4 style="font-size:0.78rem">Det stora kriget</h4><div class="by" style="font-size:0.56rem">Peter Englund</div><div class="bar"><span style="width:38%"></span></div><div class="st" style="font-size:0.52rem">38 % · yesterday</div></div>
+                </div>
+                <h5>Also in progress</h5>
+                <div class="miniq"><span class="sw"></span><span>Seeing Like a State · 12 %</span></div>
+                <div class="miniq"><span class="sw"></span><span>The Anatomy of Fascism · 71 %</span></div>
+                <div class="miniq"><span class="sw"></span><span>Bruksvallarna · 44 %</span></div>
+                <div class="sp" style="flex:1"></div>
+                <h5>Library</h5>
+                <div class="stat"><span>Books</span><b>1 284</b></div>
+                <div class="stat"><span>Downloaded</span><b>318</b></div>
+                <div class="stat"><span>Sync</span><b style="color:var(--accent)">up to date</b></div>
+                <div class="stat"><span>Scan</span><b>idle · 2 h ago</b></div>
+              </div>
+              <div>
+                <div class="secttl">Recently added <span class="n">20</span></div>
+                <div class="gap-lg" style="height:0.35rem"></div>
+                <div class="wrapgrid">
+                  <div class="bk sm"><div class="cv"><span class="tag">AUDIO</span></div><div class="t">Röde Orm</div><div class="a">F. G. Bengtsson</div></div>
+                  <div class="bk sm"><div class="cv"></div><div class="t">The Peripheral</div><div class="a">William Gibson</div></div>
+                  <div class="bk sm"><div class="cv"></div><div class="t">Klara and the Sun</div><div class="a">Kazuo Ishiguro</div></div>
+                  <div class="bk sm"><div class="cv"></div><div class="t">Vägen till Jerusalem</div><div class="a">Jan Guillou</div></div>
+                  <div class="bk sm"><div class="cv"></div><div class="t">Bomber Mafia</div><div class="a">M. Gladwell</div></div>
+                  <div class="bk sm"><div class="cv"></div><div class="t">Piranesi</div><div class="a">Susanna Clarke</div></div>
+                </div>
+              </div>
+            </div>
+            <div class="cut"></div>
+          </div>
+        </div></div>
+        <p class="note">Reading state lives permanently in a fixed rail, so it never moves as the library grows, and the whole right side is one scrolling grid of what is new. It is the only direction that shows the library's own state — count, downloaded share, sync, last scan — which today is visible nowhere on the landing page even while a first scan is populating it. Costs: two new backend reads (<code>count_all_books</code> exists; a scan/sync status feed does not), and it entrenches a desktop-only layout that mobile cannot mirror.</p>
+      </div>
+
+    </div>
+
+    <div class="scroll">
+      <table class="compare">
+        <thead><tr><th>&nbsp;</th><th>A · Hero</th><th>B · Shelves</th><th>C · Feed</th><th>D · Console</th></tr></thead>
+        <tbody>
+          <tr><th>Resume is one click, unmistakably</th><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td></tr>
+          <tr><th>Every listed book reachable without horizontal scroll</th><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td></tr>
+          <tr><th>Uses description / audiobook fields already sent</th><td><span class="mark n">○</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td></tr>
+          <tr><th>Shows scan / sync / library state</th><td><span class="mark n">○</span></td><td><span class="mark n">○</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td></tr>
+          <tr><th>Ports to the mobile frontend as drawn</th><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td></tr>
+          <tr><th>Backend work</th><td>reading position + chapter label</td><td>none</td><td>timestamps, merged query</td><td>counts, scan/sync status</td></tr>
+          <tr><th>Books above the fold <small>(1000×700)</small></th><td>1 hero + ~10</td><td>~10</td><td>3–4</td><td>1 + 3 + ~6</td></tr>
+          <tr><th>Build cost</th><td>medium</td><td>low</td><td>medium</td><td>high</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>What I'd build</h2>
+    <div class="rec">
+      <p><strong>B's mechanics under A's shape.</strong> A answers the question Home is for and B fixes the thing that is actually broken about it; they are compatible, because A's rails can wrap instead of scrolling and lose nothing. Ship the split-limit fix first — it is a defect, not a redesign, and today it can empty the page's most important section outright.</p>
+      <ol>
+        <li>Query <em>in progress</em> and <em>finished</em> separately, each with its own limit, instead of splitting one <code>LIMIT 20</code> client-side.</li>
+        <li>Bind each heading to its own body: <code>SPACE_SM</code> inside a section, <code>SPACE_XL</code> between sections.</li>
+        <li>Promote the most recently read book to a hero with position, a chapter label and a primary <em>Continue</em>.</li>
+        <li>Turn the remaining carousels into wrapping rows capped at one row, with "<em>n</em> of <em>m</em>" and a link to the full list.</li>
+        <li>Drop <em>Finished</em> as a section; suppress the progress bar at 0 % and 100 %.</li>
+        <li>Move the section titles into <code>browsing_states</code> with the rest of the page's copy.</li>
+        <li>Give Home's grids the same <code>BookManagement</code> the other pages get, so right-click behaves the same everywhere.</li>
+      </ol>
+      <p style="margin-bottom:0">C is worth keeping on the shelf: it is the only design that pays for the description and audiobook fields, and if those are meant to stay in the payload, something should render them. D is a different application — a library console — and should be argued for on its own, not smuggled in as a home page.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Not answered from the code</h2>
+    <ul class="questions">
+      <li><b>Is there a resumable position to show?</b> <code>sync_state_version</code> keys reading positions per book, but <code>BookCardRow</code> carries only <code>progress</code>. A hero saying "chapter 7 of 19" needs the locator resolved to a chapter label — which the reader may already do on open, and I did not trace.</li>
+      <li><b>Should Home respect <code>LibraryView</code>?</b> <code>set_library_view</code> deliberately skips Home. Direction C is essentially the detailed row applied to Home, which reopens that decision.</li>
+      <li><b>Is <code>home_book_limit</code> = 20 per section or per page?</b> The contract has one number and the code spends it three ways; splitting the queries forces the question.</li>
+      <li><b>Does anything intend to consume <code>audiobook_duration_ms</code>?</b> Nothing in <code>apps/</code> reads it. Either C claims it or it should stop being selected.</li>
+    </ul>
+  </section>
+
+  <footer>Mockups are 1000×700 windows drawn at 55&nbsp;%, with the real 96&nbsp;px nav rail, 18&nbsp;px content padding and 200×320 covers. Titles are plausible; counts and timestamps invented. Reviewed 2026-08-12 against <code>apps/ui/gpui/browser/src/library/pages/home.rs</code>.</footer>
+
+</div>

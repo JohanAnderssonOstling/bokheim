@@ -3,8 +3,7 @@
 use epub_svelte_lib::library::{LibraryTrashView, TrashedBook, TrashedFolder};
 use gpui::prelude::*;
 use gpui::{Context, IntoElement, Render, SharedString, Window, div, px};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::{IconName, WindowExt};
+use gpui_component::IconName;
 use ui_components as components;
 
 use crate::library::services::{LatestRequest, LibraryContext};
@@ -89,42 +88,6 @@ impl TrashPage {
         .detach();
     }
 
-    fn confirm_purge_book(&self, book: TrashedBook, cx: &mut Context<Self>) {
-        let page = cx.entity();
-        self.ui.with_window(cx, move |window, cx| {
-            window.open_dialog(cx, move |dialog, _, _| {
-                let page = page.clone();
-                let book = book.clone();
-                dialog
-                    .title(format!("Delete “{}” permanently?", book.title))
-                    .child("The book file, metadata, reading data, and placements will be removed. This cannot be undone.")
-                    .button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true))
-                    .on_ok(move |_, _, cx| {
-                        page.update(cx, |page, cx| page.purge_book(book.clone(), cx));
-                        true
-                    })
-            });
-        });
-    }
-
-    fn confirm_purge_folder(&self, folder: TrashedFolder, cx: &mut Context<Self>) {
-        let page = cx.entity();
-        self.ui.with_window(cx, move |window, cx| {
-            window.open_dialog(cx, move |dialog, _, _| {
-                let page = page.clone();
-                let folder = folder.clone();
-                dialog
-                    .title(format!("Delete “{}” permanently?", folder.name))
-                    .child("The folder will be removed permanently. Its books will not be permanently deleted.")
-                    .button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true))
-                    .on_ok(move |_, _, cx| {
-                        page.update(cx, |page, cx| page.purge_folder(folder.clone(), cx));
-                        true
-                    })
-            });
-        });
-    }
-
     fn empty(&mut self, cx: &mut Context<Self>) {
         let operation = self.ui.empty_trash();
         cx.spawn(async move |page, cx| {
@@ -132,21 +95,6 @@ impl TrashPage {
             let _ = page.update(cx, |page, cx| page.finish(result, "empty Trash", cx));
         })
         .detach();
-    }
-
-    fn confirm_empty(&self, cx: &mut Context<Self>) {
-        let page = cx.entity();
-        self.ui.with_window(cx, move |window, cx| {
-            window.open_dialog(cx, move |dialog, _, _| {
-                let page = page.clone();
-                dialog.title("Empty Trash?").child("Books and folders in Trash will be deleted permanently. This cannot be undone.").button_props(DialogButtonProps::default().ok_text("Delete permanently").show_cancel(true)).on_ok(
-                    move |_, _, cx| {
-                        page.update(cx, |page, cx| page.empty(cx));
-                        true
-                    },
-                )
-            });
-        });
     }
 
     fn render_book(&self, book: &TrashedBook, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
@@ -164,7 +112,7 @@ impl TrashPage {
                     restore.update(cx, |page, cx| page.restore_book(restore_book.clone(), cx));
                 }))
                 .child(components::topbar_action_button(format!("purge-book-{}", book.content_hash), "Delete permanently", IconName::WindowClose, theme).on_click(move |_, _, cx| {
-                    purge.update(cx, |page, cx| page.confirm_purge_book(purge_book.clone(), cx));
+                    purge.update(cx, |page, cx| page.purge_book(purge_book.clone(), cx));
                 })),
             theme,
         )
@@ -185,7 +133,7 @@ impl TrashPage {
                     restore.update(cx, |page, cx| page.restore_folder(restore_folder.clone(), cx));
                 }))
                 .child(components::topbar_action_button(format!("purge-folder-{}", folder.id), "Delete permanently", IconName::WindowClose, theme).on_click(move |_, _, cx| {
-                    purge.update(cx, |page, cx| page.confirm_purge_folder(purge_folder.clone(), cx));
+                    purge.update(cx, |page, cx| page.purge_folder(purge_folder.clone(), cx));
                 })),
             theme,
         )
@@ -203,7 +151,7 @@ impl Render for TrashPage {
         let header =
             components::browser_topbar(theme).child(components::browser_topbar_left().child(div().text_xl().font_weight(gpui::FontWeight::SEMIBOLD).child("Trash"))).child(components::browser_topbar_right().when(!empty, |actions| {
                 actions.child(components::topbar_action_button("empty-trash", "Empty Trash", IconName::WindowClose, theme).on_click(move |_, _, cx| {
-                    page.update(cx, |page, cx| page.confirm_empty(cx));
+                    page.update(cx, |page, cx| page.empty(cx));
                 }))
             }));
         let mut body = components::browser_settings_page();

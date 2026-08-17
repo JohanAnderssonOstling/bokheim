@@ -26,7 +26,7 @@ fn unique_file_name(tx: &Transaction<'_>, destination: &DirId, content_hash: &Co
         return Ok(requested);
     }
     for number in 2.. {
-        let candidate = filenames::numbered_name(&requested, number);
+        let candidate = library_model::numbered_file_name(&requested, number);
         if available(&candidate) {
             return Ok(candidate);
         }
@@ -46,7 +46,11 @@ impl FsChange {
         match self {
             Self::None => {}
             Self::Created(path) => {
-                let _ = fs::remove_file(path);
+                if path.is_dir() {
+                    let _ = fs::remove_dir_all(path);
+                } else {
+                    let _ = fs::remove_file(path);
+                }
             }
             Self::Moved { from, to } => {
                 let _ = fs::rename(to, from);
@@ -104,7 +108,7 @@ fn unique_directory_name(tx: &Transaction<'_>, parent_id: &DirId, directory_id: 
         return Ok(requested.to_owned());
     }
     for number in 2.. {
-        let candidate = format!("{requested} {number}");
+        let candidate = library_model::numbered_folder_name(requested, number);
         if available(&candidate) {
             return Ok(candidate);
         }
@@ -413,6 +417,7 @@ impl LibraryBackend {
                 "book_subject_assignment_evidence",
                 "book_subject_assignment",
                 "book_subject",
+                "book_external_entity",
                 "external_metadata_attempt",
                 "book_collection",
                 "book_publication_date",
@@ -499,7 +504,6 @@ impl LibraryBackend {
         let mut conn = self.db.get()?;
         let tx = conn.transaction()?;
         let source = active_directory_path(&tx, &self.library_root, directory_id)?.ok_or("folder does not exist or is already in Trash")?;
-        require_managed_directory(&source, directory_id)?;
         let trash_root = self.library_root.join(crate::APP_HIDDEN_DIR).join("trash/folders");
         let trashed = trash_root.join(directory_id.to_string());
         if trashed.exists() {
@@ -534,8 +538,23 @@ impl LibraryBackend {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        fs::rename(&source, &trashed)?;
-        let mut changes = vec![FsChange::Moved { from: source, to: trashed.clone() }];
+        let directory_change = if source.exists() {
+            require_managed_directory(&source, directory_id)?;
+            fs::rename(&source, &trashed)?;
+            FsChange::Moved { from: source, to: trashed.clone() }
+        } else {
+            // A missing projection is local availability state, not deletion
+            // intent. The explicit Trash action must still be able to record
+            // that intent, so create an empty managed placeholder that keeps
+            // Restore reversible without pretending the missing files exist.
+            fs::create_dir(&trashed)?;
+            if let Err(error) = fs::write(trashed.join(".biblos_uuid"), directory_id.to_string()) {
+                let _ = fs::remove_dir_all(&trashed);
+                return Err(error.into());
+            }
+            FsChange::Created(trashed.clone())
+        };
+        let mut changes = vec![directory_change];
         let now = timestamp()?;
         tx.execute("UPDATE dir SET deleted_at=?2,purged_at=NULL,intent_lifecycle=1 WHERE id=?1", rusqlite::params![directory_id.to_string(), now])?;
         let mut orphaned = HashSet::new();
@@ -616,6 +635,19 @@ impl LibraryBackend {
         fs::rename(&trashed, &restored)?;
         let mut changes = vec![FsChange::Moved { from: trashed, to: restored.clone() }];
         tx.execute("UPDATE dir SET parent_id=?2,name=?3,intent_parent_id=?2,intent_name=?3,deleted_at=NULL,purged_at=NULL,intent_lifecycle=0 WHERE id=?1", rusqlite::params![directory_id.to_string(), parent_id.to_string(), chosen_name])?;
+        let subtree_ids = tx
+            .prepare(
+                "WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM dir WHERE id=?1
+                     UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id
+                 )
+                 SELECT id FROM subtree",
+            )?
+            .query_map([directory_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for subtree_id in subtree_ids {
+            db::materialize_dir_with_markers(&tx, &self.library_root, &subtree_id)?.ok_or("restored folder has no projected path")?;
+        }
         let mut statement = tx.prepare(
             "WITH RECURSIVE subtree(id,relative_path) AS (
                  SELECT id,'' FROM dir WHERE id=?1
@@ -753,5 +785,25 @@ mod tests {
         let trash = library.trash().unwrap();
         assert!(trash.folders.is_empty());
         assert!(trash.books.is_empty());
+    }
+
+    #[test]
+    fn missing_local_folder_can_still_be_moved_to_trash_and_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        let library = open_library(&root, &temp.path().join("app"));
+        let folder = library.create_directory(&sync_common::ROOT_DIR_ID, "Missing").unwrap();
+        let child = library.create_directory(&folder.id, "Child").unwrap();
+        fs::remove_dir_all(root.join("Missing")).unwrap();
+
+        library.move_directory_to_trash(&folder.id).unwrap();
+        let trash = library.trash().unwrap();
+        assert_eq!(trash.folders[0].id, folder.id);
+        let placeholder = root.join(crate::APP_HIDDEN_DIR).join("trash/folders").join(folder.id.to_string());
+        assert_eq!(fs::read_to_string(placeholder.join(".biblos_uuid")).unwrap(), folder.id.to_string());
+
+        assert_eq!(library.restore_directory(&folder.id, None).unwrap(), "Missing");
+        assert_eq!(fs::read_to_string(root.join("Missing/.biblos_uuid")).unwrap(), folder.id.to_string());
+        assert_eq!(fs::read_to_string(root.join("Missing/Child/.biblos_uuid")).unwrap(), child.id.to_string());
     }
 }

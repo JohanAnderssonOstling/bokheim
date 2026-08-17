@@ -9,6 +9,15 @@ function storageManager(): StorageManager | undefined {
   return (globalThis.navigator as Navigator | undefined)?.storage;
 }
 
+function unavailableStorageError(reason: unknown): boolean {
+  return reason instanceof DOMException && [
+    "SecurityError",
+    "NotAllowedError",
+    "NotSupportedError",
+    "InvalidStateError",
+  ].includes(reason.name);
+}
+
 async function publicationDirectory(libraryId: string, create: boolean): Promise<FileSystemDirectoryHandle | null> {
   const storage = storageManager();
   if (!storage?.getDirectory) return null;
@@ -18,6 +27,10 @@ async function publicationDirectory(libraryId: string, create: boolean): Promise
     return await publications.getDirectoryHandle(libraryId, { create });
   } catch (reason) {
     if (!create && reason instanceof DOMException && reason.name === "NotFoundError") return null;
+    // getDirectory() is exposed by some browsers even when the current origin
+    // (for example a LAN HTTP address) is not allowed to use OPFS. In that case
+    // callers use the SQLite BLOB fallback instead.
+    if (unavailableStorageError(reason)) return null;
     throw reason;
   }
 }
@@ -61,7 +74,7 @@ export async function removePublication(storageKey: string): Promise<void> {
   try {
     await directory.removeEntry(contentHash);
   } catch (reason) {
-    if (!(reason instanceof DOMException) || reason.name !== "NotFoundError") throw reason;
+    if ((!(reason instanceof DOMException) || reason.name !== "NotFoundError") && !unavailableStorageError(reason)) throw reason;
   }
 }
 
@@ -73,6 +86,6 @@ export async function removeLibraryPublications(libraryId: string): Promise<void
     const publications = await root.getDirectoryHandle(ROOT_DIRECTORY);
     await publications.removeEntry(libraryId, { recursive: true });
   } catch (reason) {
-    if (!(reason instanceof DOMException) || reason.name !== "NotFoundError") throw reason;
+    if ((!(reason instanceof DOMException) || reason.name !== "NotFoundError") && !unavailableStorageError(reason)) throw reason;
   }
 }

@@ -1,221 +1,198 @@
-//! Controlled subject taxonomies and deterministic metadata matching.
-//!
-//! Raw publication subjects remain bibliographic evidence. The values in this
-//! module are derived browse assignments and may be rebuilt at any time.
+//! Controlled subject projection built from source-system parsers and the
+//! editable SQLite taxonomy graph.
+
+mod bisac;
+mod ddc;
+mod fast;
+mod lcc;
+mod runtime;
 
 use crate::PublicationSubject;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub use bisac::{bisac_subject_system, match_bisac_subjects, SubjectAssignment, SubjectNode, SubjectSystem};
+pub use ddc::ddc_subject_path;
+pub use lcc::{canonical_lcc_notation, lcc_subject_path};
+pub use runtime::{
+    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code, unified_lcc_subject_paths, unified_subject_paths,
+    unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
+};
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
 pub const BISAC_MATCHER_VERSION: i64 = 2;
+pub const DDC_SYSTEM_ID: &str = "ddc";
+pub const DDC_VERSION: &str = "23-summary-en-2024-08-01";
+pub const DDC_MATCHER_VERSION: i64 = 2;
+pub const LCC_SYSTEM_ID: &str = "lcc";
+pub const LCC_VERSION: &str = "2024-outline-r2";
+pub const LCC_MATCHER_VERSION: i64 = 2;
+pub const UNIFIED_SYSTEM_ID: &str = "unified";
+pub const UNIFIED_VERSION: &str = "6";
+pub const UNIFIED_MATCHER_VERSION: i64 = 12;
+const GENERIC_HISTORY_CONCEPT_ID: &str = "bokheim:subject:history";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubjectNode {
-    path: String,
-    parent_path: Option<String>,
-    name: String,
-    code: Option<String>,
-    normalized_components: Vec<String>,
-}
-
-impl SubjectNode {
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    pub fn parent_path(&self) -> Option<&str> {
-        self.parent_path.as_deref()
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn code(&self) -> Option<&str> {
-        self.code.as_deref()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SubjectSystem {
-    id: &'static str,
-    version: &'static str,
-    nodes: Vec<SubjectNode>,
-    path_index: HashMap<String, usize>,
-    code_index: HashMap<String, usize>,
-}
-
-impl SubjectSystem {
-    pub fn id(&self) -> &'static str {
-        self.id
-    }
-
-    pub fn version(&self) -> &'static str {
-        self.version
-    }
-
-    pub fn nodes(&self) -> &[SubjectNode] {
-        &self.nodes
-    }
-
-    fn node_by_path(&self, path: &str) -> Option<&SubjectNode> {
-        self.path_index.get(&normalize_path(path)).map(|index| &self.nodes[*index])
-    }
-
-    fn node_by_code(&self, code: &str) -> Option<&SubjectNode> {
-        self.code_index.get(&code.trim().to_ascii_uppercase()).map(|index| &self.nodes[*index])
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubjectAssignment {
-    node_path: String,
+pub struct ProjectedSubjectAssignment {
+    system_id: String,
+    subject_path: String,
+    matcher_version: i64,
     evidence_positions: Vec<usize>,
 }
 
-impl SubjectAssignment {
-    pub fn node_path(&self) -> &str {
-        &self.node_path
+impl ProjectedSubjectAssignment {
+    pub fn system_id(&self) -> &str {
+        &self.system_id
     }
-
+    pub fn subject_path(&self) -> &str {
+        &self.subject_path
+    }
+    pub fn matcher_version(&self) -> i64 {
+        self.matcher_version
+    }
     pub fn evidence_positions(&self) -> &[usize] {
         &self.evidence_positions
     }
 }
 
-pub fn bisac_subject_system() -> &'static SubjectSystem {
-    static SYSTEM: OnceLock<SubjectSystem> = OnceLock::new();
-    SYSTEM.get_or_init(|| parse_bisac(include_str!("../data/bisac-2021.csv")))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedSubjectCode {
+    system_id: String,
+    code: String,
+    evidence_positions: Vec<usize>,
 }
 
-fn parse_bisac(csv: &str) -> SubjectSystem {
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(csv.as_bytes());
-    let mut nodes = BTreeMap::<String, SubjectNode>::new();
-    for record in reader.records() {
-        let record = record.expect("the embedded BISAC CSV must be valid");
-        let code = record.get(0).unwrap_or_default().trim();
-        let description = record.get(1).unwrap_or_default().trim();
-        if code.is_empty() || description.is_empty() {
-            continue;
-        }
-        let components = description.split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect::<Vec<_>>();
-        let mut path_components = Vec::new();
-        for (index, component) in components.iter().enumerate() {
-            path_components.push(component.clone());
-            let path = path_components.join(" / ");
-            let parent_path = (path_components.len() > 1).then(|| path_components[..path_components.len() - 1].join(" / "));
-            let final_code = (index + 1 == components.len()).then(|| code.to_owned());
-            nodes
-                .entry(path.clone())
-                .and_modify(|node| {
-                    if final_code.is_some() {
-                        node.code = final_code.clone();
-                    }
-                })
-                .or_insert_with(|| SubjectNode { path, parent_path, name: component.clone(), code: final_code, normalized_components: path_components.iter().map(|component| normalize_term(component)).collect() });
-        }
+impl ProjectedSubjectCode {
+    pub fn system_id(&self) -> &str {
+        &self.system_id
     }
-
-    let nodes = nodes.into_values().collect::<Vec<_>>();
-    let path_index = nodes.iter().enumerate().map(|(index, node)| (normalize_path(&node.path), index)).collect();
-    let code_index = nodes.iter().enumerate().filter_map(|(index, node)| node.code.as_ref().map(|code| (code.to_ascii_uppercase(), index))).collect();
-    SubjectSystem { id: BISAC_SYSTEM_ID, version: BISAC_VERSION, nodes, path_index, code_index }
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+    pub fn evidence_positions(&self) -> &[usize] {
+        &self.evidence_positions
+    }
 }
 
-/// Matches exact BISAC labels, explicit paths, and explicit BISAC codes.
-///
-/// A flattened path matches only when metadata supplies every component. A
-/// complete slash-delimited declaration supplies its own components. The
-/// result contains only the most-specific matches; `General` remains when its
-/// parent branch has no more-specific alternative.
-pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssignment> {
-    let system = bisac_subject_system();
-    let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
-    let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
-
+pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectAssignment> {
+    let mut projected = BTreeMap::<(String, String, i64), BTreeSet<usize>>::new();
+    for assignment in match_bisac_subjects(subjects) {
+        projected.entry((BISAC_SYSTEM_ID.to_owned(), assignment.node_path().to_owned(), BISAC_MATCHER_VERSION)).or_default().extend(assignment.evidence_positions());
+    }
     for (position, subject) in subjects.iter().enumerate() {
-        let authority = subject.authority().map(str::trim).filter(|authority| !authority.is_empty());
-        if authority.is_some_and(|authority| !authority.eq_ignore_ascii_case(BISAC_SYSTEM_ID)) {
-            // An explicitly declared vocabulary is authoritative. Preserve the
-            // raw metadata, but never reinterpret another system's labels as
-            // BISAC merely because some terms happen to be spelled alike.
-            continue;
-        }
-
-        let components = split_path(subject.name());
-        for component in &components {
-            component_evidence.entry(normalize_term(component)).or_default().insert(position);
-        }
-
-        if components.len() > 1 {
-            if let Some(node) = system.node_by_path(subject.name()) {
-                matches.entry(node.path.clone()).or_default().insert(position);
+        let Some((system_id, authority_label)) = external_subject_system(subject.authority()) else { continue };
+        let notation = subject.code().unwrap_or_else(|| subject.name());
+        let (subject_path, matcher_version) = match system_id {
+            DDC_SYSTEM_ID => (ddc_subject_path(notation).unwrap_or_else(|| format!("DDC / {}", compact_whitespace(notation))), DDC_MATCHER_VERSION),
+            LCC_SYSTEM_ID => (lcc_subject_path(notation).unwrap_or_else(|| format!("LCC / Unclassified / {}", compact_whitespace(notation))), LCC_MATCHER_VERSION),
+            _ => {
+                let components = subject.name().split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect::<Vec<_>>();
+                if components.is_empty() {
+                    continue;
+                }
+                (["LCC".to_owned(), authority_label.to_owned()].into_iter().chain(components).collect::<Vec<_>>().join(" / "), 1)
             }
-        }
+        };
+        projected.entry((system_id.to_owned(), subject_path, matcher_version)).or_default().insert(position);
+    }
+    projected.into_iter().map(|((system_id, subject_path, matcher_version), evidence)| ProjectedSubjectAssignment { system_id, subject_path, matcher_version, evidence_positions: evidence.into_iter().collect() }).collect()
+}
 
-        if authority.is_some_and(|authority| authority.eq_ignore_ascii_case(BISAC_SYSTEM_ID)) {
-            if let Some(node) = subject.code().and_then(|code| system.node_by_code(code)) {
-                matches.entry(node.path.clone()).or_default().insert(position);
+pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectCode> {
+    let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
+    let bisac = bisac_subject_system();
+    for assignment in match_bisac_subjects(subjects) {
+        let Some(code) = bisac.node_by_path(assignment.node_path()).and_then(SubjectNode::code) else { continue };
+        projected.entry((BISAC_SYSTEM_ID.to_owned(), code.to_owned())).or_default().extend(assignment.evidence_positions());
+    }
+    for (position, subject) in subjects.iter().enumerate() {
+        let Some((system_id, _)) = external_subject_system(subject.authority()) else { continue };
+        let raw = subject.code().unwrap_or_else(|| subject.name());
+        let code = match system_id {
+            DDC_SYSTEM_ID => ddc::canonical_ddc_notation(raw),
+            LCC_SYSTEM_ID => canonical_lcc_notation(raw),
+            _ => None,
+        };
+        if let Some(code) = code {
+            projected.entry((system_id.to_owned(), code)).or_default().insert(position);
+        }
+    }
+    projected.into_iter().map(|((system_id, code), evidence)| ProjectedSubjectCode { system_id, code, evidence_positions: evidence.into_iter().collect() }).collect()
+}
+
+pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectAssignment> {
+    let mut projected = BTreeMap::<String, BTreeSet<usize>>::new();
+    let runtime = runtime::current();
+    for classification in project_subject_codes(subjects) {
+        for concept_id in runtime::matching_concepts(&runtime, classification.system_id(), classification.code()) {
+            for path in runtime.paths_by_concept.get(&concept_id).cloned().unwrap_or_default() {
+                projected.entry(path).or_default().extend(classification.evidence_positions());
             }
         }
     }
-
-    for node in system.nodes() {
-        let mut evidence = BTreeSet::<usize>::new();
-        let all_components_match = node.normalized_components.iter().all(|component| {
-            if let Some(positions) = component_evidence.get(component) {
-                evidence.extend(positions.iter().copied());
-                true
-            } else {
-                false
+    for (position, subject) in subjects.iter().enumerate() {
+        let uncontrolled_dc = subject.source().trim().eq_ignore_ascii_case("dc:subject") && subject.authority().is_none() && subject.code().is_none();
+        for normalized in normalized_source_labels(subject) {
+            // Plain Dublin Core terms are uncontrolled keywords. Common labels
+            // such as a country or century occur throughout LCC and must not
+            // independently activate every concept carrying that caption.
+            if uncontrolled_dc && normalized != "history" {
+                continue;
             }
-        });
-        if all_components_match {
-            matches.entry(node.path.clone()).or_default().extend(evidence);
+            let Some(concepts) = runtime.source_labels.get(&normalized) else { continue };
+            let dc_generic_history = uncontrolled_dc && normalized == "history" && concepts.contains(GENERIC_HISTORY_CONCEPT_ID);
+            let concepts = concepts.iter().filter(|concept_id| !dc_generic_history || concept_id.as_str() == GENERIC_HISTORY_CONCEPT_ID);
+            for path in concepts.flat_map(|concept_id| runtime.paths_by_concept.get(concept_id).cloned().unwrap_or_default()) {
+                projected.entry(path).or_default().insert(position);
+            }
+        }
+        for path in fast::matching_hierarchy_paths(&runtime, subject) {
+            projected.entry(path).or_default().insert(position);
         }
     }
-
-    let candidate_paths = matches.keys().cloned().collect::<Vec<_>>();
-    matches
+    projected
         .into_iter()
-        .filter(|(path, _)| !has_matched_descendant(path, &candidate_paths))
-        .filter(|(path, _)| !general_has_specific_alternative(path, &candidate_paths, system))
-        .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
+        .map(|(subject_path, evidence)| ProjectedSubjectAssignment { system_id: UNIFIED_SYSTEM_ID.to_owned(), subject_path, matcher_version: UNIFIED_MATCHER_VERSION, evidence_positions: evidence.into_iter().collect() })
         .collect()
 }
 
-fn has_matched_descendant(path: &str, candidates: &[String]) -> bool {
-    let prefix = format!("{path} / ");
-    candidates.iter().any(|candidate| candidate.starts_with(&prefix))
+fn normalized_source_labels(subject: &PublicationSubject) -> BTreeSet<String> {
+    let mut labels = BTreeSet::from([runtime::normalize_source_label(subject.name())]);
+    let source = subject.source().trim().to_ascii_lowercase();
+    let authority = subject.authority().map(str::trim).unwrap_or_default().to_ascii_lowercase();
+    let delimiter = if source == "dc:subject" && authority.is_empty() && subject.code().is_none() {
+        Some(";")
+    } else if matches!(authority.as_str(), "lcgft" | "lc genre" | "lc_genre") || source.ends_with("/#lc_genre") {
+        Some(">")
+    } else {
+        None
+    };
+    if let Some(delimiter) = delimiter {
+        labels.extend(subject.name().split(delimiter).map(runtime::normalize_source_label).filter(|label| !label.is_empty()));
+    }
+    labels.retain(|label| !label.is_empty());
+    labels
 }
 
-fn general_has_specific_alternative(path: &str, candidates: &[String], system: &SubjectSystem) -> bool {
-    let Some(node) = system.node_by_path(path) else { return false };
-    if !node.name.eq_ignore_ascii_case("general") {
-        return false;
+fn external_subject_system(authority: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match authority?.trim().to_ascii_lowercase().as_str() {
+        "lcsh" => Some(("lcsh", "LCSH")),
+        "lcgft" => Some(("lcgft", "LCGFT")),
+        "lcc" => Some((LCC_SYSTEM_ID, "LCC")),
+        "ddc" => Some((DDC_SYSTEM_ID, "DDC")),
+        _ => None,
     }
-    let Some(parent) = node.parent_path() else { return false };
-    let prefix = format!("{parent} / ");
-    candidates.iter().any(|candidate| candidate != path && candidate.starts_with(&prefix))
 }
 
 fn split_path(value: &str) -> Vec<String> {
-    // EPUB metadata uses several equivalent hierarchy separators in practice.
-    // Normalizing only the separator keeps component matching exact.
-    let normalized = value.replace("::", "/").replace("--", "/").replace(['>', '|', '›', '→'], "/");
-    normalized.split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect()
+    value.replace("::", "/").replace("--", "/").replace(['>', '|', '›', '→'], "/").split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect()
 }
-
 fn normalize_path(value: &str) -> String {
     split_path(value).iter().map(|component| normalize_term(component)).collect::<Vec<_>>().join("/")
 }
-
 fn normalize_term(value: &str) -> String {
     compact_whitespace(value).to_lowercase()
 }
-
 fn compact_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -224,90 +201,23 @@ fn compact_whitespace(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn subject(name: &str) -> PublicationSubject {
-        PublicationSubject::new(None, name, "dc:subject", None, None).unwrap()
-    }
+    #[test]
+    fn plain_dc_history_maps_only_to_generic_humanities_history() {
+        let subjects = ["History", "United States", "20th Century"].into_iter().map(|name| PublicationSubject::new(None, name, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let paths = project_unified_subjects(&subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<BTreeSet<_>>();
 
-    fn paths(subjects: &[PublicationSubject]) -> Vec<String> {
-        match_bisac_subjects(subjects).into_iter().map(|assignment| assignment.node_path).collect()
+        assert!(paths.contains("Humanities / History"));
+        assert!(paths.contains("Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century"));
+        assert!(paths.iter().all(|path| path.starts_with("Humanities / History")));
     }
 
     #[test]
-    fn embedded_bisac_has_codes_and_virtual_parents() {
-        let system = bisac_subject_system();
-        assert_eq!(system.version(), "2021");
-        assert_eq!(system.node_by_code("HIS036060").unwrap().path(), "History / United States / 20th Century");
-        assert!(system.node_by_path("History / United States").unwrap().code().is_none());
-    }
+    fn fine_lcc_identifiers_are_recorded_independently_of_local_mapping_detail() {
+        let subject = PublicationSubject::new(None, "Regional law detail", "marc", Some("lcc".to_owned()), Some("kjcx 12.4 .a2".to_owned())).unwrap();
+        let codes = project_subject_codes(&[subject]);
 
-    #[test]
-    fn flattened_white_house_years_metadata_matches_specific_siblings() {
-        let subjects = [
-            "History",
-            "General",
-            "International Relations",
-            "Political",
-            "Personal Memoirs",
-            "Political Science",
-            "Biography & Autobiography",
-            "Biography",
-            "Historical",
-            "United States",
-            "20th Century",
-            "Presidents & Heads of State",
-            "Statesmen",
-        ]
-        .map(subject);
-        assert_eq!(
-            paths(&subjects),
-            vec![
-                "Biography & Autobiography / Historical",
-                "Biography & Autobiography / Personal Memoirs",
-                "Biography & Autobiography / Political",
-                "Biography & Autobiography / Presidents & Heads of State",
-                "History / United States / 20th Century",
-                "Political Science / International Relations / General",
-            ]
-        );
-    }
-
-    #[test]
-    fn general_is_retained_only_without_a_specific_alternative_in_its_branch() {
-        assert_eq!(paths(&[subject("History"), subject("General")]), vec!["History / General"]);
-        assert_eq!(paths(&[subject("History"), subject("General"), subject("United States")]), vec!["History / United States / General"]);
-        assert_eq!(paths(&[subject("History"), subject("General"), subject("United States"), subject("20th Century")]), vec!["History / United States / 20th Century"]);
-    }
-
-    #[test]
-    fn explicit_paths_and_codes_supply_the_hierarchy() {
-        assert_eq!(paths(&[subject("History / United States / 20th Century")]), vec!["History / United States / 20th Century"]);
-        assert_eq!(paths(&[subject("History -- United States -- 20th Century")]), vec!["History / United States / 20th Century"]);
-        assert_eq!(paths(&[subject("History > United States > 20th Century")]), vec!["History / United States / 20th Century"]);
-        let coded = PublicationSubject::new(None, "outdated display text", "dc:subject", Some("BISAC".to_owned()), Some("HIS036060".to_owned())).unwrap();
-        assert_eq!(paths(&[coded]), vec!["History / United States / 20th Century"]);
-    }
-
-    #[test]
-    fn explicit_authority_is_not_reinterpreted_as_bisac() {
-        let lcsh = PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("LCSH".to_owned()), None).unwrap();
-        assert!(paths(&[lcsh]).is_empty());
-
-        let bisac = PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("BISAC".to_owned()), None).unwrap();
-        assert_eq!(paths(&[bisac]), vec!["History / United States / 20th Century"]);
-    }
-
-    #[test]
-    fn matching_is_exact_after_case_and_whitespace_normalization() {
-        assert_eq!(paths(&[subject(" history "), subject(" united   states "), subject("20TH century")]), vec!["History / United States / 20th Century"]);
-        assert!(paths(&[subject("Hist")]).is_empty());
-    }
-
-    #[test]
-    fn parser_source_does_not_change_the_synchronized_subject_shape() {
-        let subject = PublicationSubject::new(None, "History", "se:subject", None, None).unwrap();
-        let encoded = wire::encode(&subject).unwrap();
-        let decoded: PublicationSubject = wire::decode(&encoded, 1024).unwrap();
-        assert_eq!(decoded.name(), "History");
-        assert_eq!(decoded.source(), "dc:subject", "remote metadata uses the standard fallback source");
+        assert_eq!(codes.len(), 1);
+        assert_eq!(codes[0].system_id(), LCC_SYSTEM_ID);
+        assert_eq!(codes[0].code(), "KJCX 12.4 .A2");
     }
 }

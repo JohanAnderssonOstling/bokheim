@@ -1,7 +1,8 @@
 import { authenticatedWebFetch, WIRE_MEDIA_TYPE } from "./account-client.ts";
 import { getWebDatabase } from "./database.ts";
-import { readPublication, storePublication } from "./publication-storage.ts";
-import { decodeBlobManifestResponse, encodeAccountRequest, hashPublication, inspectEpubPublication, normalizeSearchText } from "./wasm-core.ts";
+import { listWebLibraries } from "./library-database.ts";
+import { readPublication } from "./publication-storage.ts";
+import { decodeBlobManifestResponse, encodeAccountRequest } from "./wasm-core.ts";
 
 interface BlobManifestResponse {
   owned: string[];
@@ -75,93 +76,53 @@ async function uploadBook(libraryId: string, contentHash: string): Promise<void>
   }
 }
 
-async function updateDownloadedBookMetadata(libraryId: string, contentHash: string, bytes: Uint8Array): Promise<void> {
-  let metadata;
-  try {
-    metadata = await inspectEpubPublication(bytes);
-  } catch {
-    // A valid transfer should still be readable by Foliate even when the small
-    // metadata inspector cannot understand a particular EPUB package document.
-    return;
-  }
-  const title = metadata.title?.trim() || null;
-  const author = metadata.author?.trim() || null;
-  if (!title && !author && !metadata.cover?.byteLength) return;
-
-  const { db } = await getWebDatabase();
-  const row = db.exec({
-    sql: "SELECT author_id FROM books WHERE library_id=? AND content_hash=?",
-    bind: [libraryId, contentHash], rowMode: 0, returnValue: "resultRows",
-  });
-  const authorId = author ? String(row[0] || crypto.randomUUID()) : null;
-  const authorKey = author ? await normalizeSearchText(author) : null;
-  db.exec({
-    sql: `UPDATE books SET
-            title=COALESCE(?, title),
-            file_name=CASE WHEN ? IS NULL THEN file_name ELSE ? || '.epub' END,
-            author=COALESCE(?, author),
-            author_id=CASE WHEN ? IS NULL THEN author_id ELSE ? END,
-            author_key=CASE WHEN ? IS NULL THEN author_key ELSE ? END,
-            cover_bytes=COALESCE(?, cover_bytes)
-          WHERE library_id=? AND content_hash=?`,
-    bind: [title, title, title, author, author, authorId, author, authorKey, metadata.cover, libraryId, contentHash],
-  });
-  if (title) {
-    db.exec({
-      sql: "UPDATE book_placements SET file_name=? WHERE library_id=? AND content_hash=?",
-      bind: [`${title}.epub`, libraryId, contentHash],
-    });
-  }
-}
-
-export async function downloadWebBook(libraryId: string, contentHash: string): Promise<"Downloaded"> {
-  await transferState(libraryId, contentHash, "book", "download", "running");
-  try {
-    const response = await authenticatedWebFetch(`/api/libraries/${encodeURIComponent(libraryId)}/blobs/${contentHash}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (await hashPublication(bytes) !== contentHash) throw new Error("Downloaded EPUB did not match its content hash");
-    const stored = await storePublication(libraryId, contentHash, bytes);
-    const { db } = await getWebDatabase();
-    db.exec({
-      sql: "UPDATE books SET storage_key=?, bytes=? WHERE library_id=? AND content_hash=?",
-      bind: [stored.storageKey, stored.fallbackBytes, libraryId, contentHash],
-    });
-    await updateDownloadedBookMetadata(libraryId, contentHash, bytes);
-    await transferState(libraryId, contentHash, "book", "download", "completed");
-    return "Downloaded";
-  } catch (reason) {
-    await transferState(libraryId, contentHash, "book", "download", "failed", reason instanceof Error ? reason.message : String(reason));
-    throw reason;
-  }
-}
-
-async function synchronizeThumbnails(libraryId: string): Promise<void> {
+export async function synchronizeWebLibraryThumbnails(libraryId: string): Promise<void> {
   const { db } = await getWebDatabase();
   const rows = db.exec({
-    sql: "SELECT content_hash, cover_bytes, (storage_key IS NOT NULL OR bytes IS NOT NULL) FROM books WHERE library_id=?",
+    sql: `SELECT books.content_hash, books.cover_bytes,
+                 EXISTS (SELECT 1 FROM web_transfers transfer
+                         WHERE transfer.library_id=books.library_id AND transfer.content_hash=books.content_hash
+                           AND transfer.kind='thumbnail' AND transfer.direction='upload' AND transfer.state='completed'),
+                 EXISTS (SELECT 1 FROM web_transfers transfer
+                         WHERE transfer.library_id=books.library_id AND transfer.content_hash=books.content_hash
+                           AND transfer.kind='thumbnail' AND transfer.direction='download' AND transfer.state='completed')
+          FROM books WHERE books.library_id=?`,
     bind: [libraryId], rowMode: "array", returnValue: "resultRows",
-  }) as Array<[string, Uint8Array | null, number]>;
-  for (const [contentHash, cover, localBook] of rows) {
+  }) as Array<[string, Uint8Array | null, number, number]>;
+  for (const [contentHash, cover, uploaded, downloaded] of rows) {
+    const endpoint = `/api/libraries/${encodeURIComponent(libraryId)}/thumbnails/${encodeURIComponent(contentHash)}`;
     if (cover instanceof Uint8Array && cover.byteLength) {
+      if (uploaded || downloaded) continue;
       await transferState(libraryId, contentHash, "thumbnail", "upload", "running");
       try {
-        await authenticatedWebFetch(`/api/libraries/${encodeURIComponent(libraryId)}/thumbnails/${contentHash}`, {
+        await authenticatedWebFetch(endpoint, {
           method: "PUT", headers: { "Content-Type": "image/jpeg" }, body: cover,
         });
         await transferState(libraryId, contentHash, "thumbnail", "upload", "completed");
       } catch (reason) {
         await transferState(libraryId, contentHash, "thumbnail", "upload", "failed", reason instanceof Error ? reason.message : String(reason));
+        throw reason;
       }
-    } else if (!localBook) {
-      await transferState(libraryId, contentHash, "thumbnail", "download", "running");
-      try {
-        const response = await authenticatedWebFetch(`/api/libraries/${encodeURIComponent(libraryId)}/thumbnails/${contentHash}`);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        db.exec({ sql: "UPDATE books SET cover_bytes=? WHERE library_id=? AND content_hash=?", bind: [bytes, libraryId, contentHash] });
-        await transferState(libraryId, contentHash, "thumbnail", "download", "completed");
-      } catch (reason) {
-        await transferState(libraryId, contentHash, "thumbnail", "download", "failed", reason instanceof Error ? reason.message : String(reason));
-      }
+      continue;
+    }
+
+    const response = await authenticatedWebFetch(endpoint, {}, [404]);
+    if (response.status === 404) {
+      await response.arrayBuffer();
+      continue;
+    }
+    await transferState(libraryId, contentHash, "thumbnail", "download", "running");
+    try {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (!bytes.byteLength) throw new Error("The server returned an empty thumbnail");
+      db.exec({
+        sql: "UPDATE books SET cover_bytes=? WHERE library_id=? AND content_hash=? AND cover_bytes IS NULL",
+        bind: [bytes, libraryId, contentHash],
+      });
+      await transferState(libraryId, contentHash, "thumbnail", "download", "completed");
+    } catch (reason) {
+      await transferState(libraryId, contentHash, "thumbnail", "download", "failed", reason instanceof Error ? reason.message : String(reason));
+      throw reason;
     }
   }
 }
@@ -172,19 +133,12 @@ export async function synchronizeWebLibraryBlobs(libraryId: string): Promise<voi
     throw new Error(`Server rejected EPUB transfer: ${manifest.rejected.map(({ reason }) => reason).join(", ")}`);
   }
   for (const contentHash of manifest.upload) await uploadBook(libraryId, contentHash);
-
-  const { db } = await getWebDatabase();
-  const missing = db.exec({
-    sql: "SELECT content_hash FROM books WHERE library_id=? AND storage_key IS NULL AND bytes IS NULL ORDER BY content_hash",
-    bind: [libraryId], rowMode: 0, returnValue: "resultRows",
-  }).map(String);
-  for (const contentHash of missing) await downloadWebBook(libraryId, contentHash);
-  await synchronizeThumbnails(libraryId);
+  await synchronizeWebLibraryThumbnails(libraryId);
 }
 
 export async function getWebLocalStorageUsage(): Promise<Array<{ library_id: string; library_name: string; used_bytes: number }>> {
   const { db } = await getWebDatabase();
-  const libraries = db.exec({ sql: "SELECT library_id, library_name FROM libraries ORDER BY library_name COLLATE NOCASE", rowMode: "array", returnValue: "resultRows" }) as Array<[string, string]>;
+  const libraries = (await listWebLibraries()).map(({ library_id, library_name }) => [library_id, library_name] as const);
   const result = [];
   for (const [libraryId, libraryName] of libraries) {
     const hashes = db.exec({
@@ -200,7 +154,7 @@ export async function getWebLocalStorageUsage(): Promise<Array<{ library_id: str
 
 export async function getWebTransferStatuses(): Promise<Array<{ library_id: string; library_name: string; transfers: unknown[]; history: unknown[] }>> {
   const { db } = await getWebDatabase();
-  const libraries = db.exec({ sql: "SELECT library_id, library_name FROM libraries ORDER BY library_name COLLATE NOCASE", rowMode: "array", returnValue: "resultRows" }) as Array<[string, string]>;
+  const libraries = (await listWebLibraries()).map(({ library_id, library_name }) => [library_id, library_name] as const);
   return libraries.map(([libraryId, libraryName]) => {
     const rows = db.exec({
       sql: "SELECT content_hash, kind, direction, state, attempts, last_error, updated_at FROM web_transfers WHERE library_id=? ORDER BY updated_at DESC",

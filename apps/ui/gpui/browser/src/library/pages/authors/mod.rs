@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use epub_svelte_lib::AuthorId;
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, uniform_list};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
 use gpui_component::input::{InputEvent, InputState};
 use ui_components as components;
 use ui_components::ScrollableElement;
@@ -198,6 +198,16 @@ impl AuthorsPage {
         self.books_request.install(task);
     }
 
+    fn clear_author(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.books_request.begin();
+        self.books.set_books(Vec::new(), cx);
+        for row in &self.rows {
+            row.update(cx, |row, cx| row.set_selected(false, cx));
+        }
+        cx.notify();
+    }
+
     fn choose_book_to_add(&mut self, cx: &mut Context<Self>) {
         self.ui.clone().choose_and_import_book(epub_svelte_lib::ROOT_DIR_ID, cx, |page, result, cx| match result {
             Ok(()) => page.refresh(cx),
@@ -208,23 +218,17 @@ impl AuthorsPage {
         });
     }
 
-    fn render_index(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_index(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let has_authors = !self.visible.is_empty();
-        let page_width = (f32::from(window.viewport_size().width) - components::nav_rail_width(f32::from(window.rem_size()))).min(components::AUTHOR_PAGE_MAX_WIDTH);
-
-        // The browser's own virtual list: it fills the panel, carries the
-        // scrollbar, and pages by the viewport on left/right, like every other
-        // list here.
-        let rows = self.visible.clone();
-        let list = components::virtual_list(uniform_list("browser-authors", rows.len(), move |range, _, _| range.map(|index| rows[index].clone()).collect::<Vec<_>>()));
+        let cards = components::author_card_grid().children(self.visible.clone());
 
         let empty_emitter = cx.entity();
         let empty_action = components::topbar_action_button("authors-add-book", self.ui.contracts().library_actions.add_book_label.clone(), gpui_component::IconName::BookOpen, theme).on_click(move |_, _, cx| {
             empty_emitter.update(cx, |page, cx| page.choose_book_to_add(cx));
         });
 
-        components::author_list_panel((page_width / 3.0).max(240.0), theme)
+        components::author_list_panel(components::AUTHOR_PAGE_MAX_WIDTH, theme)
             .key_context("BrowserArrowList")
             .on_action(|_: &FocusPreviousListItem, window, cx| window.focus_prev(cx))
             .on_action(|_: &FocusNextListItem, window, cx| window.focus_next(cx))
@@ -232,7 +236,7 @@ impl AuthorsPage {
             .child(self.render_sort_control(theme, cx))
             .when(self.rows.is_empty(), |panel| panel.child(components::browser_actionable_empty("No authors", "", empty_action, theme)))
             .when(!self.rows.is_empty() && !has_authors, |panel| panel.child(components::browser_inline_note("No matching authors", theme)))
-            .when(has_authors, |panel| panel.child(list))
+            .when(has_authors, |panel| panel.child(div().w_full().min_h_0().flex_1().overflow_y_scrollbar().child(cards)))
             .into_any_element()
     }
 
@@ -244,10 +248,8 @@ impl AuthorsPage {
             .child(components::author_sort_option("authors-sort-books", "Books", self.sort == AuthorSort::BookCount, theme).on_click(choose(AuthorSort::BookCount, cx.entity())))
     }
 
-    fn render_books(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_books(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
-        let page_width = (f32::from(window.viewport_size().width) - components::nav_rail_width(f32::from(window.rem_size()))).min(components::AUTHOR_PAGE_MAX_WIDTH);
-        let width = (page_width * 2.0 / 3.0 - components::CONTENT_PADDING * 2.0).max(components::BOOK_COVER_WIDTH);
 
         let Some(author) = self.selected.and_then(|selected| self.rows.iter().find(|row| row.read(cx).author().id() == selected)).map(|row| SharedString::from(row.read(cx).author().name().as_str().to_owned())) else {
             // Nothing chosen yet: an empty pane, not a sentence explaining that
@@ -255,7 +257,12 @@ impl AuthorsPage {
             return components::author_books_panel().overflow_y_scrollbar().into_any_element();
         };
 
-        let mut panel = components::author_books_panel().child(components::author_books_heading(author, theme));
+        let page = cx.entity();
+        let back = components::topbar_action_button("authors-back", "Authors", gpui_component::IconName::ArrowLeft, theme).on_click(move |_, _, cx| {
+            page.update(cx, |page, cx| page.clear_author(cx));
+        });
+        let heading = div().flex_none().flex().flex_row().items_center().gap(px(components::SPACE_MD)).child(back).child(components::author_books_heading(author, theme));
+        let mut panel = components::author_books_panel().child(heading);
         if self.books.is_empty() {
             panel = panel.child(components::browser_inline_note("No books found for this author", theme));
         } else {
@@ -264,7 +271,7 @@ impl AuthorsPage {
             // second scroll area, and a virtualized list cannot size itself
             // inside a parent that grows to its content. Virtualizing this
             // wants the panel split into its own scroll regions first.
-            panel = panel.child(self.books.render_static(width, window));
+            panel = panel.child(self.books.render_static("author-books-static", window, cx));
         }
 
         panel.child(self.discovery.clone()).overflow_y_scrollbar().into_any_element()
@@ -274,7 +281,8 @@ impl AuthorsPage {
 impl Render for AuthorsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let split = components::authors_split_page().child(self.render_index(window, cx)).child(self.render_books(window, cx));
+        let page = if self.selected.is_some() { self.render_books(window, cx) } else { self.render_index(window, cx) };
+        let split = components::authors_split_page().child(page);
         let entity = cx.entity();
         let retry_label = self.ui.contracts().browsing_states.retry_label.clone();
         components::browser_error_banner(self.error.clone(), retry_label.into(), theme, split.into_any_element(), move |cx| {

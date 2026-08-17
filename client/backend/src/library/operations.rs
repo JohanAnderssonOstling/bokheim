@@ -3,6 +3,7 @@
 use super::covers::generate_thumbnail_for_sync;
 use super::handle::LibraryBackend;
 use super::model::{Dir, LibraryAccountState, ReaderFormat, ResolvedBook, generate_content_hash_blake3};
+use crate::app::BackendError;
 use crate::catalog::{CatalogPublicationIdentity, CatalogSourceId};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
@@ -66,6 +67,13 @@ impl LibraryBackend {
         }
 
         Ok(Some((fallback, false)))
+    }
+
+    /// Returns the concrete publication file only when it currently exists on
+    /// this device. Unlike reader resolution, this never opens a remote reader
+    /// or schedules a download.
+    pub fn local_book_path(&self, content_hash: ContentHash) -> Result<Option<PathBuf>, BackendError> {
+        self.resolved_book_path(content_hash).map(|resolved| resolved.and_then(|(path, exists_locally)| exists_locally.then_some(path))).map_err(BackendError::operation)
     }
 
     pub(super) fn resolve_book(&self, content_hash: ContentHash) -> Result<ResolvedBook, Box<dyn std::error::Error>> {
@@ -259,9 +267,26 @@ impl LibraryBackend {
                 std::io::copy(&mut source, &mut target)?;
             }
             target.sync_all()?;
-            fs::hard_link(&temporary, &destination)?;
+            match fs::hard_link(&temporary, &destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    // Android's app-data filesystem permits creating and
+                    // renaming files but rejects hard links with EACCES.
+                    // Recheck the destination before using rename, since it
+                    // replaces an existing file on Unix.
+                    if destination.exists() {
+                        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("a book named '{}' already exists in this folder", file_name.as_str())));
+                    }
+                    fs::rename(&temporary, &destination)?;
+                }
+                Err(error) => return Err(error),
+            }
             destination_created = true;
-            fs::remove_file(&temporary)
+            match fs::remove_file(&temporary) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
         })();
         if let Err(error) = copy_result {
             let _ = fs::remove_file(&temporary);

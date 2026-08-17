@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use crate::app::executor::BackendTask;
-use crate::catalog::{CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPublicationIdentity, CatalogSearch, CatalogSearchQuery, CatalogSourceId};
+use crate::catalog::{
+    CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPublicationIdentity, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSourceId, CatalogSubjectBrowseRequest,
+};
 use crate::library::database as db;
 use crate::library::{AuthorSummary, BookCardRow, Dir, ResolvedBook};
 use crate::platform::scanner::{LibraryEvent, LibraryScanner};
 use crate::sync::SyncManager;
 use crate::{AuthorId, ContentHash, DirId, DownloadState, FolderDownloadStatus, LibraryId};
 
-use crate::app::{AppBackend, AppState, BackendContext, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogWideSearchView};
+use crate::app::{AppBackend, AppState, BackendContext, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView};
 use crossbeam_channel::Sender;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -56,6 +58,53 @@ impl LibraryBackend {
 
     pub fn id(&self) -> &LibraryId {
         &self.id
+    }
+
+    pub fn reload_unified_taxonomy(&self) -> Result<String, BackendError> {
+        let release_id = self.context.reload_unified_taxonomy_from_disk().map_err(BackendError::operation)?;
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
+        let _ = self.event_tx.send(LibraryEvent::CatalogueChanged);
+        Ok(release_id)
+    }
+
+    pub(crate) fn recorded_taxonomy_codes(&self, content_hash: &ContentHash) -> Result<Vec<taxonomy_contract::TaxonomyCode>, BackendError> {
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::recorded_taxonomy_codes(&connection, content_hash).map_err(BackendError::operation)
+    }
+
+    pub(crate) fn recorded_taxonomy_codes_for_library(&self) -> Result<Vec<taxonomy_contract::TaxonomyCode>, BackendError> {
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::recorded_taxonomy_codes_for_library(&connection).map_err(BackendError::operation)
+    }
+
+    pub(crate) fn reload_unified_subject_assignments(&self) -> Result<(), BackendError> {
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
+        let _ = self.event_tx.send(LibraryEvent::CatalogueChanged);
+        Ok(())
+    }
+
+    /// Requests catalogue recommendations using only a bounded weighted
+    /// subject profile and owned catalogue identities derived locally.
+    pub async fn catalog_recommendations(&self, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
+        self.app()?.catalog_recommendations_in(&self.id, limit).await
+    }
+
+    /// Reuses the canonical subject selected by the library hierarchy instead
+    /// of making a frontend infer its classification system from a label.
+    pub async fn catalog_subject_recommendations(&self, subject_path: &str, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
+        self.app()?.catalog_subject_recommendations_in(&self.id, subject_path, limit).await
+    }
+
+    pub(crate) fn catalog_recommendation_request(&self, limit: u32) -> Result<CatalogRecommendationRequest, BackendError> {
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::catalog_recommendation_request(&connection, limit).map_err(BackendError::operation)
+    }
+
+    pub(crate) fn catalog_subject_recommendation_request(&self, subject_path: &str, limit: u32) -> Result<CatalogRecommendationRequest, BackendError> {
+        let connection = self.db.get().map_err(BackendError::operation)?;
+        db::catalog_subject_recommendation_request(&connection, subject_path, limit).map_err(BackendError::operation)
     }
 
     pub fn spawn<T, F, Fut>(&self, operation: F) -> BackendTask<T>
@@ -180,7 +229,13 @@ impl LibraryBackend {
 
     pub fn import_book_task(&self, parent_id: DirId, source_path: std::path::PathBuf, file_name: String) -> BackendTask<Result<(), BackendError>> {
         let library = self.clone();
-        self.app().expect("a library task requires its application").spawn(move |_| async move { library.import_book(&parent_id, &source_path, &file_name).map(|_| ()) })
+        self.app().expect("a library task requires its application").spawn(move |app| async move {
+            let content_hash = library.import_book(&parent_id, &source_path, &file_name)?;
+            if let Err(error) = app.hydrate_taxonomy_for_book(&library, &content_hash).await {
+                log::warn!("book was imported, but missing taxonomy codes could not be hydrated: {error}");
+            }
+            Ok(())
+        })
     }
 
     pub async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchView, BackendError> {
@@ -193,6 +248,10 @@ impl LibraryBackend {
 
     pub async fn catalog_page(&self, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPageView, BackendError> {
         self.app()?.catalog_page_in(self.id(), source_id, locator).await
+    }
+
+    pub async fn browse_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
+        self.app()?.browse_catalog_subjects_in(self.id(), request).await
     }
 
     pub async fn search_catalog(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPageView, BackendError> {
@@ -223,6 +282,11 @@ impl LibraryBackend {
     pub fn is_audiobook(&self, content_hash: ContentHash) -> Result<bool, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         Ok(matches!(db::get_book_format(&conn, &content_hash).map_err(BackendError::operation)?, Some(library_model::BookFormat::M4b)))
+    }
+
+    pub fn is_epub(&self, content_hash: ContentHash) -> Result<bool, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        Ok(matches!(db::get_book_format(&conn, &content_hash).map_err(BackendError::operation)?, Some(library_model::BookFormat::Epub)))
     }
 
     pub fn read_book_bytes(&self, content_hash: ContentHash) -> Result<Vec<u8>, BackendError> {
@@ -347,6 +411,7 @@ pub struct TrashedBook {
     pub content_hash: ContentHash,
     pub title: String,
     pub format: String,
+    #[specta(type = f64)]
     pub deleted_at: i64,
 }
 
@@ -355,6 +420,7 @@ pub struct TrashedFolder {
     #[specta(type = String)]
     pub id: DirId,
     pub name: String,
+    #[specta(type = f64)]
     pub deleted_at: i64,
 }
 

@@ -4,11 +4,13 @@ use epub_provider::EpubProvider;
 use library_model::{marc_relator_code_from_metadata_role, BookFormat, BookMetadataState, AUTHOR_MARC_RELATOR_CODE};
 use library_model::{
     Contributor, LanguageTag, PublicationCollection, PublicationDate, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationMetadataError, PublicationProperty, PublicationSubject,
-    PublicationTitle, PublisherCredit,
+    PublicationTitle, PublicationTocEntry, PublisherCredit,
 };
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
+
+mod pdf;
 
 pub mod external;
 pub mod library_of_congress;
@@ -38,6 +40,42 @@ pub struct InspectedBook {
     pub audiobook: Option<AudiobookMetadata>,
 }
 
+pub struct InspectedEpub {
+    pub metadata: BookMetadataState,
+    pub toc: Vec<PublicationTocEntry>,
+}
+
+pub use pdf::{inspect_pdf, InspectedPdf};
+
+/// Reads package metadata and navigation from one EPUB provider instance.
+/// Catalogue ingestion uses this instead of maintaining a second EPUB
+/// metadata parser; ordinary library scans can continue to omit the TOC.
+pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
+    let provider = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
+    let metadata = epub_metadata_from_provider(path, &provider)?;
+    let mut count = 0;
+    let toc = provider.toc()?.unwrap_or_default().into_iter().filter_map(|entry| publication_toc_entry(entry, 0, &mut count)).collect();
+    Ok(InspectedEpub { metadata, toc })
+}
+
+fn publication_toc_entry(entry: epub_provider::TocEntry, depth: usize, count: &mut usize) -> Option<PublicationTocEntry> {
+    const MAX_TOC_DEPTH: usize = 32;
+    const MAX_TOC_ENTRIES: usize = 8_192;
+    const MAX_TOC_TEXT_BYTES: usize = 4_096;
+    if depth >= MAX_TOC_DEPTH || *count >= MAX_TOC_ENTRIES {
+        return None;
+    }
+    let valid_text = |value: String| {
+        let value = value.trim();
+        (!value.is_empty() && value.len() <= MAX_TOC_TEXT_BYTES && !value.chars().any(char::is_control)).then(|| value.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let title = valid_text(entry.title)?;
+    let target = valid_text(entry.link).unwrap_or_default();
+    *count += 1;
+    let children = entry.children.into_iter().filter_map(|entry| publication_toc_entry(entry, depth + 1, count)).collect();
+    Some(PublicationTocEntry { title, target, children })
+}
+
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 /// metadata receive a title derived from the file name.
 pub fn inspect_book(path: &Path, format: BookFormat) -> MetadataResult<InspectedBook> {
@@ -46,7 +84,7 @@ pub fn inspect_book(path: &Path, format: BookFormat) -> MetadataResult<Inspected
         BookFormat::Epub => (epub_metadata(path)?, None),
         BookFormat::Mobi => (mobi_metadata(path).unwrap_or_else(|_| fallback()), None),
         BookFormat::Fb2 | BookFormat::Cbz | BookFormat::Html | BookFormat::WebPub => (publication_metadata(path).unwrap_or_else(|_| fallback()), None),
-        BookFormat::Pdf => (fallback(), None),
+        BookFormat::Pdf => (inspect_pdf(path).map(|pdf| pdf.metadata).unwrap_or_else(|_| fallback()), None),
         BookFormat::M4b => match audiobook_metadata(path) {
             Ok(audiobook) => {
                 let metadata = BookMetadataState { title: audiobook.title.clone(), contributors: audiobook.authors.clone(), description: audiobook.description.clone(), publication: Default::default() };
@@ -149,6 +187,10 @@ fn publication_properties(properties: Vec<epub_provider::EpubMetadataProperty>) 
 
 fn epub_metadata(path: &Path) -> MetadataResult<BookMetadataState> {
     let provider = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
+    epub_metadata_from_provider(path, &provider)
+}
+
+fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> MetadataResult<BookMetadataState> {
     let metadata = provider.metadata()?;
     let mut authors = metadata
         .creators
@@ -160,11 +202,11 @@ fn epub_metadata(path: &Path) -> MetadataResult<BookMetadataState> {
         authors.extend(metadata.creators.first().map(|creator| author_credit(creator.name.clone(), creator.file_as.clone())).transpose()?);
     }
 
-    let identifiers = metadata
+    let mut identifiers = metadata
         .identifiers
         .into_iter()
         .map(|identifier| {
-            let scheme = match identifier.scheme {
+            let mut scheme = match identifier.scheme {
                 epub_provider::IdentifierScheme::Unspecified => PublicationIdentifierScheme::Unspecified,
                 epub_provider::IdentifierScheme::ISBN => PublicationIdentifierScheme::Isbn,
                 epub_provider::IdentifierScheme::ASIN => PublicationIdentifierScheme::Asin,
@@ -179,7 +221,14 @@ fn epub_metadata(path: &Path) -> MetadataResult<BookMetadataState> {
                 epub_provider::IdentifierScheme::KOBO => PublicationIdentifierScheme::Kobo,
                 epub_provider::IdentifierScheme::Other(value) => PublicationIdentifierScheme::Other(value),
             };
-            let identifier_types = identifier.identifier_types.into_iter().map(|kind| PublicationIdentifierType::new(kind.value, kind.scheme)).collect::<Result<Vec<_>, _>>()?;
+            let mut identifier_types = identifier.identifier_types.into_iter().map(|kind| PublicationIdentifierType::new(kind.value, kind.scheme)).collect::<Result<Vec<_>, _>>()?;
+            // Some producers emit a bare, checksum-valid ISBN without a
+            // scheme, or attach an incorrect proprietary scheme. The value is
+            // stronger evidence than that missing/mislabelled declaration.
+            if library_model::canonical_isbn(&identifier.value).is_some() && scheme != PublicationIdentifierScheme::Isbn {
+                scheme = PublicationIdentifierScheme::Isbn;
+                identifier_types.push(PublicationIdentifierType::new("checksum-inferred", Some("bokheim:provenance".to_owned()))?);
+            }
             PublicationIdentifier::new(identifier.value, scheme, identifier_types)
         })
         .collect::<Result<Vec<_>, PublicationMetadataError>>()?;
@@ -187,6 +236,17 @@ fn epub_metadata(path: &Path) -> MetadataResult<BookMetadataState> {
     let non_author_contributors =
         metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).map(contributor).collect::<Result<Vec<_>, _>>()?;
     let properties = publication_properties(metadata.properties);
+    if let Some(isbn) = isbn_from_opf_path(provider.package_document_path()) {
+        push_epub_isbn(&mut identifiers, isbn, "opf-filename")?;
+    }
+    for property in &properties {
+        let name = property.property().rsplit(':').next().unwrap_or_default();
+        if name.eq_ignore_ascii_case("isbn") || name.eq_ignore_ascii_case("identifier") {
+            if let Some(isbn) = library_model::canonical_isbn(property.value()) {
+                push_epub_isbn(&mut identifiers, isbn, "opf-property")?;
+            }
+        }
+    }
     let collections = properties
         .iter()
         .filter(|property| property.property().rsplit(':').next() == Some("belongs-to-collection"))
@@ -217,6 +277,23 @@ fn epub_metadata(path: &Path) -> MetadataResult<BookMetadataState> {
     Ok(BookMetadataState { title, contributors, description: metadata.description, publication })
 }
 
+fn isbn_from_opf_path(path: &str) -> Option<String> {
+    let file_name = path.rsplit('/').next()?;
+    let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
+    let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
+    let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
+    library_model::canonical_isbn(stem)
+}
+
+fn push_epub_isbn(identifiers: &mut Vec<PublicationIdentifier>, isbn: String, provenance: &str) -> Result<(), PublicationMetadataError> {
+    if identifiers.iter().any(|identifier| identifier.scheme() == &PublicationIdentifierScheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) {
+        return Ok(());
+    }
+    let evidence = PublicationIdentifierType::new(provenance, Some("bokheim:provenance".to_owned()))?;
+    identifiers.push(PublicationIdentifier::new(isbn, PublicationIdentifierScheme::Isbn, vec![evidence])?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +318,13 @@ mod tests {
         assert_eq!(properties.len(), 1);
         assert_eq!(properties[0].id(), None);
         assert_eq!(properties[0].refines(), None);
+    }
+
+    #[test]
+    fn opf_filename_isbn_requires_a_valid_checksum() {
+        assert_eq!(isbn_from_opf_path("OPS/9781501168697.opf").as_deref(), Some("9781501168697"));
+        assert_eq!(isbn_from_opf_path("OPS/ISBN_978-1-5011-6869-7.OPF").as_deref(), Some("9781501168697"));
+        assert_eq!(isbn_from_opf_path("OPS/9781501168698.opf"), None);
+        assert_eq!(isbn_from_opf_path("OPS/package.opf"), None);
     }
 }

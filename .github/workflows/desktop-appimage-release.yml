@@ -1,0 +1,149 @@
+name: Desktop AppImage release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-appimage-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  GPUI_FORK_REF: 68b0a5ba82860ac222c18acd9036b3838a43a08b
+  HTML_ENGINE_REF: 30b27e095b038a1a690b3e80c1e1501f3145281e
+  HTML_VIEW_CORE_REF: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
+  LINUXDEPLOY_VERSION: 1-alpha-20251107-1
+  APPIMAGETOOL_VERSION: 1.9.1
+
+jobs:
+  build:
+    name: x86-64 AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out Bokheim
+        uses: actions/checkout@v4
+        with:
+          path: bokheim
+          submodules: recursive
+
+      - name: Check out GPUI-Fork
+        uses: actions/checkout@v4
+        with:
+          repository: JohanAnderssonOstling/GPUI-Fork
+          ref: ${{ env.GPUI_FORK_REF }}
+          path: GPUI-Fork
+
+      - name: Check out HtmlEngine
+        uses: actions/checkout@v4
+        with:
+          repository: JohanAnderssonOstling/HtmlEngine
+          ref: ${{ env.HTML_ENGINE_REF }}
+          path: HtmlEngine
+
+      - name: Check out HtmlViewCore
+        uses: actions/checkout@v4
+        with:
+          repository: JohanAnderssonOstling/HtmlViewCore
+          ref: ${{ env.HTML_VIEW_CORE_REF }}
+          path: HtmlViewCore
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            file \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libfuse2 \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxcb-xkb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            zsync
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+
+      - name: Download pinned AppImage packaging tools
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage" \
+            --output "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage"
+          curl --fail --location --retry 3 \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage" \
+            --output "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+          chmod +x \
+            "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" \
+            "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+
+      - name: Check tagged version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: bokheim
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop-gpui/Cargo.toml | head -n 1)
+          test "v${VERSION}" = "$GITHUB_REF_NAME"
+
+      - name: Build desktop release
+        working-directory: bokheim
+        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui
+
+      - name: Build updateable AppImage
+        working-directory: bokheim
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          APPIMAGETOOL: ${{ runner.temp }}/appimagetool-x86_64.AppImage
+          LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
+        run: apps/desktop-gpui/linux/appimage/build-appimage.sh
+
+      - name: Verify AppImage runtime and payload
+        working-directory: bokheim
+        run: |
+          release/Bokheim-x86_64.AppImage --appimage-version
+          release/Bokheim-x86_64.AppImage --appimage-extract >/dev/null
+          test -x squashfs-root/usr/bin/desktop-gpui
+          test -f squashfs-root/se.bokheim.Bokheim.desktop
+          test -e squashfs-root/se.bokheim.Bokheim.svg -o -e squashfs-root/se.bokheim.Bokheim.png
+          apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh release/Bokheim-x86_64.AppImage 2.35
+          apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh squashfs-root 2.35
+
+      - name: Retain workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bokheim-desktop-appimage-x86-64
+          path: bokheim/release/*
+          if-no-files-found: error
+
+      - name: Create or update draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: bokheim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --generate-notes \
+              --verify-tag \
+              --title "Bokheim ${GITHUB_REF_NAME#v}" || gh release view "$GITHUB_REF_NAME" >/dev/null
+          fi
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber

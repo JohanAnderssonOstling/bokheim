@@ -9,6 +9,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub type AssetReader = Box<dyn AsyncRead + Unpin + Send>;
 pub const MAX_BOOK_UPLOAD_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
+pub const MAX_THUMBNAIL_UPLOAD_DURATION: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetKind {
@@ -39,7 +40,7 @@ pub enum AssetError {
     InvalidInput(String),
     #[error("asset bytes do not match the requested content hash")]
     HashMismatch,
-    #[error("book uploads require an exact Content-Length")]
+    #[error("asset uploads require an exact Content-Length")]
     LengthRequired,
     #[error("asset body length {actual} does not match the declared length {expected}")]
     LengthMismatch { expected: u64, actual: u64 },

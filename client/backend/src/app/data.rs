@@ -4,7 +4,10 @@ use library_registry::LibraryRegistry;
 pub use library_registry::{LibraryEntry, LIBRARY_MANIFEST_FILENAME};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use sync_common::LibraryId;
+
+const UNIFIED_TAXONOMY_RELATIVE_PATH: &str = "taxonomy/unified-taxonomy-v2.sqlite3";
 
 /// Selects where device-local application state is stored.
 ///
@@ -45,17 +48,58 @@ pub struct BackendContext {
     app_data_root: AppDataRoot,
     registry: LibraryRegistry,
     transfer_runtime: crate::sync::transfer::TransferRuntime,
+    taxonomy_update: Arc<Mutex<()>>,
 }
 
 impl BackendContext {
     pub fn initialize(location: AppDataLocation) -> Result<Self, String> {
         let app_data_root = AppDataRoot::initialize(location)?;
+        install_runtime_taxonomy(app_data_root.as_path())?;
         let registry = LibraryRegistry::open(app_data_root.as_path()).map_err(|error| format!("failed to initialize library registry: {error}"))?;
-        Ok(Self { app_data_root, registry, transfer_runtime: crate::sync::transfer::TransferRuntime::default() })
+        Ok(Self { app_data_root, registry, transfer_runtime: crate::sync::transfer::TransferRuntime::default(), taxonomy_update: Arc::new(Mutex::new(())) })
     }
 
     pub fn app_data_dir(&self) -> &Path {
         self.app_data_root.as_path()
+    }
+
+    pub fn unified_taxonomy_path(&self) -> PathBuf {
+        self.app_data_root.as_path().join(UNIFIED_TAXONOMY_RELATIVE_PATH)
+    }
+
+    pub fn reload_unified_taxonomy_from_disk(&self) -> Result<String, String> {
+        let installed_path = self.unified_taxonomy_path();
+        let development_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../library-model/data/unified-taxonomy-v2.sqlite3");
+        let path = if development_path.is_file() { development_path } else { installed_path };
+        let concepts = library_model::read_unified_taxonomy_sqlite(&path)?;
+        library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))?;
+        Ok(library_model::unified_taxonomy_release_id())
+    }
+
+    /// Persists an ancestor-closed server slice and atomically replaces the
+    /// process-wide matcher with the resulting device-local taxonomy.
+    pub(crate) fn unresolved_taxonomy_codes(&self, codes: Vec<taxonomy_contract::TaxonomyCode>) -> Result<Vec<taxonomy_contract::TaxonomyCode>, String> {
+        let codes = codes
+            .into_iter()
+            .filter_map(|mut code| {
+                code.code = code.code.trim().to_ascii_uppercase();
+                (!code.code.is_empty()).then_some(code)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let candidates = codes.iter().map(|code| (code.system.as_str().to_owned(), code.code.clone())).collect::<Vec<_>>();
+        let resolved = library_model::read_resolved_unified_taxonomy_codes(&self.unified_taxonomy_path(), &candidates)?;
+        Ok(codes.into_iter().filter(|code| !library_model::unified_has_exact_source_code(code.system.as_str(), &code.code) && !resolved.contains(&(code.system.as_str().to_owned(), code.code.clone()))).collect())
+    }
+
+    pub(crate) fn merge_unified_taxonomy_slice(&self, server_release_id: &str, concepts: &[library_model::UnifiedConceptDefinition], resolutions: &[library_model::UnifiedCodeResolution]) -> Result<String, String> {
+        let _guard = self.taxonomy_update.lock().map_err(|_| "taxonomy update lock is poisoned".to_owned())?;
+        let path = self.unified_taxonomy_path();
+        library_model::merge_unified_taxonomy_sqlite_with_resolutions(&path, server_release_id, concepts, resolutions)?;
+        let merged = library_model::read_unified_taxonomy_sqlite(&path)?;
+        library_model::install_unified_taxonomy_concepts(merged).map_err(|error| format!("failed to install merged unified taxonomy database {}: {error}", path.display()))?;
+        Ok(library_model::unified_taxonomy_release_id())
     }
 
     pub(crate) fn transfer_runtime(&self) -> crate::sync::transfer::TransferRuntime {
@@ -124,4 +168,15 @@ impl BackendContext {
     pub fn remove_library(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.registry.remove(Path::new(path))
     }
+}
+
+fn install_runtime_taxonomy(app_data_root: &Path) -> Result<(), String> {
+    let path = app_data_root.join(UNIFIED_TAXONOMY_RELATIVE_PATH);
+    if !path.exists() {
+        let parent = path.parent().ok_or_else(|| format!("taxonomy path has no parent: {}", path.display()))?;
+        fs::create_dir_all(parent).map_err(|error| format!("failed to create taxonomy directory {}: {error}", parent.display()))?;
+        fs::write(&path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to create editable taxonomy database {}: {error}", path.display()))?;
+    }
+    let concepts = library_model::read_unified_taxonomy_sqlite(&path)?;
+    library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))
 }

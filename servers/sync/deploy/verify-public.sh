@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    echo "usage: sudo $0 api.bokheim.se catalogs.bokheim.se" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "usage: sudo $0 api.bokheim.se catalogs.bokheim.se [meta.bokheim.se]" >&2
     exit 2
 fi
 if [[ ${EUID} -ne 0 ]]; then
@@ -12,7 +12,8 @@ fi
 
 domain=$1
 catalog_domain=$2
-for candidate in "${domain}" "${catalog_domain}"; do
+metadata_domain=${3:-meta.bokheim.se}
+for candidate in "${domain}" "${catalog_domain}" "${metadata_domain}"; do
     if [[ ! ${candidate} =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || [[ ${candidate} != *.* ]]; then
         echo "invalid public DNS name: ${candidate}" >&2
         exit 2
@@ -93,8 +94,8 @@ if [[ ${catalog_health} != ok ]]; then
     echo "unexpected catalog HTTPS health response: ${catalog_health}" >&2
     exit 1
 fi
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --header 'Accept: application/vnd.bokheim+bincode; version=10' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
-if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+bincode;[[:space:]]*version=10([[:space:]]|\r)*$' "${headers}"; then
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --header 'Accept: application/vnd.bokheim+protobuf; version=13' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
+if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+protobuf;[[:space:]]*version=13([[:space:]]|\r)*$' "${headers}"; then
     echo "catalog registry did not use the current Bokheim binary media type" >&2
     exit 1
 fi
@@ -102,9 +103,34 @@ if grep -Eqi '^content-encoding:' "${headers}"; then
     echo "catalog registry unexpectedly used content encoding" >&2
     exit 1
 fi
+browser_catalogs=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error "https://${catalog_domain}/api/web/catalogs")
+if ! grep -Fq '"id"' <<<"${browser_catalogs}"; then
+    echo "browser catalog registry is empty or malformed" >&2
+    exit 1
+fi
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --request OPTIONS \
+    --header "Origin: https://${BOKHEIM_APP_DOMAIN:-app.bokheim.se}" \
+    --header 'Access-Control-Request-Method: POST' \
+    --header 'Access-Control-Request-Headers: content-type' \
+    --dump-header "${headers}" --output /dev/null \
+    "https://${catalog_domain}/api/web/sources/opds-project-gutenberg/search"
+if ! grep -Eqi '^access-control-allow-origin:[[:space:]]*\*([[:space:]]|\r)*$' "${headers}" || ! grep -Eqi '^access-control-allow-methods:.*POST' "${headers}"; then
+    echo "browser catalog CORS preflight is not enabled" >&2
+    exit 1
+fi
 if ! openssl s_client -connect "${catalog_domain}:443" -servername "${catalog_domain}" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -checkend 604800 >/dev/null; then
     echo "catalog TLS certificate verification failed or the certificate expires within seven days" >&2
     exit 1
 fi
 
-echo "public deployment verified: https://${domain} and https://${catalog_domain}"
+metadata_health=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error "https://${metadata_domain}/health")
+if [[ ${metadata_health} != ok ]]; then
+    echo "unexpected metadata HTTPS health response: ${metadata_health}" >&2
+    exit 1
+fi
+if ! openssl s_client -connect "${metadata_domain}:443" -servername "${metadata_domain}" -verify_return_error </dev/null 2>/dev/null | openssl x509 -noout -checkend 604800 >/dev/null; then
+    echo "metadata TLS certificate verification failed or the certificate expires within seven days" >&2
+    exit 1
+fi
+
+echo "public deployment verified: https://${domain}, https://${catalog_domain}, and https://${metadata_domain}"

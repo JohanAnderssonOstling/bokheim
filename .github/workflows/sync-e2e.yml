@@ -1,0 +1,62 @@
+name: Sync PostgreSQL E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/sync-e2e.yml"
+      - "client/backend/**"
+      - "servers/sync/**"
+      - "shared/account-contract/**"
+      - "shared/protocol-test-support/**"
+      - "shared/sync-common/**"
+      - "shared/wire/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/sync-e2e.yml"
+      - "client/backend/**"
+      - "servers/sync/**"
+      - "shared/account-contract/**"
+      - "shared/protocol-test-support/**"
+      - "shared/sync-common/**"
+      - "shared/wire/**"
+
+permissions:
+  contents: read
+
+jobs:
+  sync-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: sync_e2e
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sync_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SYNC_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/sync_e2e
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+
+      - name: Run synchronization E2E suite
+        run: client/backend/tests/run_sync_e2e.sh

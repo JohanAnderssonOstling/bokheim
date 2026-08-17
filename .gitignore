@@ -5,6 +5,11 @@
 # Keep this explicit: its name does not match the standard `target/` rule and
 # it can grow to several gigabytes.
 /target-mobile-deploy/
+/target-android-deploy/
+/.android-tmp.*/
+/.deploy-tmp/
+/release/
+/squashfs-root/
 *.profraw
 *.profdata
 perf.data
@@ -49,6 +54,7 @@ pnpm-debug.log*
 *.db
 *.sqlite
 *.sqlite3
+!client/library-model/data/unified-taxonomy-v2.sqlite3
 *.db-journal
 *.db-shm
 *.db-wal
@@ -99,6 +105,7 @@ venv/
 /reference/plato/
 /data-analysis/
 /apps/mobile/src/vendor/foliate-js/html.js
+/apps/mobile/dummy-non-existing-folder/
 
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
 # live outside this directory.

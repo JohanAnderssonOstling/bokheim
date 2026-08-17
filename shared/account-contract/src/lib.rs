@@ -26,8 +26,9 @@ pub struct EmailRequest {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
-pub struct OneTimeTokenRequest {
-    pub token: String,
+pub struct EmailVerificationRequest {
+    pub email: String,
+    pub pin: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -63,7 +64,7 @@ pub struct MeResponse {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageUsageResponse {
-    /// Bytes held by completed, user-owned book blobs.
+    /// Bytes held by completed, user-owned book and thumbnail assets.
     pub used_bytes: u64,
     /// Bytes temporarily reserved for uploads that have not completed yet.
     pub reserved_bytes: u64,
@@ -82,7 +83,8 @@ pub struct LibraryStorageUsage {
     pub library_id: String,
     /// Bytes charged to the account and attributed to this library. The
     /// attributions across libraries partition the account's used bytes, so a
-    /// book held by two libraries is counted under one of them only.
+    /// book held by two libraries is counted under one of them only. A thumbnail
+    /// is attributed to the first library that uploads it.
     pub used_bytes: u64,
 }
 

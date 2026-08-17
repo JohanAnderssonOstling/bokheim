@@ -1,19 +1,31 @@
+use crate::OutboundNetworkPolicy;
 use crate::{
     OpdsAcquisition, OpdsAcquisitionKind, OpdsAuthorCredit, OpdsAuthorLink, OpdsBookFormat, OpdsCatalog, OpdsCatalogFreshness, OpdsCatalogLink, OpdsDirectAcquisition, OpdsError, OpdsFacet, OpdsLinkTarget, OpdsPagination, OpdsPublication,
     OpdsSearch, OpdsVersion,
 };
-use reqwest::{Client, RequestBuilder, Url};
+use reqwest::Url;
+use std::time::Duration;
 
 pub(crate) fn is_catalog_url(url: &Url) -> bool {
     ::litteraturbanken::is_catalog_url(url)
 }
 
-pub(crate) fn download_request(request: RequestBuilder, url: &Url) -> RequestBuilder {
-    ::litteraturbanken::decorate_download_request(request, url)
+pub(crate) fn decorate_download_headers(headers: &mut reqwest::header::HeaderMap, url: &Url) {
+    ::litteraturbanken::decorate_download_headers(headers, url);
 }
 
-pub(crate) async fn fetch_catalog(client: &Client, source_url: Url, byte_limit: u64) -> Result<OpdsCatalog, OpdsError> {
-    let catalog = ::litteraturbanken::fetch_catalog(client, source_url, byte_limit).await.map_err(provider_error)?;
+pub(crate) async fn fetch_catalog(policy: OutboundNetworkPolicy, source_url: Url, byte_limit: u64) -> Result<OpdsCatalog, OpdsError> {
+    let client = crate::outbound::client_for_url(&source_url, policy, &format!("Bokheim/{} OPDS", env!("CARGO_PKG_VERSION")), Duration::from_secs(10)).await.map_err(|error| OpdsError::InvalidUrl(error.to_string()))?;
+    let catalog = ::litteraturbanken::fetch_catalog(&client, source_url, byte_limit).await.map_err(provider_error)?;
+    let pagination = OpdsPagination {
+        first: catalog.first_page.as_ref().map(ToString::to_string),
+        previous: catalog.previous_page.as_ref().map(ToString::to_string),
+        next: catalog.next_page.as_ref().map(ToString::to_string),
+        last: catalog.last_page.as_ref().map(ToString::to_string),
+        number_of_items: Some(catalog.total_items),
+        items_per_page: Some(::litteraturbanken::PAGE_SIZE),
+        current_page: Some(catalog.current_page),
+    };
     Ok(OpdsCatalog {
         version: OpdsVersion::V2_0,
         freshness: OpdsCatalogFreshness::Current,
@@ -32,7 +44,7 @@ pub(crate) async fn fetch_catalog(client: &Client, source_url: Url, byte_limit: 
                 links: facet.links.into_iter().map(|link| OpdsCatalogLink { title: link.title, url: link.url.to_string(), target: OpdsLinkTarget::Catalog, number_of_items: None, active: link.active }).collect(),
             })
             .collect(),
-        pagination: OpdsPagination { number_of_items: Some(catalog.total_items), items_per_page: Some(catalog.total_items), current_page: Some(1), ..OpdsPagination::default() },
+        pagination,
         search: Some(OpdsSearch::UriTemplate { base_url: catalog.source_url.to_string(), template: catalog.search_template }),
     })
 }
@@ -74,7 +86,8 @@ mod tests {
     async fn live_catalogue_search_and_download_are_available() {
         let client = crate::OpdsClient::new().unwrap();
         let root = client.fetch_catalog(::litteraturbanken::CATALOG_URL).await.unwrap();
-        assert!(root.publications.len() > 1_000);
+        assert_eq!(root.publications.len(), ::litteraturbanken::PAGE_SIZE as usize);
+        assert!(root.pagination.next.is_some());
         let search = client.search(&root, "Doktor Glas").await.unwrap();
         let publication = search.publications.iter().find(|publication| publication.title == "Doktor Glas").unwrap();
         let bytes = client.download_book_bytes(publication.preferred_download.as_ref().unwrap()).await.unwrap();

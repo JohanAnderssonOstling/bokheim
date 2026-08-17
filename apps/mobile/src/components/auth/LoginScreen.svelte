@@ -19,7 +19,7 @@
     onlogin: (email: string, password: string) => Promise<boolean>;
     onregister: (email: string, password: string) => Promise<boolean>;
     onresendverification: (email: string) => Promise<boolean>;
-    onverifyemail: (token: string) => Promise<boolean>;
+    onverifyemail: (email: string, pin: string) => Promise<boolean>;
     onrequestpasswordreset: (email: string) => Promise<boolean>;
     onresetpassword: (token: string, password: string) => Promise<boolean>;
   } = $props();
@@ -57,7 +57,7 @@
     width: min(100%, 27rem);
     padding: clamp(1.5rem, 5vw, 2.5rem);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: 0;
     background: color-mix(in srgb, var(--color-raised-bg) 96%, transparent);
     box-shadow: 0 1.5rem 4rem var(--color-box-shadow);
   }
@@ -67,7 +67,7 @@
     height: 3rem;
     margin-bottom: 1.5rem;
     place-items: center;
-    border-radius: 1rem;
+    border-radius: 0;
     color: var(--color-raised-bg);
     background: var(--color-accent);
     font: 600 1.45rem var(--font-interface-family);

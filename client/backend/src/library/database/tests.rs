@@ -33,8 +33,29 @@ fn author(value: &str) -> Contributor {
     Contributor::new(value, None, MarcRelatorCode(*b"aut")).unwrap()
 }
 
+#[cfg(all(feature = "scanner", not(target_os = "android")))]
+#[test]
+fn scanner_directory_snapshot_accepts_the_roots_null_path() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let directories = get_known_directories_for_scan(&conn).unwrap();
+    assert!(matches!(directories.get(&sync_common::ROOT_DIR_ID).map(|directory| &directory.state), Some(KnownDirectoryState::Live(None))));
+}
+
 fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookMetadataState {
     BookMetadataState { title: title.into(), contributors: authors, description: description.into(), publication: PublicationMetadata::default() }
+}
+
+#[test]
+fn scanning_a_present_file_revives_a_purged_metadata_row_consistently() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    conn.execute("INSERT INTO book(content_hash,added_at,deleted_at,purged_at) VALUES(?1,1,1,1)", [fixture_content_hash(1).as_str()]).unwrap();
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &metadata("Returned", vec![author("Author")], ""), BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    let lifecycle = conn.query_row("SELECT deleted_at,purged_at FROM book WHERE content_hash=?1", [fixture_content_hash(1).as_str()], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))).unwrap();
+    assert_eq!(lifecycle, (None, None));
 }
 
 #[test]
@@ -71,18 +92,140 @@ fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(assignments, vec!["History / United States / 20th Century"]);
+    assert_eq!(assignments, vec!["History / United States / 20th Century", "Humanities / History / Americas / North America / United States / 20th Century"]);
+    assert_eq!(conn.query_row("SELECT system_id || ':' || code FROM book_subject_code WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1))", [], |row| row.get::<_, String>(0)).unwrap(), "bisac:HIS036060");
+    assert_eq!(
+        conn.query_row("SELECT unified_path FROM subject_code_mapping WHERE source_system_id='bisac' AND source_code='HIS036060'", [], |row| row.get::<_, String>(0)).unwrap(),
+        "Humanities / History / Americas / North America / United States / 20th Century"
+    );
+    let external_assignment = conn
+        .query_row("SELECT system_id,subject_path FROM book_subject_assignment WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',3))", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap();
+    assert_eq!(external_assignment, ("lcsh".to_owned(), "LCC / LCSH / History / United States / 20th Century".to_owned()));
     assert_eq!(conn.query_row("SELECT source FROM book_subject WHERE name='History'", [], |row| row.get::<_, String>(0)).unwrap(), "dc:subject");
 
+    let profile = catalog_recommendation_request(&conn, 20).unwrap();
+    assert!(profile.excluded_publications.is_empty(), "owned catalogue identities are filtered locally after recommendation lookup");
+    assert!(profile.subjects.iter().any(|subject| subject.system_id == "bisac" && subject.subject_path == "History / United States / 20th Century"));
+    assert!(profile.subjects.iter().any(|subject| subject.system_id == "lcsh" && subject.subject_path == "LCC / LCSH / History / United States / 20th Century"));
+    let selected_profile = catalog_subject_recommendation_request(&conn, "History", 20).unwrap();
+    assert_eq!(selected_profile.subjects, vec![crate::catalog::CatalogSubjectPreference { system_id: "bisac".to_owned(), subject_path: "History".to_owned(), weight: 1 }]);
+
     let roots = get_subject_children(&conn, "").unwrap();
-    let history = roots.iter().find(|subject| subject.id.as_str() == "History").expect("populated root is visible");
-    assert_eq!(history.book_count, 1, "subject counts include descendant assignments");
-    assert_eq!(get_book_cards_in_subject_scoped(&conn, "History", false).unwrap().len(), 0, "book grids use exact assignments");
-    assert_eq!(get_book_cards_in_subject_scoped(&conn, "History / United States / 20th Century", false).unwrap().len(), 1);
-    assert_eq!(get_uncategorized_counts(&conn).unwrap(), (1, 1));
+    assert_eq!(roots.len(), 12, "the complete designed root taxonomy is visible regardless of library contents");
+    let humanities = roots.iter().find(|subject| subject.id.as_str() == "Humanities").expect("unified root is visible");
+    assert_eq!(humanities.book_count, 1, "subject counts include descendant assignments");
+    assert!(roots.iter().any(|subject| subject.id.as_str() == "Recreation" && subject.book_count == 0), "empty taxonomy roots remain browseable");
+    let social_branches = get_subject_children(&conn, "Social Sciences").unwrap();
+    assert_eq!(social_branches.len(), 8, "Social Sciences always exposes its stable branch structure");
+    assert!(social_branches.iter().all(|subject| subject.book_count == 0));
+
+    let architecture_routes = conn
+        .query_row("SELECT COUNT(*),COUNT(DISTINCT concept_id) FROM unified_concept_route WHERE path IN ('Arts & Media / Architecture','Applied Sciences & Technology / Technology & Engineering / Architecture')", [], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .unwrap();
+    assert_eq!(architecture_routes, (2, 1), "one concept can be exposed beneath multiple parents");
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM book_unified_concept", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("SELECT mapping_type FROM source_concept_mapping WHERE source_system_id='bisac' AND source_code='HIS036060'", [], |row| row.get::<_, String>(0)).unwrap(), "exact");
+    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities", false).unwrap().len(), 0, "book grids use exact assignments");
+    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities / History / Americas / North America / United States / 20th Century", false).unwrap().len(), 1);
+    assert_eq!(get_uncategorized_counts(&conn).unwrap(), (1, 1), "only books with no subject metadata are uncategorized");
     assert_eq!(get_uncategorized_book_cards_scoped(&conn, false).unwrap().len(), 1);
-    assert_eq!(get_other_subject_system_counts(&conn).unwrap(), (0, 0));
-    assert_eq!(get_other_subject_system_book_cards_scoped(&conn, false).unwrap().len(), 0);
+    assert_eq!(get_other_subject_system_counts(&conn).unwrap(), (1, 1), "unmapped LCSH metadata stays available in the fallback facet");
+    assert_eq!(get_other_subject_system_book_cards_scoped(&conn, false).unwrap().len(), 1);
+}
+
+#[test]
+fn external_codes_are_recorded_before_exact_local_coverage_is_checked() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let state = BookMetadataState {
+        title: "Future LCC detail".to_owned(),
+        contributors: Vec::new(),
+        description: String::new(),
+        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Future schedule", "marc", Some("lcc".to_owned()), Some("ZZZZ999".to_owned())).unwrap()], ..PublicationMetadata::default() },
+    };
+    let content_hash = fixture_content_hash(77);
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, content_hash.clone(), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+
+    let codes = recorded_taxonomy_codes(&conn, &content_hash).unwrap();
+    assert_eq!(codes, vec![TaxonomyCode { system: TaxonomySystem::Lcc, code: "ZZZZ999".to_owned() }]);
+    assert_eq!(recorded_taxonomy_codes_for_library(&conn).unwrap(), codes);
+}
+
+#[test]
+fn ddc_assignments_use_named_summaries_and_upgrade_old_numeric_paths() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let ddc = library_model::PublicationSubject::new(None, "515.33", "openlibrary", Some("ddc".to_owned()), Some("515.33".to_owned())).unwrap();
+    let state = BookMetadataState { title: "Differential equations".to_owned(), contributors: Vec::new(), description: String::new(), publication: PublicationMetadata { subjects: vec![ddc], ..PublicationMetadata::default() } };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    conn.execute(
+        "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)),'equations.epub','equations',1)",
+        [],
+    )
+    .unwrap();
+
+    let expected = "DDC / Science / Mathematics / Analysis / 515.33";
+    assert_eq!(conn.query_row("SELECT subject_path FROM book_subject_assignment WHERE system_id='ddc'", [], |row| row.get::<_, String>(0)).unwrap(), expected);
+
+    conn.execute_batch(
+        "DELETE FROM subject_system WHERE id='ddc';
+         INSERT INTO subject_system(id,version,matcher_version) VALUES('ddc','external',1);
+         INSERT INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES
+             ('ddc','LCC','','LCC',NULL,1),
+             ('ddc','LCC / DDC','LCC','DDC',NULL,1),
+             ('ddc','LCC / DDC / 515.33','LCC / DDC','515.33',NULL,1);
+         INSERT INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version)
+             VALUES((SELECT row_id FROM book WHERE content_hash=printf('%064x',1)),'ddc','LCC / DDC / 515.33',1);",
+    )
+    .unwrap();
+    seed_subject_systems(&conn).unwrap();
+
+    assert_eq!(conn.query_row("SELECT subject_path FROM book_subject_assignment WHERE system_id='ddc'", [], |row| row.get::<_, String>(0)).unwrap(), expected);
+    assert_eq!(conn.query_row("SELECT version FROM subject_system WHERE id='ddc'", [], |row| row.get::<_, String>(0)).unwrap(), library_model::DDC_VERSION);
+    let roots = get_subject_children(&conn, "").unwrap();
+    assert!(roots.iter().any(|root| root.id.as_str() == "Science & Nature" && root.name == "Science & Nature"));
+    let children = get_subject_children(&conn, "Science & Nature").unwrap();
+    assert!(children.iter().any(|child| child.name == "Mathematics"));
+}
+
+#[test]
+fn lcc_assignments_use_named_outline_and_upgrade_flat_call_number_paths() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let lcc = library_model::PublicationSubject::new(None, "QA76.73.R3", "openlibrary", Some("lcc".to_owned()), None).unwrap();
+    let state = BookMetadataState { title: "Rust programming".to_owned(), contributors: Vec::new(), description: String::new(), publication: PublicationMetadata { subjects: vec![lcc], ..PublicationMetadata::default() } };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    conn.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)),'rust.epub','rust',1)", []).unwrap();
+
+    let expected = "LCC / Science / Mathematics / Calculating machines / Electronic computers. Computer science / QA76.73.R3";
+    assert_eq!(conn.query_row("SELECT subject_path FROM book_subject_assignment WHERE system_id='lcc'", [], |row| row.get::<_, String>(0)).unwrap(), expected);
+
+    conn.execute_batch(
+        "DELETE FROM subject_system WHERE id='lcc';
+         INSERT INTO subject_system(id,version,matcher_version) VALUES('lcc','external',1);
+         INSERT INTO subject_node(system_id,path,parent_path,name,code,assignable) VALUES
+             ('lcc','LCC','','LCC',NULL,1),
+             ('lcc','LCC / LCC','LCC','LCC',NULL,1),
+             ('lcc','LCC / LCC / QA76.73.R3','LCC / LCC','QA76.73.R3',NULL,1);
+         INSERT INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version)
+             VALUES((SELECT row_id FROM book WHERE content_hash=printf('%064x',1)),'lcc','LCC / LCC / QA76.73.R3',1);",
+    )
+    .unwrap();
+    seed_subject_systems(&conn).unwrap();
+
+    assert_eq!(conn.query_row("SELECT subject_path FROM book_subject_assignment WHERE system_id='lcc'", [], |row| row.get::<_, String>(0)).unwrap(), expected);
+    assert_eq!(conn.query_row("SELECT version FROM subject_system WHERE id='lcc'", [], |row| row.get::<_, String>(0)).unwrap(), library_model::LCC_VERSION);
+    let children = get_subject_children(&conn, "Applied Sciences & Technology").unwrap();
+    assert!(children.iter().any(|child| child.name == "Computers & Information Technology"));
 }
 
 #[test]
@@ -98,20 +241,25 @@ fn subject_scope_includes_books_assigned_to_descendant_subjects() {
             ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',1)), 'parent.epub', 'parent'),
             ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',2)), 'child.epub', 'child'),
             ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',3)), 'science.epub', 'science');
-         INSERT INTO subject_system(id, version, matcher_version) VALUES ('test', '1', 1);
-         INSERT INTO subject_node(system_id, path, parent_path, name, code, assignable) VALUES
-            ('test', 'History', '', 'History', NULL, 1),
-            ('test', 'History / Europe', 'History', 'Europe', NULL, 1),
-            ('test', 'Science', '', 'Science', NULL, 1);
-         INSERT INTO book_subject_assignment(book_row_id, system_id, subject_path, matcher_version) VALUES
-            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',1)), 'test', 'History', 1),
-            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',2)), 'test', 'History / Europe', 1),
-            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',3)), 'test', 'Science', 1);",
+         INSERT INTO book_unified_concept(book_row_id, concept_id, mapper_version) VALUES
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',1)), (SELECT concept_id FROM unified_concept_route WHERE path='Humanities / History'), 4),
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',2)), (SELECT concept_id FROM unified_concept_route WHERE path='Humanities / History / Europe'), 4),
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',3)), (SELECT concept_id FROM unified_concept_route WHERE path='Science & Nature / General Science'), 4);",
     )
     .unwrap();
 
-    assert_eq!(get_descendant_subject_content_hashes(&conn, "History").unwrap(), vec![fixture_content_hash(1), fixture_content_hash(2)]);
-    assert_eq!(get_descendant_subject_content_hashes(&conn, "Science").unwrap(), vec![fixture_content_hash(3)]);
+    assert_eq!(get_descendant_subject_content_hashes(&conn, "Humanities / History").unwrap(), vec![fixture_content_hash(1), fixture_content_hash(2)]);
+    assert_eq!(get_descendant_subject_content_hashes(&conn, "Science & Nature / General Science").unwrap(), vec![fixture_content_hash(3)]);
+}
+
+#[test]
+fn unified_taxonomy_graph_rejects_cycles() {
+    let conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let humanities = library_model::unified_concept_id("Humanities");
+    let history = library_model::unified_concept_id("Humanities / History");
+    let error = conn.execute("INSERT INTO unified_concept_edge(parent_concept_id,child_concept_id,relationship) VALUES(?1,?2,'broader')", rusqlite::params![history, humanities]).unwrap_err();
+    assert!(error.to_string().contains("would create a cycle"));
 }
 
 #[test]
@@ -348,7 +496,7 @@ fn an_author_row_takes_its_covers_most_recently_read_first() {
     let author_id = get_authors_scoped(&conn, false).unwrap()[0].0;
     let covers = get_author_cover_hashes_scoped(&conn, false, 2).unwrap();
 
-    assert_eq!(covers.get(&author_id), Some(&vec![fixture_content_hash(3), fixture_content_hash(2)]), "most recently read first, capped at two");
+    assert_eq!(covers.get(&author_id), Some(&vec![(fixture_content_hash(3), "Gamma".to_owned()), (fixture_content_hash(2), "Beta".to_owned())]), "most recently read first, capped at two");
 }
 
 #[test]
@@ -674,6 +822,139 @@ fn scanned_publication_metadata_is_canonical_and_relationally_projected() {
 }
 
 #[test]
+fn edition_identity_inference_adds_one_provenanced_isbn_and_never_replaces_it() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let state = BookMetadataState {
+        title: "The Example Book".to_owned(),
+        contributors: vec![author("Alex Smith")],
+        description: String::new(),
+        publication: PublicationMetadata {
+            publishers: vec![library_model::PublisherCredit::new("North Wind Press").unwrap()],
+            dates: vec![library_model::PublicationDate::new(None, "2004", Some("publication".to_owned())).unwrap()],
+            ..PublicationMetadata::default()
+        },
+    };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    conn.execute(
+        "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded)
+         VALUES('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=?1),'example.epub','example',1)",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+
+    let candidates = edition_identity_candidates(&conn, "openlibrary_edition_identity_v1", 10, false).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].authors, ["Alex Smith"]);
+    assert_eq!(candidates[0].publication_year, Some(2004));
+    let review_candidate = metadata_contract::EditionIdentityMatch {
+        canonical_isbn13: "9780306406157".to_owned(),
+        open_library_edition_id: "OL1M".to_owned(),
+        open_library_work_id: Some("OL10W".to_owned()),
+        title: "The Example Book".to_owned(),
+        work_title: Some("Example Book".to_owned()),
+        title_match: metadata_contract::EditionTitleMatch::Edition,
+        authors: vec!["Alex Smith".to_owned()],
+        publishers: vec!["North Wind Press".to_owned()],
+        publication_year: Some(2004),
+        matched_publisher: true,
+        matched_publication_year: true,
+        classifications: Vec::new(),
+    };
+    assert!(!apply_edition_identity(&mut conn, fixture_content_hash(1), "openlibrary_edition_identity_v1", "0", None, "ambiguous", None, std::slice::from_ref(&review_candidate)).unwrap());
+    let reviews = edition_identity_reviews(&conn, "openlibrary_edition_identity_v1").unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].status, "ambiguous");
+    assert_eq!(reviews[0].candidates[0].open_library_edition_id, "OL1M");
+    assert!(apply_reviewed_edition_identity(&mut conn, fixture_content_hash(1), "openlibrary_edition_identity_v1", "OL1M", "9780306406157").unwrap());
+    assert!(!apply_edition_identity(&mut conn, fixture_content_hash(1), "openlibrary_edition_identity_v1", "OL2M", Some("9780821338278"), "updated", None, &[]).unwrap());
+    let identifiers =
+        conn.prepare("SELECT canonical_value,type_evidence FROM book_identifier WHERE scheme='isbn'").unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(identifiers.len(), 1);
+    assert_eq!(identifiers[0].0, "9780306406157");
+    let evidence: Vec<library_model::PublicationIdentifierType> = sync_common::wire::decode(&identifiers[0].1, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+    assert_eq!(evidence[0].value(), "openlibrary-edition-match");
+    assert!(edition_identity_candidates(&conn, "openlibrary_edition_identity_v1", 10, false).unwrap().is_empty());
+
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(2), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    assert!(apply_alternative_edition_isbns(&mut conn, fixture_content_hash(2), "openlibrary_edition_identity_v1", "OL10W", &["9780821338278", "9780306406157", "9780821338278"], Some("two matching editions"),).unwrap());
+    let alternatives = conn
+        .prepare(
+            "SELECT canonical_value,type_evidence FROM book_identifier
+             WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND scheme='isbn'
+             ORDER BY canonical_value",
+        )
+        .unwrap()
+        .query_map([fixture_content_hash(2).as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(alternatives.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["9780306406157", "9780821338278"]);
+    for (_, encoded) in alternatives {
+        let evidence: Vec<library_model::PublicationIdentifierType> = sync_common::wire::decode(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(evidence[0].value(), "openlibrary-alternative-edition-match");
+    }
+    let rich = rich_enrichment_candidates(&conn, "openlibrary_rich_provenance_test", 10, false).unwrap();
+    let inferred = rich.iter().find(|candidate| candidate.content_hash == fixture_content_hash(2)).unwrap();
+    assert_eq!(inferred.isbns, ["9780306406157", "9780821338278"]);
+    assert!(inferred.exact_isbns.is_empty(), "ambiguous sibling ISBNs locate works but are not exact publication evidence");
+
+    // The one-time rollback removes only the ISBN set created by accepting all
+    // ambiguous candidates. The ISBN selected explicitly for book 1 survives.
+    conn.execute("DELETE FROM sync_metadata WHERE key=?1", [external_metadata::RESTORE_ALTERNATIVE_MATCHES_MIGRATION]).unwrap();
+    assert_eq!(external_metadata::migrate_automatic_alternative_edition_matches(&conn).unwrap(), 1);
+    assert_eq!(external_metadata::migrate_automatic_alternative_edition_matches(&conn).unwrap(), 0);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM book_identifier WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND scheme='isbn'", [fixture_content_hash(2).as_str()], |row| row.get::<_, i64>(0),).unwrap(), 0);
+    assert_eq!(
+        conn.query_row("SELECT canonical_value FROM book_identifier WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND scheme='isbn'", [fixture_content_hash(1).as_str()], |row| row.get::<_, String>(0),).unwrap(),
+        "9780306406157"
+    );
+    assert!(edition_identity_candidates(&conn, "openlibrary_edition_identity_v1", 10, false).unwrap().iter().any(|candidate| candidate.content_hash == fixture_content_hash(2)));
+}
+
+#[test]
+fn uncategorized_no_match_can_be_retried_or_assigned_a_manual_isbn() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let state = BookMetadataState {
+        title: "Manual Review Book".to_owned(),
+        contributors: vec![author("Alex Smith")],
+        description: String::new(),
+        publication: PublicationMetadata {
+            publishers: vec![library_model::PublisherCredit::new("North Wind Press").unwrap()],
+            dates: vec![library_model::PublicationDate::new(None, "2004", Some("publication".to_owned())).unwrap()],
+            ..PublicationMetadata::default()
+        },
+    };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+    conn.execute(
+        "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded)
+         VALUES('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=?1),'manual.epub','manual',1)",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+
+    assert!(!apply_edition_identity(&mut conn, fixture_content_hash(1), "openlibrary_edition_identity_v1", "0", None, "no_match", None, &[]).unwrap());
+    let reviews = edition_identity_reviews(&conn, "openlibrary_edition_identity_v1").unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].status, "no_match");
+    assert!(edition_identity_candidate(&conn, "openlibrary_edition_identity_v1", &fixture_content_hash(1)).unwrap().is_some());
+
+    assert!(apply_manual_edition_identity(&mut conn, fixture_content_hash(1), "openlibrary_edition_identity_v1", "0-306-40615-2").unwrap());
+    assert!(edition_identity_reviews(&conn, "openlibrary_edition_identity_v1").unwrap().is_empty());
+    let (canonical, evidence): (String, Vec<u8>) = conn.query_row("SELECT canonical_value,type_evidence FROM book_identifier WHERE scheme='isbn'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(canonical, "0306406152");
+    let evidence: Vec<library_model::PublicationIdentifierType> = sync_common::wire::decode(&evidence, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+    assert_eq!(evidence[0].value(), "manual-isbn-review");
+}
+
+#[test]
 fn authority_evidence_distinguishes_namesakes_without_splitting_spelling_variants() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
@@ -684,6 +965,8 @@ fn authority_evidence_distinguishes_namesakes_without_splitting_spelling_variant
     let first_wikidata = ExternalAuthorId::parse(AuthorAuthority::Wikidata, "Q1001").unwrap();
     let second_wikidata = ExternalAuthorId::parse(AuthorAuthority::Wikidata, "Q1002").unwrap();
     let first = resolve_book_author_identity(&tx, fixture_content_hash(1), 0, "Alex Smith", &first_wikidata).unwrap();
+    let unresolved_second = get_book_author_identities(&tx, fixture_content_hash(2)).unwrap()[0].author_id;
+    assert_ne!(first, unresolved_second, "resolving one shared provisional credit must not assign that authority to every same-name book");
     let second = resolve_book_author_identity(&tx, fixture_content_hash(2), 0, "Alex Smith", &second_wikidata).unwrap();
     let first_variant = resolve_book_author_identity(&tx, fixture_content_hash(3), 0, "Alex Smith", &first_wikidata).unwrap();
     assert_ne!(first, second, "the same normalized name must be able to represent namesakes");
@@ -696,6 +979,168 @@ fn authority_evidence_distinguishes_namesakes_without_splitting_spelling_variant
     let first_credit = get_book_author_identities(&conn, fixture_content_hash(1)).unwrap().pop().unwrap();
     assert_eq!(first_credit.author_id, first);
     assert_eq!(first_credit.external_ids.len(), 2);
+}
+
+#[test]
+fn batched_author_enrichment_candidates_resolve_before_sync_and_keep_namesakes_separate() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    insert_scanned_book_contributors(&tx, fixture_content_hash(1), "First work", &[author("Alex Smith")]).unwrap();
+    insert_scanned_book_contributors(&tx, fixture_content_hash(2), "Second work", &[author("Alex Smith")]).unwrap();
+    tx.execute(
+        "INSERT INTO book_identifier(book_row_id,position,scheme,value,canonical_value,type_evidence) VALUES((SELECT row_id FROM book WHERE content_hash=?1),0,'isbn','9780306406157','9780306406157',X'')",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO book_identifier(book_row_id,position,scheme,value,canonical_value,type_evidence) VALUES((SELECT row_id FROM book WHERE content_hash=?1),0,'isbn','9783161484100','9783161484100',X'')",
+        [fixture_content_hash(2).as_str()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    conn.execute("DELETE FROM sync_outbox", []).unwrap();
+
+    let candidates = author_enrichment_candidates(&conn, "openlibrary_authors", 256, false).unwrap();
+    assert_eq!(candidates.len(), 2);
+    let first = ExternalAuthorId::parse(AuthorAuthority::OpenLibrary, "OL100A").unwrap();
+    let second = ExternalAuthorId::parse(AuthorAuthority::OpenLibrary, "OL200A").unwrap();
+    apply_author_enrichment(&mut conn, fixture_content_hash(1), "openlibrary_authors", "9780306406157", &[(0, "Alex Smith".to_owned(), first)], "updated", None).unwrap();
+    apply_author_enrichment(&mut conn, fixture_content_hash(2), "openlibrary_authors", "9783161484100", &[(0, "Alex Smith".to_owned(), second)], "updated", None).unwrap();
+
+    let first_id = get_book_author_identities(&conn, fixture_content_hash(1)).unwrap()[0].author_id;
+    let second_id = get_book_author_identities(&conn, fixture_content_hash(2)).unwrap()[0].author_id;
+    assert_eq!(first_id.to_string(), "445826e1-4030-5774-86b1-ae8d4e606d3d", "native and web clients must derive the same author id");
+    assert_ne!(first_id, second_id);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM author_external_identifier WHERE authority='open_library'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sync_outbox WHERE state_kind='metadata'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert!(author_enrichment_candidates(&conn, "openlibrary_authors", 256, false).unwrap().is_empty());
+}
+
+#[test]
+fn rich_enrichment_persists_entity_graph_and_synchronized_subject_references() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    insert_scanned_book(&tx, fixture_content_hash(1), "A Paris book", "An Author").unwrap();
+    tx.execute(
+        "INSERT INTO book_identifier(book_row_id,position,scheme,value,canonical_value,type_evidence) VALUES((SELECT row_id FROM book WHERE content_hash=?1),0,'isbn','9780306406157','9780306406157',X'')",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO book_identifier(book_row_id,position,scheme,value,canonical_value,type_evidence) VALUES((SELECT row_id FROM book WHERE content_hash=?1),1,'isbn','9783161484100','9783161484100',X'')",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    conn.execute("DELETE FROM sync_outbox", []).unwrap();
+
+    let candidates = rich_enrichment_candidates(&conn, "openlibrary_rich_v2", 256, false).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].isbns, ["9780306406157", "9783161484100"]);
+    assert_eq!(candidates[0].exact_isbns.iter().map(String::as_str).collect::<Vec<_>>(), ["9780306406157", "9783161484100"]);
+    let matched = metadata_contract::RichWorkMetadataMatch {
+        open_library_work_id: Some("OL10W".to_owned()),
+        exact_edition_ids: vec!["OL1M".to_owned()],
+        classifications: Vec::new(),
+        authors: Vec::new(),
+        places: vec![
+            metadata_contract::EntityReference { wikidata_id: Some("Q90".to_owned()), name: "Paris".to_owned(), source: metadata_contract::EntitySource::ExactEdition },
+            metadata_contract::EntityReference { wikidata_id: None, name: "Atlantis".to_owned(), source: metadata_contract::EntitySource::Work },
+        ],
+        people: vec![metadata_contract::EntityReference { wikidata_id: Some("Q7259".to_owned()), name: "Ada Lovelace".to_owned(), source: metadata_contract::EntitySource::Work }],
+        popularity: None,
+    };
+    let places = vec![
+        metadata_contract::PlaceEntity {
+            wikidata_id: "Q90".to_owned(),
+            label: "Paris".to_owned(),
+            aliases: vec!["Paris, France".to_owned()],
+            parent_ids: Vec::new(),
+            country_ids: vec!["Q142".to_owned()],
+            latitude_e7: Some(488_566_000),
+            longitude_e7: Some(23_522_000),
+        },
+        metadata_contract::PlaceEntity { wikidata_id: "Q142".to_owned(), label: "France".to_owned(), aliases: Vec::new(), parent_ids: vec!["Q46".to_owned()], country_ids: Vec::new(), latitude_e7: None, longitude_e7: None },
+        metadata_contract::PlaceEntity { wikidata_id: "Q46".to_owned(), label: "Europe".to_owned(), aliases: Vec::new(), parent_ids: Vec::new(), country_ids: Vec::new(), latitude_e7: None, longitude_e7: None },
+    ];
+    let people = vec![metadata_contract::PersonEntity { wikidata_id: "Q7259".to_owned(), label: "Ada Lovelace".to_owned(), aliases: Vec::new(), birth_year: Some(1815), death_year: Some(1852), fictional: false }];
+    let subjects = vec![
+        library_model::PublicationSubject::new(None, "Paris", "openlibrary:metadata:exact-edition", Some("wikidata-place".to_owned()), Some("Q90".to_owned())).unwrap(),
+        library_model::PublicationSubject::new(None, "Ada Lovelace", "openlibrary:metadata:work", Some("wikidata-person".to_owned()), Some("Q7259".to_owned())).unwrap(),
+    ];
+    assert_eq!(apply_rich_enrichment(&mut conn, fixture_content_hash(1), "openlibrary_rich_v2", "9780306406157", Some(&matched), &places, &people, subjects, "updated", None, false).unwrap(), 2);
+
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM external_entity", [], |row| row.get::<_, i64>(0)).unwrap(), 5);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM external_place_edge", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM book_external_entity", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM book_subject WHERE authority IN ('wikidata-place','wikidata-person')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    let mut flat_places = Vec::new();
+    conn.get_external_places(|row| {
+        flat_places.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+        Ok(())
+    })
+    .unwrap();
+    let mut flat_people = Vec::new();
+    conn.get_external_people(|row| {
+        flat_people.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(flat_places, [("OLP-41746c616e746973".to_owned(), "Atlantis".to_owned()), ("Q90".to_owned(), "Paris".to_owned())], "resolved and raw dump headings are both shown, while place ancestors remain hidden");
+    assert_eq!(flat_people, [("Q7259".to_owned(), "Ada Lovelace".to_owned())]);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sync_outbox WHERE state_kind='metadata'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert!(rich_enrichment_candidates(&conn, "openlibrary_rich_v2", 256, false).unwrap().is_empty());
+}
+
+#[test]
+fn metadata_transport_failures_are_recorded_and_remain_explicitly_retryable() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    insert_scanned_book(&tx, fixture_content_hash(1), "A metadata candidate", "An Author").unwrap();
+    tx.execute(
+        "INSERT INTO book_identifier(book_row_id,position,scheme,value,canonical_value,type_evidence) VALUES((SELECT row_id FROM book WHERE content_hash=?1),0,'isbn','9780306406157','9780306406157',X'')",
+        [fixture_content_hash(1).as_str()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let failures = vec![(fixture_content_hash(1), "9780306406157".to_owned())];
+    record_external_metadata_failures(&mut conn, "openlibrary_rich_v2", &failures, "metadata endpoint unavailable").unwrap();
+    let attempt =
+        conn.query_row("SELECT identifier,status,detail FROM external_metadata_attempt WHERE provider_id='openlibrary_rich_v2'", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap();
+    assert_eq!(attempt, ("9780306406157".to_owned(), "failed".to_owned(), "metadata endpoint unavailable".to_owned()));
+    assert!(rich_enrichment_candidates(&conn, "openlibrary_rich_v2", 256, false).unwrap().is_empty());
+    assert_eq!(rich_enrichment_candidates(&conn, "openlibrary_rich_v2", 256, true).unwrap().len(), 1);
+}
+
+#[test]
+fn filtered_librarything_enrichment_replaces_previous_sibling_codes() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    insert_scanned_book(&tx, fixture_content_hash(1), "A noisy classic", "An Author").unwrap();
+    tx.commit().unwrap();
+
+    let old = vec![
+        PublicationSubject::new(None, "PA4021 .A2 1900", "openlibrary:metadata:work", Some("lcc".to_owned()), Some("PA4021 .A2 1900".to_owned())).unwrap(),
+        PublicationSubject::new(None, "HD1698.E3 A6", "dc:subject", Some("lcc".to_owned()), Some("HD1698.E3 A6".to_owned())).unwrap(),
+    ];
+    apply_rich_enrichment(&mut conn, fixture_content_hash(1), "openlibrary_rich_v5", "9780306406157", None, &[], &[], old, "updated", None, false).unwrap();
+
+    let retained = vec![PublicationSubject::new(None, "PA4021", "openlibrary:metadata:sibling-edition", Some("lcc".to_owned()), Some("PA4021".to_owned())).unwrap()];
+    apply_rich_enrichment(&mut conn, fixture_content_hash(1), "openlibrary_rich_v7", "9780306406157", None, &[], &[], retained, "updated", None, true).unwrap();
+
+    let codes = conn
+        .prepare("SELECT code FROM book_subject WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND authority='lcc' ORDER BY code")
+        .unwrap()
+        .query_map([fixture_content_hash(1).as_str()], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(codes, ["PA4021"]);
 }
 
 #[test]
@@ -1750,6 +2195,7 @@ fn stamp_book_dir_local_hash_makes_scanner_fast_lookup_hit() {
     let hash = local_file_fingerprint(&file).unwrap();
     let found = get_book_dirs_by_local_fingerprint(&conn).unwrap().remove(&hash).unwrap();
     assert!(!found.description_missing);
+    assert_eq!(found.content_hash, fixture_content_hash(1));
 }
 
 #[test]
@@ -1871,6 +2317,25 @@ fn materialize_download_path_is_idempotent_for_a_book_that_already_has_its_file(
     assert_eq!(second, first, "re-materializing must not escalate past the book's own file");
     let stored: String = conn.query_row("SELECT file_name FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [content_hash.as_str()], |row| row.get(0)).unwrap();
     assert_eq!(stored, "Dune.epub");
+}
+
+#[test]
+fn materialize_download_path_supports_the_library_root() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+    let library_root = root.path().canonicalize().unwrap();
+    let conn = fk_conn();
+    let content_hash = test_content_hash();
+    conn.execute("INSERT INTO book(content_hash, title, added_at, format) VALUES (?1, 'Dune', 1, 'epub')", [content_hash.as_str()]).unwrap();
+    conn.execute(
+        "INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES (?2, (SELECT row_id FROM book WHERE content_hash=?1), ?1, '', 0)",
+        rusqlite::params![content_hash.as_str(), sync_common::ROOT_DIR_ID.to_string()],
+    )
+    .unwrap();
+
+    let placement = BookPlacement::new(content_hash, RelativeBookPath::parse(&format!("/{content_hash}")).unwrap());
+    let chosen = materialize_download_path(&conn, &library_root, &placement).unwrap();
+    assert_eq!(chosen.as_str(), "/Dune.epub");
 }
 
 /// The probe must see the filesystem, not only app-managed rows: a file the user

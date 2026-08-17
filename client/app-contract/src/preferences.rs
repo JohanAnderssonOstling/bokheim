@@ -10,12 +10,20 @@ pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 3.0;
 pub const LINE_HEIGHT_MIN: f32 = 1.0;
 pub const LINE_HEIGHT_MAX: f32 = 2.4;
+pub const PDF_ZOOM_MIN: f32 = 0.05;
+pub const PDF_ZOOM_MAX: f32 = 10.0;
+pub const PDF_PAGE_COUNT_MIN: u8 = 1;
+pub const PDF_PAGE_COUNT_MAX: u8 = 6;
 pub const COLUMN_COUNT_MIN: u8 = 1;
 pub const COLUMN_COUNT_MAX: u8 = 4;
 pub const UI_FONT_SIZE_MIN: u8 = 12;
 pub const UI_FONT_SIZE_MAX: u8 = 24;
 pub const UI_FONT_SIZE_DEFAULT: u8 = 16;
 pub const WEB_DESKTOP_MIN_WIDTH_PX: u16 = 720;
+
+fn default_catalog_languages() -> Vec<String> {
+    vec!["en".to_owned()]
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -257,8 +265,10 @@ pub struct BrowsingPreferences {
     ui_font_size_px: UiFontSize,
     library_view: LibraryView,
     show_unavailable_books: bool,
-    /// Empty means that catalogue searches include every language.
-    #[serde(default)]
+    /// Empty means that catalogue searches include every language. New and
+    /// pre-language-filter profiles start with English and can explicitly
+    /// choose All languages from the catalogue dropdown.
+    #[serde(default = "default_catalog_languages")]
     included_catalog_languages: Vec<String>,
 }
 
@@ -295,7 +305,7 @@ impl Default for BrowsingPreferences {
             ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT),
             library_view: LibraryView::Covers,
             show_unavailable_books: false,
-            included_catalog_languages: Vec::new(),
+            included_catalog_languages: default_catalog_languages(),
         }
     }
 }
@@ -498,13 +508,22 @@ pub enum ReaderFlow {
     Scrolled,
 }
 
+/// How a PDF page's on-screen size is decided.
+///
+/// Every mode settles the same quantity — the zoom, in pixels per PDF point —
+/// and they differ only in which end is held fixed. `pdf_page_count` carries
+/// the count for [`PdfZoomMode::FitWidth`] and `pdf_zoom` the zoom for
+/// [`PdfZoomMode::Fixed`], so switching modes and back restores what was set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
-pub enum PdfPageLayout {
-    Single,
-    Spread,
+pub enum PdfZoomMode {
+    /// The page count is chosen and the zoom follows.
     #[default]
-    Automatic,
+    FitWidth,
+    /// The zoom is chosen and the page count follows.
+    Fixed,
+    /// A page's height fills the viewport, and the page count follows.
+    FitHeight,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -546,8 +565,14 @@ pub struct ReaderPreferences {
     hyphenation: bool,
     #[specta(type = u8)]
     max_column_count: ColumnCount,
-    /// Controls how many PDF pages the native reader presents together.
-    pdf_page_layout: PdfPageLayout,
+    /// Which end of the PDF layout is held fixed; the rest is derived.
+    pdf_zoom_mode: PdfZoomMode,
+    /// How many PDF pages sit side by side under [`PdfZoomMode::FitWidth`].
+    #[specta(type = u8)]
+    pdf_page_count: PdfPageCount,
+    /// Pixels per PDF point under [`PdfZoomMode::Fixed`].
+    #[specta(type = specta_typescript::Number)]
+    pdf_zoom: PdfZoom,
     /// Automatically removes uniform outer margins from rendered PDF pages.
     pdf_trim_margins: bool,
 }
@@ -569,11 +594,7 @@ struct UiFontSize(u8);
 
 impl UiFontSize {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("UI font size"))
-        }
+        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("UI font size")) }
     }
 
     const fn get(self) -> u8 {
@@ -595,11 +616,7 @@ macro_rules! bounded_float {
 
         impl $name {
             fn new(value: $primitive) -> Result<Self, PreferenceValueError> {
-                if value.is_finite() && ($minimum..=$maximum).contains(&value) {
-                    Ok(Self(value))
-                } else {
-                    Err(PreferenceValueError($label))
-                }
+                if value.is_finite() && ($minimum..=$maximum).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError($label)) }
             }
 
             const fn get(self) -> $primitive {
@@ -619,6 +636,7 @@ bounded_float!(FontSize, f32, "font size", FONT_SIZE_MIN, FONT_SIZE_MAX);
 bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
+bounded_float!(PdfZoom, f32, "PDF zoom", PDF_ZOOM_MIN, PDF_ZOOM_MAX);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -626,11 +644,7 @@ struct ColumnCount(u8);
 
 impl ColumnCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (COLUMN_COUNT_MIN..=COLUMN_COUNT_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("column count"))
-        }
+        if (COLUMN_COUNT_MIN..=COLUMN_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("column count")) }
     }
 
     const fn get(self) -> u8 {
@@ -639,6 +653,26 @@ impl ColumnCount {
 }
 
 impl<'de> Deserialize<'de> for ColumnCount {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct PdfPageCount(u8);
+
+impl PdfPageCount {
+    fn new(value: u8) -> Result<Self, PreferenceValueError> {
+        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("PDF page count")) }
+    }
+
+    const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PdfPageCount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::new(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
@@ -656,7 +690,9 @@ impl Default for ReaderPreferences {
             text_alignment: ReaderTextAlignment::Publisher,
             hyphenation: true,
             max_column_count: ColumnCount(2),
-            pdf_page_layout: PdfPageLayout::Automatic,
+            pdf_zoom_mode: PdfZoomMode::FitWidth,
+            pdf_page_count: PdfPageCount(1),
+            pdf_zoom: PdfZoom(1.0),
             pdf_trim_margins: true,
         }
     }
@@ -690,8 +726,14 @@ impl ReaderPreferences {
     pub fn max_column_count(self) -> u8 {
         self.max_column_count.get()
     }
-    pub fn pdf_page_layout(self) -> PdfPageLayout {
-        self.pdf_page_layout
+    pub fn pdf_zoom_mode(self) -> PdfZoomMode {
+        self.pdf_zoom_mode
+    }
+    pub fn pdf_page_count(self) -> u8 {
+        self.pdf_page_count.get()
+    }
+    pub fn pdf_zoom(self) -> f32 {
+        self.pdf_zoom.get()
     }
     pub fn pdf_trim_margins(self) -> bool {
         self.pdf_trim_margins
@@ -729,8 +771,16 @@ impl ReaderPreferences {
         self.max_column_count = ColumnCount::new(value)?;
         Ok(())
     }
-    pub fn set_pdf_page_layout(&mut self, value: PdfPageLayout) {
-        self.pdf_page_layout = value;
+    pub fn set_pdf_zoom_mode(&mut self, value: PdfZoomMode) {
+        self.pdf_zoom_mode = value;
+    }
+    pub fn set_pdf_page_count(&mut self, value: u8) -> Result<(), PreferenceValueError> {
+        self.pdf_page_count = PdfPageCount::new(value)?;
+        Ok(())
+    }
+    pub fn set_pdf_zoom(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.pdf_zoom = PdfZoom::new(value)?;
+        Ok(())
     }
     pub fn set_pdf_trim_margins(&mut self, value: bool) {
         self.pdf_trim_margins = value;
@@ -753,7 +803,10 @@ pub enum ReaderPreferencePatch {
     TextAlignment(ReaderTextAlignment),
     Hyphenation(bool),
     MaxColumnCount(u8),
-    PdfPageLayout(PdfPageLayout),
+    PdfZoomMode(PdfZoomMode),
+    PdfPageCount(u8),
+    #[specta(type = specta_typescript::Number)]
+    PdfZoom(f32),
     PdfTrimMargins(bool),
 }
 
@@ -781,10 +834,12 @@ impl ReaderPreferencePatch {
                 Ok(())
             }
             Self::MaxColumnCount(value) => preferences.set_max_column_count(value),
-            Self::PdfPageLayout(value) => {
-                preferences.set_pdf_page_layout(value);
+            Self::PdfZoomMode(value) => {
+                preferences.set_pdf_zoom_mode(value);
                 Ok(())
             }
+            Self::PdfPageCount(value) => preferences.set_pdf_page_count(value),
+            Self::PdfZoom(value) => preferences.set_pdf_zoom(value),
             Self::PdfTrimMargins(value) => {
                 preferences.set_pdf_trim_margins(value);
                 Ok(())
@@ -812,7 +867,9 @@ pub enum ReaderPreferenceKey {
     TextAlignment,
     Hyphenation,
     MaxColumnCount,
-    PdfPageLayout,
+    PdfZoomMode,
+    PdfPageCount,
+    PdfZoom,
     PdfTrimMargins,
 }
 
@@ -833,7 +890,9 @@ impl ReaderCapabilities {
                 ReaderPreferenceKey::FontFamily,
                 ReaderPreferenceKey::TextAlignment,
                 ReaderPreferenceKey::MaxColumnCount,
-                ReaderPreferenceKey::PdfPageLayout,
+                ReaderPreferenceKey::PdfZoomMode,
+                ReaderPreferenceKey::PdfPageCount,
+                ReaderPreferenceKey::PdfZoom,
                 ReaderPreferenceKey::PdfTrimMargins,
             ],
             ReaderEngine::Foliate => vec![
@@ -863,6 +922,8 @@ pub struct ReaderPreferenceConstraints {
     pub zoom: [f64; 2],
     pub line_height: [f32; 2],
     pub max_column_count: [u8; 2],
+    pub pdf_page_count: [u8; 2],
+    pub pdf_zoom: [f32; 2],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -884,8 +945,8 @@ pub struct ReaderTextAlignmentOption {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct PdfPageLayoutOption {
-    pub value: PdfPageLayout,
+pub struct PdfZoomModeOption {
+    pub value: PdfZoomMode,
     pub label: String,
 }
 
@@ -894,7 +955,7 @@ pub struct ReaderPreferenceOptions {
     pub flows: Vec<ReaderFlowOption>,
     pub font_families: Vec<ReaderFontFamilyOption>,
     pub text_alignments: Vec<ReaderTextAlignmentOption>,
-    pub pdf_page_layouts: Vec<PdfPageLayoutOption>,
+    pub pdf_zoom_modes: Vec<PdfZoomModeOption>,
 }
 
 impl Default for ReaderPreferenceOptions {
@@ -911,10 +972,10 @@ impl Default for ReaderPreferenceOptions {
                 ReaderTextAlignmentOption { value: ReaderTextAlignment::Start, label: "Left".to_string() },
                 ReaderTextAlignmentOption { value: ReaderTextAlignment::Justify, label: "Justified".to_string() },
             ],
-            pdf_page_layouts: vec![
-                PdfPageLayoutOption { value: PdfPageLayout::Single, label: "Single page".to_string() },
-                PdfPageLayoutOption { value: PdfPageLayout::Spread, label: "Two-page spread".to_string() },
-                PdfPageLayoutOption { value: PdfPageLayout::Automatic, label: "Automatic".to_string() },
+            pdf_zoom_modes: vec![
+                PdfZoomModeOption { value: PdfZoomMode::FitWidth, label: "Fit width".to_string() },
+                PdfZoomModeOption { value: PdfZoomMode::Fixed, label: "Zoom".to_string() },
+                PdfZoomModeOption { value: PdfZoomMode::FitHeight, label: "Fit height".to_string() },
             ],
         }
     }
@@ -928,6 +989,8 @@ impl Default for ReaderPreferenceConstraints {
             zoom: [ZOOM_MIN, ZOOM_MAX],
             line_height: [LINE_HEIGHT_MIN, LINE_HEIGHT_MAX],
             max_column_count: [COLUMN_COUNT_MIN, COLUMN_COUNT_MAX],
+            pdf_page_count: [PDF_PAGE_COUNT_MIN, PDF_PAGE_COUNT_MAX],
+            pdf_zoom: [PDF_ZOOM_MIN, PDF_ZOOM_MAX],
         }
     }
 }
@@ -958,11 +1021,7 @@ mod palette_tests {
     use super::*;
 
     fn channel(value: f64) -> f64 {
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
+        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
     }
 
     fn luminance(colour: u32) -> f64 {
@@ -1075,16 +1134,26 @@ mod tests {
         let transfer = TransferPreferencePatch::AutoDownloadLimitMb(Some(512));
         assert_eq!(serde_json::to_value(transfer).unwrap(), serde_json::json!({ "preference": "auto_download_limit_mb", "value": 512 }));
 
-        let reader = ReaderPreferencePatch::PdfPageLayout(PdfPageLayout::Spread);
-        assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_page_layout", "value": "spread" }));
+        let reader = ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight);
+        assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_zoom_mode", "value": "fit_height" }));
+
+        let count = ReaderPreferencePatch::PdfPageCount(3);
+        assert_eq!(serde_json::to_value(count).unwrap(), serde_json::json!({ "preference": "pdf_page_count", "value": 3 }));
     }
 
     #[test]
     fn catalogue_languages_are_normalized_to_supported_unique_values() {
         let mut preferences = BrowsingPreferences::default();
+        assert_eq!(preferences.included_catalog_languages(), ["en"]);
         BrowsingPreferencePatch::IncludedCatalogLanguages(vec!["sv".to_owned(), "unknown".to_owned(), "en".to_owned(), "sv".to_owned()]).apply(&mut preferences).unwrap();
         assert_eq!(preferences.included_catalog_languages(), ["en", "sv"]);
         BrowsingPreferencePatch::IncludedCatalogLanguages(Vec::new()).apply(&mut preferences).unwrap();
         assert!(preferences.included_catalog_languages().is_empty());
+    }
+
+    #[test]
+    fn older_profiles_receive_the_english_catalogue_default() {
+        let preferences: BrowsingPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(preferences.included_catalog_languages(), ["en"]);
     }
 }

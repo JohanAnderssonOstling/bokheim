@@ -11,6 +11,7 @@ use sync_common::ContentHash;
 use sync_common::{DeclaredBlobReference, DirId, FileName, MutationId, ReplicaId, ReplicaSeq, UnixMillis, WireMutation};
 
 mod directory_projection;
+mod mutation_protobuf;
 pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -42,18 +43,6 @@ pub enum MutationBody {
     BookLink { link_id: String, value: BookLinkState },
     CatalogPublication { source_id: CatalogSourceId, publication: CatalogPublicationIdentity, content_hash: ContentHash },
     Metadata { content_hash: ContentHash, value: BookMetadataState },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct CatalogPublicationValue {
-    publication: CatalogPublicationIdentity,
-    content_hash: ContentHash,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct PlacementValue {
-    present: bool,
-    origin_folder_id: Option<String>,
 }
 
 /// Collision-free register subkey for an edition/work identity. The edition's
@@ -147,62 +136,51 @@ impl MutationBody {
 
     /// Encodes the domain value into the generic wire envelope.
     pub fn to_wire(&self, mutation_id: MutationId, changed_at: UnixMillis, replica_seq: ReplicaSeq) -> Result<WireMutation, wire::WireError> {
-        let (entity_key, entity_subkey, value, blob_reference) = match self {
-            Self::DirectoryName { dir_id, name } => (dir_id.to_string(), String::new(), wire::encode(name)?, None),
-            Self::DirectoryParent { dir_id, parent_id } => (dir_id.to_string(), String::new(), wire::encode(parent_id)?, None),
-            Self::DirectoryLifecycle { dir_id, value } => (dir_id.to_string(), String::new(), wire::encode(value)?, None),
+        let (entity_key, entity_subkey, blob_reference) = match self {
+            Self::DirectoryName { dir_id, .. } => (dir_id.to_string(), String::new(), None),
+            Self::DirectoryParent { dir_id, .. } => (dir_id.to_string(), String::new(), None),
+            Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string(), String::new(), None),
             Self::BookLifecycle { content_hash, value } => {
                 let blob_reference = match value {
                     BookLifecycleState::Present { .. } | BookLifecycleState::Deleted { .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
                     BookLifecycleState::Purged => DeclaredBlobReference { present: false, content_hash: None },
                 };
-                (content_hash.to_string(), String::new(), wire::encode(value)?, Some(blob_reference))
+                (content_hash.to_string(), String::new(), Some(blob_reference))
             }
-            Self::Placement { dir_id, content_hash, present, origin_folder_id } => (content_hash.to_string(), dir_id.to_string(), wire::encode(&PlacementValue { present: *present, origin_folder_id: origin_folder_id.clone() })?, None),
-            Self::ReadingPosition { content_hash, value } => (content_hash.to_string(), String::new(), wire::encode(value)?, None),
-            Self::Annotation { annotation_id, value } => (annotation_id.clone(), String::new(), wire::encode(value)?, None),
-            Self::Bookmark { bookmark_id, value } => (bookmark_id.clone(), String::new(), wire::encode(value)?, None),
-            Self::BookLink { link_id, value } => (link_id.clone(), String::new(), wire::encode(value)?, None),
+            Self::Placement { dir_id, content_hash, .. } => (content_hash.to_string(), dir_id.to_string(), None),
+            Self::ReadingPosition { content_hash, .. } => (content_hash.to_string(), String::new(), None),
+            Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new(), None),
+            Self::Bookmark { bookmark_id, .. } => (bookmark_id.clone(), String::new(), None),
+            Self::BookLink { link_id, .. } => (link_id.clone(), String::new(), None),
             Self::CatalogPublication { source_id, publication, content_hash } => {
-                let value = CatalogPublicationValue { publication: publication.clone(), content_hash: content_hash.clone() };
-                (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), wire::encode(&value)?, None)
+                (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), None)
             }
-            Self::Metadata { content_hash, value } => (content_hash.to_string(), String::new(), wire::encode(value)?, None),
+            Self::Metadata { content_hash, .. } => (content_hash.to_string(), String::new(), None),
         };
+        let value = mutation_protobuf::encode(self)?;
         Ok(WireMutation { mutation_id, kind: self.kind().to_owned(), entity_key, entity_subkey, value, conflict_rank: self.conflict_rank(), blob_reference, changed_at, replica_seq })
     }
 
     /// Decodes a recognized wire value. Unknown kinds are intentionally
     /// forward-compatible and return `None` without interpreting their bytes.
     pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, wire::WireError> {
-        let key = &wire_mutation.entity_key;
-        let value = &wire_mutation.value;
-        let body = match wire_mutation.kind.as_str() {
-            sync_common::mutation_kind::DIRECTORY_NAME => Self::DirectoryName { dir_id: parse_dir_id(key)?, name: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::DIRECTORY_PARENT => Self::DirectoryParent { dir_id: parse_dir_id(key)?, parent_id: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::DIRECTORY_LIFECYCLE => Self::DirectoryLifecycle { dir_id: parse_dir_id(key)?, value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::BOOK_LIFECYCLE => Self::BookLifecycle { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::PLACEMENT => {
-                let value: PlacementValue = wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)?;
-                Self::Placement { content_hash: ContentHash::new(key.as_str()), dir_id: parse_dir_id(&wire_mutation.entity_subkey)?, present: value.present, origin_folder_id: value.origin_folder_id }
-            }
-            sync_common::mutation_kind::READING_POSITION => Self::ReadingPosition { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::ANNOTATION => Self::Annotation { annotation_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::BOOKMARK => Self::Bookmark { bookmark_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::BOOK_LINK => Self::BookLink { link_id: key.clone(), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            sync_common::mutation_kind::CATALOG_PUBLICATION => {
-                let decoded: CatalogPublicationValue = wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)?;
-                let source_id = CatalogSourceId::parse(key).map_err(wire::WireError::Decode)?;
-                let expected_subkey = catalog_publication_state_subkey(&decoded.publication.edition_id, decoded.publication.work_id.as_deref());
-                if wire_mutation.entity_subkey != expected_subkey {
-                    return Err(wire::WireError::Decode("catalog publication identity does not match its register subkey".to_owned()));
-                }
-                Self::CatalogPublication { source_id, publication: decoded.publication, content_hash: decoded.content_hash }
-            }
-            sync_common::mutation_kind::METADATA => Self::Metadata { content_hash: ContentHash::new(&key.as_str()), value: wire::decode(value, wire::MAX_DECODED_REQUEST_BYTES)? },
-            _ => return Ok(None),
-        };
-        Ok(Some(body))
+        if !matches!(
+            wire_mutation.kind.as_str(),
+            sync_common::mutation_kind::DIRECTORY_NAME
+                | sync_common::mutation_kind::DIRECTORY_PARENT
+                | sync_common::mutation_kind::DIRECTORY_LIFECYCLE
+                | sync_common::mutation_kind::BOOK_LIFECYCLE
+                | sync_common::mutation_kind::PLACEMENT
+                | sync_common::mutation_kind::READING_POSITION
+                | sync_common::mutation_kind::ANNOTATION
+                | sync_common::mutation_kind::BOOKMARK
+                | sync_common::mutation_kind::BOOK_LINK
+                | sync_common::mutation_kind::CATALOG_PUBLICATION
+                | sync_common::mutation_kind::METADATA
+        ) {
+            return Ok(None);
+        }
+        mutation_protobuf::decode(wire_mutation).map(Some)
     }
     /// Every field of every variant is bound here (payload fields discarded
     /// as `_` by name) rather than skipped with `..`, so adding a new field

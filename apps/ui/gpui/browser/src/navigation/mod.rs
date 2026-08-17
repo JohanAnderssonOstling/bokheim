@@ -50,30 +50,17 @@ fn library_feature_route(feature: LibraryFeature) -> Route {
 fn universal_feature_route(feature: UniversalFeature) -> Route {
     Route::Universal(match feature {
         UniversalFeature::Store => UniversalRoute::Store,
-        UniversalFeature::Account => UniversalRoute::Sync,
+        UniversalFeature::Account => UniversalRoute::Account,
         UniversalFeature::Settings => UniversalRoute::Settings,
     })
 }
 
 fn library_feature_icon(feature: LibraryFeature) -> Icon {
-    match feature {
-        LibraryFeature::Home => components::home_navigation_icon(),
-        LibraryFeature::Folders => Icon::from(IconName::BookOpen),
-        LibraryFeature::Subjects => Icon::from(IconName::Asterisk),
-        LibraryFeature::Authors => Icon::from(IconName::User),
-        LibraryFeature::Trash => Icon::empty().path("icons/bokheim-trash.svg"),
-    }
+    components::navigation_icon(feature.icon())
 }
 
 fn universal_feature_icon(feature: UniversalFeature) -> Icon {
-    match feature {
-        UniversalFeature::Store => Icon::from(IconName::Building2),
-        // `CircleUser` rather than `User`: the avatar-in-a-circle reads as
-        // "your account", and leaves the bare figure to mean "a person",
-        // which is what the Authors destination is about.
-        UniversalFeature::Account => Icon::from(IconName::CircleUser),
-        UniversalFeature::Settings => Icon::from(IconName::Settings),
-    }
+    components::navigation_icon(feature.icon())
 }
 
 fn library_feature_element_id(feature: LibraryFeature) -> &'static str {

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
 
   import { commands } from "../../lib/commands";
+  import { primaryCatalogAction } from "../../lib/catalog-actions";
   import { ROOT_DIRECTORY_ID } from "../../lib/directory-id";
   import { openExternalUrl } from "../../lib/external-links";
   import CatalogCover from "../store/CatalogCover.svelte";
@@ -26,10 +27,6 @@
   function evidenceLabel(match: CatalogAuthorDiscoveryMatch) {
     if (match.evidence.kind === "author_name") return "Name match";
     return `${match.evidence.identifier.scheme.toUpperCase()} match`;
-  }
-
-  function primaryAction(match: CatalogAuthorDiscoveryMatch) {
-    return match.publication.actions.find((action) => action.kind === "import") ?? match.publication.actions.find((action) => action.kind === "external") ?? null;
   }
 
   async function runAction(match: CatalogAuthorDiscoveryMatch, action: CatalogPublicationAction) {
@@ -79,7 +76,7 @@
     <p class="summary">Identifier-backed matches are shown first. Name matches may include another author with the same name.</p>
     <div class="results">
       {#each result.matches as match (matchKey(match))}
-        {@const action = primaryAction(match)}
+        {@const action = primaryCatalogAction(match.publication.actions)}
         {@const key = matchKey(match)}
         <article>
           <div class="cover"><CatalogCover sourceId={match.source.id} imageUrl={match.publication.image_url} title={match.publication.title} /></div>
@@ -113,14 +110,14 @@
   header h3 { margin-top: .15rem; color: var(--color-ink-text); font: 600 1.05rem var(--font-interface-family); }
   header small, .summary, .status { color: var(--color-subtle-text); font-size: .7rem; line-height: 1.5; }
   .results { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(23rem, 100%), 1fr)); gap: .6rem; }
-  article { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) auto; align-items: center; gap: .75rem; min-height: 5.2rem; padding: .65rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); }
-  .cover { width: 3.4rem; height: 4.8rem; overflow: hidden; border-radius: .25rem; background: var(--color-active-highlight); }
+  article { display: grid; grid-template-columns: 3.4rem minmax(0, 1fr) auto; align-items: center; gap: .75rem; min-height: 5.2rem; padding: .65rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
+  .cover { width: 3.4rem; height: 4.8rem; overflow: hidden; border-radius: 0; background: var(--color-active-highlight); }
   .copy { display: grid; min-width: 0; gap: .12rem; }
   .copy h4 { overflow: hidden; color: var(--color-ink-text); font: 650 .86rem var(--font-interface-family); text-overflow: ellipsis; white-space: nowrap; }
   .copy p, .copy small { overflow: hidden; color: var(--color-subtle-text); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
   .evidence { width: max-content; max-width: 100%; color: var(--color-subtle-text); font-size: .58rem; font-weight: 750; text-transform: uppercase; }
   .evidence.strong-evidence { color: var(--color-accent); }
-  .action, .retry { min-height: 2.35rem; padding: .45rem .7rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font: inherit; font-size: .7rem; font-weight: 750; cursor: pointer; }
+  .action, .retry { min-height: 2.35rem; padding: .45rem .7rem; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font: inherit; font-size: .7rem; font-weight: 750; cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .error { color: var(--color-danger-text); font-size: .72rem; }
   .retry { width: max-content; }

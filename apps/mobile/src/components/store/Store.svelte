@@ -3,15 +3,15 @@
   import { commands } from "../../lib/commands";
   import { ROOT_DIRECTORY_ID } from "../../lib/directory-id";
   import { listen } from "../../lib/app-events";
-  import { catalogActionKey } from "../../lib/catalog-actions";
+  import { catalogActionKey, primaryCatalogAction } from "../../lib/catalog-actions";
   import { catalogLinkAction, catalogLinkCount } from "../../lib/catalog-links";
   import { openExternalUrl } from "../../lib/external-links";
   import { isNativeApp } from "../../lib/platform";
   import { BROWSING_PREFERENCES_CONTRACT, SETTINGS_CONTRACT, STORE_CONTRACT, type BrowsingPreferencePatch, type BrowsingPreferences } from "../../lib/types";
   import FolderBreadcrumbs from "../library/FolderBreadcrumbs.svelte";
   import FolderNavigationCard from "../library/FolderNavigationCard.svelte";
-  import CatalogCover from "./CatalogCover.svelte";
-  import type { CatalogImportRequest, CatalogLink, CatalogPage, CatalogPageView, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSearch, CatalogSource, CatalogWideSearchResult, CatalogWideSearchView } from "../../lib/bindings";
+  import CatalogPublicationCard from "./CatalogPublicationCard.svelte";
+  import type { CatalogImportRequest, CatalogLink, CatalogPage, CatalogPageView, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSearch, CatalogSource, CatalogSubjectBrowseView, CatalogWideSearchResult, CatalogWideSearchView } from "../../lib/bindings";
 
   let { activeLibraryId, libraryName, preferences, onpreferencechange, onimported }: { activeLibraryId: string; libraryName: string; preferences: BrowsingPreferences; onpreferencechange: (patch: BrowsingPreferencePatch) => void | Promise<void>; onimported: () => void | Promise<void> } = $props();
 
@@ -34,17 +34,23 @@
   let ownership = $state<Record<string, boolean>>({});
   let sourceRefresh = $state<SourceRefresh>({ kind: "available" });
   let customSourceIds = $state<string[]>([]);
-  let customTitle = $state("");
-  let customUrl = $state("");
   let customSaving = $state(false);
   let wideQuery = $state("");
   let wideResult = $state<CatalogWideSearchResult | null>(null);
   let wideSearching = $state(false);
+  let subjectBrowse = $state<CatalogSubjectBrowseView | null>(null);
+  let subjectLevels = $state<CatalogLevel[]>([]);
   let wideSearchGeneration = 0;
   let sourcesInitialized = false;
   const needsExternalAuthentication = $derived(selected?.authentication.kind === "external");
   const canSearch = $derived(Boolean(query.trim() || titleQuery.trim() || authorQuery.trim()));
   const catalogLanguageValues = BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.map((option) => option.value);
+  const catalogLanguageLabel = $derived.by(() => {
+    const included = preferences.included_catalog_languages;
+    if (!included.length) return SETTINGS_CONTRACT.all_catalog_languages_label;
+    if (included.length === 1) return BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.find((option) => option.value === included[0])?.label ?? included[0];
+    return `${included.length} languages`;
+  });
 
   type WideSearchRefresh = { library_id: string; query: string; view: CatalogWideSearchView };
   type SourceSearchRefresh = { library_id: string; source_id: string; query: string; view: CatalogPageView };
@@ -58,9 +64,19 @@
     return `${link.target.kind}:${destination}:${link.title}`;
   }
 
-  function authenticationSummary(source: CatalogSource) {
-    if (source.authentication.kind === "none") return "No sign-in required";
-    return "Continues in provider";
+  function catalogPageTitle(catalogue: string, title: string) {
+    if (!title.startsWith(catalogue)) return title;
+    const remainder = title.slice(catalogue.length).replace(/^[\s:–—-]+/, "");
+    return remainder || title;
+  }
+
+  function facetLabel(title: string, links: CatalogLink[]) {
+    const active = links.find((link) => link.active);
+    return active && selected ? catalogPageTitle(selected.title, active.title) : title;
+  }
+
+  function closeToolbarMenu(event: MouseEvent) {
+    (event.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
   }
 
   function ownershipKey(sourceId: string, editionId: string) {
@@ -73,6 +89,44 @@
 
   function catalogPage(source: CatalogSource, locator: string | null) {
     return commands.getCatalogPage(activeLibraryId, source.id, locator);
+  }
+
+  function subjectGroups() {
+    if (!subjectBrowse) return [];
+    return sources.flatMap((source) => {
+      const publications = subjectBrowse?.response.publications.filter((item) => item.source_id === source.id).map((item) => item.publication) ?? [];
+      return publications.length ? [{ source, publications }] : [];
+    });
+  }
+
+  async function loadSubjects(locator: string | null, title?: string, push = false) {
+    if (loading) return;
+    loading = true;
+    error = "";
+    try {
+      const view = await commands.getCatalogSubjects(activeLibraryId, locator, 48);
+      subjectBrowse = view;
+      ownership = ownedEditions(view.owned_publications);
+      if (!subjectLevels.length || locator === null) subjectLevels = [{ title: "Subjects", url: "" }];
+      else if (push && title) subjectLevels = [...subjectLevels, { title, url: locator ?? "" }];
+    } catch (reason) {
+      error = message(reason);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function goToSubjectLevel(index: number) {
+    if (loading || index < 0 || index >= subjectLevels.length || index === subjectLevels.length - 1) return;
+    const target = subjectLevels[index];
+    subjectLevels = subjectLevels.slice(0, index + 1);
+    await loadSubjects(target.url || null);
+  }
+
+  function closeSubjects() {
+    subjectBrowse = null;
+    subjectLevels = [];
+    error = "";
   }
 
   async function refreshSources() {
@@ -94,24 +148,6 @@
       error = message(reason);
     }
     await refreshSources();
-  }
-
-  async function addCustomCatalog(event: SubmitEvent) {
-    event.preventDefault();
-    if (!isNativeApp || customSaving || !customTitle.trim() || !customUrl.trim()) return;
-    customSaving = true;
-    error = "";
-    try {
-      const source = await commands.addCustomCatalog(customTitle.trim(), customUrl.trim());
-      sources = [...sources.filter((candidate) => candidate.id !== source.id), source];
-      customSourceIds = [...customSourceIds, source.id];
-      customTitle = "";
-      customUrl = "";
-    } catch (reason) {
-      error = message(reason);
-    } finally {
-      customSaving = false;
-    }
   }
 
   async function removeCustomCatalog(sourceId: string) {
@@ -374,46 +410,37 @@
   {/if}
 {/snippet}
 
+{#snippet subjectLinks(links: CatalogLink[])}
+  {#if links.length}
+    <div class="catalog-folders">
+      {#each links as link (linkKey(link))}
+        {@const count = catalogLinkCount(link)}
+        <div class="catalog-folder">
+          <FolderNavigationCard
+            name={link.title}
+            {count}
+            active={link.active}
+            disabled={loading}
+            onclick={() => {
+              if (link.target.kind === "page") void loadSubjects(link.target.locator, link.title, true);
+            }}
+          />
+        </div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
 {#snippet publicationCards(source: CatalogSource, items: CatalogPublication[])}
   {@const visibleItems = items.filter((publication) => !ownership[ownershipKey(source.id, publication.identity.edition_id)])}
   {#if visibleItems.length}
     <div class="catalog-books">
       {#each visibleItems as publication (`${publication.identity.edition_id}:${publication.title}`)}
-        {@const primaryAction = publication.actions.find((action) => action.kind === "import") ?? publication.actions.find((action) => action.kind === "external")}
+        {@const primaryAction = primaryCatalogAction(publication.actions)}
         {@const actionKey = primaryAction ? catalogActionKey(primaryAction) : ""}
         {@const actionState = importStates[actionKey] ?? "idle"}
         {@const actionError = importErrors[actionKey] ?? ""}
-        <article class="catalog-book">
-          <div class="store-book-identity">
-            <div class="remote-cover">
-              <CatalogCover sourceId={source.id} imageUrl={publication.image_url} title={publication.title} />
-            </div>
-            <h2>{publication.title}</h2>
-            <p>{publication.authors.map((author) => author.name).join(", ") || "Unknown author"}</p>
-          </div>
-          <div class="store-book-detail">
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex (keyboard users must be able to scroll overflowing descriptions) -->
-            <div class="book-description" role="region" aria-label={`Description of ${publication.title}`} tabindex="0">
-              {#if publication.description?.format === "plain_text"}
-                <p>{publication.description.text}</p>
-              {:else if publication.description?.safe_html}
-                {@html publication.description.safe_html}
-              {:else if publication.description}
-                <p>{publication.description.plain_text}</p>
-              {:else}
-                <p>No description available.</p>
-              {/if}
-            </div>
-            {#if actionError}<p class="publication-error" role="alert">{actionError}</p>{/if}
-            {#if primaryAction}
-              <button class="publication-action" class:external-action={primaryAction.kind === "external"} type="button" disabled={primaryAction.kind === "import" && actionState === "adding"} onclick={() => void runPublicationAction(source, publication, primaryAction)}>
-                {#if primaryAction.kind === "import" && actionState === "adding"}<span class="button-progress" aria-hidden="true"></span>{/if}
-                {actionError ? STORE_CONTRACT.retry_label : primaryAction.kind === "import" ? actionState === "adding" ? STORE_CONTRACT.adding_label : STORE_CONTRACT.add_label : STORE_CONTRACT.open_label}
-                {#if primaryAction.kind === "external"}<span aria-hidden="true">↗</span>{/if}
-              </button>
-            {/if}
-          </div>
-        </article>
+        <CatalogPublicationCard sourceId={source.id} {publication} action={primaryAction} {actionState} {actionError} onaction={(action) => runPublicationAction(source, publication, action)} />
       {/each}
     </div>
   {/if}
@@ -425,24 +452,48 @@
   style={`--store-max-width: ${STORE_CONTRACT.max_width_px}px; --store-publication-min-width: ${STORE_CONTRACT.publication_min_width_px}px; --store-publication-height: ${STORE_CONTRACT.publication_height_px}px; --store-scrollbar-width: ${STORE_CONTRACT.description_scrollbar_width_px}px;`}
 >
   {#if !selected}
+    {#if subjectBrowse}
+      <div class="catalog-bar">
+        <button class="back" type="button" onclick={closeSubjects}>← <span>{STORE_CONTRACT.catalogs_label}</span></button>
+        <strong class="catalog-source-name">Browse by subject</strong>
+        {#if subjectLevels.length > 1}<FolderBreadcrumbs rootLabel={subjectLevels[1].title} levels={subjectLevels.slice(2).map((level) => ({ name: level.title }))} onselect={(level) => void goToSubjectLevel(level + 1)} />{/if}
+      </div>
+      {#if error}<p class="error" role="alert">{error}</p>{/if}
+      {@render subjectLinks(subjectBrowse.response.navigation)}
+      {#each subjectGroups() as group (group.source.id)}
+        <section class="wide-group">
+          <header><span class="source-mark">{group.source.title.slice(0, 1)}</span><div><h2>{group.source.title}</h2><small>OPDS · {group.source.languages.join(" · ")}</small></div><button type="button" onclick={() => void chooseSource(group.source)}>Open catalog</button></header>
+          {@render publicationCards(group.source, group.publications)}
+        </section>
+      {/each}
+      {#if !subjectBrowse.response.navigation.length && !subjectBrowse.response.publications.length}<p class="wide-status">No catalog books are assigned to this subject yet.</p>{/if}
+      <div class="catalog-pagination" aria-label="Subject results pages">
+        {#if subjectBrowse.response.pagination.previous}<button type="button" disabled={loading} onclick={() => void loadSubjects(subjectBrowse?.response.pagination.previous ?? null)}>Previous</button>{/if}
+        {#if subjectBrowse.response.pagination.current_page}<span>Page {subjectBrowse.response.pagination.current_page}</span>{/if}
+        {#if subjectBrowse.response.pagination.next}<button type="button" disabled={loading} onclick={() => void loadSubjects(subjectBrowse?.response.pagination.next ?? null)}>Next</button>{/if}
+      </div>
+    {:else}
     {#if sourceRefresh.kind === "failed"}<div class="error source-error" role="alert"><span>Could not update catalogs; showing available catalogs. {sourceRefresh.message}</span><button type="button" onclick={() => void refreshSources()}>{STORE_CONTRACT.retry_label}</button></div>{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
-    <form class="wide-search" onsubmit={runWideSearch}>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
-      <input type="search" bind:value={wideQuery} placeholder={STORE_CONTRACT.search_all_placeholder} aria-label={STORE_CONTRACT.search_all_placeholder} autocomplete="off" />
-      <button type="submit" disabled={!wideQuery.trim() || wideSearching}>{STORE_CONTRACT.search_label}</button>
-    </form>
-    <section class="language-filter" aria-label={SETTINGS_CONTRACT.included_catalog_languages_label}>
-      <header><strong>{SETTINGS_CONTRACT.included_catalog_languages_label}</strong><small>{SETTINGS_CONTRACT.included_catalog_languages_description}</small></header>
-      <div class="language-options">
-        <button type="button" class:active={preferences.included_catalog_languages.length === 0} aria-pressed={preferences.included_catalog_languages.length === 0} onclick={() => void setCatalogLanguages([])}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
-        {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
-          <button type="button" class:active={catalogLanguageIncluded(option.value)} aria-pressed={catalogLanguageIncluded(option.value)} onclick={() => void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value))}>{option.label}</button>
-        {/each}
-      </div>
-    </section>
+    <div class="store-toolbar">
+      <form class="wide-search" onsubmit={runWideSearch}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
+        <input type="search" bind:value={wideQuery} placeholder={STORE_CONTRACT.search_all_placeholder} aria-label={STORE_CONTRACT.search_all_placeholder} autocomplete="off" />
+        <button type="submit" disabled={!wideQuery.trim() || wideSearching}>{STORE_CONTRACT.search_label}</button>
+      </form>
+      <button class="toolbar-button" type="button" disabled={loading} onclick={() => void loadSubjects(null)}>Browse by subject</button>
+      <details class="toolbar-menu language-menu">
+        <summary class:active={preferences.included_catalog_languages.length > 0}>{catalogLanguageLabel}<span aria-hidden="true">⌄</span></summary>
+        <div class="toolbar-menu-popover" role="menu" aria-label={SETTINGS_CONTRACT.included_catalog_languages_label}>
+          <button type="button" role="menuitemcheckbox" aria-checked={preferences.included_catalog_languages.length === 0} onclick={(event) => { closeToolbarMenu(event); void setCatalogLanguages([]); }}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
+          {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
+            <button type="button" role="menuitemcheckbox" aria-checked={catalogLanguageIncluded(option.value)} onclick={(event) => { closeToolbarMenu(event); void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value)); }}>{option.label}</button>
+          {/each}
+        </div>
+      </details>
+    </div>
     {#if wideResult}
-      <header class="wide-heading"><div><p class="eyebrow">All catalogs</p><h1>Results for “{wideResult.query}”</h1></div><button type="button" onclick={clearWideSearch}>Clear search</button></header>
+      <header class="wide-heading"><h2>Results for “{wideResult.query}”</h2><button type="button" onclick={clearWideSearch}>Clear search</button></header>
       <div class="wide-groups">
         {#each wideResult.groups as group (group.source.id)}
           <section class="wide-group">
@@ -476,24 +527,12 @@
         {/each}
       </div>
     {:else}
-      {#if isNativeApp}
-        <form class="custom-catalog" onsubmit={addCustomCatalog}>
-          <header><strong>Add OPDS catalog</strong><small>Stored only on this device and contacted directly.</small></header>
-          <div class="custom-fields">
-            <label><span>Name</span><input bind:value={customTitle} maxlength="160" required autocomplete="off" /></label>
-            <label><span>Catalog URL</span><input bind:value={customUrl} type="url" inputmode="url" placeholder="https://…" required autocomplete="url" /></label>
-          </div>
-          <div class="custom-options">
-            <button type="submit" disabled={customSaving || !customTitle.trim() || !customUrl.trim()}>{customSaving ? "Saving…" : "Add catalog"}</button>
-          </div>
-        </form>
-      {/if}
       <div class="sources">
         {#each sources as source (source.id)}
           <div class="source-entry">
             <button class="source-card" type="button" onclick={() => void chooseSource(source)}>
               <span class="source-mark">{source.title.slice(0, 1)}</span>
-              <span class="source-copy"><strong>{source.title}</strong><small>{source.description}</small><i>OPDS · {source.languages.join(" · ")} · {authenticationSummary(source)}</i></span>
+              <span class="source-copy"><strong>{source.title}</strong><small>{source.description}</small></span>
               <span class="chevron">›</span>
             </button>
             {#if customSourceIds.includes(source.id)}<button class="remove-source" type="button" disabled={customSaving} aria-label={`Remove ${source.title}`} onclick={() => void removeCustomCatalog(source.id)}>Remove</button>{/if}
@@ -501,11 +540,13 @@
         {/each}
       </div>
     {/if}
+    {/if}
   {:else}
-    <header class="catalog-heading">
+    <div class="catalog-bar">
       <button class="back" type="button" onclick={() => { selected = null; catalog = null; error = ""; }}>← <span>{STORE_CONTRACT.catalogs_label}</span></button>
-      <div><p class="eyebrow">OPDS · {selected.languages.join(" · ")}</p><h1>{selected.title}</h1></div>
-    </header>
+      <strong class="catalog-source-name">{selected.title}</strong>
+      {#if levels.length > 1}<FolderBreadcrumbs rootLabel={catalogPageTitle(selected.title, levels[1].title)} levels={levels.slice(2).map((level) => ({ name: catalogPageTitle(selected!.title, level.title) }))} onselect={(level) => void goToLevel(level + 1)} />{/if}
+    </div>
 
     {#if needsExternalAuthentication && !catalog}
       <section class="credentials">
@@ -516,8 +557,7 @@
     {/if}
 
     {#if catalog}
-      <div class="catalog-tools">
-        <FolderBreadcrumbs rootLabel={levels[0]?.title ?? selected.title} levels={levels.slice(1).map((level) => ({ name: level.title }))} onselect={(level) => void goToLevel(level)} />
+      <div class="catalog-toolbar">
         {#if searchDefinition}
           <form class="catalog-search" onsubmit={runSearch}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
@@ -529,32 +569,27 @@
             <button type="submit" disabled={!canSearch || loading}>Search</button>
           </form>
         {/if}
+        {#if catalog.navigation.length}
+          <details class="toolbar-menu">
+            <summary>Browse ({catalog.navigation.length})<span aria-hidden="true">⌄</span></summary>
+            <div class="toolbar-menu-popover" role="menu">
+              {#each catalog.navigation as link (linkKey(link))}<button type="button" role="menuitem" disabled={link.active || loading} onclick={(event) => { closeToolbarMenu(event); void followCatalogLink(link); }}>{catalogPageTitle(selected.title, link.title)}{link.number_of_items !== null ? ` (${link.number_of_items.toLocaleString()})` : ""}</button>{/each}
+            </div>
+          </details>
+        {/if}
+        {#each catalog.facets as facet (`${facet.title}:${facet.links.map(linkKey).join(":")}`)}
+          <details class="toolbar-menu facet-menu">
+            <summary class:active={facet.links.findIndex((link) => link.active) > 0}>{facetLabel(facet.title, facet.links)}<span aria-hidden="true">⌄</span></summary>
+            <div class="toolbar-menu-popover" role="menu">
+              {#each facet.links as link (linkKey(link))}<button type="button" role="menuitemradio" aria-checked={link.active} disabled={link.active || loading} onclick={(event) => { closeToolbarMenu(event); void followCatalogLink(link); }}>{catalogPageTitle(selected.title, link.title)}{link.number_of_items !== null ? ` (${link.number_of_items.toLocaleString()})` : ""}</button>{/each}
+            </div>
+          </details>
+        {/each}
       </div>
 
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       {#if catalog.freshness === "stale"}<p class="cache-notice" role="status">Showing a saved catalog page while a fresh copy is requested.</p>{/if}
-      {@render catalogLinks(catalog.navigation)}
-
-      {#if catalog.facets.length}
-        <div class="catalog-facets" aria-label="Catalog filters">
-          {#each catalog.facets as facet (`${facet.title}:${facet.links.map(linkKey).join(":")}`)}
-            <label class="catalog-facet">
-              <span>{facet.title}</span>
-              <select
-                aria-label={facet.title}
-                onchange={(event) => {
-                  const link = facet.links[Number(event.currentTarget.value)];
-                  if (link && !link.active) void followCatalogLink(link);
-                }}
-              >
-                {#each facet.links as link, index (linkKey(link))}
-                  <option value={index} selected={link.active}>{link.title}{link.number_of_items !== null ? ` (${link.number_of_items.toLocaleString()})` : ""}</option>
-                {/each}
-              </select>
-            </label>
-          {/each}
-        </div>
-      {/if}
+      {#if !catalog.publications.length && !catalog.groups.length}{@render catalogLinks(catalog.navigation)}{/if}
 
       {@render publicationCards(selected, catalog.publications)}
 
@@ -592,77 +627,62 @@
   button, input { font: inherit; }
   button { -webkit-tap-highlight-color: transparent; }
   .store { container-type: inline-size; width: min(var(--store-max-width), 100%); margin: 0 auto; padding: 0 0 2rem; }
-  .catalog-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; margin-bottom: 1.35rem; }
-  h1 { margin: .1rem 0; color: var(--color-ink-text); font: 700 clamp(1.65rem, 5vw, 2.35rem) var(--font-interface-family); }
   .credentials p { max-width: 42rem; margin: .25rem 0 0; color: var(--color-subtle-text); font-size: .86rem; line-height: 1.5; }
-  .eyebrow { margin: 0; color: var(--color-accent) !important; font-size: .68rem !important; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
-  .wide-search { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; margin-bottom: 1.2rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
+  .store-toolbar, .catalog-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+  .wide-search { display: grid; flex: 1; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; min-width: 14rem; max-width: 30rem; height: 2.5rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
   .wide-search:focus-within { border-color: var(--color-accent); }
   .wide-search svg { width: 1.1rem; margin-left: .8rem; fill: none; stroke: var(--color-subtle-text); stroke-width: 1.8; }
-  .wide-search input { min-width: 0; min-height: 3rem; padding: .65rem .8rem; border: 0; color: inherit; background: transparent; outline: none; }
+  .wide-search input { min-width: 0; height: 100%; padding: .5rem .8rem; border: 0; color: inherit; background: transparent; outline: none; }
   .wide-search button { align-self: stretch; padding: 0 1rem; border: 0; border-left: 1px solid var(--color-border); color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
-  .language-filter { display: grid; gap: .55rem; margin: -.35rem 0 1.2rem; }
-  .language-filter header { display: grid; gap: .12rem; }
-  .language-filter header strong { color: var(--color-ink-text); font-size: .78rem; }
-  .language-filter header small { color: var(--color-subtle-text); font-size: .68rem; }
-  .language-options { display: flex; flex-wrap: wrap; gap: .4rem; }
-  .language-options button { min-height: 2rem; padding: .35rem .65rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-subtle-text); background: var(--color-raised-bg); font-size: .68rem; font-weight: 700; cursor: pointer; }
-  .language-options button.active { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-active-highlight); }
+  .toolbar-button, .toolbar-menu > summary { display: inline-flex; align-items: center; gap: .35rem; height: 2.5rem; max-width: 15rem; padding: 0 .7rem; overflow: hidden; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); font-size: .72rem; font-weight: 700; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; list-style: none; }
+  .toolbar-menu > summary::-webkit-details-marker { display: none; }
+  .toolbar-menu > summary.active { border-color: var(--color-accent); color: var(--color-accent); }
+  .toolbar-menu { position: relative; }
+  .toolbar-menu-popover { position: absolute; z-index: 20; top: calc(100% + .25rem); right: 0; display: grid; width: max-content; min-width: 13rem; max-width: min(22rem, 85vw); max-height: 22rem; padding: .3rem; overflow-y: auto; border: 1px solid var(--color-border); background: var(--color-raised-bg); box-shadow: 0 .7rem 1.8rem var(--color-box-shadow); }
+  .toolbar-menu-popover button { min-height: 2.25rem; padding: .45rem .65rem; border: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .72rem; cursor: pointer; }
+  .toolbar-menu-popover button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
+  .toolbar-menu-popover button[aria-checked="true"] { color: var(--color-accent); font-weight: 750; }
   .source-error { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-  .source-error button { flex: none; min-height: 2.25rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: var(--radius-sm); color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
+  .source-error button { flex: none; min-height: 2.25rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: 0; color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
   .wide-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .3rem 0 1rem; }
+  .wide-heading h2 { margin: 0; color: var(--color-ink-text); font: 650 1.05rem var(--font-interface-family); }
   .wide-heading button, .wide-group > header button { padding: .45rem .6rem; border: 0; color: var(--color-accent); background: transparent; font-size: .72rem; font-weight: 750; cursor: pointer; }
   .wide-groups { display: grid; gap: 1.25rem; }
-  .wide-group { display: grid; gap: .8rem; padding: .9rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
+  .wide-group { display: grid; gap: .8rem; }
   .wide-group > header { display: grid; grid-template-columns: 2.8rem minmax(0, 1fr) auto; gap: .75rem; align-items: center; }
   .wide-group > header h2 { margin: 0 0 .15rem; color: var(--color-ink-text); font: 700 1rem var(--font-interface-family); }
   .wide-group > header small, .wide-status { margin: 0; color: var(--color-subtle-text); font-size: .7rem; }
   .wide-result-section { display: grid; gap: .65rem; }
   .wide-result-section h3 { margin: 0; color: var(--color-ink-text); font: 700 .82rem var(--font-interface-family); }
-  .wide-group .catalog-book { background: var(--color-surface-bg); }
   .wide-external-links { display: flex; flex-wrap: wrap; gap: .5rem; }
-  .wide-external-links button { display: inline-flex; align-items: center; gap: .35rem; min-height: 2.4rem; padding: .5rem .75rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
-  .custom-catalog { display: grid; gap: .75rem; margin-bottom: 1rem; padding: .9rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
-  .custom-catalog header { display: grid; gap: .15rem; }
-  .custom-catalog header strong { color: var(--color-ink-text); font: 700 .9rem var(--font-interface-family); }
-  .custom-catalog header small, .custom-catalog label { color: var(--color-subtle-text); font-size: .68rem; }
-  .custom-fields { display: grid; grid-template-columns: minmax(10rem, .7fr) minmax(14rem, 1.3fr); gap: .6rem; }
-  .custom-catalog label:not(.check) { display: grid; gap: .25rem; font-weight: 700; }
-  .custom-catalog input:not([type="checkbox"]) { min-width: 0; min-height: 2.35rem; padding: .45rem .6rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: inherit; background: var(--color-surface-bg); outline: none; }
-  .custom-options { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; }
-  .custom-options button { min-height: 2.35rem; margin-left: auto; padding: .45rem .75rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
+  .wide-external-links button { display: inline-flex; align-items: center; gap: .35rem; min-height: 2.4rem; padding: .5rem .75rem; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
   .sources { display: grid; grid-template-columns: 1fr; gap: .75rem; }
   .source-entry { position: relative; min-width: 0; }
-  .source-card { display: grid; width: 100%; grid-template-columns: 2.8rem minmax(0, 1fr) auto; gap: .8rem; align-items: center; min-width: 0; padding: .9rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); color: inherit; background: var(--color-raised-bg); text-align: left; cursor: pointer; }
+  .source-card { display: grid; width: 100%; grid-template-columns: 2.75rem minmax(0, 1fr) auto; gap: .75rem; align-items: center; min-width: 0; min-height: 4.75rem; padding: .875rem; border: 1px solid var(--color-border); border-radius: 0; color: inherit; background: var(--color-raised-bg); text-align: left; cursor: pointer; }
   .source-card:hover { border-color: var(--color-accent); background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .source-entry:has(.remove-source) .source-card { padding-bottom: 2.35rem; }
   .remove-source { position: absolute; right: .7rem; bottom: .45rem; padding: .25rem .35rem; border: 0; color: var(--color-danger-text); background: transparent; font-size: .64rem; font-weight: 750; cursor: pointer; }
-  .source-mark { display: grid; width: 2.8rem; height: 2.8rem; place-items: center; border-radius: var(--radius-sm); color: var(--color-accent); background: var(--color-active-highlight); font: 700 1.25rem var(--font-interface-family); }
+  .source-mark { display: grid; width: 2.75rem; height: 2.75rem; place-items: center; border-radius: 0; color: var(--color-accent); background: var(--color-active-highlight); font: 700 1.25rem var(--font-interface-family); }
   .source-copy { display: grid; min-width: 0; gap: .2rem; }
   .source-copy strong { color: var(--color-ink-text); font-size: .9rem; }
   .source-copy small { color: var(--color-subtle-text); font-size: .72rem; line-height: 1.35; }
-  .source-copy i { color: var(--color-accent); font-size: .64rem; font-style: normal; font-weight: 700; }
   .chevron { color: var(--color-subtle-text); font-size: 1.4rem; }
   .back { display: inline-flex; align-items: center; gap: .35rem; padding: .5rem 0; border: 0; color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
-  .catalog-heading { justify-content: flex-start; align-items: center; }
-  .catalog-heading > div { padding-left: 1rem; border-left: 1px solid var(--color-border); }
-  .credentials { display: grid; max-width: 32rem; gap: .9rem; padding: 1.15rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
+  .catalog-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+  .catalog-bar .back { min-height: 2.5rem; padding: .45rem .25rem; color: var(--color-ink-text); font-size: .72rem; }
+  .catalog-source-name { flex: none; color: var(--color-ink-text); font-size: .82rem; }
+  .credentials { display: grid; max-width: 32rem; gap: .9rem; padding: 1.15rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
   .catalog-search input { min-width: 0; border: 1px solid var(--color-border); color: inherit; background: var(--color-surface-bg); outline: none; }
-  .primary, .retry, .pagination button { width: max-content; min-height: 2.55rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
-  .catalog-tools { display: grid; gap: .85rem; margin-bottom: 1rem; }
-  .catalog-search { display: grid; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; max-width: 46rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-raised-bg); }
+  .primary, .retry, .pagination button, .catalog-pagination button { width: max-content; min-height: 2.55rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
+  .catalog-search { display: grid; flex: 1; grid-template-columns: 1.2rem minmax(0, 1fr) auto; align-items: center; min-width: 8.75rem; max-width: 30rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
   .catalog-search svg { width: 1.1rem; margin-left: .7rem; fill: none; stroke: var(--color-subtle-text); stroke-width: 1.8; }
   .search-fields { display: flex; min-width: 0; }
-  .catalog-search input { min-height: 2.7rem; padding: .55rem .65rem; border: 0; background: transparent; }
+  .catalog-search input { min-height: 2.5rem; padding: .5rem .65rem; border: 0; background: transparent; }
   .search-fields input { flex: 1 1 9rem; }
   .search-fields input + input { border-left: 1px solid var(--color-border); }
   .catalog-search button { align-self: stretch; padding: 0 .9rem; border: 0; border-left: 1px solid var(--color-border); color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
   .catalog-folders { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .45rem; margin: 1rem 0 1.4rem; }
   .catalog-folder { width: max-content; max-width: 100%; min-width: 0; }
-  .catalog-facets { display: flex; align-items: end; gap: .55rem; margin: 1rem 0 1.4rem; padding: .65rem; overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
-  .catalog-facet { display: grid; flex: 0 0 auto; gap: .2rem; }
-  .catalog-facet > span { color: var(--color-subtle-text); font-size: .62rem; font-weight: 750; }
-  .catalog-facet select { min-width: 8rem; height: 2rem; padding: 0 1.75rem 0 .55rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-ink-text); background: var(--color-surface-bg); font-size: .68rem; }
   .catalog-groups { display: grid; gap: 1.5rem; margin-top: 1.5rem; }
   .catalog-group { display: grid; gap: .7rem; }
   .catalog-group > header { display: flex; align-items: baseline; gap: .55rem; padding-bottom: .5rem; border-bottom: 1px solid var(--color-border); }
@@ -671,35 +691,15 @@
   .catalog-group > header button { margin-left: auto; padding: .3rem .15rem; border: 0; color: var(--color-accent); background: transparent; font-size: .7rem; font-weight: 750; cursor: pointer; }
   .catalog-group .catalog-folders { margin: 0; }
   .catalog-books { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(var(--store-publication-min-width), 100%), 1fr)); gap: 16px; overflow-x: auto; }
-  .catalog-book { display: grid; grid-template-columns: var(--book-cover-width) minmax(0, 1fr); gap: 16px; min-width: var(--store-publication-min-width); height: var(--store-publication-height); overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-raised-bg); }
-  .store-book-identity { display: flex; width: var(--book-cover-width); min-width: 0; height: var(--store-publication-height); flex-direction: column; }
-  .remote-cover { display: grid; width: var(--book-cover-width); height: var(--book-cover-height); flex: none; place-items: center; overflow: hidden; border-radius: 8px; color: var(--color-accent); background: var(--color-active-highlight); box-shadow: 0 .35rem .9rem color-mix(in srgb, var(--color-box-shadow) 40%, transparent); font: 700 1.4rem var(--font-interface-family); }
-  .store-book-identity h2, .store-book-identity p { width: var(--book-cover-width); overflow: hidden; text-overflow: ellipsis; }
-  .store-book-identity h2 { display: -webkit-box; min-height: 2.3em; line-height: 1.15; white-space: normal; line-clamp: 2; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-  .store-book-identity p { white-space: nowrap; }
-  .store-book-identity h2 { height: 24px; margin: 9px 0 0; padding: 0 2px; color: var(--color-ink-text); font: 600 17px/24px var(--font-interface-family); }
-  .store-book-identity p { height: 22px; margin: 0; padding: 0 2px; color: var(--color-subtle-text); font: 400 15px/22px var(--font-interface-family); }
-  .store-book-detail { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 10px; padding: 16px 16px 16px 0; }
-  .book-description { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: auto; color: var(--color-subtle-text); font-size: 13px; line-height: 1.45; }
-  .book-description::-webkit-scrollbar { width: var(--store-scrollbar-width); }
-  .book-description::-webkit-scrollbar-track { background: transparent; }
-  .book-description::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--color-border); }
-  .book-description :global(*) { max-width: 100%; }
-  .book-description :global(p), .book-description :global(h1), .book-description :global(h2), .book-description :global(h3), .book-description :global(h4), .book-description :global(h5), .book-description :global(h6), .book-description :global(blockquote), .book-description :global(pre), .book-description :global(ul), .book-description :global(ol), .book-description :global(dl) { margin: 0; }
-  .book-description :global(p + p), .book-description :global(div + div), .book-description :global(* + ul), .book-description :global(* + ol) { margin-top: .55em; }
-  .book-description :global(ul), .book-description :global(ol) { padding-left: 1.15rem; }
-  .publication-error { max-height: 48px; margin: 0; overflow-y: auto; color: var(--color-danger-text); font-size: 11px; line-height: 1.35; }
-  .publication-action { display: inline-flex; flex: none; align-self: end; align-items: center; justify-content: center; gap: 6px; min-width: 88px; height: 40px; padding: 0 12px; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font-size: 13px; font-weight: 750; cursor: pointer; }
-  .publication-action.external-action { color: var(--color-accent); background: transparent; }
-  .button-progress { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, currentColor 35%, transparent); border-top-color: currentColor; border-radius: 50%; animation: spin .8s linear infinite; }
   button:disabled { cursor: default; opacity: .55; }
   .loading, .empty { display: flex; align-items: center; gap: .65rem; min-height: 5rem; color: var(--color-subtle-text); font-size: .82rem; }
   .loading span { width: 1rem; height: 1rem; border: 2px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin .8s linear infinite; }
-  .error { padding: .75rem; border: 1px solid color-mix(in srgb, var(--color-danger-text) 35%, transparent); border-radius: var(--radius-sm); color: var(--color-danger-text); background: var(--color-danger-bg); font-size: .78rem; }
-  .cache-notice { padding: .6rem .75rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-subtle-text); background: var(--color-active-highlight); font-size: .72rem; }
+  .error { padding: .75rem; border: 1px solid color-mix(in srgb, var(--color-danger-text) 35%, transparent); border-radius: 0; color: var(--color-danger-text); background: var(--color-danger-bg); font-size: .78rem; }
+  .cache-notice { padding: .6rem .75rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-subtle-text); background: var(--color-active-highlight); font-size: .72rem; }
   .pagination { display: flex; justify-content: center; gap: .75rem; margin-top: 1.2rem; }
+  .catalog-pagination { display: flex; align-items: center; justify-content: center; gap: .75rem; margin-top: 1.2rem; color: var(--color-subtle-text); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @container (max-width: 719px) { .catalog-heading { align-items: flex-start; flex-wrap: wrap; } .custom-fields { grid-template-columns: 1fr; } .search-fields { flex-direction: column; } .search-fields input + input { border-top: 1px solid var(--color-border); border-left: 0; } .wide-group > header { grid-template-columns: 2.8rem minmax(0, 1fr); } .wide-group > header button { grid-column: 1 / -1; justify-self: start; } }
+  @container (max-width: 719px) { .search-fields { flex-direction: column; } .search-fields input + input { border-top: 1px solid var(--color-border); border-left: 0; } .wide-group > header { grid-template-columns: 2.8rem minmax(0, 1fr); } .wide-group > header button { grid-column: 1 / -1; justify-self: start; } .catalog-books { overflow-x: hidden; } }
   @container (min-width: 720px) { .sources { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @container (min-width: 1152px) { .sources { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 </style>

@@ -382,6 +382,52 @@ pub struct CatalogPublicationIdentity {
     pub work_id: Option<String>,
 }
 
+/// A canonical, versioned subject assignment used as an anonymous
+/// recommendation signal. Raw book titles and library membership never need
+/// to cross this boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct CatalogSubjectPreference {
+    pub system_id: String,
+    pub subject_path: String,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogSubjectBrowseRequest {
+    /// Opaque locator returned by `navigation` or `pagination`. `None` opens
+    /// the subject-system roots.
+    pub locator: Option<String>,
+    pub supported_languages: Vec<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogSourcedPublication {
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublication,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogSubjectBrowseResponse {
+    pub navigation: Vec<CatalogLink>,
+    pub publications: Vec<CatalogSourcedPublication>,
+    pub pagination: CatalogPagination,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct CatalogRecommendationExclusion {
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublicationIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogRecommendationRequest {
+    pub subjects: Vec<CatalogSubjectPreference>,
+    pub supported_languages: Vec<String>,
+    pub excluded_publications: Vec<CatalogRecommendationExclusion>,
+    pub limit: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CatalogImportRequest {
     pub source_id: CatalogSourceId,
@@ -499,6 +545,20 @@ pub struct CatalogPublication {
     pub description: Option<CatalogDescription>,
     pub image_url: Option<String>,
     pub actions: Vec<CatalogPublicationAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogRecommendation {
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublication,
+    #[specta(type = f64)]
+    pub score: u64,
+    pub matched_subjects: Vec<CatalogSubjectPreference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogRecommendationResponse {
+    pub recommendations: Vec<CatalogRecommendation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Type)]

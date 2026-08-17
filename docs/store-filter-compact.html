@@ -1,0 +1,431 @@
+<title>Bokheim — Store filter chrome, compact directions</title>
+<style>
+  :root {
+    --bg: #efece2;
+    --surface: #fdfbf3;
+    --sunk: #e7e3d6;
+    --text: #1d2723;
+    --dim: #4a5852;
+    --faint: #7d8a83;
+    --line: #ddd7c6;
+    --soft: #e6e1d2;
+    --accent: #2f6a52;
+    --accent-ink: #fff;
+    --warn: #b0801f;
+    --bad: #a2402f;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+      --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+      --warn: #cfa53f; --bad: #d0705c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+    --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+    --warn: #cfa53f; --bad: #d0705c;
+  }
+  :root[data-theme="light"] {
+    --bg: #efece2; --surface: #fdfbf3; --sunk: #e7e3d6; --text: #1d2723; --dim: #4a5852;
+    --faint: #7d8a83; --line: #ddd7c6; --soft: #e6e1d2; --accent: #2f6a52; --accent-ink: #fff;
+    --warn: #b0801f; --bad: #a2402f;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 0.9375rem; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 62rem; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1rem, 3vw, 2rem) 4rem; display: flex; flex-direction: column; gap: 2.25rem; }
+
+  h1 { font-family: var(--serif); font-size: 1.75rem; font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+  h2 { font-family: var(--serif); font-size: 1.1875rem; font-weight: 600; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+  p { max-width: 74ch; }
+  code { font-family: var(--mono); font-size: 0.84em; color: var(--dim); }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header { display: flex; flex-direction: column; gap: 0.5rem; }
+  header .eyebrow { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint); }
+  header p { color: var(--dim); }
+  header .series { font-size: 0.8125rem; color: var(--faint); }
+
+  section { display: flex; flex-direction: column; gap: 0.9rem; }
+
+  /* tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; background: var(--surface); border: 1px solid var(--line); }
+  th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; background: var(--sunk); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+  tbody th { font-weight: 650; white-space: nowrap; }
+  td.where { font-family: var(--mono); font-size: 0.76rem; color: var(--faint); white-space: nowrap; }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .defect { color: var(--bad); font-weight: 700; }
+  tr.total td, tr.total th { border-top: 1px solid var(--line); font-weight: 700; background: var(--sunk); }
+  table.budget { min-width: 34rem; }
+  table.compare { min-width: 44rem; }
+
+  /* frame furniture — every mockup is one 1000×700 window at 55% */
+  .frame { border: 1px solid var(--line); background: var(--bg); display: grid; grid-template-columns: 3.3rem minmax(0, 1fr); }
+  .rail { background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 0.35rem; padding: 0.4rem 0; font-size: 0.55rem; color: var(--faint); text-align: center; }
+  .rail i { font-style: normal; font-size: 0.85rem; color: var(--dim); display: block; line-height: 1.1; }
+  .rail .on { color: var(--accent); font-weight: 700; }
+  .rail .on i { color: var(--accent); }
+  .rail .sp { flex: 1; }
+  .stage { padding: 0.62rem; display: flex; flex-direction: column; gap: 0.48rem; height: 24.2rem; overflow: hidden; position: relative; }
+  .cut { position: absolute; left: 0; right: 0; bottom: 0; height: 1.6rem; background: linear-gradient(to bottom, transparent, var(--bg)); pointer-events: none; }
+  .cut::after { content: "fold — 700 px window"; position: absolute; right: 0.5rem; bottom: 0.1rem; font-family: var(--mono); font-size: 0.55rem; color: var(--faint); }
+  .deskwrap { overflow-x: auto; }
+  .desk { min-width: 34.4rem; }
+
+  /* chrome bands — .band marks anything that is not a book */
+  .band { position: relative; }
+  .band::before { content: ""; position: absolute; left: -0.62rem; top: 0; bottom: 0; width: 2px; background: var(--warn); opacity: 0.55; }
+  .measure { position: absolute; right: 0.35rem; font-family: var(--mono); font-size: 0.5rem; color: var(--warn); }
+
+  /* store header */
+  .idrow { display: flex; align-items: center; gap: 0.55rem; }
+  .idrow h4 { font-family: var(--serif); font-size: 0.82rem; font-weight: 600; line-height: 1.1; }
+  .idrow .sub { font-size: 0.55rem; color: var(--faint); }
+  .idrow .id { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+
+  /* controls */
+  .btn { font-size: 0.58rem; padding: 0.18rem 0.5rem; border: 1px solid var(--line); background: var(--surface); color: var(--dim); white-space: nowrap; display: inline-flex; align-items: center; gap: 0.25rem; }
+  .btn.pri { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .btn.on { border-color: var(--accent); color: var(--accent); font-weight: 650; }
+  .btn.gh { border-color: transparent; background: transparent; }
+  .btn .ct { font-family: var(--mono); font-size: 0.52rem; color: var(--faint); }
+  .btn.on .ct { color: var(--accent); }
+  .field { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--surface); font-size: 0.58rem; color: var(--faint); padding: 0.18rem 0.5rem; }
+  .crumb { font-size: 0.55rem; color: var(--faint); display: flex; gap: 0.3rem; align-items: center; }
+  .crumb b { color: var(--text); font-weight: 650; }
+  .toolbar { display: flex; align-items: center; gap: 0.3rem; }
+  .toolbar.wrap { flex-wrap: wrap; }
+  .navlinks { display: flex; flex-wrap: wrap; gap: 0.28rem; }
+  .navlinks .btn { width: 8.5rem; justify-content: flex-start; }
+  .gbox { border: 1px solid var(--line); background: var(--surface); padding: 0.4rem 0.45rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: flex-end; }
+  .gbox .lbl { font-size: 0.5rem; font-weight: 650; color: var(--faint); display: block; margin-bottom: 0.15rem; }
+  .chips { display: flex; gap: 0.25rem; align-items: center; flex-wrap: wrap; }
+  .chip { font-size: 0.54rem; padding: 0.08rem 0.4rem; border: 1px solid var(--accent); color: var(--accent); background: transparent; display: inline-flex; gap: 0.25rem; align-items: center; }
+  .chip .x { color: var(--faint); }
+  .clearall { font-size: 0.54rem; color: var(--faint); text-decoration: underline; }
+
+  /* store publication card: 424 tall, cover 200×320, at 55% */
+  .pub { display: grid; grid-template-columns: 6.9rem minmax(0, 1fr); gap: 0.55rem; height: 14.57rem; border: 1px solid var(--line); background: var(--surface); flex: none; }
+  .pub .cv { width: 6.9rem; height: 11rem; background: linear-gradient(158deg, var(--sunk), var(--bg)); border-right: 1px solid var(--soft); }
+  .pub .idn { display: flex; flex-direction: column; gap: 0.2rem; padding: 0 0 0 0; }
+  .pub .t { font-size: 0.6rem; font-weight: 650; line-height: 1.2; padding: 0 0.15rem; }
+  .pub .a { font-size: 0.52rem; color: var(--faint); padding: 0 0.15rem; }
+  .pub .meta { display: flex; flex-direction: column; padding: 0.55rem 0.55rem 0.55rem 0; min-width: 0; }
+  .pub .d { font-size: 0.52rem; color: var(--dim); line-height: 1.4; flex: 1; overflow: hidden; }
+  .pub .act { display: flex; justify-content: flex-end; padding-top: 0.3rem; }
+  .pubs { display: flex; flex-direction: column; gap: 0.55rem; min-height: 0; }
+  .pubgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
+  .secttl { font-size: 0.62rem; font-weight: 650; color: var(--dim); }
+  .secttl .n { font-family: var(--mono); font-weight: 400; color: var(--faint); font-size: 0.55rem; margin-left: 0.3rem; }
+
+  /* C: sidebar */
+  .split { display: grid; grid-template-columns: 8.2rem minmax(0, 1fr); gap: 0.55rem; flex: 1; min-height: 0; }
+  .side { border: 1px solid var(--line); background: var(--surface); padding: 0.45rem; display: flex; flex-direction: column; gap: 0.5rem; overflow: hidden; }
+  .side h5 { font-family: var(--mono); font-size: 0.5rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; margin-bottom: 0.2rem; }
+  .side .opt { font-size: 0.55rem; color: var(--dim); display: flex; justify-content: space-between; gap: 0.4rem; padding: 0.08rem 0; }
+  .side .opt.on { color: var(--accent); font-weight: 650; }
+  .side .opt .n { font-family: var(--mono); font-size: 0.5rem; color: var(--faint); }
+
+  /* D: sheet */
+  .sheetwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+  .sheet { position: absolute; left: 0; top: 0; width: 13rem; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,0.18); padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; z-index: 2; }
+  .sheet h5 { font-family: var(--mono); font-size: 0.5rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; margin-bottom: 0.2rem; }
+  .sheet .opt { font-size: 0.55rem; color: var(--dim); display: flex; justify-content: space-between; padding: 0.08rem 0; }
+  .sheet .opt.on { color: var(--accent); font-weight: 650; }
+  .sheet .ft { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--soft); padding-top: 0.35rem; }
+
+  .dirs { display: flex; flex-direction: column; gap: 1.75rem; }
+  .dir { display: flex; flex-direction: column; gap: 0.5rem; }
+  .dir > .cap { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
+  .dir > .note { font-size: 0.8125rem; color: var(--dim); max-width: 74ch; }
+  .dir .gain { font-size: 0.78rem; color: var(--faint); font-family: var(--mono); }
+  .dir .gain b { color: var(--accent); font-weight: 600; }
+
+  ol, ul.plain { padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.25rem; color: var(--dim); max-width: 74ch; }
+  .rec { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--surface); padding: 0.8rem 1rem; }
+  .rec p { margin-bottom: 0.5rem; }
+  .rec p:last-child { margin-bottom: 0; }
+  ul.questions { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.875rem; color: var(--dim); padding-left: 0; }
+  ul.questions li { border-left: 2px solid var(--warn); padding-left: 0.7rem; }
+  ul.questions b { color: var(--text); }
+  footer { color: var(--faint); font-size: 0.78rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Bokheim · desktop gpui · universal / store</div>
+    <h1>The catalogue page where no book fits above the fold</h1>
+    <p>A store catalogue page stacks five full-width bands before the first result: source identity, search, breadcrumbs, navigation links, facets. On a 700&nbsp;px window that chrome is about <b>365&nbsp;px</b> and one publication card is <b>424&nbsp;px</b> (<code>LARGE_BOOK_CARD_HEIGHT_PX</code>). The reader scrolls to see a single book — and the band that costs the most, the wrapped navigation links, is the one they use least.</p>
+    <p class="series">Fourth in the series. Follows <a href="#">home page redesign</a> (<code>docs/home-page-redesign.html</code>).</p>
+  </header>
+
+  <section>
+    <h2>Current</h2>
+    <p>Drawn by <code>StorePage::render</code>, <code>apps/ui/gpui/browser/src/universal/store/view.rs:308-413</code>. Facets have already moved from one <code>GroupBox</code> per axis to a row of dropdown buttons — this counts that improvement, not the pill grid it replaced.</p>
+
+    <div class="deskwrap">
+      <div class="frame desk">
+        <div class="rail"><span class="on"><i>▤</i>Home</span><span><i>◫</i>Folders</span><span><i>✎</i>Authors</span><span class="on"><i>▩</i>Store</span><span class="sp"></span><span><i>⚙</i>Settings</span></div>
+        <div class="stage">
+          <div class="band idrow"><span class="btn">←&nbsp;Catalogs</span><span class="id"><h4>Litteraturbanken</h4><span class="sub">OPDS · sv</span></span><span class="measure" style="top:0.3rem">44</span></div>
+          <div class="band toolbar" style="max-width:16rem"><span class="field">Search this catalogue</span><span class="btn pri">Search</span><span class="measure" style="top:0.2rem">40</span></div>
+          <div class="band crumb"><b>Root</b><span>›</span><span>Prose</span><span>›</span><span>19th century</span><span class="measure" style="top:0.1rem">30</span></div>
+          <div class="band navlinks">
+            <span class="btn">▤ Alphabetical (2 431)</span><span class="btn">▤ By period (18)</span><span class="btn">▤ Recently added (60)</span>
+            <span class="btn">▤ Collections (12)</span><span class="btn">▤ Translations (204)</span><span class="btn">▤ Manuscripts (41)</span>
+            <span class="measure" style="top:0.6rem">87</span>
+          </div>
+          <div class="band gbox">
+            <span><span class="lbl">Language</span><span class="btn">Swedish ▾</span></span>
+            <span><span class="lbl">Sort by</span><span class="btn">Popularity ▾</span></span>
+            <span><span class="lbl">Format</span><span class="btn">EPUB ▾</span></span>
+            <span class="measure" style="top:0.2rem">72</span>
+          </div>
+          <div class="secttl">Prose <span class="n">2 431 books</span></div>
+          <div class="pubs">
+            <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Röda rummet</div><div class="a">August Strindberg</div><div class="d">Skildringar ur artist- och författarlivet. Strindbergs genombrottsroman från 1879, en satirisk uppgörelse med Stockholms institutioner…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+          </div>
+          <div class="cut"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <table class="budget">
+        <thead><tr><th>Band</th><th>Where</th><th class="num">px</th></tr></thead>
+        <tbody>
+          <tr><th>Page padding</th><td class="where">view.rs:416</td><td class="num">18</td></tr>
+          <tr><th>Back + source identity</th><td class="where">view.rs:309-320</td><td class="num">44</td></tr>
+          <tr><th>gap</th><td class="where">gap(18)</td><td class="num">18</td></tr>
+          <tr><th>Search row</th><td class="where">view.rs:327-336</td><td class="num">40</td></tr>
+          <tr><th>gap</th><td class="where">gap(14)</td><td class="num">14</td></tr>
+          <tr><th>Breadcrumbs</th><td class="where">view.rs:339-353</td><td class="num">30</td></tr>
+          <tr><th>gap</th><td class="where">gap(14)</td><td class="num">14</td></tr>
+          <tr><th>Navigation links <span class="defect">(2 wrapped rows)</span></th><td class="where">view.rs:355-359</td><td class="num">87</td></tr>
+          <tr><th>gap</th><td class="where">gap(14)</td><td class="num">14</td></tr>
+          <tr><th>Facet dropdowns in GroupBox</th><td class="where">view.rs:361-382</td><td class="num">72</td></tr>
+          <tr><th>gap</th><td class="where">gap(14)</td><td class="num">14</td></tr>
+          <tr class="total"><th>Chrome before the first book</th><td></td><td class="num">365</td></tr>
+          <tr><th>Pagination + bottom padding</th><td class="where">view.rs:403-413</td><td class="num">58</td></tr>
+          <tr class="total"><th>Results viewport, 700 px window</th><td></td><td class="num defect">277</td></tr>
+          <tr class="total"><th>One publication card</th><td class="where">LARGE_BOOK_CARD_HEIGHT_PX</td><td class="num">424</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+    <ol>
+      <li><b>Five bands, five heights, one axis.</b> Every control gets its own full-width row whether or not it has anything in it. Nothing shares a line with anything else, so the cost is additive and unbounded.</li>
+      <li><b>The navigation links are the most expensive and the least used.</b> Each <code>folder_card</code> is a fixed 280&nbsp;px wide × 41&nbsp;px tall (<code>library.rs:431</code>), so six links wrap to two rows at any window under ~1 700&nbsp;px. They are catalogue subsections — a place to go once, not a control to keep on screen.</li>
+      <li><b>Facet state is invisible when collapsed.</b> The dropdown shows the active option as its label, but with three closed dropdowns there is no single place that answers "what is filtering this list right now". The <code>active</code> flag OPDS already sends is spent on a button label.</li>
+      <li><b>The header repeats the rail.</b> "← Catalogs" plus a 21&nbsp;px source title plus <code>OPDS · sv</code> is 44&nbsp;px restating what the breadcrumb's root already says.</li>
+      <li><b>Chrome does not shrink when it is empty.</b> A catalogue with no facets and no search still pays for the gaps around them; <code>folder_buttons()</code> renders an empty flex row unconditionally (<code>view.rs:355-359</code>).</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Directions</h2>
+    <p>Four ways to spend less height. All four keep the same OPDS inputs — <code>page.search</code>, <code>page.levels</code>, <code>page.navigation</code>, <code>page.facets</code> — and only change where they sit.</p>
+
+    <div class="dirs">
+
+      <!-- A -->
+      <div class="dir">
+        <div class="cap">A · One toolbar line</div>
+        <p class="note">Breadcrumb and controls collapse into two thin lines. Search, facets and the subsection list all become peers on a single 32&nbsp;px strip; navigation links move behind a <b>Browse ▾</b> menu that lists them with their counts. The source title goes to the breadcrumb root, so the identity band disappears entirely.</p>
+        <div class="deskwrap">
+          <div class="frame desk">
+            <div class="rail"><span class="on"><i>▤</i>Home</span><span><i>◫</i>Folders</span><span><i>✎</i>Authors</span><span class="on"><i>▩</i>Store</span><span class="sp"></span><span><i>⚙</i>Settings</span></div>
+            <div class="stage">
+              <div class="band crumb"><span class="btn gh">←</span><b>Litteraturbanken</b><span>›</span><span>Prose</span><span>›</span><span>19th century</span><span class="measure" style="top:0.1rem">26</span></div>
+              <div class="band toolbar wrap">
+                <span class="field" style="max-width:9rem">Search…</span>
+                <span class="btn">Browse ▾ <span class="ct">6</span></span>
+                <span class="btn on">Swedish ▾</span><span class="btn">Popularity ▾</span><span class="btn">EPUB ▾</span>
+                <span class="measure" style="top:0.2rem">32</span>
+              </div>
+              <div class="secttl">Prose <span class="n">2 431 books</span></div>
+              <div class="pubs">
+                <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Röda rummet</div><div class="a">August Strindberg</div><div class="d">Skildringar ur artist- och författarlivet. Strindbergs genombrottsroman från 1879, en satirisk uppgörelse med Stockholms institutioner och en av de första moderna svenska romanerna…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+                <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Hemsöborna</div><div class="a">August Strindberg</div><div class="d">Berättelse från Stockholms skärgård, 1887. Carlsson kommer till Hemsö som dräng och gifter sig med änkan…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+              </div>
+              <div class="cut"></div>
+            </div>
+          </div>
+        </div>
+        <p class="gain">chrome 365 → <b>58</b> px · first card fully visible, second card starts above the fold</p>
+      </div>
+
+      <!-- B -->
+      <div class="dir">
+        <div class="cap">B · Toolbar plus an active-filter line</div>
+        <p class="note">A, plus one line that exists only while something is filtering the list: a removable chip per applied facet and a <b>Clear</b>. It answers "why am I seeing these results" in one place and gives a one-click way out — the thing the closed dropdowns cannot do. Zero height on an unfiltered page, so the common case pays nothing.</p>
+        <div class="deskwrap">
+          <div class="frame desk">
+            <div class="rail"><span class="on"><i>▤</i>Home</span><span><i>◫</i>Folders</span><span><i>✎</i>Authors</span><span class="on"><i>▩</i>Store</span><span class="sp"></span><span><i>⚙</i>Settings</span></div>
+            <div class="stage">
+              <div class="band crumb"><span class="btn gh">←</span><b>Litteraturbanken</b><span>›</span><span>Prose</span><span class="measure" style="top:0.1rem">26</span></div>
+              <div class="band toolbar wrap">
+                <span class="field" style="max-width:9rem">strindberg</span>
+                <span class="btn">Browse ▾ <span class="ct">6</span></span>
+                <span class="btn on">Swedish ▾</span><span class="btn on">Newest ▾</span><span class="btn">EPUB ▾</span>
+                <span class="measure" style="top:0.2rem">32</span>
+              </div>
+              <div class="band chips">
+                <span class="chip">Swedish <span class="x">✕</span></span>
+                <span class="chip">Newest first <span class="x">✕</span></span>
+                <span class="chip">“strindberg” <span class="x">✕</span></span>
+                <span class="clearall">Clear all</span>
+                <span class="measure" style="top:0.05rem">24</span>
+              </div>
+              <div class="secttl">Prose <span class="n">61 books</span></div>
+              <div class="pubs">
+                <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Röda rummet</div><div class="a">August Strindberg</div><div class="d">Skildringar ur artist- och författarlivet. Strindbergs genombrottsroman från 1879, en satirisk uppgörelse med Stockholms institutioner och en av de första moderna svenska romanerna…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+                <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Hemsöborna</div><div class="a">August Strindberg</div><div class="d">Berättelse från Stockholms skärgård, 1887…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+              </div>
+              <div class="cut"></div>
+            </div>
+          </div>
+        </div>
+        <p class="gain">chrome 365 → <b>58</b> px unfiltered, <b>90</b> px filtered · state legible, one click to undo</p>
+      </div>
+
+      <!-- C -->
+      <div class="dir">
+        <div class="cap">C · Filters as a side rail</div>
+        <p class="note">Everything that narrows the list moves to a 150&nbsp;px column beside the results, where it grows downward into space the books were never using. Facet options are visible without a click and counts read down a column. Costs horizontal room — at three publication columns that is one column lost — so it wants to collapse below <code>STORE_PUBLICATION_TWO_COLUMN_BREAKPOINT_PX</code>.</p>
+        <div class="deskwrap">
+          <div class="frame desk">
+            <div class="rail"><span class="on"><i>▤</i>Home</span><span><i>◫</i>Folders</span><span><i>✎</i>Authors</span><span class="on"><i>▩</i>Store</span><span class="sp"></span><span><i>⚙</i>Settings</span></div>
+            <div class="stage">
+              <div class="band crumb"><span class="btn gh">←</span><b>Litteraturbanken</b><span>›</span><span>Prose</span><span class="measure" style="top:0.1rem">26</span></div>
+              <div class="split">
+                <div class="side">
+                  <div><span class="field" style="display:block">Search…</span></div>
+                  <div><h5>Browse</h5>
+                    <div class="opt on">Alphabetical <span class="n">2431</span></div>
+                    <div class="opt">By period <span class="n">18</span></div>
+                    <div class="opt">Recently added <span class="n">60</span></div>
+                    <div class="opt">Collections <span class="n">12</span></div>
+                    <div class="opt">Translations <span class="n">204</span></div>
+                  </div>
+                  <div><h5>Language</h5>
+                    <div class="opt on">Swedish <span class="n">1240</span></div>
+                    <div class="opt">English <span class="n">860</span></div>
+                    <div class="opt">Norwegian <span class="n">94</span></div>
+                  </div>
+                  <div><h5>Sort by</h5>
+                    <div class="opt on">Popularity</div>
+                    <div class="opt">Newest</div>
+                  </div>
+                </div>
+                <div class="pubs">
+                  <div class="secttl">Prose <span class="n">2 431 books</span></div>
+                  <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Röda rummet</div><div class="a">August Strindberg</div><div class="d">Skildringar ur artist- och författarlivet, 1879…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+                  <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Hemsöborna</div><div class="a">August Strindberg</div><div class="d">Berättelse från Stockholms skärgård, 1887…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+                </div>
+              </div>
+              <div class="cut"></div>
+            </div>
+          </div>
+        </div>
+        <p class="gain">vertical chrome 365 → <b>26</b> px · costs 150 px of width · options visible without a click</p>
+      </div>
+
+      <!-- D -->
+      <div class="dir">
+        <div class="cap">D · One filter button, everything in a popover</div>
+        <p class="note">The toolbar is a single line no matter how many facets the catalogue declares: search, <b>Browse ▾</b>, and one <b>Filters</b> button carrying a count. Everything else lives in a popover that can be as tall as it likes, because it overlays the results instead of displacing them. The most robust against a catalogue that sends eight facet axes; the most clicks to change one thing.</p>
+        <div class="deskwrap">
+          <div class="frame desk">
+            <div class="rail"><span class="on"><i>▤</i>Home</span><span><i>◫</i>Folders</span><span><i>✎</i>Authors</span><span class="on"><i>▩</i>Store</span><span class="sp"></span><span><i>⚙</i>Settings</span></div>
+            <div class="stage">
+              <div class="band crumb"><span class="btn gh">←</span><b>Litteraturbanken</b><span>›</span><span>Prose</span><span class="measure" style="top:0.1rem">26</span></div>
+              <div class="band toolbar">
+                <span class="field" style="max-width:9rem">Search…</span>
+                <span class="btn">Browse ▾ <span class="ct">6</span></span>
+                <span class="btn on">⛭ Filters <span class="ct">2</span></span>
+                <span class="measure" style="top:0.2rem">32</span>
+              </div>
+              <div class="sheetwrap">
+                <div class="sheet">
+                  <div><h5>Language</h5>
+                    <div class="opt on">✓ Swedish <span>1240</span></div>
+                    <div class="opt">English <span>860</span></div>
+                    <div class="opt">Norwegian <span>94</span></div>
+                  </div>
+                  <div><h5>Sort by</h5>
+                    <div class="opt on">✓ Newest</div>
+                    <div class="opt">Popularity</div>
+                    <div class="opt">Title</div>
+                  </div>
+                  <div><h5>Format</h5>
+                    <div class="opt">EPUB</div><div class="opt">PDF</div>
+                  </div>
+                  <div class="ft"><span class="clearall">Clear all</span><span class="btn pri">Done</span></div>
+                </div>
+                <div class="secttl" style="margin-left:13.6rem">Prose <span class="n">61 books</span></div>
+                <div class="pubs" style="margin-left:13.6rem">
+                  <div class="pub"><div class="cv"></div><div class="meta"><div class="t">Röda rummet</div><div class="a">August Strindberg</div><div class="d">Skildringar ur artist- och författarlivet, 1879…</div><div class="act"><span class="btn pri">＋ Add</span></div></div></div>
+                </div>
+              </div>
+              <div class="cut"></div>
+            </div>
+          </div>
+        </div>
+        <p class="gain">chrome 365 → <b>58</b> px, fixed · unaffected by facet count · 2 clicks to change one filter</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Compared</h2>
+    <div class="scroll">
+      <table class="compare">
+        <thead><tr><th>&nbsp;</th><th class="num">Chrome px</th><th>Grows with facet count</th><th>Filter state visible</th><th>Clicks to change one facet</th><th>Costs width</th></tr></thead>
+        <tbody>
+          <tr><th>Today</th><td class="num defect">365</td><td>yes — wraps</td><td>partly (button labels)</td><td>2</td><td>no</td></tr>
+          <tr><th>A · one line</th><td class="num">58</td><td>wraps after ~5</td><td>partly</td><td>2</td><td>no</td></tr>
+          <tr><th>B · line + chips</th><td class="num">58 / 90</td><td>wraps after ~5</td><td><b>yes</b></td><td>2, or 1 to clear</td><td>no</td></tr>
+          <tr><th>C · side rail</th><td class="num">26</td><td>no — scrolls</td><td><b>yes</b></td><td><b>1</b></td><td>150 px</td></tr>
+          <tr><th>D · popover</th><td class="num">58</td><td><b>no</b></td><td>count only</td><td>3</td><td>no</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>What I'd build</h2>
+    <div class="rec">
+      <p><b>B, with C's rail as the wide-window form.</b> B is the smallest change from where the code already is — the facet dropdowns exist, so it is one toolbar row, one conditional chip row, and moving <code>page.navigation</code> into a <b>Browse</b> menu. That alone returns 307&nbsp;px and gets a whole card above the fold.</p>
+      <p>The chip row is the part worth insisting on: it is the only option that makes <code>CatalogLink::active</code> mean something to the reader, and it is the only one where undoing a filter is a single click rather than reopening the control that set it.</p>
+      <p>C then becomes a progressive enhancement above <code>STORE_PUBLICATION_THREE_COLUMN_BREAKPOINT_PX</code> (1 232&nbsp;px), where 150&nbsp;px of width is affordable and the same facet data can render as a rail instead of a toolbar. D is the fallback if a real catalogue turns out to send more facet axes than a line can hold — worth measuring against the crawled catalogues before building.</p>
+    </div>
+    <p>New components this needs in <code>ui-components</code>, none of which exist yet: <code>catalog_toolbar()</code>, <code>catalog_filter_chip(label, on_remove)</code>, <code>catalog_chip_row()</code>, and a <code>browse_menu_button(count)</code>. The store page keeps composing and wiring, per the crate's page/component split.</p>
+  </section>
+
+  <section>
+    <h2>Not answered from the code</h2>
+    <ul class="questions">
+      <li><b>How many facet axes do real catalogues send?</b> The layouts differ mainly in how they fail at 6+. <code>servers/opds-cache</code> has crawled the curated set — the distribution of <code>page.facets.len()</code> would settle A vs D outright.</li>
+      <li><b>Is <code>page.navigation</code> navigation or filtering?</b> I have treated the links as subsections that belong in a menu. If readers use them as a primary way to move through a catalogue, they deserve to stay visible and something else should give up the height.</li>
+      <li><b>Does the breadcrumb root reliably name the source?</b> A collapses the identity band into it. If <code>push_level</code> (<code>browse.rs:107</code>) can produce a first level whose title is not the source's, the band has to stay.</li>
+      <li><b>Should a facet change reset pagination?</b> Not a layout question, but a chip row makes filter changes cheap enough that landing on page 7 of a newly filtered list will start to be noticed.</li>
+    </ul>
+  </section>
+
+  <footer>docs/store-filter-compact.html · directions only, nothing here is implemented · measurements from view.rs, library.rs and client/app-contract/src/frontend.rs at c679c069</footer>
+
+</div>

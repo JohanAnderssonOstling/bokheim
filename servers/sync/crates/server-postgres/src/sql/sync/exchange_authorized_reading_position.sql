@@ -15,7 +15,7 @@ changed AS (
     )
     SELECT $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
     FROM owned
-    WHERE current_sync_revision >= $14
+    WHERE other_revision >= $14 AND reading_revision >= $15
     ON CONFLICT (library_id, kind, entity_key, entity_subkey) DO UPDATE SET
         value = EXCLUDED.value,
         present = EXCLUDED.present,
@@ -30,8 +30,8 @@ changed AS (
 )
 SELECT
     EXISTS(SELECT 1 FROM owned) AS authorized,
-    COALESCE((SELECT current_sync_revision FROM owned) < $14, FALSE) AS cursor_ahead,
-    COALESCE((SELECT current_sync_revision FROM owned) <= $14, FALSE) AS caught_up,
+    COALESCE((SELECT other_revision FROM owned) < $14 OR (SELECT reading_revision FROM owned) < $15, FALSE) AS cursor_ahead,
+    COALESCE((SELECT other_revision FROM owned) <= $14 AND (SELECT reading_revision FROM owned) <= $15, FALSE) AS caught_up,
     (SELECT reading_revision FROM owned) AS reading_revision,
     (SELECT other_revision FROM owned) AS other_revision,
     changed.server_seq

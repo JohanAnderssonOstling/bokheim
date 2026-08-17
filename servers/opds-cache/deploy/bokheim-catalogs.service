@@ -2,6 +2,8 @@
 Description=Bokheim public catalog server
 Wants=network-online.target
 After=network-online.target
+Wants=bokheim-metadata.service
+After=bokheim-metadata.service
 StartLimitIntervalSec=2min
 StartLimitBurst=5
 
@@ -10,18 +12,25 @@ Type=exec
 DynamicUser=true
 ExecStart=/usr/local/bin/catalog-server
 Environment=BOKHEIM_CATALOG_BIND=127.0.0.1:8090
+Environment=BOKHEIM_CATALOG_OPERATIONS_BIND=127.0.0.1:8092
 Environment=BOKHEIM_CATALOG_FILE=/usr/local/share/catalog-providers/opds.json
 Environment=BOKHEIM_CATALOG_CACHE_FILE=/var/lib/catalog-providers/catalog-cache.db
 Environment=BOKHEIM_CATALOG_COVER_CACHE_DIR=/var/lib/catalog-providers/covers
+Environment=BOKHEIM_METADATA_URL=http://127.0.0.1:8091
+Environment=BOKHEIM_CATALOG_MAX_CRAWL_PAGES=50000
 Environment=RUST_LOG=info
+# Return large, short-lived decoder allocations to the kernel promptly and
+# avoid one glibc arena per blocking worker retaining the crawl high-water mark.
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
 StateDirectory=catalog-providers
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=35s
 KillSignal=SIGTERM
 OOMPolicy=kill
-MemoryHigh=128M
-MemoryMax=256M
+MemoryHigh=1G
+MemoryMax=1536M
 TasksMax=64
 LimitNOFILE=4096
 

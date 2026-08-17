@@ -12,6 +12,8 @@
   import { isNativeApp } from "../lib/platform";
   import { enableReaderImmersiveMode, enableVolumePageTurning, onVolumePageTurn } from "../lib/volume-navigation";
   import { APP_NAME_LOWER } from "../lib/application-name";
+  import { normalizeFoliateTarget } from "../lib/foliate-target";
+  import { closeRemoteEpubSource, isRemoteEpubSource, openRemoteEpub } from "../lib/foliate-range-epub";
   import type {
     FoliateRelocateDetail,
     FoliateRenderer,
@@ -57,15 +59,15 @@
   let tocOpen = $state(false);
   let searchOpen = $state(false);
   let notesOpen = $state(false);
+  let sidebarTab = $state<"contents" | "annotations">("contents");
   let infoOpen = $state(false);
   let footnoteOpen = $state(false);
   let footnoteHost = $state<HTMLDivElement>();
   let footnoteLabel = $state("Note");
   let footnoteView: FoliateView | null = null;
   let tocItems = $state<TocItem[]>([]);
-  let landmarkItems = $state<TocItem[]>([]);
   let pageListItems = $state<TocItem[]>([]);
-  let navigationList = $state<"toc" | "landmarks" | "pages">("toc");
+  let navigationList = $state<"toc" | "pages">("toc");
   let expandedTocKeys = $state<Set<string>>(new Set());
   let activeTocHref = $state("");
   let readingFraction = $state(0);
@@ -97,7 +99,7 @@
   let maxBlockSize = $state(1440);
   const READER_UI_PREFERENCES_KEY = `${APP_NAME_LOWER}-reader-ui-preferences`;
   let isPdfBook = $derived(typeof book.file !== "string"
-    ? book.file.type === "application/pdf" || /\.pdf$/i.test(book.file.name)
+    ? !isRemoteEpubSource(book.file) && (book.file.type === "application/pdf" || /\.pdf$/i.test(book.file.name))
     : /\.pdf$/i.test(book.fileName ?? new URL(book.file).pathname));
   let selection = $state<{ cfi: string; text: string; pdfAnchor?: PdfAnnotationAnchor } | null>(null);
   let selectionNote = $state("");
@@ -114,6 +116,7 @@
   let pendingChromeToggle: ReturnType<typeof setTimeout> | undefined;
   let annotationSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let annotationSaveQueue = Promise.resolve();
+  let readerLayoutFrame: number | undefined;
   const READER_UI_PREFERENCES_VERSION = 2;
   const preferenceConstraints = READER_PREFERENCES_CONTRACT.constraints;
 
@@ -218,7 +221,7 @@
   }
 
   function visibleTocItems() {
-    const items = navigationList === "landmarks" ? landmarkItems : navigationList === "pages" ? pageListItems : tocItems;
+    const items = navigationList === "pages" ? pageListItems : tocItems;
     return items.filter((item) => item.parentKeys.every((key) => expandedTocKeys.has(key)));
   }
 
@@ -289,6 +292,16 @@
     applyPreferencesToRenderer(footnoteView?.renderer, readerPreferences);
   }
 
+  function scheduleReaderLayout() {
+    if (readerLayoutFrame !== undefined) cancelAnimationFrame(readerLayoutFrame);
+    readerLayoutFrame = requestAnimationFrame(() => {
+      readerLayoutFrame = requestAnimationFrame(() => {
+        readerLayoutFrame = undefined;
+        view?.renderer?.render?.();
+      });
+    });
+  }
+
   function persistCfi(cfi: string) {
     if (!cfi || cfi === lastPersistedCfi) return positionSaveQueue;
     saveState = "saving";
@@ -357,14 +370,31 @@
     infoOpen = false;
   }
 
-  function togglePanel(panel: "toc" | "search" | "settings" | "notes" | "info") {
-    const next = panel === "toc" ? !tocOpen : panel === "search" ? !searchOpen : panel === "notes" ? !notesOpen : panel === "info" ? !infoOpen : !settingsOpen;
+  function togglePanel(panel: "search" | "settings" | "info") {
+    const next = panel === "search" ? !searchOpen : panel === "info" ? !infoOpen : !settingsOpen;
     closePanels();
-    if (panel === "toc") setTocOpen(next);
     if (panel === "search") searchOpen = next;
     if (panel === "settings") settingsOpen = next;
-    if (panel === "notes") notesOpen = next;
     if (panel === "info") infoOpen = next;
+  }
+
+  function showReaderSidebar(tab: "contents" | "annotations") {
+    settingsOpen = false;
+    searchOpen = false;
+    infoOpen = false;
+    sidebarTab = tab;
+    tocOpen = tab === "contents";
+    notesOpen = tab === "annotations";
+    persistTocState(true);
+  }
+
+  function toggleReaderSidebar() {
+    if (tocOpen || notesOpen) {
+      setTocOpen(false);
+      notesOpen = false;
+      return;
+    }
+    showReaderSidebar(sidebarTab === "annotations" && !book.loadAnnotations ? "contents" : sidebarTab);
   }
 
   function dismissSettingsFromOutside(event: PointerEvent) {
@@ -776,6 +806,7 @@
     // dismiss it before navigation and popup positioning. Wide layouts retain
     // the list alongside the document for quick annotation-to-annotation work.
     if (window.matchMedia("(max-width: 720px)").matches) {
+      setTocOpen(false);
       notesOpen = false;
       await tick();
     }
@@ -1193,6 +1224,7 @@
     const handleWindowResize = () => {
       closeSelectionContextMenu();
       positionAnnotationPopup();
+      scheduleReaderLayout();
     };
     window.addEventListener("keydown", handleReaderKey);
     window.addEventListener("pointerdown", closeSelectionContextMenu, true);
@@ -1220,11 +1252,10 @@
 
     void (async () => {
       try {
-        await element.open(book.file);
+        await element.open(isRemoteEpubSource(book.file) ? await openRemoteEpub(book.file) : book.file);
         if (disposed) return;
         hasMediaOverlay = Boolean(element.mediaOverlay);
         tocItems = flattenToc(element.book?.toc ?? []);
-        landmarkItems = flattenToc(element.book?.landmarks ?? []);
         pageListItems = flattenToc(element.book?.pageList ?? []);
         expandedTocKeys = new Set(tocItems.filter((item) => item.depth === 0 && item.hasChildren).map((item) => item.key));
         const { FootnoteHandler } = await import("../vendor/foliate-js/footnotes.js");
@@ -1238,6 +1269,12 @@
           showTextStart: !book.initialCfi,
         });
         if (disposed) return;
+        if (book.initialTarget) await element.goTo(normalizeFoliateTarget(book.initialTarget));
+        if (disposed) return;
+        // WebKit can finish the initial pagination before the Tauri window's
+        // final grid width is committed. Re-render after two paint frames so
+        // both columns use the settled viewport instead of clipping the right.
+        scheduleReaderLayout();
         loading = false;
 
         // Annotations and bookmarks enrich an already usable reader. Loading
@@ -1293,9 +1330,12 @@
       if (pendingChromeToggle) clearTimeout(pendingChromeToggle);
       if (activeAnnotation) closeActiveAnnotation();
       if (annotationSaveTimer) clearTimeout(annotationSaveTimer);
+      if (readerLayoutFrame !== undefined) cancelAnimationFrame(readerLayoutFrame);
       void flushPosition();
       element.close();
       element.remove();
+      if (isRemoteEpubSource(book.file)) void closeRemoteEpubSource(book.file);
+      if (typeof book.file === "string" && book.file.startsWith("blob:")) URL.revokeObjectURL(book.file);
       view = null;
     };
   });
@@ -1319,14 +1359,9 @@
     <button class="reader-control square icon-control" type="button" aria-label="Return to library" title="Return to library" onclick={onclose}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
     </button>
-    <button class:active={tocOpen} class="reader-control square icon-control" type="button" aria-label="Contents" title="Contents" onclick={() => togglePanel("toc")}>
+    <button class:active={tocOpen || notesOpen} class="reader-control square icon-control" type="button" aria-label="Contents and annotations" title="Contents and annotations" onclick={toggleReaderSidebar}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6.5A3.5 3.5 0 0 1 14 9v10.5H7.5A3.5 3.5 0 0 0 4 23zM20 5.5h-2"></path><path d="M14 9a3.5 3.5 0 0 1 3.5-3.5H20V20h-2.5a3.5 3.5 0 0 0-3.5 3z"></path></svg>
     </button>
-    {#if book.loadAnnotations}
-      <button class:active={notesOpen} class="reader-control square icon-control" type="button" aria-label="Annotations and bookmarks" title="Annotations and bookmarks" onclick={() => togglePanel("notes")}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17H5zM8 8h8M8 12h8M8 16h5"></path></svg>
-      </button>
-    {/if}
     {#if hasMediaOverlay}
       <button class="reader-control square" type="button" aria-label="Previous media-overlay segment" onclick={() => stepMediaOverlay(-1)}>◀</button>
       <button class:active={mediaOverlayPlaying} class="reader-control" type="button" onclick={() => void toggleMediaOverlay()}>{mediaOverlayPlaying ? "Pause audio" : "Book audio"}</button>
@@ -1342,17 +1377,17 @@
     <button class:active={settingsOpen} class="reader-control reader-settings-trigger" type="button" aria-label="Reader settings" title="Reader settings" onclick={() => togglePanel("settings")}>{READER_SETTINGS_PRESENTATION_CONTRACT.trigger_label}</button>
   </header>
 
-  {#if tocOpen}
-    <section class="reader-panel toc-panel" aria-label="Table of contents">
-      <div class="panel-heading">
-        <strong>Contents</strong>
-        <button type="button" aria-label="Close table of contents" onclick={() => setTocOpen(false)}>×</button>
-      </div>
-      <div class="navigation-tabs" role="tablist" aria-label="Book navigation">
+  {#if tocOpen || notesOpen}
+    <section class="reader-panel reader-sidebar" aria-label={tocOpen ? "Table of contents" : "Annotations and bookmarks"}>
+      {#if book.loadAnnotations}<div class="sidebar-switcher" role="tablist" aria-label="Reader sidebar">
+        <button class:active={tocOpen} role="tab" aria-selected={tocOpen} type="button" onclick={() => showReaderSidebar("contents")}>Contents</button>
+        <button class:active={notesOpen} role="tab" aria-selected={notesOpen} type="button" onclick={() => showReaderSidebar("annotations")}>Annotations</button>
+      </div>{/if}
+      {#if tocOpen}
+      {#if pageListItems.length}<div class="navigation-tabs" role="tablist" aria-label="Book navigation">
         <button class:active={navigationList === "toc"} type="button" onclick={() => (navigationList = "toc")}>Contents</button>
-        {#if landmarkItems.length}<button class:active={navigationList === "landmarks"} type="button" onclick={() => (navigationList = "landmarks")}>Landmarks</button>{/if}
-        {#if pageListItems.length}<button class:active={navigationList === "pages"} type="button" onclick={() => (navigationList = "pages")}>Pages</button>{/if}
-      </div>
+        <button class:active={navigationList === "pages"} type="button" onclick={() => (navigationList = "pages")}>Pages</button>
+      </div>{/if}
       {#if visibleTocItems().length}
         <nav class="toc-list">
           {#each visibleTocItems() as item (item.key)}
@@ -1375,29 +1410,7 @@
       {:else}
         <p class="panel-empty">This navigation list is empty.</p>
       {/if}
-    </section>
-  {/if}
-
-  {#if infoOpen}
-    <section class="reader-panel info-panel" aria-label="Book information">
-      <div class="panel-heading"><strong>Book information</strong><button type="button" aria-label="Close book information" onclick={() => (infoOpen = false)}>×</button></div>
-      <dl>
-        <dt>Title</dt><dd>{book.title}</dd>
-        {#if book.author}<dt>Author</dt><dd>{book.author}</dd>{/if}
-        {#if view?.book?.metadata?.language}<dt>Language</dt><dd>{String(view.book.metadata.language)}</dd>{/if}
-        {#if view?.book?.metadata?.publisher}<dt>Publisher</dt><dd>{String(view.book.metadata.publisher)}</dd>{/if}
-        {#if view?.book?.metadata?.published}<dt>Published</dt><dd>{String(view.book.metadata.published)}</dd>{/if}
-        {#if view?.book?.metadata?.identifier}<dt>Identifier</dt><dd>{String(view.book.metadata.identifier)}</dd>{/if}
-      </dl>
-    </section>
-  {/if}
-
-  {#if notesOpen}
-    <section class="reader-panel notes-panel" aria-label="Annotations and bookmarks">
-      <div class="panel-heading">
-        <strong>Annotations & bookmarks</strong>
-        <button type="button" aria-label="Close annotations" onclick={() => (notesOpen = false)}>×</button>
-      </div>
+      {:else}
       <div class="notes-actions">
         <button type="button" disabled={!lastCfi} onclick={() => void addBookmark()}>Bookmark here</button>
       </div>
@@ -1424,6 +1437,21 @@
           {/each}
         </div>
       {/if}
+      {/if}
+    </section>
+  {/if}
+
+  {#if infoOpen}
+    <section class="reader-panel info-panel" aria-label="Book information">
+      <div class="panel-heading"><strong>Book information</strong><button type="button" aria-label="Close book information" onclick={() => (infoOpen = false)}>×</button></div>
+      <dl>
+        <dt>Title</dt><dd>{book.title}</dd>
+        {#if book.author}<dt>Author</dt><dd>{book.author}</dd>{/if}
+        {#if view?.book?.metadata?.language}<dt>Language</dt><dd>{String(view.book.metadata.language)}</dd>{/if}
+        {#if view?.book?.metadata?.publisher}<dt>Publisher</dt><dd>{String(view.book.metadata.publisher)}</dd>{/if}
+        {#if view?.book?.metadata?.published}<dt>Published</dt><dd>{String(view.book.metadata.published)}</dd>{/if}
+        {#if view?.book?.metadata?.identifier}<dt>Identifier</dt><dd>{String(view.book.metadata.identifier)}</dd>{/if}
+      </dl>
     </section>
   {/if}
 
@@ -1653,7 +1681,7 @@
     min-height: 2.55rem;
     padding: 0 0.55rem;
     border: 0;
-    border-radius: 0.7rem;
+    border-radius: 0;
     color: inherit;
     background: transparent;
     font: inherit;
@@ -1676,7 +1704,7 @@
     min-height: 34px;
     padding: 0 10px;
     border: 1px solid var(--chrome-strong);
-    border-radius: 8px;
+    border-radius: 0;
     background: var(--color-raised-bg);
     font-size: 0.875rem;
     white-space: nowrap;
@@ -1709,7 +1737,7 @@
     min-width: 162px;
     padding: 6px;
     border: 1px solid var(--chrome-strong);
-    border-radius: 10px;
+    border-radius: 0;
     color: var(--ink);
     background: var(--chrome);
     box-shadow: 0 10px 32px color-mix(in srgb, var(--color-ink-text) 26%, transparent);
@@ -1719,7 +1747,7 @@
     min-height: 36px;
     padding: 0 10px;
     text-align: left;
-    border-radius: 6px;
+    border-radius: 0;
   }
 
   .selection-context-menu button:hover,
@@ -1737,14 +1765,14 @@
     overflow: auto;
     padding: .75rem;
     border: 1px solid var(--chrome-strong);
-    border-radius: .75rem;
+    border-radius: 0;
     color: var(--ink);
     background: var(--chrome);
     box-shadow: 0 1rem 3rem color-mix(in srgb, var(--color-ink-text) 24%, transparent);
   }
 
   .annotation-popup q { display: block; margin-bottom: .75rem; line-height: 1.45; }
-  .annotation-popup textarea { width: 100%; min-height: 2.75rem; max-height: 10rem; box-sizing: border-box; resize: none; overflow-y: auto; field-sizing: content; border: 1px solid var(--chrome-strong); border-radius: .55rem; padding: .65rem; color: inherit; background: var(--color-raised-bg); font: inherit; line-height: 1.4; }
+  .annotation-popup textarea { width: 100%; min-height: 2.75rem; max-height: 10rem; box-sizing: border-box; resize: none; overflow-y: auto; field-sizing: content; border: 1px solid var(--chrome-strong); border-radius: 0; padding: .65rem; color: inherit; background: var(--color-raised-bg); font: inherit; line-height: 1.4; }
   .annotation-popup-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .65rem; }
   .annotation-popup-actions button { border: 1px solid var(--chrome-strong); background: var(--color-raised-bg); }
 
@@ -1792,24 +1820,28 @@
     overflow: auto;
     padding: 1rem;
     border: 1px solid var(--chrome-strong);
-    border-radius: 0 0 1rem 1rem;
+    border-radius: 0;
     color: var(--ink);
     background: var(--chrome);
     box-shadow: 0 1rem 3rem color-mix(in srgb, var(--color-ink-text) 24%, transparent);
   }
 
-  .toc-panel {
+  .reader-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
     right: auto;
     left: 0;
     bottom: 0;
     width: min(380px, 40vw);
     max-height: none;
+    margin: 0;
+    padding: 0;
     border-width: 0 1px 0 0;
     border-radius: 0;
     box-shadow: none;
   }
 
-  .notes-panel,
   .info-panel {
     left: 0;
     right: auto;
@@ -1829,7 +1861,7 @@
     width: min(var(--reader-settings-max-width), calc(100% - 1.3rem - env(safe-area-inset-left) - env(safe-area-inset-right)));
     max-height: min(var(--reader-settings-max-height), calc(100dvh - 58px - env(safe-area-inset-top)));
     padding: var(--reader-settings-padding);
-    border-radius: 1rem;
+    border-radius: 0;
   }
 
   .reader-search-bar {
@@ -1860,7 +1892,7 @@
     min-height: 36px;
     padding: 0 10px;
     border: 1px solid var(--chrome-strong);
-    border-radius: 8px;
+    border-radius: 0;
     color: inherit;
     background: var(--color-raised-bg);
     font: inherit;
@@ -1873,7 +1905,7 @@
     min-height: 34px;
     padding: 0 10px;
     border: 1px solid var(--chrome-strong);
-    border-radius: 8px;
+    border-radius: 0;
     background: var(--color-raised-bg);
     white-space: nowrap;
   }
@@ -1928,6 +1960,22 @@
 
   .navigation-tabs button.active { background: var(--chrome-strong); }
 
+  .sidebar-switcher {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    flex: none;
+    border: 1px solid var(--chrome-strong);
+    background: var(--chrome-strong);
+  }
+
+  .sidebar-switcher button {
+    min-height: 2.5rem;
+    background: var(--chrome);
+  }
+
+  .sidebar-switcher button.active { background: var(--color-raised-bg); }
+
   .info-panel dl {
     display: grid;
     grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
@@ -1945,7 +1993,7 @@
     width: min(94vw, 70rem);
     height: min(90dvh, 60rem);
     padding: 0.75rem;
-    border-radius: 0.9rem;
+    border-radius: 0;
     background: var(--chrome);
   }
 
@@ -1957,7 +2005,7 @@
     align-items: center;
     min-height: 2.75rem;
     padding-inline-start: calc(var(--toc-depth) * 1rem);
-    border-radius: 0.7rem;
+    border-radius: 0;
   }
 
   .toc-row.current {
@@ -2039,7 +2087,7 @@
     gap: 1px;
     overflow: hidden;
     border: 1px solid var(--chrome-strong);
-    border-radius: 0.55rem;
+    border-radius: 0;
     background: var(--chrome-strong);
   }
 
@@ -2071,7 +2119,7 @@
     min-width: 0;
     overflow: hidden;
     border: 1px solid var(--chrome-strong);
-    border-radius: 0.55rem;
+    border-radius: 0;
     background: var(--chrome-strong);
   }
 
@@ -2129,7 +2177,7 @@
     gap: 0.45rem;
   }
 
-  .notes-panel > input {
+  .reader-sidebar > input {
     width: 100%;
     min-height: 2.5rem;
   }
@@ -2148,7 +2196,7 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.25rem;
     border: 1px solid var(--chrome-strong);
-    border-radius: 0.65rem;
+    border-radius: 0;
   }
 
   .annotation-target {
@@ -2172,7 +2220,7 @@
 
   .annotation-color {
     grid-row: 1 / span 2;
-    border-radius: 1rem;
+    border-radius: 0;
     background: var(--annotation-color);
   }
 
@@ -2222,7 +2270,7 @@
     margin: 0 auto;
     overflow: hidden;
     border: 1px solid var(--chrome-strong);
-    border-radius: 1rem;
+    border-radius: 0;
     color: var(--ink);
     background: var(--chrome);
     box-shadow: 0 1.5rem 4rem color-mix(in srgb, var(--color-ink-text) 32%, transparent);
@@ -2257,8 +2305,7 @@
       border-radius: 0;
     }
 
-    .toc-panel,
-    .notes-panel,
+    .reader-sidebar,
     .info-panel {
       width: 100%;
     }

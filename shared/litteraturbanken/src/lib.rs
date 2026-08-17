@@ -18,7 +18,8 @@ const SORT_PARAMETER: &str = "bokheim_sort";
 const LANGUAGE_PARAMETER: &str = "bokheim_language";
 const GENDER_PARAMETER: &str = "bokheim_gender";
 const MODERNIZED_PARAMETER: &str = "bokheim_modernized";
-const MAX_RESULTS: &str = "10000";
+const PAGE_PARAMETER: &str = "bokheim_page";
+pub const PAGE_SIZE: u32 = 48;
 const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const INCLUDED_FIELDS: &str = "lbworkid,titlepath,title,titleid,work_titleid,shorttitle,mediatype,authors.authorid,authors.full_name,authors.name_for_index,authors.type,language";
 const EXCLUDED_FIELDS: &str = "text,parts,sourcedesc,pages,errata,content_vector";
@@ -29,6 +30,11 @@ pub struct Catalog {
     pub source_url: Url,
     pub root_url: Url,
     pub total_items: u32,
+    pub current_page: u32,
+    pub first_page: Option<Url>,
+    pub previous_page: Option<Url>,
+    pub next_page: Option<Url>,
+    pub last_page: Option<Url>,
     pub publications: Vec<Publication>,
     pub facets: Vec<Facet>,
     pub search_template: String,
@@ -54,6 +60,7 @@ struct QueryOptions {
     language: Option<String>,
     gender: Option<String>,
     modernized: Option<String>,
+    page: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,15 +160,30 @@ pub fn decorate_download_request(request: RequestBuilder, url: &Url) -> RequestB
     }
 }
 
+/// Adds the same provider-specific download headers without binding callers to
+/// a particular HTTP client or redirect policy.
+pub fn decorate_download_headers(headers: &mut reqwest::header::HeaderMap, url: &Url) {
+    if is_download_url(url) {
+        headers.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static("Mozilla/5.0"));
+        headers.insert("x-requested-with", reqwest::header::HeaderValue::from_static("XMLHttpRequest"));
+        headers.insert(reqwest::header::REFERER, reqwest::header::HeaderValue::from_static(CATALOG_URL));
+    }
+}
+
 pub async fn fetch_catalog(client: &Client, source_url: Url, byte_limit: u64) -> Result<Catalog, Error> {
     if !is_catalog_url(&source_url) {
         return Err(Error::InvalidUrl("URL is not the Litteraturbanken EPUB catalogue".to_owned()));
     }
     let options = query_options(&source_url);
     let search = api_search(&options);
+    let page = options.page.max(1);
+    let offset = page.saturating_sub(1).saturating_mul(PAGE_SIZE);
+    let offset = offset.to_string();
+    let end = page.saturating_mul(PAGE_SIZE).to_string();
     let api_url = source_url.join(API_PATH).map_err(|error| Error::InvalidUrl(error.to_string()))?;
     let request = client.get(api_url).header(reqwest::header::ACCEPT, "application/json, text/plain, */*").header("x-requested-with", "XMLHttpRequest").header(reqwest::header::REFERER, source_url.as_str()).query(&[
-        ("to", MAX_RESULTS),
+        ("from", offset.as_str()),
+        ("to", end.as_str()),
         ("include", INCLUDED_FIELDS),
         ("exclude", EXCLUDED_FIELDS),
         ("sort_field", api_sort(options.sort.as_deref())),
@@ -182,7 +204,13 @@ fn catalog_from_response(source_url: Url, options: QueryOptions, response: ApiRe
     let title = options.search.as_deref().filter(|query| !query.trim().is_empty()).map_or_else(|| "Litteraturbanken".to_owned(), |query| format!("Search results for {query}"));
     let facets = catalog_facets(&source_url, &options);
     let search_template = search_template(&source_url);
-    Ok(Catalog { title, source_url, root_url, total_items: response.hits, publications, facets, search_template })
+    let current_page = options.page.max(1);
+    let page_count = response.hits.div_ceil(PAGE_SIZE).max(1);
+    let first_page = (current_page > 1).then(|| page_url(&source_url, 1));
+    let previous_page = (current_page > 1).then(|| page_url(&source_url, current_page - 1));
+    let next_page = (current_page < page_count).then(|| page_url(&source_url, current_page + 1));
+    let last_page = (current_page < page_count).then(|| page_url(&source_url, page_count));
+    Ok(Catalog { title, source_url, root_url, total_items: response.hits, current_page, first_page, previous_page, next_page, last_page, publications, facets, search_template })
 }
 
 fn publication(base: &Url, work: ApiWork) -> Result<Option<Publication>, Error> {
@@ -258,6 +286,7 @@ fn query_options(url: &Url) -> QueryOptions {
             LANGUAGE_PARAMETER => options.language = Some(value.into_owned()),
             GENDER_PARAMETER => options.gender = Some(value.into_owned()),
             MODERNIZED_PARAMETER => options.modernized = Some(value.into_owned()),
+            PAGE_PARAMETER => options.page = value.parse().ok().filter(|page| *page > 0).unwrap_or(1),
             _ => {}
         }
     }
@@ -278,7 +307,7 @@ fn facet(source_url: &Url, title: &str, parameter: &str, selected: Option<&str>,
         .iter()
         .map(|(label, value)| {
             let mut url = source_url.clone();
-            let retained = url.query_pairs().filter(|(key, _)| key != parameter).map(|(key, value)| (key.into_owned(), value.into_owned())).collect::<Vec<_>>();
+            let retained = url.query_pairs().filter(|(key, _)| key != parameter && key != PAGE_PARAMETER).map(|(key, value)| (key.into_owned(), value.into_owned())).collect::<Vec<_>>();
             url.query_pairs_mut().clear().extend_pairs(retained).extend_pairs((!value.is_empty()).then_some((parameter, *value)));
             FacetLink { title: (*label).to_owned(), url, active: selected.unwrap_or("") == *value || (parameter == SORT_PARAMETER && selected.is_none() && *value == "popularity") }
         })
@@ -288,9 +317,16 @@ fn facet(source_url: &Url, title: &str, parameter: &str, selected: Option<&str>,
 
 fn search_template(source_url: &Url) -> String {
     let mut url = source_url.clone();
-    let retained = url.query_pairs().filter(|(key, _)| key != SEARCH_PARAMETER).map(|(key, value)| (key.into_owned(), value.into_owned())).collect::<Vec<_>>();
+    let retained = url.query_pairs().filter(|(key, _)| key != SEARCH_PARAMETER && key != PAGE_PARAMETER).map(|(key, value)| (key.into_owned(), value.into_owned())).collect::<Vec<_>>();
     url.query_pairs_mut().clear().extend_pairs(retained).append_pair(SEARCH_PARAMETER, "{searchTerms}");
     url.to_string().replace("%7BsearchTerms%7D", "{searchTerms}")
+}
+
+fn page_url(source_url: &Url, page: u32) -> Url {
+    let mut url = source_url.clone();
+    let retained = url.query_pairs().filter(|(key, _)| key != PAGE_PARAMETER).map(|(key, value)| (key.into_owned(), value.into_owned())).collect::<Vec<_>>();
+    url.query_pairs_mut().clear().extend_pairs(retained).extend_pairs((page > 1).then_some((PAGE_PARAMETER, page.to_string())));
+    url
 }
 
 fn root_url(source_url: &Url) -> Url {
@@ -385,14 +421,26 @@ mod tests {
 
     #[test]
     fn facets_preserve_other_controls_and_search_template() {
-        let url = Url::parse("https://litteraturbanken.se/epub?visa=epub&bokheim_sort=title&bokheim_language=sv").unwrap();
+        let url = Url::parse("https://litteraturbanken.se/epub?visa=epub&bokheim_sort=title&bokheim_language=sv&bokheim_page=3").unwrap();
         let options = query_options(&url);
         let facets = catalog_facets(&url, &options);
         assert_eq!(facets.len(), 4);
         let german = facets[1].links.iter().find(|link| link.title == "German").unwrap();
         assert!(german.url.as_str().contains("bokheim_sort=title"));
         assert!(german.url.as_str().contains("bokheim_language=de"));
+        assert!(!german.url.as_str().contains("bokheim_page"));
         assert_eq!(search_template(&url), "https://litteraturbanken.se/epub?visa=epub&bokheim_sort=title&bokheim_language=sv&bokheim_query={searchTerms}");
+    }
+
+    #[test]
+    fn large_catalogues_are_exposed_as_bounded_pages() {
+        let source_url = Url::parse("https://litteraturbanken.se/epub?visa=epub&sort=popularitet&bokheim_page=2").unwrap();
+        let catalog = catalog_from_response(source_url, QueryOptions { page: 2, ..QueryOptions::default() }, ApiResponse { hits: 1_618, data: Vec::new() }).unwrap();
+        assert_eq!(catalog.current_page, 2);
+        assert_eq!(catalog.first_page.as_ref().unwrap().as_str(), CATALOG_URL);
+        assert_eq!(catalog.previous_page.as_ref().unwrap().as_str(), CATALOG_URL);
+        assert!(catalog.next_page.as_ref().unwrap().as_str().contains("bokheim_page=3"));
+        assert!(catalog.last_page.as_ref().unwrap().as_str().contains("bokheim_page=34"));
     }
 
     #[tokio::test]
@@ -400,7 +448,13 @@ mod tests {
     async fn live_catalogue_and_search_are_available() {
         let client = Client::builder().build().unwrap();
         let root = fetch_catalog(&client, Url::parse(CATALOG_URL).unwrap(), 24 * 1024 * 1024).await.unwrap();
-        assert!(root.publications.len() > 1_000);
+        assert_eq!(root.publications.len(), PAGE_SIZE as usize);
+        assert!(root.total_items > 1_000);
+        assert!(root.next_page.is_some());
+        let second = fetch_catalog(&client, root.next_page.clone().unwrap(), 24 * 1024 * 1024).await.unwrap();
+        assert_eq!(second.current_page, 2);
+        assert_eq!(second.publications.len(), PAGE_SIZE as usize);
+        assert_ne!(second.publications[0].id, root.publications[0].id);
         let search_url = Url::parse("https://litteraturbanken.se/epub?visa=epub&sort=popularitet&bokheim_query=Doktor%20Glas").unwrap();
         let search = fetch_catalog(&client, search_url, 24 * 1024 * 1024).await.unwrap();
         assert!(search.publications.iter().any(|publication| publication.title == "Doktor Glas"));

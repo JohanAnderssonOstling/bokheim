@@ -55,3 +55,30 @@ CREATE TABLE book_upload_reservation (
 );
 
 CREATE INDEX idx_book_upload_reservation_expiry ON book_upload_reservation USING btree (expires_at);
+
+-- Thumbnails are physically scoped per account, so their quota identity is
+-- the user/hash pair rather than the globally deduplicated blob_object row.
+-- The first library that uploads a thumbnail owns its usage attribution.
+CREATE TABLE user_thumbnail_charge (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
+    charged_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, content_hash)
+);
+
+CREATE INDEX idx_user_thumbnail_charge_library ON user_thumbnail_charge USING btree (library_id);
+
+CREATE TABLE thumbnail_upload_reservation (
+    id text PRIMARY KEY,
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    UNIQUE (user_id, content_hash)
+);
+
+CREATE INDEX idx_thumbnail_upload_reservation_expiry ON thumbnail_upload_reservation USING btree (expires_at);

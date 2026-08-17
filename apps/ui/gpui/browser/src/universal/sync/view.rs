@@ -123,18 +123,32 @@ impl SyncPage {
         match self.flow {
             AccountFlow::SignIn => {
                 let login = entity.clone();
+                let register = entity.clone();
+                let reset = entity.clone();
+                let mut actions = components::action_row().child(components::primary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
+                    login.update(cx, |page, cx| page.start_login(cx));
+                }));
+                if contract.capabilities.public_registration {
+                    actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
+                        register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, cx));
+                    }));
+                }
+                if self.login_failed && contract.capabilities.password_recovery {
+                    actions = actions.child(components::secondary_action_button("account-request-reset", "Reset password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
+                    }));
+                }
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
                     .gap(px(11.0))
                     .child(Form::vertical().child(Field::new().label("Email").child(Input::new(&self.authentication.login_email))).child(Field::new().label("Password").child(Input::new(&self.authentication.password).mask_toggle())))
-                    .child(components::action_row().child(components::primary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
-                        login.update(cx, |page, cx| page.start_login(cx));
-                    })))
+                    .child(actions)
             }
             AccountFlow::Register => {
                 let register = entity.clone();
+                let sign_in = entity.clone();
                 div()
                     .w_full()
                     .flex()
@@ -148,31 +162,47 @@ impl SyncPage {
                                 .child(Input::new(&self.authentication.registration_password).mask_toggle()),
                         ),
                     )
-                    .child(components::action_row().child(components::primary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
-                        register.update(cx, |page, cx| page.start_registration(cx));
-                    })))
+                    .child(
+                        components::action_row()
+                            .child(components::primary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
+                                register.update(cx, |page, cx| page.start_registration(cx));
+                            }))
+                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
+                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
+                            })),
+                    )
             }
             AccountFlow::VerifyEmail => {
                 let verify = entity.clone();
                 let resend = entity.clone();
-                div().w_full().flex().flex_col().gap(px(11.0)).child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap(px(components::SPACE_SM))
-                        .child(div().flex_1().min_w_0().child(OtpInput::new(&self.authentication.verification_pin).groups(1).with_size(px(components::TOPBAR_ACTION_HEIGHT))))
-                        .child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
-                            verify.update(cx, |page, cx| page.start_verify_email(cx));
-                        }))
-                        .child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
-                            resend.update(cx, |page, cx| page.start_resend_verification(cx));
-                        })),
-                )
+                let sign_in = entity.clone();
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(11.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(components::SPACE_SM))
+                            .child(div().flex_1().min_w_0().child(OtpInput::new(&self.authentication.verification_pin)))
+                            .child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
+                                verify.update(cx, |page, cx| page.start_verify_email(cx));
+                            }))
+                            .child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
+                                resend.update(cx, |page, cx| page.start_resend_verification(cx));
+                            })),
+                    )
+                    .child(components::action_row().child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
+                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
+                    })))
             }
             AccountFlow::RequestPasswordReset => {
                 let request = entity.clone();
                 let token = entity.clone();
+                let sign_in = entity.clone();
                 div()
                     .w_full()
                     .flex()
@@ -186,11 +216,15 @@ impl SyncPage {
                             }))
                             .child(components::secondary_action_button("account-have-reset", "Enter reset token", IconName::ArrowRight, self.busy).on_click(move |_, _, cx| {
                                 token.update(cx, |page, cx| page.set_flow(AccountFlow::ResetPassword, cx));
+                            }))
+                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
+                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
                             })),
                     )
             }
             AccountFlow::ResetPassword => {
                 let reset = entity.clone();
+                let sign_in = entity.clone();
                 div()
                     .w_full()
                     .flex()
@@ -204,9 +238,15 @@ impl SyncPage {
                                 .child(Input::new(&self.authentication.new_password).mask_toggle()),
                         ),
                     )
-                    .child(components::action_row().child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                        reset.update(cx, |page, cx| page.start_password_reset(cx));
-                    })))
+                    .child(
+                        components::action_row()
+                            .child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                                reset.update(cx, |page, cx| page.start_password_reset(cx));
+                            }))
+                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
+                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
+                            })),
+                    )
             }
         }
     }
@@ -257,19 +297,7 @@ impl Render for SyncPage {
 
         if !self.account_status.signed_in() {
             let mut account = GroupBox::new().fill();
-            let flows = [
-                ("account-flow-sign-in", "Sign in", IconName::Globe, AccountFlow::SignIn),
-                ("account-flow-register", "Create account", IconName::User, AccountFlow::Register),
-                ("account-flow-reset", "Reset password", IconName::Redo2, AccountFlow::RequestPasswordReset),
-            ];
-            let mut actions = components::action_row();
-            for (id, label, icon, flow) in flows {
-                let entity = entity.clone();
-                actions = actions.child(components::secondary_action_button(id, label, icon, self.account_action_busy).on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.set_flow(flow, cx));
-                }));
-            }
-            account = account.child(actions).child(self.account_access_form(&contract, &entity));
+            account = account.child(self.account_access_form(&contract, &entity));
             if let Some(message) = &self.message {
                 account = account.child(Alert::info("account-message", message.clone()).with_size(Size::Small));
             }
@@ -362,7 +390,7 @@ impl Render for SyncPage {
                 list = list.child(
                     item.child(components::usage_amount_secondary(format_storage_bytes(row.local_bytes), theme))
                         .child(components::usage_bar(fraction, theme))
-                        .child(state_tag.rounded_full().with_size(Size::Small).child(state_label.to_owned())),
+                        .child(state_tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(state_label.to_owned())),
                 );
             }
             libraries = libraries.child(list);
@@ -380,7 +408,8 @@ impl Render for SyncPage {
                         None => format!("{}/{} · {}", transfer.completed_items, transfer.total_items, group.library_name),
                     };
                     let status = if matches!(transfer.state, epub_svelte_lib::TransferState::Running) { Tag::primary() } else { Tag::secondary() };
-                    list = list.child(components::item_row(theme).child(components::item_identity(transfer.kind.batch_label(), detail, theme)).child(status.rounded_full().with_size(Size::Small).child(transfer.state.label())));
+                    list = list
+                        .child(components::item_row(theme).child(components::item_identity(transfer.kind.batch_label(), detail, theme)).child(status.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(transfer.state.label())));
                 }
             }
             content = content.child(transfers.child(list));
@@ -414,7 +443,7 @@ impl Render for SyncPage {
                         None => format!("{}/{} · {}", transfer.completed_items, transfer.total_items, group.library_name),
                     };
                     let status = if matches!(transfer.state, epub_svelte_lib::TransferState::Completed) { Tag::primary() } else { Tag::secondary() };
-                    list = list.child(components::item_row(theme).child(components::item_identity(direction, detail, theme)).child(status.rounded_full().with_size(Size::Small).child(transfer.state.label())));
+                    list = list.child(components::item_row(theme).child(components::item_identity(direction, detail, theme)).child(status.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(transfer.state.label())));
                 }
             }
             content = content.child(history.child(list));

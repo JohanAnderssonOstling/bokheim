@@ -23,6 +23,19 @@
 -- the per-library pull cursor, from whichever rows a statement actually
 -- wrote (it fires on both INSERT and UPDATE, and does nothing for rows the
 -- lww_guard trigger already cancelled).
+--
+-- Cursor correctness requires every server_seq at or below an advertised
+-- channel head to be committed. Every write path therefore locks its library
+-- row with authorize_owned_library.sql before an INSERT or UPDATE can allocate
+-- server_seq. Generic and atomic reading exchanges both hold that lock through
+-- commit; the atomic path deliberately acquires it in a preceding statement so
+-- its mutation statement gets a fresh READ COMMITTED snapshot after waiting.
+-- The revision statement trigger then advances the channel head while that
+-- same transaction still owns the lock. Its sync_library_revision upsert is a
+-- second serialization point, but it happens after sequence allocation and
+-- cannot enforce this invariant by itself. Do not move or remove the pre-write
+-- library lock without replacing it with a committed-watermark design and
+-- exercising the cursor-gap test.
 
 CREATE FUNCTION advance_library_sync_revision_statement() RETURNS trigger
     LANGUAGE plpgsql

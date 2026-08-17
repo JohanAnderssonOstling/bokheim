@@ -1,7 +1,7 @@
 use crate::Session;
 use futures_util::{SinkExt, StreamExt};
 use sync_common::api::notifications::NotificationMessage;
-use sync_common::wire;
+use sync_common::transport as wire;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;

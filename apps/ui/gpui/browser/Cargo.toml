@@ -6,10 +6,13 @@ edition = "2024"
 [features]
 default = ["desktop-backend"]
 desktop-backend = ["epub_svelte_lib/desktop"]
-kobo = ["dep:gpui_kobo"]
+audiobooks = ["dep:audiobook-player"]
+kobo = ["dep:gpui_kobo", "ui-components/kobo"]
 
 [dependencies]
+async-channel = "2"
 app-contract = { path = "../../../../client/app-contract" }
+audiobook-player = { path = "../audiobook-player", optional = true }
 ui-runtime = { path = "../runtime" }
 ui-components = { path = "../components" }
 epub_svelte_lib = { package = "epub-svelte", path = "../../../../client/backend", default-features = false }
@@ -17,8 +20,12 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui_kobo = { path = "../../../../../GPUI-Fork/crates/gpui_kobo", optional = true }
 html.workspace = true
+html-view-core.workspace = true
+html-view-gpui = { path = "../../../renderers/html/crates/html-view-gpui" }
+image = { version = "0.24.9", default-features = false, features = ["jpeg"] }
 log = "0.4"
 chrono = "0.4"
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 

@@ -38,7 +38,7 @@
     onlogout: () => void | Promise<void>;
     onregister: (email: string, password: string) => Promise<boolean>;
     onresendverification: (email: string) => Promise<boolean>;
-    onverifyemail: (token: string) => Promise<boolean>;
+    onverifyemail: (email: string, pin: string) => Promise<boolean>;
     onrequestpasswordreset: (email: string) => Promise<boolean>;
     onresetpassword: (token: string, password: string) => Promise<boolean>;
   } = $props();
@@ -245,18 +245,18 @@
 
 <style>
   .account-page { width: 100%; min-height: 100%; padding: var(--layout-content-padding); }
-  .account-panel { width: min(100%, 57.5rem); margin: 0 auto; padding: 1.125rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); color: var(--color-ink-text); background: var(--color-raised-bg); }
+  .account-panel { width: min(100%, 57.5rem); margin: 0 auto; padding: 1.125rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); }
   button { font: inherit; }
   button { cursor: pointer; }
   button:disabled { opacity: .55; cursor: default; }
   .account-content { display: grid; gap: 1rem; }
   .account-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
-  .account-actions button { min-height: 2.65rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); color: var(--color-raised-bg); background: var(--color-accent); font-size: .75rem; font-weight: 750; }
+  .account-actions button { min-height: 2.65rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font-size: .75rem; font-weight: 750; }
   .account-actions .quiet { color: var(--color-subtle-text); border-color: var(--color-border); background: transparent; }
 
   /* The page opens with its conclusion; the stripe carries the state so the
      headline itself does not have to be coloured. */
-  .verdict { display: grid; gap: .8rem; padding: .75rem .75rem .75rem 1rem; border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent); border-radius: var(--radius-md); }
+  .verdict { display: grid; gap: .8rem; padding: .75rem .75rem .75rem 1rem; border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent); border-radius: 0; }
   .verdict.attention { border-left-color: var(--color-warning-text); }
   .verdict-copy { display: grid; gap: .2rem; min-width: 0; }
   .verdict-copy strong { font-size: 1.05rem; }
@@ -265,7 +265,7 @@
   .storage-usage { display: grid; gap: .45rem; }
   .storage-figures { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; font-size: .78rem; color: var(--color-subtle-text); }
   .storage-figures strong { font-size: 1.35rem; color: var(--color-ink-text); }
-  .meter { display: flex; overflow: hidden; width: 100%; height: .55rem; border: 1px solid var(--color-border); border-radius: 999px; background: color-mix(in srgb, var(--color-border) 30%, transparent); }
+  .meter { display: flex; overflow: hidden; width: 100%; height: .55rem; border: 1px solid var(--color-border); border-radius: 0; background: color-mix(in srgb, var(--color-border) 30%, transparent); }
   .segment { display: block; height: 100%; }
   /* Shades walk away from the accent rather than introducing a second hue. */
   .segment.library[data-shade="0"] { background: var(--color-accent); }
@@ -277,7 +277,7 @@
   .segment.reserved { background: var(--color-warning-text); }
   .legend { display: flex; flex-wrap: wrap; gap: .2rem 1rem; margin: 0; padding: 0; list-style: none; color: var(--color-subtle-text); font-size: .7rem; }
   .legend li { display: flex; align-items: center; gap: .35rem; }
-  .legend i { width: .5rem; height: .5rem; border-radius: 2px; }
+  .legend i { width: .5rem; height: .5rem; border-radius: 0; }
 
   .account-progress, .account-error { margin: 0; padding: .2rem .1rem; font-size: .72rem; }
   .account-progress { color: var(--color-subtle-text); }
@@ -294,9 +294,9 @@
      squeezes the library name to fit them. */
   .usage { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .75rem; }
   .usage .primary { color: var(--color-ink-text); }
-  .usage .bar { flex: 1; height: .25rem; border-radius: 999px; background: color-mix(in srgb, var(--color-border) 45%, transparent); }
-  .usage .bar > span { display: block; height: 100%; border-radius: 999px; background: var(--color-accent); }
-  .sync-membership { padding: .25rem .48rem; border-radius: 999px; color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 10%, transparent); font-size: .66rem; font-weight: 750; }
+  .usage .bar { flex: 1; height: .25rem; border-radius: 0; background: color-mix(in srgb, var(--color-border) 45%, transparent); }
+  .usage .bar > span { display: block; height: 100%; border-radius: 0; background: var(--color-accent); }
+  .sync-membership { padding: .25rem .48rem; border-radius: 0; color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 10%, transparent); font-size: .66rem; font-weight: 750; }
   .sync-membership.attention { color: var(--color-warning-text); background: var(--color-warning-bg); }
   .sync-membership.running { color: var(--color-raised-bg); background: var(--color-accent); }
   .transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .75rem; min-height: 3.45rem; padding: .55rem .7rem; border-bottom: 1px solid var(--color-border); }
@@ -304,6 +304,6 @@
   .no-transfers { margin: 0; padding: .7rem 0; color: var(--color-subtle-text); font-size: .72rem; }
 
   /* One line stands in for the batch job sections while they are empty. */
-  .activity-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .7rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
-  .activity-footer button { min-height: 2.25rem; padding: .35rem .7rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-subtle-text); background: transparent; font-size: .7rem; font-weight: 750; }
+  .activity-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; padding: .55rem .7rem; border: 1px solid var(--color-border); border-radius: 0; }
+  .activity-footer button { min-height: 2.25rem; padding: .35rem .7rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-subtle-text); background: transparent; font-size: .7rem; font-weight: 750; }
 </style>

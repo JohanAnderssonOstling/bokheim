@@ -9,7 +9,7 @@ script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_directory}/../../.." && pwd)
 host=${BOKHEIM_DEPLOY_HOST:-192.168.1.68}
 user=${BOKHEIM_DEPLOY_USER:-${USER}}
-remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/tmp/bokheim-deploy}
+remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/var/lib/bokheim-deploy/upload}
 stage_only=false
 ssh_options=()
 if [[ -n ${BOKHEIM_DEPLOY_SSH_OPTS:-} ]]; then
@@ -20,8 +20,7 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'EOF'
 Usage: servers/sync/deploy/deploy-remote.sh [--stage-only]
 
-  --stage-only  Build and transfer a release, then print the remote sudo
-                command instead of running it.
+  --stage-only  Build and transfer a release without activating it.
 
 Environment:
   BOKHEIM_DEPLOY_HOST          SSH host (default: 192.168.1.68)
@@ -44,7 +43,9 @@ if [[ ${EUID} -eq 0 ]]; then
 fi
 
 remote=${user}@${host}
-stage=$(mktemp -d)
+local_stage_root=${BOKHEIM_DEPLOY_LOCAL_STAGE_ROOT:-${repository_root}/.deploy-tmp}
+install -d -m 0700 "${local_stage_root}"
+stage=$(mktemp -d "${local_stage_root}/server.XXXXXX")
 remote_stage=
 keep_remote_stage=false
 cleanup() {
@@ -59,10 +60,13 @@ echo "Building sync-server..."
 cargo build --release --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
 echo "Building catalog-server..."
 cargo build --release --manifest-path "${repository_root}/servers/opds-cache/Cargo.toml" -p catalog-server
+echo "Building metadata-server..."
+cargo build --release --manifest-path "${repository_root}/Cargo.toml" -p metadata-server
 
 sync_binary=${repository_root}/servers/sync/target/release/sync-server
 catalog_binary=${repository_root}/target/release/catalog-server
-for required in "${sync_binary}" "${catalog_binary}" "${repository_root}/servers/opds-cache/opds.json"; do
+metadata_binary=${repository_root}/target/release/metadata-server
+for required in "${sync_binary}" "${catalog_binary}" "${metadata_binary}" "${repository_root}/servers/opds-cache/opds.json" "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${repository_root}/servers/metadata/deploy/bokheim-metadata.service"; do
     if [[ ! -x ${required} && ${required} != *.json ]]; then
         echo "missing release artifact: ${required}" >&2
         exit 1
@@ -75,25 +79,27 @@ done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
 install -m 0755 "${catalog_binary}" "${stage}/catalog-server"
+install -m 0755 "${metadata_binary}" "${stage}/metadata-server"
 install -m 0644 "${repository_root}/servers/opds-cache/opds.json" "${stage}/opds.json"
-install -m 0644 "${repository_root}/servers/sync/deploy/install-staged.sh" "${stage}/install-staged.sh"
-install -m 0755 "${repository_root}/servers/sync/deploy/deploy-sudo.sh" "${stage}/deploy-sudo.sh"
 install -m 0644 "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
 install -m 0644 "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${stage}/bokheim-catalogs.service"
-
+install -m 0644 "${repository_root}/servers/metadata/deploy/bokheim-metadata.service" "${stage}/bokheim-metadata.service"
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")
 scp "${ssh_options[@]}" "${stage}"/* "${remote}:${remote_stage}/"
+ssh "${ssh_options[@]}" "${remote}" \
+    "if test -d /var/lib/bokheim-deploy/incoming; then mv /var/lib/bokheim-deploy/incoming /var/lib/bokheim-deploy/previous.\$\$; fi; mv '${remote_stage}' /var/lib/bokheim-deploy/incoming"
+remote_stage=/var/lib/bokheim-deploy/incoming
 
 if [[ ${stage_only} == true ]]; then
     keep_remote_stage=true
     echo "Release staged on ${remote}."
-    echo "On the deployment host, run: sudo '${remote_stage}/deploy-sudo.sh'"
+    echo "Activate with: sudo /usr/local/sbin/bokheim-deploy-servers"
     exit 0
 fi
 
 echo "Installing staged release on ${remote}..."
-ssh -tt "${ssh_options[@]}" "${remote}" \
-    "sudo '${remote_stage}/deploy-sudo.sh'"
+ssh "${ssh_options[@]}" "${remote}" "sudo -n /usr/local/sbin/bokheim-deploy-servers"
+keep_remote_stage=true
 
 echo "Deployment completed successfully on ${remote}."

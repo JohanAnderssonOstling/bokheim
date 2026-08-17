@@ -56,6 +56,9 @@ pub(crate) struct SyncPage {
     activity_expanded: bool,
     busy: bool,
     account_action_busy: bool,
+    /// Password recovery is offered only after an actual sign-in request has
+    /// failed, rather than as a permanent third authentication mode.
+    login_failed: bool,
     message: Option<SharedString>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
@@ -86,6 +89,7 @@ impl SyncPage {
             activity_expanded: false,
             busy: false,
             account_action_busy: false,
+            login_failed: false,
             message: None,
             error: None,
             task: None,

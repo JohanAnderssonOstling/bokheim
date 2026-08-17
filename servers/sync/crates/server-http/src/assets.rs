@@ -1,6 +1,6 @@
 use crate::extract::{asset_error, AuthUser};
 use crate::state::AppState;
-use axum::body::{Body, Bytes};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
@@ -16,6 +16,10 @@ use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+fn required_content_length(headers: &HeaderMap) -> Result<u64, StatusCode> {
+    headers.get(header::CONTENT_LENGTH).ok_or(StatusCode::LENGTH_REQUIRED)?.to_str().ok().and_then(|value| value.parse::<u64>().ok()).ok_or(StatusCode::BAD_REQUEST)
+}
 
 fn response_headers(kind: AssetKind, hash: &ContentHash) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -115,11 +119,9 @@ fn parse_range(value: &header::HeaderValue) -> Result<ByteRange, StatusCode> {
 }
 
 async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: AssetKind, hash: &ContentHash, headers: &HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
-    let content_length = headers.get(header::CONTENT_LENGTH).map(|raw_len| raw_len.to_str().ok().and_then(|value| value.parse::<u64>().ok()).ok_or(StatusCode::BAD_REQUEST)).transpose()?;
-    if kind == AssetKind::Book && content_length.is_none() {
-        return Err(StatusCode::LENGTH_REQUIRED);
-    }
-    if let (Some(len), Some(limit)) = (content_length, kind.max_bytes()) {
+    let content_length = required_content_length(headers)?;
+    if let Some(limit) = kind.max_bytes() {
+        let len = content_length;
         if len > limit {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
@@ -135,7 +137,7 @@ async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Asse
         }
     });
     let reader = StreamReader::new(stream.boxed());
-    state.assets.put(user_id, library_id, kind, hash, content_length, Box::new(reader)).await.map_err(asset_error)?;
+    state.assets.put(user_id, library_id, kind, hash, Some(content_length), Box::new(reader)).await.map_err(asset_error)?;
     Ok(StatusCode::OK)
 }
 
@@ -169,10 +171,22 @@ pub(super) async fn get_thumbnail(State(state): State<AppState>, user: AuthUser,
 }
 
 pub(super) async fn put_thumbnail(State(state): State<AppState>, user: AuthUser, Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
-    put(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash, &headers, body).await
+    let content_length = required_content_length(&headers)?;
+    if content_length > sync_common::MAX_THUMBNAIL_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let _permit = state.thumbnail_uploads.acquire(&user.user_id, content_length).ok_or(StatusCode::TOO_MANY_REQUESTS)?;
+    match tokio::time::timeout(server_asset_store::MAX_THUMBNAIL_UPLOAD_DURATION, put(&state, &user.user_id, &library_id, AssetKind::Thumbnail, &hash, &headers, body)).await {
+        Ok(result) => result,
+        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+    }
 }
 
-pub(super) async fn put_thumbnail_batch(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<StatusCode, StatusCode> {
+async fn put_thumbnail_batch_inner(state: &AppState, user_id: &str, library_id: &LibraryId, headers: HeaderMap, body: Body, content_length: u64) -> Result<StatusCode, StatusCode> {
+    let body = to_bytes(body, MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).await.map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    if body.len() as u64 != content_length {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let request: ThumbnailBatchUploadRequest = server_wire_http::decode_request(&headers, &body, MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)?;
     if request.thumbnails.is_empty() || request.thumbnails.len() > MAX_THUMBNAIL_BATCH_ENTRIES {
         return Err(StatusCode::BAD_REQUEST);
@@ -188,9 +202,21 @@ pub(super) async fn put_thumbnail_batch(State(state): State<AppState>, user: Aut
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         let len = thumbnail.bytes.len() as u64;
-        state.assets.put(&user.user_id, &library_id, AssetKind::Thumbnail, &thumbnail.content_hash, Some(len), Box::new(Cursor::new(thumbnail.bytes))).await.map_err(asset_error)?;
+        state.assets.put(user_id, library_id, AssetKind::Thumbnail, &thumbnail.content_hash, Some(len), Box::new(Cursor::new(thumbnail.bytes))).await.map_err(asset_error)?;
     }
     Ok(StatusCode::OK)
+}
+
+pub(super) async fn put_thumbnail_batch(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Body) -> Result<StatusCode, StatusCode> {
+    let content_length = required_content_length(&headers)?;
+    if content_length > (MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024) as u64 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let _permit = state.thumbnail_uploads.acquire(&user.user_id, content_length).ok_or(StatusCode::TOO_MANY_REQUESTS)?;
+    match tokio::time::timeout(server_asset_store::MAX_THUMBNAIL_UPLOAD_DURATION, put_thumbnail_batch_inner(&state, &user.user_id, &library_id, headers, body, content_length)).await {
+        Ok(result) => result,
+        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+    }
 }
 
 pub(super) async fn post_thumbnail_batch(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {

@@ -121,11 +121,15 @@ pub fn materialize_download_path(conn: &Connection, library_root: &Path, placeme
     if content_hash != placement.content_hash {
         return Err(invalid_text_column(0, "download placement identity mismatch"));
     }
-    let components = get_dir_path_components(conn, &dir_id.to_string())?;
-    let dir_path = dir_path_from_components(&components)?.ok_or_else(|| invalid_text_column(0, "download directory has no live path"))?;
-    let absolute_dir = dir_path.resolve_under(library_root);
+    let dir_path = if dir_id == sync_common::ROOT_DIR_ID {
+        None
+    } else {
+        let components = get_dir_path_components(conn, &dir_id.to_string())?;
+        Some(dir_path_from_components(&components)?.ok_or_else(|| invalid_text_column(0, "download directory has no live path"))?)
+    };
+    let absolute_dir = dir_path.as_ref().map_or_else(|| library_root.to_path_buf(), |path| path.resolve_under(library_root));
     let relative_path = |file_name: &FileName| {
-        let path = if dir_path.as_path() == Path::new("/") { format!("/{}", file_name.as_str()) } else { format!("{}/{}", dir_path.as_path().display(), file_name.as_str()) };
+        let path = dir_path.as_ref().map_or_else(|| format!("/{}", file_name.as_str()), |path| format!("{}/{}", path.as_path().display(), file_name.as_str()));
         RelativeBookPath::parse(&path).map_err(|error| invalid_text_column(0, error.to_string()))
     };
 

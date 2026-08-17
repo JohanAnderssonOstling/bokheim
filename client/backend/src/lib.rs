@@ -14,13 +14,13 @@ mod sync;
 #[path = "../tests/convergence.rs"]
 mod convergence_tests;
 
-pub use app::{api_server_url, catalog_server_url, ServerUrl, ServerUrlError, API_SERVER_ORIGIN, CATALOG_SERVER_ORIGIN};
+pub use app::{api_server_url, catalog_server_url, metadata_server_url, taxonomy_server_url, ServerUrl, ServerUrlError, API_SERVER_ORIGIN, CATALOG_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, TAXONOMY_SERVER_ORIGIN};
 pub use app::{AppBackend, AppDataLocation, BackendContext, BackendError, LibraryEntry};
 pub use app::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_HIDDEN_SESSION_PATH, APP_HIDDEN_THUMBNAILS_PATH, APP_NAME, APP_NAME_LOWER};
 pub use app_contract::download::{BookDownloadStatus, DownloadProgress, DownloadState, FolderDownloadStatus};
 pub use app_contract::frontend::*;
 pub use library::LibraryBackend;
-pub use library_model::{AgentId, AuthorId};
+pub use library_model::{AgentId, AuthorId, FolderDestinationPolicy};
 pub use library_model::{EpubCfi, ReadProgress};
 pub use local_paths::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 pub use sync::blob::{BlobKey, BlobKind, TransferJobKind};

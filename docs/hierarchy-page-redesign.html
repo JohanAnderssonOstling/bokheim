@@ -1,0 +1,352 @@
+<title>Bokheim — Hierarchy page redesign directions</title>
+<style>
+  :root {
+    --bg: #efece2;
+    --surface: #fdfbf3;
+    --sunk: #e7e3d6;
+    --text: #1d2723;
+    --dim: #4a5852;
+    --faint: #7d8a83;
+    --line: #ddd7c6;
+    --soft: #e6e1d2;
+    --accent: #2f6a52;
+    --accent-ink: #fff;
+    --warn: #b0801f;
+    --bad: #a2402f;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+      --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+      --warn: #cfa53f; --bad: #d0705c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+    --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+    --warn: #cfa53f; --bad: #d0705c;
+  }
+  :root[data-theme="light"] {
+    --bg: #efece2; --surface: #fdfbf3; --sunk: #e7e3d6; --text: #1d2723; --dim: #4a5852;
+    --faint: #7d8a83; --line: #ddd7c6; --soft: #e6e1d2; --accent: #2f6a52; --accent-ink: #fff;
+    --warn: #b0801f; --bad: #a2402f;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 0.9375rem; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 62rem; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1rem, 3vw, 2rem) 4rem; display: flex; flex-direction: column; gap: 2.25rem; }
+
+  h1 { font-family: var(--serif); font-size: 1.75rem; font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+  h2 { font-family: var(--serif); font-size: 1.1875rem; font-weight: 600; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+  p { max-width: 74ch; }
+  code { font-family: var(--mono); font-size: 0.84em; color: var(--dim); }
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header { display: flex; flex-direction: column; gap: 0.5rem; }
+  header .eyebrow { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint); }
+  header p { color: var(--dim); }
+  header .series { font-size: 0.8125rem; color: var(--faint); }
+
+  section { display: flex; flex-direction: column; gap: 0.9rem; }
+
+  /* tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; background: var(--surface); border: 1px solid var(--line); }
+  th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; background: var(--sunk); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+  tbody th { font-weight: 650; white-space: nowrap; }
+  td.where { font-family: var(--mono); font-size: 0.76rem; color: var(--faint); white-space: nowrap; }
+  .defect { color: var(--bad); font-weight: 700; }
+  .mark { font-family: var(--mono); }
+  .mark.y { color: var(--accent); }
+  .mark.n { color: var(--faint); }
+  table.compare { min-width: 42rem; }
+  table.findings { min-width: 40rem; }
+
+  /* the one current-state mockup */
+  .frame { border: 1px solid var(--line); background: var(--sunk); }
+  .topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.6rem; background: var(--surface); border-bottom: 1px solid var(--soft); font-size: 0.78rem; color: var(--dim); }
+  .topbar .crumbs { flex: 1; min-width: 0; }
+  .topbar .crumbs b { color: var(--text); }
+  .topbar .search { border: 1px solid var(--line); background: var(--bg); color: var(--faint); padding: 0.15rem 0.5rem; }
+  .stage { padding: 0.6rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .stub { display: grid; place-items: center; border: 1px dashed var(--line); color: var(--faint); font-size: 0.72rem; padding: 0.7rem; text-align: center; font-family: var(--mono); }
+
+  /* desktop mockups */
+  .dirs { display: flex; flex-direction: column; gap: 1.75rem; }
+  .dir { display: flex; flex-direction: column; gap: 0.5rem; }
+  .dir > .cap { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
+  .dir > .note { font-size: 0.8125rem; color: var(--dim); max-width: 74ch; }
+  .deskwrap { overflow-x: auto; }
+  .desk { min-width: 58rem; }
+  .bookgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr)); gap: 0.55rem; }
+  .bk { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .bk .cv { aspect-ratio: 1 / 1.6; background: linear-gradient(158deg, var(--sunk), var(--surface)); border: 1px solid var(--soft); }
+  .bk .t { font-size: 0.66rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bk .a { font-size: 0.62rem; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .split { display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 0.6rem; align-items: stretch; }
+
+  /* current: ragged */
+  .ragged { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .fbtn { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.5rem; border: 1px solid var(--line); background: var(--surface); font-size: 0.75rem; white-space: nowrap; }
+  .fbtn .ic { color: var(--accent); }
+  .clip { display: inline-block; max-width: 11ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+
+  /* A: tight uniform grid */
+  .cell { background: var(--surface); display: inline-grid; grid-template-columns: 0.8rem auto auto; align-items: baseline; gap: 0.3rem; padding: 0.18rem 0.35rem; font-size: 0.76rem; max-width: 22rem; }
+  .cell .ic { color: var(--accent); }
+  .cell .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell .ct { font-family: var(--mono); font-size: 0.7rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .rule { height: 1px; background: var(--line); }
+    .ugrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 1px; background: var(--soft); border: 1px solid var(--soft); }
+  .ugrid .cell { display: grid; grid-template-columns: 0.8rem minmax(0, 1fr) auto; max-width: none; }
+
+  /* B: tree */
+  .tree { font-size: 0.76rem; display: flex; flex-direction: column; }
+  .tree div { display: flex; justify-content: space-between; gap: 0.4rem; padding: 0.15rem 0.4rem; color: var(--dim); border-left: 2px solid transparent; }
+  .tree div.cur { background: var(--sunk); color: var(--text); font-weight: 650; border-left-color: var(--accent); }
+  .tree .d1 { padding-left: 1.3rem; }
+  .tree .ct { font-family: var(--mono); font-size: 0.7rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+  /* C: facets */
+  .facets { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .facet { display: inline-flex; gap: 0.3rem; align-items: baseline; padding: 0.15rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; font-size: 0.75rem; }
+  .facet .n { font-family: var(--mono); font-size: 0.68rem; color: var(--faint); }
+  .facet.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .facet.on .n { color: var(--accent-ink); opacity: 0.8; }
+  .facet.sys { border-style: dashed; color: var(--dim); }
+  .toggle { display: inline-flex; border: 1px solid var(--line); font-size: 0.7rem; }
+  .toggle span { padding: 0.1rem 0.45rem; font-weight: 600; color: var(--dim); }
+  .toggle span.on { background: var(--accent); color: var(--accent-ink); }
+
+  /* D: columns */
+  .cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--soft); border: 1px solid var(--soft); font-size: 0.72rem; }
+  .col { background: var(--surface); display: flex; flex-direction: column; }
+  .col .ch { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); padding: 0.25rem 0.35rem; border-bottom: 1px solid var(--soft); }
+  .col .ci { padding: 0.18rem 0.35rem; color: var(--dim); display: flex; justify-content: space-between; gap: 0.3rem; }
+  .col .ci.sel { background: var(--accent); color: var(--accent-ink); }
+
+  ol { padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.25rem; color: var(--dim); max-width: 74ch; }
+  .rec { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--surface); padding: 0.8rem 1rem; }
+  .rec p { margin-bottom: 0.5rem; }
+  ul.questions { list-style: none; display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.875rem; color: var(--dim); }
+  ul.questions li { border-left: 2px solid var(--warn); padding-left: 0.7rem; }
+  ul.questions b { color: var(--text); }
+  footer { color: var(--faint); font-size: 0.78rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Bokheim · library · folders &amp; subjects</div>
+    <h1>The page that browses two hierarchies as if they were one</h1>
+    <p>Folders and Subjects share <code>HierarchyState::render</code> on desktop and two near-identical branches in <code>App.svelte</code> on mobile. The sharing is right; the presentation loses data the backend already sends, and renders a location and a facet with the same furniture.</p>
+    <p class="series">Second in the series. <a href="https://claude.ai/code/artifact/ba17bcbe-cb41-4fd5-96e8-7fc5afa370b3">Settings redesign →</a></p>
+  </header>
+
+  <section>
+    <h2>Current</h2>
+    <div class="frame">
+      <div class="topbar">
+        <span class="crumbs">Library / <b>Samhällsvetenskap</b></span>
+        <span class="search">⌕</span>
+        <span>▤ ＋</span>
+      </div>
+      <div class="stage">
+        <div class="ragged"><span class="fbtn"><span class="ic">▤</span><span class="clip">Arkiv 2025</span> (108)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Referens</span> (55)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Kurslittera…</span> (66)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Tidskrifter</span> (41)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Statsvetens…</span> (37)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Avhandlinga…</span> (31)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Uppsatser</span> (23)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Metod och s…</span> (19)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Working pap…</span> (14)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Att läsa</span> (12)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Rapporter</span> (9)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Konferensbi…</span> (7)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Bokkapitel</span> (5)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Inbox</span> (4)</span><span class="fbtn"><span class="ic">▤</span><span class="clip">Ek</span> (2)</span></div>
+        <div class="stub">book grid — unchanged by directions A–C</div>
+      </div>
+    </div>
+    <p>Subjects renders the same, with <code>Uncategorized</code> and <code>Other subject systems</code> among the children.</p>
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+    <div class="scroll">
+      <table class="findings">
+        <thead><tr><th>What</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><td><code>downloaded_book_count</code> is fetched and, by decision, not shown: the rows carry totals only. It is now dead weight in the payload unless the folder-download affordance claims it.</td><td class="where">handle.rs:248<br>hierarchy.rs:21</td></tr>
+          <tr><td><span class="defect">Defect.</span> The count is baked into the label string, so it can't be aligned and a long name truncates it away.</td><td class="where">hierarchy.rs:197</td></tr>
+          <tr><td>Children and books stack with no heading, count or rule between them; twenty folders hide the books entirely.</td><td class="where">hierarchy.rs:126–139</td></tr>
+          <tr><td>Child buttons are <code>w_auto</code> in a wrapping row capped at 640&nbsp;px, so the row is a mosaic, not a list.</td><td class="where">library.rs:189</td></tr>
+          <tr><td>One search box, two behaviours: desktop filters what is already on screen; mobile already runs the recursive scoped search. Desktop is the outlier.</td><td class="where">hierarchy.rs:121<br>App.svelte:1154</td></tr>
+          <tr><td>A book has one folder and many subjects, and a parent subject shows only direct assignments — stated nowhere except empty-state copy.</td><td class="where">subjects/mod.rs:74</td></tr>
+          <tr><td>Synthesized buckets <code>Uncategorized</code> / <code>Other subject systems</code> render identically to real subjects.</td><td class="where">browse.rs:142–146</td></tr>
+          <tr><td>Sibling moves cost three steps (up, scan, down) and clear the filter en route.</td><td class="where">hierarchy.rs:78</td></tr>
+          <tr><td>Three layouts for one idea; the best — mobile's uniform subject grid — is the one used least.</td><td class="where">App.svelte:1947</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Directions</h2>
+    <p>The four differ almost entirely in how the children region renders, so that is all that is drawn.</p>
+    <div class="dirs">
+
+      <div class="dir">
+        <div class="cap">A · Tight uniform grid</div>
+        <div class="deskwrap"><div class="frame desk">
+          <div class="topbar"><span class="crumbs">Library / <b>Samhällsvetenskap</b></span><span class="search">⌕</span><span>▤ ＋</span></div>
+          <div class="stage">
+            <div class="ugrid"><div class="cell"><span class="ic">▤</span><span class="nm">Arkiv 2025</span><span class="ct">108</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Referens</span><span class="ct">55</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Kurslitteratur</span><span class="ct">66</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Tidskrifter</span><span class="ct">41</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Statsvetenskap och förvaltning</span><span class="ct">37</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Avhandlingar</span><span class="ct">31</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Uppsatser</span><span class="ct">23</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Metod och statistik</span><span class="ct">19</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Working papers</span><span class="ct">14</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Att läsa</span><span class="ct">12</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Rapporter</span><span class="ct">9</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Konferensbidrag</span><span class="ct">7</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Bokkapitel</span><span class="ct">5</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Inbox</span><span class="ct">4</span></div><div class="cell"><span class="ic">▤</span><span class="nm">Ek</span><span class="ct">2</span></div></div>
+            <div class="rule"></div>
+            <div class="stub">book grid</div>
+          </div>
+        </div></div>
+        <p class="note">Fixed columns, one line per folder, the count right-set in its own column — so the numbers read down as a list of sizes and every cell is the same target wherever it sits. The same fifteen folders as the Current mockup above, which is the cost to take deliberately: four rows where today's ragged row fits them in two. A mosaic keeping the label-driven widths was drawn and rejected — it holds the two rows, but its counts only compare against their neighbours, which is most of what the column is for.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">B · Tree rail</div>
+        <div class="deskwrap"><div class="frame desk">
+          <div class="topbar"><span class="crumbs">&nbsp;</span><span class="search">⌕</span><span>▤ ＋</span></div>
+          <div class="stage">
+            <div class="split">
+              <nav class="tree" aria-label="Folder tree">
+                <div><span>▸ Business</span><span class="ct">168</span></div>
+                <div><span>▾ Samhällsvetenskap</span><span class="ct">243</span></div>
+                <div class="d1"><span>Arkiv 2025</span><span class="ct">108</span></div>
+                <div class="d1 cur"><span>Referens</span><span class="ct">55</span></div>
+                <div class="d1"><span>▸ Statsvetenskap</span><span class="ct">37</span></div>
+                <div class="d1"><span>Metod och statistik</span><span class="ct">19</span></div>
+                <div class="d1"><span>Att läsa</span><span class="ct">12</span></div>
+                <div class="d1"><span>Inbox</span><span class="ct">4</span></div>
+                <div class="d1"><span>Ek</span><span class="ct">2</span></div>
+                <div><span>▸ Självförbättring</span><span class="ct">214</span></div>
+                <div><span>▸ Skönlitteratur</span><span class="ct">61</span></div>
+              </nav>
+              <div class="stub">book grid</div>
+            </div>
+          </div>
+        </div></div>
+        <p class="note">No breadcrumb: the rail is the path, and it shows two levels of siblings at once. The books pane gains the full window height because nothing is stacked above it.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">C · Facets — subjects only</div>
+        <div class="deskwrap"><div class="frame desk">
+          <div class="topbar"><span class="crumbs">Subjects / <b>Political science</b></span><span class="search">⌕</span><span>▤</span></div>
+          <div class="stage">
+            <div class="facets">
+              <span class="toggle"><span class="on">Here</span><span>+ narrower</span></span>
+              <span class="facet on">Democracy <span class="n">23</span></span>
+              <span class="facet">Political economy <span class="n">41</span></span>
+              <span class="facet">Public administration <span class="n">8</span></span>
+              <span class="facet">International relations <span class="n">12</span></span>
+              <span class="facet">Political theory <span class="n">29</span></span>
+              <span class="facet sys">Uncategorized <span class="n">64</span></span>
+              <span class="facet sys">Other subject systems <span class="n">17</span></span>
+            </div>
+            <div class="rule"></div>
+            <div class="stub">book grid</div>
+          </div>
+        </div></div>
+        <p class="note">Two rows of chips at this width — eight subjects and the toggle — so the books still begin higher than in any other direction. Selected chips read as an intersection — the books below are those tagged <em>Political science</em> and <em>Democracy</em> both.</p>
+      </div>
+
+      <div class="dir">
+        <div class="cap">D · Columns</div>
+        <div class="deskwrap"><div class="frame desk">
+          <div class="topbar"><span class="crumbs">&nbsp;</span><span class="search">⌕</span><span>▤ ＋</span></div>
+          <div class="stage">
+            <div class="cols">
+              <div class="col">
+                <div class="ch">Library</div>
+                <div class="ci"><span>Business</span><span>168</span></div>
+                <div class="ci sel"><span>Samhällsvetenskap</span><span>243</span></div>
+                <div class="ci"><span>Självförbättring</span><span>214</span></div>
+                <div class="ci"><span>Skönlitteratur</span><span>61</span></div>
+              </div>
+              <div class="col">
+                <div class="ch">▸</div>
+                <div class="ci"><span>Arkiv 2025</span><span>108</span></div>
+                <div class="ci sel"><span>Referens</span><span>55</span></div>
+                <div class="ci"><span>Statsvetenskap</span><span>37</span></div>
+                <div class="ci"><span>Metod och statistik</span><span>19</span></div>
+                <div class="ci"><span>Att läsa</span><span>12</span></div>
+                <div class="ci"><span>Inbox</span><span>4</span></div>
+                <div class="ci"><span>Ek</span><span>2</span></div>
+              </div>
+              <div class="col" style="grid-column: span 2">
+                <div class="ch">▸ 55 books</div>
+                <div style="padding:.5rem"><div class="stub">book grid</div></div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+        <p class="note">Two levels of siblings and the books, all in view, with no breadcrumb and no headings. The cost is width: the book column gets half the window, so covers run smaller than in A or B.</p>
+      </div>
+
+    </div>
+
+    <p>None of the four adds a heading, a summary line or a second rendering of a number the page already shows, and none carries a placeholder in the search box — the leading icon already says what it is, which is why the current input has none.</p>
+
+    <div class="scroll">
+      <table class="compare">
+        <thead><tr><th>&nbsp;</th><th>A</th><th>B</th><th>C</th><th>D</th></tr></thead>
+        <tbody>
+          <tr><th>Sibling jump without going up</th><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td></tr>
+          <tr><th>Explains folder vs subject</th><td><span class="mark n">○</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td></tr>
+          <tr><th>Keeps one shared render path</th><td><span class="mark y">●</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td></tr>
+          <tr><th>Works unchanged on a phone</th><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td><td><span class="mark y">●</span></td><td><span class="mark n">○</span></td></tr>
+          <tr><th>New backend work</th><td>none</td><td>multi-level fetch</td><td>descendant counts, multi-subject query</td><td>none</td></tr>
+          <tr><th>Children visible without scrolling <small>(1000×700 window)</small></th><td>~28</td><td>~24</td><td>~40</td><td>~18 per column</td></tr>
+          <tr><th>Build cost</th><td>low</td><td>high</td><td>medium</td><td>medium</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>What I'd build</h2>
+    <div class="rec">
+      <p><strong>A now.</strong> It needs no backend work, fixes the defect, lands identically on both frontends, and is denser than what is there today rather than the trade the other three ask for. C is less a layout than an admission the app owes the reader: ship the toggle and the dashed buckets even if the chips never happen. B is the best desktop answer and wants A's groundwork first.</p>
+      <ol>
+        <li>Take the count out of the label string into its own element; totals only.</li>
+        <li>Replace the wrapping button row with the fixed-column grid above.</li>
+        <li>Separate children from books with a rule, not a pair of headings.</li>
+        <li>Decide <code>downloaded_book_count</code>'s fate: spend it on a folder-download affordance, or stop sending it.</li>
+        <li>Point desktop's box at <code>search_folder</code> / <code>search_subject</code>, then delete the Search page.</li>
+        <li>Mark the synthesized subject buckets as synthesized, wherever they render.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>Decided: one search, and the Search page goes</h2>
+    <p>The box searches every book under the current node — the folder and its subfolders, the subject and its subsubjects — on both frontends. At the root that scope is the whole library, which is what the Search page was for, so the Search page stops having a job.</p>
+    <p>This is mostly deletion. The backend already implements it and mobile already uses it:</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Piece</th><th>State</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><th>Recursive folder search</th><td>exists — filters the global hit list by <code>get_descendant_content_hashes</code></td><td class="where">browse.rs:56</td></tr>
+          <tr><th>Recursive subject search</th><td>exists — <code>get_descendant_subject_content_hashes</code>; a <code>None</code> path falls through to global search</td><td class="where">browse.rs:64</td></tr>
+          <tr><th>Mobile wiring</th><td>done — calls the scoped commands per destination</td><td class="where">App.svelte:1154</td></tr>
+          <tr><th>Mobile Search destination</th><td>already retired — redirects to Folders</td><td class="where">App.svelte:462</td></tr>
+          <tr><th>Desktop wiring</th><td><span class="defect">to do</span> — still a local <code>title_matches</code> filter over loaded rows</td><td class="where">hierarchy.rs:121, 148</td></tr>
+          <tr><th>Desktop Search page</th><td><span class="defect">to do</span> — delete the page and its navigation entry</td><td class="where">pages/search.rs</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Two consequences worth taking deliberately. Desktop search becomes a database round-trip instead of an in-memory filter, so it needs the debounce the contract already carries (<code>search_debounce_ms</code>&nbsp;220) and results are capped at <code>search_result_limit</code>&nbsp;100. And the box stops filtering the <em>children</em>: today typing narrows the folder list too. Under the new rule a query returns books from anywhere beneath, so the child list either stays put or hides while a query is active — the mockups above hide it.</p>
+  </section>
+
+  <section>
+    <h2>Not answered from the code</h2>
+    <ul class="questions">
+      <li><b>Is a folder's <code>book_count</code> recursive?</b> The download queries provably are; I did not trace the browse counts. If it isn't, A's zone headings need different copy.</li>
+      <li><b>Should desktop gain the folder download action?</b> The contract carries <code>download_folder_label</code>; mobile's <code>FolderCard</code> uses it, the desktop card offers only "open".</li>
+    </ul>
+  </section>
+
+  <footer><b>Implemented 2026-08-12.</b> Direction A now ships on desktop and mobile with borderless, spaced raised-surface cells; recursive scoped search; no standalone Search destination; totals only; and a desktop folder-download action. Folder names plausible; counts invented.</footer>
+
+</div>

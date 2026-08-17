@@ -1,0 +1,13 @@
+[package]
+name = "metadata-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+metadata-contract = { path = "../../shared/metadata-contract" }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+url = "2"

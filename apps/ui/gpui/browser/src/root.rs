@@ -6,7 +6,8 @@
 use epub_svelte_lib::app::LibraryEntry;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
 use gpui::prelude::*;
-use gpui::{px, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, Window};
+use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, Window, px};
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::notification::Notification;
 use gpui_component::{IconName, Root, WindowExt};
 use ui_components as components;
@@ -16,11 +17,17 @@ use crate::model::BrowserSession;
 use crate::navigation::{NavEvent, NavigationView};
 use crate::route::{LibraryRoute, Route, UniversalRoute};
 use crate::services::{AppServices, SaveBrowserState};
-use crate::stores::{interface_font, LibraryAvailabilityChanged, LibraryDisplayChanged, Preferences};
+use crate::stores::{LibraryAvailabilityChanged, LibraryDisplayChanged, Preferences, interface_font};
 use crate::universal::settings::SettingsPage;
 use crate::universal::store::StorePage;
 use crate::universal::sync::{SyncPage, SyncPageEvent};
 use crate::{DismissSettings, FocusSearch, ShowAuthors, ShowFolders, ShowHome, ShowSettings, ShowStore, ShowSubjects, ShowSync};
+
+#[cfg(feature = "audiobooks")]
+struct ActiveAudiobook {
+    dock: Entity<audiobook_player::AudiobookDock>,
+    _subscription: Subscription,
+}
 
 pub struct BrowserRoot {
     services: AppServices,
@@ -32,6 +39,8 @@ pub struct BrowserRoot {
     navigation: Entity<NavigationView>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+    #[cfg(feature = "audiobooks")]
+    audiobook: Option<ActiveAudiobook>,
     #[cfg(feature = "kobo")]
     kobo_auto_rotate: bool,
 }
@@ -51,7 +60,7 @@ impl UniversalPage {
     fn route(&self) -> UniversalRoute {
         match self {
             Self::Store(_) => UniversalRoute::Store,
-            Self::Sync { .. } => UniversalRoute::Sync,
+            Self::Sync { .. } => UniversalRoute::Account,
             Self::Settings(_) => UniversalRoute::Settings,
         }
     }
@@ -113,6 +122,22 @@ impl BrowserRoot {
         })
         .detach();
 
+        if let Some(updater) = services.desktop_updater.clone() {
+            let update_check = updater.check();
+            cx.spawn(async move |root, cx| {
+                let outcome = update_check.recv().await.unwrap_or_else(|_| Err("The desktop update worker stopped unexpectedly".to_owned()));
+                match outcome {
+                    Ok(Some(update)) => {
+                        updater.set_available_update(Some(update.clone()));
+                        let _ = root.update_in(cx, |root, window, cx| root.notify_update_available(update, window, cx));
+                    }
+                    Ok(None) => updater.set_available_update(None),
+                    Err(error) => log::warn!("automatic desktop update check failed: {error}"),
+                }
+            })
+            .detach();
+        }
+
         Self {
             services,
             save_state,
@@ -123,9 +148,22 @@ impl BrowserRoot {
             navigation,
             focus,
             _subscriptions: subscriptions,
+            #[cfg(feature = "audiobooks")]
+            audiobook: None,
             #[cfg(feature = "kobo")]
             kobo_auto_rotate,
         }
+    }
+
+    #[cfg(feature = "audiobooks")]
+    pub fn show_audiobook(&mut self, source: audiobook_player::AudiobookSource, initial_position: std::time::Duration, save_position: audiobook_player::SavePlaybackPosition, cx: &mut Context<Self>) {
+        let dock = audiobook_player::open_library_dock(source, initial_position, save_position, cx);
+        let subscription = cx.subscribe(&dock, |root: &mut Self, _, _: &audiobook_player::AudiobookDockEvent, cx| {
+            root.audiobook = None;
+            cx.notify();
+        });
+        self.audiobook = Some(ActiveAudiobook { dock, _subscription: subscription });
+        cx.notify();
     }
 
     fn handle_navigation(&mut self, event: &NavEvent, cx: &mut Context<Self>) {
@@ -180,6 +218,13 @@ impl BrowserRoot {
     }
 
     fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // Book details are transient and deliberately absent from `Route`.
+        // Clear them before comparing routes: clicking the already-selected
+        // sidebar item must still leave the detail page, and navigating to a
+        // universal page must not retain its renderer invisibly.
+        self.library_host.update(cx, |host, cx| {
+            host.dismiss_detail(cx);
+        });
         if self.current_route(cx) == route {
             return;
         }
@@ -204,7 +249,7 @@ impl BrowserRoot {
                 page.update(cx, |page, cx| page.refresh(cx));
                 UniversalPage::Store(page)
             }
-            UniversalRoute::Sync => {
+            UniversalRoute::Account => {
                 let page = cx.new(|cx| SyncPage::new(self.services.clone(), state, window, cx));
                 let subscription = cx.subscribe(&page, |root: &mut Self, _, event, cx| root.handle_sync(event, cx));
                 page.update(cx, |page, cx| page.refresh(cx));
@@ -334,6 +379,21 @@ impl BrowserRoot {
         window.push_notification(Notification::warning(warning).id1::<Self>("browser-warning"), cx);
     }
 
+    fn notify_update_available(&self, update: crate::services::DesktopUpdate, window: &mut Window, cx: &mut Context<Self>) {
+        let root = cx.entity();
+        let version = update.version;
+        window.push_notification(
+            Notification::info(format!("Bokheim {version} is ready to download.")).id1::<Self>("desktop-update-available").title("Update available").action(move |_, _, notification_cx| {
+                let root = root.clone();
+                Button::new("view-desktop-update").primary().label("View update").on_click(notification_cx.listener(move |notification, _, window, cx| {
+                    notification.dismiss(window, cx);
+                    let _ = root.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Settings), cx));
+                }))
+            }),
+            cx,
+        );
+    }
+
     /// Reports a failure raised where no window is in scope.
     ///
     /// Subscription callbacks receive only a context, so the notification is
@@ -391,7 +451,7 @@ impl BrowserRoot {
         self.navigate(Route::Universal(UniversalRoute::Store), window, cx);
     }
     fn on_show_sync(&mut self, _: &ShowSync, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Universal(UniversalRoute::Sync), window, cx);
+        self.navigate(Route::Universal(UniversalRoute::Account), window, cx);
     }
     fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(Route::Universal(UniversalRoute::Settings), window, cx);
@@ -435,7 +495,7 @@ impl BrowserRoot {
                 settings.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Settings), cx));
             }))
             .child(components::secondary_action_button("first-run-sync", "Sign in", IconName::User, false).on_click(move |_, _, cx| {
-                sync.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Sync), cx));
+                sync.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Account), cx));
             }));
         gpui::div()
             .size_full()
@@ -482,7 +542,10 @@ impl Render for BrowserRoot {
             .on_action(cx.listener(Self::on_dismiss));
 
         if !self.library_host.read(cx).is_configured(cx) {
-            return page.child(self.render_first_run(cx)).children(Root::render_notification_layer(window, cx)).children(Root::render_dialog_layer(window, cx)).into_any_element();
+            let content = components::library_section_content().child(self.render_first_run(cx));
+            #[cfg(feature = "audiobooks")]
+            let content = content.when_some(self.audiobook.as_ref().map(|active| active.dock.clone()), |content, dock| content.child(dock));
+            return page.child(content).children(Root::render_notification_layer(window, cx)).children(Root::render_dialog_layer(window, cx)).into_any_element();
         }
 
         let body = match &self.screen {
@@ -490,9 +553,11 @@ impl Render for BrowserRoot {
             BrowserScreen::Library => self.library_host.clone().into_any_element(),
         };
 
-        let content = components::library_section_content();
+        let content = components::library_section_content().child(body);
+        #[cfg(feature = "audiobooks")]
+        let content = content.when_some(self.audiobook.as_ref().map(|active| active.dock.clone()), |content, dock| content.child(dock));
 
-        page.child(components::browser_body().child(self.navigation.clone()).child(content.child(body)))
+        page.child(components::browser_body().child(self.navigation.clone()).child(content))
             .children(self.navigation.read(cx).library_switcher_overlay(cx))
             .children(Root::render_notification_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))

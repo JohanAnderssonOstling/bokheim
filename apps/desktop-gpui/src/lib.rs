@@ -1,11 +1,16 @@
 mod registry;
 mod session;
+#[cfg(not(feature = "kobo"))]
+mod updater;
 
 use std::borrow::Cow;
+#[cfg(feature = "audiobooks")]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 #[cfg(not(feature = "kobo"))]
 use std::sync::{Arc, LazyLock};
+#[cfg(feature = "audiobooks")]
 use std::time::Duration;
 
 #[cfg(feature = "kobo")]
@@ -84,6 +89,8 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     reader_ui::bind_keys(cx);
     let blocking_worker = BlockingWorker::new(cx.background_executor(), 2);
     let persistence_worker = BlockingWorker::new(cx.background_executor(), 1);
+    #[cfg(not(feature = "kobo"))]
+    let desktop_updater = updater::direct_appimage_updater(blocking_worker.clone());
     let session_saves = SessionSaveScheduler::new(saved_session.clone(), session_path, persistence_worker.clone());
     #[cfg(feature = "kobo")]
     let kobo_auto_rotate = {
@@ -121,7 +128,9 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
             session.reader_preferences.font_family = preferences.font_family();
             session.reader_preferences.text_alignment = preferences.text_alignment();
             session.reader_preferences.max_column_count = preferences.max_column_count();
-            session.reader_preferences.pdf_page_layout = preferences.pdf_page_layout();
+            session.reader_preferences.pdf_zoom_mode = preferences.pdf_zoom_mode();
+            session.reader_preferences.pdf_page_count = preferences.pdf_page_count();
+            session.reader_preferences.pdf_zoom = preferences.pdf_zoom();
             session.reader_preferences.pdf_trim_margins = preferences.pdf_trim_margins();
         }
         Err(error) => log::warn!("failed to load shared reader preferences: {error}"),
@@ -156,8 +165,14 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         if previous.max_column_count != preferences.max_column_count {
             patches.push(ReaderPreferencePatch::MaxColumnCount(preferences.max_column_count));
         }
-        if previous.pdf_page_layout != preferences.pdf_page_layout {
-            patches.push(ReaderPreferencePatch::PdfPageLayout(preferences.pdf_page_layout));
+        if previous.pdf_zoom_mode != preferences.pdf_zoom_mode {
+            patches.push(ReaderPreferencePatch::PdfZoomMode(preferences.pdf_zoom_mode));
+        }
+        if previous.pdf_page_count != preferences.pdf_page_count {
+            patches.push(ReaderPreferencePatch::PdfPageCount(preferences.pdf_page_count));
+        }
+        if previous.pdf_zoom != preferences.pdf_zoom {
+            patches.push(ReaderPreferencePatch::PdfZoom(preferences.pdf_zoom));
         }
         if previous.pdf_trim_margins != preferences.pdf_trim_margins {
             patches.push(ReaderPreferencePatch::PdfTrimMargins(preferences.pdf_trim_margins));
@@ -203,7 +218,13 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     let reader_backend = backend.clone();
     #[cfg(feature = "audiobooks")]
     let audiobook_worker = blocking_worker.clone();
-    let open_reader: OpenReader = Rc::new(move |locator, title, cx| {
+    #[cfg(feature = "audiobooks")]
+    let audiobook_browser: Rc<RefCell<Option<WeakEntity<BrowserRoot>>>> = Rc::new(RefCell::new(None));
+    #[cfg(feature = "audiobooks")]
+    let audiobook_browser_for_open = audiobook_browser.clone();
+    #[cfg(feature = "audiobooks")]
+    let audiobook_request_generation = Rc::new(Cell::new(0_u64));
+    let open_reader: OpenReader = Rc::new(move |locator, title, initial_target, cx| {
         let library = match reader_backend.library(locator.library_id()) {
             Ok(library) => library,
             Err(error) => {
@@ -218,10 +239,14 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         }
         #[cfg(feature = "audiobooks")]
         if library.is_audiobook(locator.content_hash()).unwrap_or(false) {
+            let request_generation = audiobook_request_generation.get().wrapping_add(1);
+            audiobook_request_generation.set(request_generation);
+            let active_request_generation = audiobook_request_generation.clone();
             let content_hash = locator.content_hash();
             let prepare_library = library.clone();
             let persistence_library = library;
             let persistence_worker = audiobook_worker.clone();
+            let audiobook_browser = audiobook_browser_for_open.clone();
             let prepare_content_hash = content_hash.clone();
             let prepare = audiobook_worker.dispatch(move || {
                 let source = prepare_library.resolve_book_for_reader(prepare_content_hash.clone()).map_err(|error| error.to_string())?;
@@ -233,6 +258,9 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                 let Ok(result) = prepare.recv().await else { return };
                 cx.update(|cx| match result {
                     Ok((source, initial_position)) => {
+                        if active_request_generation.get() != request_generation {
+                            return;
+                        }
                         let persistence_content_hash = content_hash.clone();
                         let save_content_hash = content_hash.clone();
                         let (position_tx, position_rx) = async_channel::unbounded::<(Duration, f32)>();
@@ -261,16 +289,12 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                                 log::warn!("audiobook position worker stopped for book {save_content_hash}");
                             }
                         });
-                        let bounds = Bounds::centered(None, gpui::size(px(1080.0), px(760.0)), cx);
-                        let (app_id, icon) = desktop_window_identity();
-                        if let Err(error) = cx.open_window(
-                            WindowOptions { titlebar: Some(gpui::TitlebarOptions { title: Some(title.into()), ..Default::default() }), focus: true, window_bounds: Some(WindowBounds::Windowed(bounds)), app_id, icon, ..Default::default() },
-                            move |window, cx| {
-                                let player = audiobook_player::open_library_source(source, initial_position, save_position, cx);
-                                cx.new(|cx| Root::new(player, window, cx))
-                            },
-                        ) {
-                            log::error!("failed to open audiobook window: {error}");
+                        let Some(browser) = audiobook_browser.borrow().clone() else {
+                            log::error!("cannot show audiobook: browser window is unavailable");
+                            return;
+                        };
+                        if browser.update(cx, |browser, cx| browser.show_audiobook(source, initial_position, save_position, cx)).is_err() {
+                            log::error!("cannot show audiobook: browser window was closed");
                         }
                     }
                     Err(error) => log::error!("cannot prepare audiobook {content_hash}: {error}"),
@@ -279,7 +303,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
             .detach();
             return;
         }
-        reader_ui::open_reader_window(locator, title, library, cx);
+        reader_ui::open_reader_window(locator, title, initial_target, library, cx);
     });
 
     let browser_settings = saved_session.clone();
@@ -326,13 +350,17 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         },
         move |window, cx| {
             #[cfg(feature = "kobo")]
-            let services = AppServices::new(backend, open_reader, save_browser_state, save_kobo_auto_rotate.clone(), window);
+            let services = AppServices::new(backend, open_reader, save_browser_state, None, save_kobo_auto_rotate.clone(), window);
             #[cfg(not(feature = "kobo"))]
-            let services = AppServices::new(backend, open_reader, save_browser_state, window);
+            let services = AppServices::new(backend, open_reader, save_browser_state, desktop_updater, window);
             #[cfg(feature = "kobo")]
             let browser = cx.new(|cx| BrowserRoot::new(library_entries, browser_session, services, kobo_auto_rotate, window, cx));
             #[cfg(not(feature = "kobo"))]
             let browser = cx.new(|cx| BrowserRoot::new(library_entries, browser_session, services, window, cx));
+            #[cfg(feature = "audiobooks")]
+            {
+                *audiobook_browser.borrow_mut() = Some(browser.downgrade());
+            }
             *browser_for_window.borrow_mut() = Some(browser.clone());
             let content = platform_content(browser, cx);
             cx.new(|cx| Root::new(content, window, cx))
