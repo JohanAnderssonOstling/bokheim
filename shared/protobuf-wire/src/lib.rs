@@ -1,18 +1,18 @@
 //! Protobuf codec for HTTP and WebSocket transport only.
 //!
-//! Persisted BLOBs and opaque synchronization values use the separate `wire`
-//! storage crate so transport changes cannot invalidate databases.
+//! Persisted BLOBs use the separate `wire` storage crate. Synchronization
+//! values use the explicit `MutationValue` protobuf schema below.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=13";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=14";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 13;
+const VERSION: u32 = 14;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -148,7 +148,7 @@ fn domain_value(value: protobuf::Value) -> Result<serde_value::Value, WireError>
 }
 
 pub mod protobuf {
-    include!(concat!(env!("OUT_DIR"), "/bokheim.wire.v13.rs"));
+    include!(concat!(env!("OUT_DIR"), "/bokheim.wire.v14.rs"));
 }
 
 /// Encodes one typed mutation value without the generic transport envelope.
@@ -232,12 +232,21 @@ mod tests {
     #[test]
     fn media_type_requires_the_current_version() {
         assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=13"));
+        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=14"));
         assert!(!is_current_media_type(MEDIA_TYPE_BASE));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=2"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=6"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1; version=5"));
         assert!(!is_current_media_type("application/json; version=1"));
+    }
+
+    #[test]
+    fn mutation_value_field_numbers_are_a_stable_compatibility_baseline() {
+        use protobuf::mutation_value::Kind;
+        let value = protobuf::MutationValue { kind: Some(Kind::DirectoryName("Shelf".to_owned())) };
+        // field 1 (directory_name), wire type 2, followed by the UTF-8 value.
+        assert_eq!(encode_mutation_value(&value).unwrap(), b"\x0a\x05Shelf");
+        assert_eq!(decode_mutation_value(b"\x0a\x05Shelf", 64).unwrap(), value);
     }
 }

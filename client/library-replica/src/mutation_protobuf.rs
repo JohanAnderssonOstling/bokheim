@@ -7,16 +7,12 @@
 use super::{catalog_publication_state_subkey, MutationBody};
 use catalog_contract::{CatalogPublicationIdentity, CatalogSourceId};
 use library_model::{
-    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, Contributor, DirectoryLifecycleState, LanguageTag, MarcRelatorCode,
-    PdfAnnotationAnchor, PdfAnnotationRect, PublicationCollection, PublicationDate, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationProperty,
-    PublicationSubject, PublicationTitle, PublisherCredit, ReadingPosition, ReadingPositionState,
+    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, Contributor, DirectoryLifecycleState, LanguageTag, MarcRelatorCode, PdfAnnotationAnchor,
+    PdfAnnotationRect, PublicationCollection, PublicationDate, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit,
+    ReadingPosition, ReadingPositionState,
 };
 use sync_common::transport::{self, protobuf as pb};
 use sync_common::{ContentHash, WireMutation};
-
-fn encode_error(message: impl Into<String>) -> transport::WireError {
-    transport::WireError::Encode(message.into())
-}
 
 fn decode_error(message: impl Into<String>) -> transport::WireError {
     transport::WireError::Decode(message.into())
@@ -36,14 +32,9 @@ pub(super) fn encode(body: &MutationBody) -> Result<Vec<u8>, transport::WireErro
         MutationBody::Placement { present, origin_folder_id, .. } => Kind::Placement(pb::Placement { present: *present, origin_folder_id: origin_folder_id.clone() }),
         MutationBody::ReadingPosition { value, .. } => Kind::ReadingPosition(encode_reading_position(value)),
         MutationBody::Annotation { value, .. } => Kind::Annotation(encode_annotation(value)),
-        MutationBody::Bookmark { value, .. } => Kind::Bookmark(pb::Bookmark {
-            content_hash: value.content_hash.to_string(),
-            cfi: value.cfi.clone(),
-            label: value.label.clone(),
-            created_at: value.created_at,
-            modified_at: value.modified_at,
-            deleted: value.deleted,
-        }),
+        MutationBody::Bookmark { value, .. } => {
+            Kind::Bookmark(pb::Bookmark { content_hash: value.content_hash.to_string(), cfi: value.cfi.clone(), label: value.label.clone(), created_at: value.created_at, modified_at: value.modified_at, deleted: value.deleted })
+        }
         MutationBody::BookLink { value, .. } => Kind::BookLink(pb::BookLink {
             source_content_hash: value.source_content_hash.to_string(),
             target_content_hash: value.target_content_hash.to_string(),
@@ -53,11 +44,9 @@ pub(super) fn encode(body: &MutationBody) -> Result<Vec<u8>, transport::WireErro
             modified_at: value.modified_at,
             deleted: value.deleted,
         }),
-        MutationBody::CatalogPublication { publication, content_hash, .. } => Kind::CatalogPublication(pb::CatalogPublication {
-            edition_id: publication.edition_id.clone(),
-            work_id: publication.work_id.clone(),
-            content_hash: content_hash.to_string(),
-        }),
+        MutationBody::CatalogPublication { publication, content_hash, .. } => {
+            Kind::CatalogPublication(pb::CatalogPublication { edition_id: publication.edition_id.clone(), work_id: publication.work_id.clone(), content_hash: content_hash.to_string() })
+        }
         MutationBody::Metadata { value, .. } => Kind::Metadata(encode_book_metadata(value)),
     };
     transport::encode_mutation_value(&pb::MutationValue { kind: Some(kind) })
@@ -70,35 +59,17 @@ pub(super) fn decode(wire: &WireMutation) -> Result<MutationBody, transport::Wir
     let key = wire.entity_key.as_str();
     match (wire.kind.as_str(), kind) {
         (sync_common::mutation_kind::DIRECTORY_NAME, Kind::DirectoryName(name)) => Ok(MutationBody::DirectoryName { dir_id: parse_uuid(key, "directory id")?, name }),
-        (sync_common::mutation_kind::DIRECTORY_PARENT, Kind::DirectoryParent(parent_id)) => {
-            Ok(MutationBody::DirectoryParent { dir_id: parse_uuid(key, "directory id")?, parent_id: parse_uuid(&parent_id, "parent directory id")? })
+        (sync_common::mutation_kind::DIRECTORY_PARENT, Kind::DirectoryParent(parent_id)) => Ok(MutationBody::DirectoryParent { dir_id: parse_uuid(key, "directory id")?, parent_id: parse_uuid(&parent_id, "parent directory id")? }),
+        (sync_common::mutation_kind::DIRECTORY_LIFECYCLE, Kind::DirectoryLifecycle(value)) => Ok(MutationBody::DirectoryLifecycle { dir_id: parse_uuid(key, "directory id")?, value: decode_directory_lifecycle(value)? }),
+        (sync_common::mutation_kind::BOOK_LIFECYCLE, Kind::BookLifecycle(value)) => Ok(MutationBody::BookLifecycle { content_hash: ContentHash::new(key), value: decode_book_lifecycle(value)? }),
+        (sync_common::mutation_kind::PLACEMENT, Kind::Placement(value)) => {
+            Ok(MutationBody::Placement { dir_id: parse_uuid(&wire.entity_subkey, "placement directory id")?, content_hash: ContentHash::new(key), present: value.present, origin_folder_id: value.origin_folder_id })
         }
-        (sync_common::mutation_kind::DIRECTORY_LIFECYCLE, Kind::DirectoryLifecycle(value)) => {
-            Ok(MutationBody::DirectoryLifecycle { dir_id: parse_uuid(key, "directory id")?, value: decode_directory_lifecycle(value)? })
-        }
-        (sync_common::mutation_kind::BOOK_LIFECYCLE, Kind::BookLifecycle(value)) => {
-            Ok(MutationBody::BookLifecycle { content_hash: ContentHash::new(key), value: decode_book_lifecycle(value)? })
-        }
-        (sync_common::mutation_kind::PLACEMENT, Kind::Placement(value)) => Ok(MutationBody::Placement {
-            dir_id: parse_uuid(&wire.entity_subkey, "placement directory id")?,
-            content_hash: ContentHash::new(key),
-            present: value.present,
-            origin_folder_id: value.origin_folder_id,
-        }),
-        (sync_common::mutation_kind::READING_POSITION, Kind::ReadingPosition(value)) => {
-            Ok(MutationBody::ReadingPosition { content_hash: ContentHash::new(key), value: decode_reading_position(value)? })
-        }
+        (sync_common::mutation_kind::READING_POSITION, Kind::ReadingPosition(value)) => Ok(MutationBody::ReadingPosition { content_hash: ContentHash::new(key), value: decode_reading_position(value)? }),
         (sync_common::mutation_kind::ANNOTATION, Kind::Annotation(value)) => Ok(MutationBody::Annotation { annotation_id: key.to_owned(), value: decode_annotation(value)? }),
         (sync_common::mutation_kind::BOOKMARK, Kind::Bookmark(value)) => Ok(MutationBody::Bookmark {
             bookmark_id: key.to_owned(),
-            value: BookmarkState {
-                content_hash: ContentHash::new(&value.content_hash),
-                cfi: value.cfi,
-                label: value.label,
-                created_at: value.created_at,
-                modified_at: value.modified_at,
-                deleted: value.deleted,
-            },
+            value: BookmarkState { content_hash: ContentHash::new(&value.content_hash), cfi: value.cfi, label: value.label, created_at: value.created_at, modified_at: value.modified_at, deleted: value.deleted },
         }),
         (sync_common::mutation_kind::BOOK_LINK, Kind::BookLink(value)) => Ok(MutationBody::BookLink {
             link_id: key.to_owned(),
@@ -160,11 +131,7 @@ fn encode_book_lifecycle(value: &BookLifecycleState) -> pb::BookLifecycle {
 fn decode_book_lifecycle(value: pb::BookLifecycle) -> Result<BookLifecycleState, transport::WireError> {
     use pb::book_lifecycle::State;
     match required(value.state, "book lifecycle state")? {
-        State::Present(value) => Ok(BookLifecycleState::Present {
-            metadata: decode_book_metadata(required(value.metadata, "present-book metadata")?)?,
-            added_at: value.added_at,
-            format: decode_book_format(value.format)?,
-        }),
+        State::Present(value) => Ok(BookLifecycleState::Present { metadata: decode_book_metadata(required(value.metadata, "present-book metadata")?)?, added_at: value.added_at, format: decode_book_format(value.format)? }),
         State::Deleted(value) => Ok(BookLifecycleState::Deleted { origin_folder_id: value.origin_folder_id }),
         State::Purged(_) => Ok(BookLifecycleState::Purged),
     }
@@ -200,7 +167,7 @@ fn decode_book_format(value: i32) -> Result<BookFormat, transport::WireError> {
 fn encode_reading_position(value: &ReadingPositionState) -> pb::ReadingPosition {
     use pb::reading_position::Location;
     let location = match &value.location {
-        ReadingPosition::Epub(cfi) => Location::EpubCfi(cfi.as_str().to_owned()),
+        ReadingPosition::Epub(_) => Location::EpubCfi(value.location.as_str()),
         ReadingPosition::Pdf(page) => Location::PdfPage(*page),
         ReadingPosition::Audiobook(millis) => Location::AudiobookMillis(*millis),
     };
@@ -244,11 +211,7 @@ fn decode_annotation(value: pb::Annotation) -> Result<AnnotationState, transport
     use pb::annotation_anchor::Anchor;
     let anchor = match required(required(value.anchor, "annotation anchor")?.anchor, "annotation anchor value")? {
         Anchor::EpubCfi(cfi) => AnnotationAnchor::epub_cfi(cfi),
-        Anchor::Pdf(value) => AnnotationAnchor::pdf(PdfAnnotationAnchor::new(
-            value.page_index,
-            value.rects.into_iter().map(|rect| PdfAnnotationRect::new(rect.left, rect.top, rect.width, rect.height)).collect(),
-            value.fallback_cfi,
-        )),
+        Anchor::Pdf(value) => AnnotationAnchor::pdf(PdfAnnotationAnchor::new(value.page_index, value.rects.into_iter().map(|rect| PdfAnnotationRect::new(rect.left, rect.top, rect.width, rect.height)).collect(), value.fallback_cfi)),
     };
     Ok(AnnotationState {
         content_hash: ContentHash::new(&value.content_hash),
@@ -283,12 +246,7 @@ fn decode_annotation_style(value: i32) -> Result<AnnotationStyle, transport::Wir
 }
 
 fn encode_book_metadata(value: &BookMetadataState) -> pb::BookMetadata {
-    pb::BookMetadata {
-        title: value.title.clone(),
-        contributors: value.contributors.iter().map(encode_contributor).collect(),
-        description: value.description.clone(),
-        publication: Some(encode_publication_metadata(&value.publication)),
-    }
+    pb::BookMetadata { title: value.title.clone(), contributors: value.contributors.iter().map(encode_contributor).collect(), description: value.description.clone(), publication: Some(encode_publication_metadata(&value.publication)) }
 }
 
 fn decode_book_metadata(value: pb::BookMetadata) -> Result<BookMetadataState, transport::WireError> {
@@ -301,12 +259,7 @@ fn decode_book_metadata(value: pb::BookMetadata) -> Result<BookMetadataState, tr
 }
 
 fn encode_contributor(value: &Contributor) -> pb::Contributor {
-    pb::Contributor {
-        contributor_id: value.contributor_id().to_string(),
-        name: value.name().to_owned(),
-        sort_name: value.sort_name().map(str::to_owned),
-        role: value.role_code().0.to_vec(),
-    }
+    pb::Contributor { contributor_id: value.contributor_id().to_string(), name: value.name().to_owned(), sort_name: value.sort_name().map(str::to_owned), role: value.role_code().0.to_vec() }
 }
 
 fn decode_contributor(value: pb::Contributor) -> Result<Contributor, transport::WireError> {
@@ -370,21 +323,9 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
             .collect::<Result<_, _>>()?,
         languages: value.languages.into_iter().map(|language| LanguageTag::parse(language).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
         dates: value.dates.into_iter().map(|date| PublicationDate::new(date.id, date.value, date.event).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
-        subjects: value
-            .subjects
-            .into_iter()
-            .map(|subject| PublicationSubject::new(subject.id, subject.name, "dc:subject", subject.authority, subject.code).map_err(|error| decode_error(error.to_string())))
-            .collect::<Result<_, _>>()?,
-        collections: value
-            .collections
-            .into_iter()
-            .map(|collection| PublicationCollection::new(collection.name, collection.collection_type, collection.position).map_err(|error| decode_error(error.to_string())))
-            .collect::<Result<_, _>>()?,
-        alternate_titles: value
-            .alternate_titles
-            .into_iter()
-            .map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as).map_err(|error| decode_error(error.to_string())))
-            .collect::<Result<_, _>>()?,
+        subjects: value.subjects.into_iter().map(|subject| PublicationSubject::new(subject.id, subject.name, "dc:subject", subject.authority, subject.code).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
+        collections: value.collections.into_iter().map(|collection| PublicationCollection::new(collection.name, collection.collection_type, collection.position).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
+        alternate_titles: value.alternate_titles.into_iter().map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
         rights: value.rights,
         sources: value.sources,
         types: value.types,
@@ -439,10 +380,6 @@ fn decode_publication_identifier(value: pb::PublicationIdentifier) -> Result<Pub
         pb::IdentifierScheme::Kobo => PublicationIdentifierScheme::Kobo,
         pb::IdentifierScheme::Other => PublicationIdentifierScheme::Other(required(value.other_scheme, "other identifier scheme")?),
     };
-    let identifier_types = value
-        .identifier_types
-        .into_iter()
-        .map(|value| PublicationIdentifierType::new(value.value, value.scheme).map_err(|error| decode_error(error.to_string())))
-        .collect::<Result<_, _>>()?;
+    let identifier_types = value.identifier_types.into_iter().map(|value| PublicationIdentifierType::new(value.value, value.scheme).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?;
     PublicationIdentifier::new(value.value, scheme, identifier_types).map_err(|error| decode_error(error.to_string()))
 }

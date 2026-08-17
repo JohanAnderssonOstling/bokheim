@@ -28,7 +28,7 @@ sudo systemctl enable --now bokheim-catalogs.service
 sudo systemctl reload caddy.service
 curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=13' \
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=14' \
   --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 

@@ -69,20 +69,17 @@ impl FakeServer {
         }
         // Match the production server: request identity, not client JSON,
         // determines the authoritative actor and actor-local sequence.
-        let candidate = StoredEvent {
-            change,
-            replica_id,
-            // `server_seq` is not part of VersionKey, so a provisional next
-            // value is safe while deciding whether a singleton is accepted.
-            revision: LibraryRevision::new(self.next_server_seq + 1).expect("positive server sequence"),
-        };
+        // `server_seq` is not part of VersionKey, so it is allocated only after
+        // the merge decision, exactly as the sequence default does in storage.
+        let candidate = StoredEvent { change, replica_id, revision: LibraryRevision::new(1).expect("positive server sequence") };
         let key = candidate.change.body.state_key();
         let candidate_version = VersionKey::new(candidate.change.changed_at, candidate.change.body.conflict_rank(), candidate.replica_id.clone(), candidate.change.replica_seq.get(), candidate.change.mutation_id);
         let incoming_wins =
             self.state.get(&key).is_none_or(|stored| candidate_version > VersionKey::new(stored.change.changed_at, stored.change.body.conflict_rank(), stored.replica_id.clone(), stored.change.replica_seq.get(), stored.change.mutation_id));
         if incoming_wins {
             self.next_server_seq += 1;
-            self.state.insert(key, candidate);
+            let revision = LibraryRevision::new(self.next_server_seq).expect("positive server sequence");
+            self.state.insert(key, StoredEvent { revision, ..candidate });
         }
     }
 
@@ -94,6 +91,13 @@ impl FakeServer {
 
     fn all_rows(&self) -> Vec<&StoredEvent> {
         self.state.values().collect()
+    }
+
+    fn winning_position(&self, content_hash: ContentHash) -> String {
+        match &self.state.get(&StateKey::ReadingPosition(content_hash)).expect("a stored reading position").change.body {
+            MutationBody::ReadingPosition { value, .. } => value.location.as_str().to_owned(),
+            other => panic!("reading position cell holds {other:?}"),
+        }
     }
 
     /// Mirrors placement resolution with the protocol's total VersionKey,
@@ -243,6 +247,10 @@ impl Device {
         tx.commit()?;
         self.cursor = next_cursor;
         Ok(())
+    }
+
+    fn has_pending_mutations(&self) -> bool {
+        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox)", [], |row| row.get(0)).expect("outbox state")
     }
 
     fn read_position(&self, content_hash: ContentHash) -> String {
@@ -414,6 +422,85 @@ fn equal_wall_time_singleton_conflict_converges() {
     b.pull(&server);
 
     assert_eq!(a.read_position(content_hash), b.read_position(content_hash));
+}
+
+/// Devices do not share a clock, and the service deliberately admits timestamps
+/// up to `MAX_LWW_FUTURE_SKEW_MS` ahead of its own. A replica can therefore
+/// adopt a remote value stamped later than its own next honest local write, and
+/// that local write then loses the server's merge.
+///
+/// The push acknowledgement cannot distinguish "applied" from "merged and
+/// discarded" -- both are reported as accepted -- and the trigger that stamps
+/// `sync_state_version` for a local write is unconditional, so the loser keeps
+/// its own value with no outbox entry left to retry. The winning row already
+/// sits below its pull cursor, so nothing would ever redeliver it. The service
+/// must republish the winner above every cursor instead.
+#[test]
+fn a_local_write_that_loses_the_servers_merge_is_repaired_without_a_retry() {
+    let content_hash = fixture_content_hash(1);
+    let mut server = FakeServer::default();
+    let mut ahead = Device::new("clock-ahead");
+    let mut behind = Device::new("clock-behind");
+    for device in [&ahead, &behind] {
+        device.seed_book(content_hash);
+    }
+
+    // The fast-clocked device publishes a position stamped in the other's future.
+    ahead.set_reading_position(content_hash, "epubcfi(/6/2)");
+    ahead.queue(&reading_position(content_hash, "epubcfi(/6/2)", 20.0, 2_000));
+    ahead.push(&mut server);
+    behind.pull(&server);
+    assert_eq!(behind.read_position(content_hash), "epubcfi(/6/2)", "the remote value is adopted before the local write");
+
+    // An honest local write on the slow-clocked device, which the service will
+    // discard because 1_000 loses to the stored 2_000.
+    behind.set_reading_position(content_hash, "epubcfi(/6/4)");
+    behind.queue(&reading_position(content_hash, "epubcfi(/6/4)", 40.0, 1_000));
+    behind.push(&mut server);
+    assert!(!behind.has_pending_mutations(), "an accepted push leaves nothing to retry");
+
+    behind.pull(&server);
+    ahead.pull(&server);
+
+    assert_eq!(behind.read_position(content_hash), "epubcfi(/6/2)", "the discarded local write must not survive as a divergent replica value");
+    assert_eq!(ahead.read_position(content_hash), behind.read_position(content_hash));
+    assert_eq!(server.winning_position(content_hash), "epubcfi(/6/2)");
+}
+
+/// The repair must be a redelivery, not a rewrite: republishing the winner may
+/// not disturb which mutation owns the cell, and a replica that already holds
+/// the winner must not be able to lose it to the same stale write arriving again.
+#[test]
+fn republishing_a_merge_winner_is_idempotent_across_replicas() {
+    let content_hash = fixture_content_hash(1);
+    let mut server = FakeServer::default();
+    let mut ahead = Device::new("clock-ahead");
+    let mut behind = Device::new("clock-behind");
+    let mut bystander = Device::new("bystander");
+    for device in [&ahead, &behind, &bystander] {
+        device.seed_book(content_hash);
+    }
+
+    ahead.set_reading_position(content_hash, "epubcfi(/6/2)");
+    ahead.queue(&reading_position(content_hash, "epubcfi(/6/2)", 20.0, 2_000));
+    ahead.push(&mut server);
+    for device in [&mut behind, &mut bystander] {
+        device.pull(&server);
+    }
+
+    for stale in ["epubcfi(/6/4)", "epubcfi(/6/6)"] {
+        behind.set_reading_position(content_hash, stale);
+        behind.queue(&reading_position(content_hash, stale, 40.0, 1_000));
+        behind.push(&mut server);
+        behind.pull(&server);
+        bystander.pull(&server);
+    }
+    ahead.pull(&server);
+
+    for device in [&ahead, &behind, &bystander] {
+        assert_eq!(device.read_position(content_hash), "epubcfi(/6/2)");
+    }
+    assert_eq!(server.all_rows().len(), 1, "a republished winner replaces its own row rather than accumulating");
 }
 
 #[test]

@@ -212,16 +212,18 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=13` representation. The wire body
+`application/vnd.bokheim+protobuf; version=14` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
 unsupported media types, missing version negotiation, unsupported versions, and
 compressed bodies fail before application logic runs. Raw book and thumbnail
 endpoints continue to transfer their exact validated bytes.
-Opaque mutation `value` fields remain versioned bincode storage values; the
-PostgreSQL relay stores those bytes without interpreting them. Transport and
-storage versions therefore evolve independently.
+Mutation `value` fields use the explicitly typed protobuf `MutationValue`
+schema. The PostgreSQL relay stores those protobuf bytes without interpreting
+them, keeping the service independent of client domain models. Protobuf field
+numbers and enum values are stable from protocol version 14 onward; compatible
+changes are additive and removed field numbers must never be reused.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
 Pull pages may cut across directory dependencies. SQLite clients therefore

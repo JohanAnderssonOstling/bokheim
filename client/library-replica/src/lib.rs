@@ -6,7 +6,6 @@ use catalog_contract::{CatalogPublicationIdentity, CatalogSourceId};
 use library_model::{AnnotationState, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, DirectoryLifecycleState, ReadingPositionState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use sync_common::wire;
 use sync_common::ContentHash;
 use sync_common::{DeclaredBlobReference, DirId, FileName, MutationId, ReplicaId, ReplicaSeq, UnixMillis, WireMutation};
 
@@ -135,7 +134,7 @@ impl MutationBody {
     }
 
     /// Encodes the domain value into the generic wire envelope.
-    pub fn to_wire(&self, mutation_id: MutationId, changed_at: UnixMillis, replica_seq: ReplicaSeq) -> Result<WireMutation, wire::WireError> {
+    pub fn to_wire(&self, mutation_id: MutationId, changed_at: UnixMillis, replica_seq: ReplicaSeq) -> Result<WireMutation, sync_common::transport::WireError> {
         let (entity_key, entity_subkey, blob_reference) = match self {
             Self::DirectoryName { dir_id, .. } => (dir_id.to_string(), String::new(), None),
             Self::DirectoryParent { dir_id, .. } => (dir_id.to_string(), String::new(), None),
@@ -152,9 +151,7 @@ impl MutationBody {
             Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new(), None),
             Self::Bookmark { bookmark_id, .. } => (bookmark_id.clone(), String::new(), None),
             Self::BookLink { link_id, .. } => (link_id.clone(), String::new(), None),
-            Self::CatalogPublication { source_id, publication, content_hash } => {
-                (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), None)
-            }
+            Self::CatalogPublication { source_id, publication, content_hash: _ } => (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), None),
             Self::Metadata { content_hash, .. } => (content_hash.to_string(), String::new(), None),
         };
         let value = mutation_protobuf::encode(self)?;
@@ -163,7 +160,7 @@ impl MutationBody {
 
     /// Decodes a recognized wire value. Unknown kinds are intentionally
     /// forward-compatible and return `None` without interpreting their bytes.
-    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, wire::WireError> {
+    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, sync_common::transport::WireError> {
         if !matches!(
             wire_mutation.kind.as_str(),
             sync_common::mutation_kind::DIRECTORY_NAME
@@ -220,16 +217,12 @@ impl MutationBody {
     }
 }
 
-fn parse_dir_id(value: &str) -> Result<DirId, wire::WireError> {
-    DirId::parse_str(value).map_err(|error| wire::WireError::Decode(error.to_string()))
-}
-
 impl StateMutation {
-    pub fn to_wire(&self) -> Result<WireMutation, wire::WireError> {
+    pub fn to_wire(&self) -> Result<WireMutation, sync_common::transport::WireError> {
         self.body.to_wire(self.mutation_id, self.changed_at, self.replica_seq)
     }
 
-    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, wire::WireError> {
+    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, sync_common::transport::WireError> {
         Ok(MutationBody::from_wire(wire_mutation)?.map(|body| Self { mutation_id: wire_mutation.mutation_id, body, changed_at: wire_mutation.changed_at, replica_seq: wire_mutation.replica_seq }))
     }
 }
@@ -295,6 +288,8 @@ mod tests {
             let mutation = StateMutation { mutation_id: MutationId::new(), body, changed_at: 100 + index as u64, replica_seq: ReplicaSeq::new(index as u64 + 1).unwrap() };
             let wire = mutation.to_wire().unwrap();
             assert_eq!(wire.kind, mutation.body.kind());
+            assert!(!wire.value.starts_with(b"BKHM"), "network mutation values must not use the bincode storage envelope");
+            sync_common::transport::decode_mutation_value(&wire.value, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
             assert_eq!(StateMutation::from_wire(&wire).unwrap(), Some(mutation));
         }
     }

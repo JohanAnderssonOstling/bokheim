@@ -113,8 +113,9 @@ pub struct SyncCursor {
     pub reading_revision: Option<LibraryRevision>,
 }
 
-/// Opaque mutation envelope transported and persisted by the sync service.
-/// The service does not decode `value`; clients own each kind's domain schema.
+/// Mutation envelope transported and persisted by the sync service. `value`
+/// is an encoded protobuf `MutationValue`; the service forwards it opaquely so
+/// it need not depend on client domain models.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WireMutation {
     pub mutation_id: MutationId,

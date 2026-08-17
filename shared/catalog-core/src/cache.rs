@@ -1696,7 +1696,8 @@ impl CatalogCache {
                  WHERE source_id=?1 AND generation=?2 AND sequence=0
                  ORDER BY edition_id,work_id LIMIT ?3",
             )?;
-            statement.query_map(params![crawl.source_id.as_str(), generation, batch_size], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?
+            let rows = statement.query_map(params![crawl.source_id.as_str(), generation, batch_size], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+            rows
         };
         for (edition_id, work_id, payload_hash) in &staged {
             let previous_sequence = transaction
@@ -1778,7 +1779,8 @@ impl CatalogCache {
                    AND (extraction.acquisition_url IS NULL OR extraction.catalog_generation IS NOT ?2)
                  ORDER BY publication.edition_id,publication.work_id LIMIT ?3",
             )?;
-            statement.query_map(params![source_id.as_str(), storage_i64(generation, "generation")?, batch_size], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?
+            let rows = statement.query_map(params![source_id.as_str(), storage_i64(generation, "generation")?, batch_size], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
+            rows
         };
         for payload in &payloads {
             let publication: CatalogPublication = decode_cached(payload)?;
@@ -2899,6 +2901,36 @@ mod tests {
         assert_eq!((inventory.active_page_count, inventory.active_publication_count, inventory.active_epub_count), (1, 1, 1));
         assert_eq!(inventory.sources[0].crawl_status, "failed");
         assert_eq!(inventory.sources[0].last_crawl_error.as_deref(), Some("upstream timeout"));
+    }
+
+    #[test]
+    fn crawl_activation_and_extraction_reconciliation_are_bounded() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
+        let source = source_id();
+        cache.ensure_source(&source, "https://example.com/opds").unwrap();
+        let crawl = cache.begin_crawl(&source, "https://example.com/opds").unwrap();
+        cache
+            .stage_page(
+                &crawl,
+                &page(
+                    "https://example.com/opds",
+                    vec![importable_epub("one", None), importable_epub("two", None), importable_epub("three", None)],
+                ),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(cache.prepare_crawl_activation_batch(&crawl, 1).unwrap());
+        assert!(cache.prepare_crawl_activation_batch(&crawl, 1).unwrap());
+        assert!(!cache.prepare_crawl_activation_batch(&crawl, 1).unwrap());
+        cache.finalize_crawl_activation(&crawl).unwrap();
+
+        assert!(cache.reconcile_active_epub_extractions_batch(&source, 1).unwrap());
+        assert!(cache.reconcile_active_epub_extractions_batch(&source, 1).unwrap());
+        assert!(!cache.reconcile_active_epub_extractions_batch(&source, 1).unwrap());
+        assert_eq!(cache.inventory().unwrap().epub_extractions.pending, 3);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package bokheim.wire.v13;
+package bokheim.wire.v14;
 
 // A self-describing protobuf representation of the Serde value model. This
 // lets every existing Rust contract use one codec while retaining integer

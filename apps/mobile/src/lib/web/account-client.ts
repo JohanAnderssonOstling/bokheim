@@ -4,7 +4,7 @@ import { decodeAccountResponse, encodeAccountRequest } from "./wasm-core.ts";
 
 const API_PREFIX = "/api/auth";
 const SERVER_URL = "https://api.bokheim.se";
-export const WIRE_MEDIA_TYPE = "application/vnd.bokheim+protobuf; version=13";
+export const WIRE_MEDIA_TYPE = "application/vnd.bokheim+protobuf; version=14";
 
 const requestKind = {
   login: 1,

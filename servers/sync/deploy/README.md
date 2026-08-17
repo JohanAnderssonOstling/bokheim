@@ -244,7 +244,7 @@ sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
 curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=13' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=14' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production

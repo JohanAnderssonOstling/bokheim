@@ -22,7 +22,7 @@ Public unauthenticated endpoints:
 - `POST /api/web/sources/{source-id}/acquire`
 
 Structured requests and responses use
-`application/vnd.bokheim+protobuf; version=13` with identity encoding. OPDS
+`application/vnd.bokheim+protobuf; version=14` with identity encoding. OPDS
 upstreams remain XML or JSON, and covers are canonical JPEG thumbnails. The
 `/api/web` façade uses the provider-neutral contract's JSON representation so
 ordinary browsers do not need a second implementation of the protobuf codec.
@@ -112,7 +112,7 @@ service.
 
 ```sh
 cargo run -p catalog-server
-curl --header 'Accept: application/vnd.bokheim+protobuf; version=13' \
+curl --header 'Accept: application/vnd.bokheim+protobuf; version=14' \
   --output /dev/null http://127.0.0.1:8090/api/opds/catalogs
 ```
 
