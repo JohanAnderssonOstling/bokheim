@@ -16,6 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "1"
+  RUST_VERSION: 1.95.0
   GPUI_FORK_REF: 68b0a5ba82860ac222c18acd9036b3838a43a08b
   HTML_ENGINE_REF: 30b27e095b038a1a690b3e80c1e1501f3145281e
   HTML_VIEW_CORE_REF: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
@@ -28,7 +29,7 @@ jobs:
   build:
     name: x86-64 AppImage
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Check out Bokheim
@@ -83,8 +84,29 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Restore Cargo dependency downloads
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: bokheim-cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/Cargo.lock') }}
+          restore-keys: |
+            bokheim-cargo-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
+
+      - name: Restore Cargo release build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            bokheim/target/release
+          key: bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-${{ hashFiles('bokheim/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-
+            bokheim-appimage-v1-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
 
       - name: Download pinned AppImage packaging tools
         run: |
