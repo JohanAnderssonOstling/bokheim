@@ -165,6 +165,16 @@ pub struct BookTocEntry {
     pub children: Vec<BookTocEntry>,
 }
 
+pub const AUDIOBOOK_TOC_TARGET_PREFIX: &str = "audiobook-position-ms:";
+
+pub fn audiobook_toc_target(position_ms: u64) -> String {
+    format!("{AUDIOBOOK_TOC_TARGET_PREFIX}{position_ms}")
+}
+
+pub fn audiobook_toc_position(target: &str) -> Option<u64> {
+    target.strip_prefix(AUDIOBOOK_TOC_TARGET_PREFIX)?.parse().ok()
+}
+
 /// Complete initial payload for a book detail screen. Related books are kept
 /// in the same response for native callers; browser workers may still resolve
 /// the command independently from route rendering.
@@ -296,6 +306,15 @@ mod tests {
     #[test]
     fn import_destination_rejects_unknown_fields() {
         assert!(serde_json::from_str::<BookImportDestination>(r#"{"library_id":"library-1","directory_id":"folder-1","extra":true}"#).is_err());
+    }
+
+    #[test]
+    fn audiobook_toc_targets_round_trip_chapter_positions() {
+        let target = audiobook_toc_target(3_726_500);
+        assert_eq!(target, "audiobook-position-ms:3726500");
+        assert_eq!(audiobook_toc_position(&target), Some(3_726_500));
+        assert_eq!(audiobook_toc_position("chapter.xhtml"), None);
+        assert_eq!(audiobook_toc_position("audiobook-position-ms:not-a-number"), None);
     }
 
     #[test]

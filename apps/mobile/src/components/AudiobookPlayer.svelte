@@ -34,7 +34,6 @@
   const BATTERY_NUDGE_DELAY_MS = 2_000;
   const BATTERY_NUDGE_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
 
-  const progress = $derived(duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0);
   const activeChapterIndex = $derived.by(() => {
     const positionMs = currentTime * 1000;
     const exact = session.chapters.findIndex((chapter) => positionMs >= chapter.start_ms && positionMs < chapter.end_ms);
@@ -44,6 +43,12 @@
     }
     return 0;
   });
+  const activeChapter = $derived(session.chapters[activeChapterIndex]);
+  const chapterStart = $derived((activeChapter?.start_ms ?? 0) / 1000);
+  const chapterEnd = $derived((activeChapter?.end_ms ?? Math.max(0, duration * 1000)) / 1000);
+  const chapterDuration = $derived(Math.max(0, chapterEnd - chapterStart));
+  const chapterPosition = $derived(Math.min(chapterDuration, Math.max(0, currentTime - chapterStart)));
+  const chapterProgress = $derived(chapterDuration > 0 ? Math.min(1, Math.max(0, chapterPosition / chapterDuration)) : 0);
 
   function formatTime(seconds: number) {
     if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -101,17 +106,18 @@
     void persist(true);
   }
 
-  function seekToFraction(fraction: number) {
+  function seekToChapterFraction(fraction: number) {
+    const next = chapterStart + chapterDuration * Math.min(1, Math.max(0, fraction));
     if (useNativeAudio) {
-      if (duration > 0) {
-        currentTime = duration * Math.min(1, Math.max(0, fraction));
+      if (chapterDuration > 0) {
+        currentTime = next;
         seekNativeAudiobookTo(currentTime * 1000);
         void persist(true);
       }
       return;
     }
     if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
-    audio.currentTime = audio.duration * Math.min(1, Math.max(0, fraction));
+    audio.currentTime = Math.min(audio.duration, next);
     currentTime = audio.currentTime;
     updateMediaPosition();
     void persist(true);
@@ -286,14 +292,14 @@
           {#if error}<small role="alert">{error}</small>{/if}
         </div>
       </div>
-      <div class="expanded-timeline">
-        <input aria-label="Audiobook position" type="range" min="0" max="1000" value={Math.round(progress * 1000)} oninput={(event) => seekToFraction(Number(event.currentTarget.value) / 1000)} />
-        <div><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
-      </div>
       <div class="expanded-transport" aria-label="Playback controls">
         <button type="button" aria-label="Back 15 seconds" onclick={() => seekBy(-15)}><RotateCcw size={26} /><small>15</small></button>
         <button class="play" type="button" aria-label={playing ? "Pause" : "Play"} onclick={togglePlayback}>{#if playing}<Pause size={34} />{:else}<Play size={34} />{/if}</button>
         <button type="button" aria-label="Forward 30 seconds" onclick={() => seekBy(30)}><RotateCw size={26} /><small>30</small></button>
+      </div>
+      <div class="expanded-timeline">
+        <input aria-label="Current chapter position" type="range" min="0" max="1000" value={Math.round(chapterProgress * 1000)} oninput={(event) => seekToChapterFraction(Number(event.currentTarget.value) / 1000)} />
+        <div><span>{formatTime(chapterPosition)}</span><span>{formatTime(chapterDuration)}</span></div>
       </div>
       <section class="chapter-browser" aria-label="Chapters">
         <header><strong>Chapters</strong><small>{session.chapters.length}</small></header>
@@ -345,9 +351,12 @@
       <button class="play" type="button" aria-label={playing ? "Pause" : "Play"} onclick={togglePlayback}>{#if playing}<Pause size={23} />{:else}<Play size={23} />{/if}</button>
       <button type="button" aria-label="Forward 30 seconds" onclick={() => seekBy(30)}><RotateCw size={20} /></button>
     </div>
+    <label class="dock-speed"><span>Speed</span><select aria-label="Playback speed" bind:value={playbackRate} onchange={applyPlaybackRate}>
+      {#each [0.75, 1, 1.25, 1.5, 1.75, 2] as rate}<option value={rate}>{rate}×</option>{/each}
+    </select></label>
     <div class="timeline">
-      <input aria-label="Audiobook position" type="range" min="0" max="1000" value={Math.round(progress * 1000)} oninput={(event) => seekToFraction(Number(event.currentTarget.value) / 1000)} />
-      <div><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
+      <input aria-label="Current chapter position" type="range" min="0" max="1000" value={Math.round(chapterProgress * 1000)} oninput={(event) => seekToChapterFraction(Number(event.currentTarget.value) / 1000)} />
+      <div><span>{formatTime(chapterPosition)}</span><span>{formatTime(chapterDuration)}</span></div>
     </div>
     <button class="expand" type="button" aria-label={expanded ? "Collapse audiobook player" : "Expand audiobook player"} onclick={() => (expanded = !expanded)}>{#if expanded}<ChevronDown size={20} />{:else}<ChevronUp size={20} />{/if}</button>
     <button class="close" type="button" aria-label="Close audiobook player" onclick={closePlayer}><X size={20} /></button>
@@ -400,7 +409,7 @@
   .battery-nudge small { color:var(--color-subtle-text); font-size:.68rem; line-height:1.35; }
   .battery-nudge > div { display:flex; gap:.25rem; }
   .battery-nudge button { width:auto; min-width:0; min-height:40px; padding:0 .6rem; border:1px solid var(--color-border); background:var(--color-raised-bg); font-size:.68rem; font-weight:650; white-space:nowrap; }
-  .dock { position:relative; display:grid; grid-template-columns:42px minmax(0,1fr) auto auto auto; align-items:center; gap:.55rem; min-height:72px; padding:.38rem max(.55rem,env(safe-area-inset-right)) .38rem max(.55rem,env(safe-area-inset-left)); }
+  .dock { position:relative; display:grid; grid-template-columns:42px minmax(0,1fr) auto auto auto auto; align-items:center; gap:.35rem .55rem; min-height:112px; padding:.38rem max(.55rem,env(safe-area-inset-right)) .5rem max(.55rem,env(safe-area-inset-left)); }
   .dock > :not(.dock-expander) { position:relative; z-index:1; }
   .dock > .cover,.dock > .identity { pointer-events:none; }
   button.dock-expander { position:absolute; z-index:0; inset:0; width:100%; height:100%; min-width:0; min-height:0; }
@@ -412,9 +421,13 @@
   .identity strong { font-size:.78rem; font-weight:600; } .identity span { color:var(--color-subtle-text); font-size:.66rem; }
   button { display:grid; place-items:center; min-width:44px; min-height:44px; padding:0; border:0; border-radius:0; color:inherit; background:transparent; }
   button.play { border:1px solid var(--color-accent); color:var(--color-surface-bg); background:var(--color-accent); }
-  .transport { display:flex; align-items:center; gap:.1rem; } .timeline { display:none; min-width:8rem; }
+  .transport { display:flex; align-items:center; gap:.1rem; }
+  .dock-speed { display:flex; align-items:center; gap:.3rem; }
+  .dock-speed span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  .dock-speed select { min-width:4.25rem; min-height:40px; padding:0 .25rem; font-size:.7rem; }
+  .timeline { display:block; grid-column:1/-1; min-width:0; }
   .timeline input { width:100%; accent-color:var(--color-accent); } .timeline div { display:flex; justify-content:space-between; color:var(--color-subtle-text); font-size:.62rem; }
   label { display:grid; gap:.25rem; color:var(--color-subtle-text); font-size:.68rem; } select { min-height:40px; border:1px solid var(--color-border); border-radius:0; color:var(--color-ink-text); background:var(--color-raised-bg); }
   @media (max-width:36rem) { .transport button:first-child,.transport button:last-child { display:none; } .expand { display:none; } .battery-nudge { grid-template-columns:1fr; } .battery-nudge > div { justify-content:flex-end; } }
-  @media (min-width:45rem) { .audiobook-player,.audiobook-player.above-navigation { bottom:0; left:var(--layout-sidebar-width); } .dock { grid-template-columns:48px minmax(10rem,14rem) auto minmax(10rem,1fr) auto auto; min-height:88px; padding:.45rem 1rem; } .cover { width:48px; height:64px; } .timeline { display:block; } .expanded-sheet { width:min(540px,calc(100vw - var(--layout-sidebar-width) - 2rem)); margin-left:var(--layout-sidebar-width); justify-self:center; box-sizing:border-box; } }
+  @media (min-width:45rem) { .audiobook-player,.audiobook-player.above-navigation { bottom:0; left:var(--layout-sidebar-width); } .dock { grid-template-columns:48px minmax(10rem,1fr) auto auto auto auto; min-height:122px; padding:.45rem 1rem .55rem; } .cover { width:48px; height:64px; } .expanded-sheet { width:min(540px,calc(100vw - var(--layout-sidebar-width) - 2rem)); margin-left:var(--layout-sidebar-width); justify-self:center; box-sizing:border-box; } }
 </style>

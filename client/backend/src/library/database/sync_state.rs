@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
 use sync_common::StateCell;
 #[derive(Debug)]
 pub enum OutboxReadError {

@@ -20,7 +20,10 @@ use catalog_contract::{materialize_page, page_layout, CatalogPageResponse, Catal
 // writable by the previous binary during an automated deployment rollback.
 // The logical version lives in catalog_cache_metadata instead.
 const CATALOG_CACHE_FILE_VERSION: i64 = 1;
-const CATALOG_CACHE_SCHEMA_VERSION: i64 = 11;
+// Version 12 also invalidates payloads written with storage-wire version 11.
+// The cache is rehydratable, so replacing it is safer than attempting to
+// decode an incompatible persisted representation during startup.
+const CATALOG_CACHE_SCHEMA_VERSION: i64 = 12;
 const CATALOG_EPUB_ENRICHMENT_VERSION: i64 = 4;
 const CATALOG_METADATA_BACKFILL_VERSION: i64 = 1;
 const MAX_CRAWL_ERROR_BYTES: usize = 2_048;
@@ -46,7 +49,7 @@ CREATE TABLE IF NOT EXISTS catalog_cache_metadata (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     schema_version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO catalog_cache_metadata(singleton, schema_version) VALUES(1, 11);
+INSERT OR IGNORE INTO catalog_cache_metadata(singleton, schema_version) VALUES(1, 12);
 
 CREATE TABLE IF NOT EXISTS catalog_epub_extraction (
     source_id TEXT NOT NULL REFERENCES catalog_source(source_id) ON DELETE CASCADE,

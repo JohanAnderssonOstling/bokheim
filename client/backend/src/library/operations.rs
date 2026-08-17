@@ -30,8 +30,8 @@ impl LibraryBackend {
         let mut bytes = self.context.try_get_thumbnail(content_hash.clone())?;
         if bytes.is_none() {
             let conn = self.db.get()?;
-            for content_hash in db::get_book_hashes(&conn, content_hash)? {
-                let path = crate::sync::transfer::thumbnail_path_from_content_hash(&self.library_root, &content_hash);
+            for equivalent_hash in db::get_book_hashes(&conn, content_hash.clone())? {
+                let path = crate::sync::transfer::thumbnail_path_from_content_hash(&self.library_root, &equivalent_hash);
                 match fs::read(path) {
                     Ok(found) => {
                         bytes = Some(found);
@@ -40,6 +40,17 @@ impl LibraryBackend {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
                 }
+            }
+        }
+        if bytes.is_none() {
+            let conn = self.db.get()?;
+            let is_audiobook = matches!(db::get_book_format(&conn, &content_hash)?, Some(BookFormat::M4b));
+            drop(conn);
+            if is_audiobook
+                && let Some(path) = self.local_book_path(content_hash.clone())?
+                && generate_thumbnail_for_sync(&self.context, &self.library_root, &path, &content_hash)?
+            {
+                bytes = self.context.try_get_thumbnail(content_hash)?;
             }
         }
         Ok(bytes)

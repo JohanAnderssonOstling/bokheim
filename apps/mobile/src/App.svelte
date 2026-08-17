@@ -1738,7 +1738,7 @@
       }
       pendingOpenBook = null;
       if (book.audiobook) {
-        await openAudiobook(book);
+        await openAudiobook(book, initialTarget);
         return;
       }
       const openedBook = await openDownloadedBook(book.content_hash, book.title || "Untitled", book.author, initialTarget);
@@ -1750,7 +1750,7 @@
     }
   }
 
-  async function openAudiobook(book: BookCardData) {
+  async function openAudiobook(book: BookCardData, initialTarget?: string) {
     const libraryId = activeLibraryId;
     if (!libraryId) throw new Error("No library is selected");
     if (audiobookSession?.libraryId === libraryId && audiobookSession.contentHash === book.content_hash) return;
@@ -1773,7 +1773,7 @@
       title: book.title || "Untitled audiobook",
       author: book.author,
       coverUrl: coverUrl ?? "",
-      initialPositionMs: initialPositionMs ?? 0,
+      initialPositionMs: parseAudiobookTarget(initialTarget) ?? initialPositionMs ?? 0,
       expectedDurationMs: book.audiobook_duration_ms,
       chapters,
       savePosition: async (positionMs, progress) => {
@@ -1785,6 +1785,13 @@
       await tick();
     }
     if (request === audiobookRequest) audiobookSession = nextSession;
+  }
+
+  function parseAudiobookTarget(target?: string) {
+    const prefix = "audiobook-position-ms:";
+    if (!target?.startsWith(prefix)) return undefined;
+    const position = Number(target.slice(prefix.length));
+    return Number.isSafeInteger(position) && position >= 0 ? position : undefined;
   }
 
   function closeAudiobook() {

@@ -239,6 +239,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         }
         #[cfg(feature = "audiobooks")]
         if library.is_audiobook(locator.content_hash()).unwrap_or(false) {
+            let requested_position = initial_target.as_deref().and_then(app_contract::library::audiobook_toc_position).map(Duration::from_millis);
             let request_generation = audiobook_request_generation.get().wrapping_add(1);
             audiobook_request_generation.set(request_generation);
             let active_request_generation = audiobook_request_generation.clone();
@@ -250,9 +251,9 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
             let prepare_content_hash = content_hash.clone();
             let prepare = audiobook_worker.dispatch(move || {
                 let source = prepare_library.resolve_book_for_reader(prepare_content_hash.clone()).map_err(|error| error.to_string())?;
-                let initial_position = prepare_library.audiobook_reading_position(prepare_content_hash).map_err(|error| error.to_string())?.unwrap_or(0);
+                let saved_position = prepare_library.audiobook_reading_position(prepare_content_hash).map_err(|error| error.to_string())?.unwrap_or(0);
                 let source = audiobook_player::AudiobookSource::new(source.reader, source.path);
-                Ok::<_, String>((source, Duration::from_millis(initial_position)))
+                Ok::<_, String>((source, requested_position.unwrap_or_else(|| Duration::from_millis(saved_position))))
             });
             cx.spawn(async move |cx| {
                 let Ok(result) = prepare.recv().await else { return };

@@ -152,6 +152,11 @@ impl LibraryBackend {
         let toc = if self.is_epub(content_hash.clone())? {
             let resolved = self.resolve_book_for_reader(content_hash)?;
             epub_provider::EpubProvider::try_from_reader(resolved.reader).and_then(|provider| provider.toc()).ok().flatten().unwrap_or_default().into_iter().map(convert_toc_entry).collect()
+        } else if self.is_audiobook(content_hash.clone())? {
+            self.audiobook_chapters(content_hash)?
+                .into_iter()
+                .map(|chapter| BookTocEntry { title: chapter.title, target: app_contract::library::audiobook_toc_target(chapter.start_ms), children: Vec::new() })
+                .collect()
         } else {
             Vec::new()
         };

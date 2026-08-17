@@ -1796,6 +1796,68 @@ mod tests {
         assert!(matches!(validate_push_response(&requested_ids[..1], &contradictory), Err(PushResponseError::InvalidAcknowledgments(_))));
     }
 
+    /// The whole path, through a real pull: a synchronized placement removal
+    /// records its file work in the commit that advances the cursor, performs
+    /// it, and retires it. Without the enqueue wired into the pull itself the
+    /// replay machinery is dead code, so this covers the wiring the unit tests
+    /// above cannot see.
+    #[tokio::test]
+    async fn a_pulled_placement_removal_records_performs_and_retires_its_file_work() {
+        async fn pull_page(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            let request = decode_sync_exchange(&headers, &body);
+            let pull = match request.cursor.state_revision {
+                None => pull_response(
+                    vec![pulled_change(1, MutationBody::Placement { dir_id: fixture_dir_id("Shelf"), content_hash: fixture_content_hash(1), present: false, origin_folder_id: None })],
+                    LibraryRevision::new(1).ok(),
+                    false,
+                ),
+                _ => PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
+            };
+            binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull })
+        }
+
+        let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(pull_page));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+
+        // A live placement whose file is on disk, which the pull then removes.
+        // Seeded as remote-origin state: a local-origin insert would stamp the
+        // cell with the current wall clock and the pulled removal would lose
+        // the merge, which is a property of the reducer, not of this test.
+        let dir_id = fixture_dir_id("Shelf");
+        let content_hash = fixture_content_hash(1);
+        {
+            let conn = manager.db_pool.get().unwrap();
+            db::set_sync_metadata(&conn, "change_origin", "remote").unwrap();
+            conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1,'00000000-0000-0000-0000-000000000000','Shelf')", [dir_id.to_string()]).unwrap();
+            conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [content_hash.as_str()]).unwrap();
+            conn.execute(
+                "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES (?2,(SELECT row_id FROM book WHERE content_hash=?1),'book.epub','fp',1)",
+                rusqlite::params![content_hash.as_str(), dir_id.to_string()],
+            )
+            .unwrap();
+            db::set_sync_metadata(&conn, "change_origin", "local").unwrap();
+        }
+        let on_disk = temp.path().join("Shelf").join("book.epub");
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(&on_disk, b"book bytes").unwrap();
+
+        manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
+
+        assert!(!on_disk.exists(), "the synchronized removal reaches the file, not only the database");
+        let conn = manager.db_pool.get().unwrap();
+        assert_eq!(db::get_pull_cursor(&conn).unwrap().state_revision, LibraryRevision::new(1).ok());
+        assert!(db::pending_fs_actions(&conn).unwrap().is_empty(), "work that completed is retired rather than replayed on every later sync");
+        server.abort();
+    }
+
     /// A library holding one book placed in one directory, with its file on
     /// disk and the placement already tombstoned — the committed state a pull
     /// page leaves behind when synchronization removes a placement.

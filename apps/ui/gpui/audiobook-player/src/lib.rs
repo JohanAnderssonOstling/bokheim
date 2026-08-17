@@ -446,48 +446,7 @@ impl Render for AudiobookPlayer {
                 .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).line_height(relative(1.08)).child(book.title.clone()))
         };
 
-        let mut speed_menu = div()
-            .absolute()
-            .right_0()
-            .bottom(px(42.0))
-            .w(px(176.0))
-            .p(px(8.0))
-            .rounded(px(0.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.raised_bg)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(div().px(px(10.0)).pt(px(5.0)).pb(px(7.0)).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Playback speed"))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for rate in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
-            let option_target = target.clone();
-            speed_menu = speed_menu.child(
-                div()
-                    .id(format!("speed-{rate}"))
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(12.0))
-                    .py(px(9.0))
-                    .rounded(px(0.0))
-                    .text_size(px(13.0))
-                    .hover(|style| style.bg(theme.accent_soft))
-                    .when((rate - current_rate).abs() < f64::EPSILON, |row| row.bg(theme.accent_soft).text_color(theme.accent))
-                    .child(format_playback_rate(rate))
-                    .when((rate - current_rate).abs() < f64::EPSILON, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        let _ = option_target.update(cx, |this, cx| {
-                            this.set_rate(rate);
-                            cx.notify();
-                        });
-                    }),
-            );
-        }
+        let speed_menu = playback_speed_menu(target.clone(), current_rate, theme);
 
         let mut chapter_list = div().flex().flex_col().gap(px(2.0)).child(
             div()
@@ -566,9 +525,8 @@ impl Render for AudiobookPlayer {
             )
             .child(div().id("chapter-scroll").flex_1().min_h_0().overflow_y_scrollbar().px(px(10.0)).py(px(10.0)).child(chapter_list))
             .child(
-                div().flex_none().relative().w_full().px(px(24.0)).pt(px(15.0)).pb(px(17.0)).bg(theme.surface).border_t_1().border_color(theme.border).child(progress_row).child(
+                div().flex_none().relative().w_full().px(px(24.0)).pt(px(15.0)).pb(px(17.0)).bg(theme.surface).border_t_1().border_color(theme.border).child(
                     div()
-                        .mt(px(4.0))
                         .relative()
                         .w_full()
                         .flex()
@@ -620,7 +578,7 @@ impl Render for AudiobookPlayer {
                                 });
                             },
                         ))),
-                ),
+                ).child(div().mt(px(8.0)).child(progress_row)),
             )
             .when_some(self.error.clone(), |column, error| column.child(div().absolute().left(px(16.0)).right(px(16.0)).top(px(16.0)).p(px(10.0)).rounded(px(0.0)).bg(theme.accent_soft).text_color(theme.danger).child(error)))
     }
@@ -666,9 +624,16 @@ impl Render for AudiobookDock {
                 .into_any_element();
         }
 
-        let (publication, error, playing, position) = {
+        let (publication, error, playing, position, current_rate, speed_menu_open) = {
             let player = self.player.read(cx);
-            (player.publication.clone(), player.error.clone(), player.is_playing(), player.position())
+            (
+                player.publication.clone(),
+                player.error.clone(),
+                player.is_playing(),
+                player.position(),
+                player.controller.as_ref().map(PlaybackController::rate).unwrap_or(1.0),
+                player.speed_menu_open,
+            )
         };
 
         let Some(book) = publication else {
@@ -691,15 +656,21 @@ impl Render for AudiobookDock {
         };
 
         let position = position.min(book.duration);
-        let progress = playback_progress(position, book.duration) / 100.0;
         let active_chapter = self.player.read(cx).active_chapter_index();
-        let chapter_title = chapter_display_title(&book.chapters[active_chapter].title);
+        let chapter = &book.chapters[active_chapter];
+        let chapter_title = chapter_display_title(&chapter.title);
+        let chapter_start = chapter.start;
+        let chapter_end = chapter.end;
+        let chapter_duration = chapter_end.saturating_sub(chapter_start);
+        let chapter_position = position.saturating_sub(chapter_start).min(chapter_duration);
+        let progress = playback_progress(chapter_position, chapter_duration) / 100.0;
         let player_target = self.player.downgrade();
         let play_target = player_target.clone();
         let back_target = player_target.clone();
         let forward_target = player_target.clone();
         let previous_target = player_target.clone();
-        let next_target = player_target;
+        let next_target = player_target.clone();
+        let rate_target = player_target.clone();
         let progress_target = self.player.downgrade();
         let progress_bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
         let painted_progress_bounds = progress_bounds.clone();
@@ -739,8 +710,8 @@ impl Render for AudiobookDock {
                 if width <= 0.0 {
                     return;
                 }
-                let fraction = (f32::from(mouse_position.x - bounds.left()) / width).clamp(0.0, 1.0);
-                let target = book.duration.mul_f32(fraction);
+                let fraction = f32::from(mouse_position.x - bounds.left()) / width;
+                let target = chapter_position_at_fraction(chapter_start, chapter_end, fraction);
                 let _ = progress_target.update(cx, |player, cx| {
                     player.seek_to(target);
                     cx.notify();
@@ -748,36 +719,55 @@ impl Render for AudiobookDock {
             })
             .child(div().relative().w_full().h(px(5.0)).bg(theme.surface_alt).child(div().absolute().left_0().top_0().h_full().w(relative(progress)).bg(theme.accent)));
 
+        let speed_menu = playback_speed_menu(player_target, current_rate, theme);
+
         div()
             .w_full()
-            .h(px(92.0))
+            .h(px(176.0))
             .relative()
             .flex_none()
             .flex()
-            .items_center()
-            .gap(px(14.0))
-            .px(px(16.0))
+            .flex_col()
+            .gap(px(4.0))
+            .px(px(12.0))
+            .py(px(8.0))
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.surface)
             .text_color(theme.text)
-            .child(cover)
             .child(
                 div()
-                    .w(px(220.0))
-                    .min_w_0()
-                    .flex_none()
+                    .w_full()
+                    .min_h(px(56.0))
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(book.title.clone()))
-                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.0)).text_color(theme.text_muted).child(chapter_title)),
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(cover)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(book.title.clone()))
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.0)).text_color(theme.text_muted).child(chapter_title)),
+                    )
+                    .child(div().id("audiobook-expand").cursor_pointer().px(px(10.0)).py(px(8.0)).font_weight(FontWeight::SEMIBOLD).child("Chapters").on_click(move |_, _, cx| {
+                        let _ = expand_dock.update(cx, |dock, cx| dock.toggle_expanded(cx));
+                    }))
+                    .child(div().id("audiobook-close").cursor_pointer().size(px(36.0)).flex_none().flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
+                        let _ = close_dock.update(cx, |dock, cx| dock.close(cx));
+                    })),
             )
             .child(
                 div()
-                    .flex_none()
+                    .relative()
+                    .w_full()
+                    .min_h(px(48.0))
                     .flex()
                     .items_center()
+                    .justify_center()
                     .gap(px(2.0))
                     .child(transport_control("dock-previous-chapter", chapter_icon(false, theme), theme).on_click(move |_, _, cx| {
                         let _ = previous_target.update(cx, |player, cx| {
@@ -808,25 +798,25 @@ impl Render for AudiobookDock {
                             player.next_chapter();
                             cx.notify();
                         });
-                    })),
+                    }))
+                    .child(div().relative().ml(px(6.0)).when(speed_menu_open, |wrapper| wrapper.child(speed_menu)).child(speed_control(format_playback_rate(current_rate), speed_menu_open, theme).on_click(move |_, _, cx| {
+                        let _ = rate_target.update(cx, |player, cx| {
+                            player.toggle_speed_menu();
+                            cx.notify();
+                        });
+                    }))),
             )
             .child(
                 div()
-                    .min_w(px(180.0))
-                    .flex_1()
+                    .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .child(progress_track)
-                    .child(div().flex().justify_between().text_size(px(11.0)).text_color(theme.text_muted).child(format_time(position)).child(format_time(book.duration))),
+                    .child(div().flex().justify_between().text_size(px(11.0)).text_color(theme.text_muted).child(format_time(chapter_position)).child(format_time(chapter_duration))),
             )
-            .child(div().id("audiobook-expand").cursor_pointer().px(px(10.0)).py(px(8.0)).font_weight(FontWeight::SEMIBOLD).child("Chapters").on_click(move |_, _, cx| {
-                let _ = expand_dock.update(cx, |dock, cx| dock.toggle_expanded(cx));
-            }))
-            .child(div().id("audiobook-close").cursor_pointer().size(px(36.0)).flex_none().flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
-                let _ = close_dock.update(cx, |dock, cx| dock.close(cx));
-            }))
-            .when_some(error, |dock, error| dock.child(div().absolute().left(px(16.0)).bottom(px(96.0)).p(px(8.0)).bg(theme.raised_bg).text_color(theme.danger).child(error)))
+            .when_some(error, |dock, error| dock.child(div().absolute().left(px(16.0)).bottom(px(180.0)).p(px(8.0)).bg(theme.raised_bg).text_color(theme.danger).child(error)))
             .into_any_element()
     }
 }
@@ -850,6 +840,52 @@ fn speed_control(label: impl Into<SharedString>, open: bool, theme: ui_component
         .text_size(px(12.0))
         .font_weight(FontWeight::BOLD)
         .child(label.into())
+}
+
+fn playback_speed_menu(target: gpui::WeakEntity<AudiobookPlayer>, current_rate: f64, theme: ui_components::BrowserTheme) -> gpui::Div {
+    let mut menu = div()
+        .absolute()
+        .right_0()
+        .bottom(px(42.0))
+        .w(px(176.0))
+        .p(px(8.0))
+        .rounded(px(0.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.raised_bg)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(div().px(px(10.0)).pt(px(5.0)).pb(px(7.0)).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Playback speed"))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    for rate in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+        let option_target = target.clone();
+        menu = menu.child(
+            div()
+                .id(format!("speed-{rate}"))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(12.0))
+                .py(px(9.0))
+                .rounded(px(0.0))
+                .text_size(px(13.0))
+                .hover(|style| style.bg(theme.accent_soft))
+                .when((rate - current_rate).abs() < f64::EPSILON, |row| row.bg(theme.accent_soft).text_color(theme.accent))
+                .child(format_playback_rate(rate))
+                .when((rate - current_rate).abs() < f64::EPSILON, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let _ = option_target.update(cx, |player, cx| {
+                        player.set_rate(rate);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    menu
 }
 
 fn format_playback_rate(rate: f64) -> String {
