@@ -284,8 +284,31 @@ let databasePromise: Promise<WebDatabase> | undefined;
 const BACKUP_DATABASE_NAME = "bokheim-web-database";
 const BACKUP_STORE_NAME = "sqlite";
 const BACKUP_KEY = "bokheim-web-v4.sqlite3";
+const OPFS_BACKUP_KEY = "bokheim-web-v4.backup.sqlite3";
 
-function backupDatabase(): Promise<IDBDatabase | null> {
+function unavailableFileStorage(reason: unknown): boolean {
+  return reason instanceof DOMException && [
+    "SecurityError",
+    "NotAllowedError",
+    "NotSupportedError",
+    "InvalidStateError",
+  ].includes(reason.name);
+}
+
+async function backupFile(create: boolean): Promise<FileSystemFileHandle | null> {
+  const storage = (globalThis.navigator as Navigator | undefined)?.storage;
+  if (!storage?.getDirectory) return null;
+  try {
+    const root = await storage.getDirectory();
+    return await root.getFileHandle(OPFS_BACKUP_KEY, { create });
+  } catch (reason) {
+    if (!create && reason instanceof DOMException && reason.name === "NotFoundError") return null;
+    if (unavailableFileStorage(reason)) return null;
+    throw reason;
+  }
+}
+
+function indexedDbBackupDatabase(): Promise<IDBDatabase | null> {
   if (!("indexedDB" in globalThis)) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(BACKUP_DATABASE_NAME, 1);
@@ -296,7 +319,10 @@ function backupDatabase(): Promise<IDBDatabase | null> {
 }
 
 async function loadDatabaseBackup(): Promise<Uint8Array | null> {
-  const backup = await backupDatabase();
+  const file = await backupFile(false);
+  if (file) return new Uint8Array(await (await file.getFile()).arrayBuffer());
+
+  const backup = await indexedDbBackupDatabase();
   if (!backup) return null;
   try {
     return await new Promise((resolve, reject) => {
@@ -313,12 +339,26 @@ async function loadDatabaseBackup(): Promise<Uint8Array | null> {
 }
 
 async function saveDatabaseBackup(bytes: Uint8Array): Promise<boolean> {
-  const backup = await backupDatabase();
+  const file = await backupFile(true);
+  if (file) {
+    const writable = await file.createWritable();
+    try {
+      await writable.write(bytes.slice().buffer);
+      await writable.close();
+      return true;
+    } catch (reason) {
+      await writable.abort().catch(() => undefined);
+      throw reason;
+    }
+  }
+
+  const backup = await indexedDbBackupDatabase();
   if (!backup) return false;
   try {
     await new Promise<void>((resolve, reject) => {
       const transaction = backup.transaction(BACKUP_STORE_NAME, "readwrite");
-      transaction.objectStore(BACKUP_STORE_NAME).put(bytes, BACKUP_KEY);
+      const request = transaction.objectStore(BACKUP_STORE_NAME).put(bytes, BACKUP_KEY);
+      request.onerror = () => reject(request.error ?? new Error("Could not save the browser database backup"));
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error ?? new Error("Could not save the browser database backup"));
       transaction.onabort = () => reject(transaction.error ?? new Error("Saving the browser database backup was aborted"));
