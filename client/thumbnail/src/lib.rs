@@ -2,18 +2,8 @@
 
 #[cfg(feature = "publication-extractors")]
 use epub_provider::EpubProvider;
-#[cfg(feature = "epub-page-render")]
-use epub_provider::ResourceProvider;
 use fast_image_resize::images::Image;
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-#[cfg(feature = "epub-page-render")]
-use gpui::{px, size, AppContext as _, Empty, HeadlessAppContext, PlatformTextSystem as _};
-#[cfg(feature = "epub-page-render")]
-use gpui_wgpu::CosmicTextSystem;
-#[cfg(feature = "epub-page-render")]
-use html_view_core::RendererInitialConfig;
-#[cfg(feature = "epub-page-render")]
-use html_view_gpui::HtmlView;
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::io::Reader as ImageReader;
 use image::{ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, RgbImage};
@@ -26,10 +16,6 @@ use std::io::{BufWriter, Cursor};
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(feature = "publication-extractors")]
 use std::path::Path;
-#[cfg(feature = "epub-page-render")]
-use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(feature = "epub-page-render")]
-use std::time::{Duration, Instant};
 
 /// Covers are displayed at `LARGE_BOOK_COVER_WIDTH_PX` *logical* pixels, so the
 /// stored asset has to carry the device pixel ratio too: 200 logical at DPR 3
@@ -47,15 +33,11 @@ const EPUB_FALLBACK_MIN_WIDTH: u32 = 300;
 const EPUB_FALLBACK_MIN_HEIGHT: u32 = 400;
 const EPUB_FALLBACK_MIN_ASPECT_RATIO: f64 = 0.45;
 const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
-#[cfg(feature = "epub-page-render")]
-const EPUB_PAGE_HEIGHT: u32 = 900;
 
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Extracts a publication cover and returns a resized JPEG. With
-/// `epub-page-render`, an EPUB without cover art uses a rendering of its first
-/// spine page. Other publications with no cover, and formats without an
-/// extractor, return `None`.
+/// Extracts a publication cover and returns a resized JPEG. Publications with
+/// no usable embedded cover, and formats without an extractor, return `None`.
 #[cfg(feature = "publication-extractors")]
 pub fn generate_thumbnail(book_path: &Path) -> ThumbnailResult<Option<Vec<u8>>> {
     let extension = book_path.extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
@@ -102,10 +84,6 @@ fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
         }
     }
 
-    #[cfg(feature = "epub-page-render")]
-    return render_epub_first_page(epub).map(Some);
-
-    #[cfg(not(feature = "epub-page-render"))]
     Ok(None)
 }
 
@@ -118,55 +96,6 @@ pub fn reasonable_cover_dimensions(width: u32, height: u32) -> bool {
     }
     let aspect_ratio = f64::from(width) / f64::from(height);
     (EPUB_FALLBACK_MIN_ASPECT_RATIO..=EPUB_FALLBACK_MAX_ASPECT_RATIO).contains(&aspect_ratio)
-}
-
-/// Renders are serialized because each headless GPUI context owns a GPU-backed
-/// renderer. EPUBs with embedded covers continue through the parallel image
-/// path and never acquire this lock.
-#[cfg(feature = "epub-page-render")]
-fn render_epub_first_page(epub: EpubProvider) -> ThumbnailResult<RgbImage> {
-    static RENDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _render_guard = RENDER_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    let document_uris = epub.list_html_candidates("")?;
-    if document_uris.is_empty() {
-        return Err("EPUB contains no readable spine documents to render as a cover".into());
-    }
-
-    let text_system = Arc::new(CosmicTextSystem::new("sans-serif"));
-    if text_system.all_font_names().is_empty() {
-        return Err("no system fonts are available for EPUB cover rendering".into());
-    }
-    let mut context = HeadlessAppContext::with_platform_and_scale_factor(text_system, Arc::new(()), gpui_platform::current_headless_renderer, 1.0);
-    let window = context.open_window(size(px(THUMBNAIL_WIDTH as f32), px(EPUB_PAGE_HEIGHT as f32)), |_, cx| cx.new(|_| Empty))?;
-    let window = window.into();
-    let provider: Arc<dyn html_view_core::ResourceProvider> = Arc::new(epub);
-    let view = context.update_window(window, |_, window, cx| {
-        window.replace_root(cx, move |window, cx| {
-            let config = RendererInitialConfig { font_size: 18.0, column_width: THUMBNAIL_WIDTH as f64, max_column_count: Some(1), ..RendererInitialConfig::default() };
-            HtmlView::from_provider(provider, document_uris, 0, None, config, window, cx)
-        })
-    })?;
-    context.run_until_parked();
-
-    // The initial paint schedules visible resource decoding. Capture subsequent
-    // frames until the page has settled so images are not replaced by their
-    // loading placeholders in the generated cover.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut screenshot = context.capture_screenshot(window)?;
-    while context.update(|cx| view.read(cx).has_pending_resources()) {
-        if Instant::now() >= deadline {
-            return Err("timed out waiting for first-page EPUB resources".into());
-        }
-        context.advance_clock(Duration::from_millis(16));
-        context.run_until_parked();
-        std::thread::yield_now();
-        screenshot = context.capture_screenshot(window)?;
-    }
-
-    let (width, height) = screenshot.dimensions();
-    let rgb = screenshot.pixels().flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect();
-    RgbImage::from_raw(width, height, rgb).ok_or_else(|| "EPUB renderer returned invalid image dimensions".into())
 }
 
 #[cfg(feature = "publication-extractors")]
@@ -291,7 +220,7 @@ fn encode_thumbnail(decoded: RgbImage) -> ThumbnailResult<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+mod core_tests {
     use super::*;
 
     #[test]
@@ -352,7 +281,7 @@ fn image_format(path: &str) -> Option<ImageFormat> {
 }
 
 #[cfg(all(test, feature = "publication-extractors"))]
-mod tests {
+mod publication_extractor_tests {
     use super::*;
     use mobi::record::PdbRecord;
     use std::io::Write;
@@ -427,34 +356,4 @@ mod tests {
         assert!(center[0] > 170 && center[1] < 55 && center[2] < 45, "unexpected fallback pixel: {center:?}");
     }
 
-    #[cfg(feature = "epub-page-render")]
-    #[test]
-    #[ignore = "requires a local WGPU headless renderer"]
-    fn renders_first_epub_page_when_cover_art_is_absent() {
-        let file = tempfile::Builder::new().suffix(".epub").tempfile().unwrap();
-        let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
-        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        archive.start_file("mimetype", stored).unwrap();
-        archive.write_all(b"application/epub+zip").unwrap();
-        archive.start_file("META-INF/container.xml", deflated).unwrap();
-        archive
-            .write_all(br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#)
-            .unwrap();
-        archive.start_file("EPUB/package.opf", deflated).unwrap();
-        archive
-            .write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Fallback Page</dc:title></metadata><manifest><item id="page" href="page.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="page"/></spine></package>"#)
-            .unwrap();
-        archive.start_file("EPUB/page.xhtml", deflated).unwrap();
-        archive
-            .write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><style>body { background: #efe2bb; color: #173a32; text-align: center; padding: 120px 40px; } h1 { font-size: 56px; }</style></head><body><h1>Fallback Page</h1><p>This EPUB intentionally has no cover image.</p></body></html>"#)
-            .unwrap();
-        archive.finish().unwrap();
-
-        let jpeg = generate_thumbnail(file.path()).unwrap().expect("rendered first-page thumbnail");
-        assert_eq!(image::guess_format(&jpeg).unwrap(), ImageFormat::Jpeg);
-        let rendered = image::load_from_memory(&jpeg).unwrap().to_rgb8();
-        assert_eq!(rendered.dimensions(), (THUMBNAIL_WIDTH, EPUB_PAGE_HEIGHT));
-        assert!(rendered.pixels().filter(|pixel| pixel.0 != [255, 255, 255]).count() > 100_000);
-    }
 }

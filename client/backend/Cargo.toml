@@ -25,7 +25,7 @@ path = "tests/blake3_hash_benchmark.rs"
 
 [features]
 default = ["desktop"]
-desktop = ["watcher", "pdf", "thumbnail/epub-page-render"]
+desktop = ["watcher", "pdf"]
 scanner = []
 watcher = ["scanner", "dep:notify"]
 pdf = ["dep:pdf-reader-core", "thumbnail/pdf"]
