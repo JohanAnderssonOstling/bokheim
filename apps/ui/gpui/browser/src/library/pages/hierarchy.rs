@@ -85,7 +85,7 @@ impl<P: Render + 'static> HierarchySplits<P> {
         let mut actions = components::browser_topbar_right()
             .child(components::topbar_icon_action_button(format!("add-{id_prefix}-split-{}", self.pane_id), "Add split", IconName::PanelRightOpen, theme).on_click(move |_, window, cx| add(add_page.clone(), window, cx)));
         if self.is_secondary() {
-            actions = actions.child(components::topbar_icon_action_button(format!("close-{id_prefix}-split-{}", self.pane_id), "Close this split", IconName::PanelRightClose, theme).on_click(move |_, _, cx| close(page.clone(), cx)));
+            actions = actions.child(components::topbar_icon_action_button(format!("close-{id_prefix}-split-{}", self.pane_id), "Close this split", IconName::Close, theme).on_click(move |_, _, cx| close(page.clone(), cx)));
         }
         actions
     }
@@ -569,7 +569,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         div().w_full().flex_1().min_h_0().flex().flex_col().child(query).into_any_element()
     }
 
-    fn render_header<P, SetPath>(&self, root_label: &'static str, breadcrumb_actions: gpui::Div, control_actions: gpui::Div, show_controls: bool, page: Entity<P>, set_path: SetPath, cx: &mut Context<P>) -> gpui::AnyElement
+    fn render_header<P, SetPath>(&self, root_label: &'static str, split_actions: gpui::Div, control_actions: gpui::Div, show_controls: bool, page: Entity<P>, set_path: SetPath, cx: &mut Context<P>) -> gpui::AnyElement
     where
         P: 'static,
         SetPath: Fn(&mut P, Vec<C>, &mut Window, &mut Context<P>) + Clone + 'static,
@@ -614,8 +614,16 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
             .justify_start()
             .child(breadcrumb.flex_none())
             .child(gpui::div().w(gpui::px(1.0)).h(gpui::px(1.0)).flex_none());
-        let breadcrumb_row = gpui::div().w_full().min_w_0().flex().items_center().gap(gpui::px(components::SPACE_MD)).child(breadcrumb_viewport).child(breadcrumb_actions);
-        let control_row = gpui::div().w_full().min_w_0().flex().flex_wrap().items_center().gap(gpui::px(components::SPACE_MD)).child(controls.min_w(gpui::px(180.0)).justify_start()).child(control_actions.flex_none());
+        let breadcrumb_row = gpui::div().w_full().min_w_0().flex().items_center().child(breadcrumb_viewport);
+        let control_row = gpui::div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(gpui::px(components::SPACE_MD))
+            .child(controls.min_w_0().justify_start())
+            .child(control_actions.flex_none())
+            .child(split_actions.flex_none());
         components::browser_stacked_topbar(theme).child(breadcrumb_row).when(show_controls, |header| header.child(control_row)).into_any_element()
     }
 

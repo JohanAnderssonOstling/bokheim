@@ -64,7 +64,7 @@ pub fn navigation_icon(icon: app_contract::NavigationIcon) -> Icon {
 }
 
 pub fn browser_search_box() -> Div {
-    div().w_full().max_w(px(480.0)).min_w_0().h(px(TOPBAR_ACTION_HEIGHT)).flex_1()
+    div().w_full().min_w_0().h(px(TOPBAR_ACTION_HEIGHT)).flex_1()
 }
 
 /// A text input that searches or filters.
