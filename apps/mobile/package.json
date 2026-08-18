@@ -11,7 +11,7 @@
     "prebuild": "npm run apply:vendor",
     "build": "npm run build:web-core && BOKHEIM_FRONTEND_OUT_DIR=dist vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test:cfi": "node scripts/check-cfi-parity.mjs",
     "test:catalog": "node --test src/lib/catalog.test.ts",
     "test:semantic-links": "node --test src/lib/semantic-links.test.ts",
