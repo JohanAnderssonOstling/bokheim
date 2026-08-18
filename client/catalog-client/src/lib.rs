@@ -13,7 +13,7 @@ use catalog_core::{opds_publication, opds_search, wide_search_concurrency};
 #[cfg(test)]
 use catalog_contract::CatalogBookFormat;
 use catalog_contract::{
-    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogSearch, CatalogSearchQuery,
+    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction, CatalogSearch, CatalogSearchQuery,
     CatalogSource, CatalogSourceId, CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
 };
 use futures_util::stream::{self, StreamExt};
@@ -598,7 +598,7 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use catalog_contract::{
-        CatalogAuthorDiscoveryEvidence, CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme, CatalogPublicationIdentity,
+        CatalogAuthorDiscoveryEvidence, CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme, CatalogPublicationIdentity,
         CatalogSearchDefinition, CatalogSearchField,
     };
     use image::{DynamicImage, ImageOutputFormat};

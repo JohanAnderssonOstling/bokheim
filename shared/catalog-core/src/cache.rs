@@ -3106,7 +3106,9 @@ mod tests {
         let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
         cache.ensure_source(&source_id(), "https://example.com/opds").unwrap();
         let crawl = cache.begin_crawl(&source_id(), "https://example.com/opds").unwrap();
-        let books = page("https://example.com/opds", vec![importable_epub("history-one", None), importable_epub("history-two", None)]);
+        let mut books = page("https://example.com/opds", vec![importable_epub("history-one", None), importable_epub("history-two", None)]);
+        books.publications[0].title = "First History".to_owned();
+        books.publications[1].title = "Second History".to_owned();
         cache.stage_page(&crawl, &books, None, None).unwrap();
         let history = PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap();
         let dewey = PublicationSubject::new(None, "515.33", "openlibrary", Some("ddc".to_owned()), Some("515.33".to_owned())).unwrap();
@@ -3152,7 +3154,7 @@ mod tests {
             locator: Some(locator.clone()),
             supported_languages: vec!["en".to_owned()],
             source_ids: vec![source_id()],
-            query: "HISTORY-ONE".to_owned(),
+            query: "FIRST HISTORY".to_owned(),
             limit: 10,
         });
         let searched = searched.unwrap();

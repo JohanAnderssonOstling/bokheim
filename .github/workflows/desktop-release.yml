@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-appimage-release-${{ github.ref }}
+  group: desktop-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -199,7 +199,7 @@ jobs:
             --clobber
 
   build-windows:
-    name: x86-64 Windows portable
+    name: x86-64 Windows installer
     runs-on: windows-2025
     timeout-minutes: 120
 
@@ -257,14 +257,14 @@ jobs:
           }
           "PDFIUM_ARCHIVE_PATH=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Check tagged version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Read and check desktop version
         working-directory: bokheim
         shell: pwsh
         run: |
           $line = Select-String -Path "apps/desktop-gpui/Cargo.toml" -Pattern '^version = "([^"]+)"' | Select-Object -First 1
           $version = $line.Matches[0].Groups[1].Value
-          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+          "BOKHEIM_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($env:GITHUB_REF.StartsWith("refs/tags/") -and "v$version" -ne $env:GITHUB_REF_NAME) {
             throw "Tag $env:GITHUB_REF_NAME does not match desktop version v$version"
           }
 
@@ -283,33 +283,38 @@ jobs:
         shell: pwsh
         run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui --no-default-features --features desktop
 
-      - name: Package Windows portable build
+      - name: Build Windows installer
         working-directory: bokheim
         shell: pwsh
         run: |
-          $package = "Bokheim-Windows-x86_64.zip"
-          $updaterExecutable = "Bokheim-Windows-x86_64.exe"
-          New-Item -ItemType Directory -Force -Path "release", "windows-package" | Out-Null
-          Copy-Item "target/release/desktop-gpui.exe" "windows-package/Bokheim.exe"
-          Copy-Item "target/release/desktop-gpui.exe" "release/$updaterExecutable"
-          Compress-Archive -Path "windows-package/Bokheim.exe" -DestinationPath "release/$package" -CompressionLevel Optimal
-          foreach ($asset in @($package, $updaterExecutable)) {
-            $hash = (Get-FileHash -Algorithm SHA256 "release/$asset").Hash.ToLowerInvariant()
-            "$hash  $asset" | Out-File -FilePath "release/$asset.sha256" -Encoding ascii
+          $installer = "Bokheim-Windows-x86_64-Setup.exe"
+          $sourceExe = (Resolve-Path "target/release/desktop-gpui.exe").Path
+          $iconFile = (Resolve-Path "apps/mobile/src-tauri/icons/icon.ico").Path
+          $outputDir = Join-Path $PWD "release"
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          $isccCommand = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          $iscc = if ($isccCommand) { $isccCommand.Source } else { "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (!(Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found"
           }
+          & $iscc "/DMyAppVersion=$env:BOKHEIM_VERSION" "/DSourceExe=$sourceExe" "/DOutputDir=$outputDir" "/DIconFile=$iconFile" "apps/desktop-gpui/windows/Bokheim.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 "release/$installer").Hash.ToLowerInvariant()
+          "$hash  $installer" | Out-File -FilePath "release/$installer.sha256" -Encoding ascii
 
-      - name: Verify Windows portable payload
+      - name: Verify Windows installer
         working-directory: bokheim
         shell: pwsh
         run: |
-          Expand-Archive -Path "release/Bokheim-Windows-x86_64.zip" -DestinationPath "$env:RUNNER_TEMP/bokheim-windows-verify"
-          $executable = "$env:RUNNER_TEMP/bokheim-windows-verify/Bokheim.exe"
-          if (!(Test-Path $executable) -or (Get-Item $executable).Length -eq 0) {
-            throw "The Windows archive does not contain a non-empty Bokheim.exe"
+          $installer = "release/Bokheim-Windows-x86_64-Setup.exe"
+          if (!(Test-Path $installer) -or (Get-Item $installer).Length -eq 0) {
+            throw "The Windows installer is missing or empty"
           }
-          $signature = [System.IO.File]::ReadAllBytes($executable)[0..1]
+          $signature = [System.IO.File]::ReadAllBytes($installer)[0..1]
           if ($signature[0] -ne 0x4d -or $signature[1] -ne 0x5a) {
-            throw "Bokheim.exe is not a Windows PE executable"
+            throw "The Windows installer is not a PE executable"
           }
 
       - name: Retain workflow artifact
@@ -335,6 +340,15 @@ jobs:
               --title "Bokheim ${GITHUB_REF_NAME#v}" || \
               gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-release >/dev/null
           fi
+          for obsolete in \
+            Bokheim-Windows-x86_64.zip \
+            Bokheim-Windows-x86_64.zip.sha256 \
+            Bokheim-Windows-x86_64.exe \
+            Bokheim-Windows-x86_64.exe.sha256; do
+            gh release delete-asset "$GITHUB_REF_NAME" "$obsolete" \
+              --repo JohanAnderssonOstling/bokheim-release \
+              --yes >/dev/null 2>&1 || true
+          done
           gh release upload "$GITHUB_REF_NAME" release/* \
             --repo JohanAnderssonOstling/bokheim-release \
             --clobber

@@ -1629,12 +1629,36 @@ fn parse_atom_document(bytes: &[u8]) -> Result<Feed, OpdsError> {
         Err(original_error) => {
             let repaired = String::from_utf8_lossy(bytes).replacen("xmlns=\"https://www.w3.org/2005/Atom\"", "xmlns=\"http://www.w3.org/2005/Atom\"", 1);
             let repaired = escape_non_xml_named_entities(&repaired);
+            let repaired = repair_year_only_atom_timestamps(&repaired);
             if repaired.as_bytes() == bytes {
                 return Err(OpdsError::InvalidCatalog(original_error.to_string()));
             }
             parse(repaired.as_bytes()).map_err(|_| OpdsError::InvalidCatalog(original_error.to_string()))
         }
     }
+}
+
+fn repair_year_only_atom_timestamps(value: &str) -> String {
+    let mut repaired = value.to_owned();
+    for tag in ["published", "updated"] {
+        let opening = format!("<{tag}>");
+        let closing = format!("</{tag}>");
+        let mut cursor = 0;
+        while let Some(relative_start) = repaired[cursor..].find(&opening) {
+            let value_start = cursor + relative_start + opening.len();
+            let Some(relative_end) = repaired[value_start..].find(&closing) else { break };
+            let value_end = value_start + relative_end;
+            let timestamp = repaired[value_start..value_end].trim();
+            if timestamp.len() == 4 && timestamp.bytes().all(|byte| byte.is_ascii_digit()) && timestamp != "0000" {
+                let replacement = format!("{timestamp}-01-01T00:00:00Z");
+                repaired.replace_range(value_start..value_end, &replacement);
+                cursor = value_start + replacement.len() + closing.len();
+            } else {
+                cursor = value_end + closing.len();
+            }
+        }
+    }
+    repaired
 }
 
 fn escape_non_xml_named_entities(value: &str) -> String {
@@ -2981,6 +3005,16 @@ mod tests {
         assert_eq!(resolve_url(&base, "http://opds.openedition.org/?platform=OB&core=publishers").unwrap().as_str(), "https://opds.openedition.org/?platform=OB&core=publishers");
         assert_eq!(resolve_url(&base, "http://other.example/catalog").unwrap().as_str(), "http://other.example/catalog");
         assert_eq!(resolve_url(&base, "http://opds.openedition.org:8080/catalog").unwrap().as_str(), "http://opds.openedition.org:8080/catalog");
+    }
+
+    #[test]
+    fn accepts_openedition_year_only_published_dates() {
+        let feed = OPDS_1.replace("<summary>A summary</summary>", "<summary>A summary</summary><published>2013</published>");
+        let catalog = parse_catalog(Url::parse("https://opds.openedition.org/books").unwrap(), Some("application/atom+xml"), feed.as_bytes()).unwrap();
+        assert_eq!(catalog.publications[0].title, "A Book");
+
+        let malformed = OPDS_1.replace("<summary>A summary</summary>", "<summary>A summary</summary><published>not-a-date</published>");
+        assert!(parse_catalog(Url::parse("https://example.com/books").unwrap(), Some("application/atom+xml"), malformed.as_bytes()).is_err());
     }
 
     #[test]
