@@ -46,6 +46,8 @@
   </div></details>
 </div>
 
+<button class="desktop-back" type="button" onclick={onback}>← <span>Back</span></button>
+
 <article class="book-detail">
   <div class="hero">
     <div class="cover-column">
@@ -88,6 +90,7 @@
 <style>
   .mobile-detail-bar { display: grid; grid-template-columns: 2.75rem minmax(0,1fr) 2.75rem; align-items: center; min-height: 3.5rem; margin: -1.1rem -1rem 1.25rem; padding: env(safe-area-inset-top) .45rem 0; border-bottom: 1px solid var(--color-border); background: var(--color-surface-bg); }
   .mobile-detail-bar > button, summary { display: grid; place-items: center; min-width: 2.75rem; min-height: 2.75rem; border: 0; color: inherit; background: transparent; cursor: pointer; font: 600 1.25rem var(--font-interface-family); list-style: none; }
+  .desktop-back { display: none; align-items: center; gap: .45rem; min-height: 2.5rem; margin: 0 auto 1.25rem; padding: 0 .8rem; border: 1px solid var(--color-border); color: var(--color-accent); background: var(--color-raised-bg); cursor: pointer; font: 600 .8125rem var(--font-interface-family); }
   summary::-webkit-details-marker { display:none; } .mobile-detail-bar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align:center; font-size:.82rem; }
   details { position: relative; } .menu { position:absolute; z-index:12; top:100%; right:0; display:grid; width:max-content; min-width:13rem; padding:.35rem; border:1px solid var(--color-border); border-radius: 0; background:var(--color-raised-bg); box-shadow:0 .8rem 2rem var(--color-box-shadow); }
   .menu button { min-height:2.75rem; padding:.55rem .75rem; border:0; border-radius: 0; color:var(--color-ink-text); background:transparent; text-align:left; cursor:pointer; font:650 .76rem var(--font-interface-family); } .menu button:hover { background-image:linear-gradient(var(--color-hover-overlay),var(--color-hover-overlay)); } .menu .danger { color:var(--color-danger-text); }
@@ -108,7 +111,7 @@
   .description :global(pre) { margin: .65em 0; overflow-x: auto; white-space: pre-wrap; text-align: left; }
   .subjects { display:flex; flex-wrap:wrap; gap:.45rem; margin-top:1.25rem; } .subjects button { min-height:2.2rem; padding:.35rem .7rem; border:1px solid var(--color-border); border-radius: 0; color:var(--color-subtle-text); background:var(--color-raised-bg); cursor:pointer; font:.68rem var(--font-interface-family); } .subjects button:hover { color:var(--color-accent); border-color:var(--color-accent); }
   .toc { margin-top:2.4rem; overflow:hidden; border:1px solid var(--color-border); border-radius: 0; } .toc-heading { display:flex; align-items:center; gap:.65rem; width:100%; min-height:3rem; padding:.55rem .85rem; border:0; color:inherit; background:transparent; cursor:pointer; text-align:left; } .toc-heading span { width:1rem; color:var(--color-subtle-text); } h2 { margin:0; font:600 1.05rem var(--font-interface-family); letter-spacing:-.02em; } .toc-body { padding:.45rem .65rem .75rem; border-top:1px solid var(--color-border); } .toc-body > p { color:var(--color-subtle-text); }
-  @media (min-width:45rem) { .mobile-detail-bar { display:none; } .hero { grid-template-columns:var(--book-cover-width) minmax(0,80ch); gap:2rem; } .desktop-actions { display:block; flex:none; } .desktop-actions summary { border:1px solid var(--color-border); border-radius:50%; font-size:1.15rem; } .description { margin-top:1.5rem; } }
+  @media (min-width:45rem) { .mobile-detail-bar { display:none; } .desktop-back { display: inline-flex; } .hero { grid-template-columns:var(--book-cover-width) minmax(0,80ch); gap:2rem; } .desktop-actions { display:block; flex:none; } .desktop-actions summary { border:1px solid var(--color-border); border-radius:50%; font-size:1.15rem; } .description { margin-top:1.5rem; } }
   @media (max-width:34rem) { .hero { grid-template-columns:minmax(7rem, 34vw) minmax(0,1fr); } }
   @media (prefers-reduced-motion:no-preference) { .cover-button { transition:outline-color .12s ease, transform .08s ease; } }
 </style>
