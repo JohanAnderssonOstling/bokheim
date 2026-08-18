@@ -422,7 +422,7 @@ impl Render for CatalogPublicationCardView {
             detail = detail.pl(px(16.0)).child(metadata);
         }
         if let Some(description) = self.presentation.description.clone() {
-            detail = detail.child(div().flex_1().min_h_0().overflow_hidden().line_clamp(12).line_height(gpui::relative(1.35)).text_size(gpui::rems(13.0 / 16.0)).text_color(theme.text_muted).child(description));
+            detail = detail.child(div().flex_1().min_h_0().overflow_hidden().line_clamp(12).line_height(gpui::relative(1.35)).text_size(gpui::rems(1.0)).text_color(theme.text_muted).child(description));
         }
         if let Some(error) = &self.import_error {
             detail = detail.child(div().h(px(32.0)).flex_none().overflow_hidden().line_clamp(2).text_size(gpui::rems(11.0 / 16.0)).text_color(theme.danger).child(error.clone()));

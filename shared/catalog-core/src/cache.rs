@@ -5,7 +5,7 @@ use catalog_contract::{
 use catalog_model::normalize_search_text;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use catalog_contract::{materialize_page, page_layout, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse};
+use catalog_contract::{CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse, materialize_page, page_layout};
 
 // Keep SQLite's file version at 1 because the additive v2 schema remains
 // writable by the previous binary during an automated deployment rollback.
@@ -1588,6 +1588,7 @@ impl CatalogCache {
 
         let mut child_publications = HashMap::<(String, Option<String>, String), HashSet<(String, String, String)>>::new();
         let mut publications = HashMap::<(String, String, String), CatalogSourcedPublication>::new();
+        let mut direct_publication_keys = HashSet::new();
         let mut popularity = HashMap::<(String, String, String), (bool, i64, i64, u64, i64)>::new();
         let system_id = location.system_id.as_deref().expect("subject system checked above");
         if !browse_subject_system(system_id) {
@@ -1648,6 +1649,12 @@ impl CatalogCache {
                 popularity.insert(key.clone(), (reading_log_count > 0 || rating_count > 0, reading_log_count, rating_count, provider_popularity, sequence));
                 publications.insert(key.clone(), CatalogSourcedPublication { source_id, publication });
             }
+            // Match regular library subject browsing: an unsearched level
+            // lists only books assigned exactly there. Searching within a
+            // subject continues to include matching descendants.
+            if !normalized_query.is_empty() || location.subject_path.as_deref() == Some(subject_path.as_str()) {
+                direct_publication_keys.insert(key.clone());
+            }
             if let Some((child_system, child_path, child_title)) = browse_subject_child(&location, &system_id, &subject_path) {
                 child_publications.entry((child_system, child_path, child_title)).or_default().insert(key.clone());
             }
@@ -1667,7 +1674,7 @@ impl CatalogCache {
             navigation.clear();
         }
 
-        let mut publications = publications.into_values().collect::<Vec<_>>();
+        let mut publications = publications.into_iter().filter_map(|(key, publication)| direct_publication_keys.contains(&key).then_some(publication)).collect::<Vec<_>>();
         publications.sort_by(|left, right| {
             let left_key = (left.source_id.as_str().to_owned(), left.publication.identity.edition_id.clone(), left.publication.identity.work_id.clone().unwrap_or_default());
             let right_key = (right.source_id.as_str().to_owned(), right.publication.identity.edition_id.clone(), right.publication.identity.work_id.clone().unwrap_or_default());
@@ -2271,15 +2278,7 @@ fn upsert_active_publication(transaction: &Transaction<'_>, source_id: &CatalogS
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let sequence = if let Some((previous_hash, sequence)) = previous {
-        if previous_hash == payload_hash {
-            sequence
-        } else {
-            allocate_sequence(transaction, source_id)?
-        }
-    } else {
-        allocate_sequence(transaction, source_id)?
-    };
+    let sequence = if let Some((previous_hash, sequence)) = previous { if previous_hash == payload_hash { sequence } else { allocate_sequence(transaction, source_id)? } } else { allocate_sequence(transaction, source_id)? };
     transaction.execute(
         "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14)
@@ -3130,8 +3129,23 @@ mod tests {
         assert!(root.publications.is_empty());
         let bisac = root.navigation.iter().find(|link| link.title == "BISAC").unwrap();
         let CatalogLinkTarget::Page { locator } = &bisac.target else { panic!("subject roots must be internal links") };
-        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
-        assert_eq!(first.navigation[0].title, "History");
+        let bisac_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        assert_eq!(bisac_root.navigation[0].title, "History");
+        assert!(bisac_root.publications.is_empty(), "a parent level must not include descendant books");
+
+        let CatalogLinkTarget::Page { locator: history_locator } = &bisac_root.navigation[0].target else { panic!("subject children must be internal links") };
+        let history_level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(history_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        assert_eq!(history_level.navigation[0].title, "United States");
+        assert!(history_level.publications.is_empty(), "only exact subject assignments belong at a level");
+
+        let CatalogLinkTarget::Page { locator: country_locator } = &history_level.navigation[0].target else { panic!("subject children must be internal links") };
+        let country_level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(country_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        assert_eq!(country_level.navigation[0].title, "20th Century");
+        assert!(country_level.publications.is_empty());
+
+        let CatalogLinkTarget::Page { locator: leaf_locator } = &country_level.navigation[0].target else { panic!("subject children must be internal links") };
+        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(leaf_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        assert!(first.navigation.is_empty());
         assert_eq!(first.publications.len(), 1);
         assert_eq!(first.publications[0].source_id, source_id());
         assert_eq!(first.publications[0].publication.identity.edition_id, "history-two", "popular books sort first within an equally relevant subject");

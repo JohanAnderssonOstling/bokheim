@@ -151,19 +151,14 @@ impl StorePage {
         &self, response: CatalogSubjectBrowseResponse, owned: std::collections::HashSet<epub_svelte_lib::catalog::CatalogPublicationKey>, levels: Vec<(String, Option<String>)>, cx: &mut Context<Self>,
     ) -> super::SubjectBrowseView {
         let mut seen = std::collections::HashSet::new();
-        let sources = self
-            .sources
-            .iter()
-            .filter_map(|source| {
-                let publications = response.publications.iter().filter(|item| item.source_id == source.id).map(|item| item.publication.clone()).collect::<Vec<_>>();
-                if publications.is_empty() {
-                    return None;
-                }
-                let cards = self.cards.group_unique(source, &publications, &owned, false, &mut seen, cx);
-                Some(super::WideSearchSourceResults { source: source.clone(), cards, external_links: Vec::new() })
-            })
-            .collect();
-        super::SubjectBrowseView { response, owned_publications: owned, levels, sources }
+        let mut cards = self.cards.empty_group();
+        for item in &response.publications {
+            let Some(source) = self.sources.iter().find(|source| source.id == item.source_id) else {
+                continue;
+            };
+            cards.append(self.cards.group_unique(source, std::slice::from_ref(&item.publication), &owned, true, &mut seen, cx));
+        }
+        super::SubjectBrowseView { response, owned_publications: owned, levels, cards }
     }
 
     pub(super) fn load_page(&mut self, locator: Option<String>, cx: &mut Context<Self>) {

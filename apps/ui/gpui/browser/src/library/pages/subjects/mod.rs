@@ -81,6 +81,8 @@ pub(crate) struct SubjectsPage {
     hierarchy: HierarchyState<SubjectCrumb>,
     refresh_request: LatestRequest,
     search_request: LatestRequest,
+    taxonomy_reload_request: LatestRequest,
+    taxonomy_reloading: bool,
     review_request: LatestRequest,
     reviews: Rc<Vec<epub_svelte_lib::library::EditionIdentityReview>>,
     review_status: epub_svelte_lib::library::EditionIdentityReviewStatus,
@@ -110,6 +112,8 @@ impl SubjectsPage {
             ui,
             refresh_request: LatestRequest::default(),
             search_request: LatestRequest::default(),
+            taxonomy_reload_request: LatestRequest::default(),
+            taxonomy_reloading: false,
             review_request: LatestRequest::default(),
             reviews: Rc::new(Vec::new()),
             review_status: epub_svelte_lib::library::EditionIdentityReviewStatus::Ambiguous,
@@ -392,6 +396,34 @@ impl SubjectsPage {
         cx.notify();
     }
 
+    fn reload_taxonomy(&mut self, cx: &mut Context<Self>) {
+        if self.taxonomy_reloading {
+            return;
+        }
+        self.taxonomy_reloading = true;
+        let generation = self.taxonomy_reload_request.begin();
+        let reload = self.ui.reload_unified_taxonomy();
+        let task = cx.spawn(async move |page, cx| {
+            let result = reload.await;
+            let _ = page.update(cx, |page, cx| {
+                if !page.taxonomy_reload_request.is_current(generation) {
+                    return;
+                }
+                page.taxonomy_reloading = false;
+                match result {
+                    Ok(_) => {
+                        page.hierarchy.clear_error();
+                        page.refresh(cx);
+                    }
+                    Err(error) => page.hierarchy.set_error(format!("Taxonomy reload failed: {error}"), cx),
+                }
+                cx.notify();
+            });
+        });
+        self.taxonomy_reload_request.install(task);
+        cx.notify();
+    }
+
     fn split_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
         let page = cx.entity();
         self.splits.actions("subject", page, |page, window, cx| page.update(cx, |page, cx| page.request_split(window, cx)), |page, cx| page.update(cx, |page, cx| page.request_close_split(cx)), cx)
@@ -399,8 +431,9 @@ impl SubjectsPage {
 
     fn control_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = components::browser_theme(cx);
+        let page = cx.entity();
         let selected_file_type = self.hierarchy.file_type();
-        let filter_page = cx.entity();
+        let filter_page = page.clone();
         let file_type_control =
             components::catalog_dropdown_button("subject-file-type", selected_file_type.label(), false, false, theme).h(gpui::px(components::TOPBAR_ACTION_HEIGHT)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
                 epub_svelte_lib::library::LibraryFileTypeFilter::ALL.into_iter().fold(menu, |menu, file_type| {
@@ -410,7 +443,10 @@ impl SubjectsPage {
                     }))
                 })
             });
-        components::browser_topbar_right().child(file_type_control)
+        let label = if self.taxonomy_reloading { "Reloading…" } else { "Reload taxonomy" };
+        components::browser_topbar_right()
+            .child(file_type_control)
+            .child(components::topbar_action_button("reload-taxonomy", label, gpui_component::IconName::Redo2, theme).disabled(self.taxonomy_reloading).on_click(move |_, _, cx| page.update(cx, |page, cx| page.reload_taxonomy(cx))))
     }
 
     /// Searches this subject and every narrower subject beneath it. At the root

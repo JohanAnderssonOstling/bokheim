@@ -62,7 +62,7 @@ struct SubjectBrowseView {
     response: CatalogSubjectBrowseResponse,
     owned_publications: std::collections::HashSet<epub_svelte_lib::catalog::CatalogPublicationKey>,
     levels: Vec<(String, Option<String>)>,
-    sources: Vec<WideSearchSourceResults>,
+    cards: CatalogCardGroup,
 }
 
 struct WideSearchView {

@@ -305,12 +305,9 @@ impl StorePage {
             }
             StoreMode::Subjects(subjects) => {
                 Self::append_link_rows(&mut rows, &subjects.response.navigation, "store-subject-link".to_owned(), link_columns);
-                for source in &subjects.sources {
-                    rows.push(StoreVirtualRow::SourceHeader(source.source.clone()));
-                    Self::append_publication_rows(&mut rows, &source.cards, columns);
-                }
+                Self::append_publication_rows(&mut rows, &subjects.cards, columns);
                 if rows.is_empty() {
-                    rows.push(StoreVirtualRow::Status { source: None, message: "No catalogue books are assigned to this subject yet.".to_owned(), error: false });
+                    rows.push(StoreVirtualRow::Status { source: None, message: "No catalogue books are assigned directly to this subject.".to_owned(), error: false });
                 }
             }
             StoreMode::Catalogue(page) => {

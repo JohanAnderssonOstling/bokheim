@@ -150,6 +150,11 @@ impl LibraryContext {
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 
+    pub(crate) fn reload_unified_taxonomy(&self) -> impl Future<Output = Result<String, String>> + 'static {
+        let operation = self.library.spawn_blocking(move |library| library.reload_unified_taxonomy());
+        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
+    }
+
     pub(crate) fn load_edition_identity_reviews(&self) -> impl Future<Output = Result<Vec<epub_svelte_lib::library::EditionIdentityReview>, String>> + 'static {
         let operation = self.library.spawn_blocking(move |library| library.edition_identity_reviews());
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
