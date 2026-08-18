@@ -835,10 +835,10 @@
       moveViewport(-1);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      goToPage(currentPage + visibleColumns());
+      moveViewport(1);
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
-      goToPage(currentPage - visibleColumns());
+      moveViewport(-1);
     }
   }
 
