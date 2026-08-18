@@ -320,7 +320,14 @@ function indexedDbBackupDatabase(): Promise<IDBDatabase | null> {
 
 async function loadDatabaseBackup(): Promise<Uint8Array | null> {
   const file = await backupFile(false);
-  if (file) return new Uint8Array(await (await file.getFile()).arrayBuffer());
+  if (file) {
+    const stored = await file.getFile();
+    // Creating a file handle precedes its first writable stream. If that
+    // initial write was aborted (quota exhaustion, process termination), an
+    // empty placeholder may remain and must not shadow the older IndexedDB
+    // backup.
+    if (stored.size > 0) return new Uint8Array(await stored.arrayBuffer());
+  }
 
   const backup = await indexedDbBackupDatabase();
   if (!backup) return null;

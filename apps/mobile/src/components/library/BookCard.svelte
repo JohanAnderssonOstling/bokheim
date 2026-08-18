@@ -38,7 +38,11 @@
   let coverUrl = $state("");
   let thumbnailResolved = $state(false);
   let coverElement = $state<HTMLElement>();
+  let actions = $state<HTMLDetailsElement>();
   let thumbnailStarted = false;
+  let longPressTimer: ReturnType<typeof setTimeout> | undefined;
+  let longPressOrigin: { x: number; y: number } | undefined;
+  let suppressOpenUntil = 0;
   const title = $derived(book.title || "Untitled");
   const progress = $derived(Math.min(100, Math.max(0, book.progress ?? 0)));
   const backendDownloadState = $derived(book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded");
@@ -51,6 +55,75 @@
 
   function closeMenu(event: MouseEvent) {
     (event.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
+  }
+
+  function showActions() {
+    suppressOpenUntil = Date.now() + 800;
+    if (actions) actions.open = true;
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = undefined;
+    longPressOrigin = undefined;
+  }
+
+  function startLongPress(event: PointerEvent) {
+    if (event.pointerType === "mouse" || event.button !== 0) return;
+    cancelLongPress();
+    longPressOrigin = { x: event.clientX, y: event.clientY };
+    longPressTimer = setTimeout(() => {
+      longPressTimer = undefined;
+      navigator.vibrate?.(10);
+      showActions();
+    }, 500);
+  }
+
+  function trackLongPress(event: PointerEvent) {
+    if (!longPressOrigin) return;
+    if (Math.hypot(event.clientX - longPressOrigin.x, event.clientY - longPressOrigin.y) > 8) cancelLongPress();
+  }
+
+  function openContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelLongPress();
+    showActions();
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    showActions();
+  }
+
+  function openBook(event: MouseEvent) {
+    if (Date.now() < suppressOpenUntil) {
+      suppressOpenUntil = 0;
+      event.preventDefault();
+      return;
+    }
+    return onopen(book);
+  }
+
+  function contextActions(node: HTMLElement) {
+    node.addEventListener("pointerdown", startLongPress);
+    node.addEventListener("pointerup", cancelLongPress);
+    node.addEventListener("pointercancel", cancelLongPress);
+    node.addEventListener("pointermove", trackLongPress);
+    node.addEventListener("contextmenu", openContextMenu);
+    node.addEventListener("keydown", handleKeydown);
+    return {
+      destroy() {
+        cancelLongPress();
+        node.removeEventListener("pointerdown", startLongPress);
+        node.removeEventListener("pointerup", cancelLongPress);
+        node.removeEventListener("pointercancel", cancelLongPress);
+        node.removeEventListener("pointermove", trackLongPress);
+        node.removeEventListener("contextmenu", openContextMenu);
+        node.removeEventListener("keydown", handleKeydown);
+      },
+    };
   }
 
   async function loadThumbnail() {
@@ -82,8 +155,8 @@
   });
 </script>
 
-<div class="book-card" class:detailed={detailed}>
-  <button class="cover-button" class:detailed type="button" disabled={opening} aria-label={`Open details for ${title}`} onclick={() => onopen(book)}>
+<div class="book-card" class:detailed={detailed} use:contextActions>
+  <button class="cover-button" class:detailed type="button" disabled={opening} aria-label={`Open details for ${title}`} onclick={openBook}>
     <span class="book-cover" class:detailed class:missing={thumbnailResolved && !coverUrl} aria-hidden="true" bind:this={coverElement}>
       {#if coverUrl}
         <img src={coverUrl} alt="" loading="lazy" decoding="async" />
@@ -108,11 +181,9 @@
       {/if}
     </span>
   </span>
-  {#if detailed}<button class="wide-open" type="button" disabled={opening} onclick={() => onopen(book)}>{BOOK_ACTIONS_CONTRACT.open_label}</button>{/if}
-  <details class="book-actions" use:managedMenu>
-    <summary aria-label={`${BOOK_ACTIONS_CONTRACT.menu_label} for ${title}`} title={BOOK_ACTIONS_CONTRACT.menu_label}>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.25"></circle><circle cx="12" cy="12" r="1.25"></circle><circle cx="12" cy="19" r="1.25"></circle></svg>
-    </summary>
+  {#if detailed}<button class="wide-open" type="button" disabled={opening} onclick={openBook}>{BOOK_ACTIONS_CONTRACT.open_label}</button>{/if}
+  <details class="book-actions" bind:this={actions} use:managedMenu>
+    <summary aria-label={`${BOOK_ACTIONS_CONTRACT.menu_label} for ${title}`} tabindex="-1"></summary>
     <div class="book-menu" role="menu">
       {#if downloaded || isWebApp}<button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return onopen(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6.5A3.5 3.5 0 0 1 14 9v10.5H7.5A3.5 3.5 0 0 0 4 23zM20 5.5h-2"></path></svg><span>{BOOK_ACTIONS_CONTRACT.open_label}</span></button>{/if}
       {#if !isWebApp && downloaded}
@@ -159,13 +230,10 @@
   .progress-track i { display: block; height: 100%; border-radius: 0; background: var(--color-accent); }
   .opening { position: absolute; right: 9px; bottom: 9px; left: 9px; padding: 5px; border-radius: 0; color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .75rem; font-weight: 600; }
   .wide-open { display: none; align-items: center; justify-content: center; height: 40px; padding: 0 11px; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-accent); background: var(--color-raised-bg); font-size: .8125rem; font-weight: 600; cursor: pointer; }
-  .book-actions { position: absolute; z-index: 4; top: 5px; right: 5px; }
-  .book-actions summary { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 55%, transparent); box-shadow: none; cursor: pointer; list-style: none; }
+  .book-actions { position: absolute; z-index: 4; top: 0; right: 0; }
+  .book-actions summary { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; list-style: none; }
   .book-actions summary::-webkit-details-marker { display: none; }
-  .book-actions summary svg { width: 18px; height: 18px; fill: currentColor; stroke: none; filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--color-ink-text) 85%, transparent)); }
-  .book-actions summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
-  .book-actions[open] summary { color: var(--color-accent); background: var(--color-raised-bg); }
-  .book-menu { position: absolute; top: calc(100% + 5px); right: 0; display: grid; width: max-content; min-width: 184px; padding: 5px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 13px 32px var(--color-box-shadow); }
+  .book-menu { position: absolute; top: 5px; right: 0; display: grid; width: max-content; min-width: 184px; padding: 5px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 13px 32px var(--color-box-shadow); }
   .book-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 40px; padding: 9px 11px; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .75rem; font-weight: 600; cursor: pointer; }
   .book-menu button svg { width: 17px; height: 17px; }
   .book-menu button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
