@@ -503,8 +503,8 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         let detailed = self.books.uses_detailed_rows();
         let list_id: gpui::SharedString = format!("{grid_id}-with-hierarchy").into();
         let list_page = page.clone();
-        let query = container_query(move |size, window, _| {
-            let width = f32::from(size.width);
+        let query = container_query(move |available, window, _| {
+            let width = f32::from(available.width);
             let hierarchy_width = (width - components::HIERARCHY_LAYOUT_SAFETY).max(components::HIERARCHY_CELL_MIN_WIDTH);
             let (hierarchy_column_count, cell_width) = components::hierarchy_grid_layout(hierarchy_width, children.len(), hierarchy_columns.get());
             hierarchy_columns.set(hierarchy_column_count);

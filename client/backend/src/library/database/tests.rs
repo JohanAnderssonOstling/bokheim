@@ -289,14 +289,17 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
     .unwrap();
 
     let scope = FileTypeScope::load(&conn, app_contract::library::LibraryFileTypeFilter::All).unwrap();
-    let taxonomy_roots = compact_subject_children(&conn, "", false, &scope).unwrap();
+    let (taxonomy_roots, root_books) = compact_subject_children(&conn, "", false, &scope).unwrap();
     assert_eq!(taxonomy_roots.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test"]);
+    assert!(root_books.is_empty());
 
-    let root_children = compact_subject_children(&conn, "Test", false, &scope).unwrap();
-    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / Solo", "Test / United States / Texas"]);
+    let (root_children, root_books) = compact_subject_children(&conn, "Test", false, &scope).unwrap();
+    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas"]);
+    assert_eq!(root_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Solo book"]);
 
-    let texas_children = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
-    assert_eq!(texas_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas / Austin", "Test / United States / Texas / Dallas"]);
+    let (texas_children, texas_books) = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
+    assert!(texas_children.is_empty());
+    assert_eq!(texas_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Austin book", "Dallas book"]);
 }
 
 #[test]
