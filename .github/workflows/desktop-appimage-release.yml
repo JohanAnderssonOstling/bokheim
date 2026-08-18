@@ -183,15 +183,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-releases >/dev/null 2>&1; then
+          if ! gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
-              --repo JohanAnderssonOstling/bokheim-releases \
+              --repo JohanAnderssonOstling/bokheim-release \
               --target main \
               --draft \
               --generate-notes \
               --title "Bokheim ${GITHUB_REF_NAME#v}" || \
-              gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-releases >/dev/null
+              gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-release >/dev/null
           fi
           gh release upload "$GITHUB_REF_NAME" release/* \
-            --repo JohanAnderssonOstling/bokheim-releases \
+            --repo JohanAnderssonOstling/bokheim-release \
             --clobber
