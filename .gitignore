@@ -104,7 +104,6 @@ venv/
 /client/backend/tests/test_folder/
 /reference/plato/
 /data-analysis/
-/apps/mobile/src/vendor/foliate-js/html.js
 /apps/mobile/dummy-non-existing-folder/
 
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
