@@ -3,11 +3,36 @@
 use epub_svelte_lib::AuthorId;
 use epub_svelte_lib::catalog::{CatalogPublication, CatalogSource};
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, Render, SharedString, Task, Window};
+use gpui::{AnyElement, Context, Entity, SharedString, Task, div, px};
+use gpui_component::alert::Alert;
 use ui_components as components;
 
-use crate::catalog::{CatalogCardGroup, CatalogCardServices};
+use crate::catalog::{CatalogCardGroup, CatalogCardItem, CatalogCardServices};
 use crate::library::services::LibraryContext;
+
+const DISCLOSURE_ROW_HEIGHT: f32 = 58.0;
+const STATUS_ROW_HEIGHT: f32 = 66.0;
+const SOURCE_ROW_HEIGHT: f32 = 58.0;
+
+#[derive(Clone)]
+pub(super) enum AuthorDiscoveryVirtualRow {
+    Disclosure { expanded: bool },
+    Status(SharedString),
+    Error(SharedString),
+    SourceHeader { title: String, detail: String },
+    Publications(Vec<CatalogCardItem>),
+}
+
+impl AuthorDiscoveryVirtualRow {
+    pub(super) fn content_height(&self, publication_height: f32) -> f32 {
+        match self {
+            Self::Disclosure { .. } => DISCLOSURE_ROW_HEIGHT,
+            Self::Status(_) | Self::Error(_) => STATUS_ROW_HEIGHT,
+            Self::SourceHeader { .. } => SOURCE_ROW_HEIGHT,
+            Self::Publications(_) => publication_height,
+        }
+    }
+}
 
 struct DiscoveryGroup {
     source: CatalogSource,
@@ -100,43 +125,49 @@ impl AuthorDiscoveryView {
         );
         cx.notify();
     }
-}
 
-impl Render for AuthorDiscoveryView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = components::browser_theme(cx);
-        let contract = &self.ui.contracts().store;
-        let responsive = crate::virtual_grid::ResponsiveColumns::for_element(
-            "author-discovery-grid",
-            crate::virtual_grid::ColumnPolicy::MinimumItemWidth { width: crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px), gap: 16.0 },
-            window,
-            cx,
-        );
-        let columns = responsive.columns(cx);
-
-        let entity = cx.entity();
-        let mut section =
-            components::author_discovery_section().child(components::author_discovery_disclosure("author-discovery-disclosure", "More books by this author", "Search your catalogues", self.expanded, theme).on_click(move |_, _, cx| {
-                entity.update(cx, |view, cx| view.toggle(cx));
-            }));
-
+    pub(super) fn virtual_rows(&self, columns: usize) -> Vec<AuthorDiscoveryVirtualRow> {
+        let mut rows = vec![AuthorDiscoveryVirtualRow::Disclosure { expanded: self.expanded }];
         if !self.expanded {
-            return section;
+            return rows;
         }
         if self.task.is_some() {
-            return section.child(components::browser_inline_note("Searching catalogues…", theme));
+            rows.push(AuthorDiscoveryVirtualRow::Status("Searching catalogues…".into()));
+            return rows;
         }
         if let Some(error) = &self.error {
-            return section.child(gpui_component::alert::Alert::error("author-discovery-error", format!("Catalogue search unavailable: {error}")));
+            rows.push(AuthorDiscoveryVirtualRow::Error(format!("Catalogue search unavailable: {error}").into()));
+            return rows;
         }
-        let Some(groups) = self.groups.as_ref() else { return section };
+        let Some(groups) = self.groups.as_ref() else { return rows };
         if groups.is_empty() {
-            return section.child(components::browser_inline_note("No additional books found in the configured catalogues", theme));
+            rows.push(AuthorDiscoveryVirtualRow::Status("No additional books found in the configured catalogues".into()));
+            return rows;
         }
-
         for group in groups {
-            section = section.child(components::section_header(group.source.title.clone(), format!("{} results", group.count), theme)).child(group.cards.grid(columns));
+            rows.push(AuthorDiscoveryVirtualRow::SourceHeader { title: group.source.title.clone(), detail: format!("{} results", group.count) });
+            rows.extend(group.cards.packed_rows(columns).into_iter().map(AuthorDiscoveryVirtualRow::Publications));
         }
-        responsive.track(section)
+        rows
+    }
+
+    pub(super) fn render_virtual_row(
+        row: &AuthorDiscoveryVirtualRow, index: usize, entity: Entity<Self>, columns: usize, unit_width: f32, publication_height: f32, trailing_gap: f32, theme: components::BrowserTheme,
+    ) -> AnyElement {
+        let content = match row {
+            AuthorDiscoveryVirtualRow::Disclosure { expanded } => {
+                components::author_discovery_disclosure("author-discovery-disclosure", "More books by this author", "Search your catalogues", *expanded, theme)
+                    .on_click(move |_, _, cx| entity.update(cx, |view, cx| view.toggle(cx)))
+                    .into_any_element()
+            }
+            AuthorDiscoveryVirtualRow::Status(message) => components::browser_inline_note(message.clone(), theme).into_any_element(),
+            AuthorDiscoveryVirtualRow::Error(message) => Alert::error(format!("author-discovery-error-{index}"), message.clone()).into_any_element(),
+            AuthorDiscoveryVirtualRow::SourceHeader { title, detail } => components::section_header(title.clone(), detail.clone(), theme).into_any_element(),
+            AuthorDiscoveryVirtualRow::Publications(items) => {
+                let cards = items.iter().map(|item| (item.card.clone(), item.span)).collect::<Vec<_>>();
+                crate::virtual_grid::fixed_spanned_entity_row(&cards, columns, unit_width, publication_height, 16.0).into_any_element()
+            }
+        };
+        div().w_full().h(px(row.content_height(publication_height) + trailing_gap)).flex_none().child(content).into_any_element()
     }
 }

@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 use epub_svelte_lib::AuthorId;
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, container_query, div, px, uniform_list};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window, container_query, div, px, size, uniform_list};
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::v_virtual_list;
 use ui_components as components;
 use ui_components::ScrollableElement;
 
@@ -46,6 +47,7 @@ pub(crate) struct AuthorsPage {
     refresh_request: LatestRequest,
     books_request: LatestRequest,
     _input_subscription: Subscription,
+    _discovery_subscription: Subscription,
 }
 
 impl AuthorsPage {
@@ -59,6 +61,7 @@ impl AuthorsPage {
                 cx.notify();
             }
         });
+        let discovery_subscription = cx.observe(&discovery, |_, _, cx| cx.notify());
         Self {
             ui,
             filter_input,
@@ -73,6 +76,7 @@ impl AuthorsPage {
             refresh_request: LatestRequest::default(),
             books_request: LatestRequest::default(),
             _input_subscription: input_subscription,
+            _discovery_subscription: discovery_subscription,
         }
     }
 
@@ -287,17 +291,86 @@ impl AuthorsPage {
             page.update(cx, |page, cx| page.clear_author(cx));
         });
         let heading = div().flex_none().flex().flex_row().items_center().gap(px(components::SPACE_MD)).child(back).child(components::author_books_heading(author, theme));
-        let mut panel = components::author_books_panel().child(heading);
-        if self.books.is_empty() {
-            panel = panel.child(div().w_full().min_h_0().flex_1().child(components::browser_inline_note("No books found for this author", theme)));
-        } else {
-            panel = panel.child(self.books.render_virtualized("author-books-virtual", window, cx));
-        }
+        let book_views = self.books.virtual_views();
+        let detailed = self.books.uses_detailed_rows();
+        let discovery = self.discovery.clone();
+        let page = cx.entity();
+        let rem_size = f32::from(window.rem_size());
+        let contract = &self.ui.contracts().store;
+        let publication_unit_width = crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px);
+        let publication_height = contract.publication_height_px as f32;
+        let combined = container_query(move |available, _, cx| {
+            let width = f32::from(available.width);
+            let book_capacity = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
+            let (book_columns, book_width) = if detailed {
+                (1, width)
+            } else {
+                crate::virtual_grid::grid_geometry(width, book_capacity, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP)
+            };
+            let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, rem_size) };
+            let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_columns);
+            let local_row_count = book_row_count.max(1);
+            let discovery_columns = crate::virtual_grid::columns_for_width(width, publication_unit_width, 16.0);
+            let discovery_rows = Rc::new(discovery.read(cx).virtual_rows(discovery_columns));
 
-        // Catalogue discovery is independently bounded so its variable-height
-        // results cannot make the book list grow to content and defeat the
-        // virtual viewport above it.
-        panel.child(div().w_full().max_h(px(360.0)).min_h_0().flex_none().child(self.discovery.clone()).overflow_y_scrollbar_with_id("author-discovery-scroll")).into_any_element()
+            let mut item_sizes = Vec::with_capacity(local_row_count + discovery_rows.len());
+            item_sizes.extend((0..local_row_count).map(|row| {
+                let height = if book_views.is_empty() { 66.0 } else { book_row_height };
+                let trailing_gap = if row + 1 == local_row_count { components::SPACE_LG } else { 0.0 };
+                size(px(width), px(height + trailing_gap))
+            }));
+            item_sizes.extend(discovery_rows.iter().enumerate().map(|(index, row)| {
+                let trailing_gap = if index + 1 == discovery_rows.len() { 0.0 } else { components::SPACE_MD };
+                size(px(width), px(row.content_height(publication_height) + trailing_gap))
+            }));
+
+            let render_books = book_views.clone();
+            let render_discovery = discovery.clone();
+            let render_rows = discovery_rows.clone();
+            let list = v_virtual_list(page.clone(), "author-books-and-discovery", Rc::new(item_sizes), move |_, range, _, _| {
+                range
+                    .map(|index| {
+                        if index < local_row_count {
+                            let trailing_gap = if index + 1 == local_row_count { components::SPACE_LG } else { 0.0 };
+                            if render_books.is_empty() {
+                                div()
+                                    .w_full()
+                                    .h(px(66.0 + trailing_gap))
+                                    .flex_none()
+                                    .child(components::browser_inline_note("No books found for this author", theme))
+                                    .into_any_element()
+                            } else if detailed {
+                                div().w_full().h(px(book_row_height + trailing_gap)).flex_none().child(render_books[index].clone()).into_any_element()
+                            } else {
+                                let book_range = crate::virtual_grid::row_range(index, book_columns, render_books.len());
+                                div()
+                                    .w_full()
+                                    .h(px(book_row_height + trailing_gap))
+                                    .flex_none()
+                                    .child(crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_columns, book_width, book_row_height, components::BOOK_GRID_GAP))
+                                    .into_any_element()
+                            }
+                        } else {
+                            let discovery_index = index - local_row_count;
+                            let trailing_gap = if discovery_index + 1 == render_rows.len() { 0.0 } else { components::SPACE_MD };
+                            AuthorDiscoveryView::render_virtual_row(
+                                &render_rows[discovery_index],
+                                discovery_index,
+                                render_discovery.clone(),
+                                discovery_columns,
+                                publication_unit_width,
+                                publication_height,
+                                trailing_gap,
+                                theme,
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            div().size_full().min_h_0().flex().flex_col().child(components::sized_virtual_list(list).flex_1().min_h_0())
+        });
+
+        components::author_books_panel().child(heading).child(div().w_full().flex_1().min_h_0().flex().flex_col().child(combined)).into_any_element()
     }
 }
 
