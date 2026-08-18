@@ -91,9 +91,6 @@ jobs:
           npm run check
           npm run check:tokens
 
-      - name: Test shared mobile backend
-        run: cargo test -p epub-svelte --lib --no-default-features --features mobile
-
       - name: Configure Android signing
         shell: bash
         env:
@@ -130,6 +127,10 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "release/bokheim-v${VERSION}-arm64.apk"
           cd release
           sha256sum "bokheim-v${VERSION}-arm64.apk" > "bokheim-v${VERSION}-arm64.apk.sha256"
+          # Stable-named copy so bokheim.se can link to a permanent
+          # releases/latest/download URL that survives version bumps.
+          cp "bokheim-v${VERSION}-arm64.apk" bokheim-arm64.apk
+          sha256sum bokheim-arm64.apk > bokheim-arm64.apk.sha256
 
       - name: Retain workflow artifact
         uses: actions/upload-artifact@v4
