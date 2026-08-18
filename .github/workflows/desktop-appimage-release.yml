@@ -89,11 +89,12 @@ jobs:
       - name: Restore Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: bokheim-appimage-v2
+          prefix-key: bokheim-appimage-v3
           shared-key: desktop-x86-64
           key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}
           workspaces: bokheim -> target
           cache-on-failure: true
+          cache-workspace-crates: true
 
       - name: Download pinned AppImage packaging tools
         run: |

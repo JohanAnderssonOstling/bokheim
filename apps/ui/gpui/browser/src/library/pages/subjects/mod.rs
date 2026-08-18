@@ -223,6 +223,14 @@ impl SubjectsPage {
     }
 
     fn refresh_reviews(&mut self, cx: &mut Context<Self>) {
+        // Scanner and enrichment batches can emit several catalogue events while
+        // this read is in flight. Replacing the request for every event aborts
+        // each future before it can publish its result, leaving the review page
+        // permanently on its loading state. The active query observes the latest
+        // committed SQLite snapshot when it gets a connection, so let it finish.
+        if self.review_loading {
+            return;
+        }
         let generation = self.review_request.begin();
         self.review_loading = true;
         self.review_error = None;
@@ -765,7 +773,7 @@ impl SubjectsPage {
         if let Some(error) = &self.review_error {
             header_card = header_card.child(gpui_component::alert::Alert::error("isbn-review-error", error.clone()).with_size(gpui_component::Size::Small));
         }
-        let body = if self.review_loading {
+        let body = if self.review_loading && self.reviews.is_empty() {
             components::browser_inline_note("Loading metadata reviews…", theme).into_any_element()
         } else if filtered.is_empty() {
             components::browser_inline_note("No metadata decisions in this status need review.", theme).into_any_element()
