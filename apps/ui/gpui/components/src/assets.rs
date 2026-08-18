@@ -20,7 +20,7 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 37] = [
     ("icons/folder-open.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/folder-open.svg")),
     ("icons/globe.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/globe.svg")),
     ("icons/panel-left-open.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/sidebar-simple.svg")),
-    ("icons/panel-right-open.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/sidebar-simple.svg")),
+    ("icons/panel-right-open.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/sidebar-simple-right.svg")),
     ("icons/pause.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/pause.svg")),
     ("icons/play.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/play.svg")),
     ("icons/plus.svg", include_bytes!("../../../design-tokens/assets/phosphor-light/plus.svg")),
@@ -65,5 +65,23 @@ impl AssetSource for Assets {
             assets.push(APP_ICON_PATH.into());
         }
         Ok(assets)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn phosphor_overrides_are_unique_valid_light_svgs() {
+        let mut paths = HashSet::new();
+        for (path, bytes) in PHOSPHOR_LIGHT_ICONS {
+            assert!(paths.insert(path), "duplicate icon override: {path}");
+            let svg = std::str::from_utf8(bytes).expect("Phosphor SVG must be UTF-8");
+            assert!(svg.starts_with("<svg"), "invalid SVG override: {path}");
+            assert!(svg.contains("viewBox=\"0 0 256 256\""), "unexpected Phosphor viewBox: {path}");
+            assert!(svg.contains("currentColor"), "icon must inherit the GPUI text color: {path}");
+        }
     }
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
 
   import { getThumbnailUrl } from "../../lib/thumbnail-cache";
   import { isDownloadActive, isDownloaded } from "../../lib/download-state";
@@ -39,6 +39,7 @@
   let thumbnailResolved = $state(false);
   let coverElement = $state<HTMLElement>();
   let actions = $state<HTMLDetailsElement>();
+  let menuPosition = $state({ x: 0, y: 0 });
   let thumbnailStarted = false;
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressOrigin: { x: number; y: number } | undefined;
@@ -57,9 +58,19 @@
     (event.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
   }
 
-  function showActions() {
+  async function showActions(x: number, y: number) {
     suppressOpenUntil = Date.now() + 800;
-    if (actions) actions.open = true;
+    if (!actions) return;
+    menuPosition = { x, y };
+    actions.open = true;
+    await tick();
+    const menu = actions.querySelector<HTMLElement>(".book-menu");
+    if (!menu || !actions.open) return;
+    const padding = 8;
+    menuPosition = {
+      x: Math.max(padding, Math.min(x, window.innerWidth - menu.offsetWidth - padding)),
+      y: Math.max(padding, Math.min(y, window.innerHeight - menu.offsetHeight - padding)),
+    };
   }
 
   function cancelLongPress() {
@@ -74,8 +85,10 @@
     longPressOrigin = { x: event.clientX, y: event.clientY };
     longPressTimer = setTimeout(() => {
       longPressTimer = undefined;
+      const origin = longPressOrigin;
+      if (!origin) return;
       navigator.vibrate?.(10);
-      showActions();
+      void showActions(origin.x, origin.y);
     }, 500);
   }
 
@@ -88,13 +101,14 @@
     event.preventDefault();
     event.stopPropagation();
     cancelLongPress();
-    showActions();
+    void showActions(event.clientX, event.clientY);
   }
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
     event.preventDefault();
-    showActions();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    void showActions(rect.left + rect.width / 2, rect.top + rect.height / 2);
   }
 
   function openBook(event: MouseEvent) {
@@ -182,7 +196,7 @@
     </span>
   </span>
   {#if detailed}<button class="wide-open" type="button" disabled={opening} onclick={openBook}>{BOOK_ACTIONS_CONTRACT.open_label}</button>{/if}
-  <details class="book-actions" bind:this={actions} use:managedMenu>
+  <details class="book-actions" style={`left: ${menuPosition.x}px; top: ${menuPosition.y}px;`} bind:this={actions} use:managedMenu>
     <summary aria-label={`${BOOK_ACTIONS_CONTRACT.menu_label} for ${title}`} tabindex="-1"></summary>
     <div class="book-menu" role="menu">
       {#if downloaded || isWebApp}<button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return onopen(book); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h6.5A3.5 3.5 0 0 1 14 9v10.5H7.5A3.5 3.5 0 0 0 4 23zM20 5.5h-2"></path></svg><span>{BOOK_ACTIONS_CONTRACT.open_label}</span></button>{/if}
@@ -230,10 +244,10 @@
   .progress-track i { display: block; height: 100%; border-radius: 0; background: var(--color-accent); }
   .opening { position: absolute; right: 9px; bottom: 9px; left: 9px; padding: 5px; border-radius: 0; color: var(--color-raised-bg); background: color-mix(in srgb, var(--color-ink-text) 78%, transparent); text-align: center; font-size: .75rem; font-weight: 600; }
   .wide-open { display: none; align-items: center; justify-content: center; height: 40px; padding: 0 11px; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-accent); background: var(--color-raised-bg); font-size: .8125rem; font-weight: 600; cursor: pointer; }
-  .book-actions { position: absolute; z-index: 4; top: 0; right: 0; }
+  .book-actions { position: fixed; z-index: 40; width: 0; height: 0; }
   .book-actions summary { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; list-style: none; }
   .book-actions summary::-webkit-details-marker { display: none; }
-  .book-menu { position: absolute; top: 5px; right: 0; display: grid; width: max-content; min-width: 184px; padding: 5px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 13px 32px var(--color-box-shadow); }
+  .book-menu { position: absolute; top: 0; left: 0; display: grid; width: max-content; min-width: 184px; padding: 5px; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 13px 32px var(--color-box-shadow); }
   .book-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 40px; padding: 9px 11px; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .75rem; font-weight: 600; cursor: pointer; }
   .book-menu button svg { width: 17px; height: 17px; }
   .book-menu button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
@@ -247,5 +261,5 @@
     .book-cover { width: var(--book-cover-width); height: var(--book-cover-height); aspect-ratio: auto; border-radius: 0; }
     .book-cover.detailed { width: 100px; height: 160px; }
   }
-  @media (min-width: 940px) { .wide-open { display: inline-flex; } .book-card.detailed .book-actions { top: 55px; right: 14px; } }
+  @media (min-width: 940px) { .wide-open { display: inline-flex; } }
 </style>

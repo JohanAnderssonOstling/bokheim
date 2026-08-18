@@ -6,6 +6,7 @@
   import { catalogActionKey, primaryCatalogAction } from "../../lib/catalog-actions";
   import { catalogLinkAction, catalogLinkCount } from "../../lib/catalog-links";
   import { openExternalUrl } from "../../lib/external-links";
+  import { managedMenu } from "../../lib/keyboard-navigation";
   import { isNativeApp } from "../../lib/platform";
   import { BROWSING_PREFERENCES_CONTRACT, SETTINGS_CONTRACT, STORE_CONTRACT, type BrowsingPreferencePatch, type BrowsingPreferences } from "../../lib/types";
   import FolderBreadcrumbs from "../library/FolderBreadcrumbs.svelte";
@@ -540,12 +541,12 @@
         <button type="submit" disabled={!wideQuery.trim() || wideSearching}>{STORE_CONTRACT.search_label}</button>
       </form>
       <button class="toolbar-button" type="button" disabled={loading} onclick={() => void loadSubjects(null)}>Browse by subject</button>
-      <details class="toolbar-menu language-menu">
+      <details class="toolbar-menu language-menu" use:managedMenu>
         <summary class:active={preferences.included_catalog_languages.length > 0}>{catalogLanguageLabel}<span aria-hidden="true">⌄</span></summary>
         <div class="toolbar-menu-popover" role="menu" aria-label={SETTINGS_CONTRACT.included_catalog_languages_label}>
-          <button type="button" role="menuitemcheckbox" aria-checked={preferences.included_catalog_languages.length === 0} onclick={(event) => { closeToolbarMenu(event); void setCatalogLanguages([]); }}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
+          <button type="button" role="menuitemcheckbox" aria-checked={preferences.included_catalog_languages.length === 0} onclick={() => void setCatalogLanguages([])}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
           {#each catalogLanguageOptions as option}
-            <button type="button" role="menuitemcheckbox" aria-checked={catalogLanguageIncluded(option.value)} onclick={(event) => { closeToolbarMenu(event); void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value)); }}>{option.label}</button>
+            <button type="button" role="menuitemcheckbox" aria-checked={catalogLanguageIncluded(option.value)} onclick={() => void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value))}>{option.label}</button>
           {/each}
         </div>
       </details>

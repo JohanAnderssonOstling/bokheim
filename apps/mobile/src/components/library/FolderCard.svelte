@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { tick } from "svelte";
+
   import type { FolderDownloadStatus, LibraryDirectory } from "../../lib/types";
   import { isWebApp } from "../../lib/platform";
   import DownloadIndicator from "./DownloadIndicator.svelte";
@@ -30,13 +32,24 @@
   const progress = $derived(total ? downloaded / total : 0);
   const complete = $derived(total > 0 && downloaded >= total);
   let actions = $state<HTMLDetailsElement>();
+  let menuPosition = $state({ x: 0, y: 0 });
   let longPressTimer: ReturnType<typeof setTimeout> | undefined;
   let longPressOrigin: { x: number; y: number } | undefined;
   let suppressOpenUntil = 0;
 
-  function showActions() {
+  async function showActions(x: number, y: number) {
     suppressOpenUntil = Date.now() + 800;
-    if (actions) actions.open = true;
+    if (!actions) return;
+    menuPosition = { x, y };
+    actions.open = true;
+    await tick();
+    const menu = actions.querySelector<HTMLElement>(".folder-menu");
+    if (!menu || !actions.open) return;
+    const padding = 8;
+    menuPosition = {
+      x: Math.max(padding, Math.min(x, window.innerWidth - menu.offsetWidth - padding)),
+      y: Math.max(padding, Math.min(y, window.innerHeight - menu.offsetHeight - padding)),
+    };
   }
 
   function cancelLongPress() {
@@ -51,8 +64,10 @@
     longPressOrigin = { x: event.clientX, y: event.clientY };
     longPressTimer = setTimeout(() => {
       longPressTimer = undefined;
+      const origin = longPressOrigin;
+      if (!origin) return;
       navigator.vibrate?.(10);
-      showActions();
+      void showActions(origin.x, origin.y);
     }, 500);
   }
 
@@ -65,13 +80,14 @@
     event.preventDefault();
     event.stopPropagation();
     cancelLongPress();
-    showActions();
+    void showActions(event.clientX, event.clientY);
   }
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
     event.preventDefault();
-    showActions();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    void showActions(rect.left + rect.width / 2, rect.top + rect.height / 2);
   }
 
   function openFolder(event: MouseEvent) {
@@ -113,7 +129,7 @@
       />
     </div>
   {/if}
-  <details class="folder-actions" bind:this={actions} use:managedMenu>
+  <details class="folder-actions" style={`left: ${menuPosition.x}px; top: ${menuPosition.y}px;`} bind:this={actions} use:managedMenu>
     <summary aria-label={`Folder actions for ${folder.name}`} tabindex="-1"></summary>
     <div class="folder-menu" role="menu">
       <button type="button" role="menuitem" onclick={(event) => { closeMenu(event); return onrename(folder); }}>Rename</button>
@@ -126,10 +142,10 @@
 <style>
   .folder-card { position: relative; width: auto; min-width: 0; }
   .download-action { position: absolute; top: 50%; right: .55rem; display: grid; width: 2.75rem; height: 2.75rem; place-items: center; transform: translateY(-50%); pointer-events: none; }
-  .folder-actions { position: absolute; z-index: 5; top: 100%; right: 0; }
+  .folder-actions { position: fixed; z-index: 40; width: 0; height: 0; }
   .folder-actions summary { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; list-style: none; }
   .folder-actions summary::-webkit-details-marker { display: none; }
-  .folder-menu { position: absolute; top: 2px; right: 0; display: grid; width: max-content; min-width: 11rem; padding: .35rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 .8rem 2rem var(--color-box-shadow); }
+  .folder-menu { position: absolute; top: 0; left: 0; display: grid; width: max-content; min-width: 11rem; padding: .35rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); box-shadow: 0 .8rem 2rem var(--color-box-shadow); }
   .folder-menu button { min-height: 2.5rem; padding: .55rem .7rem; border: 0; border-radius: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .76rem; font-weight: 650; cursor: pointer; }
   .folder-menu button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .folder-menu button.danger { color: var(--color-danger-text); }
