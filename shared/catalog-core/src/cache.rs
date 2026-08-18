@@ -3141,22 +3141,10 @@ mod tests {
         assert_ne!(first.publications[0].publication.identity, second.publications[0].publication.identity);
 
         let excluded_source = CatalogSourceId::parse("another-source").unwrap();
-        let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest {
-            locator: None,
-            supported_languages: vec!["en".to_owned()],
-            source_ids: vec![excluded_source],
-            query: String::new(),
-            limit: 10,
-        });
+        let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![excluded_source], query: String::new(), limit: 10 });
         assert!(filtered_root.unwrap().navigation.is_empty());
 
-        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest {
-            locator: Some(locator.clone()),
-            supported_languages: vec!["en".to_owned()],
-            source_ids: vec![source_id()],
-            query: "FIRST HISTORY".to_owned(),
-            limit: 10,
-        });
+        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "FIRST HISTORY".to_owned(), limit: 10 });
         let searched = searched.unwrap();
         assert!(searched.navigation.is_empty());
         assert_eq!(searched.publications.len(), 1);

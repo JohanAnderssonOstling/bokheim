@@ -502,17 +502,15 @@ impl Render for StorePage {
             let entity = cx.entity();
             let mut controls = div().w_full().flex().items_center().gap(px(8.0));
             if levels.len() > 1 {
-                controls = controls
-                    .child(div().flex_1().min_w_0().max_w(px(480.0)).child(Input::new(&self.subject_search_input)))
-                    .child(components::secondary_action_button("store-subject-search", "Search", IconName::Search, self.loading).on_click(move |_, _, cx| {
+                controls = controls.child(div().flex_1().min_w_0().max_w(px(480.0)).child(Input::new(&self.subject_search_input))).child(
+                    components::secondary_action_button("store-subject-search", "Search", IconName::Search, self.loading).on_click(move |_, _, cx| {
                         entity.update(cx, |page, cx| page.search_subjects(cx));
-                    }));
+                    }),
+                );
             } else {
                 controls = controls.child(div().flex_1());
             }
-            content = content
-                .child(controls.child(self.subject_source_dropdown(theme, cx)))
-                .child(self.virtual_rows("store-subject-results", retained_rows.expect("subject browse rows"), publication_columns, link_width, None, theme, cx));
+            content = content.child(controls.child(self.subject_source_dropdown(theme, cx))).child(self.virtual_rows("store-subject-results", retained_rows.expect("subject browse rows"), publication_columns, link_width, None, theme, cx));
             return components::folder_dashboard().child(publication_grid.track(content)).into_any_element();
         }
 

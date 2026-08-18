@@ -68,7 +68,7 @@
   svg { width: var(--hierarchy-icon-size); height: var(--hierarchy-icon-size); fill: none; stroke: var(--color-accent); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
   button.external svg { stroke: var(--color-subtle-text); }
   span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--hierarchy-label-size); font-weight: 500; }
-  small { color: var(--color-subtle-text); font-size: .8125rem; font-weight: 650; text-align: right; }
+  small { color: var(--color-subtle-text); font-size: 1rem; font-weight: 650; text-align: right; }
   i { color: var(--color-subtle-text); font-style: normal; }
 
   @media (min-width: 45rem) {

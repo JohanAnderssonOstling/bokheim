@@ -5,10 +5,10 @@
 
 mod state;
 
+use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::LibraryEntry;
 use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
-use epub_svelte_lib::LibraryId;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, IntoElement, Render, Subscription, Window};
 
 use super::services::LibraryContext;

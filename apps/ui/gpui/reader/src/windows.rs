@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 #[cfg(feature = "audiobooks")]
 use std::time::Duration;
 use std::time::Instant;
@@ -13,6 +13,10 @@ use epub_svelte_lib::{BookLocator, ContentHash, LibraryBackend, LibraryId};
 use gpui::{AnyWindowHandle, App, AppContext, Bounds, Global, SharedString, Subscription, WeakEntity, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 use ui_runtime::BlockingWorker;
+
+#[cfg(not(feature = "kobo"))]
+static BOKHEIM_WINDOW_ICON: LazyLock<Option<Arc<image::RgbaImage>>> =
+    LazyLock::new(|| image::load_from_memory_with_format(include_bytes!("../../../design-tokens/assets/icon/bokheim-180.png"), image::ImageFormat::Png).ok().map(|image| Arc::new(image.into_rgba8())));
 
 #[cfg(feature = "kobo")]
 fn platform_content<V: gpui::Render + 'static>(content: gpui::Entity<V>, cx: &mut App) -> gpui::Entity<gpui_kobo::KoboKeyboardRoot<V>> {
@@ -167,12 +171,17 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, initial_targ
     let reader_for_window = reader_out.clone();
     let locator_for_window = locator.clone();
     let library_for_window = library.clone();
+    #[cfg(not(feature = "kobo"))]
+    let icon = BOKHEIM_WINDOW_ICON.clone();
+    #[cfg(feature = "kobo")]
+    let icon = None;
     let handle = match cx.open_window(
         WindowOptions {
             window_bounds: Some(bounds),
             titlebar: Some(gpui::TitlebarOptions { title: Some(SharedString::from(title.clone())), ..Default::default() }),
             focus: true,
             app_id: (!cfg!(feature = "kobo")).then(|| "se.bokheim.Bokheim".to_owned()),
+            icon,
             ..Default::default()
         },
         move |window, cx| match prepared {

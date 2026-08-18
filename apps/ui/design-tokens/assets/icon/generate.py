@@ -23,14 +23,14 @@ INK, TILE = "#2E3D31", "#F9F5EE"
 # --- geometry -------------------------------------------------------------
 X0, X1 = 256.0, 428.0          # fold .. arm tip
 APEX, DROP = 150.0, 185.0      # peak height, fall across one arm  (47 degrees)
-TH_FOLD, TH_TIP = 60.0, 110.0  # page-block thickness at fold and tip
+TH_FOLD, TH_TIP = 38.0, 68.0   # lighter page blocks retain the book/roof silhouette
 NOTCH = 172.0                  # bottom of the dip between the two humps
 HUMP_X = 280.0                 # where each hump starts, inboard of the fold
 AMP, FREQ, PHASE = 5.5, 1.6, 0.30   # cut-line waver
-CUT_W, EDGE_W = 7.0, 9.0            # cut-line and block-outline stroke widths
+CUT_W, EDGE_W = 5.0, 4.0            # fine page cuts and a restrained silhouette edge
 N = 30                              # samples per edge
-WINDOW = [(224, 300, 28, 28), (260, 300, 28, 28),
-          (224, 336, 28, 28), (260, 336, 28, 28)]
+WINDOW = [(227, 303, 24, 24), (261, 303, 24, 24),
+          (227, 337, 24, 24), (261, 337, 24, 24)]
 
 
 def Y(u, t):
@@ -80,7 +80,9 @@ def fit(blocks, scale):
     pts += [(x, y) for x, y, w, h in WINDOW for x, y in ((x, y), (x + w, y + h))]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
-    s = 512 * 0.84 * scale / span
+    # Negative space is part of the mark at launcher sizes. Filling the entire
+    # tile makes diagonal edges feel heavy and exaggerates antialiasing.
+    s = 512 * 0.78 * scale / span
     tx = 256 - (min(xs) + max(xs)) / 2 * s
     ty = 256 - (min(ys) + max(ys)) / 2 * s
     return f"translate({tx:.2f},{ty:.2f}) scale({s:.4f})", s

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use app_contract::{ReaderSettingsAnchor, ReaderSettingsPresentationContract};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style,
-    StyledImage, Window, div, img, px,
+    div, img, px, App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful,
+    Style, StyledImage, Window,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::list::ListItem;
@@ -15,8 +15,8 @@ use gpui_component::{Disableable, ElementExt, Selectable};
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, action_button,
-    browser_theme, scroll::Scrollable,
+    action_button, browser_theme, scroll::Scrollable, BrowserTheme, ScrollableElement, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+    SPACE_XXS, TEXT_LG, TEXT_SM, TEXT_XS,
 };
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
@@ -42,6 +42,10 @@ pub fn reader_toolbar_title(title: impl Into<SharedString>) -> Div {
 
 pub fn reader_control_button_state(id: impl Into<ElementId>, label: impl Into<SharedString>, enabled: bool, theme: BrowserTheme) -> Button {
     reader_control_button(id, label, theme).disabled(!enabled)
+}
+
+pub fn reader_sidebar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool, theme: BrowserTheme) -> Button {
+    action_button(id, label).icon(icon).disabled(!enabled).h(px(34.0)).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border)
 }
 
 pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {

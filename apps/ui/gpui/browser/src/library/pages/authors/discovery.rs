@@ -151,15 +151,11 @@ impl AuthorDiscoveryView {
         rows
     }
 
-    pub(super) fn render_virtual_row(
-        row: &AuthorDiscoveryVirtualRow, index: usize, entity: Entity<Self>, columns: usize, unit_width: f32, publication_height: f32, trailing_gap: f32, theme: components::BrowserTheme,
-    ) -> AnyElement {
+    pub(super) fn render_virtual_row(row: &AuthorDiscoveryVirtualRow, index: usize, entity: Entity<Self>, columns: usize, unit_width: f32, publication_height: f32, trailing_gap: f32, theme: components::BrowserTheme) -> AnyElement {
         let content = match row {
-            AuthorDiscoveryVirtualRow::Disclosure { expanded } => {
-                components::author_discovery_disclosure("author-discovery-disclosure", "More books by this author", "Search your catalogues", *expanded, theme)
-                    .on_click(move |_, _, cx| entity.update(cx, |view, cx| view.toggle(cx)))
-                    .into_any_element()
-            }
+            AuthorDiscoveryVirtualRow::Disclosure { expanded } => components::author_discovery_disclosure("author-discovery-disclosure", "More books by this author", "Search your catalogues", *expanded, theme)
+                .on_click(move |_, _, cx| entity.update(cx, |view, cx| view.toggle(cx)))
+                .into_any_element(),
             AuthorDiscoveryVirtualRow::Status(message) => components::browser_inline_note(message.clone(), theme).into_any_element(),
             AuthorDiscoveryVirtualRow::Error(message) => Alert::error(format!("author-discovery-error-{index}"), message.clone()).into_any_element(),
             AuthorDiscoveryVirtualRow::SourceHeader { title, detail } => components::section_header(title.clone(), detail.clone(), theme).into_any_element(),

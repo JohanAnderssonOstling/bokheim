@@ -97,14 +97,29 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          test -n "$KEYSTORE_BASE64"
-          test -n "$KEYSTORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bokheim-release.jks"
-          chmod 600 "$RUNNER_TEMP/bokheim-release.jks"
+          for variable in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::The GitHub secret for $variable is missing or empty."
+              exit 1
+            fi
+          done
+
+          keystore="$RUNNER_TEMP/bokheim-release.jks"
+          if ! printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$keystore"; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not valid Base64. Regenerate it with: base64 -w 0 bokheim-release.jks"
+            exit 1
+          fi
+          if [ ! -s "$keystore" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 decoded to an empty file."
+            exit 1
+          fi
+          chmod 600 "$keystore"
+          if ! keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null; then
+            echo "::error::The decoded keystore, ANDROID_KEYSTORE_PASSWORD, or ANDROID_KEY_ALIAS is incorrect."
+            exit 1
+          fi
           {
-            printf 'storeFile=%s\n' "$RUNNER_TEMP/bokheim-release.jks"
+            printf 'storeFile=%s\n' "$keystore"
             printf 'storePassword=%s\n' "$KEYSTORE_PASSWORD"
             printf 'keyAlias=%s\n' "$KEY_ALIAS"
             printf 'keyPassword=%s\n' "$KEY_PASSWORD"

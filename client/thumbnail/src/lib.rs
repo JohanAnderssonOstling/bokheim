@@ -64,9 +64,8 @@ pub fn generate_thumbnail_from_image_bytes(bytes: &[u8]) -> ThumbnailResult<Vec<
 fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     let epub = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
     if let Some(image_path) = epub.declared_cover_image_path()? {
-        let format = image_format(&image_path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported EPUB cover image format: {image_path}")))?;
         let bytes = epub.read_bytes(&image_path)?;
-        let image = decode_cover_image(&bytes, format)?;
+        let image = decode_epub_image(&bytes, &image_path)?;
         if reasonable_cover_dimensions(image.width(), image.height()) {
             return Ok(Some(image));
         }
@@ -85,6 +84,44 @@ fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     }
 
     Ok(None)
+}
+
+#[cfg(feature = "publication-extractors")]
+fn decode_epub_image(bytes: &[u8], path: &str) -> ThumbnailResult<RgbImage> {
+    if bytes.len() > MAX_COVER_IMAGE_BYTES {
+        return Err("cover image exceeds the byte limit".into());
+    }
+    if path.rsplit('.').next().is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
+        return rasterize_svg_cover(bytes);
+    }
+    let format = image_format(path).or_else(|| image::guess_format(bytes).ok()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported EPUB cover image format: {path}")))?;
+    decode_cover_image(bytes, format)
+}
+
+#[cfg(feature = "publication-extractors")]
+fn rasterize_svg_cover(bytes: &[u8]) -> ThumbnailResult<RgbImage> {
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &options)?;
+    let size = tree.size();
+    let source_width = size.width();
+    let source_height = size.height();
+    if !source_width.is_finite() || !source_height.is_finite() || source_width <= 0.0 || source_height <= 0.0 {
+        return Err("SVG cover has invalid dimensions".into());
+    }
+    let aspect_ratio = f64::from(source_width) / f64::from(source_height);
+    let destination_height = (f64::from(THUMBNAIL_WIDTH) / aspect_ratio).round().max(1.0);
+    if destination_height > f64::from(MAX_COVER_IMAGE_DIMENSION) || u64::from(THUMBNAIL_WIDTH) * destination_height as u64 > MAX_COVER_IMAGE_PIXELS {
+        return Err("SVG cover exceeds the pixel limit".into());
+    }
+    let destination_height = destination_height as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(THUMBNAIL_WIDTH, destination_height).ok_or("could not allocate SVG cover pixmap")?;
+    // JPEG has no alpha channel. A white mat preserves the expected appearance
+    // of transparent SVG book covers instead of turning transparent pixels black.
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    let scale = THUMBNAIL_WIDTH as f32 / source_width;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    let rgb = pixmap.data().chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect::<Vec<_>>();
+    RgbImage::from_raw(THUMBNAIL_WIDTH, destination_height, rgb).ok_or_else(|| "SVG renderer returned invalid image dimensions".into())
 }
 
 /// Returns whether an image is large enough and sufficiently cover-shaped to
@@ -322,6 +359,16 @@ mod publication_extractor_tests {
     }
 
     #[test]
+    fn rasterizes_svg_cover_to_thumbnail_width() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="#c02010"/></svg>"##;
+        let rendered = rasterize_svg_cover(svg).unwrap();
+
+        assert_eq!(rendered.dimensions(), (THUMBNAIL_WIDTH, 900));
+        let center = rendered.get_pixel(THUMBNAIL_WIDTH / 2, 450);
+        assert!(center[0] > 170 && center[1] < 60 && center[2] < 45, "unexpected SVG pixel: {center:?}");
+    }
+
+    #[test]
     fn uses_first_reasonable_spine_image_when_cover_art_is_absent() {
         let file = tempfile::Builder::new().suffix(".epub").tempfile().unwrap();
         let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
@@ -355,5 +402,4 @@ mod publication_extractor_tests {
         let center = rendered.get_pixel(THUMBNAIL_WIDTH / 2, 450);
         assert!(center[0] > 170 && center[1] < 55 && center[2] < 45, "unexpected fallback pixel: {center:?}");
     }
-
 }

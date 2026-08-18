@@ -4,6 +4,7 @@ import type {
   CatalogImportRequest,
   CatalogPage,
   CatalogPageView,
+  CatalogPublication,
   CatalogRecommendationResponse,
   CatalogSearch,
   CatalogSearchQuery,
@@ -68,6 +69,61 @@ function requestState(languages: string[]) {
   return { supported_languages: languages, epoch: null, known_publications: [] };
 }
 
+function gutenbergEditionHasImages(publication: CatalogPublication): boolean {
+  return publication.actions.some((action) => {
+    if (action.kind !== "import") return false;
+    const downloadUrl = action.request.download_url.toLocaleLowerCase();
+    return downloadUrl.includes(".images") && !downloadUrl.includes(".noimages");
+  });
+}
+
+function deduplicateGutenbergPublications(publications: CatalogPublication[]): CatalogPublication[] {
+  const workPositions = new Map<string, number>();
+  const deduplicated: CatalogPublication[] = [];
+  for (const publication of publications) {
+    const workId = publication.identity.work_id;
+    if (!workId?.startsWith("urn:gutenberg:")) {
+      deduplicated.push(publication);
+      continue;
+    }
+    const position = workPositions.get(workId);
+    if (position === undefined) {
+      workPositions.set(workId, deduplicated.length);
+      deduplicated.push(publication);
+    } else if (gutenbergEditionHasImages(publication) && !gutenbergEditionHasImages(deduplicated[position])) {
+      deduplicated[position] = publication;
+    }
+  }
+  return deduplicated;
+}
+
+function normalizeCatalogPage(sourceId: string, page: CatalogPage): CatalogPage {
+  if (sourceId !== "opds-project-gutenberg") return page;
+  page.publications = deduplicateGutenbergPublications(page.publications);
+  for (const group of page.groups) group.publications = deduplicateGutenbergPublications(group.publications);
+  return page;
+}
+
+function normalizeSourcedGutenbergPublications<T extends { source_id: string; publication: CatalogPublication }>(items: T[]): T[] {
+  const workPositions = new Map<string, number>();
+  const deduplicated: T[] = [];
+  for (const item of items) {
+    const workId = item.publication.identity.work_id;
+    if (item.source_id !== "opds-project-gutenberg" || !workId?.startsWith("urn:gutenberg:")) {
+      deduplicated.push(item);
+      continue;
+    }
+    const position = workPositions.get(workId);
+    if (position === undefined) {
+      workPositions.set(workId, deduplicated.length);
+      deduplicated.push(item);
+    } else if (gutenbergEditionHasImages(item.publication) && !gutenbergEditionHasImages(deduplicated[position].publication)) {
+      deduplicated[position] = item;
+    }
+  }
+  return deduplicated;
+}
+
 export function getWebCatalogSources(): CatalogSource[] {
   return [...cachedSources];
 }
@@ -83,10 +139,10 @@ async function sources(): Promise<CatalogSource[]> {
 
 export async function getWebCatalogPage(libraryId: string, sourceId: string, locator: string | null): Promise<CatalogPageView> {
   const languages = await supportedLanguages();
-  const page = await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(sourceId)}/page`, {
+  const page = normalizeCatalogPage(sourceId, await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(sourceId)}/page`, {
     locator,
     ...requestState(languages),
-  });
+  }));
   return { page, owned_publications: await getOwnedWebCatalogPublications(libraryId) };
 }
 
@@ -98,6 +154,7 @@ export async function getWebCatalogSubjects(libraryId: string, locator: string |
     query,
     limit: Math.max(1, Math.min(100, Math.trunc(limit))),
   });
+  response.publications = normalizeSourcedGutenbergPublications(response.publications);
   return { response, owned_publications: await getOwnedWebCatalogPublications(libraryId) };
 }
 
@@ -109,6 +166,7 @@ export async function getWebCatalogSubjectRecommendations(libraryId: string, sub
     excluded_publications: [],
     limit: Math.min(100, boundedLimit * 3),
   });
+  response.recommendations = normalizeSourcedGutenbergPublications(response.recommendations);
   const owned = new Set((await getOwnedWebCatalogPublications(libraryId)).map((key) => `${key.source_id}:${key.publication.edition_id}:${key.publication.work_id ?? ""}`));
   response.recommendations = response.recommendations
     .filter((item) => !owned.has(`${item.source_id}:${item.publication.identity.edition_id}:${item.publication.identity.work_id ?? ""}`))
@@ -118,10 +176,10 @@ export async function getWebCatalogSubjectRecommendations(libraryId: string, sub
 
 async function searchSource(source: CatalogSource, query: string, languages: string[]): Promise<CatalogWideSearchGroup> {
   try {
-    const page = await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(source.id)}/search`, {
+    const page = normalizeCatalogPage(source.id, await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(source.id)}/search`, {
       query,
       ...requestState(languages),
-    });
+    }));
     return { source, outcome: { kind: "results", page } };
   } catch (reason) {
     return { source, outcome: { kind: "failed", message: reason instanceof Error ? reason.message : String(reason) } };
@@ -147,10 +205,10 @@ export async function searchWebCatalog(
 ): Promise<CatalogPageView> {
   const terms = [query.query, query.title, query.author].map((value) => value?.trim()).filter(Boolean).join(" ");
   if (!terms) throw new Error("Catalogue search cannot be empty");
-  const page = await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(sourceId)}/search`, {
+  const page = normalizeCatalogPage(sourceId, await catalogJson<CatalogPage>(`/sources/${encodeURIComponent(sourceId)}/search`, {
     query: terms,
     ...requestState(await supportedLanguages()),
-  });
+  }));
   return { page, owned_publications: await getOwnedWebCatalogPublications(libraryId) };
 }
 

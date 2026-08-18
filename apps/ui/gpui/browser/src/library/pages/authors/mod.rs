@@ -302,11 +302,8 @@ impl AuthorsPage {
         let combined = container_query(move |available, _, cx| {
             let width = f32::from(available.width);
             let book_capacity = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
-            let (book_columns, book_width) = if detailed {
-                (1, width)
-            } else {
-                crate::virtual_grid::grid_geometry(width, book_capacity, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP)
-            };
+            let (book_columns, book_width) =
+                if detailed { (1, width) } else { crate::virtual_grid::grid_geometry(width, book_capacity, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
             let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, rem_size) };
             let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_columns);
             let local_row_count = book_row_count.max(1);
@@ -333,12 +330,7 @@ impl AuthorsPage {
                         if index < local_row_count {
                             let trailing_gap = if index + 1 == local_row_count { components::SPACE_LG } else { 0.0 };
                             if render_books.is_empty() {
-                                div()
-                                    .w_full()
-                                    .h(px(66.0 + trailing_gap))
-                                    .flex_none()
-                                    .child(components::browser_inline_note("No books found for this author", theme))
-                                    .into_any_element()
+                                div().w_full().h(px(66.0 + trailing_gap)).flex_none().child(components::browser_inline_note("No books found for this author", theme)).into_any_element()
                             } else if detailed {
                                 div().w_full().h(px(book_row_height + trailing_gap)).flex_none().child(render_books[index].clone()).into_any_element()
                             } else {
@@ -353,16 +345,7 @@ impl AuthorsPage {
                         } else {
                             let discovery_index = index - local_row_count;
                             let trailing_gap = if discovery_index + 1 == render_rows.len() { 0.0 } else { components::SPACE_MD };
-                            AuthorDiscoveryView::render_virtual_row(
-                                &render_rows[discovery_index],
-                                discovery_index,
-                                render_discovery.clone(),
-                                discovery_columns,
-                                publication_unit_width,
-                                publication_height,
-                                trailing_gap,
-                                theme,
-                            )
+                            AuthorDiscoveryView::render_virtual_row(&render_rows[discovery_index], discovery_index, render_discovery.clone(), discovery_columns, publication_unit_width, publication_height, trailing_gap, theme)
                         }
                     })
                     .collect::<Vec<_>>()

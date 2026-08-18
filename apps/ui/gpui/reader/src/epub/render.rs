@@ -6,14 +6,14 @@ use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NavigateHistoryBack, NavigateHistoryForward, NextLine, NextPage, NextSection, PreviousLine,
     PreviousPage, PreviousSection, ToggleFullscreen, ToggleSearch, ToggleToc,
 };
-use app_contract::{READER_NAVIGATION_SHORTCUTS, ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut};
+use app_contract::{ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut, READER_NAVIGATION_SHORTCUTS};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window, px};
-use gpui_component::Sizable;
+use gpui::{px, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window};
 use gpui_component::input::Input;
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tab::TabBar;
 use gpui_component::tree::tree;
+use gpui_component::Sizable;
 use ui_components as components;
 
 const READER_TOOLBAR_HEIGHT: f32 = 58.0;
@@ -126,7 +126,9 @@ impl ReaderView {
 
         if self.reader_state_bookmarks {
             panel = panel.child(
-                components::reader_control_button_state("reader-bookmark-current", "Bookmark here", self.current_cfi.is_some(), theme).tooltip("Bookmark the current location").on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
+                components::reader_sidebar_action_button("reader-bookmark-current", "Bookmark here", gpui_component::IconName::Star, self.current_cfi.is_some(), theme)
+                    .tooltip("Bookmark the current location")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
             );
             if self.marks.bookmarks.is_empty() {
                 panel = panel.child(components::reader_state_note("No bookmarks yet. Use Bookmark here to save this location.", theme));
@@ -137,8 +139,14 @@ impl ReaderView {
                 panel = panel.child(
                     components::reader_state_card(("reader-bookmark", index), false, theme).child(components::reader_state_quote(bookmark.label)).child(
                         components::reader_state_actions()
-                            .child(components::reader_control_button(("reader-bookmark-go", index), "Go", theme).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))))
-                            .child(components::reader_control_button(("reader-bookmark-delete", index), "Delete", theme).on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx)))),
+                            .child(
+                                components::reader_sidebar_action_button(("reader-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
+                            )
+                            .child(
+                                components::reader_sidebar_action_button(("reader-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
+                            ),
                     ),
                 );
             }
@@ -161,8 +169,14 @@ impl ReaderView {
                     .when(!note.is_empty(), |card| card.child(components::reader_state_note(note, theme)))
                     .child(
                         components::reader_state_actions()
-                            .child(components::reader_control_button(("reader-annotation-go", index), "Go", theme).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))))
-                            .child(components::reader_control_button(("reader-annotation-delete", index), "Delete", theme).on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx)))),
+                            .child(
+                                components::reader_sidebar_action_button(("reader-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
+                            )
+                            .child(
+                                components::reader_sidebar_action_button(("reader-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx))),
+                            ),
                     );
                 panel = panel.child(card);
             }

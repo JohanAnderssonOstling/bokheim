@@ -193,11 +193,14 @@
     `--author-row-content-gap: ${BROWSING_LAYOUT_CONTRACT.author_row_content_gap_px}px`,
     `--author-row-horizontal-padding: ${BROWSING_LAYOUT_CONTRACT.author_row_horizontal_padding_px}px`,
     `--author-row-font-size: ${BROWSING_LAYOUT_CONTRACT.author_row_label_size_px / 16}rem`,
-    `--hierarchy-cell-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_height_px}px`,
-    `--hierarchy-touch-cell-min-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_touch_cell_min_height_px}px`,
+    // A hierarchy cell is a row of text, so its geometry is emitted in rem and
+    // follows the UI font size the reader picked. Leaving it in px froze the
+    // row while the label inside it kept growing.
+    `--hierarchy-cell-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_height_px / 16}rem`,
+    `--hierarchy-touch-cell-min-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_touch_cell_min_height_px / 16}rem`,
     `--hierarchy-cell-min-width: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_min_width_px}px`,
     `--hierarchy-cell-gap: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_gap_px}px`,
-    `--hierarchy-icon-size: ${BROWSING_LAYOUT_CONTRACT.hierarchy_icon_size_px}px`,
+    `--hierarchy-icon-size: ${BROWSING_LAYOUT_CONTRACT.hierarchy_icon_size_px / 16}rem`,
     `--hierarchy-label-size: ${BROWSING_LAYOUT_CONTRACT.hierarchy_label_size_px / 16}rem`,
   ].join("; ");
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ROOT_DIRECTORY_ID } from "../directory-id.ts";
-import { getWebCatalogSubjectRecommendations, importWebCatalogBook, refreshWebCatalogSources } from "./catalog-client.ts";
+import { getWebCatalogPage, getWebCatalogSubjectRecommendations, importWebCatalogBook, refreshWebCatalogSources } from "./catalog-client.ts";
 import { createWebLibrary, getOwnedWebCatalogPublications, getWebLibraryHome, removeWebLibrary } from "./library-database.ts";
 import { testEpub } from "./test-epub.ts";
 
@@ -40,6 +40,55 @@ test("browser catalogue client loads sources and imports a proxied EPUB", async 
       source_id: source.id,
       publication: request.publication,
     }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await removeWebLibrary(library.library_id);
+  }
+});
+
+test("browser Gutenberg pages keep only the illustrated edition of each work", async () => {
+  const originalFetch = globalThis.fetch;
+  const library = await createWebLibrary(`Gutenberg deduplication ${crypto.randomUUID()}`);
+  const publication = (editionId: string, downloadUrl: string) => ({
+    identity: { edition_id: editionId, work_id: "urn:gutenberg:1342" },
+    title: "Pride and Prejudice",
+    authors: [{ name: "Jane Austen", sort_name: null, identifiers: [], provider_link: null }],
+    languages: ["en"],
+    description: null,
+    image_url: "https://www.gutenberg.org/cover.jpg",
+    actions: [{
+      kind: "import" as const,
+      request: {
+        source_id: "opds-project-gutenberg",
+        catalog_locator: "https://www.gutenberg.org/ebooks/1342.opds",
+        publication: { edition_id: editionId, work_id: "urn:gutenberg:1342" },
+        download_url: downloadUrl,
+        book_format: "epub" as const,
+      },
+    }],
+  });
+  globalThis.fetch = async (input) => {
+    assert.ok(String(input).endsWith("/api/web/sources/opds-project-gutenberg/page"));
+    return Response.json({
+      source_id: "opds-project-gutenberg",
+      freshness: "current",
+      title: "Pride and Prejudice",
+      locator: "https://www.gutenberg.org/ebooks/1342.opds",
+      navigation: [],
+      publications: [
+        publication("urn:gutenberg:1342:2", "https://www.gutenberg.org/ebooks/1342.epub.noimages"),
+        publication("urn:gutenberg:1342:3", "https://www.gutenberg.org/ebooks/1342.epub.images"),
+      ],
+      groups: [],
+      facets: [],
+      pagination: { first: null, previous: null, next: null, last: null, number_of_items: 2, items_per_page: 2, current_page: 1 },
+      search: null,
+    });
+  };
+  try {
+    const view = await getWebCatalogPage(library.library_id, "opds-project-gutenberg", null);
+    assert.equal(view.page.publications.length, 1);
+    assert.equal(view.page.publications[0].identity.edition_id, "urn:gutenberg:1342:3");
   } finally {
     globalThis.fetch = originalFetch;
     await removeWebLibrary(library.library_id);

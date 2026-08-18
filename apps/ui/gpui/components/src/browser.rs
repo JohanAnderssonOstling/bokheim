@@ -5,8 +5,8 @@ use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT,
-    TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
+    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable,
+    ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -339,7 +339,18 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
 }
 
 pub fn browser_settings_font_size_button(id: impl Into<ElementId>, label: impl Into<SharedString>, disabled: bool, theme: BrowserTheme) -> Button {
-    Button::new(id).label(label).disabled(disabled).ghost().w(px(SETTINGS_CONTROL_HEIGHT)).h(px(SETTINGS_CONTROL_HEIGHT)).rounded(px(0.0)).border_0().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(16.0 / 16.0)).font_weight(FontWeight::SEMIBOLD)
+    Button::new(id)
+        .label(label)
+        .disabled(disabled)
+        .ghost()
+        .w(px(SETTINGS_CONTROL_HEIGHT))
+        .h(px(SETTINGS_CONTROL_HEIGHT))
+        .rounded(px(0.0))
+        .border_0()
+        .bg(theme.surface)
+        .text_color(theme.text)
+        .text_size(gpui::rems(16.0 / 16.0))
+        .font_weight(FontWeight::SEMIBOLD)
 }
 
 pub fn browser_settings_font_size_stepper(decrease: impl IntoElement, value: impl Into<SharedString>, increase: impl IntoElement, theme: BrowserTheme) -> Div {
@@ -354,7 +365,19 @@ pub fn browser_settings_font_size_stepper(decrease: impl IntoElement, value: imp
         .border_color(theme.border)
         .bg(theme.border)
         .child(decrease)
-        .child(div().w(px(SETTINGS_STEPPER_VALUE_WIDTH)).h(px(SETTINGS_CONTROL_HEIGHT)).flex().items_center().justify_center().bg(theme.surface).text_color(theme.text).text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).child(value.into()))
+        .child(
+            div()
+                .w(px(SETTINGS_STEPPER_VALUE_WIDTH))
+                .h(px(SETTINGS_CONTROL_HEIGHT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.surface)
+                .text_color(theme.text)
+                .text_size(gpui::rems(TEXT_XS / 16.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(value.into()),
+        )
         .child(increase)
 }
 

@@ -336,7 +336,9 @@ impl LibraryBackend {
             db::upsert_audiobook_metadata(&conn, &content_hash, &audiobook)?;
         }
 
-        let _ = generate_thumbnail_for_sync(&self.context, &self.library_root, &destination, &content_hash);
+        if let Err(error) = generate_thumbnail_for_sync(&self.context, &self.library_root, &destination, &content_hash) {
+            log::warn!("could not generate thumbnail for imported book {}: {error}", destination.display());
+        }
         let relative_path = destination.strip_prefix(self.library_root.as_path()).unwrap_or(&destination).to_string_lossy().into_owned();
         let _ = self.event_tx.send(LibraryEvent::BookAdded { content_hash: content_hash.clone(), path: relative_path });
         Ok(content_hash)

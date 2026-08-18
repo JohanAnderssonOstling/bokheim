@@ -59,9 +59,8 @@ impl StorePage {
         let requested_locator = locator.clone();
         let source_ids = self.subject_source_ids.clone();
         let query = self.subject_search_input.read(cx).value().trim().to_owned();
-        let operation = self.library.spawn(move |library| async move {
-            library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), source_ids, query, limit: 100 }).await.map_err(|error| error.to_string())
-        });
+        let operation =
+            self.library.spawn(move |library| async move { library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), source_ids, query, limit: 100 }).await.map_err(|error| error.to_string()) });
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = page.update(cx, |page, cx| {

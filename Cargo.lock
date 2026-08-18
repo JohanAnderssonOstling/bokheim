@@ -12999,6 +12999,7 @@ dependencies = [
  "mobi",
  "mp4ameta",
  "pdf-reader-core",
+ "resvg 0.46.0",
  "tempfile",
  "zip",
 ]

@@ -44,4 +44,9 @@ impl LibraryScanner {
     pub(crate) fn is_scanning(&self) -> bool {
         false
     }
+
+    /// Keep the platform scanner contract available when local filesystem
+    /// discovery is disabled. Android manages library files through its own
+    /// application flow, so starting the scanner is intentionally a no-op.
+    pub(crate) fn start_scanning(&self) {}
 }

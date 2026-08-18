@@ -2,8 +2,8 @@ use std::panic::Location;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, UniformList, UniformListScrollHandle, Window,
-    div,
+    div, App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, UniformList, UniformListScrollHandle,
+    Window,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_component::{StyledExt, VirtualListScrollHandle};
@@ -163,7 +163,7 @@ where
             .child(content);
 
         let scrollbar = self.show_scrollbar.then(|| Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(self.axis));
-        div().id(self.id).size_full().refine_style(&root_style).relative().on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
+        div().id(self.id).size_full().relative().refine_style(&root_style).on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
     }
 }
 
@@ -319,7 +319,15 @@ fn page_scroll(scroll_handle: &ScrollHandle, direction: f32, window: &mut Window
 
 fn outer_layout_style<E: Styled>(element: &mut E) -> StyleRefinement {
     let style = element.style();
+    // Scrollable renders an extra viewport wrapper around the supplied
+    // element. Positioning belongs to that outer layout box; leaving it on the
+    // inner content makes an `absolute()` scroll surface participate in its
+    // parent's flex layout and positions only the content inside the wrapper.
+    let position = style.position.take();
+    let inset = std::mem::take(&mut style.inset);
     StyleRefinement {
+        position,
+        inset,
         size: style.size.clone(),
         min_size: style.min_size.clone(),
         max_size: style.max_size.clone(),
@@ -328,5 +336,22 @@ fn outer_layout_style<E: Styled>(element: &mut E) -> StyleRefinement {
         flex_basis: style.flex_basis,
         align_self: style.align_self,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use gpui::{px, Position};
+
+    #[test]
+    fn outer_layout_style_moves_absolute_positioning_to_the_scroll_wrapper() {
+        let mut element = div().absolute().left(px(12.0)).top(px(24.0));
+        let outer = outer_layout_style(&mut element);
+
+        assert_eq!(outer.position, Some(Position::Absolute));
+        assert_ne!(outer.inset, Default::default());
+        assert_eq!(element.style().position, None);
+        assert_eq!(element.style().inset, Default::default());
     }
 }

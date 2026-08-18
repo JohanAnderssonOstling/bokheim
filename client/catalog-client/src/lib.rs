@@ -13,8 +13,8 @@ use catalog_core::{opds_publication, opds_search, wide_search_concurrency};
 #[cfg(test)]
 use catalog_contract::CatalogBookFormat;
 use catalog_contract::{
-    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction, CatalogSearch, CatalogSearchQuery,
-    CatalogSource, CatalogSourceId, CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
+    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction, CatalogSearch,
+    CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
 };
 use futures_util::stream::{self, StreamExt};
 use opds::{CatalogRegistry, DownloadedOpdsBook, OpdsEndpoint, OpdsEndpointStore, OpdsSearch};
@@ -598,8 +598,8 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use catalog_contract::{
-        CatalogAuthorDiscoveryEvidence, CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme, CatalogPublicationIdentity,
-        CatalogSearchDefinition, CatalogSearchField,
+        CatalogAuthorDiscoveryEvidence, CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme, CatalogPublicationIdentity, CatalogSearchDefinition,
+        CatalogSearchField,
     };
     use image::{DynamicImage, ImageOutputFormat};
     use opds::{OpdsAcquisition, OpdsAuthorCredit, OpdsAuthorLink, OpdsCatalogLink, OpdsFacet, OpdsIndirectAcquisition, OpdsLinkTarget, OpdsPagination, OpdsPublication, OpdsUnsupportedAcquisition, OpdsVersion};
@@ -681,10 +681,7 @@ mod tests {
                 }],
             }
         };
-        let mut publications = vec![
-            edition("urn:gutenberg:2465:2", "https://www.gutenberg.org/ebooks/2465.epub.noimages"),
-            edition("urn:gutenberg:2465:3", "https://www.gutenberg.org/ebooks/2465.epub.images"),
-        ];
+        let mut publications = vec![edition("urn:gutenberg:2465:2", "https://www.gutenberg.org/ebooks/2465.epub.noimages"), edition("urn:gutenberg:2465:3", "https://www.gutenberg.org/ebooks/2465.epub.images")];
 
         normalize_project_gutenberg_publications(&mut publications);
 

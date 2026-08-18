@@ -67,12 +67,12 @@ pub const LARGE_BOOK_GRID_ROW_HEIGHT_PX: u16 = LARGE_BOOK_CARD_HEIGHT_PX + BOOK_
 /// Folder and subject navigation share one visual geometry across frontends.
 /// Pointer-first layouts keep the compact row; touch-first layouts use the
 /// larger minimum without changing the label, icon, or grid rhythm.
-pub const HIERARCHY_CELL_HEIGHT_PX: u16 = 40;
-pub const HIERARCHY_TOUCH_CELL_MIN_HEIGHT_PX: u16 = 56;
+pub const HIERARCHY_CELL_HEIGHT_PX: u16 = 56;
+pub const HIERARCHY_TOUCH_CELL_MIN_HEIGHT_PX: u16 = 72;
 pub const HIERARCHY_CELL_MIN_WIDTH_PX: u16 = 240;
 pub const HIERARCHY_CELL_GAP_PX: u8 = 4;
 pub const HIERARCHY_ICON_SIZE_PX: u8 = 22;
-pub const HIERARCHY_LABEL_SIZE_PX: u8 = 18;
+pub const HIERARCHY_LABEL_SIZE_PX: u8 = 16;
 
 /// The detailed book row — cover art beside the text, rather than under it.
 ///
@@ -1039,12 +1039,13 @@ mod tests {
     #[test]
     fn hierarchy_geometry_distinguishes_pointer_and_touch_density() {
         let layout = FrontendContract::default().browsing_layout;
-        assert_eq!(layout.hierarchy_cell_height_px, 40);
-        assert_eq!(layout.hierarchy_touch_cell_min_height_px, 56);
+        assert_eq!(layout.hierarchy_cell_height_px, 56);
+        assert_eq!(layout.hierarchy_touch_cell_min_height_px, 72);
         assert_eq!(layout.hierarchy_cell_min_width_px, 240);
         assert_eq!(layout.hierarchy_cell_gap_px, 4);
         assert_eq!(layout.hierarchy_icon_size_px, 22);
-        assert_eq!(layout.hierarchy_label_size_px, 18);
+        assert_eq!(layout.hierarchy_label_size_px, 16);
+        assert!(layout.hierarchy_touch_cell_min_height_px > layout.hierarchy_cell_height_px);
     }
 
     #[test]

@@ -615,15 +615,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
             .child(breadcrumb.flex_none())
             .child(gpui::div().w(gpui::px(1.0)).h(gpui::px(1.0)).flex_none());
         let breadcrumb_row = gpui::div().w_full().min_w_0().flex().items_center().child(breadcrumb_viewport);
-        let control_row = gpui::div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(gpui::px(components::SPACE_MD))
-            .child(controls.min_w_0().justify_start())
-            .child(control_actions.flex_none())
-            .child(split_actions.flex_none());
+        let control_row = gpui::div().w_full().min_w_0().flex().items_center().gap(gpui::px(components::SPACE_MD)).child(controls.min_w_0().justify_start()).child(control_actions.flex_none()).child(split_actions.flex_none());
         components::browser_stacked_topbar(theme).child(breadcrumb_row).when(show_controls, |header| header.child(control_row)).into_any_element()
     }
 
