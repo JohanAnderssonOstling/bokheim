@@ -7,7 +7,7 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: desktop-appimage-release-${{ github.ref }}
@@ -181,13 +181,17 @@ jobs:
         working-directory: bokheim
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if ! gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-releases >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
+              --repo JohanAnderssonOstling/bokheim-releases \
+              --target main \
               --draft \
               --generate-notes \
-              --verify-tag \
-              --title "Bokheim ${GITHUB_REF_NAME#v}" || gh release view "$GITHUB_REF_NAME" >/dev/null
+              --title "Bokheim ${GITHUB_REF_NAME#v}" || \
+              gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-releases >/dev/null
           fi
-          gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          gh release upload "$GITHUB_REF_NAME" release/* \
+            --repo JohanAnderssonOstling/bokheim-releases \
+            --clobber

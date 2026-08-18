@@ -64,8 +64,8 @@ class MainActivity : TauriActivity() {
     private const val NETWORK_CHANGED_EVENT = "${APP_NAME_LOWER}-network-changed"
     private const val AUDIOBOOK_STATE_EVENT = "${APP_NAME_LOWER}-audiobook-state"
     private const val APK_UPDATE_EVENT = "${APP_NAME_LOWER}-apk-update"
-    private const val RELEASE_API = "https://api.github.com/repos/JohanAnderssonOstling/bokheim/releases/latest"
-    private const val RELEASE_DOWNLOAD_PREFIX = "https://github.com/JohanAnderssonOstling/bokheim/releases/download/"
+    private const val RELEASE_API = "https://api.github.com/repos/JohanAnderssonOstling/bokheim-releases/releases/latest"
+    private const val RELEASE_DOWNLOAD_PREFIX = "https://github.com/JohanAnderssonOstling/bokheim-releases/releases/download/"
     private const val UPDATE_CHECK_INTERVAL_MS = 24L * 60L * 60L * 1000L
   }
 

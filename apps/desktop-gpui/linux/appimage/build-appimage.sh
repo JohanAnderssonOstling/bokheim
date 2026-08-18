@@ -8,7 +8,7 @@ RELEASE_DIRECTORY=${RELEASE_DIRECTORY:-"$REPOSITORY_ROOT/release"}
 DESKTOP_BINARY=${DESKTOP_BINARY:-"$REPOSITORY_ROOT/target/release/desktop-gpui"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy-x86_64.AppImage}
 APPIMAGETOOL=${APPIMAGETOOL:-appimagetool-x86_64.AppImage}
-UPDATE_INFORMATION=${UPDATE_INFORMATION:-"zsync|https://github.com/JohanAnderssonOstling/bokheim/releases/latest/download/Bokheim-x86_64.AppImage.zsync"}
+UPDATE_INFORMATION=${UPDATE_INFORMATION:-"zsync|https://github.com/JohanAnderssonOstling/bokheim-releases/releases/latest/download/Bokheim-x86_64.AppImage.zsync"}
 
 test -n "$PACKAGE_VERSION"
 test -x "$DESKTOP_BINARY"
