@@ -61,6 +61,18 @@ jobs:
         shell: bash
         run: cp .github/mobile-release-Cargo.toml Cargo.toml
 
+      - name: Restore Rust dependencies and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: android-rust-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-ndk-${{ env.NDK_VERSION }}-${{ hashFiles('Cargo.lock', '.github/mobile-release-Cargo.toml') }}
+          restore-keys: |
+            android-rust-v1-${{ runner.os }}-${{ runner.arch }}-rust-1.95.0-ndk-${{ env.NDK_VERSION }}-
+
       - name: Install frontend dependencies
         working-directory: apps/mobile
         run: npm ci

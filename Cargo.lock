@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-gpui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-channel",
  "audiobook-player",
@@ -7404,7 +7404,7 @@ dependencies = [
 
 [[package]]
 name = "mobileapp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crossbeam-channel",
  "epub-svelte",
