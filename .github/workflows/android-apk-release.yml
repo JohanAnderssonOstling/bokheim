@@ -114,11 +114,14 @@ jobs:
             exit 1
           fi
           chmod 600 "$keystore"
-          if ! keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" >/dev/null; then
+          echo "Decoded keystore SHA-256: $(sha256sum "$keystore" | cut -d ' ' -f 1)"
+          if ! keytool_error=$(keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" 2>&1); then
+            printf '%s\n' "$keytool_error"
             echo "::error::The decoded keystore is invalid or ANDROID_KEYSTORE_PASSWORD is incorrect."
             exit 1
           fi
-          if ! keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null; then
+          if ! keytool_error=$(keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" 2>&1); then
+            printf '%s\n' "$keytool_error"
             echo "::error::ANDROID_KEY_ALIAS does not exist in the decoded keystore."
             exit 1
           fi

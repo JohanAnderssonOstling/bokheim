@@ -151,6 +151,8 @@ pub const NAV_RAIL_LABEL_WEIGHT: FontWeight = FontWeight(app_contract::NAVIGATIO
 pub const NAV_RAIL_ICON_SIZE: f32 = app_contract::NAVIGATION_ICON_SIZE_PX as f32;
 pub const NAV_RAIL_ICON_LABEL_GAP: f32 = app_contract::NAVIGATION_ICON_LABEL_GAP_PX as f32;
 pub const NAV_RAIL_ITEM_MIN_HEIGHT: f32 = app_contract::NAVIGATION_ITEM_MIN_HEIGHT_PX as f32;
+pub const NAV_RAIL_ITEM_MIN_HEIGHT_REM: f32 = NAV_RAIL_ITEM_MIN_HEIGHT / 16.0;
+pub const NAV_RAIL_SWITCHER_HEIGHT_REM: f32 = 72.0 / 16.0;
 pub const NAV_RAIL_WIDTH_REM: f32 = NAV_RAIL_WIDTH / 16.0;
 
 /// Preserve the approved 96px rail at the default and smaller type sizes, then

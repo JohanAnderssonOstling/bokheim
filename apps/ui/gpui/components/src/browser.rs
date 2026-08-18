@@ -1,12 +1,12 @@
 use gpui::prelude::*;
-use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui::{div, px, Div, ElementId, FontWeight, SharedString, Stateful};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable,
-    ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
+    BrowserTheme, Scrollable, ScrollableElement, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
+    SPACE_XS, SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -14,7 +14,7 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
     Button::new(id)
         .ghost()
         .w_full()
-        .min_h(px(crate::NAV_RAIL_ITEM_MIN_HEIGHT))
+        .min_h(gpui::rems(crate::NAV_RAIL_ITEM_MIN_HEIGHT_REM))
         .py(px(SPACE_SM))
         .p_0()
         .rounded(px(RADIUS_MD))
@@ -85,7 +85,7 @@ pub fn library_section_content() -> Div {
 }
 
 pub fn library_switcher_group(theme: BrowserTheme) -> Div {
-    div().relative().w_full().min_h(px(72.0)).flex_none().flex().items_center().gap(px(SPACE_SM)).border_b_1().border_color(theme.border)
+    div().relative().w_full().min_h(gpui::rems(crate::NAV_RAIL_SWITCHER_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM)).border_b_1().border_color(theme.border)
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
@@ -146,18 +146,29 @@ pub fn browser_actionable_empty(title: impl Into<SharedString>, description: imp
 
 pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let label = label.into();
-    Button::new("library-switcher-trigger").ghost().w_full().h(px(72.0)).min_h(px(72.0)).p_0().overflow_hidden().text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::BOLD).text_color(theme.accent).tooltip(label.clone()).child(
-        div()
-            .size_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(SPACE_XXS))
-            .child(navigation_icon(app_contract::NavigationIcon::BookOpen).large())
-            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label)),
-    )
+    Button::new("library-switcher-trigger")
+        .ghost()
+        .w_full()
+        .h(gpui::rems(crate::NAV_RAIL_SWITCHER_HEIGHT_REM))
+        .min_h(gpui::rems(crate::NAV_RAIL_SWITCHER_HEIGHT_REM))
+        .p_0()
+        .overflow_hidden()
+        .text_size(gpui::rems(TEXT_XS / 16.0))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme.accent)
+        .tooltip(label.clone())
+        .child(
+            div()
+                .size_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_XXS))
+                .child(navigation_icon(app_contract::NavigationIcon::BookOpen).large())
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label)),
+        )
 }
 
 pub fn library_switcher_panel() -> Div {
