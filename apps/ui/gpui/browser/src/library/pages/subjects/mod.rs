@@ -149,6 +149,16 @@ impl SubjectsPage {
         let subject_path = self.selected_path().map(str::to_owned);
         let file_type = self.hierarchy.file_type();
         let is_uncategorized = subject_path.as_deref() == Some(UNCATEGORIZED_SUBJECT_PATH);
+        if is_uncategorized {
+            self.refresh_request.begin();
+            self.hierarchy.clear_error();
+            self.hierarchy.install(Vec::new(), Vec::new(), cx);
+            self.refresh_reviews(cx);
+            for split in self.splits.pages() {
+                split.update(cx, |page, cx| page.refresh(cx));
+            }
+            return;
+        }
         let request_path = subject_path.clone();
         let generation = self.refresh_request.begin();
         let load = self.ui.load_subjects(request_path.clone(), file_type);
@@ -161,8 +171,7 @@ impl SubjectsPage {
                 match result {
                     Ok(data) => {
                         page.hierarchy.clear_error();
-                        let books = if is_uncategorized { Vec::new() } else { data.books };
-                        page.hierarchy.install(data.children, books, cx);
+                        page.hierarchy.install(data.children, data.books, cx);
                         cx.notify();
                     }
                     Err(error) => {
@@ -174,14 +183,10 @@ impl SubjectsPage {
             });
         });
         self.refresh_request.install(task);
-        if is_uncategorized {
-            self.refresh_reviews(cx);
-        } else {
-            self.review_request.begin();
-            self.reviews = Rc::new(Vec::new());
-            self.review_loading = false;
-            self.review_error = None;
-        }
+        self.review_request.begin();
+        self.reviews = Rc::new(Vec::new());
+        self.review_loading = false;
+        self.review_error = None;
         for split in self.splits.pages() {
             split.update(cx, |page, cx| page.refresh(cx));
         }
@@ -453,7 +458,7 @@ impl SubjectsPage {
         for review in self.reviews.iter().filter(|review| review.status == epub_svelte_lib::library::EditionIdentityReviewStatus::NoMatch) {
             self.manual_isbn_inputs.entry(review.content_hash.clone()).or_insert_with(|| cx.new(|cx| InputState::new(window, cx).placeholder("ISBN-10 or ISBN-13")));
         }
-        for review in self.reviews.iter() {
+        for review in self.reviews.iter().filter(|review| review.status == self.review_status) {
             self.review_covers.entry(review.content_hash.clone()).or_insert_with(|| ReviewCoverView::create(review.content_hash.clone(), self.ui.clone(), cx));
         }
 
@@ -486,19 +491,20 @@ impl SubjectsPage {
             );
         }
 
-        let filtered = Rc::new(self.reviews.iter().filter(|review| review.status == self.review_status).cloned().collect::<Vec<_>>());
+        let rows = self.reviews.clone();
+        let filtered = Rc::new(rows.iter().enumerate().filter_map(|(index, review)| (review.status == self.review_status).then_some(index)).collect::<Vec<_>>());
         let inputs = Rc::new(self.manual_isbn_inputs.clone());
         let covers = Rc::new(self.review_covers.clone());
         let selections = Rc::new(self.candidate_selections.clone());
         let busy = self.review_busy.clone();
         let batch_busy = self.review_batch_busy;
         let row_page = page.clone();
-        let rows = filtered.clone();
+        let visible_rows = filtered.clone();
         let row_height = px(app_contract::METADATA_REVIEW_ITEM_HEIGHT_PX as f32);
-        let list = uniform_list(format!("isbn-review-list-{:?}", self.review_status), rows.len(), move |range, _, _| {
+        let list = uniform_list(format!("isbn-review-list-{:?}", self.review_status), filtered.len(), move |range, _, _| {
             range
                 .map(|index| {
-                    let review = &rows[index];
+                    let review = &rows[visible_rows[index]];
                     let hash = review.content_hash.clone();
                     let cover = covers.get(&hash).expect("every review row has a cover view").clone();
                     let selected = selections.get(&hash).copied().unwrap_or(0).min(review.candidates.len().saturating_sub(1));
@@ -537,19 +543,45 @@ impl SubjectsPage {
                     }
 
                     let evidence = if review.status == epub_svelte_lib::library::EditionIdentityReviewStatus::Ambiguous {
-                        let metadata_values = |title: &str, authors: &[String], publishers: &[String], publication_year: Option<i32>, classifications: &[String], show_classification_status: bool| {
+                        let metadata_values = |title: &str,
+                                               authors: &[String],
+                                               publishers: &[String],
+                                               publication_year: Option<i32>,
+                                               classifications: &[String],
+                                               show_classification_status: bool,
+                                               inferred_title: bool,
+                                               inferred_author: Option<&str>,
+                                               inferred_publication_year: Option<i32>| {
                             let mut values = div().flex_1().min_w_0().h_full().overflow_hidden().flex().flex_col().gap(px(5.0));
                             if !title.trim().is_empty() {
-                                values = values.child(div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(2).line_height(gpui::relative(1.25)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()));
+                                let mut field = div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(2).line_height(gpui::relative(1.25)).font_weight(FontWeight::SEMIBOLD);
+                                if inferred_title {
+                                    field = field.child(div().text_size(gpui::rems(10.0 / 16.0)).font_weight(FontWeight::NORMAL).text_color(theme.accent).child("Inferred from title"));
+                                }
+                                values = values.child(field.child(title.to_owned()));
                             }
-                            if !authors.is_empty() {
-                                values = values.child(div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(2).line_height(gpui::relative(1.25)).text_color(theme.text_muted).child(authors.join(", ")));
+                            if !authors.is_empty() || inferred_author.is_some() {
+                                let mut author_values = authors.to_vec();
+                                if let Some(author) = inferred_author {
+                                    if !author_values.iter().any(|existing| existing.eq_ignore_ascii_case(author)) {
+                                        author_values.push(author.to_owned());
+                                    }
+                                }
+                                let mut field = div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(2).line_height(gpui::relative(1.25)).text_color(theme.text_muted);
+                                if inferred_author.is_some() {
+                                    field = field.child(div().text_size(gpui::rems(10.0 / 16.0)).text_color(theme.accent).child("Author inferred from title"));
+                                }
+                                values = values.child(field.child(author_values.join(", ")));
                             }
                             if !publishers.is_empty() {
                                 values = values.child(div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(2).line_height(gpui::relative(1.25)).text_color(theme.text_muted).child(publishers.join(", ")));
                             }
-                            if let Some(year) = publication_year {
-                                values = values.child(div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).text_color(theme.text_muted).child(year.to_string()));
+                            if let Some(year) = publication_year.or(inferred_publication_year) {
+                                let mut field = div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).text_color(theme.text_muted);
+                                if publication_year.is_none() && inferred_publication_year.is_some() {
+                                    field = field.child(div().text_size(gpui::rems(10.0 / 16.0)).text_color(theme.accent).child("Year inferred from title"));
+                                }
+                                values = values.child(field.child(year.to_string()));
                             }
                             if !classifications.is_empty() {
                                 values = values.child(div().w_full().px(px(7.0)).py(px(5.0)).border_1().border_color(theme.border).line_clamp(3).line_height(gpui::relative(1.25)).text_color(theme.accent).child(classifications.join("\n")));
@@ -558,14 +590,18 @@ impl SubjectsPage {
                             }
                             values
                         };
+                        let local_title = review.inferred_title.as_deref().unwrap_or(&review.title);
                         let local_column = div().flex_1().min_w_0().h(px(352.0)).overflow_hidden().flex().flex_col().child(div().h(px(32.0)).flex_none().flex().items_center().font_weight(FontWeight::SEMIBOLD).child("Your book")).child(
-                            div().w_full().h(px(320.0)).overflow_hidden().flex().items_start().gap(px(10.0)).child(cover.clone()).child(metadata_values(
-                                &review.title,
+                            div().w_full().h(px(320.0)).overflow_hidden().flex().items_start().child(metadata_values(
+                                local_title,
                                 &review.authors,
                                 &review.publishers,
                                 review.publication_year,
                                 &[],
                                 false,
+                                review.inferred_title.is_some(),
+                                review.inferred_author.as_deref(),
+                                review.inferred_publication_year,
                             )),
                         );
                         let external_column = if let Some(candidate) = candidate {
@@ -588,6 +624,9 @@ impl SubjectsPage {
                                     candidate.publication_year,
                                     &candidate.classifications,
                                     true,
+                                    false,
+                                    None,
+                                    None,
                                 )))
                                 .child(
                                     div()
@@ -619,7 +658,8 @@ impl SubjectsPage {
                         } else {
                             div().flex_1().min_w_0().child(div().h(px(32.0)).flex().items_center().font_weight(FontWeight::SEMIBOLD).child("External book"))
                         };
-                        div().w_full().min_w_0().flex().items_start().gap(px(8.0)).child(local_column).child(external_column).into_any_element()
+                        let cover_column = div().w(px(components::BOOK_COVER_WIDTH)).h(px(352.0)).flex_none().pt(px(32.0)).child(cover.clone());
+                        div().w_full().min_w_0().flex().items_start().gap(px(8.0)).child(cover_column).child(local_column).child(external_column).into_any_element()
                     } else {
                         let detail = review.detail.clone().unwrap_or_else(|| {
                             if review.status == epub_svelte_lib::library::EditionIdentityReviewStatus::Failed { "The metadata lookup failed without an error message.".to_owned() } else { "No candidate was returned.".to_owned() }

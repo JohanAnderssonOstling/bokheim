@@ -3,7 +3,7 @@ use library_model::{canonical_isbn, PublicationIdentifier, PublicationIdentifier
 use metadata_contract::{EditionIdentityMatch, EditionTitleMatch, EntitySource, PersonEntity, PlaceEntity, RichWorkMetadataMatch};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 const ALTERNATIVE_EDITION_PROVENANCE: &str = "openlibrary-alternative-edition-match";
 pub(super) const RESTORE_ALTERNATIVE_MATCHES_MIGRATION: &str = "migration_restore_automatic_alternative_edition_matches_v1";
@@ -219,7 +219,7 @@ pub(crate) fn record_external_metadata_attempt(conn: &Connection, content_hash: 
 pub(crate) fn edition_identity_reviews(conn: &Connection, provider_id: &str) -> Result<Vec<EditionIdentityReviewRow>, rusqlite::Error> {
     let mut reviews = conn
         .prepare(
-            "SELECT book.content_hash,COALESCE(book.title,''),book.publication_metadata,attempt.status,attempt.detail
+            "SELECT book.row_id,book.content_hash,COALESCE(book.title,''),book.publication_metadata,attempt.status,attempt.detail
              FROM external_metadata_attempt attempt
              JOIN book ON book.row_id=attempt.book_row_id
              WHERE attempt.provider_id=?1
@@ -231,32 +231,58 @@ pub(crate) fn edition_identity_reviews(conn: &Connection, provider_id: &str) -> 
              ORDER BY CASE attempt.status WHEN 'ambiguous' THEN 0 WHEN 'no_match' THEN 1 ELSE 2 END,
                       LOWER(COALESCE(book.title,'')),book.content_hash",
         )?
-        .query_map([provider_id], |row| Ok((ContentHash::new(&row.get::<_, String>(0)?), row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?)))?
+        .query_map([provider_id], |row| Ok((row.get::<_, i64>(0)?, ContentHash::new(&row.get::<_, String>(1)?), row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?)))?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut statement = conn.prepare(
-        "SELECT candidate FROM external_metadata_candidate
-         WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND provider_id=?2 ORDER BY position",
-    )?;
+    let review_ids = reviews.iter().map(|review| review.0).collect::<BTreeSet<_>>();
+    let mut authors = HashMap::<i64, Vec<String>>::new();
     let mut author_statement = conn.prepare(
-        "SELECT name FROM book_contributor
-         WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND role=X'617574'
-         ORDER BY position",
+        "SELECT contributor.book_row_id,contributor.name
+         FROM external_metadata_attempt attempt
+         JOIN book_contributor contributor ON contributor.book_row_id=attempt.book_row_id AND contributor.role=X'617574'
+         WHERE attempt.provider_id=?1 AND attempt.status IN ('ambiguous','no_match','failed')
+         ORDER BY contributor.book_row_id,contributor.position",
     )?;
+    let author_rows = author_statement.query_map([provider_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    for row in author_rows {
+        let (book_row_id, name) = row?;
+        if review_ids.contains(&book_row_id) {
+            authors.entry(book_row_id).or_default().push(name);
+        }
+    }
+    let mut candidates = HashMap::<i64, Vec<EditionIdentityMatch>>::new();
+    let mut candidate_statement = conn.prepare(
+        "SELECT candidate.book_row_id,candidate.candidate
+         FROM external_metadata_attempt attempt
+         JOIN external_metadata_candidate candidate
+           ON candidate.book_row_id=attempt.book_row_id AND candidate.provider_id=attempt.provider_id
+         WHERE attempt.provider_id=?1 AND attempt.status IN ('ambiguous','no_match','failed')
+         ORDER BY candidate.book_row_id,candidate.position",
+    )?;
+    let candidate_rows = candidate_statement.query_map([provider_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+    for row in candidate_rows {
+        let (book_row_id, encoded) = row?;
+        if review_ids.contains(&book_row_id) {
+            let candidate = sync_common::wire::decode(&encoded, metadata_contract::MAX_RESPONSE_BYTES).map_err(|error| invalid_text_column(1, error.to_string()))?;
+            candidates.entry(book_row_id).or_default().push(candidate);
+        }
+    }
     let mut result = Vec::with_capacity(reviews.len());
-    for (content_hash, title, raw_publication, status, detail) in reviews.drain(..) {
+    for (book_row_id, content_hash, title, raw_publication, status, detail) in reviews.drain(..) {
         let publication = decode_publication_metadata(&raw_publication)?;
-        let authors = author_statement.query_map([content_hash.as_str()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         let publishers = publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect::<Vec<_>>();
         let publication_year = library_model::unique_publication_year(publication.dates.iter().map(|date| date.value()));
-        let candidates = statement
-            .query_map(rusqlite::params![content_hash.as_str(), provider_id], |row| row.get::<_, Vec<u8>>(0))?
-            .map(|encoded| {
-                let encoded = encoded?;
-                sync_common::wire::decode(&encoded, metadata_contract::MAX_RESPONSE_BYTES).map_err(|error| invalid_text_column(0, error.to_string()))
-            })
-            .collect::<Result<Vec<EditionIdentityMatch>, _>>()?;
         let candidates_truncated = detail.as_deref() == Some("candidate list was truncated");
-        result.push(EditionIdentityReviewRow { content_hash, title, authors, publishers, publication_year, status, detail, candidates, candidates_truncated });
+        result.push(EditionIdentityReviewRow {
+            content_hash,
+            title,
+            authors: authors.remove(&book_row_id).unwrap_or_default(),
+            publishers,
+            publication_year,
+            status,
+            detail,
+            candidates: candidates.remove(&book_row_id).unwrap_or_default(),
+            candidates_truncated,
+        });
     }
     Ok(result)
 }

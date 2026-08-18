@@ -42,13 +42,17 @@ install -Dm644 \
   "$APPDIR/usr/share/icons/hicolor/scalable/apps/se.bokheim.Bokheim.svg"
 
 mkdir -p "$RELEASE_DIRECTORY"
+RELEASE_DIRECTORY=$(cd "$RELEASE_DIRECTORY" && pwd)
 OUTPUT_FILE="$RELEASE_DIRECTORY/Bokheim-x86_64.AppImage"
 
-ARCH=x86_64 VERSION="$PACKAGE_VERSION" \
-  "$APPIMAGETOOL" --no-appstream --updateinformation "$UPDATE_INFORMATION" "$APPDIR" "$OUTPUT_FILE"
+(
+  cd "$RELEASE_DIRECTORY"
+  ARCH=x86_64 VERSION="$PACKAGE_VERSION" \
+    "$APPIMAGETOOL" --no-appstream --updateinformation "$UPDATE_INFORMATION" "$APPDIR" "$(basename "$OUTPUT_FILE")"
+)
 
-test -f "$OUTPUT_FILE"
-test -f "$OUTPUT_FILE.zsync"
+test -s "$OUTPUT_FILE" || { printf 'AppImage was not created: %s\n' "$OUTPUT_FILE" >&2; exit 1; }
+test -s "$OUTPUT_FILE.zsync" || { printf 'zsync file was not created: %s\n' "$OUTPUT_FILE.zsync" >&2; exit 1; }
 chmod +x "$OUTPUT_FILE"
 sha256sum "$OUTPUT_FILE" > "$OUTPUT_FILE.sha256"
 

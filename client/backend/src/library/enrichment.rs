@@ -158,6 +158,9 @@ pub struct EditionIdentityReview {
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
     pub publication_year: Option<i32>,
+    pub inferred_title: Option<String>,
+    pub inferred_author: Option<String>,
+    pub inferred_publication_year: Option<i32>,
     pub status: EditionIdentityReviewStatus,
     pub detail: Option<String>,
     pub candidates: Vec<EditionIdentityReviewCandidate>,
@@ -218,12 +221,19 @@ impl LibraryBackend {
                         };
                         let mut candidates = review.candidates.into_iter().map(Into::into).collect::<Vec<_>>();
                         candidates.sort_by(|left, right| candidate_classification_rank(right).cmp(&candidate_classification_rank(left)));
+                        let (query_title, inferred_author, inferred_year) = edition_identity_title_author_and_year(&review.title);
+                        let inferred_title = (query_title.trim() != review.title.trim()).then_some(query_title);
+                        let inferred_author = inferred_author.filter(|author| !review.authors.iter().any(|existing| existing.eq_ignore_ascii_case(author)));
+                        let inferred_publication_year = review.publication_year.is_none().then_some(inferred_year).flatten();
                         Some(EditionIdentityReview {
                             content_hash: review.content_hash,
                             title: review.title,
                             authors: review.authors,
                             publishers: review.publishers,
                             publication_year: review.publication_year,
+                            inferred_title,
+                            inferred_author,
+                            inferred_publication_year,
                             status,
                             detail: review.detail,
                             candidates,

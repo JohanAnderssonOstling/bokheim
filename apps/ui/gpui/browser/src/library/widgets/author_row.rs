@@ -4,11 +4,11 @@
 //! owns their thumbnail reads the way a book card owns its own. Keeping the
 //! row retained is what stops a scroll from re-reading the same JPEGs.
 
-use std::rc::Rc;
 use epub_svelte_lib::AuthorId;
 use epub_svelte_lib::library::AuthorSummary;
 use gpui::prelude::*;
 use gpui::{AppContext, Context, Entity, IntoElement, Render, SharedString, Task, Window};
+use std::rc::Rc;
 use ui_components as components;
 
 use crate::ActivateAuthor;

@@ -7,10 +7,10 @@ use epub_svelte_lib::library::BookCardRow;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, container_query, div, px, size};
 use gpui_component::IconName;
-use gpui_component::v_virtual_list;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu};
 use gpui_component::scroll::ScrollableElement as ComponentScrollableElement;
+use gpui_component::v_virtual_list;
 use std::cell::Cell;
 use std::rc::Rc;
 use ui_components as components;
@@ -161,7 +161,6 @@ mod tests {
         books.sort_by(|left, right| HierarchySort::Name.compare(left, right));
         assert_eq!(books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Alpha", "zebra"]);
     }
-
 }
 
 pub(crate) trait HierarchyCrumb: Clone + PartialEq + 'static {
@@ -479,18 +478,9 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
 
     #[allow(clippy::too_many_arguments)]
     fn render_virtualized_hierarchy<P, SetPath>(
-        &self,
-        grid_id: &'static str,
-        button_prefix: &'static str,
-        hierarchy_icon: app_contract::NavigationIcon,
-        page: Entity<P>,
-        set_path: SetPath,
-        child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
-        child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
-        child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>,
-        child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>,
-        child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>,
-        child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>,
+        &self, grid_id: &'static str, button_prefix: &'static str, hierarchy_icon: app_contract::NavigationIcon, page: Entity<P>, set_path: SetPath, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
+        child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>, child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>,
+        child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>, child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>, child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>,
     ) -> AnyElement
     where
         P: Render + 'static,
@@ -512,11 +502,8 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
             let hierarchy_row_height = components::HIERARCHY_CELL_HEIGHT + components::HIERARCHY_CELL_MARGIN * 2.0;
 
             let book_column_count = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
-            let (book_column_count, book_width) = if detailed {
-                (1, width)
-            } else {
-                crate::virtual_grid::grid_geometry(width, book_column_count, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP)
-            };
+            let (book_column_count, book_width) =
+                if detailed { (1, width) } else { crate::virtual_grid::grid_geometry(width, book_column_count, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
             let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, f32::from(window.rem_size())) };
             let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_column_count);
             let mut item_sizes = Vec::with_capacity(hierarchy_row_count + book_row_count);
