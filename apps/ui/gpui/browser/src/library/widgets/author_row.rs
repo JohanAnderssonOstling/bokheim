@@ -5,16 +5,15 @@
 //! row retained is what stops a scroll from re-reading the same JPEGs.
 
 use std::rc::Rc;
-use std::sync::Arc;
-
 use epub_svelte_lib::AuthorId;
 use epub_svelte_lib::library::AuthorSummary;
 use gpui::prelude::*;
-use gpui::{AppContext, Context, Entity, Image, ImageFormat, IntoElement, Render, SharedString, Task, Window};
+use gpui::{AppContext, Context, Entity, IntoElement, Render, SharedString, Task, Window};
 use ui_components as components;
 
 use crate::ActivateAuthor;
 use crate::library::services::LibraryContext;
+use crate::library::widgets::book_card::{LoadedCover, loaded_cover_from_jpeg};
 
 /// What the page does when a row is chosen. The row renders itself, so the
 /// page hands it the one behaviour it owns rather than the row reaching back
@@ -27,7 +26,7 @@ pub(crate) type SelectAuthor = Rc<dyn Fn(AuthorId, &mut gpui::App)>;
 #[derive(Clone)]
 enum CoverState {
     Pending,
-    Loaded(Arc<Image>),
+    Loaded(LoadedCover),
     Missing,
 }
 
@@ -81,7 +80,7 @@ impl AuthorRowView {
                             // The same JPEG check the book card makes: a
                             // thumbnail that is not one would otherwise reach
                             // the image decoder as an image of unknown format.
-                            Ok(Some(bytes)) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => CoverState::Loaded(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes))),
+                            Ok(Some(bytes)) => loaded_cover_from_jpeg(bytes).map(CoverState::Loaded).unwrap_or(CoverState::Missing),
                             Ok(_) => CoverState::Missing,
                             Err(error) => {
                                 log::error!("failed to load author row thumbnail: {error}");
@@ -119,7 +118,7 @@ impl Render for AuthorRowView {
         let covers = self.covers.iter().zip(self.author.cover_hashes()).take(cover_count).enumerate().map(|(index, (cover, content_hash))| {
             let title = self.author.cover_titles().get(index).cloned().unwrap_or_else(|| "Untitled".to_owned());
             let frame = match cover {
-                CoverState::Loaded(image) => components::author_row_cover_frame().child(components::author_row_cover_image(image.clone(), theme)),
+                CoverState::Loaded(cover) => components::author_row_cover_frame().child(components::author_row_cover_image(cover.image.clone(), cover.aspect_ratio, theme)),
                 // The book is there; its thumbnail is not, or not yet.
                 CoverState::Pending => components::author_row_cover_frame(),
                 CoverState::Missing => components::author_row_missing_cover(title, theme),

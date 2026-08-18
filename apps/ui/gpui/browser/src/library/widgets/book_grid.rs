@@ -118,7 +118,10 @@ impl BookGrid {
             // the same retained cards that static subject grids already show.
             div().size_full().flex().flex_col().child(components::virtual_list(list))
         });
-        div().w_full().flex_1().min_h_0().child(query).into_any_element()
+        // The query fills its parent with relative sizing. Make that parent a
+        // flex sizing boundary so the virtual list receives the dashboard's
+        // remaining height instead of resolving its Covers viewport to zero.
+        div().w_full().flex_1().min_h_0().flex().flex_col().child(query).into_any_element()
     }
 
     /// Renders every retained card into normal document flow. This is for

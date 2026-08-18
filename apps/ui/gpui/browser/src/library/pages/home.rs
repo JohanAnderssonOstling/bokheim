@@ -137,10 +137,11 @@ impl Render for HomePage {
         // blank page in both cases.
         if !rendered_any && self.error.is_none() {
             let states = &self.ui.contracts().browsing_states;
-            page = page.child(if self.loaded {
+            page = page.child(if self.loaded && !self.ui.scanner_running() {
                 components::browser_actionable_empty(states.empty_library_title.clone(), states.empty_library_description.clone(), gpui::div(), theme).into_any_element()
             } else {
-                components::browser_loading_message(states.loading_library_label.clone(), theme).into_any_element()
+                let label = if self.ui.scanner_running() { "Scanning library…".into() } else { states.loading_library_label.clone() };
+                components::browser_loading_message(label, theme).into_any_element()
             });
         }
 

@@ -199,6 +199,9 @@ pub(crate) struct HierarchyState<C> {
     /// Results for the query in the box, covering everything beneath the node
     /// being browsed. `None` means no query is active and `books` is showing.
     results: Option<BookGrid>,
+    /// Empty children/books are not an empty-state result until the current
+    /// browse request has settled.
+    loading: bool,
     /// Rejects a slow search that resolves after a newer one.
     search_generation: u64,
     error: Option<gpui::SharedString>,
@@ -224,6 +227,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                 books: BookGrid::browsable(ui.clone(), false, ui.library_view()),
                 filter_input,
                 results: None,
+                loading: true,
                 search_generation: 0,
                 error: None,
                 hierarchy_columns: Cell::new(1),
@@ -263,13 +267,29 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
     }
 
     pub(crate) fn install<P: 'static>(&mut self, children: Vec<C>, books: Vec<BookCardRow>, cx: &mut Context<P>) {
+        let was_loading = self.loading;
+        self.loading = false;
         let children_changed = self.children.as_ref() != &children;
         if children_changed {
             self.children = Rc::new(children);
         }
         self.books.set_books(books, cx);
         self.sort.apply(&mut self.books, cx);
-        if children_changed {
+        if was_loading || children_changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn begin_load<P: 'static>(&mut self, cx: &mut Context<P>) {
+        if !self.loading {
+            self.loading = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn finish_load<P: 'static>(&mut self, cx: &mut Context<P>) {
+        if self.loading {
+            self.loading = false;
             cx.notify();
         }
     }
@@ -337,7 +357,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render<P, SetPath, Retry>(
         &self, root_label: &'static str, hierarchy_icon: app_contract::NavigationIcon, button_prefix: &'static str, grid_id: &'static str, retry_label: gpui::SharedString, searching_label: gpui::SharedString, breadcrumb_actions: gpui::Div,
-        control_actions: gpui::Div, empty: gpui::AnyElement, page: Entity<P>, set_path: SetPath, retry: Retry, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
+        control_actions: gpui::Div, empty: gpui::AnyElement, loading_label: gpui::SharedString, page: Entity<P>, set_path: SetPath, retry: Retry, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
         child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>, child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>, show_books: bool,
         lead: Option<AnyElement>, footer: Option<AnyElement>, child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>, child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>,
         child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>, window: &mut Window, cx: &mut Context<P>,
@@ -360,7 +380,9 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         let document_scroll = query.is_empty() && footer.is_some();
 
         let mut dashboard = components::folder_dashboard();
-        if !show_books {
+        if query.is_empty() && self.loading {
+            dashboard = dashboard.child(components::browser_loading_message(loading_label, theme));
+        } else if !show_books {
             dashboard = match lead {
                 Some(lead) => dashboard.child(div().size_full().min_h_0().flex().flex_col().child(lead)),
                 None => dashboard.child(empty),

@@ -47,8 +47,8 @@ pub fn book_cover_image(source: impl Into<ImageSource>, aspect_ratio: f32, theme
         .border_color(theme.border)
         .shadow(vec![gpui_component::box_shadow(px(0.0), px(4.0), px(12.0), px(0.0), theme.shadow)])
         .object_fit(ObjectFit::Contain)
-        .when(aspect_ratio >= frame_ratio, |image| image.w_full().h(gpui::relative(frame_ratio / aspect_ratio)))
-        .when(aspect_ratio < frame_ratio, |image| image.w(gpui::relative(aspect_ratio / frame_ratio)).h_full())
+        .when(aspect_ratio >= frame_ratio, |image| image.w(px(BOOK_COVER_WIDTH)).h(px(BOOK_COVER_WIDTH / aspect_ratio)))
+        .when(aspect_ratio < frame_ratio, |image| image.w(px(BOOK_COVER_HEIGHT * aspect_ratio)).h(px(BOOK_COVER_HEIGHT)))
 }
 
 pub fn book_row_cover_image(source: impl Into<ImageSource>) -> Img {
@@ -214,7 +214,8 @@ pub fn author_list_row(id: impl Into<ElementId>, cover_count: usize, selected: b
         .flex_col()
         .gap(px(AUTHOR_ROW_CONTENT_GAP))
         .rounded(px(RADIUS_SM))
-        .shadow(vec![gpui_component::box_shadow(px(0.0), px(0.0), px(0.0), px(1.0), gpui::black())])
+        .border_1()
+        .border_color(theme.border)
         .when(selected, |row| row.bg(theme.accent_soft))
         .when(!selected, |row| row.hover(move |style| style.bg(theme.hover)))
         .cursor_pointer()
@@ -230,8 +231,15 @@ pub fn author_row_cover_frame() -> Div {
     div().w(px(AUTHOR_ROW_COVER_WIDTH)).h(px(AUTHOR_ROW_COVER_HEIGHT)).flex_none().flex().flex_col().items_center().justify_end().overflow_hidden()
 }
 
-pub fn author_row_cover_image(source: impl Into<ImageSource>, theme: BrowserTheme) -> Img {
-    img(source).w(px(AUTHOR_ROW_COVER_WIDTH)).h_auto().max_h_full().border_1().border_color(theme.border).object_fit(ObjectFit::Contain)
+pub fn author_row_cover_image(source: impl Into<ImageSource>, aspect_ratio: f32, theme: BrowserTheme) -> Img {
+    let frame_ratio = AUTHOR_ROW_COVER_WIDTH / AUTHOR_ROW_COVER_HEIGHT;
+    img(source)
+        .flex_none()
+        .border_1()
+        .border_color(theme.border)
+        .object_fit(ObjectFit::Contain)
+        .when(aspect_ratio >= frame_ratio, |image| image.w(px(AUTHOR_ROW_COVER_WIDTH)).h(px(AUTHOR_ROW_COVER_WIDTH / aspect_ratio)))
+        .when(aspect_ratio < frame_ratio, |image| image.w(px(AUTHOR_ROW_COVER_HEIGHT * aspect_ratio)).h(px(AUTHOR_ROW_COVER_HEIGHT)))
 }
 
 /// The slot an author with one book — or one thumbnail — leaves empty. Drawn

@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 
 const mobileRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-copyFileSync(
-  resolve(mobileRoot, "vendor-overrides/foliate-js/html.js"),
-  resolve(mobileRoot, "src/vendor/foliate-js/html.js"),
-);
+for (const file of ["html.js", "pdf.js", "view.js"]) {
+  copyFileSync(
+    resolve(mobileRoot, "vendor-overrides/foliate-js", file),
+    resolve(mobileRoot, "src/vendor/foliate-js", file),
+  );
+}

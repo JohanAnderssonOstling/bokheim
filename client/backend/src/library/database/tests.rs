@@ -258,37 +258,45 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
     init_db(&conn).unwrap();
     conn.execute_batch(
         "INSERT INTO unified_concept(concept_id,preferred_label,status,introduced_version) VALUES
+            ('test:root','Test','active','test'),
             ('test:us','United States','active','test'),
             ('test:texas','Texas','active','test'),
             ('test:austin','Austin','active','test'),
             ('test:dallas','Dallas','active','test'),
+            ('test:solo','Solo','active','test'),
             ('test:empty','Empty','active','test');
          INSERT INTO unified_concept_route(path,concept_id,parent_path,label) VALUES
+            ('Test','test:root','','Test'),
             ('Test / United States','test:us','Test','United States'),
             ('Test / United States / Texas','test:texas','Test / United States','Texas'),
             ('Test / United States / Texas / Austin','test:austin','Test / United States / Texas','Austin'),
             ('Test / United States / Texas / Dallas','test:dallas','Test / United States / Texas','Dallas'),
+            ('Test / Solo','test:solo','Test','Solo'),
             ('Test / Empty','test:empty','Test','Empty');
          INSERT INTO book(content_hash,title,format) VALUES
             (printf('%064x',101),'Austin book','epub'),
-            (printf('%064x',102),'Dallas book','epub');
+            (printf('%064x',102),'Dallas book','epub'),
+            (printf('%064x',103),'Solo book','epub');
          INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) VALUES
             ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',101)),'austin.epub','austin'),
-            ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'dallas.epub','dallas');
+            ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'dallas.epub','dallas'),
+            ('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=printf('%064x',103)),'solo.epub','solo');
          INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES
             ((SELECT row_id FROM book WHERE content_hash=printf('%064x',101)),'test:austin',1),
-            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'test:dallas',1);",
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'test:dallas',1),
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',103)),'test:solo',1);",
     )
     .unwrap();
 
     let scope = FileTypeScope::load(&conn, app_contract::library::LibraryFileTypeFilter::All).unwrap();
-    let (root_children, root_books) = compact_subject_children(&conn, "Test", false, &scope).unwrap();
-    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas"]);
-    assert!(root_books.is_empty());
+    let taxonomy_roots = compact_subject_children(&conn, "", false, &scope).unwrap();
+    assert_eq!(taxonomy_roots.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test"]);
 
-    let (texas_children, texas_books) = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
-    assert!(texas_children.is_empty());
-    assert_eq!(texas_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Austin book", "Dallas book"]);
+    let root_children = compact_subject_children(&conn, "Test", false, &scope).unwrap();
+    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / Solo", "Test / United States / Texas"]);
+
+    let texas_children = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
+    assert_eq!(texas_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas / Austin", "Test / United States / Texas / Dallas"]);
 }
 
 #[test]
@@ -2660,7 +2668,18 @@ fn current_schema_has_integer_relationships_foreign_keys_and_lookup_indexes() {
     let foreign_key_errors: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).unwrap();
     assert_eq!(foreign_key_errors, 0);
 
-    for index in ["sqlite_autoindex_book_1", "idx_book_dir_book", "idx_book_dir_local_hash", "idx_annotation_book", "idx_bookmark_book", "idx_book_link_source", "idx_book_link_target"] {
+    for index in [
+        "sqlite_autoindex_book_1",
+        "idx_book_dir_book",
+        "idx_book_dir_local_hash",
+        "idx_unified_concept_route_parent",
+        "idx_unified_concept_route_concept",
+        "idx_book_unified_concept_concept",
+        "idx_annotation_book",
+        "idx_bookmark_book",
+        "idx_book_link_source",
+        "idx_book_link_target",
+    ] {
         let present: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?1", [index], |row| row.get(0)).unwrap();
         assert_eq!(present, 1, "missing identity/relationship index {index}");
     }

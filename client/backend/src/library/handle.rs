@@ -60,6 +60,12 @@ impl LibraryBackend {
         &self.id
     }
 
+    /// True while the local filesystem scanner is scheduled or actively
+    /// walking this library.
+    pub fn scanner_running(&self) -> bool {
+        self._scanner.is_scanning()
+    }
+
     pub fn reload_unified_taxonomy(&self) -> Result<String, BackendError> {
         let release_id = self.context.reload_unified_taxonomy_from_disk().map_err(BackendError::operation)?;
         let connection = self.db.get().map_err(BackendError::operation)?;

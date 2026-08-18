@@ -40,4 +40,8 @@ impl LibraryScanner {
     pub(crate) fn pending_thumbnail_jobs(&self) -> Arc<Mutex<HashSet<ContentHash>>> {
         Arc::new(Mutex::new(HashSet::new()))
     }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        false
+    }
 }

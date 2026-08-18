@@ -67,6 +67,7 @@ struct ScannerState {
     db: Pool<SqliteConnectionManager>,
     park_thread: OnceLock<thread::Thread>,
     scan_requested: AtomicBool,
+    scan_active: AtomicBool,
     should_finish: AtomicBool,
     thumbnail_queue: crossbeam_channel::Sender<ThumbnailWork>,
     hash_queue: crossbeam_channel::Sender<HashTask>,
@@ -79,6 +80,19 @@ struct ScannerState {
     event_tx: Sender<LibraryEvent>,
     #[cfg(test)]
     thumbnail_tasks_started: std::sync::atomic::AtomicUsize,
+}
+
+/// Clears the public scanning state before announcing completion, including
+/// early-return error paths. Consumers can therefore handle `ScanComplete`
+/// and immediately observe a settled scanner instead of racing the worker.
+struct ScanActivity<'a>(&'a ScannerState);
+
+impl Drop for ScanActivity<'_> {
+    fn drop(&mut self) {
+        self.0.scan_active.store(false, Ordering::Release);
+        let _ = self.0.event_tx.send(LibraryEvent::ScanComplete);
+        let _ = self.0.thumbnail_queue.send(ThumbnailWork::ScanFinished);
+    }
 }
 
 struct ThumbnailTask {
@@ -165,6 +179,7 @@ impl LibraryScanner {
             db,
             park_thread: OnceLock::new(),
             scan_requested: AtomicBool::new(true),
+            scan_active: AtomicBool::new(true),
             should_finish: AtomicBool::new(false),
             thumbnail_queue: thumbnail_tx,
             hash_queue: hash_tx,
@@ -206,7 +221,13 @@ impl LibraryScanner {
         Arc::clone(&self.state.pending_thumbnail_jobs)
     }
 
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.state.scan_active.load(Ordering::Acquire) || self.state.scan_requested.load(Ordering::Acquire)
+    }
+
     fn scan_library(db: &Pool<SqliteConnectionManager>, state: &Arc<ScannerState>) {
+        state.scan_active.store(true, Ordering::Release);
+        let _activity = ScanActivity(state);
         let mut conn = match db.get() {
             Ok(c) => c,
             Err(e) => {
@@ -499,8 +520,6 @@ impl LibraryScanner {
                 Self::schedule_rescan(state, RESCAN_DELAY);
             }
         }
-        let _ = state.event_tx.send(LibraryEvent::ScanComplete);
-        let _ = state.thumbnail_queue.send(ThumbnailWork::ScanFinished);
     }
 
     fn queue_hash_tasks(state: &Arc<ScannerState>, tasks: Vec<HashTask>) -> bool {
@@ -1002,6 +1021,7 @@ mod tests {
             db,
             park_thread: OnceLock::new(),
             scan_requested: AtomicBool::new(true),
+            scan_active: AtomicBool::new(true),
             should_finish: AtomicBool::new(false),
             thumbnail_queue: thumbnail_tx,
             hash_queue: hash_tx,

@@ -122,6 +122,7 @@ impl FoldersPage {
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.hierarchy.begin_load(cx);
         let folder_id = self.folder_id();
         let file_type = self.hierarchy.file_type();
         let generation = self.refresh_request.begin();
@@ -146,6 +147,7 @@ impl FoldersPage {
                     }
                     Err(error) => {
                         log::error!("failed to load Library hierarchy: {error}");
+                        page.hierarchy.finish_load(cx);
                         page.hierarchy.set_error(error, cx);
                     }
                 }
@@ -708,6 +710,9 @@ impl FoldersPage {
         let theme = components::browser_theme(cx);
         let contracts = self.ui.contracts();
         let file_type = self.hierarchy.file_type();
+        if file_type == epub_svelte_lib::library::LibraryFileTypeFilter::All && self.hierarchy.path().is_empty() && self.ui.scanner_running() {
+            return components::browser_loading_message("Scanning library…", theme).into_any_element();
+        }
         let (title, description) = if file_type != epub_svelte_lib::library::LibraryFileTypeFilter::All {
             let label = file_type.label().to_lowercase();
             (format!("No {label} here"), format!("This folder and its subfolders contain no {label}."))
@@ -793,6 +798,7 @@ impl Render for FoldersPage {
             breadcrumb_actions,
             control_actions,
             empty,
+            self.ui.contracts().browsing_states.loading_library_label.clone().into(),
             cx.entity(),
             |page, path, window, cx| page.set_path(path, window, cx),
             |page, cx| page.refresh(cx),

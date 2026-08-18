@@ -82,6 +82,10 @@ impl LibraryContext {
         self.app.backend.browsing_preferences().map(|preferences| preferences.library_view()).unwrap_or_default()
     }
 
+    pub(crate) fn scanner_running(&self) -> bool {
+        self.library.scanner_running()
+    }
+
     pub(crate) fn sync_server_connected(&self) -> bool {
         let network = self.app.backend.network_status();
         self.app.backend.account_status().map(|status| status.signed_in()).unwrap_or(false) && network.connected && network.validated != Some(false)
@@ -143,11 +147,6 @@ impl LibraryContext {
 
     pub(crate) fn load_subjects(&self, subject_path: Option<String>, file_type: epub_svelte_lib::library::LibraryFileTypeFilter) -> impl Future<Output = Result<SubjectBrowseRows, String>> + 'static {
         let operation = self.library.spawn_blocking(move |library| library.subjects_filtered(subject_path.as_deref(), file_type));
-        async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
-    }
-
-    pub(crate) fn reload_unified_taxonomy(&self) -> impl Future<Output = Result<String, String>> + 'static {
-        let operation = self.library.spawn_blocking(move |library| library.reload_unified_taxonomy());
         async move { operation.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) }
     }
 

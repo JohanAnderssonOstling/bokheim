@@ -269,7 +269,7 @@ impl AuthorsPage {
             .child(components::author_filter_box().child(components::browser_search_input(&self.filter_input)))
             .when(self.rows.is_empty(), |panel| panel.child(components::browser_actionable_empty("No authors", "", empty_action, theme)))
             .when(!self.rows.is_empty() && !has_authors, |panel| panel.child(components::browser_inline_note("No matching authors", theme)))
-            .when(has_authors, |panel| panel.child(div().w_full().min_h_0().flex_1().child(cards_view)))
+            .when(has_authors, |panel| panel.child(div().w_full().min_h_0().flex_1().flex().flex_col().child(cards_view)))
             .into_any_element()
     }
 

@@ -110,33 +110,36 @@ GROUP BY root.id, root.name;
 -- name: get_subject_children?
 -- param: parent_path: &str
 WITH RECURSIVE
-eligible_books(book_row_id, downloaded) AS (
-    SELECT book.row_id, MAX(placement.is_downloaded)
-    FROM book
-    JOIN book_dir placement
-      ON placement.book_row_id = book.row_id
+assigned_paths(path,parent_path,book_row_id,downloaded) AS (
+    SELECT route.path,route.parent_path,assignment.book_row_id,MAX(placement.is_downloaded)
+    FROM book_unified_concept assignment
+    JOIN book
+      ON book.row_id=assignment.book_row_id
+     AND book.deleted_at IS NULL
+     AND book.hidden_at IS NULL
+    JOIN book_dir placement INDEXED BY idx_book_dir_book
+      ON placement.book_row_id=book.row_id
      AND placement.deleted_at IS NULL
-    WHERE book.deleted_at IS NULL
-      AND book.hidden_at IS NULL
-    GROUP BY book.row_id
-), descendants(root_path,path,concept_id) AS (
-    SELECT route.path,route.path,route.concept_id
-    FROM unified_concept_route route
-    WHERE route.parent_path=:parent_path
+    -- CROSS JOIN fixes the small assignment set as the driving input. Without
+    -- it SQLite may scan the complete taxonomy before probing assignments.
+    CROSS JOIN unified_concept_route route INDEXED BY idx_unified_concept_route_concept
+      ON route.concept_id=assignment.concept_id
+    GROUP BY route.path,route.parent_path,assignment.book_row_id
+), ancestors(path,parent_path,book_row_id,downloaded) AS (
+    SELECT path,parent_path,book_row_id,downloaded
+    FROM assigned_paths
     UNION ALL
-    SELECT descendants.root_path,child.path,child.concept_id
-    FROM descendants
-    JOIN unified_concept_route child ON child.parent_path=descendants.path
+    SELECT parent.path,parent.parent_path,child.book_row_id,child.downloaded
+    FROM ancestors child
+    JOIN unified_concept_route parent ON parent.path=child.parent_path
 )
 SELECT
     root.path,
     root.label,
-    COUNT(DISTINCT eligible.book_row_id) AS book_count,
-    COUNT(DISTINCT CASE WHEN eligible.downloaded = 1 THEN eligible.book_row_id END) AS downloaded_book_count
+    COUNT(DISTINCT ancestors.book_row_id) AS book_count,
+    COUNT(DISTINCT CASE WHEN ancestors.downloaded = 1 THEN ancestors.book_row_id END) AS downloaded_book_count
 FROM unified_concept_route root
-LEFT JOIN descendants ON descendants.root_path=root.path
-LEFT JOIN book_unified_concept assignment ON assignment.concept_id=descendants.concept_id
-LEFT JOIN eligible_books eligible ON eligible.book_row_id=assignment.book_row_id
+LEFT JOIN ancestors ON ancestors.path=root.path
 WHERE root.parent_path=:parent_path
 GROUP BY root.path,root.label
 ORDER BY LOWER(root.label),root.path;
@@ -186,26 +189,6 @@ JOIN book_unified_concept assignment ON assignment.book_row_id=card.book_row_id
 JOIN unified_concept_route route ON route.concept_id=assignment.concept_id
 WHERE route.path=:subject_path
   AND (:downloaded_only=0 OR card.downloaded)
-ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
-
--- name: get_book_cards_in_subject_tree?
--- param: subject_path: &str
--- param: downloaded_only: i32
-WITH RECURSIVE routes(path,concept_id) AS (
-    SELECT path,concept_id FROM unified_concept_route WHERE path=:subject_path
-    UNION ALL
-    SELECT child.path,child.concept_id
-    FROM routes parent
-    JOIN unified_concept_route child ON child.parent_path=parent.path
-)
-SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
-       card.downloaded, card.download_requested, card.audiobook,
-       card.audiobook_duration_ms, card.audiobook_chapter_count,
-       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
-FROM book_cards card
-JOIN book_unified_concept assignment ON assignment.book_row_id=card.book_row_id
-JOIN routes ON routes.concept_id=assignment.concept_id
-WHERE (:downloaded_only=0 OR card.downloaded)
 ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
 
 -- name: get_uncategorized_book_cards?
