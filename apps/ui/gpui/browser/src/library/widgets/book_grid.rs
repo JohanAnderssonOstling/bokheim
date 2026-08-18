@@ -70,6 +70,14 @@ impl BookGrid {
         self.cards.is_empty()
     }
 
+    pub(crate) fn virtual_views(&self) -> Rc<Vec<Entity<BookCardView>>> {
+        self.all_views.clone()
+    }
+
+    pub(crate) fn uses_detailed_rows(&self) -> bool {
+        self.library_view == LibraryView::Detailed
+    }
+
     /// Reorders retained cards without rebuilding their views or reloading covers.
     pub(crate) fn sort_by<P: 'static>(&mut self, mut compare: impl FnMut(&BookCardRow, &BookCardRow) -> std::cmp::Ordering, cx: &mut Context<P>) {
         let previous_order = self.cards.iter().map(|entry| entry.book.content_hash.clone()).collect::<Vec<_>>();

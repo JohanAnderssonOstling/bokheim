@@ -5,8 +5,9 @@
 
 use epub_svelte_lib::library::BookCardRow;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Focusable, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, div, px};
+use gpui::{AnyElement, App, Context, Entity, Focusable, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, container_query, div, px, size};
 use gpui_component::IconName;
+use gpui_component::v_virtual_list;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu};
 use gpui_component::scroll::ScrollableElement as ComponentScrollableElement;
@@ -205,7 +206,7 @@ pub(crate) struct HierarchyState<C> {
     /// Rejects a slow search that resolves after a newer one.
     search_generation: u64,
     error: Option<gpui::SharedString>,
-    hierarchy_columns: Cell<usize>,
+    hierarchy_columns: Rc<Cell<usize>>,
     sort: HierarchySort,
     file_type: epub_svelte_lib::library::LibraryFileTypeFilter,
     breadcrumb_scroll: ScrollHandle,
@@ -230,7 +231,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                 loading: true,
                 search_generation: 0,
                 error: None,
-                hierarchy_columns: Cell::new(1),
+                hierarchy_columns: Rc::new(Cell::new(1)),
                 sort: HierarchySort::default(),
                 file_type: epub_svelte_lib::library::LibraryFileTypeFilter::All,
                 breadcrumb_scroll: ScrollHandle::new(),
@@ -391,6 +392,20 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
             // No query: the page is the node's own children and its own books.
             if self.children.is_empty() && self.books.is_empty() && !has_lead {
                 dashboard = dashboard.child(empty);
+            } else if !self.children.is_empty() && !has_lead && !document_scroll {
+                dashboard = dashboard.child(self.render_virtualized_hierarchy(
+                    grid_id,
+                    button_prefix,
+                    hierarchy_icon,
+                    page.clone(),
+                    set_path.clone(),
+                    child_action.clone(),
+                    child_menu.clone(),
+                    child_override.clone(),
+                    child_drag.clone(),
+                    child_can_drop.clone(),
+                    child_drop.clone(),
+                ));
             } else {
                 if !self.children.is_empty() {
                     let hierarchy_measure = crate::virtual_grid::ResponsiveColumns::for_element(
@@ -403,7 +418,8 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                     let (columns, cell_width) = components::hierarchy_grid_layout(hierarchy_width, self.children.len(), self.hierarchy_columns.get());
                     self.hierarchy_columns.set(columns);
                     let mut cells = self.children.iter().map(|child| {
-                        self.render_child(
+                        Self::render_child(
+                            &self.path,
                             child,
                             button_prefix,
                             hierarchy_icon,
@@ -461,6 +477,111 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         components::library_section_content().child(header).child(body).into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_virtualized_hierarchy<P, SetPath>(
+        &self,
+        grid_id: &'static str,
+        button_prefix: &'static str,
+        hierarchy_icon: app_contract::NavigationIcon,
+        page: Entity<P>,
+        set_path: SetPath,
+        child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
+        child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+        child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>,
+        child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>,
+        child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>,
+        child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>,
+    ) -> AnyElement
+    where
+        P: Render + 'static,
+        SetPath: Fn(&mut P, Vec<C>, &mut Window, &mut Context<P>) + Clone + 'static,
+    {
+        let children = self.children.clone();
+        let base_path = self.path.clone();
+        let hierarchy_columns = self.hierarchy_columns.clone();
+        let book_views = self.books.virtual_views();
+        let detailed = self.books.uses_detailed_rows();
+        let list_id: gpui::SharedString = format!("{grid_id}-with-hierarchy").into();
+        let list_page = page.clone();
+        let query = container_query(move |size, window, _| {
+            let width = f32::from(size.width);
+            let hierarchy_width = (width - components::HIERARCHY_LAYOUT_SAFETY).max(components::HIERARCHY_CELL_MIN_WIDTH);
+            let (hierarchy_column_count, cell_width) = components::hierarchy_grid_layout(hierarchy_width, children.len(), hierarchy_columns.get());
+            hierarchy_columns.set(hierarchy_column_count);
+            let hierarchy_row_count = crate::virtual_grid::row_count(children.len(), hierarchy_column_count);
+            let hierarchy_row_height = components::HIERARCHY_CELL_HEIGHT + components::HIERARCHY_CELL_MARGIN * 2.0;
+
+            let book_column_count = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
+            let (book_column_count, book_width) = if detailed {
+                (1, width)
+            } else {
+                crate::virtual_grid::grid_geometry(width, book_column_count, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP)
+            };
+            let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, f32::from(window.rem_size())) };
+            let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_column_count);
+            let mut item_sizes = Vec::with_capacity(hierarchy_row_count + book_row_count);
+            item_sizes.extend((0..hierarchy_row_count).map(|row| {
+                let trailing_gap = if row + 1 == hierarchy_row_count { components::SPACE_LG } else { 0.0 };
+                size(px(width), px(hierarchy_row_height + trailing_gap))
+            }));
+            item_sizes.extend((0..book_row_count).map(|_| size(px(width), px(book_row_height))));
+
+            let render_children = children.clone();
+            let render_books = book_views.clone();
+            let render_path = base_path.clone();
+            let render_page = page.clone();
+            let render_set_path = set_path.clone();
+            let render_child_action = child_action.clone();
+            let render_child_menu = child_menu.clone();
+            let render_child_override = child_override.clone();
+            let render_child_drag = child_drag.clone();
+            let render_child_can_drop = child_can_drop.clone();
+            let render_child_drop = child_drop.clone();
+            let list = v_virtual_list(list_page.clone(), list_id.clone(), Rc::new(item_sizes), move |_, range, _, cx| {
+                range
+                    .map(|row| {
+                        if row < hierarchy_row_count {
+                            let child_range = crate::virtual_grid::row_range(row, hierarchy_column_count, render_children.len());
+                            let cells = render_children[child_range]
+                                .iter()
+                                .map(|child| {
+                                    Self::render_child(
+                                        &render_path,
+                                        child,
+                                        button_prefix,
+                                        hierarchy_icon,
+                                        render_page.clone(),
+                                        render_set_path.clone(),
+                                        render_child_action.clone(),
+                                        render_child_menu.clone(),
+                                        render_child_override.clone(),
+                                        render_child_drag.clone(),
+                                        render_child_can_drop.clone(),
+                                        render_child_drop.clone(),
+                                        cell_width,
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let trailing_gap = if row + 1 == hierarchy_row_count { components::SPACE_LG } else { 0.0 };
+                            div().w_full().h(px(hierarchy_row_height + trailing_gap)).flex_none().child(components::hierarchy_grid_row().children(cells)).into_any_element()
+                        } else {
+                            let book_row = row - hierarchy_row_count;
+                            if detailed {
+                                render_books[book_row].clone().into_any_element()
+                            } else {
+                                let book_range = crate::virtual_grid::row_range(book_row, book_column_count, render_books.len());
+                                crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_column_count, book_width, book_row_height, components::BOOK_GRID_GAP).into_any_element()
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            div().size_full().min_h_0().flex().flex_col().child(components::sized_virtual_list(list).flex_1().min_h_0())
+        });
+        div().w_full().flex_1().min_h_0().flex().flex_col().child(query).into_any_element()
+    }
+
     fn render_header<P, SetPath>(&self, root_label: &'static str, breadcrumb_actions: gpui::Div, control_actions: gpui::Div, show_controls: bool, page: Entity<P>, set_path: SetPath, cx: &mut Context<P>) -> gpui::AnyElement
     where
         P: 'static,
@@ -512,7 +633,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
     }
 
     fn render_child<P, SetPath>(
-        &self, child: &C, button_prefix: &'static str, hierarchy_icon: app_contract::NavigationIcon, page: Entity<P>, set_path: SetPath, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
+        base_path: &[C], child: &C, button_prefix: &'static str, hierarchy_icon: app_contract::NavigationIcon, page: Entity<P>, set_path: SetPath, child_action: Option<Rc<dyn Fn(&C, Entity<P>, &mut Context<P>) -> AnyElement>>,
         child_menu: Option<Rc<dyn Fn(PopupMenu, C, Entity<P>, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>, child_override: Option<Rc<dyn Fn(&C, Entity<P>, f32, &mut Context<P>) -> Option<AnyElement>>>,
         child_drag: Option<Rc<dyn Fn(&C) -> LibraryDrag>>, child_can_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App) -> bool>>, child_drop: Option<Rc<dyn Fn(&C, &LibraryDrag, Entity<P>, &mut gpui::App)>>,
         cell_width: f32, cx: &mut Context<P>,
@@ -533,7 +654,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         let id = format!("{button_prefix}-{}", child.hierarchy_key());
         let drag_id = format!("{id}-drag");
         let end_action = child_action.map(|render| render(&child, page.clone(), cx));
-        let mut path = self.path.clone();
+        let mut path = base_path.to_vec();
         path.push(child.clone());
         let click_page = page.clone();
         let button = components::hierarchy_cell(id, label, count, hierarchy_icon, end_action, cell_width, theme).on_click(move |_, window, cx| {
