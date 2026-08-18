@@ -157,6 +157,7 @@ pub(crate) struct AppState {
     backend: BackendContext,
     active_library: Mutex<Option<LibraryBackend>>,
     open_libraries: Mutex<HashMap<LibraryId, LibraryBackend>>,
+    library_scanning_enabled: AtomicBool,
     catalogue_updates: Mutex<()>,
     preference_updates: Mutex<()>,
     account: Mutex<Option<crate::auth::Session>>,
@@ -431,7 +432,7 @@ impl AppBackend {
     }
 
     fn initialize_with_executor(location: AppDataLocation, executor: BackendExecutor) -> Result<Self, BackendError> {
-        Self::new_with_executor(BackendContext::initialize(location).map_err(BackendError::message)?, executor)
+        Self::new_with_executor(BackendContext::initialize(location).map_err(BackendError::message)?, executor, true)
     }
 
     /// Reuses a host-owned Tokio runtime even when the calling thread is not
@@ -443,10 +444,17 @@ impl AppBackend {
 
     pub fn new(backend: BackendContext) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
-        Self::new_with_executor(backend, executor)
+        Self::new_with_executor(backend, executor, true)
     }
 
-    fn new_with_executor(backend: BackendContext, executor: BackendExecutor) -> Result<Self, BackendError> {
+    /// Constructs a desktop backend whose library scanners remain parked until
+    /// the graphical host has rendered its first frame.
+    pub fn new_deferred_scanning(backend: BackendContext) -> Result<Self, BackendError> {
+        let executor = BackendExecutor::new().map_err(BackendError::operation)?;
+        Self::new_with_executor(backend, executor, false)
+    }
+
+    fn new_with_executor(backend: BackendContext, executor: BackendExecutor, library_scanning_enabled: bool) -> Result<Self, BackendError> {
         let (event_tx, event_rx) = unbounded();
         let (sync_wake_tx, sync_wake_rx) = bounded(1);
         let pending_sync = Arc::new(Mutex::new(PendingSyncWork::default()));
@@ -477,6 +485,7 @@ impl AppBackend {
                 backend,
                 active_library: Mutex::new(None),
                 open_libraries: Mutex::new(HashMap::new()),
+                library_scanning_enabled: AtomicBool::new(library_scanning_enabled),
                 catalogue_updates: Mutex::new(()),
                 preference_updates: Mutex::new(()),
                 account: Mutex::new(account),
@@ -574,19 +583,24 @@ impl AppBackend {
     }
 
     pub fn library(&self, library_id: &LibraryId) -> Result<LibraryBackend, BackendError> {
-        let library = self.library_handle(library_id)?;
+        let library = self.library_handle(library_id, true)?;
         *self.lock(&self.state.active_library)? = Some(library.clone());
         Ok(library)
     }
 
-    fn library_handle(&self, library_id: &LibraryId) -> Result<LibraryBackend, BackendError> {
+    fn library_handle(&self, library_id: &LibraryId, start_scan: bool) -> Result<LibraryBackend, BackendError> {
+        let start_scan = start_scan && self.state.library_scanning_enabled.load(Ordering::Acquire);
         if let Some(library) = self.lock(&self.state.open_libraries)?.get(library_id).cloned() {
+            if start_scan {
+                library.start_scanner();
+            }
             return Ok(library);
         }
         let account = self.current_account()?;
         let entry = self.library_entry(library_id)?;
         let path = entry.library_path().to_string_lossy();
-        let (library, events) = LibraryBackend::open(self, &self.state.backend, &path, *library_id).map_err(BackendError::operation)?;
+        let (library, events) =
+            if start_scan { LibraryBackend::open(self, &self.state.backend, &path, *library_id) } else { LibraryBackend::open_deferred_scan(self, &self.state.backend, &path, *library_id) }.map_err(BackendError::operation)?;
         if let Some(session) = account {
             library.adopt_session(session).map_err(BackendError::message)?;
         }
@@ -594,6 +608,19 @@ impl AppBackend {
         self.forward_library_events(library.clone(), events);
         self.request_library_sync(*library_id, true);
         Ok(library)
+    }
+
+    /// Enables scanning after a deferred desktop startup and starts every
+    /// library that background synchronization or the UI opened meanwhile.
+    pub fn enable_library_scanning(&self) -> Result<(), BackendError> {
+        if self.state.library_scanning_enabled.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let libraries = self.lock(&self.state.open_libraries)?.values().cloned().collect::<Vec<_>>();
+        for library in libraries {
+            library.start_scanner();
+        }
+        Ok(())
     }
 
     pub fn catalog_sources(&self) -> Vec<CatalogSource> {
@@ -1026,7 +1053,7 @@ impl AppBackend {
         self.enroll_default_libraries(&session)?;
         let mut attached = Vec::new();
         for entry in self.libraries()? {
-            let library = self.library_handle(entry.library_id())?;
+            let library = self.library_handle(entry.library_id(), true)?;
             self.publish_library(&library).await?;
             self.synchronize_library_with_retry(&library, AssetSync::Transfer(crate::TransferOrigin::UserInitiated)).await?;
             attached.push(entry);
@@ -1129,7 +1156,7 @@ impl AppBackend {
         let session = self.require_account()?;
         self.enroll_default_libraries(&session)?;
         for entry in self.libraries()? {
-            let library = self.library_handle(entry.library_id())?;
+            let library = self.library_handle(entry.library_id(), true)?;
             self.publish_library(&library).await?;
             self.synchronize_library_with_retry(&library, AssetSync::Transfer(crate::TransferOrigin::UserInitiated)).await?;
         }
@@ -1137,7 +1164,7 @@ impl AppBackend {
     }
 
     fn prepare_library_sync(&self, library_id: &LibraryId, session: &crate::auth::Session) -> Result<LibraryBackend, BackendError> {
-        let library = self.library_handle(library_id)?;
+        let library = self.library_handle(library_id, true)?;
         let account = library.account_state().map_err(BackendError::message)?;
         if account.user_id.as_deref() != Some(session.user_id()) {
             library.adopt_session(session.clone()).map_err(BackendError::message)?;
@@ -1291,7 +1318,7 @@ impl AppBackend {
             // asset transfers, so another device never waits behind uploads to
             // discover later libraries in this catalogue.
             for entry in &entries {
-                let library = self.library_handle(entry.library_id())?;
+                let library = self.library_handle(entry.library_id(), true)?;
                 if let Err(error) = self.publish_library(&library).await {
                     log::warn!("failed to publish {} during background synchronization: {error}", entry.library_name());
                     publish_failed.insert(*entry.library_id());
@@ -1306,7 +1333,7 @@ impl AppBackend {
             if publish_failed.contains(entry.library_id()) {
                 continue;
             }
-            let library = self.library_handle(entry.library_id())?;
+            let library = self.library_handle(entry.library_id(), true)?;
             let assets = if scope.assets { AssetSync::Transfer(crate::TransferOrigin::Background) } else { AssetSync::Skip };
             let result = self.synchronize_library_with_retry(&library, assets).await;
             if let Err(error) = result {
@@ -1755,6 +1782,19 @@ mod tests {
         let root_id = sync_common::ROOT_DIR_ID;
         let created = library.create_directory(&root_id, "Shelf").unwrap();
         assert_eq!(library.folder(&root_id).unwrap().children[0].id, *created.id());
+    }
+
+    #[test]
+    fn deferred_desktop_backend_keeps_scanners_parked_until_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
+        let core = AppBackend::new_deferred_scanning(context).unwrap();
+        let entry = core.create_library("Test".to_owned(), Some(root.path().join("library"))).unwrap();
+        let library = core.library(entry.library_id()).unwrap();
+
+        assert!(!library.scanner_running());
+        core.enable_library_scanning().unwrap();
+        assert!(core.state.library_scanning_enabled.load(Ordering::Acquire));
     }
 
     #[test]

@@ -152,7 +152,8 @@ pub fn unified_concept_definitions() -> Vec<UnifiedConceptDefinition> {
 
 pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
     let replacement = Arc::new(build_runtime(concepts)?);
-    *RUNTIME.get_or_init(|| RwLock::new(default_runtime())).write().map_err(|_| "unified taxonomy runtime lock is poisoned".to_owned())? = replacement;
+    let runtime = RUNTIME.get_or_init(|| RwLock::new(replacement.clone()));
+    *runtime.write().map_err(|_| "unified taxonomy runtime lock is poisoned".to_owned())? = replacement;
     Ok(())
 }
 

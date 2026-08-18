@@ -17,7 +17,7 @@ impl Global for LibraryRegistry {}
 impl LibraryRegistry {
     pub fn open(context: &BackendContext) -> Self {
         let event_thread_name = format!("{APP_NAME_LOWER}-app-events");
-        let core = AppBackend::new(context.clone()).expect("failed to initialize shared application backend");
+        let core = AppBackend::new_deferred_scanning(context.clone()).expect("failed to initialize shared application backend");
         let backend_events = core.take_events().expect("desktop application owns the backend event receiver");
         let (event_sender, events) = async_channel::unbounded();
         let event_thread = std::thread::Builder::new()

@@ -66,6 +66,11 @@ impl LibraryBackend {
         self._scanner.is_scanning()
     }
 
+    /// Enables the initial filesystem scan for a handle opened in deferred mode.
+    pub fn start_scanner(&self) {
+        self._scanner.start_scanning();
+    }
+
     pub fn reload_unified_taxonomy(&self) -> Result<String, BackendError> {
         let release_id = self.context.reload_unified_taxonomy_from_disk().map_err(BackendError::operation)?;
         let connection = self.db.get().map_err(BackendError::operation)?;

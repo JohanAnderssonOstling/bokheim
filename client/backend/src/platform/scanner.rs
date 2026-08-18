@@ -66,6 +66,7 @@ struct ScannerState {
     library_root: PathBuf,
     db: Pool<SqliteConnectionManager>,
     park_thread: OnceLock<thread::Thread>,
+    scan_enabled: AtomicBool,
     scan_requested: AtomicBool,
     scan_active: AtomicBool,
     should_finish: AtomicBool,
@@ -178,8 +179,9 @@ impl LibraryScanner {
             library_root,
             db,
             park_thread: OnceLock::new(),
-            scan_requested: AtomicBool::new(true),
-            scan_active: AtomicBool::new(true),
+            scan_enabled: AtomicBool::new(false),
+            scan_requested: AtomicBool::new(false),
+            scan_active: AtomicBool::new(false),
             should_finish: AtomicBool::new(false),
             thumbnail_queue: thumbnail_tx,
             hash_queue: hash_tx,
@@ -222,7 +224,12 @@ impl LibraryScanner {
     }
 
     pub(crate) fn is_scanning(&self) -> bool {
-        self.state.scan_active.load(Ordering::Acquire) || self.state.scan_requested.load(Ordering::Acquire)
+        self.state.scan_active.load(Ordering::Acquire) || (self.state.scan_enabled.load(Ordering::Acquire) && self.state.scan_requested.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn start_scanning(&self) {
+        self.state.scan_enabled.store(true, Ordering::Release);
+        Self::request_scan(&self.state);
     }
 
     fn scan_library(db: &Pool<SqliteConnectionManager>, state: &Arc<ScannerState>) {
@@ -575,6 +582,7 @@ impl LibraryScanner {
 impl Drop for LibraryScanner {
     fn drop(&mut self) {
         self.state.should_finish.store(true, Ordering::Release);
+        self.state.scan_enabled.store(true, Ordering::Release);
         self.state.scan_requested.store(true, Ordering::Release);
         self.state.hash_jobs_changed.notify_all();
         if let Some(thread) = self.state.park_thread.get() {
@@ -772,6 +780,10 @@ impl LibraryScanner {
             if state.should_finish.load(Ordering::Acquire) {
                 break;
             }
+            if !state.scan_enabled.load(Ordering::Acquire) {
+                thread::park();
+                continue;
+            }
             if !state.scan_requested.swap(false, Ordering::AcqRel) {
                 thread::park();
                 continue;
@@ -954,8 +966,10 @@ impl LibraryScanner {
 
     fn request_scan(state: &ScannerState) {
         state.scan_requested.store(true, Ordering::Release);
-        if let Some(thread) = state.park_thread.get() {
-            thread.unpark();
+        if state.scan_enabled.load(Ordering::Acquire) {
+            if let Some(thread) = state.park_thread.get() {
+                thread.unpark();
+            }
         }
     }
 
@@ -1020,6 +1034,7 @@ mod tests {
             library_root: library_root.to_path_buf(),
             db,
             park_thread: OnceLock::new(),
+            scan_enabled: AtomicBool::new(true),
             scan_requested: AtomicBool::new(true),
             scan_active: AtomicBool::new(true),
             should_finish: AtomicBool::new(false),

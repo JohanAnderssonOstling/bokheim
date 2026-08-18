@@ -5,10 +5,10 @@
 
 mod state;
 
-use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::LibraryEntry;
 use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
+use epub_svelte_lib::LibraryId;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, IntoElement, Render, Subscription, Window};
 
 use super::services::LibraryContext;
@@ -227,6 +227,7 @@ impl LibraryHost {
     }
 
     fn install_library_root(&mut self, library: LibraryBackend, place: LibraryPlace, window: &mut Window, cx: &mut Context<Self>) {
+        let scanner_backend = self.services.backend.clone();
         let services = LibraryContext::new(self.services.clone(), library);
         let root = cx.new(|cx| LibraryRoot::new(services, place.route, place.folder_path, place.subject_path, window, cx));
         let subscription = cx.subscribe(&root, |_: &mut Self, _, event: &LibraryRootEvent, cx| match event {
@@ -234,6 +235,11 @@ impl LibraryHost {
             LibraryRootEvent::SubjectPathChanged => cx.emit(LibraryHostEvent::SessionChanged),
         });
         self.hosted = HostedLibrary::Active { root, _subscription: subscription };
+        cx.on_next_frame(window, move |_, _, _| {
+            if let Err(error) = scanner_backend.enable_library_scanning() {
+                log::error!("failed to start library scanning after the first frame: {error}");
+            }
+        });
     }
 
     fn drop_library_root(&mut self, cx: &mut Context<Self>) {

@@ -28,15 +28,21 @@ fn canonical_library_root(path: &Path) -> std::io::Result<PathBuf> {
 
 impl LibraryBackend {
     pub(crate) fn open(app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
-        Self::open_with_server_url(app, context, library_path, library_id, sync_server_url()?)
+        Self::open_with_server_url(app, context, library_path, library_id, sync_server_url()?, true)
+    }
+
+    pub(crate) fn open_deferred_scan(app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
+        Self::open_with_server_url(app, context, library_path, library_id, sync_server_url()?, false)
     }
 
     #[cfg(test)]
     pub(crate) fn open_for_test(app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId, server_url: ServerUrl) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
-        Self::open_with_server_url(app, context, library_path, library_id, server_url)
+        Self::open_with_server_url(app, context, library_path, library_id, server_url, true)
     }
 
-    fn open_with_server_url(app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId, server_url: ServerUrl) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
+    fn open_with_server_url(
+        app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId, server_url: ServerUrl, start_scan: bool,
+    ) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
         let library_root = canonical_library_root(Path::new(library_path))?;
         let metadata_dir = library_root.join(crate::APP_HIDDEN_DIR);
         fs::create_dir_all(metadata_dir.join("thumbnails"))?;
@@ -68,6 +74,9 @@ impl LibraryBackend {
         };
         let (event_tx, event_rx) = unbounded();
         let scanner = LibraryScanner::from_root(context.clone(), library_root.clone(), pool.clone(), event_tx.clone())?;
+        if start_scan {
+            scanner.start_scanning();
+        }
         let pending_thumbnail_jobs = scanner.pending_thumbnail_jobs();
         let sync_manager = Arc::new(SyncManager::new(
             pool.clone(),
