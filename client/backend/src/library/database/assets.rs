@@ -295,9 +295,12 @@ pub fn local_file_fingerprint(path: &Path) -> std::io::Result<u64> {
     let metadata = fs::metadata(path)?;
     let modified_time = metadata.modified()?.duration_since(UNIX_EPOCH).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     hasher.write_u128(modified_time.as_nanos());
-    hasher.write_u64(metadata.size());
-    hasher.write_u64(metadata.ino());
-    hasher.write_u64(metadata.dev());
+    hasher.write_u64(metadata.len());
+    #[cfg(unix)]
+    {
+        hasher.write_u64(metadata.ino());
+        hasher.write_u64(metadata.dev());
+    }
     Ok(hasher.digest())
 }
 pub fn stamp_book_dir_local_hash(conn: &Connection, dir_id: &str, content_hash: ContentHash, _file_name: &str, path: &Path) -> std::io::Result<()> {

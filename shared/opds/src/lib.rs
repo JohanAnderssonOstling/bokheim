@@ -2355,7 +2355,17 @@ fn discover_opds_url(base: &Url, link_headers: &[String], bytes: &[u8]) -> Optio
 }
 
 fn resolve_url(base: &Url, value: &str) -> Result<Url, OpdsError> {
-    let url = base.join(value).map_err(|error| OpdsError::InvalidUrl(error.to_string()))?;
+    let mut url = base.join(value).map_err(|error| OpdsError::InvalidUrl(error.to_string()))?;
+    // Some established OPDS feeds (notably OpenEdition) are served over
+    // HTTPS but still emit absolute HTTP links back to their own host. Never
+    // follow the downgrade: canonicalize only that same-host/default-port
+    // case to the already authenticated HTTPS origin. Cross-host links and
+    // non-default ports remain untouched and are still subject to the
+    // catalogue origin policy at the call site.
+    if base.scheme() == "https" && url.scheme() == "http" && base.host_str() == url.host_str() && base.port_or_known_default() == Some(443) && url.port_or_known_default() == Some(80) {
+        url.set_scheme("https").map_err(|()| OpdsError::InvalidUrl("could not upgrade a same-host OPDS URL to HTTPS".to_owned()))?;
+        url.set_port(base.port()).map_err(|()| OpdsError::InvalidUrl("could not restore the OPDS HTTPS port".to_owned()))?;
+    }
     validate_http_url(url)
 }
 
@@ -2963,6 +2973,14 @@ mod tests {
         assert!(parse_http_url("file:///tmp/catalog.xml").is_err());
         assert!(parse_http_url("https://user:secret@example.com/opds").is_err());
         assert!(resolve_url(&Url::parse("https://example.com/opds").unwrap(), "javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn upgrades_same_host_http_links_from_an_https_catalog() {
+        let base = Url::parse("https://opds.openedition.org/").unwrap();
+        assert_eq!(resolve_url(&base, "http://opds.openedition.org/?platform=OB&core=publishers").unwrap().as_str(), "https://opds.openedition.org/?platform=OB&core=publishers");
+        assert_eq!(resolve_url(&base, "http://other.example/catalog").unwrap().as_str(), "http://other.example/catalog");
+        assert_eq!(resolve_url(&base, "http://opds.openedition.org:8080/catalog").unwrap().as_str(), "http://opds.openedition.org:8080/catalog");
     }
 
     #[test]

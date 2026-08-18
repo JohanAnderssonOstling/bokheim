@@ -40,15 +40,27 @@
   let wideSearching = $state(false);
   let subjectBrowse = $state<CatalogSubjectBrowseView | null>(null);
   let subjectLevels = $state<CatalogLevel[]>([]);
+  let subjectSourceIds = $state<string[]>([]);
+  let subjectQuery = $state("");
   let wideSearchGeneration = 0;
   let sourcesInitialized = false;
   const needsExternalAuthentication = $derived(selected?.authentication.kind === "external");
   const canSearch = $derived(Boolean(query.trim() || titleQuery.trim() || authorQuery.trim()));
-  const catalogLanguageValues = BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.map((option) => option.value);
+  function catalogLanguageAvailable(option: { value: string; label: string }) {
+    const value = option.value.toLocaleLowerCase();
+    const label = option.label.toLocaleLowerCase();
+    return sources.some((source) => source.languages.some((language) => {
+      const candidate = language.trim().replaceAll("_", "-").toLocaleLowerCase();
+      return candidate === value || candidate === label || candidate.startsWith(`${value}-`);
+    }));
+  }
+
+  const catalogLanguageOptions = $derived(BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.filter(catalogLanguageAvailable));
+  const catalogLanguageValues = $derived(catalogLanguageOptions.map((option) => option.value));
   const catalogLanguageLabel = $derived.by(() => {
     const included = preferences.included_catalog_languages;
     if (!included.length) return SETTINGS_CONTRACT.all_catalog_languages_label;
-    if (included.length === 1) return BROWSING_PREFERENCES_CONTRACT.options.catalog_languages.find((option) => option.value === included[0])?.label ?? included[0];
+    if (included.length === 1) return catalogLanguageOptions.find((option) => option.value === included[0])?.label ?? included[0];
     return `${included.length} languages`;
   });
 
@@ -99,12 +111,22 @@
     });
   }
 
+  const subjectSourceLabel = $derived.by(() => {
+    if (!subjectSourceIds.length) return "All catalogues";
+    if (subjectSourceIds.length === 1) return sources.find((source) => source.id === subjectSourceIds[0])?.title ?? subjectSourceIds[0];
+    return `${subjectSourceIds.length} catalogues`;
+  });
+
+  function currentSubjectLocator() {
+    return subjectLevels.at(-1)?.url || null;
+  }
+
   async function loadSubjects(locator: string | null, title?: string, push = false) {
     if (loading) return;
     loading = true;
     error = "";
     try {
-      const view = await commands.getCatalogSubjects(activeLibraryId, locator, 48);
+      const view = await commands.getCatalogSubjects(activeLibraryId, locator, subjectSourceIds, subjectQuery.trim(), 48);
       subjectBrowse = view;
       ownership = ownedEditions(view.owned_publications);
       if (!subjectLevels.length || locator === null) subjectLevels = [{ title: "Subjects", url: "" }];
@@ -114,6 +136,22 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function setSubjectSources(sourceIds: string[]) {
+    subjectSourceIds = sourceIds;
+    await loadSubjects(currentSubjectLocator());
+  }
+
+  async function toggleSubjectSource(sourceId: string) {
+    if (!subjectSourceIds.length) await setSubjectSources([sourceId]);
+    else if (subjectSourceIds.includes(sourceId)) await setSubjectSources(subjectSourceIds.filter((candidate) => candidate !== sourceId));
+    else await setSubjectSources([...subjectSourceIds, sourceId]);
+  }
+
+  async function searchSubjects(event: SubmitEvent) {
+    event.preventDefault();
+    await loadSubjects(currentSubjectLocator());
   }
 
   async function goToSubjectLevel(index: number) {
@@ -215,7 +253,9 @@
   }
 
   function toggleCatalogLanguage(language: string, included: boolean) {
-    const current = preferences.included_catalog_languages.length === 0 ? [...catalogLanguageValues] : [...preferences.included_catalog_languages];
+    const current = preferences.included_catalog_languages.length === 0
+      ? [...catalogLanguageValues]
+      : preferences.included_catalog_languages.filter((value) => catalogLanguageValues.some((candidate) => candidate === value));
     const next = included ? [...new Set([...current, language])] : current.filter((value) => value !== language);
     return setCatalogLanguages(next.length === catalogLanguageValues.length ? [] : next);
   }
@@ -458,6 +498,24 @@
         <strong class="catalog-source-name">Browse by subject</strong>
         {#if subjectLevels.length > 1}<FolderBreadcrumbs rootLabel={subjectLevels[1].title} levels={subjectLevels.slice(2).map((level) => ({ name: level.title }))} onselect={(level) => void goToSubjectLevel(level + 1)} />{/if}
       </div>
+      <div class="store-toolbar subject-toolbar">
+        {#if subjectLevels.length > 1}
+          <form class="wide-search" onsubmit={searchSubjects}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
+            <input type="search" bind:value={subjectQuery} placeholder="Search in this subject" aria-label="Search in this subject" autocomplete="off" />
+            <button type="submit" disabled={loading}>Search</button>
+          </form>
+        {/if}
+        <details class="toolbar-menu source-menu">
+          <summary class:active={subjectSourceIds.length > 0}>{subjectSourceLabel}<span aria-hidden="true">⌄</span></summary>
+          <div class="toolbar-menu-popover" role="menu" aria-label="Included catalogues">
+            <button type="button" role="menuitemcheckbox" aria-checked={subjectSourceIds.length === 0} onclick={(event) => { closeToolbarMenu(event); void setSubjectSources([]); }}>All catalogues</button>
+            {#each sources as source (source.id)}
+              <button type="button" role="menuitemcheckbox" aria-checked={subjectSourceIds.includes(source.id)} onclick={(event) => { closeToolbarMenu(event); void toggleSubjectSource(source.id); }}>{source.title}</button>
+            {/each}
+          </div>
+        </details>
+      </div>
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       {@render subjectLinks(subjectBrowse.response.navigation)}
       {#each subjectGroups() as group (group.source.id)}
@@ -486,7 +544,7 @@
         <summary class:active={preferences.included_catalog_languages.length > 0}>{catalogLanguageLabel}<span aria-hidden="true">⌄</span></summary>
         <div class="toolbar-menu-popover" role="menu" aria-label={SETTINGS_CONTRACT.included_catalog_languages_label}>
           <button type="button" role="menuitemcheckbox" aria-checked={preferences.included_catalog_languages.length === 0} onclick={(event) => { closeToolbarMenu(event); void setCatalogLanguages([]); }}>{SETTINGS_CONTRACT.all_catalog_languages_label}</button>
-          {#each BROWSING_PREFERENCES_CONTRACT.options.catalog_languages as option}
+          {#each catalogLanguageOptions as option}
             <button type="button" role="menuitemcheckbox" aria-checked={catalogLanguageIncluded(option.value)} onclick={(event) => { closeToolbarMenu(event); void toggleCatalogLanguage(option.value, !catalogLanguageIncluded(option.value)); }}>{option.label}</button>
           {/each}
         </div>

@@ -30,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hasher;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

@@ -594,8 +594,8 @@ async fn get_catalog_page(state: State<'_, AppState>, library_id: String, source
 
 #[tauri::command]
 #[specta::specta]
-async fn get_catalog_subjects(state: State<'_, AppState>, library_id: String, locator: Option<String>, limit: u32) -> Result<CatalogSubjectBrowseView, String> {
-    library(&state.core, &library_id)?.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), limit }).await.map_err(|error| error.to_string())
+async fn get_catalog_subjects(state: State<'_, AppState>, library_id: String, locator: Option<String>, source_ids: Vec<CatalogSourceId>, query: String, limit: u32) -> Result<CatalogSubjectBrowseView, String> {
+    library(&state.core, &library_id)?.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), source_ids, query, limit }).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]

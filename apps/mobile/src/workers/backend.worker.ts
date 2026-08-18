@@ -105,6 +105,12 @@ function nullableStringArg(request: WorkerCommandRequest, index: number, name: s
   return value;
 }
 
+function stringArrayArg(request: WorkerCommandRequest, index: number, name: string): string[] {
+  const value = request.args[index];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${name} must be an array of strings`);
+  return value;
+}
+
 function fileTypeArg(request: WorkerCommandRequest, index: number): LibraryFileTypeFilter {
   const value = request.args[index] ?? "all";
   if (value === "all" || value === "book" || value === "pdf" || value === "audiobook") return value;
@@ -194,7 +200,7 @@ async function executeCommand(request: WorkerCommandRequest): Promise<unknown> {
       );
     case "get_catalog_subjects":
       return getWebCatalogSubjects(
-        stringArg(request, 0, "library_id"), nullableStringArg(request, 1, "locator"), numberArg(request, 2, "limit"),
+        stringArg(request, 0, "library_id"), nullableStringArg(request, 1, "locator"), stringArrayArg(request, 2, "source_ids"), stringArg(request, 3, "query"), numberArg(request, 4, "limit"),
       );
     case "get_catalog_subject_recommendations":
       return getWebCatalogSubjectRecommendations(

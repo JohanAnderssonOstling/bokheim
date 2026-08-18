@@ -398,6 +398,12 @@ pub struct CatalogSubjectBrowseRequest {
     /// the subject-system roots.
     pub locator: Option<String>,
     pub supported_languages: Vec<String>,
+    /// Empty includes every catalogue source.
+    #[serde(default)]
+    pub source_ids: Vec<CatalogSourceId>,
+    /// Case- and diacritic-insensitive title, author, or table-of-contents query.
+    #[serde(default)]
+    pub query: String,
     pub limit: u32,
 }
 

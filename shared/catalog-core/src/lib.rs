@@ -765,16 +765,27 @@ pub fn opds_endpoint_id(source_id: &CatalogSourceId) -> Result<OpdsEndpointId, C
     OpdsEndpointId::parse(value).map_err(|error| CatalogProviderError::new(error.to_string()))
 }
 
-pub fn validate_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<(), CatalogProviderError> {
+pub fn canonicalize_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<String, CatalogProviderError> {
     let expected = url::Url::parse(&endpoint.url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    let actual = url::Url::parse(locator).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+    let mut actual = url::Url::parse(locator).map_err(|error| CatalogProviderError::new(error.to_string()))?;
     if !matches!(actual.scheme(), "http" | "https") || !actual.username().is_empty() || actual.password().is_some() {
         return Err(CatalogProviderError::new("catalog page locator must be an HTTP URL without embedded credentials"));
+    }
+    // OpenEdition is served over HTTPS but currently publishes absolute HTTP
+    // links back to its own OPDS host. Preserve the origin boundary while
+    // refusing to follow that downgrade.
+    if expected.scheme() == "https" && actual.scheme() == "http" && expected.host_str() == actual.host_str() && expected.port_or_known_default() == Some(443) && actual.port_or_known_default() == Some(80) {
+        actual.set_scheme("https").map_err(|()| CatalogProviderError::new("could not upgrade the OPDS catalog locator to HTTPS"))?;
+        actual.set_port(expected.port()).map_err(|()| CatalogProviderError::new("could not restore the registered OPDS HTTPS port"))?;
     }
     if actual.origin() != expected.origin() {
         return Err(CatalogProviderError::new("catalog page locator does not belong to the registered OPDS origin"));
     }
-    Ok(())
+    Ok(actual.into())
+}
+
+pub fn validate_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<(), CatalogProviderError> {
+    canonicalize_opds_catalog_locator(endpoint, locator).map(|_| ())
 }
 
 pub fn opds_page(source_id: CatalogSourceId, catalog: OpdsCatalog) -> CatalogPage {

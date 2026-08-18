@@ -1,4 +1,4 @@
-name: GPUI desktop AppImage release
+name: GPUI desktop release
 
 on:
   workflow_dispatch:
@@ -24,9 +24,11 @@ env:
   APPIMAGETOOL_VERSION: 1.9.1
   PDFIUM_LINUX_X64_URL: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-linux-x64.tgz
   PDFIUM_LINUX_X64_SHA256: 019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2
+  PDFIUM_WINDOWS_X64_URL: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-win-x64.tgz
+  PDFIUM_WINDOWS_X64_SHA256: 88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4
 
 jobs:
-  build:
+  build-appimage:
     name: x86-64 AppImage
     runs-on: ubuntu-22.04
     timeout-minutes: 120
@@ -173,6 +175,147 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bokheim-desktop-appimage-x86-64
+          path: bokheim/release/*
+          if-no-files-found: error
+
+      - name: Create or update draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: bokheim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --repo JohanAnderssonOstling/bokheim-release \
+              --target main \
+              --draft \
+              --generate-notes \
+              --title "Bokheim ${GITHUB_REF_NAME#v}" || \
+              gh release view "$GITHUB_REF_NAME" --repo JohanAnderssonOstling/bokheim-release >/dev/null
+          fi
+          gh release upload "$GITHUB_REF_NAME" release/* \
+            --repo JohanAnderssonOstling/bokheim-release \
+            --clobber
+
+  build-windows:
+    name: x86-64 Windows portable
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out Bokheim
+        uses: actions/checkout@v6
+        with:
+          path: bokheim
+
+      - name: Check out GPUI-Fork
+        uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/GPUI-Fork
+          ref: ${{ env.GPUI_FORK_REF }}
+          path: GPUI-Fork
+
+      - name: Check out HtmlEngine
+        uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlEngine
+          ref: ${{ env.HTML_ENGINE_REF }}
+          path: HtmlEngine
+
+      - name: Check out HtmlViewCore
+        uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlViewCore
+          ref: ${{ env.HTML_VIEW_CORE_REF }}
+          path: HtmlViewCore
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup default $env:RUST_VERSION
+
+      - name: Restore Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: bokheim-windows-v1
+          shared-key: desktop-windows-x86-64
+          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}
+          workspaces: bokheim -> target
+          cache-on-failure: true
+          cache-workspace-crates: true
+
+      - name: Download pinned PDFium
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $env:PDFIUM_WINDOWS_X64_URL -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:PDFIUM_WINDOWS_X64_SHA256) {
+            throw "PDFium checksum mismatch: expected $env:PDFIUM_WINDOWS_X64_SHA256, received $actual"
+          }
+          "PDFIUM_ARCHIVE_PATH=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check tagged version
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: bokheim
+        shell: pwsh
+        run: |
+          $line = Select-String -Path "apps/desktop-gpui/Cargo.toml" -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          $version = $line.Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match desktop version v$version"
+          }
+
+      - name: Verify the desktop dependency graph is GPUI-only
+        working-directory: bokheim
+        shell: pwsh
+        run: |
+          $tree = cargo tree --locked -p desktop-gpui --no-default-features --features desktop
+          $tree | Out-File -FilePath (Join-Path $env:RUNNER_TEMP "desktop-dependency-tree.txt") -Encoding utf8
+          if ($tree | Select-String -Pattern '(^|\s)(tauri|wry|webkit2gtk|mobileapp)(\s|$)' -CaseSensitive:$false) {
+            throw "The GPUI Windows build must not depend on Tauri or the mobile application."
+          }
+
+      - name: Build GPUI desktop release
+        working-directory: bokheim
+        shell: pwsh
+        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui --no-default-features --features desktop
+
+      - name: Package Windows portable build
+        working-directory: bokheim
+        shell: pwsh
+        run: |
+          $package = "Bokheim-Windows-x86_64.zip"
+          $updaterExecutable = "Bokheim-Windows-x86_64.exe"
+          New-Item -ItemType Directory -Force -Path "release", "windows-package" | Out-Null
+          Copy-Item "target/release/desktop-gpui.exe" "windows-package/Bokheim.exe"
+          Copy-Item "target/release/desktop-gpui.exe" "release/$updaterExecutable"
+          Compress-Archive -Path "windows-package/Bokheim.exe" -DestinationPath "release/$package" -CompressionLevel Optimal
+          foreach ($asset in @($package, $updaterExecutable)) {
+            $hash = (Get-FileHash -Algorithm SHA256 "release/$asset").Hash.ToLowerInvariant()
+            "$hash  $asset" | Out-File -FilePath "release/$asset.sha256" -Encoding ascii
+          }
+
+      - name: Verify Windows portable payload
+        working-directory: bokheim
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "release/Bokheim-Windows-x86_64.zip" -DestinationPath "$env:RUNNER_TEMP/bokheim-windows-verify"
+          $executable = "$env:RUNNER_TEMP/bokheim-windows-verify/Bokheim.exe"
+          if (!(Test-Path $executable) -or (Get-Item $executable).Length -eq 0) {
+            throw "The Windows archive does not contain a non-empty Bokheim.exe"
+          }
+          $signature = [System.IO.File]::ReadAllBytes($executable)[0..1]
+          if ($signature[0] -ne 0x4d -or $signature[1] -ne 0x5a) {
+            throw "Bokheim.exe is not a Windows PE executable"
+          }
+
+      - name: Retain workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bokheim-desktop-windows-x86-64
           path: bokheim/release/*
           if-no-files-found: error
 

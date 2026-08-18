@@ -1573,7 +1573,12 @@ impl CatalogCache {
     /// each UI.
     pub fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogCacheError> {
         const MAX_RESULTS: usize = 100;
+        const MAX_SOURCE_FILTERS: usize = 256;
+        if request.source_ids.len() > MAX_SOURCE_FILTERS {
+            return Err(CatalogCacheError::new("too many catalogue source filters"));
+        }
         let limit = usize::try_from(request.limit).unwrap_or(MAX_RESULTS).clamp(1, MAX_RESULTS);
+        let normalized_query = normalize_search_text(&request.query);
         let location = request.locator.as_deref().map(parse_subject_locator).transpose()?.unwrap_or_default();
         let offset = usize::try_from(location.offset).unwrap_or(usize::MAX);
         let connection = self.pool.get()?;
@@ -1597,7 +1602,16 @@ impl CatalogCache {
                  LEFT JOIN catalog_publication_popularity pop
                    ON pop.source_id=p.source_id AND pop.generation=p.generation AND pop.edition_id=p.edition_id AND pop.work_id=p.work_id
                  WHERE a.system_id=?1 AND p.importable=1
-                   AND (?2='' OR a.subject_path=?2 OR instr(a.subject_path,?2 || ' / ')=1)",
+                   AND (?2='' OR a.subject_path=?2 OR instr(a.subject_path,?2 || ' / ')=1)
+                   AND (?3='' OR instr(p.normalized_title,?3)>0
+                     OR EXISTS(SELECT 1 FROM catalog_publication_author author
+                       WHERE author.source_id=p.source_id AND author.generation=p.generation
+                         AND author.edition_id=p.edition_id AND author.work_id=p.work_id
+                         AND instr(author.normalized_name,?3)>0)
+                     OR EXISTS(SELECT 1 FROM catalog_publication_toc toc
+                       WHERE toc.source_id=p.source_id AND toc.generation=p.generation
+                         AND toc.edition_id=p.edition_id AND toc.work_id=p.work_id
+                         AND instr(toc.normalized_title,?3)>0))",
         )?;
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
@@ -1612,10 +1626,13 @@ impl CatalogCache {
                 row.get::<_, i64>(8)?,
             ))
         };
-        let mut rows = statement.query_map(params![system_id, location.subject_path.as_deref().unwrap_or("")], map_row)?;
+        let mut rows = statement.query_map(params![system_id, location.subject_path.as_deref().unwrap_or(""), normalized_query], map_row)?;
         let mut rejected = HashSet::new();
         while let Some(row) = rows.next() {
             let (system_id, subject_path, source, edition, work, payload, reading_log_count, rating_count, sequence) = row?;
+            if !request.source_ids.is_empty() && !request.source_ids.iter().any(|source_id| source_id.as_str() == source) {
+                continue;
+            }
             let key = (source.clone(), edition, work);
             if rejected.contains(&key) {
                 continue;
@@ -1646,6 +1663,9 @@ impl CatalogCache {
             })
             .collect::<Vec<_>>();
         navigation.sort_by(|left, right| left.title.cmp(&right.title));
+        if !normalized_query.is_empty() {
+            navigation.clear();
+        }
 
         let mut publications = publications.into_values().collect::<Vec<_>>();
         publications.sort_by(|left, right| {
@@ -2449,6 +2469,9 @@ fn browse_subject_roots(connection: &Connection, request: &CatalogSubjectBrowseR
     let mut counts = HashMap::<String, HashSet<(String, String, String)>>::new();
     for row in rows {
         let (system_id, source_id, edition_id, work_id) = row?;
+        if !request.source_ids.is_empty() && !request.source_ids.iter().any(|selected| selected.as_str() == source_id) {
+            continue;
+        }
         counts.entry(system_id).or_default().insert((source_id, edition_id, work_id));
     }
     let mut navigation = counts
@@ -3100,20 +3123,42 @@ mod tests {
             )
             .unwrap();
 
-        let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], limit: 1 }).unwrap();
+        let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
         assert_eq!(root.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["BISAC", "Dewey Decimal Classification"]);
         assert!(root.publications.is_empty());
         let bisac = root.navigation.iter().find(|link| link.title == "BISAC").unwrap();
         let CatalogLinkTarget::Page { locator } = &bisac.target else { panic!("subject roots must be internal links") };
-        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], limit: 1 }).unwrap();
+        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
         assert_eq!(first.navigation[0].title, "History");
         assert_eq!(first.publications.len(), 1);
         assert_eq!(first.publications[0].source_id, source_id());
         assert_eq!(first.publications[0].publication.identity.edition_id, "history-two", "popular books sort first within an equally relevant subject");
         assert_eq!(first.pagination.number_of_items, Some(2));
-        let second = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: first.pagination.next.clone(), supported_languages: vec!["en".to_owned()], limit: 1 }).unwrap();
+        let second = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: first.pagination.next.clone(), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
         assert_eq!(second.publications.len(), 1);
         assert_ne!(first.publications[0].publication.identity, second.publications[0].publication.identity);
+
+        let excluded_source = CatalogSourceId::parse("another-source").unwrap();
+        let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest {
+            locator: None,
+            supported_languages: vec!["en".to_owned()],
+            source_ids: vec![excluded_source],
+            query: String::new(),
+            limit: 10,
+        });
+        assert!(filtered_root.unwrap().navigation.is_empty());
+
+        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest {
+            locator: Some(locator.clone()),
+            supported_languages: vec!["en".to_owned()],
+            source_ids: vec![source_id()],
+            query: "HISTORY-ONE".to_owned(),
+            limit: 10,
+        });
+        let searched = searched.unwrap();
+        assert!(searched.navigation.is_empty());
+        assert_eq!(searched.publications.len(), 1);
+        assert_eq!(searched.publications[0].publication.identity.edition_id, "history-one");
     }
 
     #[test]
@@ -3136,10 +3181,10 @@ mod tests {
         }
         cache.activate_crawl(&crawl).unwrap();
 
-        let roots = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], limit: 10 }).unwrap();
+        let roots = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
         let bisac = roots.navigation.iter().find(|link| link.title == "BISAC").unwrap();
         let CatalogLinkTarget::Page { locator } = &bisac.target else { panic!("subject roots must be internal links") };
-        let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], limit: 10 }).unwrap();
+        let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
         assert_eq!(response.publications[0].publication.title, "The popular book");
     }
 

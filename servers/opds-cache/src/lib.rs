@@ -10,8 +10,8 @@ use catalog_contract::{
     CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
 };
 use catalog_core::{
-    opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogEpubExtractionJob, CatalogEpubMetadata,
-    CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogPublicationPopularity,
+    canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline,
+    CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogPublicationPopularity,
 };
 use futures_util::stream::{self, StreamExt};
 use library_model::{canonical_isbn, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject};
@@ -794,8 +794,7 @@ impl CatalogService {
 
     pub async fn page_response(&self, source_id: &CatalogSourceId, request: CatalogPageRequest) -> Result<CatalogPageResponse, CatalogServiceError> {
         let endpoint = self.public_endpoint(source_id).await?;
-        let locator = request.locator.as_deref().unwrap_or(&endpoint.url).to_owned();
-        validate_opds_catalog_locator(&endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let locator = canonicalize_opds_catalog_locator(&endpoint, request.locator.as_deref().unwrap_or(&endpoint.url)).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_locator = locator.clone();
         if self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await?.is_none() {
@@ -808,7 +807,10 @@ impl CatalogService {
             let cache_locator = locator.clone();
             let epoch = request.epoch.clone();
             let known = request.known_publications.clone();
-            return self.cache_call(move |cache| cache.page_response(&cache_source, &cache_locator, epoch.as_deref(), &known)).await?.ok_or_else(|| CatalogServiceError("catalog has no active cached generation for this page".to_owned()));
+            let mut response =
+                self.cache_call(move |cache| cache.page_response(&cache_source, &cache_locator, epoch.as_deref(), &known)).await?.ok_or_else(|| CatalogServiceError("catalog has no active cached generation for this page".to_owned()))?;
+            canonicalize_page_layout_locators(&endpoint, &mut response.page)?;
+            return Ok(response);
         }
 
         let cache_source = source_id.clone();
@@ -820,6 +822,7 @@ impl CatalogService {
             group.publications.retain(|publication| supported.contains(&publication.identity));
         }
         retain_delta_payloads(&mut response.payloads, response.page.publications.iter().chain(response.page.groups.iter().flat_map(|group| group.publications.iter())), request.epoch.as_deref(), &response.epoch, request.known_publications);
+        canonicalize_page_layout_locators(&endpoint, &mut response.page)?;
         Ok(response)
     }
 
@@ -882,8 +885,7 @@ impl CatalogService {
     /// absent from the active crawl generation fall back to an on-demand fetch.
     pub async fn browser_page(&self, source_id: &CatalogSourceId, request: CatalogPageRequest) -> Result<CatalogPage, CatalogServiceError> {
         let endpoint = self.public_endpoint(source_id).await?;
-        let locator = request.locator.as_deref().unwrap_or(&endpoint.url);
-        validate_opds_catalog_locator(&endpoint, locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let locator = canonicalize_opds_catalog_locator(&endpoint, request.locator.as_deref().unwrap_or(&endpoint.url)).map_err(|error| CatalogServiceError(error.to_string()))?;
         if let Ok(response) = self.page_response(source_id, request.clone()).await {
             let payloads = response.payloads.into_iter().map(|payload| (payload.publication.identity.clone(), (payload.sequence, payload.publication))).collect::<HashMap<_, _>>();
             if let Some(mut page) = materialize_page(response.page, |reference| payloads.get(&reference.identity).filter(|(sequence, _)| *sequence == reference.sequence).map(|(_, publication)| publication.clone())) {
@@ -892,7 +894,7 @@ impl CatalogService {
                 return Ok(page);
             }
         }
-        let catalog = tokio::time::timeout(BROWSER_UPSTREAM_TIMEOUT, self.state.opds.fetch_catalog_fresh(locator))
+        let catalog = tokio::time::timeout(BROWSER_UPSTREAM_TIMEOUT, self.state.opds.fetch_catalog_fresh(&locator))
             .await
             .map_err(|_| CatalogServiceError("catalogue page did not respond before the browser timeout".to_owned()))?
             .map_err(|error| CatalogServiceError(error.to_string()))?;
@@ -1917,6 +1919,22 @@ fn internal_page_links(root: &Url, page: &CatalogPage) -> Result<Vec<String>, Ca
         }
     }
     Ok(internal)
+}
+
+fn canonicalize_page_layout_locators(endpoint: &OpdsEndpoint, page: &mut catalog_contract::CatalogPageLayout) -> Result<(), CatalogServiceError> {
+    page.locator = canonicalize_opds_catalog_locator(endpoint, &page.locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+    for link in page.navigation.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.navigation.iter_mut())).chain(page.facets.iter_mut().flat_map(|facet| facet.links.iter_mut())) {
+        if let CatalogLinkTarget::Page { locator } = &mut link.target {
+            *locator = canonicalize_opds_catalog_locator(endpoint, locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+        }
+    }
+    for locator in page.groups.iter_mut().filter_map(|group| group.page_locator.as_mut()) {
+        *locator = canonicalize_opds_catalog_locator(endpoint, locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+    }
+    for locator in [&mut page.pagination.first, &mut page.pagination.previous, &mut page.pagination.next, &mut page.pagination.last].into_iter().flatten() {
+        *locator = canonicalize_opds_catalog_locator(endpoint, locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn same_origin(root: &Url, candidate: &str) -> Result<bool, CatalogServiceError> {

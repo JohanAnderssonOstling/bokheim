@@ -146,14 +146,14 @@ impl StorePage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let included = preferences.included_catalog_languages();
+        let options = browsing_contract.options.catalog_languages.iter().filter(|option| self.sources.iter().any(|source| catalog_language_available(&source.languages, &option.value, &option.label))).cloned().collect::<Vec<_>>();
         let label = if included.is_empty() {
             all_languages_label.to_owned()
         } else if included.len() == 1 {
-            browsing_contract.options.catalog_languages.iter().find(|option| option.value == included[0]).map_or_else(|| included[0].clone(), |option| option.label.clone())
+            options.iter().find(|option| option.value == included[0]).map_or_else(|| included[0].clone(), |option| option.label.clone())
         } else {
             format!("{} languages", included.len())
         };
-        let options = browsing_contract.options.catalog_languages.clone();
         let selected = included.to_vec();
         let all_label = all_languages_label.to_owned();
         let entity = cx.entity();
@@ -171,6 +171,38 @@ impl StorePage {
                         let option_entity = entity.clone();
                         menu.item(PopupMenuItem::new(option.label.clone()).checked(chosen).on_click(move |_, _, cx| {
                             option_entity.update(cx, |page, cx| page.toggle_catalog_language(&value, cx));
+                        }))
+                    },
+                )
+            })
+            .into_any_element()
+    }
+
+    fn subject_source_dropdown(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.subject_source_ids.clone();
+        let label = if selected.is_empty() {
+            "All catalogues".to_owned()
+        } else if selected.len() == 1 {
+            self.sources.iter().find(|source| source.id == selected[0]).map_or_else(|| selected[0].as_str().to_owned(), |source| source.title.clone())
+        } else {
+            format!("{} catalogues", selected.len())
+        };
+        let sources = self.sources.clone();
+        let entity = cx.entity();
+        components::catalog_dropdown_button("store-subject-sources", label, !selected.is_empty(), self.loading, theme)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let all_entity = entity.clone();
+                sources.iter().fold(
+                    menu.item(PopupMenuItem::new("All catalogues").checked(selected.is_empty()).on_click(move |_, _, cx| {
+                        all_entity.update(cx, |page, cx| page.set_subject_sources(Vec::new(), cx));
+                    })),
+                    |menu, source| {
+                        let source_id = source.id.clone();
+                        let chosen = selected.contains(&source_id);
+                        let source_entity = entity.clone();
+                        menu.item(PopupMenuItem::new(source.title.clone()).checked(chosen).on_click(move |_, _, cx| {
+                            source_entity.update(cx, |page, cx| page.toggle_subject_source(&source_id, cx));
                         }))
                     },
                 )
@@ -466,7 +498,21 @@ impl Render for StorePage {
                 }
                 identity = identity.child(breadcrumbs);
             }
-            content = content.child(identity).child(self.virtual_rows("store-subject-results", retained_rows.expect("subject browse rows"), publication_columns, link_width, None, theme, cx));
+            content = content.child(identity);
+            let entity = cx.entity();
+            let mut controls = div().w_full().flex().items_center().gap(px(8.0));
+            if levels.len() > 1 {
+                controls = controls
+                    .child(div().flex_1().min_w_0().max_w(px(480.0)).child(Input::new(&self.subject_search_input)))
+                    .child(components::secondary_action_button("store-subject-search", "Search", IconName::Search, self.loading).on_click(move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.search_subjects(cx));
+                    }));
+            } else {
+                controls = controls.child(div().flex_1());
+            }
+            content = content
+                .child(controls.child(self.subject_source_dropdown(theme, cx)))
+                .child(self.virtual_rows("store-subject-results", retained_rows.expect("subject browse rows"), publication_columns, link_width, None, theme, cx));
             return components::folder_dashboard().child(publication_grid.track(content)).into_any_element();
         }
 

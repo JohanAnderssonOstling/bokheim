@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use epub_svelte_lib::LibraryBackend;
-use epub_svelte_lib::catalog::{CatalogFacet, CatalogLink, CatalogLinkTarget, CatalogPagination, CatalogSearch, CatalogSource, CatalogSubjectBrowseResponse};
+use epub_svelte_lib::catalog::{CatalogFacet, CatalogLink, CatalogLinkTarget, CatalogPagination, CatalogSearch, CatalogSource, CatalogSourceId, CatalogSubjectBrowseResponse};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::Disableable;
@@ -40,6 +40,15 @@ fn toggled_catalog_languages(included: &[String], value: &str) -> Vec<String> {
     selected.sort();
     selected.dedup();
     selected
+}
+
+fn catalog_language_available(source_languages: impl IntoIterator<Item = impl AsRef<str>>, value: &str, label: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    let label = label.to_lowercase();
+    source_languages.into_iter().any(|language| {
+        let candidate = language.as_ref().trim().replace('_', "-").to_lowercase();
+        candidate == value || candidate == label || candidate.strip_prefix(&value).is_some_and(|suffix| suffix.starts_with('-'))
+    })
 }
 
 enum StoreMode {
@@ -125,8 +134,11 @@ pub(crate) struct StorePage {
     enrichment_refresh_task: Option<Task<()>>,
     search_input: Entity<InputState>,
     wide_search_input: Entity<InputState>,
+    subject_search_input: Entity<InputState>,
+    subject_source_ids: Vec<CatalogSourceId>,
     _search_subscription: Subscription,
     _wide_search_subscription: Subscription,
+    _subject_search_subscription: Subscription,
     virtual_rows: HashMap<(usize, usize), view::StoreVirtualRows>,
     catalog_link_columns: Cell<usize>,
 }
@@ -135,6 +147,7 @@ impl StorePage {
     pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, library: LibraryBackend, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Catalogue search"));
         let wide_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Catalogue search"));
+        let subject_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in this subject"));
         let search_subscription = cx.subscribe(&search_input, |page: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 page.search_within_source(cx);
@@ -143,6 +156,11 @@ impl StorePage {
         let wide_search_subscription = cx.subscribe(&wide_search_input, |page: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 page.search_catalogs(cx);
+            }
+        });
+        let subject_search_subscription = cx.subscribe(&subject_search_input, |page: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                page.search_subjects(cx);
             }
         });
         let import_library = library.clone();
@@ -161,8 +179,11 @@ impl StorePage {
             enrichment_refresh_task: None,
             search_input,
             wide_search_input,
+            subject_search_input,
+            subject_source_ids: Vec::new(),
             _search_subscription: search_subscription,
             _wide_search_subscription: wide_search_subscription,
+            _subject_search_subscription: subject_search_subscription,
             virtual_rows: HashMap::new(),
             catalog_link_columns: Cell::new(1),
         }
@@ -176,7 +197,7 @@ impl StorePage {
     fn update_catalog_languages(&mut self, languages: Vec<String>, cx: &mut Context<Self>) {
         match self.preferences.update(cx, |preferences, cx| preferences.update_browsing(epub_svelte_lib::app::preferences::BrowsingPreferencePatch::IncludedCatalogLanguages(languages), cx)) {
             Ok(()) => {
-                self.sources = Arc::new(self.services.backend.supported_catalog_sources());
+                self.sources = Arc::new(self.services.backend.catalog_sources());
                 if matches!(self.mode, StoreMode::WideSearch(_)) {
                     self.search_catalogs(cx);
                 }
@@ -195,7 +216,7 @@ impl StorePage {
 
 #[cfg(test)]
 mod tests {
-    use super::toggled_catalog_languages;
+    use super::{catalog_language_available, toggled_catalog_languages};
 
     #[test]
     fn catalogue_languages_toggle_as_a_persisted_set() {
@@ -203,5 +224,13 @@ mod tests {
         assert_eq!(toggled_catalog_languages(&["en".to_owned()], "sv"), ["en", "sv"]);
         assert_eq!(toggled_catalog_languages(&["en".to_owned(), "sv".to_owned()], "en"), ["sv"]);
         assert!(toggled_catalog_languages(&["en".to_owned()], "en").is_empty());
+    }
+
+    #[test]
+    fn catalogue_language_options_require_an_available_source_language() {
+        assert!(catalog_language_available(["English"], "en", "English"));
+        assert!(catalog_language_available(["sv-SE"], "sv", "Swedish"));
+        assert!(!catalog_language_available(["French"], "de", "German"));
+        assert!(!catalog_language_available(["Multilingual"], "en", "English"));
     }
 }

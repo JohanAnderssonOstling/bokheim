@@ -268,7 +268,7 @@ impl Render for SettingsPage {
                 DesktopUpdateState::Idle => {
                     let action = entity.clone();
                     (
-                        format!("Version {current_version}. Updates are available only for this directly downloaded AppImage."),
+                        format!("Version {current_version}. Updates are available for directly downloaded Bokheim builds."),
                         components::secondary_action_button("check-desktop-update", "Check for updates", IconName::Redo2, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.check_desktop_update(cx))),
                     )
                 }
@@ -284,7 +284,7 @@ impl Render for SettingsPage {
                     let available = update.clone();
                     let action = entity.clone();
                     (
-                        format!("{} is available. The download is verified before the current AppImage is replaced.", update.release_name),
+                        format!("{} is available. The download is verified before the current application is replaced.", update.release_name),
                         components::secondary_action_button("install-desktop-update", format!("Install {}", update.version), IconName::ArrowRight, false)
                             .on_click(move |_, _, cx| action.update(cx, |page, cx| page.install_desktop_update(available.clone(), cx))),
                     )
@@ -293,7 +293,7 @@ impl Render for SettingsPage {
                 DesktopUpdateState::ReadyToRestart { version } => {
                     let action = entity.clone();
                     (
-                        format!("Bokheim {version} is installed. The previous AppImage remains beside it as a backup."),
+                        format!("Bokheim {version} is ready. Restart Bokheim to finish installing the update."),
                         components::secondary_action_button("restart-desktop-update", "Restart Bokheim", IconName::ArrowRight, false).on_click(move |_, _, cx| action.update(cx, |page, cx| page.restart_after_desktop_update(cx))),
                     )
                 }

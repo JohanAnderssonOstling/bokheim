@@ -14,7 +14,7 @@ impl StorePage {
         self.error = None;
         let operation = self.services.backend.spawn(move |core| async move {
             let refresh_error = core.refresh_catalog_sources().await.err().map(|error| error.to_string());
-            (core.supported_catalog_sources(), refresh_error)
+            (core.catalog_sources(), refresh_error)
         });
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await;
@@ -57,7 +57,11 @@ impl StorePage {
         self.loading = true;
         self.error = None;
         let requested_locator = locator.clone();
-        let operation = self.library.spawn(move |library| async move { library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), limit: 100 }).await.map_err(|error| error.to_string()) });
+        let source_ids = self.subject_source_ids.clone();
+        let query = self.subject_search_input.read(cx).value().trim().to_owned();
+        let operation = self.library.spawn(move |library| async move {
+            library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator, supported_languages: Vec::new(), source_ids, query, limit: 100 }).await.map_err(|error| error.to_string())
+        });
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = page.update(cx, |page, cx| {
@@ -90,8 +94,11 @@ impl StorePage {
         let StoreMode::Subjects(current) = &self.mode else { return };
         let Some(locator) = current.response.pagination.next.clone() else { return };
         self.loading = true;
-        let operation =
-            self.library.spawn(move |library| async move { library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: Vec::new(), limit: 100 }).await.map_err(|error| error.to_string()) });
+        let source_ids = self.subject_source_ids.clone();
+        let query = self.subject_search_input.read(cx).value().trim().to_owned();
+        let operation = self.library.spawn(move |library| async move {
+            library.browse_catalog_subjects(CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: Vec::new(), source_ids, query, limit: 100 }).await.map_err(|error| error.to_string())
+        });
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = page.update(cx, |page, cx| {
@@ -116,6 +123,29 @@ impl StorePage {
                 cx.notify();
             });
         }));
+    }
+
+    pub(super) fn search_subjects(&mut self, cx: &mut Context<Self>) {
+        let StoreMode::Subjects(current) = &self.mode else { return };
+        let locator = current.levels.last().and_then(|(_, locator)| locator.clone());
+        self.load_subjects(locator, None, cx);
+    }
+
+    pub(super) fn set_subject_sources(&mut self, source_ids: Vec<epub_svelte_lib::catalog::CatalogSourceId>, cx: &mut Context<Self>) {
+        self.subject_source_ids = source_ids;
+        self.search_subjects(cx);
+    }
+
+    pub(super) fn toggle_subject_source(&mut self, source_id: &epub_svelte_lib::catalog::CatalogSourceId, cx: &mut Context<Self>) {
+        let mut selected = self.subject_source_ids.clone();
+        if selected.is_empty() {
+            selected.push(source_id.clone());
+        } else if selected.contains(source_id) {
+            selected.retain(|candidate| candidate != source_id);
+        } else {
+            selected.push(source_id.clone());
+        }
+        self.set_subject_sources(selected, cx);
     }
 
     fn build_subject_view(

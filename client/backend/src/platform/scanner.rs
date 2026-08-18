@@ -12,7 +12,6 @@ use library_model::BookFormat;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "watcher")]
@@ -324,7 +323,7 @@ impl LibraryScanner {
                 }
             };
             batch_entries += 1;
-            if entry.file_name().as_bytes().starts_with(b".") {
+            if entry.file_name().to_string_lossy().starts_with('.') {
                 if entry.file_type().is_dir() {
                     walkdir.skip_current_dir();
                 }

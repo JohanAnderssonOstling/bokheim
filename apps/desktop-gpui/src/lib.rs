@@ -1,7 +1,9 @@
 mod registry;
 mod session;
-#[cfg(not(feature = "kobo"))]
+#[cfg(all(not(feature = "kobo"), target_os = "linux"))]
 mod updater;
+#[cfg(all(not(feature = "kobo"), target_os = "windows"))]
+mod windows_updater;
 
 use std::borrow::Cow;
 #[cfg(feature = "audiobooks")]
@@ -89,8 +91,12 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     reader_ui::bind_keys(cx);
     let blocking_worker = BlockingWorker::new(cx.background_executor(), 2);
     let persistence_worker = BlockingWorker::new(cx.background_executor(), 1);
-    #[cfg(not(feature = "kobo"))]
+    #[cfg(all(not(feature = "kobo"), target_os = "linux"))]
     let desktop_updater = updater::direct_appimage_updater(blocking_worker.clone());
+    #[cfg(all(not(feature = "kobo"), target_os = "windows"))]
+    let desktop_updater = windows_updater::windows_installer_updater(blocking_worker.clone());
+    #[cfg(all(not(feature = "kobo"), not(any(target_os = "linux", target_os = "windows"))))]
+    let desktop_updater: Option<browser_ui::DesktopUpdater> = None;
     let session_saves = SessionSaveScheduler::new(saved_session.clone(), session_path, persistence_worker.clone());
     #[cfg(feature = "kobo")]
     let kobo_auto_rotate = {

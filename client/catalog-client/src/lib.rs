@@ -3,8 +3,8 @@ pub use catalog_contract::{
     CatalogSearchResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
 };
 pub use catalog_core::{
-    discover_author_books_locally, opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, opds_source, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator, CatalogCache, CatalogCoverCache,
-    CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches,
+    canonicalize_opds_catalog_locator, discover_author_books_locally, opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, opds_source, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator,
+    CatalogCache, CatalogCoverCache, CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches,
 };
 use catalog_core::{opds_endpoint_id, search_opds_catalogs, validate_server_cover, validated_opds_import};
 #[cfg(test)]
@@ -21,7 +21,7 @@ use opds::{CatalogRegistry, DownloadedOpdsBook, OpdsEndpoint, OpdsEndpointStore,
 #[cfg(test)]
 use opds::{OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsDirectAcquisition, OpdsEndpointId, OpdsPublicationIdentity};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
@@ -42,6 +42,67 @@ fn normalize_project_gutenberg_publication(publication: &mut CatalogPublication)
         CatalogDescription::RichHtml { safe_html, .. } => opds::project_gutenberg_description_parts(&safe_html).map(|(safe_html, plain_text)| CatalogDescription::RichHtml { safe_html, plain_text }),
     };
     publication.description != previous
+}
+
+fn project_gutenberg_edition_has_images(publication: &CatalogPublication) -> bool {
+    publication.actions.iter().any(|action| {
+        let CatalogPublicationAction::Import { request } = action else { return false };
+        let download_url = request.download_url.to_ascii_lowercase();
+        download_url.contains(".images") && !download_url.contains(".noimages")
+    })
+}
+
+fn normalize_project_gutenberg_publications(publications: &mut Vec<CatalogPublication>) {
+    let mut work_positions = HashMap::<String, usize>::new();
+    let mut normalized = Vec::with_capacity(publications.len());
+    for mut publication in publications.drain(..) {
+        normalize_project_gutenberg_publication(&mut publication);
+        let Some(work_id) = publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
+            normalized.push(publication);
+            continue;
+        };
+        if let Some(&position) = work_positions.get(work_id) {
+            if project_gutenberg_edition_has_images(&publication) && !project_gutenberg_edition_has_images(&normalized[position]) {
+                normalized[position] = publication;
+            }
+        } else {
+            work_positions.insert(work_id.to_owned(), normalized.len());
+            normalized.push(publication);
+        }
+    }
+    *publications = normalized;
+}
+
+fn normalize_project_gutenberg_page(page: &mut CatalogPage) {
+    normalize_project_gutenberg_publications(&mut page.publications);
+    for group in &mut page.groups {
+        normalize_project_gutenberg_publications(&mut group.publications);
+    }
+}
+
+fn normalize_project_gutenberg_sourced_publications(publications: &mut Vec<catalog_contract::CatalogSourcedPublication>) {
+    let mut work_positions = HashMap::<String, usize>::new();
+    let mut normalized = Vec::with_capacity(publications.len());
+    for mut item in publications.drain(..) {
+        if item.source_id.as_str() != "opds-project-gutenberg" {
+            normalized.push(item);
+            continue;
+        }
+        normalize_project_gutenberg_publication(&mut item.publication);
+        let Some(work_id) = item.publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
+            normalized.push(item);
+            continue;
+        };
+        if let Some(&position) = work_positions.get(work_id) {
+            if project_gutenberg_edition_has_images(&item.publication) && !project_gutenberg_edition_has_images(&normalized[position].publication) {
+                normalized[position] = item;
+            }
+        } else {
+            work_positions.insert(work_id.to_owned(), normalized.len());
+            normalized.push(item);
+        }
+    }
+    *publications = normalized;
 }
 
 #[derive(Clone)]
@@ -101,9 +162,7 @@ impl CatalogClient {
     fn prepare_page(&self, source: &CatalogSource, page: &mut CatalogPage) {
         self.language_filter().filter_page(source, page);
         if source.id.as_str() == "opds-project-gutenberg" {
-            for publication in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())) {
-                normalize_project_gutenberg_publication(publication);
-            }
+            normalize_project_gutenberg_page(page);
         }
     }
 
@@ -202,9 +261,7 @@ impl CatalogClient {
         for group in &mut result.groups {
             if group.source.id.as_str() == "opds-project-gutenberg" {
                 if let CatalogWideSearchOutcome::Results { page } = &mut group.outcome {
-                    for publication in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())) {
-                        normalize_project_gutenberg_publication(publication);
-                    }
+                    normalize_project_gutenberg_page(page);
                 }
             }
         }
@@ -214,10 +271,9 @@ impl CatalogClient {
 
     pub async fn page(&self, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPage, CatalogProviderError> {
         let endpoint = self.endpoint_for_source(source_id)?;
-        let locator = locator.unwrap_or(&endpoint.url);
-        validate_opds_catalog_locator(&endpoint, locator)?;
+        let locator = canonicalize_opds_catalog_locator(&endpoint, locator.unwrap_or(&endpoint.url))?;
         if self.is_curated_endpoint(&endpoint)? {
-            let request = self.page_request(source_id, locator)?;
+            let request = self.page_request(source_id, &locator)?;
             match self.server.catalog_page(source_id, &request).await {
                 Ok(response) => {
                     let mut page = self.cache.apply_page_response(&endpoint.url, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
@@ -227,7 +283,7 @@ impl CatalogClient {
                 }
                 Err(error) => {
                     log::warn!(target: "catalog", "catalog server page unavailable; using local page or direct OPDS: {error}");
-                    if let Some(cached) = self.cache.page(source_id, locator).map_err(|error| CatalogProviderError::new(error.to_string()))? {
+                    if let Some(cached) = self.cache.page(source_id, &locator).map_err(|error| CatalogProviderError::new(error.to_string()))? {
                         let mut page = cached.page;
                         page.freshness = CatalogFreshness::Stale;
                         self.prepare_page(&opds_source(&endpoint), &mut page);
@@ -237,7 +293,7 @@ impl CatalogClient {
                 }
             }
         }
-        let catalog = self.opds.fetch_catalog(locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let catalog = self.opds.fetch_catalog(&locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
         let mut page = opds_page(source_id.clone(), catalog);
         self.prepare_page(&opds_source(&endpoint), &mut page);
@@ -307,11 +363,7 @@ impl CatalogClient {
             request.supported_languages = self.language_filter().supported().to_vec();
         }
         let mut response = self.server.browse_subjects(&request).await?;
-        for item in &mut response.publications {
-            if item.source_id.as_str() == "opds-project-gutenberg" {
-                normalize_project_gutenberg_publication(&mut item.publication);
-            }
-        }
+        normalize_project_gutenberg_sourced_publications(&mut response.publications);
         self.covers.remember_subject_browse(&response);
         Ok(response)
     }
@@ -607,6 +659,40 @@ mod tests {
     }
 
     #[test]
+    fn gutenberg_work_duplicates_prefer_the_illustrated_edition() {
+        let source_id = CatalogSourceId::parse("opds-project-gutenberg").unwrap();
+        let edition = |edition_id: &str, download_url: &str| {
+            let identity = CatalogPublicationIdentity { edition_id: edition_id.to_owned(), work_id: Some("urn:gutenberg:2465".to_owned()) };
+            CatalogPublication {
+                identity: identity.clone(),
+                title: "Carmen".to_owned(),
+                authors: Vec::new(),
+                languages: vec!["en".to_owned()],
+                description: None,
+                image_url: None,
+                actions: vec![CatalogPublicationAction::Import {
+                    request: CatalogImportRequest {
+                        source_id: source_id.clone(),
+                        catalog_locator: "https://www.gutenberg.org/ebooks/2465.opds".to_owned(),
+                        publication: identity,
+                        download_url: download_url.to_owned(),
+                        book_format: CatalogBookFormat::Epub,
+                    },
+                }],
+            }
+        };
+        let mut publications = vec![
+            edition("urn:gutenberg:2465:2", "https://www.gutenberg.org/ebooks/2465.epub.noimages"),
+            edition("urn:gutenberg:2465:3", "https://www.gutenberg.org/ebooks/2465.epub.images"),
+        ];
+
+        normalize_project_gutenberg_publications(&mut publications);
+
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].identity.edition_id, "urn:gutenberg:2465:3");
+    }
+
+    #[test]
     fn wide_search_refresh_failures_retain_the_cached_source_page() {
         let mut cached = search_page(CatalogSourceId::parse("opds-test").unwrap(), "book".to_owned(), CatalogSearchMatches::default());
         cached.freshness = CatalogFreshness::Stale;
@@ -738,7 +824,9 @@ mod tests {
         assert!(opds_endpoint_id(&CatalogSourceId::parse("unknown").unwrap()).is_err());
         let endpoint = OpdsEndpoint { id: OpdsEndpointId::parse("example").unwrap(), title: "Example".to_owned(), description: "Example".to_owned(), languages: vec!["English".to_owned()], url: "https://catalog.example/root".to_owned() };
         assert!(validate_opds_catalog_locator(&endpoint, "https://catalog.example/page").is_ok());
+        assert_eq!(canonicalize_opds_catalog_locator(&endpoint, "http://catalog.example/page").unwrap(), "https://catalog.example/page");
         assert!(validate_opds_catalog_locator(&endpoint, "https://attacker.example/page").is_err());
+        assert!(validate_opds_catalog_locator(&endpoint, "http://catalog.example:8080/page").is_err());
         assert!(validate_opds_catalog_locator(&endpoint, "https://user:secret@catalog.example/page").is_err());
     }
 

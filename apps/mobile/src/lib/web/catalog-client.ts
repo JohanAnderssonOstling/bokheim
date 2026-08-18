@@ -90,10 +90,12 @@ export async function getWebCatalogPage(libraryId: string, sourceId: string, loc
   return { page, owned_publications: await getOwnedWebCatalogPublications(libraryId) };
 }
 
-export async function getWebCatalogSubjects(libraryId: string, locator: string | null, limit: number): Promise<CatalogSubjectBrowseView> {
+export async function getWebCatalogSubjects(libraryId: string, locator: string | null, sourceIds: string[], query: string, limit: number): Promise<CatalogSubjectBrowseView> {
   const response = await catalogJson<CatalogSubjectBrowseResponse>("/subjects", {
     locator,
     supported_languages: await supportedLanguages(),
+    source_ids: sourceIds,
+    query,
     limit: Math.max(1, Math.min(100, Math.trunc(limit))),
   });
   return { response, owned_publications: await getOwnedWebCatalogPublications(libraryId) };
