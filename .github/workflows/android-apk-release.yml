@@ -62,7 +62,8 @@ jobs:
         run: cp .github/mobile-release-Cargo.toml Cargo.toml
 
       - name: Restore Rust dependencies and build artifacts
-        uses: actions/cache@v4
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -156,3 +157,15 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" release/* \
             --repo JohanAnderssonOstling/bokheim-release \
             --clobber
+
+      - name: Save Rust dependencies and build artifacts
+        if: always() && steps.rust-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
