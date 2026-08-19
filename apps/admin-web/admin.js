@@ -118,7 +118,7 @@ function card(label, value, detail) {
 function serviceState(service) {
   return service.available ? ["Available", `${number(service.latency_ms)} ms response`] : ["Unavailable", "Check the service or dashboard target configuration"];
 }
-function render(overview, history, requestHistory, engagement, services, identityReviews) {
+function render(overview, history, requestHistory, engagement, services, identityReviews, accounts) {
   const catalogueState = serviceState(services.catalogue);
   const metadataState = serviceState(services.metadata);
   elements.cards.replaceChildren(
@@ -164,6 +164,7 @@ function render(overview, history, requestHistory, engagement, services, identit
     return row;
   });
   elements.engagement.replaceChildren(...engagementRows);
+  renderAccounts(accounts);
 
   const catalogue = services.catalogue.data;
   elements["catalogue-unavailable"].hidden = Boolean(catalogue);
@@ -296,6 +297,34 @@ function render(overview, history, requestHistory, engagement, services, identit
   renderIdentityReviews(identityReviews);
 }
 
+function renderAccounts(data) {
+  if (!data) return;
+  const shown = data.accounts.length;
+  elements["accounts-total"].textContent = shown < data.total
+    ? `${number(shown)} of ${number(data.total)} registered addresses · newest first · every view is audited`
+    : `${number(data.total)} registered addresses · every view is audited`;
+  elements["accounts-empty"].hidden = shown !== 0;
+  const rows = data.accounts.map((account) => {
+    const row = document.createElement("tr");
+    const status = [account.verified ? "Verified" : "Unverified", account.is_admin ? "administrator" : null].filter(Boolean).join(" · ");
+    const values = [
+      account.email,
+      new Date(account.created_at_ms).toLocaleString(),
+      status,
+      account.last_seen_at_ms ? new Date(account.last_seen_at_ms).toLocaleString() : "Never",
+      number(account.request_count),
+      number(account.libraries),
+    ];
+    for (const [index, value] of values.entries()) {
+      const cell = document.createElement("td");
+      if (index === 0) { const code = document.createElement("code"); code.textContent = value; cell.append(code); } else cell.textContent = value;
+      row.append(cell);
+    }
+    return row;
+  });
+  elements.accounts.replaceChildren(...rows);
+}
+
 function renderIdentityReviews(data) {
   if (!data) return;
   const inventory = data.inventory;
@@ -361,6 +390,11 @@ async function load() {
     const identityReviewRequest = activePage === "catalogue-review"
       ? request(`/api/admin/catalog-identity-reviews?${reviewQuery}`)
       : Promise.resolve({ ok:true, status:200, json:async () => null });
+    // Email addresses are only fetched while the accounts page is open, so the
+    // background poll on other pages does not keep reading account identities.
+    const accountsRequest = activePage === "accounts"
+      ? request("/api/admin/accounts?limit=200")
+      : Promise.resolve({ ok:true, status:200, json:async () => null });
     const responses = await Promise.all([
       request("/api/admin/overview"),
       request(`/api/admin/traffic?hours=${hours}`),
@@ -368,6 +402,7 @@ async function load() {
       request("/api/admin/engagement?days=30"),
       request("/api/admin/services"),
       identityReviewRequest,
+      accountsRequest,
     ]);
     if (responses.some((response) => response.status === 401)) return showError("Sign in with an administrator account.", true);
     if (responses.some((response) => response.status === 403)) return showError("This account is not an administrator.", true);

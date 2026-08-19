@@ -10,8 +10,8 @@ use catalog_contract::{
     CatalogSubjectBrowseResponse, materialize_page,
 };
 use catalog_core::{
-    CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate,
-    CatalogPublicationPopularity, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import,
+    CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogCrawlGeneration, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob,
+    CatalogMetadataBackfillUpdate, CatalogPageWrite, CatalogPublicationPopularity, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import,
 };
 use futures_util::stream::{self, StreamExt};
 use library_model::{PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject, canonical_isbn};
@@ -50,6 +50,14 @@ const MAX_RECENT_BROWSER_COVERS: usize = 4_096;
 // source remains serial and polite to its host.
 const CRAWL_CONCURRENCY: usize = 3;
 const CRAWL_FRONTIER_BATCH_SIZE: usize = 64;
+const CRAWL_WRITE_BATCH_INITIAL_PAGES: usize = 32;
+const CRAWL_WRITE_BATCH_MIN_PAGES: usize = 8;
+const CRAWL_WRITE_BATCH_MAX_PAGES: usize = 64;
+const CRAWL_WRITE_BATCH_MAX_PUBLICATIONS: usize = 2_000;
+const CRAWL_WRITE_BATCH_MAX_BYTES: usize = 16 * 1024 * 1024;
+const CRAWL_WRITE_BATCH_MAX_AGE: Duration = Duration::from_millis(250);
+const CRAWL_WRITE_BATCH_FAST_COMMIT: Duration = Duration::from_millis(75);
+const CRAWL_WRITE_BATCH_SLOW_COMMIT: Duration = Duration::from_millis(200);
 const SQLITE_LOCK_RETRY_DELAYS: [Duration; 3] = [Duration::from_millis(100), Duration::from_millis(250), Duration::from_millis(500)];
 const CRAWL_ACTIVATION_BATCH: usize = 256;
 const EXTRACTION_RECONCILIATION_BATCH: usize = 256;
@@ -136,6 +144,48 @@ struct CrawlProgress {
     started_at: Instant,
     pages_fetched: u64,
     publications_seen: u64,
+}
+
+struct AdaptiveCrawlWriteBatch {
+    pages: Vec<CatalogPageWrite>,
+    publications: usize,
+    bytes: usize,
+    started_at: Option<Instant>,
+    page_limit: usize,
+}
+
+impl Default for AdaptiveCrawlWriteBatch {
+    fn default() -> Self {
+        Self { pages: Vec::new(), publications: 0, bytes: 0, started_at: None, page_limit: CRAWL_WRITE_BATCH_INITIAL_PAGES }
+    }
+}
+
+impl AdaptiveCrawlWriteBatch {
+    fn push(&mut self, write: CatalogPageWrite, publications: usize, bytes: usize) {
+        self.started_at.get_or_insert_with(Instant::now);
+        self.pages.push(write);
+        self.publications = self.publications.saturating_add(publications);
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+
+    fn should_flush(&self) -> bool {
+        self.pages.len() >= self.page_limit || self.publications >= CRAWL_WRITE_BATCH_MAX_PUBLICATIONS || self.bytes >= CRAWL_WRITE_BATCH_MAX_BYTES || self.started_at.is_some_and(|started| started.elapsed() >= CRAWL_WRITE_BATCH_MAX_AGE)
+    }
+
+    fn take_pages(&mut self) -> Vec<CatalogPageWrite> {
+        self.publications = 0;
+        self.bytes = 0;
+        self.started_at = None;
+        std::mem::take(&mut self.pages)
+    }
+
+    fn record_commit(&mut self, elapsed: Duration) {
+        if elapsed >= CRAWL_WRITE_BATCH_SLOW_COMMIT {
+            self.page_limit = (self.page_limit / 2).max(CRAWL_WRITE_BATCH_MIN_PAGES);
+        } else if elapsed <= CRAWL_WRITE_BATCH_FAST_COMMIT {
+            self.page_limit = self.page_limit.saturating_mul(2).min(CRAWL_WRITE_BATCH_MAX_PAGES);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -493,6 +543,65 @@ impl CatalogService {
         .map_err(cache_error)
     }
 
+    async fn flush_replacement_crawl_batch(&self, crawl: &CatalogCrawlGeneration, source_id: &CatalogSourceId, batch: &mut AdaptiveCrawlWriteBatch) -> Result<(), CatalogServiceError> {
+        if batch.pages.is_empty() {
+            return Ok(());
+        }
+        let pages = batch.take_pages();
+        let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
+        let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
+        let cache_crawl = crawl.clone();
+        let started = Instant::now();
+        self.cache_write_call(move |cache| cache.stage_pages(&cache_crawl, &pages)).await?;
+        batch.record_commit(started.elapsed());
+        for publications in publication_counts {
+            self.record_crawl_page(source_id, publications).await;
+        }
+        self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    async fn flush_incremental_crawl_batch(&self, source_id: &CatalogSourceId, source_url: &str, batch: &mut AdaptiveCrawlWriteBatch) -> Result<(), CatalogServiceError> {
+        if batch.pages.is_empty() {
+            return Ok(());
+        }
+        let pages = batch.take_pages();
+        // Re-read enrichment only after acquiring the source lock. This keeps
+        // a concurrent EPUB result from being overwritten by buffered feed data.
+        let update_lock = self.source_update_lock(source_id).await;
+        let _update = update_lock.lock().await;
+        let mut enriched_pages = Vec::with_capacity(pages.len());
+        for mut write in pages {
+            let cache_source = source_id.clone();
+            let mut page = write.page;
+            page = self
+                .cache_call(move |cache| {
+                    cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
+                    Ok(page)
+                })
+                .await?;
+            self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
+            write.page = page;
+            enriched_pages.push(write);
+        }
+        let pages = enriched_pages;
+        let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
+        let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
+        let cache_source = source_id.clone();
+        let cache_root = source_url.to_owned();
+        let started = Instant::now();
+        self.cache_write_call(move |cache| cache.put_pages(&cache_source, &cache_root, &pages)).await?;
+        batch.record_commit(started.elapsed());
+        drop(_update);
+        for publications in publication_counts {
+            self.record_crawl_page(source_id, publications).await;
+        }
+        self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
     async fn cleanup_inactive_generations(&self, source_id: CatalogSourceId) {
         loop {
             let cache_source = source_id.clone();
@@ -552,6 +661,7 @@ impl CatalogService {
         let crawl = self.cache_write_call(move |cache| cache.begin_crawl(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not start replacement crawl: {error}")))?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
+        let mut write_batch = AdaptiveCrawlWriteBatch::default();
         let result = async {
             loop {
                 let batch = frontier.claim_batch()?;
@@ -583,15 +693,15 @@ impl CatalogService {
                         .await?;
                     self.prepare_publication_cover_fallbacks(&source_id, &mut page).await;
                     frontier.enqueue(internal_page_links(&root_url, &page)?)?;
-                    let publications = page_publication_count(&page);
-                    let cover_urls = page_cover_urls(&page);
-                    let cache_crawl = crawl.clone();
-                    let cache_page = page;
-                    self.cache_write_call(move |cache| cache.stage_page(&cache_crawl, &cache_page, validators.etag.as_deref(), validators.last_modified.as_deref())).await?;
-                    self.record_crawl_page(&source_id, publications).await;
-                    self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
+                    let publications = page_publication_count(&page) as usize;
+                    let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
+                    write_batch.push(CatalogPageWrite { page, etag: validators.etag, last_modified: validators.last_modified }, publications, bytes);
+                    if write_batch.should_flush() {
+                        self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
+                    }
                 }
             }
+            self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
             loop {
                 let cache_crawl = crawl.clone();
                 let more = self.cache_write_call(move |cache| cache.prepare_crawl_activation_batch(&cache_crawl, CRAWL_ACTIVATION_BATCH)).await?;
@@ -632,6 +742,7 @@ impl CatalogService {
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
         let mut fetched = 0usize;
+        let mut write_batch = AdaptiveCrawlWriteBatch::default();
         let result = async {
             loop {
                 let batch = frontier.claim_batch()?;
@@ -647,39 +758,23 @@ impl CatalogService {
                         continue;
                     }
                     if fetched >= self.state.max_crawl_pages {
+                        self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
                         return Ok(false);
                     }
                     fetched += 1;
                     let catalog = self.state.opds.fetch_catalog_fresh(&locator).await.map_err(|error| CatalogServiceError(error.to_string()))?;
                     validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
-                    let mut page = opds_page(source_id.clone(), catalog);
+                    let page = opds_page(source_id.clone(), catalog);
                     frontier.enqueue(internal_page_links(&root_url, &page)?)?;
-                    let (publications, cover_urls) = {
-                        // Network traversal is deliberately outside this lock.
-                        // Re-read extraction results after acquiring it so either
-                        // the page commit or enrichment wins without lost fields.
-                        let update_lock = self.source_update_lock(&source_id).await;
-                        let _update = update_lock.lock().await;
-                        let cache_source = source_id.clone();
-                        page = self
-                            .cache_call(move |cache| {
-                                cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
-                                Ok(page)
-                            })
-                            .await?;
-                        self.prepare_publication_cover_fallbacks(&source_id, &mut page).await;
-                        let publications = page_publication_count(&page);
-                        let cover_urls = page_cover_urls(&page);
-                        let cache_source = source_id.clone();
-                        let cache_root = endpoint.url.clone();
-                        let cache_page = page;
-                        self.cache_write_call(move |cache| cache.put_page(&cache_source, &cache_root, &cache_page, None, None)).await?;
-                        (publications, cover_urls)
-                    };
-                    self.record_crawl_page(&source_id, publications).await;
-                    self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
+                    let publications = page_publication_count(&page) as usize;
+                    let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
+                    write_batch.push(CatalogPageWrite { page, etag: None, last_modified: None }, publications, bytes);
+                    if write_batch.should_flush() {
+                        self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
+                    }
                 }
             }
+            self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
             Ok::<_, CatalogServiceError>(true)
         }
         .await;
@@ -2521,6 +2616,22 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tower::ServiceExt;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn adaptive_crawl_batch_grows_and_shrinks_with_commit_latency() {
+        let mut batch = AdaptiveCrawlWriteBatch::default();
+        assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_INITIAL_PAGES);
+        batch.record_commit(CRAWL_WRITE_BATCH_FAST_COMMIT - Duration::from_millis(1));
+        assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_MAX_PAGES);
+        batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
+        assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_INITIAL_PAGES);
+        batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
+        batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
+        batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
+        assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_MIN_PAGES);
+        batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
+        assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_MIN_PAGES);
+    }
 
     fn endpoint(url: String) -> OpdsEndpoint {
         OpdsEndpoint { id: OpdsEndpointId::parse("test").unwrap(), title: "Test".to_owned(), description: "Test catalog".to_owned(), languages: vec!["Multilingual".to_owned()], url }

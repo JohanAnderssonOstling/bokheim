@@ -16,6 +16,8 @@ const MAX_REQUEST_LOG_LIMIT: u16 = 1_000;
 const MAX_REQUEST_LOG_HOURS: u16 = 24 * 7;
 const DEFAULT_ENGAGEMENT_DAYS: u16 = 30;
 const MAX_ENGAGEMENT_DAYS: u16 = 90;
+const DEFAULT_ACCOUNT_LIMIT: u16 = 200;
+const MAX_ACCOUNT_LIMIT: u16 = 1_000;
 
 #[derive(Deserialize)]
 pub(crate) struct AdminLogin {
@@ -159,6 +161,29 @@ struct EngagementPoint {
     active_accounts: i64,
     sync_accounts: i64,
     new_verified_accounts: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AccountQuery {
+    limit: Option<u16>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AccountList {
+    generated_at_ms: i64,
+    total: i64,
+    accounts: Vec<AccountEntry>,
+}
+
+#[derive(Serialize)]
+struct AccountEntry {
+    email: String,
+    created_at_ms: i64,
+    verified: bool,
+    is_admin: bool,
+    last_seen_at_ms: Option<i64>,
+    request_count: i64,
+    libraries: i64,
 }
 
 pub(crate) async fn overview(State(state): State<AppState>, admin: AdminUser) -> Result<Response, StatusCode> {
@@ -351,6 +376,40 @@ pub(crate) async fn engagement(State(state): State<AppState>, admin: AdminUser, 
     json_response(EngagementHistory { generated_at_ms: Utc::now().timestamp_millis(), days, points })
 }
 
+/// Unlike every other dashboard query this one returns account identities, so
+/// each read is audited and the newest registrations come first.
+pub(crate) async fn accounts(State(state): State<AppState>, admin: AdminUser, Query(query): Query<AccountQuery>) -> Result<Response, StatusCode> {
+    audit(&state, &admin.user_id, "dashboard_account_emails_viewed").await?;
+    let limit = query.limit.unwrap_or(DEFAULT_ACCOUNT_LIMIT);
+    if !(1..=MAX_ACCOUNT_LIMIT).contains(&limit) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let pool = state.database.pool();
+    let total = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users WHERE email IS NOT NULL").fetch_one(pool);
+    let rows = sqlx::query_as::<_, (String, DateTime<Utc>, bool, bool, Option<DateTime<Utc>>, i64, i64)>(
+        "SELECT users.email,
+                users.created_at,
+                users.password_hash IS NOT NULL,
+                users.is_admin,
+                admin_account_activity.last_seen_at,
+                COALESCE(admin_account_activity.request_count, 0)::bigint,
+                (SELECT count(*) FROM libraries WHERE libraries.user_id = users.id AND libraries.deleted_at IS NULL)::bigint
+         FROM users
+         LEFT JOIN admin_account_activity ON admin_account_activity.user_id = users.id
+         WHERE users.email IS NOT NULL
+         ORDER BY users.created_at DESC
+         LIMIT $1",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(pool);
+    let (total, rows) = tokio::try_join!(total, rows).map_err(internal)?;
+    let accounts = rows
+        .into_iter()
+        .map(|row| AccountEntry { email: row.0, created_at_ms: row.1.timestamp_millis(), verified: row.2, is_admin: row.3, last_seen_at_ms: row.4.map(|seen| seen.timestamp_millis()), request_count: row.5, libraries: row.6 })
+        .collect();
+    json_response(AccountList { generated_at_ms: Utc::now().timestamp_millis(), total, accounts })
+}
+
 pub(crate) async fn services(State(state): State<AppState>, admin: AdminUser) -> Result<Response, StatusCode> {
     audit(&state, &admin.user_id, "dashboard_services_viewed").await?;
     json_response(state.operational_services.snapshot().await)
@@ -423,5 +482,8 @@ mod tests {
         assert!((1..=MAX_ENGAGEMENT_DAYS).contains(&90));
         assert!(!(1..=MAX_ENGAGEMENT_DAYS).contains(&0));
         assert!(!(1..=MAX_ENGAGEMENT_DAYS).contains(&91));
+        assert!((1..=MAX_ACCOUNT_LIMIT).contains(&1_000));
+        assert!(!(1..=MAX_ACCOUNT_LIMIT).contains(&0));
+        assert!(!(1..=MAX_ACCOUNT_LIMIT).contains(&1_001));
     }
 }

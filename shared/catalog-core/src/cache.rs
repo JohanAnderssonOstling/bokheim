@@ -5,7 +5,7 @@ use catalog_contract::{
 use catalog_model::normalize_search_text;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use catalog_contract::{materialize_page, page_layout, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse};
+use catalog_contract::{CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse, materialize_page, page_layout};
 
 // Keep SQLite's file version at 1 because the additive v2 schema remains
 // writable by the previous binary during an automated deployment rollback.
@@ -624,6 +624,13 @@ pub struct CatalogUnmatchedDcSubject {
 pub struct CatalogCrawlGeneration {
     pub source_id: CatalogSourceId,
     pub generation: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CatalogPageWrite {
+    pub page: CatalogPage,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 impl CatalogCache {
@@ -1551,6 +1558,30 @@ impl CatalogCache {
         Ok(())
     }
 
+    /// Commits a bounded set of incrementally discovered pages together. Page
+    /// serialization happens before SQLite's single writer is acquired and
+    /// active inventory counts are refreshed only once for the whole batch.
+    pub fn put_pages(&self, source_id: &CatalogSourceId, source_url: &str, pages: &[CatalogPageWrite]) -> Result<(), CatalogCacheError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let payloads = pages.iter().map(|write| wire::encode(&write.page)).collect::<Result<Vec<_>, _>>()?;
+        let mut connection = self.pool.get()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_source_in(&transaction, source_id, source_url)?;
+        let generation = active_generation_in(&transaction, source_id)?;
+        for (write, payload) in pages.iter().zip(&payloads) {
+            put_page_row(&transaction, source_id, generation, &write.page, payload, write.etag.as_deref(), write.last_modified.as_deref())?;
+            for publication in unique_page_publications(&write.page) {
+                upsert_active_publication(&transaction, source_id, generation, publication)?;
+                queue_publication_extraction(&transaction, source_id, generation, publication, false)?;
+            }
+        }
+        refresh_active_counts(&transaction, source_id, generation)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn page(&self, source_id: &CatalogSourceId, locator: &str) -> Result<Option<CachedCatalogPage>, CatalogCacheError> {
         let connection = self.pool.get()?;
         let Some(generation) = active_generation_optional(&connection, source_id)? else {
@@ -1933,6 +1964,29 @@ impl CatalogCache {
             copy_subject_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
             copy_toc_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
             copy_popularity_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Stages several replacement-crawl pages in one bounded transaction.
+    /// Encoding and publication preparation remain outside BEGIN IMMEDIATE.
+    pub fn stage_pages(&self, crawl: &CatalogCrawlGeneration, pages: &[CatalogPageWrite]) -> Result<(), CatalogCacheError> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let prepared = pages.iter().map(PreparedPageWrite::new).collect::<Result<Vec<_>, _>>()?;
+        let mut connection = self.pool.get()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active_generation = active_generation_in(&transaction, &crawl.source_id)?;
+        for prepared_page in &prepared {
+            put_page_row(&transaction, &crawl.source_id, crawl.generation, &prepared_page.write.page, &prepared_page.payload, prepared_page.write.etag.as_deref(), prepared_page.write.last_modified.as_deref())?;
+            for publication in &prepared_page.publications {
+                insert_staged_publication(&transaction, &crawl.source_id, crawl.generation, publication)?;
+                copy_subject_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
+                copy_toc_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
+                copy_popularity_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
+            }
         }
         transaction.commit()?;
         Ok(())
@@ -2783,6 +2837,20 @@ struct PreparedStagedPublication<'a> {
     extraction: Option<PublicationExtraction<'a>>,
 }
 
+struct PreparedPageWrite<'a> {
+    write: &'a CatalogPageWrite,
+    payload: Vec<u8>,
+    publications: Vec<PreparedStagedPublication<'a>>,
+}
+
+impl<'a> PreparedPageWrite<'a> {
+    fn new(write: &'a CatalogPageWrite) -> Result<Self, CatalogCacheError> {
+        let payload = wire::encode(&write.page)?;
+        let publications = unique_page_publications(&write.page).into_iter().map(PreparedStagedPublication::new).collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { write, payload, publications })
+    }
+}
+
 impl<'a> PreparedStagedPublication<'a> {
     fn new(publication: &'a CatalogPublication) -> Result<Self, CatalogCacheError> {
         let payload = wire::encode(publication)?;
@@ -2900,15 +2968,7 @@ fn upsert_active_publication(transaction: &Transaction<'_>, source_id: &CatalogS
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let sequence = if let Some((previous_hash, sequence)) = previous {
-        if previous_hash == payload_hash {
-            sequence
-        } else {
-            allocate_sequence(transaction, source_id)?
-        }
-    } else {
-        allocate_sequence(transaction, source_id)?
-    };
+    let sequence = if let Some((previous_hash, sequence)) = previous { if previous_hash == payload_hash { sequence } else { allocate_sequence(transaction, source_id)? } } else { allocate_sequence(transaction, source_id)? };
     transaction.execute(
         "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14)
@@ -3680,6 +3740,42 @@ mod tests {
         let remaining = cache.claim_next_epub_extraction(&source).unwrap().unwrap();
         assert_eq!(remaining.publication, second.identity);
         assert!(cache.claim_next_epub_extraction(&source).unwrap().is_none());
+    }
+
+    #[test]
+    fn page_batches_commit_incremental_and_replacement_pages_atomically() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
+        let source = source_id();
+        let root = "https://example.com/opds";
+        let child = "https://example.com/child";
+        cache
+            .put_pages(
+                &source,
+                root,
+                &[
+                    CatalogPageWrite { page: page(root, vec![publication("one", "One", "Author", &["en"])]), etag: Some("root-v1".to_owned()), last_modified: None },
+                    CatalogPageWrite { page: page(child, vec![publication("two", "Two", "Author", &["en"])]), etag: Some("child-v1".to_owned()), last_modified: None },
+                ],
+            )
+            .unwrap();
+        assert_eq!(cache.pages(&source).unwrap().len(), 2);
+        assert_eq!(cache.page(&source, child).unwrap().unwrap().etag.as_deref(), Some("child-v1"));
+
+        let crawl = cache.begin_crawl(&source, root).unwrap();
+        cache
+            .stage_pages(
+                &crawl,
+                &[
+                    CatalogPageWrite { page: page(root, vec![publication("three", "Three", "Author", &["en"])]), etag: Some("root-v2".to_owned()), last_modified: None },
+                    CatalogPageWrite { page: page(child, Vec::new()), etag: Some("child-v2".to_owned()), last_modified: None },
+                ],
+            )
+            .unwrap();
+        assert_eq!(cache.page(&source, root).unwrap().unwrap().page.publications[0].identity.edition_id, "one", "staging must not leak before activation");
+        cache.activate_crawl(&crawl).unwrap();
+        assert_eq!(cache.page(&source, root).unwrap().unwrap().page.publications[0].identity.edition_id, "three");
+        assert_eq!(cache.page(&source, child).unwrap().unwrap().etag.as_deref(), Some("child-v2"));
     }
 
     #[test]
