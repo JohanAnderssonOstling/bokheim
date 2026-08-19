@@ -797,59 +797,6 @@ fn renderer_toc_entry(entry: TocEntry) -> html::resources::TocEntry {
     html::resources::TocEntry { title: entry.title, link: entry.link, children: entry.children.into_iter().map(renderer_toc_entry).collect() }
 }
 
-fn referenced_resources(base: &str, bytes: &[u8]) -> Vec<String> {
-    let mut reader = quick_xml::Reader::from_reader(bytes);
-    reader.trim_text(false);
-    let mut buffer = Vec::new();
-    let mut resources = HashSet::new();
-    loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(quick_xml::events::Event::Start(element)) | Ok(quick_xml::events::Event::Empty(element)) => {
-                for attribute in element.attributes().flatten() {
-                    if !matches!(attribute.key.as_ref(), b"src" | b"href" | b"poster") {
-                        continue;
-                    }
-                    let value = String::from_utf8_lossy(attribute.value.as_ref());
-                    if value.starts_with('#') || value.contains("://") || value.starts_with("data:") {
-                        continue;
-                    }
-                    let value = value.split(['#', '?']).next().unwrap_or_default();
-                    let base_dir = base.rsplit_once('/').map(|(directory, _)| directory).unwrap_or_default();
-                    let resolved = normalize_epub_path(&format!("{base_dir}/{value}"));
-                    if !resolved.is_empty() && !EpubProvider::is_html_entry(&resolved) {
-                        resources.insert(resolved);
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-    resources.into_iter().collect()
-}
-
-fn referenced_css_resources(base: &str, bytes: &[u8]) -> Vec<String> {
-    let css = String::from_utf8_lossy(bytes);
-    let base_dir = base.rsplit_once('/').map(|(directory, _)| directory).unwrap_or_default();
-    let mut resources = HashSet::new();
-    let mut remainder = css.as_ref();
-    while let Some(index) = remainder.find("url(") {
-        remainder = &remainder[index + 4..];
-        let Some(end) = remainder.find(')') else { break };
-        let value = remainder[..end].trim().trim_matches(['\'', '"']);
-        if !value.is_empty() && !value.starts_with("data:") && !value.contains("://") {
-            let value = value.split(['#', '?']).next().unwrap_or_default();
-            let resolved = normalize_epub_path(&format!("{base_dir}/{value}"));
-            if !resolved.is_empty() {
-                resources.insert(resolved);
-            }
-        }
-        remainder = &remainder[end + 1..];
-    }
-    resources.into_iter().collect()
-}
-
 fn normalize_epub_path(path: &str) -> String {
     let mut parts = Vec::new();
     for segment in path.split('/') {
@@ -1029,10 +976,6 @@ fn parse_smil_cues(smil: &str, smil_path: &str) -> Vec<MediaOverlayCue> {
         buffer.clear();
     }
     cues
-}
-
-fn compact_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn infer_identifier_scheme(value: &str) -> IdentifierScheme {
@@ -1404,12 +1347,6 @@ fn subject_values(source: &str, value: &serde_json::Value) -> Vec<EpubSubject> {
         serde_json::Value::Array(values) => values.iter().flat_map(|value| subject_values(source, value)).collect(),
         _ => Vec::new(),
     }
-}
-
-fn parse_creator_name(name: &str) -> String {
-    let name = name.trim();
-    // Check if it's in "Last, First" format
-    if let Some((last, first)) = name.split_once(',') { format!("{} {}", first.trim(), last.trim()) } else { name.to_string() }
 }
 
 #[derive(Clone, Copy)]

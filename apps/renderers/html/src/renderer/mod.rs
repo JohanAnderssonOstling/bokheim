@@ -18,6 +18,14 @@ mod view;
 pub use adapter::RendererHandle;
 pub use boundary::{RendererCommand, RendererEvent, RendererHost, RendererOperation};
 
+/// The HTML pipeline carries its own navigation entry, which holds the same
+/// fields as the publication one this crate exposes. Converting here keeps
+/// `crate::TocEntry` in the public interface, so the lightweight builds that
+/// use it without linking the renderer keep working.
+fn publication_toc_entry(entry: html_view_core::TocEntry) -> crate::TocEntry {
+    crate::TocEntry { title: entry.title, link: entry.link, children: entry.children.into_iter().map(publication_toc_entry).collect() }
+}
+
 pub struct HTMLRenderer {
     adapter: Rc<adapter::FloemAdapter>,
     renderer: RendererSession<GlyphCache>,
@@ -94,11 +102,11 @@ impl HTMLRenderer {
     }
 
     pub fn toc(&self) -> std::io::Result<Option<Vec<crate::TocEntry>>> {
-        self.renderer.toc()
+        Ok(self.renderer.toc()?.map(|entries| entries.into_iter().map(publication_toc_entry).collect()))
     }
 
     pub fn document_toc(&self) -> Vec<crate::TocEntry> {
-        self.renderer.document_toc()
+        self.renderer.document_toc().into_iter().map(publication_toc_entry).collect()
     }
 
     pub fn get_current_cfi(&self) -> Option<String> {

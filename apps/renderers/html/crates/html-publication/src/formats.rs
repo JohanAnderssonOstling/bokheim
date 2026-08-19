@@ -654,10 +654,6 @@ struct WebPubProvider {
 }
 
 impl WebPubProvider {
-    fn new(bytes: Vec<u8>) -> Result<Self, String> {
-        Self::from_reader(Cursor::new(bytes))
-    }
-
     fn from_reader<R>(reader: R) -> Result<Self, String>
     where
         R: Read + io::Seek + Send + 'static,
