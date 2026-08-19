@@ -35,6 +35,13 @@ if [ ! -x "$TOOLCHAIN/bin/armv7l-linux-musleabihf-gcc" ] || [ ! -f "$FBINK_RELEA
     "$GPUI_FORK/crates/gpui_kobo/scripts/package-kobo.sh" >/dev/null
 fi
 
+# This build only runs on developer machines now that the release package is
+# published from one, so the job count is no longer pinned to a small CI
+# runner. It stays well below the core count: `codegen-units=1` makes each
+# rustc a single large process, and the release profile exhausts memory before
+# it exhausts cores.
+CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-6}
+
 cd "$REPO_ROOT"
 FBINK_LIB_DIR="$FBINK_RELEASE" \
 RUSTFLAGS="$KOBO_RUSTFLAGS" \
@@ -44,7 +51,7 @@ CC_armv7_unknown_linux_musleabihf="$TOOLCHAIN/bin/armv7l-linux-musleabihf-gcc" \
 AR_armv7_unknown_linux_musleabihf="$TOOLCHAIN/bin/armv7l-linux-musleabihf-ar" \
 CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} \
+CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
 cargo build --locked --release --target armv7-unknown-linux-musleabihf \
     -p desktop-gpui --no-default-features --features kobo --bin desktop-gpui-kobo
