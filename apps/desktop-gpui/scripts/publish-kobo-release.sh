@@ -37,6 +37,32 @@ if [ -z "$(git branch --remotes --contains "$COMMIT" 2>/dev/null)" ]; then
     exit 1
 fi
 
+# The cross build takes minutes, so everything the upload needs is checked
+# before it starts: discovering a missing CLI or a read-only token after the
+# package is built wastes the whole build.
+check_upload_prerequisites() {
+    if ! command -v gh >/dev/null 2>&1; then
+        printf 'The GitHub CLI (gh) is not installed; it is required to upload the package.\n' >&2
+        return 1
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        printf 'The GitHub CLI is not authenticated; run gh auth login.\n' >&2
+        return 1
+    fi
+    if [ "$(gh api "repos/$RELEASE_REPOSITORY" --jq .permissions.push 2>/dev/null)" != true ]; then
+        printf 'The authenticated account cannot write to %s.\n' "$RELEASE_REPOSITORY" >&2
+        return 1
+    fi
+}
+
+if [ "$DRY_RUN" = 1 ]; then
+    # A dry run never uploads, so a missing CLI is worth reporting but is not
+    # a reason to refuse to build and verify the package.
+    check_upload_prerequisites || printf 'Continuing: the dry run does not upload.\n' >&2
+else
+    check_upload_prerequisites || exit 1
+fi
+
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop-gpui/Cargo.toml | head -n 1)
 test -n "$VERSION"
 TAG="v$VERSION"
