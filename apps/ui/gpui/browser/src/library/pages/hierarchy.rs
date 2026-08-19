@@ -212,8 +212,14 @@ pub(crate) struct HierarchyState<C> {
 }
 
 impl<C: HierarchyCrumb> HierarchyState<C> {
-    pub(crate) fn new<P: 'static>(ui: LibraryContext, path: Vec<C>, on_query_changed: impl Fn(&mut P, &mut Context<P>) + 'static, window: &mut Window, cx: &mut Context<P>) -> (Self, Subscription) {
-        let filter_input = cx.new(|cx| InputState::new(window, cx));
+    pub(crate) fn new<P: 'static>(ui: LibraryContext, path: Vec<C>, search_placeholder: Option<&'static str>, on_query_changed: impl Fn(&mut P, &mut Context<P>) + 'static, window: &mut Window, cx: &mut Context<P>) -> (Self, Subscription) {
+        let filter_input = cx.new(|cx| {
+            let input = InputState::new(window, cx);
+            match search_placeholder {
+                Some(placeholder) => input.placeholder(placeholder),
+                None => input,
+            }
+        });
         let input_subscription = cx.subscribe(&filter_input, move |page: &mut P, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 on_query_changed(page, cx);
@@ -409,12 +415,13 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                 if !self.children.is_empty() {
                     let hierarchy_measure = crate::virtual_grid::ResponsiveColumns::for_element(
                         format!("{grid_id}-hierarchy"),
-                        crate::virtual_grid::ColumnPolicy::MinimumItemWidth { width: components::HIERARCHY_CELL_MIN_WIDTH + components::HIERARCHY_CELL_MARGIN * 2.0, gap: 0.0 },
+                        crate::virtual_grid::ColumnPolicy::MinimumItemWidth { width: components::hierarchy_cell_min_width(f32::from(window.rem_size())) + components::HIERARCHY_CELL_MARGIN * 2.0, gap: 0.0 },
                         window,
                         cx,
                     );
-                    let hierarchy_width = (hierarchy_measure.width(cx) - components::HIERARCHY_LAYOUT_SAFETY).max(components::HIERARCHY_CELL_MIN_WIDTH);
-                    let (columns, cell_width) = components::hierarchy_grid_layout(hierarchy_width, self.children.len(), self.hierarchy_columns.get());
+                    let rem_size = f32::from(window.rem_size());
+                    let hierarchy_width = (hierarchy_measure.width(cx) - components::HIERARCHY_LAYOUT_SAFETY).max(components::hierarchy_cell_min_width(rem_size));
+                    let (columns, cell_width) = components::hierarchy_grid_layout(hierarchy_width, self.children.len(), self.hierarchy_columns.get(), rem_size);
                     self.hierarchy_columns.set(columns);
                     let mut cells = self.children.iter().map(|child| {
                         Self::render_child(
@@ -495,15 +502,16 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
         let list_page = page.clone();
         let query = container_query(move |available, window, _| {
             let width = f32::from(available.width);
-            let hierarchy_width = (width - components::HIERARCHY_LAYOUT_SAFETY).max(components::HIERARCHY_CELL_MIN_WIDTH);
-            let (hierarchy_column_count, cell_width) = components::hierarchy_grid_layout(hierarchy_width, children.len(), hierarchy_columns.get());
+            let rem_size = f32::from(window.rem_size());
+            let hierarchy_width = (width - components::HIERARCHY_LAYOUT_SAFETY).max(components::hierarchy_cell_min_width(rem_size));
+            let (hierarchy_column_count, cell_width) = components::hierarchy_grid_layout(hierarchy_width, children.len(), hierarchy_columns.get(), rem_size);
             hierarchy_columns.set(hierarchy_column_count);
             let hierarchy_row_count = crate::virtual_grid::row_count(children.len(), hierarchy_column_count);
-            let hierarchy_row_height = components::HIERARCHY_CELL_HEIGHT + components::HIERARCHY_CELL_MARGIN * 2.0;
+            let hierarchy_row_height = components::hierarchy_cell_height(rem_size) + components::HIERARCHY_CELL_MARGIN * 2.0;
 
             let book_column_count = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
-            let (book_column_count, book_width) =
-                if detailed { (1, width) } else { crate::virtual_grid::grid_geometry(width, book_column_count, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
+            let (book_column_count, book_width, book_column_gap) =
+                if detailed { (1, width, 0.0) } else { crate::virtual_grid::grid_geometry(width, book_column_count, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
             let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, f32::from(window.rem_size())) };
             let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_column_count);
             let mut item_sizes = Vec::with_capacity(hierarchy_row_count + book_row_count);
@@ -558,7 +566,7 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
                                 render_books[book_row].clone().into_any_element()
                             } else {
                                 let book_range = crate::virtual_grid::row_range(book_row, book_column_count, render_books.len());
-                                crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_column_count, book_width, book_row_height, components::BOOK_GRID_GAP).into_any_element()
+                                crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_column_count, book_width, book_row_height, book_column_gap).into_any_element()
                             }
                         }
                     })

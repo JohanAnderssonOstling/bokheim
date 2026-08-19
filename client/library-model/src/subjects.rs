@@ -21,7 +21,7 @@ pub use runtime::{
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
-pub const BISAC_MATCHER_VERSION: i64 = 7;
+pub const BISAC_MATCHER_VERSION: i64 = 8;
 pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_VERSION: &str = "23-summary-en-2024-08-01";
 pub const DDC_MATCHER_VERSION: i64 = 2;
@@ -30,7 +30,7 @@ pub const LCC_VERSION: &str = "2024-outline-r2";
 pub const LCC_MATCHER_VERSION: i64 = 2;
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
 pub const UNIFIED_VERSION: &str = "6";
-pub const UNIFIED_MATCHER_VERSION: i64 = 19;
+pub const UNIFIED_MATCHER_VERSION: i64 = 20;
 const GENERIC_HISTORY_CONCEPT_ID: &str = "bokheim:subject:history";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn bisac_components_in_separate_dc_subjects_keep_combined_evidence_in_unified_projection() {
         runtime::install_authoritative_taxonomy_for_tests();
-        let subjects = ["Short stories", "Adventure and adventurers -- Fiction"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let subjects = ["Fiction", "Short Stories"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         let bisac = match_bisac_subjects(&subjects);
         let short_stories = bisac.iter().find(|assignment| assignment.node_path() == "Fiction / Short Stories").expect("production subject components must infer the BISAC path");
         assert_eq!(short_stories.evidence_positions(), &[0, 1]);
@@ -246,21 +246,27 @@ mod tests {
     }
 
     #[test]
-    fn lcsh_style_dc_subjects_resolve_to_bisac_codes_before_unified_projection() {
-        runtime::install_authoritative_taxonomy_for_tests();
-        for (heading, expected_code) in [
-            ("Animals -- Juvenile fiction", "JUV002000"),
-            ("Women -- France -- Fiction", "FIC044000"),
-            ("Clothing and dress -- United States -- History", "HIS036000"),
-            ("Time travel -- Fiction", "FIC028080"),
-            ("Family life -- Fiction", "FIC045000"),
-        ] {
+    fn lcsh_subjects_require_a_complete_adjacent_bisac_hierarchy() {
+        for heading in ["History -- Great Britain", "Great Britain -- History -- Victoria, 1837-1901 -- Fiction", "Clothing and dress -- United States -- History"] {
             let subject = PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap();
-            let assignments = match_bisac_subjects(std::slice::from_ref(&subject));
-            assert!(assignments.iter().all(|assignment| bisac::bisac_path_has_exact_code(assignment.node_path())), "{heading} produced a BISAC navigation-only path: {assignments:?}");
             let codes = project_subject_codes(&[subject]);
-            assert!(codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == expected_code), "{heading} must resolve to {expected_code}, got {codes:?}");
+            assert!(codes.iter().all(|code| code.code() != "HIS015000"), "incomplete or reordered LCSH heading {heading} produced Great Britain history: {codes:?}");
         }
+
+        let complete = PublicationSubject::new(None, "History -- Europe -- Great Britain", "marc", Some("lcsh".to_owned()), None).unwrap();
+        assert!(project_subject_codes(&[complete]).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS015000"));
+
+        let fiction = PublicationSubject::new(None, "Fiction -- Short Stories", "dc:subject", None, None).unwrap();
+        assert!(project_subject_codes(&[fiction]).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "FIC029000"));
+    }
+
+    #[test]
+    fn bisac_hierarchy_inference_requires_every_component() {
+        let partial = ["History", "Great Britain"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        assert!(project_subject_codes(&partial).iter().all(|code| code.code() != "HIS015000"), "a missing Europe component must not infer Great Britain history");
+
+        let complete = ["History", "Europe", "Great Britain"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        assert!(project_subject_codes(&complete).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS015000"), "the complete BISAC hierarchy should infer Great Britain history");
     }
 
     #[test]

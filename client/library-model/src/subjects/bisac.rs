@@ -81,11 +81,6 @@ pub fn bisac_code_for_path(path: &str) -> Option<&'static str> {
     bisac_subject_system().code_for_path(path)
 }
 
-#[cfg(test)]
-pub(super) fn bisac_path_has_exact_code(path: &str) -> bool {
-    bisac_subject_system().node_by_path(path).is_some_and(|node| node.code().is_some())
-}
-
 fn parse_bisac(csv: &str) -> SubjectSystem {
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(csv.as_bytes());
     let mut nodes = BTreeMap::<String, SubjectNode>::new();
@@ -126,30 +121,31 @@ pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssig
     for (position, subject) in subjects.iter().enumerate() {
         let authority = subject.authority().map(str::trim).filter(|authority| !authority.is_empty());
         let lcsh_style = authority.is_some_and(|authority| authority.eq_ignore_ascii_case("lcsh")) || (subject.source().trim().eq_ignore_ascii_case("dc:subject") && subject.name().contains("--"));
-        if authority.is_some_and(|authority| !authority.eq_ignore_ascii_case(BISAC_SYSTEM_ID)) && !lcsh_style {
+        if authority.is_some_and(|authority| !authority.eq_ignore_ascii_case(BISAC_SYSTEM_ID) && !authority.eq_ignore_ascii_case("lcsh")) {
             continue;
         }
         let components = split_path(subject.name());
-        if !lcsh_style {
-            for component in &components {
-                component_evidence.entry(normalize_term(component)).or_default().insert(position);
+        if lcsh_style {
+            // An LCSH heading is independent evidence. It may map to BISAC
+            // only when the complete heading is already one contiguous BISAC
+            // hierarchy in root-to-leaf order. Never omit intermediate nodes
+            // or combine subdivisions from separate LCSH headings.
+            if let Some(node) = system.node_by_path(subject.name()) {
+                matches.entry(node.path.clone()).or_default().insert(position);
             }
+            continue;
+        }
+        for component in &components {
+            component_evidence.entry(normalize_term(component)).or_default().insert(position);
         }
         if components.len() > 1 {
             if let Some(node) = system.node_by_path(subject.name()) {
-                if !lcsh_style || node.code().is_some() {
-                    matches.entry(node.path.clone()).or_default().insert(position);
-                }
+                matches.entry(node.path.clone()).or_default().insert(position);
             }
         } else if let Some(node) = system.node_by_path(subject.name()) {
             matches.entry(node.path.clone()).or_default().insert(position);
         }
-        if lcsh_style {
-            for path in match_lcsh_bisac_paths(system, &components) {
-                matches.entry(path).or_default().insert(position);
-            }
-        }
-        let declared_code = (!lcsh_style).then(|| subject.code().or_else(|| (authority.is_none()).then_some(subject.name()))).flatten();
+        let declared_code = subject.code().or_else(|| (authority.is_none()).then_some(subject.name()));
         if let Some(node) = declared_code.and_then(|code| system.node_by_code(code)) {
             matches.entry(node.path.clone()).or_default().insert(position);
         }
@@ -179,34 +175,4 @@ pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssig
         })
         .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
         .collect()
-}
-
-fn match_lcsh_bisac_paths(system: &SubjectSystem, components: &[String]) -> Vec<String> {
-    let normalized = components.iter().map(|component| normalize_term(component)).collect::<BTreeSet<_>>();
-    let roots = system.nodes().iter().filter(|node| node.parent_path().is_none() && normalized.contains(&normalize_term(node.name()))).map(|node| node.path().to_owned()).collect::<BTreeSet<_>>();
-    if roots.is_empty() {
-        return Vec::new();
-    }
-
-    let candidates = system
-        .nodes()
-        .iter()
-        .filter(|node| roots.iter().any(|root| node.path() == root || node.path().starts_with(&format!("{root} / "))))
-        // Intermediate BISAC headings are navigation nodes, not classifications.
-        // Emitting one can suppress a coded leaf without itself representing a
-        // valid BISAC classification.
-        .filter(|node| node.code().is_some())
-        .filter(|node| {
-            normalized.contains(&normalize_term(node.name()))
-                || (node.name().eq_ignore_ascii_case("general") && node.parent_path().and_then(|parent| system.node_by_path(parent)).is_some_and(|parent| normalized.contains(&normalize_term(parent.name()))))
-        })
-        .map(|node| {
-            let matched_components = node.normalized_components.iter().filter(|component| normalized.contains(*component)).count();
-            let omitted_components = node.normalized_components.iter().filter(|component| component.as_str() != "general" && !normalized.contains(*component)).count();
-            (matched_components, omitted_components, node.path().to_owned())
-        })
-        .collect::<Vec<_>>();
-    let Some(best_match_count) = candidates.iter().map(|(matched, _, _)| *matched).max() else { return Vec::new() };
-    let fewest_omissions = candidates.iter().filter(|(matched, _, _)| *matched == best_match_count).map(|(_, omitted, _)| *omitted).min().unwrap_or(0);
-    candidates.into_iter().filter(|(matched, omitted, _)| *matched == best_match_count && *omitted == fewest_omissions).map(|(_, _, path)| path).collect()
 }

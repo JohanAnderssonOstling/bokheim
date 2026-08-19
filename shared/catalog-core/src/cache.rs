@@ -2110,7 +2110,9 @@ impl CatalogCache {
         // tokenizer preserves the previous substring-search semantics.
         let search_parameter = if use_search_index { format!("\"{}\"", normalized_query.replace('"', "\"\"")) } else { normalized_query.clone() };
         let mut ranked_publications = Vec::new();
-        let mut total = 0_usize;
+        let exact_total = normalized_query.is_empty();
+        let mut total = None;
+        let mut has_more = false;
         if !normalized_query.is_empty() || !subject_path.is_empty() {
             let matching_publications = if normalized_query.is_empty() {
                 String::new()
@@ -2172,9 +2174,11 @@ impl CatalogCache {
                    AND matching.edition_id=p.edition_id AND matching.work_id=p.work_id"
                     .to_owned()
             };
+            let count_projection = if exact_total { "COUNT(*) OVER()" } else { "NULL" };
+            let fetch_limit = if exact_total { limit } else { limit.saturating_add(1) };
             let sql = format!(
                 "{matching_publications}
-                 SELECT p.source_id,p.payload,COUNT(*) OVER(),COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),p.sequence
+                 SELECT p.source_id,p.payload,{count_projection},COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),p.sequence
                    FROM catalog_publication p
                    JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
                    {matching_join}
@@ -2193,12 +2197,18 @@ impl CatalogCache {
             );
             let mut statement = connection.prepare(&sql)?;
             let rows = statement
-                .query_map(params![system_id, subject_path, search_parameter, source_ids, supported_languages, storage_i64(limit as u64, "subject result limit")?, storage_i64(offset as u64, "subject result offset")?], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?))
+                .query_map(params![system_id, subject_path, search_parameter, source_ids, supported_languages, storage_i64(fetch_limit as u64, "subject result limit")?, storage_i64(offset as u64, "subject result offset")?], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?))
                 })?;
             for row in rows {
                 let (source, payload, count, reading_log_count, rating_count, sequence) = row?;
-                total = usize::try_from(stored_u64(count, "subject result count")?).unwrap_or(usize::MAX);
+                if let Some(count) = count {
+                    total = Some(usize::try_from(stored_u64(count, "subject result count")?).unwrap_or(usize::MAX));
+                }
+                if !exact_total && ranked_publications.len() == limit {
+                    has_more = true;
+                    continue;
+                }
                 let publication: CatalogPublication = decode_cached(&payload)?;
                 let provider_popularity = project_gutenberg_download_count(&publication).unwrap_or(0);
                 ranked_publications.push((
@@ -2210,14 +2220,18 @@ impl CatalogCache {
         ranked_publications.sort_by(|left, right| right.1.cmp(&left.1));
         let publications = ranked_publications.into_iter().map(|(publication, _)| publication).collect();
         let page = offset / limit + 1;
-        let page_count = total.div_ceil(limit).max(1);
         let at = |new_offset| subject_locator(&SubjectBrowseLocation { offset: u32::try_from(new_offset).unwrap_or(u32::MAX), ..location.clone() });
+        let next = if total.map_or(has_more, |total| offset.saturating_add(limit) < total) { Some(at(offset.saturating_add(limit))) } else { None };
+        let last = total.and_then(|total| {
+            let page_count = total.div_ceil(limit).max(1);
+            (page < page_count).then(|| at((page_count - 1) * limit))
+        });
         let pagination = CatalogPagination {
             first: (offset > 0).then(|| at(0)),
             previous: (offset > 0).then(|| at(offset.saturating_sub(limit))),
-            next: (offset.saturating_add(limit) < total).then(|| at(offset.saturating_add(limit))),
-            last: (page < page_count).then(|| at((page_count - 1) * limit)),
-            number_of_items: Some(u32::try_from(total).unwrap_or(u32::MAX)),
+            next,
+            last,
+            number_of_items: total.map(|total| u32::try_from(total).unwrap_or(u32::MAX)),
             items_per_page: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
             current_page: Some(u32::try_from(page).unwrap_or(u32::MAX)),
         };
@@ -3828,7 +3842,19 @@ mod tests {
         let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source], query: "FIRST".to_owned(), limit: 1 }).unwrap();
         assert_eq!(searched.publications.len(), 1);
         assert_eq!(searched.publications[0].publication.identity.edition_id, "sqlite-one");
-        assert_eq!(searched.pagination.number_of_items, Some(1));
+        assert_eq!(searched.pagination.number_of_items, None);
+        assert_eq!(searched.pagination.last, None);
+
+        let first_search_page = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), limit: 1 }).unwrap();
+        assert_eq!(first_search_page.publications.len(), 1);
+        assert!(first_search_page.pagination.next.is_some());
+        assert_eq!(first_search_page.pagination.number_of_items, None);
+        let second_search_page = cache
+            .browse_subjects(&CatalogSubjectBrowseRequest { locator: first_search_page.pagination.next, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), limit: 1 })
+            .unwrap();
+        assert_eq!(second_search_page.publications.len(), 1);
+        assert!(second_search_page.pagination.next.is_none());
+        assert_ne!(first_search_page.publications[0].publication.identity, second_search_page.publications[0].publication.identity);
 
         let connection = cache.pool.get().unwrap();
         let query_plan = connection
