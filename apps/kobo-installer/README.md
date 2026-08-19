@@ -38,15 +38,20 @@ temporary directory containing a `.kobo` directory.
 
 The Kobo package itself is built on a maintainer machine, not in CI: its ARMv7
 musl cross toolchain is published by a single volunteer-run host that is
-regularly unreachable, which is not acceptable in the release path. Publish it
-first, then build the installers against it:
+regularly unreachable, which is not acceptable in the release path. The built
+package is therefore committed to the repository at
+`package/Bokheim-Kobo-Libra2-armv7.tar.gz`, and the `Kobo release` workflow
+embeds whatever is committed there.
+
+Whenever the Kobo application changes, rebuild and commit the package before
+running the workflow:
 
 ```sh
-apps/desktop-gpui/scripts/publish-kobo-release.sh   # --dry-run to verify only
+apps/desktop-gpui/scripts/refresh-kobo-package.sh
+git add apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+git commit -m "Refresh the committed Kobo package"
 ```
 
-The script refuses to publish from a dirty tree or an unpushed commit, applies
-the package checks listed above, and uploads the archive and its checksum to
-the shared draft release. The `Kobo release` workflow then downloads that
-package, verifies its checksum, and embeds it in the Windows and Linux
-installers.
+The script cross-compiles the package, applies the checks listed above, and
+replaces the committed archive only once they pass. Note that each refresh
+adds a new copy of the archive to the repository's history permanently.

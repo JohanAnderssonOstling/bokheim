@@ -64,28 +64,22 @@ jobs:
         with:
           path: bokheim
 
-      - name: Download the published Kobo package
+      - name: Check the committed Kobo package
         working-directory: bokheim
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
-          # The Kobo package is cross-compiled and published from a maintainer
-          # machine by apps/desktop-gpui/scripts/publish-kobo-release.sh: its
-          # ARMv7 musl toolchain comes from a single host that is too often
-          # unreachable to sit in the release path. The installers embed that
-          # verified package rather than rebuilding it.
-          mkdir -p kobo-package
-          if ! gh release download "$RELEASE_TAG" \
-              --repo JohanAnderssonOstling/bokheim-release \
-              --pattern 'Bokheim-Kobo-Libra2-armv7.tar.gz*' \
-              --dir kobo-package --clobber; then
-            echo "::error::No Kobo package on $RELEASE_TAG. Run apps/desktop-gpui/scripts/publish-kobo-release.sh before building the installers."
+          # The Kobo package is cross-compiled on a maintainer machine and
+          # committed to the repository: its ARMv7 musl toolchain comes from a
+          # single host that is too often unreachable to sit in the release
+          # path. The installers embed the committed package rather than
+          # rebuilding or downloading it, so a checkout is all CI needs.
+          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          if [ ! -s "$package" ]; then
+            echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          cd kobo-package
-          sha256sum --check Bokheim-Kobo-Libra2-armv7.tar.gz.sha256
+          tar -tzf "$package" >/dev/null
+          ls -l "$package"
 
       - name: Install Rust
         shell: pwsh
@@ -112,7 +106,7 @@ jobs:
         working-directory: bokheim
         shell: pwsh
         run: |
-          $archive = (Resolve-Path "kobo-package/Bokheim-Kobo-Libra2-armv7.tar.gz").Path
+          $archive = (Resolve-Path "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz").Path
           $env:BOKHEIM_KOBO_ARCHIVE = $archive
           $env:BOKHEIM_VERSION = "${{ needs.version.outputs.version }}"
           $env:RUSTFLAGS = "-C target-feature=+crt-static"
@@ -125,7 +119,7 @@ jobs:
         shell: pwsh
         run: |
           $installer = "release/Bokheim-Kobo-Installer-Windows-x86_64.exe"
-          $archive = "kobo-package/Bokheim-Kobo-Libra2-armv7.tar.gz"
+          $archive = "apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz"
           if (!(Test-Path $installer) -or (Get-Item $installer).Length -le (Get-Item $archive).Length) {
             throw "The installer is missing its embedded Kobo package"
           }
@@ -177,28 +171,22 @@ jobs:
         with:
           path: bokheim
 
-      - name: Download the published Kobo package
+      - name: Check the committed Kobo package
         working-directory: bokheim
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
-          # The Kobo package is cross-compiled and published from a maintainer
-          # machine by apps/desktop-gpui/scripts/publish-kobo-release.sh: its
-          # ARMv7 musl toolchain comes from a single host that is too often
-          # unreachable to sit in the release path. The installers embed that
-          # verified package rather than rebuilding it.
-          mkdir -p kobo-package
-          if ! gh release download "$RELEASE_TAG" \
-              --repo JohanAnderssonOstling/bokheim-release \
-              --pattern 'Bokheim-Kobo-Libra2-armv7.tar.gz*' \
-              --dir kobo-package --clobber; then
-            echo "::error::No Kobo package on $RELEASE_TAG. Run apps/desktop-gpui/scripts/publish-kobo-release.sh before building the installers."
+          # The Kobo package is cross-compiled on a maintainer machine and
+          # committed to the repository: its ARMv7 musl toolchain comes from a
+          # single host that is too often unreachable to sit in the release
+          # path. The installers embed the committed package rather than
+          # rebuilding or downloading it, so a checkout is all CI needs.
+          package=apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          if [ ! -s "$package" ]; then
+            echo "::error::$package is missing. Rebuild it with apps/desktop-gpui/scripts/package-kobo.sh and commit the result."
             exit 1
           fi
-          cd kobo-package
-          sha256sum --check Bokheim-Kobo-Libra2-armv7.tar.gz.sha256
+          tar -tzf "$package" >/dev/null
+          ls -l "$package"
 
       - name: Install build and AppImage dependencies
         run: |
@@ -252,7 +240,7 @@ jobs:
       - name: Build Linux installer
         working-directory: bokheim
         env:
-          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/kobo-package/Bokheim-Kobo-Libra2-armv7.tar.gz
+          BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/apps/kobo-installer/package/Bokheim-Kobo-Libra2-armv7.tar.gz
           BOKHEIM_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --locked --release --manifest-path apps/kobo-installer/Cargo.toml
 
