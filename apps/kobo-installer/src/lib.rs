@@ -167,9 +167,7 @@ fn validate_archive_size(archive: &[u8]) -> io::Result<u64> {
         }
         if entry_type.is_file() {
             unpacked_bytes = unpacked_bytes.checked_add(entry.header().size()?).filter(|bytes| *bytes <= MAX_UNPACKED_PACKAGE_BYTES).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the Kobo package is unexpectedly large"))?;
-            if let Some(path) = relative.to_str() {
-                required.remove(path);
-            }
+            required.remove(package_entry_name(&relative).as_str());
         }
     }
 
@@ -184,6 +182,14 @@ fn validate_device_root(device_root: &Path) -> io::Result<PathBuf> {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a mounted Kobo device", device_root.display())));
     }
     device_root.canonicalize()
+}
+
+/// Renders a sanitised package path the way the archive spells it. The
+/// sanitised path is rebuilt component by component, so on Windows it comes
+/// back separated by backslashes and never matches the slash-separated names
+/// the package is required to contain.
+fn package_entry_name(relative: &Path) -> String {
+    relative.components().filter_map(|component| component.as_os_str().to_str()).collect::<Vec<_>>().join("/")
 }
 
 fn sanitize_package_path(path: &Path) -> io::Result<PathBuf> {
@@ -325,6 +331,17 @@ mod tests {
         fs::create_dir(directory.path().join(".kobo")).unwrap();
         let error = install_archive(directory.path(), &test_archive(Some("unexpected/file"))).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn names_package_entries_with_slashes_on_every_platform() {
+        // The required entries are spelled with slashes, so the sanitised path
+        // has to be rendered the same way on Windows, where rebuilding it
+        // component by component would otherwise separate it with backslashes.
+        for required in REQUIRED_INSTALLED_FILES {
+            let sanitized = sanitize_package_path(Path::new(required)).unwrap();
+            assert_eq!(package_entry_name(&sanitized), *required);
+        }
     }
 
     #[test]
