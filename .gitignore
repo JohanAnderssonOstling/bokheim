@@ -103,6 +103,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Local colour and typography exploration page kept outside the repository.
+/sage-text-alternatives.html
+
 # Local books, large test assets, and external reference checkouts
 *.epub
 /TestData/
