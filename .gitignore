@@ -16,11 +16,13 @@ perf.data
 perf.data.old
 flamegraph.svg
 
-# Workspace members use the root lockfile. The independently built server keeps
-# its own lockfile so application and release builds remain reproducible.
+# Workspace members use the root lockfile. The independently built server and
+# Kobo installer keep their own lockfiles so application and release builds
+# remain reproducible.
 **/Cargo.lock
 !/Cargo.lock
 !/servers/sync/Cargo.lock
+!/apps/kobo-installer/Cargo.lock
 
 # JavaScript dependencies, generated output, and tool caches
 **/node_modules/
