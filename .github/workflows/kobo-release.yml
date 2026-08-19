@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Upload the package to the shared draft release for this version
+        description: Upload the installers to the shared draft release for this version
         required: true
         type: boolean
         default: false
@@ -21,77 +21,24 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: "1"
   RUST_VERSION: 1.95.0
-  GPUI_FORK_REF: 68b0a5ba82860ac222c18acd9036b3838a43a08b
-  HTML_ENGINE_REF: 30b27e095b038a1a690b3e80c1e1501f3145281e
-  HTML_VIEW_CORE_REF: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
 
 jobs:
-  build:
-    name: Kobo Libra 2 ARMv7 package
+  version:
+    name: Release version
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - name: Check out Bokheim
         uses: actions/checkout@v6
         with:
           path: bokheim
-
-      - name: Check out GPUI-Fork
-        uses: actions/checkout@v6
-        with:
-          repository: JohanAnderssonOstling/GPUI-Fork
-          ref: ${{ env.GPUI_FORK_REF }}
-          path: GPUI-Fork
-
-      - name: Check out HtmlEngine
-        uses: actions/checkout@v6
-        with:
-          repository: JohanAnderssonOstling/HtmlEngine
-          ref: ${{ env.HTML_ENGINE_REF }}
-          path: HtmlEngine
-
-      - name: Check out HtmlViewCore
-        uses: actions/checkout@v6
-        with:
-          repository: JohanAnderssonOstling/HtmlViewCore
-          ref: ${{ env.HTML_VIEW_CORE_REF }}
-          path: HtmlViewCore
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y \
-            build-essential \
-            curl \
-            file \
-            protobuf-compiler \
-            xz-utils
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-          rustup target add armv7-unknown-linux-musleabihf
-
-      - name: Restore Kobo toolchain and Rust build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            bokheim/target
-            GPUI-Fork/target/gpui-kobo
-          key: kobo-libra2-v1-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-${{ hashFiles('bokheim/Cargo.lock', 'bokheim/apps/desktop-gpui/scripts/package-kobo.sh') }}
-          restore-keys: |
-            kobo-libra2-v1-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-
 
       - name: Read and check release version
         id: version
@@ -100,75 +47,14 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop-gpui/Cargo.toml | head -n 1)
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "BOKHEIM_VERSION=$version" >> "$GITHUB_ENV"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             test "v${version}" = "$GITHUB_REF_NAME"
-            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
-          elif [[ "${{ inputs.publish }}" == true ]]; then
-            echo "RELEASE_TAG=v${version}" >> "$GITHUB_ENV"
           fi
-
-      - name: Build Kobo package
-        working-directory: bokheim
-        env:
-          KOBO_CPU_PROFILE: libra2
-        run: |
-          archive=$(apps/desktop-gpui/scripts/package-kobo.sh)
-          test -s "$archive"
-          mkdir -p release
-          cp "$archive" "release/Bokheim-v${BOKHEIM_VERSION}-Kobo-Libra2-armv7.tar.gz"
-
-      - name: Verify and checksum Kobo package
-        working-directory: bokheim
-        run: |
-          package="release/Bokheim-v${BOKHEIM_VERSION}-Kobo-Libra2-armv7.tar.gz"
-          listing=$(tar -tzf "$package")
-          for required in \
-            ./.adds/bokheim/desktop-gpui-kobo \
-            ./.adds/bokheim/fbink \
-            ./.adds/bokheim/run.sh \
-            ./.adds/bokheim/run-monitored.sh \
-            ./.adds/nm/desktop-gpui-kobo; do
-            printf '%s\n' "$listing" | grep -Fx "$required"
-          done
-          verify_dir=$(mktemp -d)
-          tar -xzf "$package" -C "$verify_dir" ./.adds/bokheim/desktop-gpui-kobo
-          file "$verify_dir/.adds/bokheim/desktop-gpui-kobo" | grep -E 'ELF 32-bit.*ARM'
-          cp "$package" release/Bokheim-Kobo-Libra2-armv7.tar.gz
-          cd release
-          sha256sum "Bokheim-v${BOKHEIM_VERSION}-Kobo-Libra2-armv7.tar.gz" > "Bokheim-v${BOKHEIM_VERSION}-Kobo-Libra2-armv7.tar.gz.sha256"
-          sha256sum Bokheim-Kobo-Libra2-armv7.tar.gz > Bokheim-Kobo-Libra2-armv7.tar.gz.sha256
-
-      - name: Retain workflow artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: bokheim-kobo-libra2-armv7
-          path: bokheim/release/*
-          if-no-files-found: error
-
-      - name: Create or update draft GitHub release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish == true
-        working-directory: bokheim
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-        run: |
-          if ! gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
-              --repo JohanAnderssonOstling/bokheim-release \
-              --target main \
-              --draft \
-              --generate-notes \
-              --title "Bokheim ${RELEASE_TAG#v}" || \
-              gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null
-          fi
-          gh release upload "$RELEASE_TAG" release/* \
-            --repo JohanAnderssonOstling/bokheim-release \
-            --clobber
 
   build-windows-installer:
     name: Windows USB installer
-    needs: build
+    needs: version
     runs-on: windows-2025
     timeout-minutes: 30
 
@@ -178,11 +64,28 @@ jobs:
         with:
           path: bokheim
 
-      - name: Download the verified Kobo package
-        uses: actions/download-artifact@v8
-        with:
-          name: bokheim-kobo-libra2-armv7
-          path: bokheim/kobo-package
+      - name: Download the published Kobo package
+        working-directory: bokheim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # The Kobo package is cross-compiled and published from a maintainer
+          # machine by apps/desktop-gpui/scripts/publish-kobo-release.sh: its
+          # ARMv7 musl toolchain comes from a single host that is too often
+          # unreachable to sit in the release path. The installers embed that
+          # verified package rather than rebuilding it.
+          mkdir -p kobo-package
+          if ! gh release download "$RELEASE_TAG" \
+              --repo JohanAnderssonOstling/bokheim-release \
+              --pattern 'Bokheim-Kobo-Libra2-armv7.tar.gz*' \
+              --dir kobo-package --clobber; then
+            echo "::error::No Kobo package on $RELEASE_TAG. Run apps/desktop-gpui/scripts/publish-kobo-release.sh before building the installers."
+            exit 1
+          fi
+          cd kobo-package
+          sha256sum --check Bokheim-Kobo-Libra2-armv7.tar.gz.sha256
 
       - name: Install Rust
         shell: pwsh
@@ -198,7 +101,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             bokheim/apps/kobo-installer/target
-          key: kobo-installer-windows-v2-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
+          key: kobo-installer-windows-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
 
       - name: Test installer extraction safeguards
         working-directory: bokheim
@@ -211,7 +114,7 @@ jobs:
         run: |
           $archive = (Resolve-Path "kobo-package/Bokheim-Kobo-Libra2-armv7.tar.gz").Path
           $env:BOKHEIM_KOBO_ARCHIVE = $archive
-          $env:BOKHEIM_VERSION = "${{ needs.build.outputs.version }}"
+          $env:BOKHEIM_VERSION = "${{ needs.version.outputs.version }}"
           $env:RUSTFLAGS = "-C target-feature=+crt-static"
           cargo build --locked --release --manifest-path apps/kobo-installer/Cargo.toml
           New-Item -ItemType Directory -Force -Path release | Out-Null
@@ -247,7 +150,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: v${{ needs.build.outputs.version }}
+          RELEASE_TAG: v${{ needs.version.outputs.version }}
         run: |
           if ! gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
@@ -264,7 +167,7 @@ jobs:
 
   build-linux-installer:
     name: Linux USB installer AppImage
-    needs: build
+    needs: version
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -274,11 +177,28 @@ jobs:
         with:
           path: bokheim
 
-      - name: Download the verified Kobo package
-        uses: actions/download-artifact@v8
-        with:
-          name: bokheim-kobo-libra2-armv7
-          path: bokheim/kobo-package
+      - name: Download the published Kobo package
+        working-directory: bokheim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # The Kobo package is cross-compiled and published from a maintainer
+          # machine by apps/desktop-gpui/scripts/publish-kobo-release.sh: its
+          # ARMv7 musl toolchain comes from a single host that is too often
+          # unreachable to sit in the release path. The installers embed that
+          # verified package rather than rebuilding it.
+          mkdir -p kobo-package
+          if ! gh release download "$RELEASE_TAG" \
+              --repo JohanAnderssonOstling/bokheim-release \
+              --pattern 'Bokheim-Kobo-Libra2-armv7.tar.gz*' \
+              --dir kobo-package --clobber; then
+            echo "::error::No Kobo package on $RELEASE_TAG. Run apps/desktop-gpui/scripts/publish-kobo-release.sh before building the installers."
+            exit 1
+          fi
+          cd kobo-package
+          sha256sum --check Bokheim-Kobo-Libra2-armv7.tar.gz.sha256
 
       - name: Install build and AppImage dependencies
         run: |
@@ -313,7 +233,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             bokheim/apps/kobo-installer/target
-          key: kobo-installer-linux-v2-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-gpui-${{ env.GPUI_FORK_REF }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
+          key: kobo-installer-linux-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
 
       - name: Download pinned AppImage tools
         run: |
@@ -333,7 +253,7 @@ jobs:
         working-directory: bokheim
         env:
           BOKHEIM_KOBO_ARCHIVE: ${{ github.workspace }}/bokheim/kobo-package/Bokheim-Kobo-Libra2-armv7.tar.gz
-          BOKHEIM_VERSION: ${{ needs.build.outputs.version }}
+          BOKHEIM_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --locked --release --manifest-path apps/kobo-installer/Cargo.toml
 
       - name: Build installer AppImage
@@ -371,7 +291,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: v${{ needs.build.outputs.version }}
+          RELEASE_TAG: v${{ needs.version.outputs.version }}
         run: |
           if ! gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \

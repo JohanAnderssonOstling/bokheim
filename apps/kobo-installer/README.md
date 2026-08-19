@@ -33,3 +33,20 @@ cargo run --manifest-path apps/kobo-installer/Cargo.toml
 
 The detection layer also accepts `BOKHEIM_KOBO_MOUNT` for development with a
 temporary directory containing a `.kobo` directory.
+
+## Releases
+
+The Kobo package itself is built on a maintainer machine, not in CI: its ARMv7
+musl cross toolchain is published by a single volunteer-run host that is
+regularly unreachable, which is not acceptable in the release path. Publish it
+first, then build the installers against it:
+
+```sh
+apps/desktop-gpui/scripts/publish-kobo-release.sh   # --dry-run to verify only
+```
+
+The script refuses to publish from a dirty tree or an unpushed commit, applies
+the package checks listed above, and uploads the archive and its checksum to
+the shared draft release. The `Kobo release` workflow then downloads that
+package, verifies its checksum, and embeds it in the Windows and Linux
+installers.
