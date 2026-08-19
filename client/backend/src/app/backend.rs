@@ -783,6 +783,12 @@ impl AppBackend {
 
     pub(crate) async fn hydrate_taxonomy_for_books(&self, library: &LibraryBackend, content_hashes: &[ContentHash]) -> Result<(), BackendError> {
         let _update = self.state.taxonomy_updates.lock().await;
+        match self.state.taxonomy.current_release_id().await {
+            Ok(server_release_id) => {
+                self.state.backend.invalidate_unified_taxonomy_if_obsolete(&server_release_id).map_err(BackendError::operation)?;
+            }
+            Err(error) => log::warn!("continuing with cached taxonomy after release check failed: {error}"),
+        }
         // Repair a prior partial reprojection before consulting the resolution
         // ledger. Otherwise an already-fetched code could suppress the retry.
         self.reload_taxonomy_assignments(library)?;
@@ -826,6 +832,12 @@ impl AppBackend {
 
     pub(crate) async fn hydrate_taxonomy_for_library(&self, library: &LibraryBackend) -> Result<(), BackendError> {
         let _update = self.state.taxonomy_updates.lock().await;
+        match self.state.taxonomy.current_release_id().await {
+            Ok(server_release_id) => {
+                self.state.backend.invalidate_unified_taxonomy_if_obsolete(&server_release_id).map_err(BackendError::operation)?;
+            }
+            Err(error) => log::warn!("continuing with cached taxonomy after release check failed: {error}"),
+        }
         self.reload_taxonomy_assignments(library)?;
         let codes = self.state.backend.unresolved_taxonomy_codes(library.recorded_taxonomy_codes_for_library()?).map_err(BackendError::operation)?;
         let Some(response) = self.state.taxonomy.resolve_codes(codes).await.map_err(BackendError::operation)? else {

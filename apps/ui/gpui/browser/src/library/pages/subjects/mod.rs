@@ -106,7 +106,7 @@ impl SubjectsPage {
     }
 
     fn new_pane(ui: LibraryContext, path: Vec<SubjectCrumb>, split_root: Option<WeakEntity<SubjectsPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, |page: &mut Self, cx| page.search(cx), window, cx);
+        let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, None, |page: &mut Self, cx| page.search(cx), window, cx);
         Self {
             hierarchy,
             ui,

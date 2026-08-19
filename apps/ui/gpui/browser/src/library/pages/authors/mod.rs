@@ -219,6 +219,7 @@ impl AuthorsPage {
 
     fn render_index(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
+        let rem_size = f32::from(window.rem_size());
         let has_authors = !self.visible.is_empty();
         let visible_cover_limit = if f32::from(window.viewport_size().width) <= 480.0 {
             1
@@ -257,7 +258,7 @@ impl AuthorsPage {
             let packed = Rc::new(packed);
             let row_count = packed.len();
             let rows = packed.clone();
-            let list = uniform_list(format!("authors-index-virtual-{generation}"), row_count, move |range, _, _| range.map(|index| components::author_virtual_row().children(rows[index].clone())).collect::<Vec<_>>());
+            let list = uniform_list(format!("authors-index-virtual-{generation}"), row_count, move |range, _, _| range.map(|index| components::author_virtual_row(rem_size).children(rows[index].clone())).collect::<Vec<_>>());
             div().size_full().flex().flex_col().child(components::virtual_list(list))
         });
 
@@ -297,13 +298,14 @@ impl AuthorsPage {
         let page = cx.entity();
         let rem_size = f32::from(window.rem_size());
         let contract = &self.ui.contracts().store;
-        let publication_unit_width = crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px);
-        let publication_height = contract.publication_height_px as f32;
+        let description_width = crate::catalog::catalog_description_width(window, crate::stores::interface_font(cx));
+        let publication_unit_width = crate::catalog::catalog_grid_unit_width_for_description(contract.publication_min_width_px, description_width);
+        let publication_height = crate::catalog::catalog_publication_height(contract.publication_height_px, rem_size);
         let combined = container_query(move |available, _, cx| {
             let width = f32::from(available.width);
             let book_capacity = if detailed { 1 } else { crate::virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
-            let (book_columns, book_width) =
-                if detailed { (1, width) } else { crate::virtual_grid::grid_geometry(width, book_capacity, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
+            let (book_columns, book_width, book_column_gap) =
+                if detailed { (1, width, 0.0) } else { crate::virtual_grid::grid_geometry(width, book_capacity, book_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP) };
             let book_row_height = if detailed { components::DETAILED_ROW_HEIGHT } else { components::book_grid_row_height_for_cover_width(book_width, rem_size) };
             let book_row_count = crate::virtual_grid::row_count(book_views.len(), book_columns);
             let local_row_count = book_row_count.max(1);
@@ -339,7 +341,7 @@ impl AuthorsPage {
                                     .w_full()
                                     .h(px(book_row_height + trailing_gap))
                                     .flex_none()
-                                    .child(crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_columns, book_width, book_row_height, components::BOOK_GRID_GAP))
+                                    .child(crate::virtual_grid::flexible_entity_row(&render_books, book_range, book_columns, book_width, book_row_height, book_column_gap))
                                     .into_any_element()
                             }
                         } else {

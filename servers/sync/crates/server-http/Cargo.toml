@@ -13,7 +13,7 @@ axum = { version = "0.7", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 wire = { package = "protobuf-wire", path = "../../../../shared/protobuf-wire" }
 futures-util = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 server-account = { path = "../server-account" }
 server-asset-store = { path = "../server-asset-store" }
 server-postgres = { path = "../server-postgres" }

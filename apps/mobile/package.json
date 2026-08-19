@@ -23,7 +23,8 @@
     "generate:tokens": "cargo run --manifest-path ../../client/app-contract/Cargo.toml --bin export_design_tokens",
     "check:tokens": "cargo run --manifest-path ../../client/app-contract/Cargo.toml --bin export_design_tokens -- --check",
     "check:watch": "svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:layout-tokens": "node --test src/lib/layout-tokens.test.ts"
   },
   "license": "MIT",
   "dependencies": {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { BookCardData, DownloadState } from "../../lib/types";
   import BookCard from "./BookCard.svelte";
   import EmptyPage from "../shell/EmptyPage.svelte";
@@ -33,10 +34,38 @@
     onremovefromfolder?: (book: BookCardData) => void | Promise<void>;
   } = $props();
 
+  let gridElement = $state<HTMLDivElement>();
+  let distributeColumns = $state(false);
+
+  function updateColumnDistribution() {
+    if (!gridElement || detailed || window.innerWidth < 720) {
+      distributeColumns = false;
+      return;
+    }
+    const style = getComputedStyle(gridElement);
+    const coverWidth = Number.parseFloat(style.getPropertyValue("--book-cover-width")) || 200;
+    const baseGap = Number.parseFloat(style.getPropertyValue("--book-grid-column-gap")) || 28;
+    const columns = Math.max(1, Math.floor((gridElement.clientWidth + baseGap) / (coverWidth + baseGap)));
+    distributeColumns = columns > 1 && books.length >= columns;
+  }
+
+  $effect(() => {
+    books.length;
+    detailed;
+    queueMicrotask(updateColumnDistribution);
+  });
+
+  onMount(() => {
+    updateColumnDistribution();
+    const observer = new ResizeObserver(updateColumnDistribution);
+    if (gridElement) observer.observe(gridElement);
+    return () => observer.disconnect();
+  });
+
 </script>
 
 {#if books.length}
-  <div class={detailed ? "book-grid detailed" : "book-grid"}>
+  <div class={detailed ? "book-grid detailed" : "book-grid"} class:distributed={distributeColumns} bind:this={gridElement}>
     {#each books as book (book.content_hash)}
     <BookCard {book} {libraryId} detailed={detailed} opening={openingBookId === book.content_hash} downloadState={downloadStates[book.content_hash]} {onopen} {ondownload} {onremove} {ontrash} {oncopytofolder} {onmovetofolder} {onremovefromfolder} />
     {/each}
@@ -53,6 +82,7 @@
   @media (min-width: 36rem) { .book-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   @media (min-width: 45rem) {
     .book-grid { grid-template-columns: repeat(auto-fill, var(--book-cover-width)); column-gap: var(--book-grid-column-gap); row-gap: calc(var(--book-grid-row-height) - var(--book-card-height)); }
+    .book-grid.distributed { justify-content: space-between; }
     .book-grid.detailed { grid-template-columns: 1fr; row-gap: 0; }
   }
 </style>

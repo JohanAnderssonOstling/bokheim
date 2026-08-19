@@ -6,17 +6,20 @@ use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NavigateHistoryBack, NavigateHistoryForward, NextLine, NextPage, NextSection, PreviousLine,
     PreviousPage, PreviousSection, ToggleFullscreen, ToggleSearch, ToggleToc,
 };
-use app_contract::{ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut, READER_NAVIGATION_SHORTCUTS};
+use app_contract::{READER_NAVIGATION_SHORTCUTS, ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut};
 use gpui::prelude::*;
-use gpui::{px, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window};
+use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window, px};
+use gpui_component::Sizable;
 use gpui_component::input::Input;
 use gpui_component::menu::ContextMenuExt;
 use gpui_component::tab::TabBar;
 use gpui_component::tree::tree;
-use gpui_component::Sizable;
 use ui_components as components;
 
 const READER_TOOLBAR_HEIGHT: f32 = 58.0;
+/// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
+/// This is a renderer guard band, not an authored EPUB margin.
+const KOBO_READER_EDGE_INSET: f32 = 2.0;
 const ANNOTATION_POPUP_WIDTH: f32 = 360.0;
 const ANNOTATION_POPUP_MAX_HEIGHT: f32 = 420.0;
 const ANNOTATION_POPUP_INSET: f32 = 12.0;
@@ -126,7 +129,7 @@ impl ReaderView {
 
         if self.reader_state_bookmarks {
             panel = panel.child(
-                components::reader_sidebar_action_button("reader-bookmark-current", "Bookmark here", gpui_component::IconName::Star, self.current_cfi.is_some(), theme)
+                components::reader_sidebar_action_button("reader-bookmark-current", "Bookmark here", gpui_component::IconName::Star, self.current_cfi.is_some())
                     .tooltip("Bookmark the current location")
                     .on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
             );
@@ -139,13 +142,9 @@ impl ReaderView {
                 panel = panel.child(
                     components::reader_state_card(("reader-bookmark", index), false, theme).child(components::reader_state_quote(bookmark.label)).child(
                         components::reader_state_actions()
+                            .child(components::reader_sidebar_action_button(("reader-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))))
                             .child(
-                                components::reader_sidebar_action_button(("reader-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
-                            )
-                            .child(
-                                components::reader_sidebar_action_button(("reader-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
+                                components::reader_sidebar_action_button(("reader-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true).on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
                             ),
                     ),
                 );
@@ -170,11 +169,10 @@ impl ReaderView {
                     .child(
                         components::reader_state_actions()
                             .child(
-                                components::reader_sidebar_action_button(("reader-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
+                                components::reader_sidebar_action_button(("reader-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
                             )
                             .child(
-                                components::reader_sidebar_action_button(("reader-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
+                                components::reader_sidebar_action_button(("reader-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true)
                                     .on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx))),
                             ),
                     );
@@ -317,6 +315,7 @@ impl Render for ReaderView {
                 let image_renderer = renderer.clone();
                 components::reader_content()
                     .id("epub-reader-document")
+                    .when(cfg!(feature = "kobo"), |document| document.px(px(KOBO_READER_EDGE_INSET)))
                     .child(renderer.clone())
                     .context_menu(move |menu, window, cx| {
                         let position = window.mouse_position();
@@ -461,7 +460,7 @@ impl Render for ReaderView {
             document_body.into_any_element()
         };
 
-        let page = components::app_page("IBM Plex Sans", 16, theme)
+        let page = components::reader_app_page(window, cx, theme)
             .key_context("Reader")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_previous_page))
@@ -480,8 +479,58 @@ impl Render for ReaderView {
             .on_action(cx.listener(Self::on_decrease_column_width))
             .on_action(cx.listener(Self::on_toggle_fullscreen))
             .children((!self.chrome_hidden).then(|| self.toolbar_view.clone().into_any_element()))
-            .children(self.chrome_hidden.then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()));
-        page.child(components::reader_content().child(content))
+            .child(components::reader_content().child(content));
+        let kobo_tap_zone_top = px(if self.chrome_hidden { 0.0 } else { READER_TOOLBAR_HEIGHT });
+        let page = page
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-epub-previous-page-tap-zone")
+                    .absolute()
+                    .left_0()
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .w(gpui::relative(0.25))
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        reader.hide_chrome(cx);
+                        reader.previous_page(cx);
+                    }))
+                    .into_any_element()
+            }))
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-epub-next-page-tap-zone")
+                    .absolute()
+                    .right_0()
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .w(gpui::relative(0.25))
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        reader.hide_chrome(cx);
+                        reader.next_page(cx);
+                    }))
+                    .into_any_element()
+            }))
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-epub-toggle-toolbar-tap-zone")
+                    .absolute()
+                    .left(gpui::relative(0.25))
+                    .right(gpui::relative(0.25))
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        if reader.chrome_hidden {
+                            reader.show_chrome(cx);
+                        } else {
+                            reader.hide_chrome(cx);
+                        }
+                    }))
+                    .into_any_element()
+            }));
+        page.children(
+            (self.chrome_hidden && !cfg!(feature = "kobo"))
+                .then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()),
+        )
     }
 }
 

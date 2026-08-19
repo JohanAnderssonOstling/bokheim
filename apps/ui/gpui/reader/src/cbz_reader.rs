@@ -429,7 +429,7 @@ impl Render for CbzReaderView {
             // `self.focus` is the handle carrying `CbzReaderDocument`, so the
             // popover leaves the page keys working while it is open.
             .child(components::reader_settings_popover(Some(&self.focus), theme).child(settings));
-        components::app_page("IBM Plex Sans", 16, theme)
+        components::reader_app_page(window, cx, theme)
             .key_context("CbzReaderDocument")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_previous_action))

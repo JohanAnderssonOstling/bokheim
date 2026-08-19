@@ -363,38 +363,28 @@ impl LibraryBackend {
 }
 
 /// Produces the useful category choices immediately below a subject. Empty
-/// taxonomy branches disappear and, below the root, a chain with no books or
-/// forks is represented by its first meaningful category. Root categories are
-/// never compacted. Below the root, a one-book leaf becomes that book.
+/// taxonomy branches disappear. A populated route is compacted only when the
+/// user has exactly one visible child at this level; siblings are never
+/// bypassed or replaced by their books. Root categories are never compacted.
 pub(super) fn compact_subject_children(conn: &Connection, parent_path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<(Vec<LibrarySubjectEntry>, Vec<BookCardRow>), rusqlite::Error> {
-    let mut visible = Vec::new();
-    let mut hoisted_books = Vec::new();
-    for child in populated_subject_children(conn, parent_path, downloaded_only, scope)? {
-        if parent_path.is_empty() {
-            visible.push(child);
-            continue;
-        }
-        let mut display = child;
-        loop {
-            let mut exact_books = get_book_cards_in_subject_scoped(conn, display.id.as_str(), downloaded_only)?;
-            scope.retain_books(&mut exact_books);
-            if !exact_books.is_empty() {
-                if display.book_count == 1 && exact_books.len() == 1 {
-                    hoisted_books.extend(exact_books);
-                } else {
-                    visible.push(display);
-                }
-                break;
-            }
-            let mut children = populated_subject_children(conn, display.id.as_str(), downloaded_only, scope)?;
-            if children.len() != 1 {
-                visible.push(display);
-                break;
-            }
-            display = children.remove(0);
-        }
+    let mut children = populated_subject_children(conn, parent_path, downloaded_only, scope)?;
+    if parent_path.is_empty() || children.len() != 1 {
+        return Ok((children, Vec::new()));
     }
-    Ok((visible, hoisted_books))
+
+    let mut display = children.remove(0);
+    loop {
+        let mut exact_books = get_book_cards_in_subject_scoped(conn, display.id.as_str(), downloaded_only)?;
+        scope.retain_books(&mut exact_books);
+        if !exact_books.is_empty() {
+            return if display.book_count == 1 && exact_books.len() == 1 { Ok((Vec::new(), exact_books)) } else { Ok((vec![display], Vec::new())) };
+        }
+        let mut descendants = populated_subject_children(conn, display.id.as_str(), downloaded_only, scope)?;
+        if descendants.len() != 1 {
+            return Ok((vec![display], Vec::new()));
+        }
+        display = descendants.remove(0);
+    }
 }
 
 fn populated_subject_children(conn: &Connection, parent_path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<Vec<LibrarySubjectEntry>, rusqlite::Error> {

@@ -5,10 +5,10 @@
 //! policy that treats a whole [`PublicationMetadata`] value as a single
 //! last-writer-wins register lives with the mutation protocol, not here.
 
-use crate::{canonical_doi, canonical_isbn, canonical_uuid, MarcRelatorCode};
+use crate::{MarcRelatorCode, canonical_doi, canonical_isbn, canonical_uuid};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 pub type AgentId = uuid::Uuid;
 pub type AuthorId = AgentId;

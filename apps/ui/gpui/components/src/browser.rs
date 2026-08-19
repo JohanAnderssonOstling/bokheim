@@ -1,12 +1,12 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, FontWeight, SharedString, Stateful};
+use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, Scrollable, ScrollableElement, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
-    SPACE_XS, SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
+    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable,
+    ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -18,7 +18,7 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
         .py(px(SPACE_SM))
         .p_0()
         .rounded(px(RADIUS_MD))
-        .text_color(if selected { theme.accent } else { theme.text_muted })
+        .text_color(if selected { theme.accent } else { theme.text })
         .when(selected, |button| button.bg(theme.accent_soft).text_color(theme.accent))
         .tooltip(label.clone())
         .child(
@@ -39,7 +39,8 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
 /// from both rail edges so it reads as a grouping rule rather than a panel
 /// border.
 pub fn nav_rail_divider(theme: BrowserTheme) -> Div {
-    div().w_full().flex_none().px(px(SPACE_SM)).py(px(SPACE_XS)).child(div().w_full().h(px(1.0)).bg(theme.border))
+    let _ = theme;
+    div().w_full().h(px(SPACE_SM)).flex_none()
 }
 
 pub fn home_navigation_icon() -> Icon {
@@ -69,9 +70,9 @@ pub fn browser_search_box() -> Div {
 
 /// A text input that searches or filters.
 ///
-/// The leading icon carries the meaning, so these inputs deliberately have no
-/// placeholder text. `cleanable` gives a filter a way out that does not involve
-/// selecting the text and deleting it.
+/// The leading icon carries the general meaning; individual pages may add a
+/// contextual placeholder through their `InputState`. `cleanable` gives a
+/// filter a way out that does not involve selecting and deleting its text.
 pub fn browser_search_input(state: &gpui::Entity<gpui_component::input::InputState>) -> gpui_component::input::Input {
     gpui::Styled::h(gpui_component::input::Input::new(state).prefix(Icon::new(IconName::Search)).cleanable(true), px(TOPBAR_ACTION_HEIGHT))
 }
@@ -85,11 +86,12 @@ pub fn library_section_content() -> Div {
 }
 
 pub fn library_switcher_group(theme: BrowserTheme) -> Div {
-    div().relative().w_full().min_h(gpui::rems(crate::NAV_RAIL_SWITCHER_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM)).border_b_1().border_color(theme.border)
+    let _ = theme;
+    div().relative().w_full().min_h(gpui::rems(crate::NAV_RAIL_SWITCHER_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
 }
 
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
-    div().h(px(TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).bg(theme.surface)
+    div().h(gpui::rems(TOPBAR_HEIGHT / 16.0)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).px(px(CONTENT_PADDING)).bg(theme.surface)
 }
 
 /// Two-line hierarchy header used when controls belong beneath the path.

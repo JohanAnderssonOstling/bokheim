@@ -21,10 +21,8 @@ test("the shared Rust EPUB provider inspects a real archive", async () => {
     author: "Archive Author",
     description: "Archive description",
     subjects: ["History", "United States", "20th Century"],
-    subject_paths: [
-      "Humanities / History",
-      "Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century",
-    ],
+    subject_paths: ["Humanities / History"],
+    subject_codes: [{ system: "bisac", code: "HIS036060" }],
     isbns: ["9780306406157"],
     toc: [],
   });
@@ -37,7 +35,7 @@ test("the shared Rust EPUB provider inspects a real archive", async () => {
 test("the web publication boundary accepts PDF documents", async () => {
   const bytes = new TextEncoder().encode("%PDF-1.7\n%%EOF");
   const metadata = await inspectPublication(new File([bytes], "book.pdf", { type: "application/pdf" }), "book.pdf", bytes);
-  assert.deepEqual(metadata, { title: null, author: null, description: null, subjects: [], subject_paths: [], isbns: [], cover: null, toc: [] });
+  assert.deepEqual(metadata, { title: null, author: null, description: null, subjects: [], subject_paths: [], subject_codes: [], isbns: [], cover: null, toc: [] });
 });
 
 test("the web publication boundary rejects files with a false PDF extension", async () => {

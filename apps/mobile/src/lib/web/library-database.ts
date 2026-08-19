@@ -1600,6 +1600,12 @@ export async function importWebBook(
   await requireDirectory(destination.library_id, destination.directory_id);
   const bytes = new Uint8Array(await file.arrayBuffer());
   const metadata = await inspectPublication(file, fileName, bytes);
+  if (metadata.subject_codes.length) {
+    await hydrateWebTaxonomy(metadata.subject_codes)
+      .catch((reason) => console.warn("Continuing publication import without missing taxonomy detail", reason));
+    const hydratedSubjectPaths = await Promise.all(metadata.subject_codes.map((classification) => unifiedSubjectPaths(classification.system, classification.code)));
+    metadata.subject_paths = [...new Set([...metadata.subject_paths, ...hydratedSubjectPaths.flat()])].sort();
+  }
   if (renderedCover?.length) metadata.cover = renderedCover;
   const author = metadata.author ?? "";
   const authorKey = author ? await normalizeSearchText(author) : "";
@@ -1666,7 +1672,10 @@ export async function importWebBook(
       contributors: author ? [{ contributor_id: authorId, name: author, sort_name: null, role: [97, 117, 116] }] : [],
       description: metadata.description ?? "",
       publication: {
-        subjects: metadata.subjects.map((name) => ({ id: null, name, authority: null, code: null })),
+        subjects: [
+          ...metadata.subjects.map((name) => ({ id: null, name, authority: null, code: null })),
+          ...metadata.subject_codes.map((classification) => ({ id: null, name: classification.code, authority: classification.system, code: classification.code })),
+        ],
         subject_paths: metadata.subject_paths,
       },
     };

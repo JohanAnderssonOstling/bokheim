@@ -1,5 +1,5 @@
 import { getWebDatabase } from "./database.ts";
-import { installTaxonomyOverlay, unifiedHasExactSourceCode, unifiedSubjectPaths } from "./wasm-core.ts";
+import { installTaxonomyOverlay, projectSubjectCodes, unifiedHasExactSourceCode, unifiedSubjectPaths } from "./wasm-core.ts";
 
 export type TaxonomySystem = "bisac" | "ddc" | "lcc";
 export interface TaxonomyCode { system: TaxonomySystem; code: string }
@@ -19,7 +19,26 @@ const MAX_CODES = 512;
 const MAX_CODE_BYTES = 256;
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const RELEASE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const encoder = new TextEncoder();
+let releaseCache: { releaseId: string; etag: string; checkedAt: number } | undefined;
+
+async function currentServerRelease(): Promise<string> {
+  if (releaseCache && Date.now() - releaseCache.checkedAt < RELEASE_CHECK_INTERVAL_MS) return releaseCache.releaseId;
+  const headers = new Headers();
+  if (releaseCache) headers.set("If-None-Match", releaseCache.etag);
+  const response = await fetch(`${TAXONOMY_ORIGIN}/v1/taxonomy`, { method: "HEAD", headers, signal: AbortSignal.timeout(10_000) });
+  if (response.status === 304 && releaseCache) {
+    releaseCache.checkedAt = Date.now();
+    return releaseCache.releaseId;
+  }
+  if (!response.ok) throw new Error(`Taxonomy release check returned HTTP ${response.status}`);
+  const etag = response.headers.get("etag");
+  const releaseId = etag?.match(/^"(.+)"$/)?.[1];
+  if (!etag || !releaseId) throw new Error("Taxonomy release check returned an invalid ETag");
+  releaseCache = { releaseId, etag, checkedAt: Date.now() };
+  return releaseId;
+}
 
 function key(code: TaxonomyCode): string {
   return `${code.system}\0${code.code}`;
@@ -98,9 +117,37 @@ async function installPersistedOverlay(db: Awaited<ReturnType<typeof getWebDatab
   await installTaxonomyOverlay(rows.map((json) => JSON.parse(String(json))));
 }
 
+function reconcileServerRelease(db: Awaited<ReturnType<typeof getWebDatabase>>["db"], releaseId: string): boolean {
+  const row = db.exec({ sql: "SELECT value FROM web_backend_metadata WHERE key='taxonomy_server_release_id'", rowMode: 0, returnValue: "resultRows" })[0];
+  const obsolete = row !== undefined && String(row) !== releaseId;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (obsolete) {
+      db.exec("DELETE FROM web_taxonomy_resolutions");
+      db.exec("DELETE FROM web_taxonomy_concepts");
+    }
+    db.exec({
+      sql: "INSERT INTO web_backend_metadata(key,value) VALUES('taxonomy_server_release_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      bind: [releaseId],
+    });
+    db.exec("COMMIT");
+  } catch (reason) {
+    db.exec("ROLLBACK");
+    throw reason;
+  }
+  return obsolete;
+}
+
 async function hydrateWebTaxonomyInner(requested: Iterable<TaxonomyCode>): Promise<void> {
   const { db } = await getWebDatabase();
-  await installPersistedOverlay(db);
+  let advertisedReleaseId: string | undefined;
+  try {
+    advertisedReleaseId = await currentServerRelease();
+  } catch (reason) {
+    console.warn("Continuing with cached taxonomy after release check failed", reason);
+  }
+  const invalidated = advertisedReleaseId === undefined ? false : reconcileServerRelease(db, advertisedReleaseId);
+  await installPersistedOverlay(db, invalidated);
   const codes = normalizeCodes(requested);
   const missing: TaxonomyCode[] = [];
   for (const code of codes) {
@@ -118,6 +165,15 @@ async function hydrateWebTaxonomyInner(requested: Iterable<TaxonomyCode>): Promi
   const concepts = new Map<string, TaxonomyConcept>();
   for (const batch of prepareBatches(missing)) {
     const response = await fetchBatch(batch);
+    if (advertisedReleaseId === undefined) {
+      reconcileServerRelease(db, response.release_id);
+      advertisedReleaseId = response.release_id;
+    } else if (response.release_id !== advertisedReleaseId) {
+      releaseCache = undefined;
+      if (results.length) throw new Error("Taxonomy release changed during multi-batch hydration");
+      reconcileServerRelease(db, response.release_id);
+      advertisedReleaseId = response.release_id;
+    }
     if (releaseId !== undefined && releaseId !== response.release_id) throw new Error("Taxonomy release changed while resolving a multi-batch operation");
     releaseId = response.release_id;
     results.push(...response.results);
@@ -170,17 +226,10 @@ function publicationFromMutationValue(value: unknown): Record<string, unknown> |
   return publication && typeof publication === "object" ? publication as Record<string, unknown> : null;
 }
 
-function codesFromPublication(publication: Record<string, unknown>): TaxonomyCode[] {
+async function codesFromPublication(publication: Record<string, unknown>): Promise<TaxonomyCode[]> {
   const subjects = Array.isArray(publication.subjects) ? publication.subjects : [];
-  const codes: TaxonomyCode[] = [];
-  for (const value of subjects) {
-    if (!value || typeof value !== "object") continue;
-    const subject = value as Record<string, unknown>;
-    if ((subject.authority === "bisac" || subject.authority === "ddc" || subject.authority === "lcc") && typeof subject.code === "string") {
-      codes.push({ system: subject.authority, code: subject.code });
-    }
-  }
-  return codes;
+  const structured = subjects.filter((subject): subject is Record<string, unknown> => Boolean(subject) && typeof subject === "object");
+  return projectSubjectCodes(structured);
 }
 
 export async function hydrateMutationTaxonomy(mutations: Array<{ kind: string; value: unknown }>): Promise<void> {
@@ -188,11 +237,11 @@ export async function hydrateMutationTaxonomy(mutations: Array<{ kind: string; v
     .filter((mutation) => mutation.kind === "metadata" || mutation.kind === "book_lifecycle")
     .map((mutation) => publicationFromMutationValue(mutation.value))
     .filter((publication): publication is Record<string, unknown> => publication !== null);
-  const codes = publications.flatMap(codesFromPublication);
+  const codes = (await Promise.all(publications.map(codesFromPublication))).flat();
   await hydrateWebTaxonomy(codes);
   for (const publication of publications) {
     const paths = new Set(Array.isArray(publication.subject_paths) ? publication.subject_paths.filter((path): path is string => typeof path === "string") : []);
-    for (const code of codesFromPublication(publication)) {
+    for (const code of await codesFromPublication(publication)) {
       for (const path of await unifiedSubjectPaths(code.system, code.code.trim())) paths.add(path);
     }
     publication.subject_paths = [...paths].sort();

@@ -58,11 +58,7 @@ pub fn lcc_subject_path(notation: &str) -> Option<String> {
 /// taxonomy coverage so finer server-side schedules can be requested later.
 pub fn canonical_lcc_notation(notation: &str) -> Option<String> {
     let notation = compact_whitespace(notation).to_ascii_uppercase();
-    if letters_only_syntax(&notation) || parse_lcc_call(&notation).is_some() {
-        Some(notation)
-    } else {
-        None
-    }
+    if letters_only_syntax(&notation) || parse_lcc_call(&notation).is_some() { Some(notation) } else { None }
 }
 
 fn letters_only_syntax(value: &str) -> bool {

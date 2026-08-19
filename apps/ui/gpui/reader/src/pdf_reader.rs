@@ -1,22 +1,22 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use epub_svelte_lib::library::ResolvedBook;
+use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use epub_svelte_lib::{BookLocator, LibraryBackend};
 use gpui::prelude::*;
-use gpui::{px, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, Render, ScrollStrategy, Subscription, Window};
+use gpui::{App, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, Render, ScrollStrategy, Subscription, Window, px};
+use gpui_component::Sizable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::tab::TabBar;
-use gpui_component::tree::{tree, TreeItem, TreeState};
-use gpui_component::Sizable;
+use gpui_component::tree::{TreeItem, TreeState, tree};
 use pdf_reader_core::{NormalizedRect, PdfOutlineEntry};
-use pdf_view_gpui::{PdfAnnotationOverlay, PdfAnnotationStyle, PdfView, PdfViewEvent, PdfZoomMode, MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT};
+use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfAnnotationOverlay, PdfAnnotationStyle, PdfView, PdfViewEvent, PdfZoomMode};
 use ui_components as components;
 
-use crate::epub::marks::MarksState;
 use crate::epub::ReaderWindowId;
+use crate::epub::marks::MarksState;
 use crate::invalidation::Component;
-use crate::pdf::toc::{nest_pdf_outline, pdf_toc_tree_items, PdfTocState};
+use crate::pdf::toc::{PdfTocState, nest_pdf_outline, pdf_toc_tree_items};
 use crate::settings::{PdfZoomModePreference, ReaderPreferences, ReaderSettings};
 use crate::shell::chrome;
 use crate::shell::persistence::{self, PositionWriter};
@@ -542,9 +542,7 @@ impl PdfReaderView {
 
         if self.showing_bookmarks {
             panel = panel.child(
-                components::reader_sidebar_action_button("pdf-bookmark-current", "Bookmark here", gpui_component::IconName::Star, true, theme)
-                    .tooltip("Bookmark the current page")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
+                components::reader_sidebar_action_button("pdf-bookmark-current", "Bookmark here", gpui_component::IconName::Star, true).tooltip("Bookmark the current page").on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
             );
             if self.marks.bookmarks.is_empty() {
                 panel = panel.child(components::reader_state_note("No bookmarks yet. Use Bookmark here to save this page.", theme));
@@ -555,12 +553,9 @@ impl PdfReaderView {
                 panel = panel.child(
                     components::reader_state_card(("pdf-bookmark", index), false, theme).child(components::reader_state_quote(bookmark.label)).child(
                         components::reader_state_actions()
+                            .child(components::reader_sidebar_action_button(("pdf-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_bookmark(&cfi, cx))))
                             .child(
-                                components::reader_sidebar_action_button(("pdf-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_bookmark(&cfi, cx))),
-                            )
-                            .child(
-                                components::reader_sidebar_action_button(("pdf-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
+                                components::reader_sidebar_action_button(("pdf-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true).on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
                             ),
                     ),
                 );
@@ -587,11 +582,11 @@ impl PdfReaderView {
                 .child(
                     components::reader_state_actions()
                         .child(
-                            components::reader_sidebar_action_button(("pdf-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true, theme)
+                            components::reader_sidebar_action_button(("pdf-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true)
                                 .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_annotation(&navigate_annotation, cx))),
                         )
                         .child(
-                            components::reader_sidebar_action_button(("pdf-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true, theme)
+                            components::reader_sidebar_action_button(("pdf-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true)
                                 .on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx))),
                         ),
                 );
@@ -872,7 +867,7 @@ impl Render for PdfReaderView {
             .child(components::reader_settings_popover(Some(&pdf_document_focus), theme).child(settings));
         let toolbar = components::reader_toolbar(theme).child(left).child(components::reader_toolbar_title(section_title)).child(right);
 
-        components::app_page("IBM Plex Sans", 16, theme)
+        let page = components::reader_app_page(window, cx, theme)
             .key_context("Reader")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_previous_page))
@@ -886,8 +881,58 @@ impl Render for PdfReaderView {
             .on_action(cx.listener(Self::on_increase_scale))
             .on_action(cx.listener(Self::on_decrease_scale))
             .children((!self.chrome_hidden).then(|| toolbar.into_any_element()))
-            .children(self.chrome_hidden.then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()))
-            .child(components::reader_content().child(content))
+            .child(components::reader_content().child(content));
+        let kobo_tap_zone_top = px(if self.chrome_hidden { 0.0 } else { PDF_READER_TOOLBAR_HEIGHT });
+        let page = page
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-pdf-previous-page-tap-zone")
+                    .absolute()
+                    .left_0()
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .w(gpui::relative(0.25))
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        reader.hide_chrome(cx);
+                        reader.previous_page(cx);
+                    }))
+                    .into_any_element()
+            }))
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-pdf-next-page-tap-zone")
+                    .absolute()
+                    .right_0()
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .w(gpui::relative(0.25))
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        reader.hide_chrome(cx);
+                        reader.next_page(cx);
+                    }))
+                    .into_any_element()
+            }))
+            .children((cfg!(feature = "kobo") && !sidebar_visible).then(|| {
+                gpui::div()
+                    .id("kobo-pdf-toggle-toolbar-tap-zone")
+                    .absolute()
+                    .left(gpui::relative(0.25))
+                    .right(gpui::relative(0.25))
+                    .top(kobo_tap_zone_top)
+                    .bottom_0()
+                    .on_click(cx.listener(|reader: &mut Self, _, _, cx| {
+                        if reader.chrome_hidden {
+                            reader.show_chrome(cx);
+                        } else {
+                            reader.hide_chrome(cx);
+                        }
+                    }))
+                    .into_any_element()
+            }));
+        page.children(
+            (self.chrome_hidden && !cfg!(feature = "kobo"))
+                .then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()),
+        )
     }
 }
 
@@ -975,11 +1020,7 @@ fn format_page_indicator(visible_page_range: Option<(usize, usize)>, page_count:
     let Some((first, last)) = visible_page_range else {
         return format!("0/{page_count}");
     };
-    if first == last {
-        format!("{}/{page_count}", first + 1)
-    } else {
-        format!("{}–{}/{page_count}", first + 1, last + 1)
-    }
+    if first == last { format!("{}/{page_count}", first + 1) } else { format!("{}–{}/{page_count}", first + 1, last + 1) }
 }
 
 fn pdf_progress(visible_page_range: Option<(usize, usize)>, page_count: usize) -> String {

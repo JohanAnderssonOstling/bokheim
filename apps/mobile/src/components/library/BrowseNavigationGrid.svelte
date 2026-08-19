@@ -14,6 +14,5 @@
     grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--hierarchy-cell-min-width)), 1fr));
     gap: var(--hierarchy-cell-gap);
     margin-bottom: 18px;
-    padding: calc(var(--hierarchy-cell-gap) / 2);
   }
 </style>

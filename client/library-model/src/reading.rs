@@ -87,11 +87,7 @@ impl ReadingPosition {
     }
 
     pub fn epub_cfi(value: &str) -> Result<Self, InvalidReadingPosition> {
-        if valid_epub_cfi(value) {
-            Ok(Self::Epub(ReadingEpubCfi(value.to_owned())))
-        } else {
-            Err(InvalidReadingPosition)
-        }
+        if valid_epub_cfi(value) { Ok(Self::Epub(ReadingEpubCfi(value.to_owned()))) } else { Err(InvalidReadingPosition) }
     }
 
     pub const fn pdf_page(page_index: u32) -> Self {
@@ -209,11 +205,7 @@ impl ReadProgress {
     pub const ZERO: Self = Self(0.0);
 
     pub fn new(value: f32) -> Result<Self, InvalidReadProgress> {
-        if value.is_finite() && (0.0..=100.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(InvalidReadProgress)
-        }
+        if value.is_finite() && (0.0..=100.0).contains(&value) { Ok(Self(value)) } else { Err(InvalidReadProgress) }
     }
 
     pub fn value(self) -> f32 {

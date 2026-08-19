@@ -46,7 +46,7 @@ CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
-cargo build --release --target armv7-unknown-linux-musleabihf \
+cargo build --locked --release --target armv7-unknown-linux-musleabihf \
     -p desktop-gpui --no-default-features --features kobo --bin desktop-gpui-kobo
 
 mkdir -p "$OUTPUT"

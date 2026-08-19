@@ -9,6 +9,7 @@ const pageDefinitions = {
   traffic: ["Traffic", "/admin/traffic"],
   accounts: ["Account activity", "/admin/accounts"],
   catalogue: ["Catalogue operations", "/admin/catalogue"],
+  "catalogue-review": ["Catalogue manual review", "/admin/catalogue-review"],
   metadata: ["Metadata enrichment", "/admin/metadata"],
   security: ["Security and incident response", "/admin/security"],
 };
@@ -74,6 +75,13 @@ async function request(pathname, retry = true) {
   }
   return response;
 }
+async function post(pathname, body, retry = true) {
+  let response = await fetch(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
+  if (response.status === 401 && retry) {
+    if (await refreshSession()) response = await fetch(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
+  }
+  return response;
+}
 
 function aggregate(points) {
   const buckets = new Map();
@@ -110,7 +118,7 @@ function card(label, value, detail) {
 function serviceState(service) {
   return service.available ? ["Available", `${number(service.latency_ms)} ms response`] : ["Unavailable", "Check the service or dashboard target configuration"];
 }
-function render(overview, history, requestHistory, engagement, services) {
+function render(overview, history, requestHistory, engagement, services, identityReviews) {
   const catalogueState = serviceState(services.catalogue);
   const metadataState = serviceState(services.metadata);
   elements.cards.replaceChildren(
@@ -280,6 +288,57 @@ function render(overview, history, requestHistory, engagement, services) {
     return row;
   });
   elements["request-ips"].replaceChildren(...requestRows);
+
+  const sources = services.catalogue.data?.sources ?? [];
+  const selectedSource = elements["review-source"].value;
+  elements["review-source"].replaceChildren(new Option("All sources", ""), ...sources.map((source) => new Option(source.source_id, source.source_id)));
+  elements["review-source"].value = selectedSource;
+  renderIdentityReviews(identityReviews);
+}
+
+function renderIdentityReviews(data) {
+  if (!data) return;
+  const inventory = data.inventory;
+  elements["review-cards"].replaceChildren(
+    card("Ambiguous", number(inventory.ambiguous), "Select the supported edition"),
+    card("No match", number(inventory.no_match), "Enter an ISBN, retry, or reject"),
+    card("Insufficient metadata", number(inventory.insufficient_metadata), "Manual identification required"),
+    card("Failed", number(inventory.failed), "Transient requests eligible for retry"),
+    card("Resolved", number(inventory.resolved), `${number(inventory.rejected)} rejected`),
+  );
+  elements["reviews-empty"].hidden = data.reviews.length !== 0;
+  const reviews = data.reviews.map((review) => {
+    const article = document.createElement("article");
+    article.className = "review-item";
+    article.dataset.reviewId = review.review_id;
+    const heading = document.createElement("h3"); heading.textContent = review.title || "Untitled publication";
+    const meta = document.createElement("p"); meta.className = "review-meta";
+    meta.textContent = [review.authors.join(", ") || "Unknown author", review.publication_year, review.source_id, review.status.replaceAll("_", " ")].filter(Boolean).join(" · ");
+    article.append(heading, meta);
+    if (review.detail) { const detail = document.createElement("p"); detail.className = "review-detail"; detail.textContent = review.detail; article.append(detail); }
+    const candidates = document.createElement("div"); candidates.className = "review-candidates";
+    for (const candidate of review.candidates) {
+      const row = document.createElement("div"); row.className = "review-candidate";
+      const description = document.createElement("div");
+      const title = document.createElement("strong"); title.textContent = candidate.title;
+      const evidence = document.createElement("span");
+      const classifications = candidate.classifications.length ? ` · ${candidate.classifications.join("; ")}` : " · no mapped classifications";
+      evidence.textContent = `${candidate.authors.join(", ") || "Unknown author"} · ${candidate.publication_year || "year unknown"} · ISBN ${candidate.isbn13}${classifications}`;
+      description.append(title, evidence);
+      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = "Select edition"; choose.dataset.reviewAction = "select_candidate"; choose.dataset.editionId = candidate.edition_id; choose.dataset.isbn13 = candidate.isbn13;
+      row.append(description, choose); candidates.append(row);
+    }
+    if (review.candidates_truncated) { const note = document.createElement("p"); note.className = "review-detail"; note.textContent = "Candidate list was truncated; refine metadata or enter an ISBN manually."; candidates.append(note); }
+    article.append(candidates);
+    const actions = document.createElement("div"); actions.className = "review-actions";
+    const form = document.createElement("form"); form.dataset.reviewAction = "manual_isbn";
+    const isbn = document.createElement("input"); isbn.name = "isbn"; isbn.placeholder = "ISBN-10 or ISBN-13"; isbn.required = true; isbn.setAttribute("aria-label", "Manual ISBN");
+    const apply = document.createElement("button"); apply.type = "submit"; apply.textContent = "Apply ISBN"; form.append(isbn, apply);
+    const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry match"; retry.dataset.reviewAction = "retry";
+    const reject = document.createElement("button"); reject.type = "button"; reject.textContent = "No suitable edition"; reject.className = "danger"; reject.dataset.reviewAction = "reject";
+    actions.append(form, retry, reject); article.append(actions); return article;
+  });
+  elements.reviews.replaceChildren(...reviews);
 }
 
 function showError(message, signIn) {
@@ -296,12 +355,19 @@ async function load() {
   refreshing = true;
   elements.refresh.disabled = true;
   try {
+    const reviewQuery = new URLSearchParams({ limit:"100" });
+    if (elements["review-source"].value) reviewQuery.set("source_id", elements["review-source"].value);
+    if (elements["review-status"].value) reviewQuery.set("status", elements["review-status"].value);
+    const identityReviewRequest = activePage === "catalogue-review"
+      ? request(`/api/admin/catalog-identity-reviews?${reviewQuery}`)
+      : Promise.resolve({ ok:true, status:200, json:async () => null });
     const responses = await Promise.all([
       request("/api/admin/overview"),
       request(`/api/admin/traffic?hours=${hours}`),
       request(`/api/admin/requests?hours=${Math.min(hours, 168)}&limit=200`),
       request("/api/admin/engagement?days=30"),
       request("/api/admin/services"),
+      identityReviewRequest,
     ]);
     if (responses.some((response) => response.status === 401)) return showError("Sign in with an administrator account.", true);
     if (responses.some((response) => response.status === 403)) return showError("This account is not an administrator.", true);
@@ -338,6 +404,27 @@ elements.ranges.addEventListener("click", (event) => {
   for (const range of elements.ranges.querySelectorAll("button")) range.classList.toggle("active", range === button);
   load();
 });
+elements["review-source"].addEventListener("change", load);
+elements["review-status"].addEventListener("change", load);
+elements.reviews.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-review-action]");
+  if (!button) return;
+  const review = button.closest("[data-review-id]");
+  const action = button.dataset.reviewAction;
+  const body = action === "select_candidate" ? { action, edition_id:button.dataset.editionId, isbn13:button.dataset.isbn13 } : { action };
+  button.disabled = true;
+  try { const response = await post(`/api/admin/catalog-identity-reviews/${review.dataset.reviewId}`, body); if (!response.ok) throw new Error(); await load(); }
+  catch { button.disabled = false; window.alert("The review decision could not be saved."); }
+});
+elements.reviews.addEventListener("submit", async (event) => {
+  const form = event.target.closest("form[data-review-action='manual_isbn']");
+  if (!form) return;
+  event.preventDefault();
+  const review = form.closest("[data-review-id]");
+  const submit = form.querySelector("button[type='submit']"); submit.disabled = true;
+  try { const response = await post(`/api/admin/catalog-identity-reviews/${review.dataset.reviewId}`, { action:"manual_isbn", isbn:new FormData(form).get("isbn") }); if (!response.ok) throw new Error(); await load(); }
+  catch { submit.disabled = false; window.alert("The ISBN could not be applied."); }
+});
 elements["login-form"].addEventListener("submit", async (event) => {
   event.preventDefault();
   elements.login.disabled = true;
@@ -362,4 +449,7 @@ elements["login-form"].addEventListener("submit", async (event) => {
 
 selectPage();
 load();
-window.setInterval(() => { if (!elements.dashboard.hidden) load(); }, 15_000);
+window.setInterval(() => {
+  const editingReview = activePage === "catalogue-review" && document.activeElement?.closest("form[data-review-action='manual_isbn']");
+  if (!elements.dashboard.hidden && !editingReview) load();
+}, 15_000);

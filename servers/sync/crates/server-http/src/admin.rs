@@ -1,10 +1,10 @@
 use crate::state::AppState;
+use axum::Json;
 use axum::async_trait;
 use axum::body::Body;
-use axum::extract::{FromRequestParts, Query, State};
-use axum::http::{header, request::Parts, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -137,6 +137,13 @@ struct RequestPoint {
 #[derive(Deserialize)]
 pub(crate) struct EngagementQuery {
     days: Option<u16>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CatalogIdentityReviewQuery {
+    source_id: Option<String>,
+    status: Option<String>,
+    limit: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -349,6 +356,25 @@ pub(crate) async fn services(State(state): State<AppState>, admin: AdminUser) ->
     json_response(state.operational_services.snapshot().await)
 }
 
+pub(crate) async fn catalog_identity_reviews(State(state): State<AppState>, admin: AdminUser, Query(query): Query<CatalogIdentityReviewQuery>) -> Result<Response, StatusCode> {
+    audit(&state, &admin.user_id, "dashboard_catalog_identity_reviews_viewed").await?;
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let response = state.operational_services.catalog_identity_reviews(query.source_id.as_deref(), query.status.as_deref(), limit).await.map_err(remote_admin_error)?;
+    json_response(response)
+}
+
+pub(crate) async fn catalog_identity_review_action(State(state): State<AppState>, admin: AdminUser, Path(review_id): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
+    if review_id.len() != 64 || !review_id.bytes().all(|byte| byte.is_ascii_hexdigit()) || !action.is_object() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    audit(&state, &admin.user_id, "dashboard_catalog_identity_review_changed").await?;
+    let response = state.operational_services.catalog_identity_review_action(&review_id, &action).await.map_err(remote_admin_error)?;
+    json_response(response)
+}
+
 async fn audit(state: &AppState, administrator_user_id: &str, event_type: &'static str) -> Result<(), StatusCode> {
     sqlx::query(
         "INSERT INTO admin_audit_event(administrator_user_id, event_type, window_started_at)
@@ -373,6 +399,11 @@ fn json_response(value: impl Serialize) -> Result<Response, StatusCode> {
 fn internal(error: sqlx::Error) -> StatusCode {
     tracing::error!(%error, "administrator dashboard query failed");
     StatusCode::INTERNAL_SERVER_ERROR
+}
+
+fn remote_admin_error(error: String) -> StatusCode {
+    tracing::warn!(%error, "administrator catalogue review request failed");
+    StatusCode::BAD_GATEWAY
 }
 
 #[cfg(test)]

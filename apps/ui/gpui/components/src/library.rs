@@ -5,11 +5,11 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HEIGHT, AUTHOR_ROW_HORIZONTAL_PADDING, AUTHOR_ROW_LABEL_SIZE,
-    BOOK_CARD_AUTHOR_HEIGHT_REM, BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TEXT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE,
-    BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT, BOOK_COVER_WIDTH, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT,
-    CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH, DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD,
-    RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
+    AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HORIZONTAL_PADDING, AUTHOR_ROW_LABEL_SIZE, BOOK_CARD_AUTHOR_HEIGHT_REM,
+    BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT,
+    BOOK_COVER_WIDTH, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT, CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH,
+    DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -21,7 +21,7 @@ pub fn book_card(id: impl Into<ElementId>) -> Stateful<Div> {
 }
 
 pub fn book_card_text() -> Div {
-    div().w_full().min_w(px(BOOK_COVER_WIDTH)).flex_none().flex().flex_col().gap(px(BOOK_CARD_TEXT_GAP))
+    div().w_full().min_w(px(BOOK_COVER_WIDTH)).flex_none().flex().flex_col().gap(px(2.0))
 }
 
 pub fn book_cover(_theme: BrowserTheme) -> Div {
@@ -94,8 +94,6 @@ pub fn book_card_title() -> Div {
     div()
         .w_full()
         .min_w(px(BOOK_COVER_WIDTH))
-        .h(gpui::rems(BOOK_CARD_TITLE_HEIGHT_REM))
-        .flex_none()
         .text_size(gpui::rems(BOOK_CARD_TITLE_SIZE / 16.0))
         .line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT / BOOK_CARD_TITLE_SIZE))
         .font_weight(BOOK_CARD_TITLE_WEIGHT)
@@ -143,7 +141,16 @@ pub fn carousel_controls() -> Div {
 /// a horizontal row of cards is otherwise reachable only by a pointer that can
 /// scroll sideways.
 pub fn carousel_arrow_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id).icon(icon).secondary().outline().border_color(theme.border).text_color(theme.accent).w(px(crate::CAROUSEL_ARROW_SIZE)).h(px(crate::CAROUSEL_ARROW_SIZE)).rounded(px(RADIUS_SM)).tooltip(label.into())
+    Button::new(id)
+        .icon(icon)
+        .secondary()
+        .outline()
+        .border_color(theme.border)
+        .text_color(theme.accent)
+        .w(gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0))
+        .h(gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0))
+        .rounded(px(RADIUS_SM))
+        .tooltip(label.into())
 }
 
 pub fn authors_split_page() -> Div {
@@ -169,8 +176,8 @@ pub fn author_card_width(cover_count: usize) -> f32 {
 /// One fixed-height row in the virtualized author index. The trailing grid
 /// gap is included in the row height because `uniform_list` positions rows
 /// directly adjacent to one another.
-pub fn author_virtual_row() -> Div {
-    div().w_full().h(px(AUTHOR_ROW_HEIGHT + crate::BOOK_GRID_GAP)).flex_none().flex().flex_row().items_start().gap(px(crate::BOOK_GRID_GAP))
+pub fn author_virtual_row(rem_size: f32) -> Div {
+    div().w_full().h(px(crate::author_row_height(rem_size) + crate::BOOK_GRID_GAP)).flex_none().flex().flex_row().items_start().gap(px(crate::BOOK_GRID_GAP))
 }
 
 pub fn author_filter_box() -> Div {
@@ -202,12 +209,12 @@ pub fn author_sort_option(id: impl Into<ElementId>, label: impl Into<SharedStrin
 
 /// One author card. Its width follows the one-to-three regular-size covers it
 /// contains, while the name and vertical geometry remain identical.
-pub fn author_list_row(id: impl Into<ElementId>, cover_count: usize, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
+pub fn author_list_row(id: impl Into<ElementId>, cover_count: usize, selected: bool, theme: BrowserTheme, rem_size: f32) -> Stateful<Div> {
     let width = author_card_width(cover_count);
     div()
         .id(id)
         .w(px(width))
-        .min_h(px(AUTHOR_ROW_HEIGHT))
+        .min_h(px(crate::author_row_height(rem_size)))
         .p(px(AUTHOR_ROW_HORIZONTAL_PADDING))
         .flex_none()
         .flex()
@@ -355,7 +362,7 @@ pub fn hierarchy_grid(_theme: BrowserTheme) -> Div {
 /// One explicit hierarchy row. Column placement is decided by the shared
 /// hysteresis state, so this row must never independently wrap its children.
 pub fn hierarchy_grid_row() -> Div {
-    div().w_full().flex_none().flex().flex_row()
+    div().w_full().flex_none().flex().flex_row().gap(px(crate::HIERARCHY_CELL_MARGIN * 2.0))
 }
 
 /// One child of the folder or subject being browsed: name, and the number of
@@ -385,8 +392,8 @@ fn hierarchy_navigation_cell(id: impl Into<ElementId>, label: impl Into<SharedSt
         .ghost()
         .w(px(width))
         .flex_none()
-        .h(px(crate::HIERARCHY_CELL_HEIGHT))
-        .m(px(crate::HIERARCHY_CELL_MARGIN))
+        .h(gpui::rems(crate::HIERARCHY_CELL_HEIGHT / 16.0))
+        .my(px(crate::HIERARCHY_CELL_MARGIN))
         .px(px(SPACE_SM))
         .py(px(SPACE_XS))
         .rounded(px(0.0))
@@ -401,7 +408,7 @@ fn hierarchy_navigation_cell(id: impl Into<ElementId>, label: impl Into<SharedSt
                 .flex_row()
                 .items_center()
                 .gap(px(SPACE_SM))
-                .child(icon.size(px(crate::HIERARCHY_ICON_SIZE)).text_color(theme.accent))
+                .child(icon.size(gpui::rems(crate::HIERARCHY_ICON_SIZE / 16.0)).text_color(theme.accent))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(crate::HIERARCHY_LABEL_SIZE / 16.0)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(label))
                 .children(count)
                 .children(end_action),
@@ -507,7 +514,13 @@ pub fn catalog_toolbar() -> Div {
 /// The search field's slot in the toolbar. Bounded so a wide window spends its
 /// room on results rather than on an oversized input.
 pub fn catalog_toolbar_search() -> Div {
-    div().flex_1().min_w(px(140.0)).max_w(px(CATALOG_SEARCH_WIDTH))
+    div().flex_1().min_w(px(140.0)).max_w(px(CATALOG_SEARCH_WIDTH)).h(px(CATALOG_CONTROL_HEIGHT))
+}
+
+/// A Store search field with the same explicit height as every adjacent
+/// topbar action. Input defaults must not decide toolbar geometry.
+pub fn catalog_search_input(state: &gpui::Entity<gpui_component::input::InputState>) -> gpui_component::input::Input {
+    gpui::Styled::h(gpui_component::input::Input::new(state), px(CATALOG_CONTROL_HEIGHT))
 }
 
 /// A toolbar dropdown trigger. `active` marks an axis the catalogue reports as
@@ -656,7 +669,7 @@ pub fn catalog_section_heading(title: impl Into<SharedString>, detail: impl Into
 }
 
 pub fn catalog_source_name(text: impl Into<SharedString>) -> Div {
-    div().flex_none().text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::SEMIBOLD).child(text.into())
+    div().h(px(CATALOG_CONTROL_HEIGHT)).flex_none().flex().items_center().text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::SEMIBOLD).child(text.into())
 }
 
 pub fn catalog_back_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {

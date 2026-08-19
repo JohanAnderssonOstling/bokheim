@@ -35,7 +35,7 @@
 <style>
   .file-type-filter { width: auto; min-width: 0; }
   details { position: relative; width: auto; }
-  summary { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: .75rem; width: auto; min-width: 4rem; min-height: var(--layout-topbar-action-height); padding: 0 .75rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: var(--color-raised-bg); font: 700 max(12px, .75rem) var(--font-interface-family); cursor: pointer; list-style: none; }
+  summary { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: .75rem; width: auto; min-width: 4rem; min-height: var(--layout-topbar-action-height); padding: 0 .75rem; border: 1px solid var(--color-border); border-radius: 0; color: var(--color-ink-text); background: transparent; font: 700 max(12px, .75rem) var(--font-interface-family); cursor: pointer; list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
   details[open] summary { border-color: var(--color-accent); }

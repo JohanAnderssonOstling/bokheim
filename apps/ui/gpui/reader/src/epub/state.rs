@@ -91,7 +91,7 @@ impl ReaderView {
             title: pending.title,
             load_state: LoadState::Loading,
             load_generation: generation,
-            desired_column_count: 2,
+            desired_column_count: if cfg!(feature = "kobo") { 1 } else { ReaderSettings::preferences(cx).max_column_count },
             toc: TocState::default(),
             toc_tree,
             toc_visible: ReaderSettings::preferences(cx).toc_visible,
@@ -142,10 +142,15 @@ impl ReaderView {
         let documents = publication.document_uris.clone();
         let start_index = publication.start_index;
         let preferences = ReaderSettings::preferences(cx).clone();
+        // Kobo always uses one edge-to-edge renderer column. A deliberately
+        // wide base column is reduced to the current viewport by HtmlViewCore,
+        // keeping its computed outer column gap at zero in either orientation.
+        let column_width = if cfg!(feature = "kobo") { LINE_WIDTH_MAX } else { preferences.column_width };
         let initial_config = RendererInitialConfig {
             font_size: preferences.font_size,
-            column_width: preferences.column_width,
+            column_width,
             scale: preferences.scale,
+            max_column_count: cfg!(feature = "kobo").then_some(1),
             style_overrides: preferences.style_overrides(),
             paint_palette: library_paint_palette(cx),
             interaction_palette: InteractionPalette::default(),
@@ -601,10 +606,9 @@ impl ReaderView {
         // the first hardware key arrives, so it must not gate navigation. The
         // renderer owns the authoritative boundary checks and safely no-ops at
         // the beginning of the publication.
-        #[cfg(feature = "kobo")]
-        if let Err(error) = gpui_kobo::request_reader_page_repaint(gpui::px(58.0)) {
-            log::error!("failed to request Kobo reader page repaint: {error}");
-        }
+        // Kobo reader pages deliberately stay on the normal grayscale refresh
+        // path. DU is faster, but it cannot preserve the cream page background
+        // or the antialiased edges of text.
         self.with_renderer(cx, |renderer, cx| {
             renderer.previous_page(cx);
         });
@@ -613,10 +617,7 @@ impl ReaderView {
     pub(crate) fn next_page(&self, cx: &mut Context<Self>) {
         // See `previous_page`: renderer position is authoritative, while the
         // progress model may lag behind renderer creation or a page turn.
-        #[cfg(feature = "kobo")]
-        if let Err(error) = gpui_kobo::request_reader_page_repaint(gpui::px(58.0)) {
-            log::error!("failed to request Kobo reader page repaint: {error}");
-        }
+        // Keep the same quality refresh behavior as `previous_page`.
         self.with_renderer(cx, |renderer, cx| {
             renderer.next_page(cx);
         });
@@ -776,8 +777,9 @@ impl ReaderView {
 
     pub(crate) fn reset_appearance(&mut self, cx: &mut Context<Self>) {
         let defaults = ReaderPreferences::default();
-        let desired_columns_changed = self.desired_column_count != defaults.max_column_count;
-        self.desired_column_count = defaults.max_column_count;
+        let default_column_count = if cfg!(feature = "kobo") { 1 } else { defaults.max_column_count };
+        let desired_columns_changed = self.desired_column_count != default_column_count;
+        self.desired_column_count = default_column_count;
         let changed = ReaderSettings::update(cx, |preferences| {
             preferences.font_size = defaults.font_size;
             preferences.column_width = defaults.column_width;
@@ -793,7 +795,8 @@ impl ReaderView {
         let preferences = ReaderSettings::preferences(cx).clone();
         self.with_renderer(cx, |renderer, cx| {
             renderer.apply(RendererCommand::SetFontSize(preferences.font_size), cx);
-            renderer.apply(RendererCommand::SetColumnWidth(preferences.column_width), cx);
+            renderer.apply(RendererCommand::SetColumnWidth(if cfg!(feature = "kobo") { LINE_WIDTH_MAX } else { preferences.column_width }), cx);
+            renderer.apply(RendererCommand::SetMaxColumnCount(cfg!(feature = "kobo").then_some(1)), cx);
             renderer.apply(RendererCommand::SetScale(preferences.scale), cx);
             renderer.apply(RendererCommand::SetReaderStyleOverrides(preferences.style_overrides()), cx);
         });
@@ -806,6 +809,9 @@ impl ReaderView {
     }
 
     pub(crate) fn adjust_desired_column_count(&mut self, delta: i8, window: &mut Window, cx: &mut Context<Self>) {
+        if cfg!(feature = "kobo") {
+            return;
+        }
         const MIN_COLUMN_GAP: f64 = 20.0;
         let count = (i16::from(self.desired_column_count) + i16::from(delta)).clamp(i16::from(COLUMN_COUNT_MIN), i16::from(COLUMN_COUNT_MAX)) as u8;
         if count == self.desired_column_count {
@@ -842,6 +848,9 @@ impl ReaderView {
     }
 
     pub(crate) fn adjust_column_width(&self, delta: f64, cx: &mut Context<Self>) {
+        if cfg!(feature = "kobo") {
+            return;
+        }
         let width = (ReaderSettings::preferences(cx).column_width + delta).clamp(LINE_WIDTH_MIN, LINE_WIDTH_MAX);
         self.apply_appearance(cx, |preferences| preferences.column_width = width, |_| RendererCommand::SetColumnWidth(width));
     }

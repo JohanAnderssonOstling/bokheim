@@ -275,6 +275,7 @@ pub struct HtmlView {
     prepared_paint: Option<PreparedPaint>,
     display_dirty: bool,
     pointer_active: bool,
+    wheel_scroll_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -407,9 +408,11 @@ impl Element for HtmlDocumentElement {
             if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
                 return;
             }
-            scroll_target.update(cx, |view, cx| {
-                view.on_scroll(event, window, cx);
-            });
+            if scroll_target.read(cx).wheel_scroll_enabled {
+                scroll_target.update(cx, |view, cx| {
+                    view.on_scroll(event, window, cx);
+                });
+            }
         });
 
         let focus = self.focus.clone();
@@ -471,6 +474,7 @@ impl HtmlView {
             prepared_paint: None,
             display_dirty: true,
             pointer_active: false,
+            wheel_scroll_enabled: true,
         };
         println!("HTML_VIEW_STARTUP phase=view_ready elapsed_ms={}", startup_started.elapsed().as_millis());
         view
@@ -497,12 +501,23 @@ impl HtmlView {
         true
     }
 
-    pub fn next_page(&mut self, _cx: &mut Context<Self>) {
+    pub fn next_page(&mut self, _cx: &mut Context<Self>) -> bool {
+        let before = self.renderer.current_cfi();
         self.renderer.next_page();
+        before != self.renderer.current_cfi()
     }
 
-    pub fn previous_page(&mut self, _cx: &mut Context<Self>) {
+    /// Controls whether this view consumes vertical wheel gestures itself.
+    /// Embedders with explicit pagination can disable this so wheel gestures
+    /// continue to the surrounding page instead.
+    pub fn set_wheel_scroll_enabled(&mut self, enabled: bool) {
+        self.wheel_scroll_enabled = enabled;
+    }
+
+    pub fn previous_page(&mut self, _cx: &mut Context<Self>) -> bool {
+        let before = self.renderer.current_cfi();
         self.renderer.previous_page();
+        before != self.renderer.current_cfi()
     }
 
     pub fn next_line(&mut self, _cx: &mut Context<Self>) {

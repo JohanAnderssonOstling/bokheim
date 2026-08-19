@@ -224,7 +224,7 @@
   .cover-button:disabled { opacity: .58; }
   .cover-button.detailed { width: 100px; height: 160px; }
   .book-details { display: flex; flex-direction: column; gap: 5px; min-width: 0; max-width: 640px; height: 160px; align-content: start; }
-  .book-meta { display: grid; gap: var(--book-card-text-gap); min-width: 0; }
+  .book-meta { display: grid; gap: 2px; min-width: 0; }
   .book-meta strong, .book-meta span { overflow: hidden; text-overflow: ellipsis; }
   .book-meta strong { height: 22px; font-size: var(--book-card-title-size); font-weight: var(--book-card-title-weight); line-height: 22px; white-space: nowrap; }
   .book-meta span { height: 20px; color: var(--color-subtle-text); font-size: var(--book-card-author-size); line-height: 20px; white-space: nowrap; }
@@ -235,9 +235,9 @@
   .book-cover img { display: block; width: auto; max-width: 100%; height: auto; max-height: 100%; border: 1px solid var(--color-border); object-fit: contain; box-shadow: 0 4px 12px color-mix(in srgb, var(--color-box-shadow) 40%, transparent); }
   .book-cover > svg { width: 24px; height: 24px; }
   .book-cover > small { font-size: .75rem; }
-  .card-copy { display: grid; gap: var(--book-card-text-gap); min-width: 0; }
+  .card-copy { display: grid; gap: 2px; min-width: 0; }
   .card-copy strong, .card-copy > span:not(.progress-track) { overflow: hidden; text-overflow: ellipsis; }
-  .card-copy strong { display: -webkit-box; height: var(--book-card-title-block-height); font-size: var(--book-card-title-size); font-weight: var(--book-card-title-weight); line-height: var(--book-card-title-line-height); white-space: normal; line-clamp: var(--book-card-title-lines); -webkit-box-orient: vertical; -webkit-line-clamp: var(--book-card-title-lines); }
+  .card-copy strong { display: -webkit-box; max-height: var(--book-card-title-block-height); font-size: var(--book-card-title-size); font-weight: var(--book-card-title-weight); line-height: var(--book-card-title-line-height); white-space: normal; line-clamp: var(--book-card-title-lines); -webkit-box-orient: vertical; -webkit-line-clamp: var(--book-card-title-lines); }
   .card-copy .book-meta span { height: var(--book-card-author-block-height); color: var(--color-subtle-text); font-size: var(--book-card-author-size); line-height: var(--book-card-author-line-height); white-space: nowrap; }
   .progress-slot { display: flex; align-items: start; width: 100%; height: var(--book-card-progress-height); padding-top: 6px; }
   .progress-track { display: block; width: 100%; height: 4px; overflow: hidden; border-radius: 0; background: var(--color-border); }

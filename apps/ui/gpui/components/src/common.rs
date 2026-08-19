@@ -1,9 +1,10 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Div, ElementId, FontWeight, SharedString, div, px};
+use gpui::{AnyElement, App, Div, ElementId, FontWeight, SharedString, Window, div, px};
 use gpui_component::Disableable;
 use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::Size;
+use gpui_component::Theme;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants};
 
@@ -11,6 +12,18 @@ use crate::{BrowserTheme, SPACE_MD, SPACE_SM, Scrollable, ScrollableElement, TEX
 
 pub fn app_page(font_family: impl Into<SharedString>, font_size_px: u8, theme: BrowserTheme) -> Div {
     div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
+}
+
+/// A reader-window root using the application-wide interface typography.
+///
+/// Reader content owns its typography separately. This root only establishes
+/// the font family and rem basis used by reader chrome, panels, and popovers.
+pub fn reader_app_page(window: &mut Window, cx: &App, theme: BrowserTheme) -> Div {
+    let application_theme = Theme::global(cx);
+    let font_size = application_theme.font_size;
+    let font_family = application_theme.font_family.clone();
+    window.set_rem_size(font_size);
+    div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(font_size)
 }
 
 pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedString, theme: BrowserTheme, body: AnyElement, on_retry: impl Fn(&mut App) + 'static) -> AnyElement {

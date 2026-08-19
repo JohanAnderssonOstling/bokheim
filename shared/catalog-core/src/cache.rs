@@ -5,16 +5,16 @@ use catalog_contract::{
 use catalog_model::normalize_search_text;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use catalog_contract::{CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse, materialize_page, page_layout};
+use catalog_contract::{materialize_page, page_layout, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse};
 
 // Keep SQLite's file version at 1 because the additive v2 schema remains
 // writable by the previous binary during an automated deployment rollback.
@@ -25,7 +25,8 @@ const CATALOG_CACHE_FILE_VERSION: i64 = 1;
 // decode an incompatible persisted representation during startup.
 const CATALOG_CACHE_SCHEMA_VERSION: i64 = 12;
 const CATALOG_EPUB_ENRICHMENT_VERSION: i64 = 4;
-const CATALOG_METADATA_BACKFILL_VERSION: i64 = 1;
+const CATALOG_METADATA_BACKFILL_VERSION: i64 = 2;
+const CATALOG_SEARCH_INDEX_VERSION: i64 = 1;
 const MAX_CRAWL_ERROR_BYTES: usize = 2_048;
 
 const CREATE_SCHEMA: &str = r#"
@@ -50,6 +51,11 @@ CREATE TABLE IF NOT EXISTS catalog_cache_metadata (
     schema_version INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO catalog_cache_metadata(singleton, schema_version) VALUES(1, 12);
+
+CREATE TABLE IF NOT EXISTS catalog_subject_projection_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    unified_matcher_version INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS catalog_epub_extraction (
     source_id TEXT NOT NULL REFERENCES catalog_source(source_id) ON DELETE CASCADE,
@@ -103,6 +109,26 @@ CREATE TABLE IF NOT EXISTS catalog_metadata_backfill (
 );
 CREATE INDEX IF NOT EXISTS catalog_metadata_backfill_status
     ON catalog_metadata_backfill(status, attempts, source_id, acquisition_url);
+
+CREATE TABLE IF NOT EXISTS catalog_identity_review (
+    review_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    acquisition_url TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ambiguous','no_match','insufficient_metadata','failed','resolved','rejected')),
+    result_payload BLOB,
+    detail TEXT,
+    candidates_truncated INTEGER NOT NULL DEFAULT 0 CHECK(candidates_truncated IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    selected_isbn TEXT,
+    UNIQUE(source_id, acquisition_url),
+    FOREIGN KEY(source_id, acquisition_url)
+        REFERENCES catalog_epub_extraction(source_id, acquisition_url)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS catalog_identity_review_status
+    ON catalog_identity_review(status, source_id, updated_at, review_id);
 
 CREATE TABLE IF NOT EXISTS catalog_page (
     source_id TEXT NOT NULL REFERENCES catalog_source(source_id) ON DELETE CASCADE,
@@ -201,6 +227,67 @@ CREATE TABLE IF NOT EXISTS catalog_publication_toc (
         ON DELETE CASCADE
 );
 
+-- These external-content FTS tables index the existing normalized search
+-- columns without duplicating publication payloads. Triggers keep the index
+-- correct even if this database is temporarily opened by the rollback binary.
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_title_fts USING fts5(
+    normalized_title,
+    content='catalog_publication',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_author_fts USING fts5(
+    normalized_name,
+    content='catalog_publication_author',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_toc_fts USING fts5(
+    normalized_title,
+    content='catalog_publication_toc',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+CREATE TABLE IF NOT EXISTS catalog_search_index_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    index_version INTEGER NOT NULL,
+    ready INTEGER NOT NULL CHECK(ready IN (0, 1))
+);
+INSERT OR IGNORE INTO catalog_search_index_metadata(singleton,index_version,ready) VALUES(1,1,0);
+
+CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_insert AFTER INSERT ON catalog_publication BEGIN
+    INSERT INTO catalog_publication_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_delete AFTER DELETE ON catalog_publication BEGIN
+    INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_update AFTER UPDATE OF normalized_title ON catalog_publication BEGIN
+    INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+    INSERT INTO catalog_publication_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_insert AFTER INSERT ON catalog_publication_author BEGIN
+    INSERT INTO catalog_publication_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_delete AFTER DELETE ON catalog_publication_author BEGIN
+    INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_update AFTER UPDATE OF normalized_name ON catalog_publication_author BEGIN
+    INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
+    INSERT INTO catalog_publication_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_insert AFTER INSERT ON catalog_publication_toc BEGIN
+    INSERT INTO catalog_publication_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_delete AFTER DELETE ON catalog_publication_toc BEGIN
+    INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_update AFTER UPDATE OF normalized_title ON catalog_publication_toc BEGIN
+    INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+    INSERT INTO catalog_publication_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+
 CREATE TABLE IF NOT EXISTS catalog_publication_popularity (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
@@ -290,6 +377,12 @@ impl From<wire::WireError> for CatalogCacheError {
     }
 }
 
+impl From<serde_json::Error> for CatalogCacheError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
 #[derive(Clone)]
 pub struct CatalogCache {
     pool: Pool<SqliteConnectionManager>,
@@ -347,11 +440,13 @@ pub struct CatalogSourceInventory {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogInventory {
+    pub search_index_ready: bool,
     pub active_page_count: u64,
     pub active_publication_count: u64,
     pub active_epub_count: u64,
     pub epub_extractions: CatalogEpubExtractionInventory,
     pub metadata_backfill: CatalogMetadataBackfillInventory,
+    pub identity_reviews: CatalogIdentityReviewInventory,
     pub sources: Vec<CatalogSourceInventory>,
 }
 
@@ -361,6 +456,73 @@ pub struct CatalogMetadataBackfillInventory {
     pub running: u64,
     pub succeeded: u64,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CatalogIdentityReviewInventory {
+    pub ambiguous: u64,
+    pub no_match: u64,
+    pub insufficient_metadata: u64,
+    pub failed: u64,
+    pub resolved: u64,
+    pub rejected: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CatalogIdentityReview {
+    pub review_id: String,
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublicationIdentity,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub publishers: Vec<String>,
+    pub publication_year: Option<i32>,
+    pub status: String,
+    pub detail: Option<String>,
+    pub candidates: Vec<CatalogIdentityReviewCandidate>,
+    pub candidates_truncated: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CatalogIdentityReviewCandidate {
+    pub isbn13: String,
+    pub edition_id: String,
+    pub work_id: Option<String>,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub publishers: Vec<String>,
+    pub publication_year: Option<i32>,
+    pub matched_publisher: bool,
+    pub matched_publication_year: bool,
+    pub classifications: Vec<String>,
+}
+
+impl From<metadata_contract::EditionIdentityMatch> for CatalogIdentityReviewCandidate {
+    fn from(candidate: metadata_contract::EditionIdentityMatch) -> Self {
+        let classifications = candidate
+            .classifications
+            .iter()
+            .flat_map(|classification| match classification.scheme {
+                metadata_contract::ClassificationScheme::LibraryOfCongress => library_model::unified_lcc_subject_paths(&classification.notation),
+                metadata_contract::ClassificationScheme::DeweyDecimal => library_model::unified_ddc_subject_paths(&classification.notation),
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self {
+            isbn13: candidate.canonical_isbn13,
+            edition_id: candidate.open_library_edition_id,
+            work_id: candidate.open_library_work_id,
+            title: candidate.title,
+            authors: candidate.authors,
+            publishers: candidate.publishers,
+            publication_year: candidate.publication_year,
+            matched_publisher: candidate.matched_publisher,
+            matched_publication_year: candidate.matched_publication_year,
+            classifications,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -393,13 +555,15 @@ pub struct CatalogMetadataBackfillJob {
     pub metadata: CatalogEpubMetadata,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct CatalogMetadataBackfillUpdate {
     pub source_id: CatalogSourceId,
     pub publication: CatalogPublicationIdentity,
     pub acquisition_url: String,
     pub subjects: Vec<library_model::PublicationSubject>,
     pub popularity: Option<CatalogPublicationPopularity>,
+    pub metadata: CatalogEpubMetadata,
+    pub identity_result: Option<metadata_contract::EditionIdentityResult>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -435,6 +599,25 @@ impl CatalogPublicationPopularity {
     pub fn reading_log_count(&self) -> u64 {
         self.want_to_read_count.saturating_add(self.currently_reading_count).saturating_add(self.already_read_count)
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CatalogSubjectProjectionAudit {
+    pub dc_subject_occurrences: u64,
+    pub dc_subject_occurrences_with_bisac_assignment: u64,
+    pub dc_subject_occurrences_without_bisac_assignment: u64,
+    pub distinct_dc_subject_headings: u64,
+    pub distinct_dc_subject_headings_without_bisac_assignment: u64,
+    pub bisac_book_subject_combinations: u64,
+    pub bisac_books: u64,
+    pub unmatched_dc_subjects: Vec<CatalogUnmatchedDcSubject>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CatalogUnmatchedDcSubject {
+    pub subject: String,
+    pub occurrences: u64,
+    pub examples: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +656,124 @@ impl CatalogCache {
             connection.execute("UPDATE catalog_metadata_backfill SET status='pending', last_error='metadata backfill interrupted by service restart' WHERE status='running'", [])?;
         }
         Ok(Self { pool })
+    }
+
+    /// Builds the external-content FTS indexes once, after the HTTP listener is
+    /// available. Their database triggers keep them current across later
+    /// crawls, enrichment, and rollback to an older server binary.
+    pub fn refresh_search_index(&self) -> Result<bool, CatalogCacheError> {
+        let mut connection = self.pool.get()?;
+        let current = connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get::<_, bool>(0))?;
+        if current {
+            return Ok(false);
+        }
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("UPDATE catalog_search_index_metadata SET index_version=?1,ready=0 WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION])?;
+        transaction.execute("INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts) VALUES('rebuild')", [])?;
+        transaction.execute("INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts) VALUES('rebuild')", [])?;
+        transaction.execute("INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts) VALUES('rebuild')", [])?;
+        transaction.execute("UPDATE catalog_search_index_metadata SET ready=1 WHERE singleton=1", [])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn search_index_ready(&self) -> Result<bool, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get(0)).map_err(Into::into)
+    }
+
+    /// Rebuilds persisted unified taxonomy assignments in bounded batches.
+    /// Servers should run this away from their health-critical startup path.
+    pub fn refresh_unified_subject_assignments(&self) -> Result<(), CatalogCacheError> {
+        let mut connection = self.pool.get()?;
+        refresh_unified_subject_assignments(&mut connection)
+    }
+
+    /// Audits only whether Dublin Core subject headings resolve to coded BISAC
+    /// positions. Unified output never determines BISAC validity.
+    pub fn subject_projection_audit(&self) -> Result<CatalogSubjectProjectionAudit, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        let mut statement = connection.prepare(
+            "SELECT subject.source_id,subject.edition_id,subject.work_id,
+                    subject.name,subject.source,subject.authority,subject.code
+               FROM catalog_publication_subject subject
+               JOIN catalog_source source ON source.source_id=subject.source_id AND source.active_generation=subject.generation
+               JOIN catalog_publication publication ON publication.source_id=subject.source_id AND publication.generation=subject.generation
+                 AND publication.edition_id=subject.edition_id AND publication.work_id=subject.work_id
+              WHERE publication.importable=1
+              ORDER BY subject.source_id,subject.edition_id,subject.work_id,subject.position",
+        )?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?)))?;
+
+        let mut dc_subject_occurrences = 0_u64;
+        let mut matched_dc_subject_occurrences = 0_u64;
+        let mut dc_headings = BTreeSet::<String>::new();
+        let mut unmatched_headings = BTreeSet::<String>::new();
+        let mut bisac_combinations = 0_u64;
+        let mut bisac_books = 0_u64;
+        let mut unmatched = BTreeMap::<String, (u64, Vec<Vec<String>>)>::new();
+        let mut current_book = None::<(String, String, String)>;
+        let mut subjects = Vec::<library_model::PublicationSubject>::new();
+        let mut audit_book = |subjects: &[library_model::PublicationSubject]| {
+            if subjects.is_empty() {
+                return;
+            }
+            let bisac_assignments = library_model::match_bisac_subjects(&subjects);
+            let coded_assignments = bisac_assignments.iter().filter(|assignment| library_model::bisac_code_for_path(assignment.node_path()).is_some()).collect::<Vec<_>>();
+            if !coded_assignments.is_empty() {
+                bisac_books = bisac_books.saturating_add(1);
+            }
+            bisac_combinations = bisac_combinations.saturating_add(u64::try_from(coded_assignments.len()).unwrap_or(u64::MAX));
+            let matched_positions = coded_assignments.iter().flat_map(|assignment| assignment.evidence_positions().iter().copied()).collect::<BTreeSet<_>>();
+            let context = subjects.iter().map(|subject| format!("{} [source={}; authority={}; code={}]", subject.name(), subject.source(), subject.authority().unwrap_or(""), subject.code().unwrap_or(""))).collect::<Vec<_>>();
+            for (position, subject) in subjects.iter().enumerate() {
+                if !subject.source().trim().eq_ignore_ascii_case("dc:subject") {
+                    continue;
+                }
+                dc_subject_occurrences = dc_subject_occurrences.saturating_add(1);
+                let normalized = subject.name().split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                dc_headings.insert(normalized.clone());
+                if matched_positions.contains(&position) {
+                    matched_dc_subject_occurrences = matched_dc_subject_occurrences.saturating_add(1);
+                } else {
+                    unmatched_headings.insert(normalized);
+                    let entry = unmatched.entry(subject.name().to_owned()).or_default();
+                    entry.0 = entry.0.saturating_add(1);
+                    if entry.1.len() < 3 {
+                        entry.1.push(context.clone());
+                    }
+                }
+            }
+        };
+
+        for row in rows {
+            let (source_id, edition_id, work_id, name, source, authority, code) = row?;
+            let key = (source_id, edition_id, work_id);
+            if current_book.as_ref().is_some_and(|current| current != &key) {
+                audit_book(&subjects);
+                subjects.clear();
+            }
+            current_book = Some(key);
+            subjects.push(library_model::PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogCacheError::new(error.to_string()))?);
+        }
+        audit_book(&subjects);
+        drop(audit_book);
+
+        let mut unmatched_dc_subjects = unmatched.into_iter().map(|(subject, (occurrences, examples))| CatalogUnmatchedDcSubject { subject, occurrences, examples }).collect::<Vec<_>>();
+        unmatched_dc_subjects.sort_by(|left, right| right.occurrences.cmp(&left.occurrences).then_with(|| left.subject.cmp(&right.subject)));
+        unmatched_dc_subjects.truncate(100);
+
+        Ok(CatalogSubjectProjectionAudit {
+            dc_subject_occurrences,
+            dc_subject_occurrences_with_bisac_assignment: matched_dc_subject_occurrences,
+            dc_subject_occurrences_without_bisac_assignment: dc_subject_occurrences.saturating_sub(matched_dc_subject_occurrences),
+            distinct_dc_subject_headings: u64::try_from(dc_headings.len()).unwrap_or(u64::MAX),
+            distinct_dc_subject_headings_without_bisac_assignment: u64::try_from(unmatched_headings.len()).unwrap_or(u64::MAX),
+            bisac_book_subject_combinations: bisac_combinations,
+            bisac_books,
+            unmatched_dc_subjects,
+        })
     }
 
     /// Rewrites cached publication payloads and page snapshots for one source.
@@ -573,7 +874,9 @@ impl CatalogCache {
             succeeded: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE status='succeeded'", [], |row| stored_u64(row.get(0)?, "succeeded metadata backfill count"))?,
             last_error: connection.query_row("SELECT last_error FROM catalog_metadata_backfill WHERE last_error IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1", [], |row| row.get(0)).optional()?,
         };
+        let identity_reviews = identity_review_inventory_in(&connection, None)?;
         Ok(CatalogInventory {
+            search_index_ready: connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get(0))?,
             active_page_count: sources.iter().map(|source| source.active_page_count).sum(),
             active_publication_count: sources.iter().map(|source| source.active_publication_count).sum(),
             active_epub_count: sources.iter().map(|source| source.active_epub_count).sum(),
@@ -590,6 +893,7 @@ impl CatalogCache {
                 total
             }),
             metadata_backfill,
+            identity_reviews,
             sources,
         })
     }
@@ -670,6 +974,129 @@ impl CatalogCache {
         payload.map(|payload| decode_cached(&payload)).transpose().map_err(Into::into)
     }
 
+    pub fn identity_review_inventory(&self) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        identity_review_inventory_in(&connection, None)
+    }
+
+    pub fn identity_review_inventory_for_source(&self, source_id: &CatalogSourceId) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        identity_review_inventory_in(&connection, Some(source_id))
+    }
+
+    pub fn identity_reviews(&self, source_id: Option<&CatalogSourceId>, status: Option<&str>, limit: usize) -> Result<Vec<CatalogIdentityReview>, CatalogCacheError> {
+        if status.is_some_and(|value| !matches!(value, "ambiguous" | "no_match" | "insufficient_metadata" | "failed" | "resolved" | "rejected")) {
+            return Err(CatalogCacheError::new("invalid catalogue identity review status"));
+        }
+        let limit = storage_i64(limit.clamp(1, 200) as u64, "identity review limit")?;
+        let connection = self.pool.get()?;
+        let mut statement = connection.prepare(
+            "SELECT review.review_id,review.source_id,extraction.edition_id,extraction.work_id,extraction.metadata_payload,
+                    review.status,review.detail,review.result_payload,review.candidates_truncated,review.updated_at
+             FROM catalog_identity_review review
+             JOIN catalog_epub_extraction extraction
+               ON extraction.source_id=review.source_id AND extraction.acquisition_url=review.acquisition_url
+             JOIN catalog_source source ON source.source_id=review.source_id
+             JOIN catalog_publication publication
+               ON publication.source_id=review.source_id AND publication.generation=source.active_generation
+              AND publication.acquisition_url=review.acquisition_url
+             WHERE (?1 IS NULL OR review.source_id=?1)
+               AND ((?2 IS NULL AND review.status IN ('ambiguous','no_match','insufficient_metadata','failed')) OR review.status=?2)
+             ORDER BY CASE review.status WHEN 'ambiguous' THEN 0 WHEN 'no_match' THEN 1 WHEN 'insufficient_metadata' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,
+                      review.updated_at DESC,review.review_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![source_id.map(CatalogSourceId::as_str), status, limit], |row| {
+            let source = row.get::<_, String>(1)?;
+            let metadata_payload = row.get::<_, Vec<u8>>(4)?;
+            let metadata: CatalogEpubMetadata = decode_cached(&metadata_payload).map_err(sql_decode_error)?;
+            let result_payload = row.get::<_, Option<Vec<u8>>>(7)?;
+            let result = result_payload.map(|payload| serde_json::from_slice::<metadata_contract::EditionIdentityResult>(&payload)).transpose().map_err(sql_decode_error)?;
+            let publication_year = library_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value()));
+            let title = metadata.book.title.clone();
+            let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect();
+            let publishers = metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect();
+            Ok(CatalogIdentityReview {
+                review_id: row.get(0)?,
+                source_id: CatalogSourceId::parse(&source).map_err(|error| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?,
+                publication: CatalogPublicationIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
+                title,
+                authors,
+                publishers,
+                publication_year,
+                status: row.get(5)?,
+                detail: row.get(6)?,
+                candidates: result.as_ref().map(|result| result.candidates.clone().into_iter().map(Into::into).collect()).unwrap_or_default(),
+                candidates_truncated: row.get(8)?,
+                updated_at: stored_u64(row.get(9)?, "identity review update timestamp")?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn identity_review_candidate_isbn(&self, review_id: &str, edition_id: &str, isbn13: &str) -> Result<Option<String>, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        let payload = connection.query_row("SELECT result_payload FROM catalog_identity_review WHERE review_id=?1 AND status='ambiguous'", [review_id], |row| row.get::<_, Option<Vec<u8>>>(0)).optional()?.flatten();
+        let Some(payload) = payload else { return Ok(None) };
+        let result: metadata_contract::EditionIdentityResult = serde_json::from_slice(&payload).map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        Ok(result.candidates.into_iter().find(|candidate| candidate.open_library_edition_id == edition_id && candidate.canonical_isbn13 == isbn13).map(|candidate| candidate.canonical_isbn13))
+    }
+
+    pub fn resolve_identity_review_with_isbn(&self, review_id: &str, canonical_isbn13: &str) -> Result<bool, CatalogCacheError> {
+        let mut connection = self.pool.get()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                "SELECT review.source_id,review.acquisition_url,extraction.metadata_payload
+                 FROM catalog_identity_review review JOIN catalog_epub_extraction extraction
+                   ON extraction.source_id=review.source_id AND extraction.acquisition_url=review.acquisition_url
+                 WHERE review.review_id=?1 AND review.status IN ('ambiguous','no_match','insufficient_metadata','failed')",
+                [review_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            )
+            .optional()?;
+        let Some((source_id, acquisition_url, payload)) = row else { return Ok(false) };
+        let mut metadata: CatalogEpubMetadata = decode_cached(&payload)?;
+        let provenance = library_model::PublicationIdentifierType::new("openlibrary-edition-match", Some("bokheim:provenance".to_owned())).map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        let identifier = library_model::PublicationIdentifier::new(canonical_isbn13, library_model::PublicationIdentifierScheme::Isbn, vec![provenance]).map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &library_model::PublicationIdentifierScheme::Isbn);
+        metadata.book.publication.identifiers.push(identifier);
+        transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id, acquisition_url, wire::encode(&metadata)?])?;
+        transaction.execute(
+            "INSERT INTO catalog_metadata_backfill(source_id,acquisition_url,version,status) VALUES(?1,?2,?3,'pending')
+             ON CONFLICT(source_id,acquisition_url) DO UPDATE SET version=excluded.version,status='pending',last_error=NULL",
+            params![source_id, acquisition_url, CATALOG_METADATA_BACKFILL_VERSION],
+        )?;
+        let now = unix_timestamp()?;
+        transaction.execute("UPDATE catalog_identity_review SET status='resolved',selected_isbn=?2,resolved_at=?3,updated_at=?3 WHERE review_id=?1", params![review_id, canonical_isbn13, now])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn reject_identity_review(&self, review_id: &str) -> Result<bool, CatalogCacheError> {
+        let connection = self.pool.get()?;
+        let now = unix_timestamp()?;
+        Ok(connection.execute("UPDATE catalog_identity_review SET status='rejected',resolved_at=?2,updated_at=?2 WHERE review_id=?1 AND status IN ('ambiguous','no_match','insufficient_metadata','failed')", params![review_id, now])? == 1)
+    }
+
+    pub fn retry_identity_review(&self, review_id: &str) -> Result<bool, CatalogCacheError> {
+        let mut connection = self.pool.get()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row("SELECT source_id,acquisition_url FROM catalog_identity_review WHERE review_id=?1 AND status IN ('ambiguous','no_match','insufficient_metadata','failed')", [review_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let Some((source_id, acquisition_url)) = row else { return Ok(false) };
+        transaction.execute(
+            "INSERT INTO catalog_metadata_backfill(source_id,acquisition_url,version,status) VALUES(?1,?2,?3,'pending')
+             ON CONFLICT(source_id,acquisition_url) DO UPDATE SET version=excluded.version,status='pending',last_error=NULL",
+            params![source_id, acquisition_url, CATALOG_METADATA_BACKFILL_VERSION],
+        )?;
+        transaction.execute("DELETE FROM catalog_identity_review WHERE review_id=?1", [review_id])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn schedule_metadata_backfill(&self) -> Result<usize, CatalogCacheError> {
         let connection = self.pool.get()?;
         connection
@@ -741,6 +1168,7 @@ impl CatalogCache {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for update in updates {
             let generation = active_generation_in(&transaction, &update.source_id)?;
+            transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&update.metadata)?])?;
             if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
                 replace_publication_subjects(&transaction, &update.source_id, generation, &update.publication, &update.subjects)?;
                 if let Some(popularity) = &update.popularity {
@@ -764,6 +1192,32 @@ impl CatalogCache {
                     )?;
                 }
             }
+            match update.identity_result.as_ref() {
+                Some(result) if result.status != metadata_contract::EditionIdentityStatus::Matched => {
+                    let status = match result.status {
+                        metadata_contract::EditionIdentityStatus::Ambiguous => "ambiguous",
+                        metadata_contract::EditionIdentityStatus::NoMatch => "no_match",
+                        metadata_contract::EditionIdentityStatus::InsufficientMetadata => "insufficient_metadata",
+                        metadata_contract::EditionIdentityStatus::Matched => unreachable!(),
+                    };
+                    let review_id = blake3::hash(format!("{}\n{}", update.source_id.as_str(), update.acquisition_url).as_bytes()).to_hex().to_string();
+                    let now = unix_timestamp()?;
+                    transaction.execute(
+                        "INSERT INTO catalog_identity_review(review_id,source_id,acquisition_url,status,result_payload,candidates_truncated,created_at,updated_at)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?7)
+                         ON CONFLICT(source_id,acquisition_url) DO UPDATE SET
+                           status=excluded.status,result_payload=excluded.result_payload,detail=NULL,candidates_truncated=excluded.candidates_truncated,
+                           updated_at=excluded.updated_at,resolved_at=NULL,selected_isbn=NULL",
+                        params![review_id, update.source_id.as_str(), update.acquisition_url, status, serde_json::to_vec(result)?, result.candidates_truncated, now],
+                    )?;
+                }
+                _ => {
+                    transaction.execute(
+                        "DELETE FROM catalog_identity_review WHERE source_id=?1 AND acquisition_url=?2 AND status IN ('ambiguous','no_match','insufficient_metadata','failed')",
+                        params![update.source_id.as_str(), update.acquisition_url],
+                    )?;
+                }
+            }
             transaction.execute("UPDATE catalog_metadata_backfill SET status='succeeded',last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![update.source_id.as_str(), update.acquisition_url])?;
         }
         transaction.commit()?;
@@ -776,6 +1230,16 @@ impl CatalogCache {
         let error = bounded_crawl_error(error);
         for job in jobs {
             transaction.execute("UPDATE catalog_metadata_backfill SET status='pending',last_error=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![job.source_id.as_str(), job.acquisition_url, error])?;
+            let review_id = blake3::hash(format!("{}\n{}", job.source_id.as_str(), job.acquisition_url).as_bytes()).to_hex().to_string();
+            let now = unix_timestamp()?;
+            transaction.execute(
+                "INSERT INTO catalog_identity_review(review_id,source_id,acquisition_url,status,detail,created_at,updated_at)
+                 VALUES(?1,?2,?3,'failed',?4,?5,?5)
+                 ON CONFLICT(source_id,acquisition_url) DO UPDATE SET
+                   status='failed',result_payload=NULL,detail=excluded.detail,candidates_truncated=0,updated_at=excluded.updated_at,resolved_at=NULL,selected_isbn=NULL
+                 WHERE catalog_identity_review.status NOT IN ('resolved','rejected')",
+                params![review_id, job.source_id.as_str(), job.acquisition_url, error, now],
+            )?;
         }
         transaction.commit()?;
         Ok(())
@@ -1567,10 +2031,9 @@ impl CatalogCache {
         Ok(CatalogRecommendationResponse { recommendations })
     }
 
-    /// Browses the same canonical subject assignments used by recommendation
-    /// matching. The locator is deliberately opaque to clients so taxonomy
-    /// storage and hierarchy rules stay here rather than being duplicated in
-    /// each UI.
+    /// Browses the same unified taxonomy projection as the local library. The
+    /// locator is deliberately opaque to clients so taxonomy storage and
+    /// hierarchy rules stay here rather than being duplicated in each UI.
     pub fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogCacheError> {
         const MAX_RESULTS: usize = 100;
         const MAX_SOURCE_FILTERS: usize = 256;
@@ -1579,114 +2042,173 @@ impl CatalogCache {
         }
         let limit = usize::try_from(request.limit).unwrap_or(MAX_RESULTS).clamp(1, MAX_RESULTS);
         let normalized_query = normalize_search_text(&request.query);
-        let location = request.locator.as_deref().map(parse_subject_locator).transpose()?.unwrap_or_default();
+        let location = request.locator.as_deref().map(parse_subject_locator).transpose()?.unwrap_or_else(|| SubjectBrowseLocation { system_id: Some(library_model::UNIFIED_SYSTEM_ID.to_owned()), subject_path: None, offset: 0 });
         let offset = usize::try_from(location.offset).unwrap_or(usize::MAX);
         let connection = self.pool.get()?;
-        if location.system_id.is_none() {
-            return browse_subject_roots(&connection, request);
-        }
-
-        let mut child_publications = HashMap::<(String, Option<String>, String), HashSet<(String, String, String)>>::new();
-        let mut publications = HashMap::<(String, String, String), CatalogSourcedPublication>::new();
-        let mut direct_publication_keys = HashSet::new();
-        let mut popularity = HashMap::<(String, String, String), (bool, i64, i64, u64, i64)>::new();
         let system_id = location.system_id.as_deref().expect("subject system checked above");
         if !browse_subject_system(system_id) {
             return Err(CatalogCacheError::new("unsupported catalogue subject system"));
         }
-        let mut statement = connection.prepare(
-            "SELECT a.system_id,a.subject_path,p.source_id,p.edition_id,p.work_id,p.payload,
-                    COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),p.sequence
-                 FROM catalog_publication_subject_assignment a
-                 JOIN catalog_source s ON s.source_id=a.source_id AND s.active_generation=a.generation
-                 JOIN catalog_publication p ON p.source_id=a.source_id AND p.generation=a.generation AND p.edition_id=a.edition_id AND p.work_id=a.work_id
-                 LEFT JOIN catalog_publication_popularity pop
-                   ON pop.source_id=p.source_id AND pop.generation=p.generation AND pop.edition_id=p.edition_id AND pop.work_id=p.work_id
-                 WHERE a.system_id=?1 AND p.importable=1
-                   AND (?2='' OR a.subject_path=?2 OR instr(a.subject_path,?2 || ' / ')=1)
-                   AND (?3='' OR instr(p.normalized_title,?3)>0
-                     OR EXISTS(SELECT 1 FROM catalog_publication_author author
-                       WHERE author.source_id=p.source_id AND author.generation=p.generation
-                         AND author.edition_id=p.edition_id AND author.work_id=p.work_id
-                         AND instr(author.normalized_name,?3)>0)
-                     OR EXISTS(SELECT 1 FROM catalog_publication_toc toc
-                       WHERE toc.source_id=p.source_id AND toc.generation=p.generation
-                         AND toc.edition_id=p.edition_id AND toc.work_id=p.work_id
-                         AND instr(toc.normalized_title,?3)>0))",
-        )?;
-        let map_row = |row: &rusqlite::Row<'_>| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-            ))
-        };
-        let mut rows = statement.query_map(params![system_id, location.subject_path.as_deref().unwrap_or(""), normalized_query], map_row)?;
-        let mut rejected = HashSet::new();
-        while let Some(row) = rows.next() {
-            let (system_id, subject_path, source, edition, work, payload, reading_log_count, rating_count, sequence) = row?;
-            if !request.source_ids.is_empty() && !request.source_ids.iter().any(|source_id| source_id.as_str() == source) {
-                continue;
+        let subject_path = location.subject_path.as_deref().unwrap_or("");
+        let source_ids = serde_json::to_string(&request.source_ids.iter().map(CatalogSourceId::as_str).collect::<Vec<_>>())?;
+        let supported_languages = serde_json::to_string(&request.supported_languages)?;
+        let language_filter = "(json_array_length(?5)=0 OR NOT EXISTS(
+                    SELECT 1 FROM catalog_publication_language any_language
+                     WHERE any_language.source_id=p.source_id AND any_language.generation=p.generation
+                       AND any_language.edition_id=p.edition_id AND any_language.work_id=p.work_id
+                 ) OR EXISTS(
+                    SELECT 1 FROM catalog_publication_language language
+                    JOIN json_each(?5) supported
+                      ON lower(substr(language.language,1,instr(language.language || '-', '-')-1))=
+                         lower(substr(supported.value,1,instr(supported.value || '-', '-')-1))
+                   WHERE language.source_id=p.source_id AND language.generation=p.generation
+                     AND language.edition_id=p.edition_id AND language.work_id=p.work_id
+                 ))";
+        let source_filter = "(json_array_length(?4)=0 OR p.source_id IN (SELECT value FROM json_each(?4)))";
+
+        let mut navigation = Vec::new();
+        if normalized_query.is_empty() {
+            let sql = format!(
+                "WITH scoped AS (
+                    SELECT CASE WHEN ?2='' THEN a.subject_path ELSE substr(a.subject_path,length(?2)+4) END AS remainder,
+                           p.source_id || char(31) || p.edition_id || char(31) || p.work_id AS publication_key
+                      FROM catalog_publication_subject_assignment a
+                      JOIN catalog_source s ON s.source_id=a.source_id AND s.active_generation=a.generation
+                      JOIN catalog_publication p ON p.source_id=a.source_id AND p.generation=a.generation
+                       AND p.edition_id=a.edition_id AND p.work_id=a.work_id
+                     WHERE a.system_id=?1 AND p.importable=1
+                       AND (?2='' OR instr(a.subject_path,?2 || ' / ')=1)
+                       AND {source_filter} AND {language_filter}
+                 ), children AS (
+                    SELECT CASE WHEN instr(remainder,' / ')>0 THEN substr(remainder,1,instr(remainder,' / ')-1) ELSE remainder END AS child,
+                           publication_key
+                      FROM scoped WHERE remainder!=''
+                 )
+                 SELECT child,COUNT(DISTINCT publication_key) FROM children
+                  WHERE child!='' GROUP BY child ORDER BY child"
+            );
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(params![system_id, subject_path, normalized_query, source_ids, supported_languages], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (title, count) = row?;
+                let child_path = if subject_path.is_empty() { title.clone() } else { format!("{subject_path} / {title}") };
+                navigation.push(CatalogLink {
+                    title,
+                    target: CatalogLinkTarget::Page { locator: subject_locator(&SubjectBrowseLocation { system_id: Some(system_id.to_owned()), subject_path: Some(child_path), offset: 0 }) },
+                    number_of_items: Some(u32::try_from(stored_u64(count, "subject publication count")?).unwrap_or(u32::MAX)),
+                    active: false,
+                });
             }
-            let key = (source.clone(), edition, work);
-            if rejected.contains(&key) {
-                continue;
-            }
-            if !publications.contains_key(&key) {
+        }
+
+        let path_filter = if normalized_query.is_empty() { "a.subject_path=?2" } else { "(?2='' OR a.subject_path=?2 OR instr(a.subject_path,?2 || ' / ')=1)" };
+        let use_search_index = !normalized_query.is_empty()
+            && normalized_query.chars().count() >= 3
+            && connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get::<_, bool>(0))?;
+        // Quoting makes the normalized text a literal FTS phrase instead of
+        // exposing MATCH operators supplied by an HTTP client. The trigram
+        // tokenizer preserves the previous substring-search semantics.
+        let search_parameter = if use_search_index { format!("\"{}\"", normalized_query.replace('"', "\"\"")) } else { normalized_query.clone() };
+        let mut ranked_publications = Vec::new();
+        let mut total = 0_usize;
+        if !normalized_query.is_empty() || !subject_path.is_empty() {
+            let matching_publications = if normalized_query.is_empty() {
+                String::new()
+            } else if use_search_index {
+                format!(
+                    "WITH matching_publications(source_id,generation,edition_id,work_id) AS MATERIALIZED (
+                        SELECT p.source_id,p.generation,p.edition_id,p.work_id
+                          FROM catalog_publication_title_fts
+                          JOIN catalog_publication p ON p.rowid=catalog_publication_title_fts.rowid
+                          JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
+                         WHERE p.importable=1 AND {source_filter} AND catalog_publication_title_fts MATCH ?3
+                        UNION
+                        SELECT author.source_id,author.generation,author.edition_id,author.work_id
+                          FROM catalog_publication_author_fts
+                          JOIN catalog_publication_author author ON author.rowid=catalog_publication_author_fts.rowid
+                          JOIN catalog_source active ON active.source_id=author.source_id AND active.active_generation=author.generation
+                          JOIN catalog_publication p ON p.source_id=author.source_id AND p.generation=author.generation
+                           AND p.edition_id=author.edition_id AND p.work_id=author.work_id
+                         WHERE p.importable=1 AND {source_filter} AND catalog_publication_author_fts MATCH ?3
+                        UNION
+                        SELECT toc.source_id,toc.generation,toc.edition_id,toc.work_id
+                          FROM catalog_publication_toc_fts
+                          JOIN catalog_publication_toc toc ON toc.rowid=catalog_publication_toc_fts.rowid
+                          JOIN catalog_source active ON active.source_id=toc.source_id AND active.active_generation=toc.generation
+                          JOIN catalog_publication p ON p.source_id=toc.source_id AND p.generation=toc.generation
+                           AND p.edition_id=toc.edition_id AND p.work_id=toc.work_id
+                         WHERE p.importable=1 AND {source_filter} AND catalog_publication_toc_fts MATCH ?3
+                    )"
+                )
+            } else {
+                format!(
+                    "WITH matching_publications(source_id,generation,edition_id,work_id) AS MATERIALIZED (
+                        SELECT p.source_id,p.generation,p.edition_id,p.work_id
+                          FROM catalog_publication p
+                          JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
+                         WHERE p.importable=1 AND {source_filter} AND instr(p.normalized_title,?3)>0
+                        UNION
+                        SELECT author.source_id,author.generation,author.edition_id,author.work_id
+                          FROM catalog_publication_author author
+                          JOIN catalog_source active ON active.source_id=author.source_id AND active.active_generation=author.generation
+                          JOIN catalog_publication p ON p.source_id=author.source_id AND p.generation=author.generation
+                           AND p.edition_id=author.edition_id AND p.work_id=author.work_id
+                         WHERE p.importable=1 AND {source_filter} AND instr(author.normalized_name,?3)>0
+                        UNION
+                        SELECT toc.source_id,toc.generation,toc.edition_id,toc.work_id
+                          FROM catalog_publication_toc toc
+                          JOIN catalog_source active ON active.source_id=toc.source_id AND active.active_generation=toc.generation
+                          JOIN catalog_publication p ON p.source_id=toc.source_id AND p.generation=toc.generation
+                           AND p.edition_id=toc.edition_id AND p.work_id=toc.work_id
+                         WHERE p.importable=1 AND {source_filter} AND instr(toc.normalized_title,?3)>0
+                    )"
+                )
+            };
+            let matching_join = if normalized_query.is_empty() {
+                String::new()
+            } else {
+                "JOIN matching_publications matching
+                    ON matching.source_id=p.source_id AND matching.generation=p.generation
+                   AND matching.edition_id=p.edition_id AND matching.work_id=p.work_id"
+                    .to_owned()
+            };
+            let sql = format!(
+                "{matching_publications}
+                 SELECT p.source_id,p.payload,COUNT(*) OVER(),COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),p.sequence
+                   FROM catalog_publication p
+                   JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
+                   {matching_join}
+                   LEFT JOIN catalog_publication_popularity pop
+                     ON pop.source_id=p.source_id AND pop.generation=p.generation
+                    AND pop.edition_id=p.edition_id AND pop.work_id=p.work_id
+                  WHERE p.importable=1 AND {source_filter} AND {language_filter}
+                    AND EXISTS(SELECT 1 FROM catalog_publication_subject_assignment a
+                         WHERE a.source_id=p.source_id AND a.generation=p.generation
+                           AND a.edition_id=p.edition_id AND a.work_id=p.work_id
+                           AND a.system_id=?1 AND {path_filter})
+                  ORDER BY (COALESCE(pop.reading_log_count,0)>0 OR COALESCE(pop.rating_count,0)>0) DESC,
+                           COALESCE(pop.reading_log_count,0) DESC,COALESCE(pop.rating_count,0) DESC,p.sequence DESC,
+                           p.source_id,p.edition_id,p.work_id
+                  LIMIT ?6 OFFSET ?7"
+            );
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement
+                .query_map(params![system_id, subject_path, search_parameter, source_ids, supported_languages, storage_i64(limit as u64, "subject result limit")?, storage_i64(offset as u64, "subject result offset")?], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?))
+                })?;
+            for row in rows {
+                let (source, payload, count, reading_log_count, rating_count, sequence) = row?;
+                total = usize::try_from(stored_u64(count, "subject result count")?).unwrap_or(usize::MAX);
                 let publication: CatalogPublication = decode_cached(&payload)?;
-                if !request.supported_languages.is_empty() && !publication.languages.is_empty() && !publication.languages.iter().any(|language| language_supported(language, &request.supported_languages)) {
-                    rejected.insert(key);
-                    continue;
-                }
-                let source_id = CatalogSourceId::parse(&source).map_err(CatalogCacheError::new)?;
                 let provider_popularity = project_gutenberg_download_count(&publication).unwrap_or(0);
-                popularity.insert(key.clone(), (reading_log_count > 0 || rating_count > 0, reading_log_count, rating_count, provider_popularity, sequence));
-                publications.insert(key.clone(), CatalogSourcedPublication { source_id, publication });
-            }
-            // Match regular library subject browsing: an unsearched level
-            // lists only books assigned exactly there. Searching within a
-            // subject continues to include matching descendants.
-            if !normalized_query.is_empty() || location.subject_path.as_deref() == Some(subject_path.as_str()) {
-                direct_publication_keys.insert(key.clone());
-            }
-            if let Some((child_system, child_path, child_title)) = browse_subject_child(&location, &system_id, &subject_path) {
-                child_publications.entry((child_system, child_path, child_title)).or_default().insert(key.clone());
+                ranked_publications.push((
+                    CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogCacheError::new)?, publication },
+                    (reading_log_count > 0 || rating_count > 0, reading_log_count, rating_count, provider_popularity, sequence),
+                ));
             }
         }
-
-        let mut navigation = child_publications
-            .into_iter()
-            .map(|((system_id, subject_path, title), keys)| CatalogLink {
-                title,
-                target: CatalogLinkTarget::Page { locator: subject_locator(&SubjectBrowseLocation { system_id: Some(system_id), subject_path, offset: 0 }) },
-                number_of_items: Some(u32::try_from(keys.len()).unwrap_or(u32::MAX)),
-                active: false,
-            })
-            .collect::<Vec<_>>();
-        navigation.sort_by(|left, right| left.title.cmp(&right.title));
-        if !normalized_query.is_empty() {
-            navigation.clear();
-        }
-
-        let mut publications = publications.into_iter().filter_map(|(key, publication)| direct_publication_keys.contains(&key).then_some(publication)).collect::<Vec<_>>();
-        publications.sort_by(|left, right| {
-            let left_key = (left.source_id.as_str().to_owned(), left.publication.identity.edition_id.clone(), left.publication.identity.work_id.clone().unwrap_or_default());
-            let right_key = (right.source_id.as_str().to_owned(), right.publication.identity.edition_id.clone(), right.publication.identity.work_id.clone().unwrap_or_default());
-            popularity
-                .get(&right_key)
-                .unwrap_or(&(false, 0, 0, 0, 0))
-                .cmp(popularity.get(&left_key).unwrap_or(&(false, 0, 0, 0, 0)))
-                .then_with(|| left.source_id.as_str().cmp(right.source_id.as_str()))
-                .then_with(|| left.publication.identity.edition_id.cmp(&right.publication.identity.edition_id))
-        });
-        let total = publications.len();
-        let publications = publications.into_iter().skip(offset).take(limit).collect();
+        ranked_publications.sort_by(|left, right| right.1.cmp(&left.1));
+        let publications = ranked_publications.into_iter().map(|(publication, _)| publication).collect();
         let page = offset / limit + 1;
         let page_count = total.div_ceil(limit).max(1);
         let at = |new_offset| subject_locator(&SubjectBrowseLocation { offset: u32::try_from(new_offset).unwrap_or(u32::MAX), ..location.clone() });
@@ -1908,6 +2430,26 @@ impl CatalogCache {
     }
 }
 
+fn identity_review_inventory_in(connection: &Connection, source_id: Option<&CatalogSourceId>) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+    let mut inventory = CatalogIdentityReviewInventory::default();
+    let mut statement = connection.prepare("SELECT status,COUNT(*) FROM catalog_identity_review WHERE (?1 IS NULL OR source_id=?1) GROUP BY status")?;
+    let rows = statement.query_map([source_id.map(CatalogSourceId::as_str)], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (status, count) = row?;
+        let count = stored_u64(count, "identity review count")?;
+        match status.as_str() {
+            "ambiguous" => inventory.ambiguous = count,
+            "no_match" => inventory.no_match = count,
+            "insufficient_metadata" => inventory.insufficient_metadata = count,
+            "failed" => inventory.failed = count,
+            "resolved" => inventory.resolved = count,
+            "rejected" => inventory.rejected = count,
+            _ => return Err(CatalogCacheError::new("invalid stored identity review status")),
+        }
+    }
+    Ok(inventory)
+}
+
 fn prepare_database_file(path: &Path) -> Result<(), CatalogCacheError> {
     if !path.exists() {
         return Ok(());
@@ -2112,12 +2654,78 @@ fn flatten_toc_titles<'a>(entries: &'a [library_model::PublicationTocEntry], out
 }
 
 fn insert_subject_assignments(transaction: &Transaction<'_>, source_id: &str, generation: i64, edition_id: &str, work_id: &str, subjects: &[library_model::PublicationSubject]) -> Result<(), CatalogCacheError> {
-    for assignment in library_model::project_subjects(subjects) {
+    for assignment in library_model::project_subjects(subjects).into_iter().chain(library_model::project_unified_subjects(subjects)) {
         transaction.execute(
             "INSERT INTO catalog_publication_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![source_id, generation, edition_id, work_id, assignment.system_id(), assignment.subject_path(), assignment.matcher_version()],
         )?;
     }
+    Ok(())
+}
+
+fn refresh_unified_subject_assignments(connection: &mut Connection) -> Result<(), CatalogCacheError> {
+    const BATCH_SIZE: i64 = 256;
+    let stored_version = connection.query_row("SELECT unified_matcher_version FROM catalog_subject_projection_metadata WHERE singleton=1", [], |row| row.get::<_, i64>(0)).optional()?;
+    if stored_version == Some(library_model::UNIFIED_MATCHER_VERSION) {
+        return Ok(());
+    }
+
+    connection.execute("DELETE FROM catalog_publication_subject_assignment WHERE system_id=?1", [library_model::UNIFIED_SYSTEM_ID])?;
+    let mut cursor: Option<(String, i64, String, String)> = None;
+    loop {
+        let keys = {
+            let (sql, parameters): (&str, Vec<rusqlite::types::Value>) = match &cursor {
+                Some((source_id, generation, edition_id, work_id)) => (
+                    "SELECT DISTINCT source_id,generation,edition_id,work_id
+                       FROM catalog_publication_subject
+                      WHERE (source_id,generation,edition_id,work_id) > (?1,?2,?3,?4)
+                      ORDER BY source_id,generation,edition_id,work_id LIMIT ?5",
+                    vec![source_id.clone().into(), (*generation).into(), edition_id.clone().into(), work_id.clone().into(), BATCH_SIZE.into()],
+                ),
+                None => (
+                    "SELECT DISTINCT source_id,generation,edition_id,work_id
+                       FROM catalog_publication_subject
+                      ORDER BY source_id,generation,edition_id,work_id LIMIT ?1",
+                    vec![BATCH_SIZE.into()],
+                ),
+            };
+            let mut statement = connection.prepare(sql)?;
+            let keys = statement.query_map(rusqlite::params_from_iter(parameters), |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()?;
+            keys
+        };
+        if keys.is_empty() {
+            break;
+        }
+        cursor = keys.last().cloned();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (source_id, generation, edition_id, work_id) in keys {
+            let subjects = {
+                let mut statement = transaction.prepare(
+                    "SELECT name,source,authority,code FROM catalog_publication_subject
+                      WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position",
+                )?;
+                let rows = statement.query_map(params![source_id, generation, edition_id, work_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)))?;
+                let mut subjects = Vec::new();
+                for row in rows {
+                    let (name, source, authority, code) = row?;
+                    subjects.push(library_model::PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogCacheError::new(error.to_string()))?);
+                }
+                subjects
+            };
+            for assignment in library_model::project_unified_subjects(&subjects) {
+                transaction.execute(
+                    "INSERT INTO catalog_publication_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![source_id, generation, edition_id, work_id, assignment.system_id(), assignment.subject_path(), assignment.matcher_version()],
+                )?;
+            }
+        }
+        transaction.commit()?;
+    }
+    connection.execute(
+        "INSERT INTO catalog_subject_projection_metadata(singleton,unified_matcher_version) VALUES(1,?1)
+         ON CONFLICT(singleton) DO UPDATE SET unified_matcher_version=excluded.unified_matcher_version",
+        [library_model::UNIFIED_MATCHER_VERSION],
+    )?;
     Ok(())
 }
 
@@ -2278,7 +2886,15 @@ fn upsert_active_publication(transaction: &Transaction<'_>, source_id: &CatalogS
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    let sequence = if let Some((previous_hash, sequence)) = previous { if previous_hash == payload_hash { sequence } else { allocate_sequence(transaction, source_id)? } } else { allocate_sequence(transaction, source_id)? };
+    let sequence = if let Some((previous_hash, sequence)) = previous {
+        if previous_hash == payload_hash {
+            sequence
+        } else {
+            allocate_sequence(transaction, source_id)?
+        }
+    } else {
+        allocate_sequence(transaction, source_id)?
+    };
     transaction.execute(
         "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14)
@@ -2440,52 +3056,6 @@ fn valid_subject_key(system_id: &str, subject_path: &str) -> bool {
         && !subject_path.chars().any(char::is_control)
 }
 
-fn browse_subject_roots(connection: &Connection, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogCacheError> {
-    let mut primary_languages = request.supported_languages.iter().filter_map(|language| language.split('-').next()).filter(|language| !language.is_empty()).map(str::to_ascii_lowercase).collect::<Vec<_>>();
-    primary_languages.sort();
-    primary_languages.dedup();
-    let language_predicate = if request.supported_languages.is_empty() {
-        String::new()
-    } else if primary_languages.is_empty() {
-        " AND NOT EXISTS(SELECT 1 FROM catalog_publication_language l WHERE l.source_id=p.source_id AND l.generation=p.generation AND l.edition_id=p.edition_id AND l.work_id=p.work_id)".to_owned()
-    } else {
-        let placeholders = std::iter::repeat_n("?", primary_languages.len()).collect::<Vec<_>>().join(",");
-        format!(
-            " AND (NOT EXISTS(SELECT 1 FROM catalog_publication_language l WHERE l.source_id=p.source_id AND l.generation=p.generation AND l.edition_id=p.edition_id AND l.work_id=p.work_id)
-               OR EXISTS(SELECT 1 FROM catalog_publication_language l WHERE l.source_id=p.source_id AND l.generation=p.generation AND l.edition_id=p.edition_id AND l.work_id=p.work_id
-                         AND lower(CASE WHEN instr(l.language,'-')>0 THEN substr(l.language,1,instr(l.language,'-')-1) ELSE l.language END) IN ({placeholders})))"
-        )
-    };
-    let sql = format!(
-        "SELECT a.system_id,p.source_id,p.edition_id,p.work_id
-         FROM catalog_publication_subject_assignment a
-         JOIN catalog_source s ON s.source_id=a.source_id AND s.active_generation=a.generation
-         JOIN catalog_publication p ON p.source_id=a.source_id AND p.generation=a.generation AND p.edition_id=a.edition_id AND p.work_id=a.work_id
-         WHERE a.system_id IN ('bisac','ddc','lcc') AND p.importable=1{language_predicate}"
-    );
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(primary_languages.iter()), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?;
-    let mut counts = HashMap::<String, HashSet<(String, String, String)>>::new();
-    for row in rows {
-        let (system_id, source_id, edition_id, work_id) = row?;
-        if !request.source_ids.is_empty() && !request.source_ids.iter().any(|selected| selected.as_str() == source_id) {
-            continue;
-        }
-        counts.entry(system_id).or_default().insert((source_id, edition_id, work_id));
-    }
-    let mut navigation = counts
-        .into_iter()
-        .map(|(system_id, publications)| CatalogLink {
-            title: subject_system_title(&system_id).to_owned(),
-            target: CatalogLinkTarget::Page { locator: subject_locator(&SubjectBrowseLocation { subject_path: subject_system_root(&system_id), system_id: Some(system_id), offset: 0 }) },
-            number_of_items: Some(u32::try_from(publications.len()).unwrap_or(u32::MAX)),
-            active: false,
-        })
-        .collect::<Vec<_>>();
-    navigation.sort_by(|left, right| left.title.cmp(&right.title));
-    Ok(CatalogSubjectBrowseResponse { navigation, publications: Vec::new(), pagination: CatalogPagination::default() })
-}
-
 #[derive(Clone, Debug, Default)]
 struct SubjectBrowseLocation {
     system_id: Option<String>,
@@ -2494,38 +3064,7 @@ struct SubjectBrowseLocation {
 }
 
 fn browse_subject_system(system_id: &str) -> bool {
-    matches!(system_id, library_model::BISAC_SYSTEM_ID | library_model::DDC_SYSTEM_ID | library_model::LCC_SYSTEM_ID)
-}
-
-fn subject_system_title(system_id: &str) -> &'static str {
-    match system_id {
-        library_model::BISAC_SYSTEM_ID => "BISAC",
-        library_model::DDC_SYSTEM_ID => "Dewey Decimal Classification",
-        library_model::LCC_SYSTEM_ID => "Library of Congress Classification",
-        _ => "Subjects",
-    }
-}
-
-fn subject_system_root(system_id: &str) -> Option<String> {
-    match system_id {
-        library_model::DDC_SYSTEM_ID => Some("DDC".to_owned()),
-        library_model::LCC_SYSTEM_ID => Some("LCC".to_owned()),
-        _ => None,
-    }
-}
-
-fn browse_subject_child(location: &SubjectBrowseLocation, system_id: &str, assigned_path: &str) -> Option<(String, Option<String>, String)> {
-    if location.system_id.is_none() {
-        return browse_subject_system(system_id).then(|| (system_id.to_owned(), subject_system_root(system_id), subject_system_title(system_id).to_owned()));
-    }
-    let base = location.subject_path.as_deref().unwrap_or("");
-    let remainder = if base.is_empty() { assigned_path } else { assigned_path.strip_prefix(base)?.strip_prefix(" / ")? };
-    let child = remainder.split(" / ").next()?.trim();
-    if child.is_empty() {
-        return None;
-    }
-    let child_path = if base.is_empty() { child.to_owned() } else { format!("{base} / {child}") };
-    Some((system_id.to_owned(), Some(child_path), child.to_owned()))
+    system_id == library_model::UNIFIED_SYSTEM_ID
 }
 
 fn subject_locator(location: &SubjectBrowseLocation) -> String {
@@ -3028,9 +3567,78 @@ mod tests {
         let cache = CatalogCache::open(&path).unwrap();
         let jobs = cache.claim_metadata_backfill_batch(128).unwrap();
         assert_eq!(jobs.len(), 1, "an interrupted metadata-only batch must resume after restart");
-        cache.finish_metadata_backfill_batch(&[CatalogMetadataBackfillUpdate { source_id: source.clone(), publication: book.identity, acquisition_url: jobs[0].acquisition_url.clone(), subjects: Vec::new(), popularity: None }]).unwrap();
+        cache
+            .finish_metadata_backfill_batch(&[CatalogMetadataBackfillUpdate {
+                source_id: source.clone(),
+                publication: book.identity,
+                acquisition_url: jobs[0].acquisition_url.clone(),
+                subjects: Vec::new(),
+                popularity: None,
+                metadata: jobs[0].metadata.clone(),
+                identity_result: None,
+            }])
+            .unwrap();
         assert!(cache.claim_metadata_backfill_batch(128).unwrap().is_empty());
         assert_eq!(cache.inventory().unwrap().epub_extractions.attempts, 1, "metadata backfill must not claim or download the publication again");
+    }
+
+    #[test]
+    fn ambiguous_identity_backfill_can_be_reviewed_and_resolved_manually() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
+        let source = source_id();
+        let book = importable_epub("review", None);
+        cache.put_page(&source, "https://example.com/opds", &page("https://example.com/opds", vec![book.clone()]), None, None).unwrap();
+        let extraction = cache.claim_next_epub_extraction(&source).unwrap().unwrap();
+        let metadata = CatalogEpubMetadata {
+            book: library_model::BookMetadataState { title: "A title needing review".to_owned(), contributors: Vec::new(), description: String::new(), publication: library_model::PublicationMetadata::default() },
+            toc: Vec::new(),
+        };
+        cache.finish_epub_extraction(&source, &extraction.acquisition_url, 123, &book, Some(&metadata)).unwrap();
+        cache.schedule_metadata_backfill().unwrap();
+        let job = cache.claim_metadata_backfill_batch(1).unwrap().pop().unwrap();
+        let candidate = metadata_contract::EditionIdentityMatch {
+            canonical_isbn13: "9780306406157".to_owned(),
+            open_library_edition_id: "OL123M".to_owned(),
+            open_library_work_id: Some("OL456W".to_owned()),
+            title: "A title needing review".to_owned(),
+            work_title: None,
+            title_match: metadata_contract::EditionTitleMatch::Edition,
+            authors: Vec::new(),
+            publishers: Vec::new(),
+            publication_year: None,
+            matched_publisher: false,
+            matched_publication_year: false,
+            classifications: Vec::new(),
+        };
+        cache
+            .finish_metadata_backfill_batch(&[CatalogMetadataBackfillUpdate {
+                source_id: source.clone(),
+                publication: book.identity,
+                acquisition_url: job.acquisition_url,
+                subjects: Vec::new(),
+                popularity: None,
+                metadata: job.metadata,
+                identity_result: Some(metadata_contract::EditionIdentityResult {
+                    query_id: "review-query".to_owned(),
+                    status: metadata_contract::EditionIdentityStatus::Ambiguous,
+                    matched: None,
+                    candidates: vec![candidate],
+                    candidates_truncated: false,
+                }),
+            }])
+            .unwrap();
+
+        let inventory = cache.identity_review_inventory_for_source(&source).unwrap();
+        assert_eq!(inventory.ambiguous, 1);
+        let review = cache.identity_reviews(Some(&source), None, 10).unwrap().pop().unwrap();
+        assert_eq!(review.candidates[0].isbn13, "9780306406157");
+        assert_eq!(cache.identity_review_candidate_isbn(&review.review_id, "OL123M", "9780306406157").unwrap().as_deref(), Some("9780306406157"));
+        assert!(cache.resolve_identity_review_with_isbn(&review.review_id, "9780306406157").unwrap());
+        assert_eq!(cache.identity_review_inventory_for_source(&source).unwrap().resolved, 1);
+        assert!(cache.identity_reviews(Some(&source), None, 10).unwrap().is_empty());
+        assert_eq!(cache.claim_metadata_backfill_batch(1).unwrap().len(), 1, "manual selection must queue classification backfill without downloading the EPUB again");
+        assert!(cache.epub_metadata(&source, "https://example.com/review.epub").unwrap().unwrap().book.publication.identifiers.iter().any(|identifier| identifier.value() == "9780306406157"));
     }
 
     #[test]
@@ -3125,26 +3733,20 @@ mod tests {
             .unwrap();
 
         let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
-        assert_eq!(root.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["BISAC", "Dewey Decimal Classification"]);
+        assert_eq!(root.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["Humanities", "Science & Nature"]);
         assert!(root.publications.is_empty());
-        let bisac = root.navigation.iter().find(|link| link.title == "BISAC").unwrap();
-        let CatalogLinkTarget::Page { locator } = &bisac.target else { panic!("subject roots must be internal links") };
-        let bisac_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
-        assert_eq!(bisac_root.navigation[0].title, "History");
-        assert!(bisac_root.publications.is_empty(), "a parent level must not include descendant books");
+        let humanities = root.navigation.iter().find(|link| link.title == "Humanities").unwrap();
+        let CatalogLinkTarget::Page { locator } = &humanities.target else { panic!("subject roots must be internal links") };
+        let humanities_locator = locator.clone();
+        let mut locator = locator.clone();
+        for expected_child in ["History", "History by Region", "Americas", "North America", "United States", "Historical Eras", "20th Century"] {
+            let level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+            let child = level.navigation.iter().find(|link| link.title == expected_child).unwrap_or_else(|| panic!("missing unified subject child {expected_child}"));
+            let CatalogLinkTarget::Page { locator: child_locator } = &child.target else { panic!("subject children must be internal links") };
+            locator = child_locator.clone();
+        }
 
-        let CatalogLinkTarget::Page { locator: history_locator } = &bisac_root.navigation[0].target else { panic!("subject children must be internal links") };
-        let history_level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(history_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
-        assert_eq!(history_level.navigation[0].title, "United States");
-        assert!(history_level.publications.is_empty(), "only exact subject assignments belong at a level");
-
-        let CatalogLinkTarget::Page { locator: country_locator } = &history_level.navigation[0].target else { panic!("subject children must be internal links") };
-        let country_level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(country_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
-        assert_eq!(country_level.navigation[0].title, "20th Century");
-        assert!(country_level.publications.is_empty());
-
-        let CatalogLinkTarget::Page { locator: leaf_locator } = &country_level.navigation[0].target else { panic!("subject children must be internal links") };
-        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(leaf_locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
         assert!(first.navigation.is_empty());
         assert_eq!(first.publications.len(), 1);
         assert_eq!(first.publications[0].source_id, source_id());
@@ -3158,7 +3760,7 @@ mod tests {
         let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![excluded_source], query: String::new(), limit: 10 });
         assert!(filtered_root.unwrap().navigation.is_empty());
 
-        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "FIRST HISTORY".to_owned(), limit: 10 });
+        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(humanities_locator), supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "FIRST HISTORY".to_owned(), limit: 10 });
         let searched = searched.unwrap();
         assert!(searched.navigation.is_empty());
         assert_eq!(searched.publications.len(), 1);
@@ -3185,11 +3787,109 @@ mod tests {
         }
         cache.activate_crawl(&crawl).unwrap();
 
-        let roots = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
-        let bisac = roots.navigation.iter().find(|link| link.title == "BISAC").unwrap();
-        let CatalogLinkTarget::Page { locator } = &bisac.target else { panic!("subject roots must be internal links") };
-        let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
+        let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: "book".to_owned(), limit: 10 }).unwrap();
         assert_eq!(response.publications[0].publication.title, "The popular book");
+    }
+
+    #[test]
+    fn subject_browse_filters_and_paginates_inside_sqlite() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
+        let source = source_id();
+        let crawl = cache.begin_crawl(&source, "https://example.com/opds").unwrap();
+        let mut books = page("https://example.com/opds", vec![importable_epub("sqlite-one", None), importable_epub("sqlite-two", None)]);
+        books.publications[0].title = "First indexed history".to_owned();
+        books.publications[1].title = "Second indexed history".to_owned();
+        cache.stage_page(&crawl, &books, None, None).unwrap();
+        cache.activate_crawl(&crawl).unwrap();
+        let generation = cache.source_state(&source).unwrap().unwrap().active_generation;
+        let connection = cache.pool.get().unwrap();
+        for publication in &books.publications {
+            connection
+                .execute(
+                    "INSERT INTO catalog_publication_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path,matcher_version)
+                     VALUES(?1,?2,?3,'','unified','Humanities / History',1)",
+                    params![source.as_str(), storage_i64(generation, "generation").unwrap(), publication.identity.edition_id],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert!(!cache.search_index_ready().unwrap());
+        assert!(cache.refresh_search_index().unwrap());
+        assert!(cache.search_index_ready().unwrap());
+
+        let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source.clone()], query: String::new(), limit: 1 }).unwrap();
+        assert_eq!(root.navigation.len(), 1);
+        assert_eq!(root.navigation[0].title, "Humanities");
+        assert_eq!(root.navigation[0].number_of_items, Some(2));
+        assert!(root.publications.is_empty());
+
+        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source], query: "FIRST".to_owned(), limit: 1 }).unwrap();
+        assert_eq!(searched.publications.len(), 1);
+        assert_eq!(searched.publications[0].publication.identity.edition_id, "sqlite-one");
+        assert_eq!(searched.pagination.number_of_items, Some(1));
+
+        let connection = cache.pool.get().unwrap();
+        let query_plan = connection
+            .prepare("EXPLAIN QUERY PLAN SELECT rowid FROM catalog_publication_title_fts WHERE catalog_publication_title_fts MATCH '\"history\"'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(query_plan.iter().any(|detail| detail.contains("VIRTUAL TABLE INDEX")), "FTS query must use the trigram virtual-table index: {query_plan:?}");
+
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO catalog_publication_author(source_id,generation,edition_id,work_id,position,normalized_name)
+                 VALUES(?1,?2,'sqlite-two','',0,'authorneedle')",
+                params![source_id().as_str(), storage_i64(generation, "generation").unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO catalog_publication_toc(source_id,generation,edition_id,work_id,position,normalized_title)
+                 VALUES(?1,?2,'sqlite-two','',0,'tocneedle')",
+                params![source_id().as_str(), storage_i64(generation, "generation").unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        for query in ["authorneedle", "tocneedle"] {
+            let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: query.to_owned(), limit: 10 });
+            let searched = searched.unwrap();
+            assert_eq!(searched.publications.len(), 1, "FTS trigger did not index {query}");
+            assert_eq!(searched.publications[0].publication.identity.edition_id, "sqlite-two");
+        }
+    }
+
+    #[test]
+    fn existing_cache_backfill_rebuilds_the_unified_subject_projection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("catalog-cache.db");
+        {
+            let cache = CatalogCache::open(&path).unwrap();
+            cache.ensure_source(&source_id(), "https://example.com/opds").unwrap();
+            let crawl = cache.begin_crawl(&source_id(), "https://example.com/opds").unwrap();
+            let books = page("https://example.com/opds", vec![importable_epub("history", None)]);
+            cache.stage_page(&crawl, &books, None, None).unwrap();
+            let history = PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap();
+            cache.stage_publication_subjects(&crawl, &books.publications[0].identity, &[history]).unwrap();
+            cache.activate_crawl(&crawl).unwrap();
+
+            let connection = cache.pool.get().unwrap();
+            connection.execute("DELETE FROM catalog_publication_subject_assignment WHERE system_id=?1", [library_model::UNIFIED_SYSTEM_ID]).unwrap();
+            connection.execute("DELETE FROM catalog_subject_projection_metadata", []).unwrap();
+        }
+
+        let cache = CatalogCache::open(&path).unwrap();
+        cache.refresh_unified_subject_assignments().unwrap();
+        let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: Vec::new(), source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
+        assert!(root.navigation.iter().any(|link| link.title == "Humanities"));
+        let connection = cache.pool.get().unwrap();
+        let unified_count = connection.query_row("SELECT COUNT(*) FROM catalog_publication_subject_assignment WHERE system_id=?1", [library_model::UNIFIED_SYSTEM_ID], |row| row.get::<_, i64>(0)).unwrap();
+        assert!(unified_count > 0);
     }
 
     #[test]

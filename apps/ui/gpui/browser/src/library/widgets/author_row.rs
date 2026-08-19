@@ -105,6 +105,7 @@ impl Render for AuthorRowView {
         }
         let theme = components::browser_theme(cx);
         let author_id = self.author.id();
+        let rem_size = f32::from(window.rem_size());
 
         let viewport_width = f32::from(window.viewport_size().width);
         let visible_cover_limit = if viewport_width <= 480.0 {
@@ -138,7 +139,7 @@ impl Render for AuthorRowView {
 
         let activate = self.select.clone();
         let click = self.select.clone();
-        components::author_list_row(format!("author-{author_id}"), cover_count, self.selected, theme)
+        components::author_list_row(format!("author-{author_id}"), cover_count, self.selected, theme, rem_size)
             .tab_index(self.tab_index)
             .key_context("BrowserAuthorList")
             .child(components::author_list_name(SharedString::from(self.author.name().as_str().to_owned())))

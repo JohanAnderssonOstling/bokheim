@@ -25,7 +25,7 @@
     padding: 0 14px;
     border: 1px solid var(--color-border);
     border-radius: 0;
-    background: var(--color-raised-bg);
+    background: transparent;
   }
   .search-field:focus-within { border-color: var(--color-accent); }
   svg { width: 18px; color: var(--color-accent); fill: none; stroke: currentColor; stroke-width: 1.8; }

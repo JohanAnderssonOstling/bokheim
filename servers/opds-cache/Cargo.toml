@@ -13,7 +13,7 @@ blake3 = "1"
 catalog-contract = { path = "../../shared/catalog-contract" }
 catalog-core = { path = "../../shared/catalog-core" }
 book-metadata = { path = "../../client/book-metadata" }
-library-model = { path = "../../client/library-model" }
+library-model = { path = "../../client/library-model", features = ["authoritative-taxonomy"] }
 metadata-contract = { path = "../../shared/metadata-contract" }
 mobi.workspace = true
 opds = { path = "../../shared/opds" }

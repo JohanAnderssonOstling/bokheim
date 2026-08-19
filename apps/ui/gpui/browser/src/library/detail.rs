@@ -1,16 +1,16 @@
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::{io, vec};
+use std::vec;
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, FontWeight, IntoElement, Render, SharedString, Task, TextRun, Window, div, font, px};
 use gpui_component::progress::Progress;
 use gpui_component::{ElementExt as _, Sizable, Size};
-use html_view_core::{RendererInitialConfig, ResourceMetadata, ResourceProvider};
+use html_view_core::RendererInitialConfig;
 use html_view_gpui::HtmlView;
 use ui_components as components;
 
+use crate::description::description_provider;
 use crate::stores::interface_font;
 
 use super::services::LibraryContext;
@@ -121,42 +121,6 @@ impl BookDetailPage {
     }
 }
 
-struct DescriptionProvider {
-    document: Vec<u8>,
-}
-
-impl ResourceProvider for DescriptionProvider {
-    fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
-        (uri == "description.html").then(|| self.document.clone()).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, uri.to_owned()))
-    }
-
-    fn metadata(&self, uri: &str) -> io::Result<ResourceMetadata> {
-        if uri == "description.html" { Ok(ResourceMetadata { media_type: Some("text/html".to_owned()), charset: Some("utf-8".to_owned()) }) } else { Err(io::Error::new(io::ErrorKind::NotFound, uri.to_owned())) }
-    }
-
-    fn exists(&self, uri: &str) -> bool {
-        uri == "description.html"
-    }
-
-    fn resolve(&self, _base: &str, href: &str) -> String {
-        href.to_owned()
-    }
-
-    fn list_html_candidates(&self, _root: &str) -> io::Result<Vec<String>> {
-        Ok(vec!["description.html".to_owned()])
-    }
-}
-
-fn description_document(description: &str) -> Vec<u8> {
-    let lower = description.to_ascii_lowercase();
-    let authored_html = ["<p", "<br", "<div", "<em", "<strong", "<ul", "<ol", "<blockquote", "<span", "<a "].iter().any(|tag| lower.contains(tag));
-    let content = if authored_html { description.to_owned() } else { description.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br/>") };
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body,article{{margin:0;padding:0;background:transparent}} article{{text-align:justify;hyphens:auto;line-height:1.65}}</style></head><body><article>{content}</article></body></html>"
-    )
-    .into_bytes()
-}
-
 fn toc_rows(
     entries: &[app_contract::library::BookTocEntry], depth: usize, parent_key: &str, expanded: &HashSet<String>, page: &gpui::WeakEntity<BookDetailPage>, ui: &LibraryContext, content_hash: &epub_svelte_lib::ContentHash, book_title: &str,
     theme: components::BrowserTheme,
@@ -245,7 +209,7 @@ impl Render for BookDetailPage {
             self.description_font = Some(current_interface_font.clone());
         }
         if !book.description.trim().is_empty() && self.description.is_none() {
-            let provider: Arc<dyn ResourceProvider> = Arc::new(DescriptionProvider { document: description_document(book.description.trim()) });
+            let provider = description_provider(book.description.trim());
             let foreground = u32::from(gpui::Rgba::from(theme.text));
             let background = u32::from(gpui::Rgba::from(theme.page_bg));
             let config = RendererInitialConfig {
@@ -365,7 +329,9 @@ impl Render for BookDetailPage {
                                     .border_color(theme.border)
                                     .rounded(px(components::RADIUS_SM))
                                     .child("‹")
-                                    .on_click(move |_, _, cx| previous.update(cx, |view, cx| view.previous_page(cx))),
+                                    .on_click(move |_, _, cx| {
+                                        let _ = previous.update(cx, |view, cx| view.previous_page(cx));
+                                    }),
                             )
                             .child(
                                 div()
@@ -378,7 +344,9 @@ impl Render for BookDetailPage {
                                     .border_color(theme.border)
                                     .rounded(px(components::RADIUS_SM))
                                     .child("›")
-                                    .on_click(move |_, _, cx| next.update(cx, |view, cx| view.next_page(cx))),
+                                    .on_click(move |_, _, cx| {
+                                        let _ = next.update(cx, |view, cx| view.next_page(cx));
+                                    }),
                             ),
                     ),
                 )
@@ -447,22 +415,5 @@ impl Render for BookDetailPage {
                     }),
             )
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::description_document;
-
-    #[test]
-    fn plain_description_is_safe_html_with_preserved_line_breaks() {
-        let html = String::from_utf8(description_document("Books & history\nSecond line")).unwrap();
-        assert!(html.contains("Books &amp; history<br/>Second line"));
-    }
-
-    #[test]
-    fn authored_description_markup_is_preserved() {
-        let html = String::from_utf8(description_document("<p>A <em>short</em> description.</p>")).unwrap();
-        assert!(html.contains("<p>A <em>short</em> description.</p>"));
     }
 }

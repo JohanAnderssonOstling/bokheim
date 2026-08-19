@@ -137,6 +137,47 @@ fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
 }
 
 #[test]
+fn plain_dc_bisac_heading_uses_general_code_for_library_unified_assignment() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let state = BookMetadataState {
+        title: "Plain fiction".to_owned(),
+        contributors: Vec::new(),
+        description: String::new(),
+        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Fiction", "dc:subject", None, None).unwrap()], ..PublicationMetadata::default() },
+    };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+
+    assert_eq!(conn.query_row("SELECT system_id || ':' || code FROM book_subject_code", [], |row| row.get::<_, String>(0)).unwrap(), "bisac:FIC000000");
+    let expected = library_model::unified_subject_paths("bisac", "FIC000000").into_iter().collect::<std::collections::BTreeSet<_>>();
+    let actual = conn.prepare("SELECT subject_path FROM book_subject_assignment WHERE system_id='unified'").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<std::collections::BTreeSet<_>, _>>().unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn lcsh_style_dc_subject_uses_bisac_code_for_library_unified_assignment() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let state = BookMetadataState {
+        title: "Time travel fiction".to_owned(),
+        contributors: Vec::new(),
+        description: String::new(),
+        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Time travel -- Fiction", "dc:subject", None, None).unwrap()], ..PublicationMetadata::default() },
+    };
+    let transaction = conn.transaction().unwrap();
+    insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
+    transaction.commit().unwrap();
+
+    let codes = conn.prepare("SELECT system_id || ':' || code FROM book_subject_code ORDER BY code").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<std::collections::BTreeSet<_>, _>>().unwrap();
+    assert_eq!(codes, std::collections::BTreeSet::from(["bisac:FIC027090".to_owned(), "bisac:FIC028080".to_owned()]));
+    let expected = ["FIC027090", "FIC028080"].into_iter().flat_map(|code| library_model::unified_subject_paths("bisac", code)).collect::<std::collections::BTreeSet<_>>();
+    let actual = conn.prepare("SELECT subject_path FROM book_subject_assignment WHERE system_id='unified'").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<std::collections::BTreeSet<_>, _>>().unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn external_codes_are_recorded_before_exact_local_coverage_is_checked() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
@@ -264,6 +305,7 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
             ('test:austin','Austin','active','test'),
             ('test:dallas','Dallas','active','test'),
             ('test:solo','Solo','active','test'),
+            ('test:solo-leaf','Solo Leaf','active','test'),
             ('test:empty','Empty','active','test');
          INSERT INTO unified_concept_route(path,concept_id,parent_path,label) VALUES
             ('Test','test:root','','Test'),
@@ -272,6 +314,7 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
             ('Test / United States / Texas / Austin','test:austin','Test / United States / Texas','Austin'),
             ('Test / United States / Texas / Dallas','test:dallas','Test / United States / Texas','Dallas'),
             ('Test / Solo','test:solo','Test','Solo'),
+            ('Test / Solo / Solo Leaf','test:solo-leaf','Test / Solo','Solo Leaf'),
             ('Test / Empty','test:empty','Test','Empty');
          INSERT INTO book(content_hash,title,format) VALUES
             (printf('%064x',101),'Austin book','epub'),
@@ -284,7 +327,7 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
          INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES
             ((SELECT row_id FROM book WHERE content_hash=printf('%064x',101)),'test:austin',1),
             ((SELECT row_id FROM book WHERE content_hash=printf('%064x',102)),'test:dallas',1),
-            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',103)),'test:solo',1);",
+            ((SELECT row_id FROM book WHERE content_hash=printf('%064x',103)),'test:solo-leaf',1);",
     )
     .unwrap();
 
@@ -294,12 +337,20 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
     assert!(root_books.is_empty());
 
     let (root_children, root_books) = compact_subject_children(&conn, "Test", false, &scope).unwrap();
-    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas"]);
-    assert_eq!(root_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Solo book"]);
+    assert_eq!(root_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States", "Test / Solo"]);
+    assert!(root_books.is_empty());
+
+    let (united_states_children, united_states_books) = compact_subject_children(&conn, "Test / United States", false, &scope).unwrap();
+    assert_eq!(united_states_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas"]);
+    assert!(united_states_books.is_empty());
 
     let (texas_children, texas_books) = compact_subject_children(&conn, "Test / United States / Texas", false, &scope).unwrap();
-    assert!(texas_children.is_empty());
-    assert_eq!(texas_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Austin book", "Dallas book"]);
+    assert_eq!(texas_children.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test / United States / Texas / Austin", "Test / United States / Texas / Dallas"]);
+    assert!(texas_books.is_empty());
+
+    let (solo_children, solo_books) = compact_subject_children(&conn, "Test / Solo", false, &scope).unwrap();
+    assert!(solo_children.is_empty());
+    assert_eq!(solo_books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Solo book"]);
 }
 
 #[test]

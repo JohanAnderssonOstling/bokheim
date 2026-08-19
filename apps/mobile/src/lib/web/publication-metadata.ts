@@ -11,7 +11,7 @@ export async function inspectPublication(_file: File, fileName: string, bytes: U
   if (kind === "pdf") {
     const signature = new TextDecoder("ascii").decode(bytes.subarray(0, 5));
     if (signature !== "%PDF-") throw new Error("The selected file is not a valid PDF document");
-    return { title: null, author: null, description: null, subjects: [], subject_paths: [], isbns: [], cover: null, toc: [] };
+    return { title: null, author: null, description: null, subjects: [], subject_paths: [], subject_codes: [], isbns: [], cover: null, toc: [] };
   }
   throw new Error("The web library currently accepts EPUB and PDF files");
 }

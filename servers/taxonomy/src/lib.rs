@@ -158,7 +158,10 @@ async fn health() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-async fn description(State(service): State<TaxonomyService>) -> Response {
+async fn description(State(service): State<TaxonomyService>, headers: HeaderMap) -> Response {
+    if headers.get(header::IF_NONE_MATCH) == Some(&service.state.etag) {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, service.state.etag.clone()), (header::CACHE_CONTROL, HeaderValue::from_static(JSON_CACHE_CONTROL))]).into_response();
+    }
     cached_json(&service, &service.state.description)
 }
 
@@ -339,6 +342,19 @@ mod tests {
         let slice: TaxonomySlice = json(response).await;
         assert!(slice.concepts.iter().any(|concept| concept.preferred_label == "History"));
         assert!(slice.requested_concept_ids.iter().all(|concept_id| slice.concepts.iter().any(|concept| &concept.concept_id == concept_id)));
+    }
+
+    #[tokio::test]
+    async fn release_description_supports_bodyless_conditional_checks() {
+        let router = app(service());
+        let response = router.clone().oneshot(Request::builder().method(Method::HEAD).uri("/v1/taxonomy").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()[header::ETAG].clone();
+        assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
+
+        let response = router.oneshot(Request::builder().method(Method::HEAD).uri("/v1/taxonomy").header(header::IF_NONE_MATCH, etag).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
     }
 
     #[tokio::test]

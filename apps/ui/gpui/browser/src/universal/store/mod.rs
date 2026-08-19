@@ -18,7 +18,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::Disableable;
 use gpui_component::IconName;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use ui_components as components;
 
 use crate::catalog::{CatalogCardGroup, CatalogCardServices};
@@ -139,7 +139,7 @@ pub(crate) struct StorePage {
     _search_subscription: Subscription,
     _wide_search_subscription: Subscription,
     _subject_search_subscription: Subscription,
-    virtual_rows: HashMap<(usize, usize), view::StoreVirtualRows>,
+    virtual_rows: HashMap<(usize, usize, u32, u32), view::StoreVirtualRows>,
     catalog_link_columns: Cell<usize>,
 }
 
@@ -147,7 +147,7 @@ impl StorePage {
     pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, library: LibraryBackend, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Catalogue search"));
         let wide_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Catalogue search"));
-        let subject_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in this subject"));
+        let subject_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search subjects"));
         let search_subscription = cx.subscribe(&search_input, |page: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 page.search_within_source(cx);

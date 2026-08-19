@@ -1,5 +1,5 @@
-use super::runtime::{normalize_source_label, UnifiedTaxonomyRuntime};
 use super::UnifiedConceptRoute;
+use super::runtime::{UnifiedTaxonomyRuntime, normalize_source_label};
 use crate::PublicationSubject;
 use std::collections::BTreeSet;
 

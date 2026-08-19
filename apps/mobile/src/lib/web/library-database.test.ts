@@ -120,11 +120,25 @@ test("browser rich enrichment presents directly referenced places and people as 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     if (String(input).includes("taxonomy.bokheim.se")) {
+      if (init?.method === "HEAD") return new Response(null, { headers: { ETag: '"test-taxonomy-release"' } });
       const request = JSON.parse(String(init?.body)) as { codes: Array<{ system: string; code: string }> };
+      const literatureLeaf = "bokheim:lcc-detail:04b519c3-d098-5aac-8169-0c9d4c05af87";
+      const analysisLeaf = "unified:0864b3fe-19d6-575e-b85b-a1d4491da38d";
       return new Response(JSON.stringify({
         release_id: "test-taxonomy-release",
-        results: request.codes.map((code) => ({ ...code, matched_concept_ids: [] })),
-        concepts: [],
+        results: request.codes.map((code) => ({ ...code, matched_concept_ids: [code.system === "lcc" ? literatureLeaf : analysisLeaf] })),
+        concepts: [
+          { concept_id: "bokheim:subject:humanities", preferred_label: "Humanities", parents: [], source_selectors: {}, source_labels: [] },
+          { concept_id: "unified:6aaa3a4d-bf1d-5bb0-8cda-617aff1c5854", preferred_label: "Literature", parents: [{ concept_id: "bokheim:subject:humanities", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: "bokheim:subject:literature:romance", preferred_label: "Romance-Language Literatures", parents: [{ concept_id: "unified:6aaa3a4d-bf1d-5bb0-8cda-617aff1c5854", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: "unified:60d4653a-8bc0-596f-b83e-cdecf0651020", preferred_label: "French & Related Literatures", parents: [{ concept_id: "bokheim:subject:literature:romance", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: "unified:1866b1cc-6191-503a-9acf-ee7fd97e070d", preferred_label: "Modern literature", parents: [{ concept_id: "unified:60d4653a-8bc0-596f-b83e-cdecf0651020", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: literatureLeaf, preferred_label: "1900-1960", parents: [{ concept_id: "unified:1866b1cc-6191-503a-9acf-ee7fd97e070d", display_order: 0 }], source_selectors: { lcc: ["PQ2600..PQ2651@4"] }, source_labels: [] },
+          { concept_id: "unified:2d01b451-4e64-5f6b-a068-a6f7ea63e386", preferred_label: "Science & Nature", parents: [], source_selectors: {}, source_labels: [] },
+          { concept_id: "unified:f158bcdc-8f35-5cea-baa7-fce8bcbdc3b4", preferred_label: "Mathematics", parents: [{ concept_id: "unified:2d01b451-4e64-5f6b-a068-a6f7ea63e386", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: "bokheim:mathematics:analysis-calculus", preferred_label: "Analysis, Calculus & Differential Equations", parents: [{ concept_id: "unified:f158bcdc-8f35-5cea-baa7-fce8bcbdc3b4", display_order: 0 }], source_selectors: {}, source_labels: [] },
+          { concept_id: analysisLeaf, preferred_label: "Analysis", parents: [{ concept_id: "bokheim:mathematics:analysis-calculus", display_order: 0 }], source_selectors: { ddc: ["515"] }, source_labels: [] },
+        ],
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     return new Response(JSON.stringify({

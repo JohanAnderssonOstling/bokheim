@@ -1,23 +1,23 @@
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Json, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use catalog_contract::{
-    materialize_page, CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPublication, CatalogPublicationAction,
-    CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest, CatalogSearchResponse, CatalogSource, CatalogSourceId,
-    CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
+    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity,
+    CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest, CatalogSearchResponse, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest,
+    CatalogSubjectBrowseResponse, materialize_page,
 };
 use catalog_core::{
-    canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline,
-    CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogPublicationPopularity,
+    CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate,
+    CatalogPublicationPopularity, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import,
 };
 use futures_util::stream::{self, StreamExt};
-use library_model::{canonical_isbn, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject};
+use library_model::{PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject, canonical_isbn};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, LookupStatus, MetadataEnrichmentRequest, RichWorkMetadataMatch};
 use opds::{
-    endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsHttpValidators, OpdsSearch,
+    CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsHttpValidators, OpdsSearch, endpoints_from_registry, validate_curated_registry,
 };
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -258,11 +258,13 @@ struct CatalogInventoryResponse {
     uptime_seconds: u64,
     registry_revision: u64,
     metadata_enrichment_configured: bool,
+    search_index_ready: bool,
     active_page_count: u64,
     active_publication_count: u64,
     active_epub_count: u64,
     epub_extractions: EpubExtractionInventoryResponse,
     metadata_backfill: MetadataBackfillInventoryResponse,
+    identity_reviews: catalog_core::CatalogIdentityReviewInventory,
     sources: Vec<CatalogSourceInventoryResponse>,
 }
 
@@ -329,6 +331,28 @@ struct CatalogSourceInventoryResponse {
     active_publication_count: u64,
     active_epub_count: u64,
     epub_extractions: EpubExtractionInventoryResponse,
+}
+
+#[derive(Deserialize)]
+struct IdentityReviewQuery {
+    source_id: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct IdentityReviewResponse {
+    inventory: catalog_core::CatalogIdentityReviewInventory,
+    reviews: Vec<catalog_core::CatalogIdentityReview>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum IdentityReviewAction {
+    SelectCandidate { edition_id: String, isbn13: String },
+    ManualIsbn { isbn: String },
+    Reject,
+    Retry,
 }
 
 struct ApiError {
@@ -689,6 +713,20 @@ impl CatalogService {
         loop {
             tokio::join!(self.resume_pending_epub_extractions(), self.resume_metadata_backfill());
             tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL).await;
+        }
+    }
+
+    pub async fn refresh_search_index(&self) {
+        match self.cache_write_call(|cache| cache.refresh_search_index()).await {
+            Ok(true) => tracing::info!("catalogue full-text search index is ready"),
+            Ok(false) => {}
+            Err(error) => tracing::error!(%error, "failed to refresh catalogue full-text search index"),
+        }
+    }
+
+    pub async fn refresh_unified_subject_assignments(&self) {
+        if let Err(error) = self.cache_write_call(|cache| cache.refresh_unified_subject_assignments()).await {
+            tracing::error!(%error, "failed to refresh unified catalogue subject assignments");
         }
     }
 
@@ -1177,6 +1215,7 @@ impl CatalogService {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        let mut identity_results = vec![None; jobs.len()];
 
         let queries = jobs
             .iter()
@@ -1198,29 +1237,49 @@ impl CatalogService {
         for response in responses {
             let response = response?;
             for result in response.results {
-                if result.status != EditionIdentityStatus::Matched {
-                    continue;
-                }
-                let Some(matched) = result.matched else { continue };
                 if let Ok(index) = result.query_id.parse::<usize>() {
-                    if let Some(isbns) = isbn_groups.get_mut(index) {
-                        isbns.push(matched.canonical_isbn13);
+                    if result.status == EditionIdentityStatus::Matched {
+                        if let (Some(isbns), Some(matched)) = (isbn_groups.get_mut(index), result.matched.as_ref()) {
+                            isbns.push(matched.canonical_isbn13.clone());
+                        }
+                    }
+                    if let Some(slot) = identity_results.get_mut(index) {
+                        *slot = Some(result);
                     }
                 }
+            }
+        }
+
+        for index in 0..jobs.len() {
+            if isbn_groups[index].is_empty() && identity_results[index].is_none() {
+                identity_results[index] =
+                    Some(metadata_contract::EditionIdentityResult { query_id: index.to_string(), status: EditionIdentityStatus::InsufficientMetadata, matched: None, candidates: Vec::new(), candidates_truncated: false });
             }
         }
 
         let all_isbns = isbn_groups.iter().flatten().cloned().collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
         let (snapshot_date, matches_by_isbn) = self.metadata_matches_by_isbn(&all_isbns).await?;
         let mut updates = Vec::with_capacity(jobs.len());
-        for (job, isbns) in jobs.iter().zip(isbn_groups) {
+        for ((job, isbns), identity_result) in jobs.iter().zip(isbn_groups).zip(identity_results) {
             let records = isbns.iter().filter_map(|isbn| matches_by_isbn.get(isbn)).flatten().collect::<Vec<_>>();
             let matched = catalog_metadata_match(records, &snapshot_date);
             let mut subjects = job.metadata.book.publication.subjects.clone();
             subjects.extend(matched.subjects);
             subjects.sort_by(|left, right| (left.authority(), left.name(), left.code()).cmp(&(right.authority(), right.name(), right.code())));
             subjects.dedup();
-            updates.push(CatalogMetadataBackfillUpdate { source_id: job.source_id.clone(), publication: job.publication.clone(), acquisition_url: job.acquisition_url.clone(), subjects, popularity: matched.popularity });
+            let mut metadata = job.metadata.clone();
+            if let Some(isbn) = identity_result.as_ref().and_then(|result| result.matched.as_ref()).map(|matched| matched.canonical_isbn13.as_str()) {
+                add_catalog_identity_isbn(&mut metadata, isbn)?;
+            }
+            updates.push(CatalogMetadataBackfillUpdate {
+                source_id: job.source_id.clone(),
+                publication: job.publication.clone(),
+                acquisition_url: job.acquisition_url.clone(),
+                subjects,
+                popularity: matched.popularity,
+                metadata,
+                identity_result,
+            });
         }
         Ok(updates)
     }
@@ -1283,9 +1342,7 @@ impl CatalogService {
             return Ok(None);
         }
         let Some(matched) = result.matched else { return Ok(None) };
-        let provenance = PublicationIdentifierType::new("openlibrary-edition-match", Some("bokheim:provenance".to_owned())).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let identifier = PublicationIdentifier::new(&matched.canonical_isbn13, PublicationIdentifierScheme::Isbn, vec![provenance]).map_err(|error| CatalogServiceError(error.to_string()))?;
-        metadata.book.publication.identifiers.push(identifier);
+        add_catalog_identity_isbn(metadata, &matched.canonical_isbn13)?;
         Ok(Some(matched.canonical_isbn13))
     }
 
@@ -1896,6 +1953,14 @@ fn catalog_metadata_match(records: Vec<&RichWorkMetadataMatch>, snapshot_date: &
     CatalogMetadataMatch { subjects, popularity }
 }
 
+fn add_catalog_identity_isbn(metadata: &mut CatalogEpubMetadata, canonical_isbn13: &str) -> Result<(), CatalogServiceError> {
+    let provenance = PublicationIdentifierType::new("openlibrary-edition-match", Some("bokheim:provenance".to_owned())).map_err(|error| CatalogServiceError(error.to_string()))?;
+    let identifier = PublicationIdentifier::new(canonical_isbn13, PublicationIdentifierScheme::Isbn, vec![provenance]).map_err(|error| CatalogServiceError(error.to_string()))?;
+    metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &PublicationIdentifierScheme::Isbn);
+    metadata.book.publication.identifiers.push(identifier);
+    Ok(())
+}
+
 fn page_publication_count(page: &CatalogPage) -> u64 {
     page.publications.len().saturating_add(page.groups.iter().map(|group| group.publications.len()).sum::<usize>()) as u64
 }
@@ -2007,7 +2072,12 @@ pub fn app(service: CatalogService) -> Router {
 /// Loopback-only operational surface. The catalogue binary serves this on a
 /// separate listener so public reverse proxies cannot accidentally expose it.
 pub fn operations_app(service: CatalogService) -> Router {
-    Router::new().route("/internal/operations", get(catalog_operations)).with_state(service)
+    Router::new()
+        .route("/internal/operations", get(catalog_operations))
+        .route("/internal/subject-audit", get(catalog_subject_audit))
+        .route("/internal/identity-reviews", get(catalog_identity_reviews))
+        .route("/internal/identity-reviews/:review_id", post(catalog_identity_review_action))
+        .with_state(service)
 }
 
 async fn health() -> (StatusCode, &'static str) {
@@ -2131,6 +2201,65 @@ async fn catalog_operations(State(service): State<CatalogService>) -> Result<Res
     json_response(&CatalogOperationsResponse { inventory, extraction_failures }, "no-store")
 }
 
+async fn catalog_subject_audit(State(service): State<CatalogService>) -> Result<Response, ApiError> {
+    let audit = service.cache_call(CatalogCache::subject_projection_audit).await.map_err(ApiError::unavailable)?;
+    json_response(&audit, "no-store")
+}
+
+async fn catalog_identity_reviews(State(service): State<CatalogService>, Query(query): Query<IdentityReviewQuery>) -> Result<Response, ApiError> {
+    let source_id = query.source_id.as_deref().map(CatalogSourceId::parse).transpose().map_err(ApiError::bad_request)?;
+    let status = query.status.clone();
+    let review_source = source_id.clone();
+    let reviews = service.cache_call(move |cache| cache.identity_reviews(review_source.as_ref(), status.as_deref(), query.limit.unwrap_or(100))).await.map_err(ApiError::unavailable)?;
+    let inventory = service
+        .cache_call(move |cache| match source_id.as_ref() {
+            Some(source_id) => cache.identity_review_inventory_for_source(source_id),
+            None => cache.identity_review_inventory(),
+        })
+        .await
+        .map_err(ApiError::unavailable)?;
+    json_response(&IdentityReviewResponse { inventory, reviews }, "no-store")
+}
+
+async fn catalog_identity_review_action(State(service): State<CatalogService>, AxumPath(review_id): AxumPath<String>, Json(action): Json<IdentityReviewAction>) -> Result<Response, ApiError> {
+    if review_id.len() != 64 || !review_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request("invalid identity review id"));
+    }
+    let requeue = !matches!(&action, IdentityReviewAction::Reject);
+    let changed = match action {
+        IdentityReviewAction::SelectCandidate { edition_id, isbn13 } => {
+            let canonical = canonical_isbn(&isbn13).ok_or_else(|| ApiError::bad_request("invalid ISBN"))?;
+            let cache_review = review_id.clone();
+            let cache_edition = edition_id.clone();
+            let candidate = service.cache_call(move |cache| cache.identity_review_candidate_isbn(&cache_review, &cache_edition, &canonical)).await.map_err(ApiError::unavailable)?;
+            let Some(candidate) = candidate else { return Err(ApiError::bad_request("candidate does not belong to this review")) };
+            let cache_review = review_id.clone();
+            service.cache_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &candidate)).await.map_err(ApiError::unavailable)?
+        }
+        IdentityReviewAction::ManualIsbn { isbn } => {
+            let canonical = canonical_isbn(&isbn).ok_or_else(|| ApiError::bad_request("invalid ISBN"))?;
+            let cache_review = review_id.clone();
+            service.cache_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &canonical)).await.map_err(ApiError::unavailable)?
+        }
+        IdentityReviewAction::Reject => {
+            let cache_review = review_id.clone();
+            service.cache_write_call(move |cache| cache.reject_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
+        }
+        IdentityReviewAction::Retry => {
+            let cache_review = review_id.clone();
+            service.cache_write_call(move |cache| cache.retry_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
+        }
+    };
+    if !changed {
+        return Err(ApiError { status: StatusCode::NOT_FOUND, message: "identity review is no longer pending".to_owned() });
+    }
+    if requeue {
+        let worker = service.clone();
+        tokio::spawn(async move { worker.resume_metadata_backfill().await });
+    }
+    json_response(&serde_json::json!({ "status": "accepted", "review_id": review_id }), "no-store")
+}
+
 async fn catalog_inventory_response(service: &CatalogService) -> Result<CatalogInventoryResponse, ApiError> {
     let registry = service.registry().await;
     let uptime_seconds = service.state.started_at.elapsed().as_secs();
@@ -2142,6 +2271,7 @@ async fn catalog_inventory_response(service: &CatalogService) -> Result<CatalogI
         uptime_seconds,
         registry_revision: registry.revision,
         metadata_enrichment_configured,
+        search_index_ready: inventory.search_index_ready,
         active_page_count: inventory.active_page_count,
         active_publication_count: inventory.active_publication_count,
         active_epub_count: inventory.active_epub_count,
@@ -2152,6 +2282,7 @@ async fn catalog_inventory_response(service: &CatalogService) -> Result<CatalogI
             succeeded: inventory.metadata_backfill.succeeded,
             last_error: inventory.metadata_backfill.last_error,
         },
+        identity_reviews: inventory.identity_reviews,
         sources: inventory
             .sources
             .into_iter()
@@ -2380,12 +2511,12 @@ fn configured_max_crawl_pages() -> Result<usize, CatalogServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::routing::get;
     use image::{GenericImageView, ImageOutputFormat};
     use lopdf::dictionary;
-    use opds::{registry_from_endpoints, OpdsEndpointId};
+    use opds::{OpdsEndpointId, registry_from_endpoints};
     use std::io::{Cursor, Write};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tower::ServiceExt;
@@ -3459,6 +3590,12 @@ mod tests {
         assert_eq!(classify_catalog_failure("HTTP 404 Not Found"), ("http_unavailable", false));
         assert_eq!(classify_catalog_failure("invalid EPUB ZIP central directory"), ("invalid_publication", false));
         assert_eq!(classify_catalog_failure("database worker stopped"), ("internal", true));
+    }
+
+    #[test]
+    fn catalogue_server_embeds_the_complete_authoritative_taxonomy() {
+        let paths = library_model::unified_subject_paths("bisac", "HIS036000");
+        assert!(paths.contains(&"Humanities / History / History by Region / Americas / North America / United States".to_owned()), "the server taxonomy must retain deep History routes, got {paths:?}");
     }
 
     #[test]

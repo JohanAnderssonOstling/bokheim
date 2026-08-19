@@ -88,7 +88,7 @@ impl FoldersPage {
     }
 
     fn new_pane(ui: LibraryContext, path: Vec<FolderCrumb>, split_root: Option<WeakEntity<FoldersPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, |page: &mut Self, cx| page.search(cx), window, cx);
+        let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, Some("Search books or authors in this folder"), |page: &mut Self, cx| page.search(cx), window, cx);
         Self {
             hierarchy,
             ui,
@@ -521,7 +521,7 @@ impl FoldersPage {
         div()
             .id(format!("folder-inline-rename-{folder_id}"))
             .w(px(width))
-            .h(px(components::HIERARCHY_CELL_HEIGHT))
+            .h(gpui::rems(components::HIERARCHY_CELL_HEIGHT / 16.0))
             .flex_none()
             .m(px(components::HIERARCHY_CELL_MARGIN))
             .px(px(components::SPACE_SM))

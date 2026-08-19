@@ -17,7 +17,7 @@ pub const PDF_PAGE_COUNT_MAX: u8 = 6;
 pub const COLUMN_COUNT_MIN: u8 = 1;
 pub const COLUMN_COUNT_MAX: u8 = 4;
 pub const UI_FONT_SIZE_MIN: u8 = 12;
-pub const UI_FONT_SIZE_MAX: u8 = 24;
+pub const UI_FONT_SIZE_MAX: u8 = 32;
 pub const UI_FONT_SIZE_DEFAULT: u8 = 16;
 pub const WEB_DESKTOP_MIN_WIDTH_PX: u16 = 720;
 

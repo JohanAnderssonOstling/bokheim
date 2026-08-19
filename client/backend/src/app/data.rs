@@ -68,9 +68,7 @@ impl BackendContext {
     }
 
     pub fn reload_unified_taxonomy_from_disk(&self) -> Result<String, String> {
-        let installed_path = self.unified_taxonomy_path();
-        let development_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../library-model/data/unified-taxonomy-v2.sqlite3");
-        let path = if development_path.is_file() { development_path } else { installed_path };
+        let path = self.ensure_unified_taxonomy_file(&self.unified_taxonomy_path())?;
         let concepts = library_model::read_unified_taxonomy_sqlite(&path)?;
         library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))?;
         Ok(library_model::unified_taxonomy_release_id())
@@ -95,11 +93,41 @@ impl BackendContext {
 
     pub(crate) fn merge_unified_taxonomy_slice(&self, server_release_id: &str, concepts: &[library_model::UnifiedConceptDefinition], resolutions: &[library_model::UnifiedCodeResolution]) -> Result<String, String> {
         let _guard = self.taxonomy_update.lock().map_err(|_| "taxonomy update lock is poisoned".to_owned())?;
-        let path = self.unified_taxonomy_path();
+        let path = self.ensure_unified_taxonomy_file(&self.unified_taxonomy_path())?;
+        if library_model::unified_taxonomy_server_release_id(&path)?.is_some_and(|cached| cached != server_release_id) {
+            reset_taxonomy_cache(&path)?;
+        }
         library_model::merge_unified_taxonomy_sqlite_with_resolutions(&path, server_release_id, concepts, resolutions)?;
         let merged = library_model::read_unified_taxonomy_sqlite(&path)?;
         library_model::install_unified_taxonomy_concepts(merged).map_err(|error| format!("failed to install merged unified taxonomy database {}: {error}", path.display()))?;
         Ok(library_model::unified_taxonomy_release_id())
+    }
+
+    /// Drops a sparse overlay when the server advertises a different release.
+    /// The bundled seed remains immediately available and missing codes are
+    /// fetched again by the normal hydration path.
+    pub(crate) fn invalidate_unified_taxonomy_if_obsolete(&self, server_release_id: &str) -> Result<bool, String> {
+        let _guard = self.taxonomy_update.lock().map_err(|_| "taxonomy update lock is poisoned".to_owned())?;
+        let path = self.unified_taxonomy_path();
+        let Some(cached_release_id) = library_model::unified_taxonomy_server_release_id(&path)? else {
+            return Ok(false);
+        };
+        if cached_release_id == server_release_id {
+            return Ok(false);
+        }
+        reset_taxonomy_cache(&path)?;
+        library_model::install_unified_taxonomy_overlay(Vec::new())?;
+        Ok(true)
+    }
+
+    fn ensure_unified_taxonomy_file(&self, path: &Path) -> Result<PathBuf, String> {
+        if path.is_file() {
+            return Ok(path.to_owned());
+        }
+        let parent = path.parent().ok_or_else(|| format!("taxonomy path has no parent: {}", path.display()))?;
+        fs::create_dir_all(parent).map_err(|error| format!("failed to create taxonomy directory {}: {error}", parent.display()))?;
+        fs::write(path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to create editable taxonomy database {}: {error}", path.display()))?;
+        Ok(path.to_owned())
     }
 
     pub(crate) fn transfer_runtime(&self) -> crate::sync::transfer::TransferRuntime {
@@ -173,11 +201,12 @@ impl BackendContext {
 fn install_runtime_taxonomy(app_data_root: &Path) -> Result<(), String> {
     let path = app_data_root.join(UNIFIED_TAXONOMY_RELATIVE_PATH);
     if !path.exists() {
-        let parent = path.parent().ok_or_else(|| format!("taxonomy path has no parent: {}", path.display()))?;
-        fs::create_dir_all(parent).map_err(|error| format!("failed to create taxonomy directory {}: {error}", parent.display()))?;
-        fs::write(&path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to create editable taxonomy database {}: {error}", path.display()))?;
+        // The compact structural seed is already embedded in the binary.
+        // Create an editable device-local copy only when a server overlay must
+        // later be persisted.
+        return Ok(());
     }
-    match read_and_install_runtime_taxonomy(&path) {
+    match install_persisted_taxonomy_overlay(&path) {
         Ok(()) => Ok(()),
         Err(persisted_error) => {
             // Server-resolved taxonomy slices are a rehydratable cache. An
@@ -187,12 +216,48 @@ fn install_runtime_taxonomy(app_data_root: &Path) -> Result<(), String> {
             fs::copy(&path, &backup_path).map_err(|error| format!("failed to preserve invalid taxonomy database {} as {} after {persisted_error}: {error}", path.display(), backup_path.display()))?;
             log::warn!("Resetting invalid taxonomy cache {} (backup: {}): {persisted_error}", path.display(), backup_path.display());
             fs::write(&path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to reset invalid taxonomy database {}: {error}", path.display()))?;
-            read_and_install_runtime_taxonomy(&path).map_err(|reset_error| format!("failed to install bundled taxonomy database {} after persisted taxonomy failed ({persisted_error}): {reset_error}", path.display()))
+            install_persisted_taxonomy_overlay(&path).map_err(|reset_error| format!("failed to validate bundled taxonomy database {} after persisted taxonomy failed ({persisted_error}): {reset_error}", path.display()))
         }
     }
+}
+
+fn install_persisted_taxonomy_overlay(path: &Path) -> Result<(), String> {
+    if !library_model::is_unified_taxonomy_client_seed(path)? {
+        // Older clients used the complete authoritative database as their
+        // cache base. Replace it with the compact seed; fetched data is
+        // rehydratable and must not keep the full taxonomy on the device.
+        reset_taxonomy_cache(path)?;
+    } else if library_model::has_unified_taxonomy_overlay(path)? {
+        read_and_install_runtime_taxonomy(path)?;
+    }
+    Ok(())
+}
+
+fn reset_taxonomy_cache(path: &Path) -> Result<(), String> {
+    fs::write(path, library_model::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to reset taxonomy cache {}: {error}", path.display()))
 }
 
 fn read_and_install_runtime_taxonomy(path: &Path) -> Result<(), String> {
     let concepts = library_model::read_unified_taxonomy_sqlite(path)?;
     library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_server_release_restores_the_bundled_seed() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::PlatformLocal(directory.path().to_owned())).unwrap();
+        let resolution = library_model::UnifiedCodeResolution::new("lcc".to_owned(), "ZZZZ999".to_owned(), Vec::new());
+        context.merge_unified_taxonomy_slice("release-one", &[], &[resolution]).unwrap();
+        let path = context.unified_taxonomy_path();
+        assert_eq!(library_model::unified_taxonomy_server_release_id(&path).unwrap().as_deref(), Some("release-one"));
+
+        assert!(context.invalidate_unified_taxonomy_if_obsolete("release-two").unwrap());
+        assert_eq!(library_model::unified_taxonomy_server_release_id(&path).unwrap(), None);
+        assert!((1_000..=2_000).contains(&library_model::read_unified_taxonomy_sqlite(&path).unwrap().len()));
+        assert!(!context.invalidate_unified_taxonomy_if_obsolete("release-two").unwrap());
+    }
 }

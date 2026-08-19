@@ -19,10 +19,29 @@ listener on loopback and terminate HTTPS in a reverse proxy.
 No route accepts or requires credentials. Browser clients may access the public
 API through permissive CORS.
 
+## Deploy
+
+Provision the dedicated, root-owned deployer once on the server:
+
+```sh
+sudo servers/taxonomy/deploy/provision-taxonomy-deploy.sh johan
+```
+
+Routine releases are then built, staged, atomically activated, health checked,
+and rolled back on failure with:
+
+```sh
+servers/taxonomy/deploy/deploy-remote.sh
+```
+
+The deployment installs the authoritative snapshot read-only, runs the service
+on `127.0.0.1:8093`, and exposes it through Caddy at
+`https://taxonomy.bokheim.se`.
+
 ## API
 
 - `GET /health`
-- `GET /v1/taxonomy` — release identifier and snapshot counts
+- `GET` or `HEAD /v1/taxonomy` — release identifier and snapshot counts; supports `If-None-Match`
 - `GET /v1/roots` — initial visible roots
 - `POST /v1/resolve` — batch resolution for all locally unsupported codes
 - `GET /v1/resolve?system=lcc&code=DC256` — single-code diagnostic lookup
@@ -63,3 +82,11 @@ into WASM on demand. Rich metadata and remotely synchronized metadata both
 trigger hydration, while taxonomy downtime never blocks metadata storage or
 core library synchronization. A new server release invalidates old resolution
 rows so previously negative codes can be checked again.
+
+Native and browser clients bundle only an ancestor-closed structural seed: all
+roots, their direct children, and second-level children. They retain the
+server's content-derived release ID and check `/v1/taxonomy` at startup/use,
+then at most once every six hours. The bodyless conditional request normally
+returns `304 Not Modified`. A changed ETag discards the rehydratable sparse
+overlay and negative-resolution ledger, restores the bundled seed, and lets
+normal code hydration refill only the concepts that device uses.

@@ -1,3 +1,4 @@
+use axum::{http::StatusCode, routing::get, Router};
 use catalog_server::{app, operations_app, CatalogService};
 use std::io;
 use std::net::SocketAddr;
@@ -51,24 +52,46 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !operations_bind_address.ip().is_loopback() {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "BOKHEIM_CATALOG_OPERATIONS_BIND must be loopback").into());
     }
+    let listener = tokio::net::TcpListener::bind(bind_address).await?;
+    let operations_listener = tokio::net::TcpListener::bind(operations_bind_address).await?;
     let registry_path = std::env::var_os("BOKHEIM_CATALOG_FILE").map(PathBuf::from);
     let cache_path = std::env::var_os("BOKHEIM_CATALOG_CACHE_FILE").map(PathBuf::from);
     let cover_cache_directory = std::env::var_os("BOKHEIM_CATALOG_COVER_CACHE_DIR")
         .map(PathBuf::from)
         .or_else(|| cache_path.as_deref().and_then(Path::parent).map(|parent| parent.join("covers")))
         .unwrap_or_else(|| std::env::temp_dir().join("catalog-server-covers"));
-    let service = match registry_path {
-        Some(path) => CatalogService::from_file_with_storage(path, cache_path, cover_cache_directory).await?,
-        None => CatalogService::bundled_with_storage(cache_path, cover_cache_directory)?,
+    let service = match match registry_path {
+        Some(path) => CatalogService::from_file_with_storage(path, cache_path, cover_cache_directory).await,
+        None => CatalogService::bundled_with_storage(cache_path, cover_cache_directory),
+    } {
+        Ok(service) => service,
+        Err(error) => {
+            let diagnostic = error.to_string();
+            tracing::error!(%diagnostic, "catalogue service initialization failed");
+            let diagnostic_app = Router::new().route(
+                "/health",
+                get(move || {
+                    let diagnostic = diagnostic.clone();
+                    async move { (StatusCode::SERVICE_UNAVAILABLE, diagnostic) }
+                }),
+            );
+            axum::serve(listener, diagnostic_app).with_graceful_shutdown(shutdown_signal()).await?;
+            return Ok(());
+        }
     };
+    // Give the one-time FTS rebuild first access to the serialized SQLite
+    // writer. Public health remains available while the existing cache is
+    // indexed, and searches use the compatibility query until it is ready.
+    let search_index_service = service.clone();
+    tokio::spawn(async move { search_index_service.refresh_search_index().await });
     let refresh_service = service.clone();
     tokio::spawn(async move { refresh_service.run_refresh_loop().await });
     let registry_service = service.clone();
     tokio::spawn(async move { registry_service.run_registry_refresh_loop().await });
     let extraction_service = service.clone();
     tokio::spawn(async move { extraction_service.run_epub_extraction_loop().await });
-    let listener = tokio::net::TcpListener::bind(bind_address).await?;
-    let operations_listener = tokio::net::TcpListener::bind(operations_bind_address).await?;
+    let subject_projection_service = service.clone();
+    tokio::spawn(async move { subject_projection_service.refresh_unified_subject_assignments().await });
     tracing::info!(address = %listener.local_addr()?, "public unauthenticated catalog server listening");
     tracing::info!(address = %operations_listener.local_addr()?, "loopback catalogue operations server listening");
     let public_server = axum::serve(listener, app(service.clone()));

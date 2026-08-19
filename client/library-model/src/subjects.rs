@@ -10,17 +10,18 @@ mod runtime;
 use crate::PublicationSubject;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use bisac::{bisac_subject_system, match_bisac_subjects, SubjectAssignment, SubjectNode, SubjectSystem};
+pub use bisac::{SubjectAssignment, SubjectNode, SubjectSystem, bisac_code_for_path, bisac_subject_system, match_bisac_subjects};
 pub use ddc::ddc_subject_path;
 pub use lcc::{canonical_lcc_notation, lcc_subject_path};
 pub use runtime::{
-    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code, unified_lcc_subject_paths, unified_subject_paths,
-    unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
+    BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, install_unified_taxonomy_concepts, install_unified_taxonomy_overlay,
+    loaded_unified_taxonomy_release_id, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code, unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys,
+    unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes,
 };
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
-pub const BISAC_MATCHER_VERSION: i64 = 2;
+pub const BISAC_MATCHER_VERSION: i64 = 7;
 pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_VERSION: &str = "23-summary-en-2024-08-01";
 pub const DDC_MATCHER_VERSION: i64 = 2;
@@ -29,7 +30,7 @@ pub const LCC_VERSION: &str = "2024-outline-r2";
 pub const LCC_MATCHER_VERSION: i64 = 2;
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
 pub const UNIFIED_VERSION: &str = "6";
-pub const UNIFIED_MATCHER_VERSION: i64 = 12;
+pub const UNIFIED_MATCHER_VERSION: i64 = 19;
 const GENERIC_HISTORY_CONCEPT_ID: &str = "bokheim:subject:history";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,9 +101,8 @@ pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubject
 
 pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectCode> {
     let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
-    let bisac = bisac_subject_system();
     for assignment in match_bisac_subjects(subjects) {
-        let Some(code) = bisac.node_by_path(assignment.node_path()).and_then(SubjectNode::code) else { continue };
+        let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
         projected.entry((BISAC_SYSTEM_ID.to_owned(), code.to_owned())).or_default().extend(assignment.evidence_positions());
     }
     for (position, subject) in subjects.iter().enumerate() {
@@ -203,12 +203,64 @@ mod tests {
 
     #[test]
     fn plain_dc_history_maps_only_to_generic_humanities_history() {
+        runtime::install_authoritative_taxonomy_for_tests();
         let subjects = ["History", "United States", "20th Century"].into_iter().map(|name| PublicationSubject::new(None, name, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         let paths = project_unified_subjects(&subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<BTreeSet<_>>();
 
         assert!(paths.contains("Humanities / History"));
         assert!(paths.contains("Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century"));
         assert!(paths.iter().all(|path| path.starts_with("Humanities / History")));
+    }
+
+    #[test]
+    fn plain_dc_bisac_headings_resolve_through_codes_before_unified_projection() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        for (heading, expected_code) in
+            [("Fiction", "FIC000000"), ("History", "HIS000000"), ("Juvenile Fiction", "JUV000000"), ("Drama", "DRA000000"), ("Poetry", "POE000000"), ("Science", "SCI000000"), ("Fiction / Short Stories", "FIC029000")]
+        {
+            let subject = PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap();
+            let codes = project_subject_codes(std::slice::from_ref(&subject));
+            assert!(codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == expected_code), "{heading} must resolve to {expected_code}");
+
+            let expected_paths = unified_subject_paths(BISAC_SYSTEM_ID, expected_code).into_iter().collect::<BTreeSet<_>>();
+            assert!(!expected_paths.is_empty(), "{expected_code} must exist in the unified taxonomy");
+            let projected_paths = project_unified_subjects(&[subject]).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<BTreeSet<_>>();
+            assert!(expected_paths.is_subset(&projected_paths), "{heading} must use its BISAC code's unified routes");
+        }
+    }
+
+    #[test]
+    fn bisac_components_in_separate_dc_subjects_keep_combined_evidence_in_unified_projection() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        let subjects = ["Short stories", "Adventure and adventurers -- Fiction"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let bisac = match_bisac_subjects(&subjects);
+        let short_stories = bisac.iter().find(|assignment| assignment.node_path() == "Fiction / Short Stories").expect("production subject components must infer the BISAC path");
+        assert_eq!(short_stories.evidence_positions(), &[0, 1]);
+
+        let expected = unified_subject_paths(BISAC_SYSTEM_ID, "FIC029000").into_iter().collect::<BTreeSet<_>>();
+        let unified = project_unified_subjects(&subjects);
+        for path in expected {
+            let assignment = unified.iter().find(|assignment| assignment.subject_path() == path).expect("the inferred BISAC code must resolve into unified taxonomy");
+            assert_eq!(assignment.evidence_positions(), &[0, 1]);
+        }
+    }
+
+    #[test]
+    fn lcsh_style_dc_subjects_resolve_to_bisac_codes_before_unified_projection() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        for (heading, expected_code) in [
+            ("Animals -- Juvenile fiction", "JUV002000"),
+            ("Women -- France -- Fiction", "FIC044000"),
+            ("Clothing and dress -- United States -- History", "HIS036000"),
+            ("Time travel -- Fiction", "FIC028080"),
+            ("Family life -- Fiction", "FIC045000"),
+        ] {
+            let subject = PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap();
+            let assignments = match_bisac_subjects(std::slice::from_ref(&subject));
+            assert!(assignments.iter().all(|assignment| bisac::bisac_path_has_exact_code(assignment.node_path())), "{heading} produced a BISAC navigation-only path: {assignments:?}");
+            let codes = project_subject_codes(&[subject]);
+            assert!(codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == expected_code), "{heading} must resolve to {expected_code}, got {codes:?}");
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ publish = false
 [features]
 default = ["random-ids"]
 random-ids = ["uuid/v4"]
+authoritative-taxonomy = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -30,3 +31,4 @@ tempfile = "3"
 [build-dependencies]
 bincode = "2.0.1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+uuid = { version = "1", features = ["v5"] }

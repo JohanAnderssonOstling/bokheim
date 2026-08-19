@@ -106,6 +106,13 @@ pub const BOOK_CARD_AUTHOR_HEIGHT_REM: f32 = BOOK_CARD_AUTHOR_LINE_HEIGHT / 16.0
 pub const BOOK_CARD_PROGRESS_HEIGHT: f32 = app_contract::frontend::BOOK_CARD_PROGRESS_HEIGHT_PX as f32;
 pub const BOOK_GRID_ROW_TRAILING_SPACE: f32 = app_contract::frontend::BOOK_GRID_ROW_TRAILING_SPACE_PX as f32;
 
+/// Cover, title, and author: the stable visual identity shared by library and
+/// catalogue cards. Controls and optional progress must not make this block
+/// taller, or paired description columns stop aligning with the cover card.
+pub fn book_card_identity_height(rem_size: f32) -> f32 {
+    BOOK_COVER_HEIGHT + BOOK_CARD_COVER_CONTENT_GAP + BOOK_CARD_TITLE_HEIGHT_REM * rem_size + BOOK_CARD_TEXT_GAP + BOOK_CARD_AUTHOR_HEIGHT_REM * rem_size + BOOK_GRID_ROW_TRAILING_SPACE
+}
+
 pub fn book_grid_row_height(rem_size: f32) -> f32 {
     book_grid_row_height_for_cover_width(BOOK_COVER_WIDTH, rem_size)
 }
@@ -187,15 +194,41 @@ pub const HIERARCHY_CELL_MARGIN: f32 = app_contract::HIERARCHY_CELL_GAP_PX as f3
 pub const HIERARCHY_ICON_SIZE: f32 = app_contract::HIERARCHY_ICON_SIZE_PX as f32;
 pub const HIERARCHY_LABEL_SIZE: f32 = app_contract::HIERARCHY_LABEL_SIZE_PX as f32;
 pub const HIERARCHY_CELL_MAX_WIDTH: f32 = HIERARCHY_CELL_MIN_WIDTH * 2.0 + HIERARCHY_CELL_MARGIN * 2.0;
+
+/// A hierarchy cell is a row of text, so its geometry follows the reader's UI
+/// font size while the margin between cells stays put. Styling can say
+/// `rems(..)` and let the window resolve it, but the virtual grid measures in
+/// real pixels, so these take the rem size explicitly.
+pub const HIERARCHY_CELL_HEIGHT_REM: f32 = HIERARCHY_CELL_HEIGHT / 16.0;
+pub const HIERARCHY_CELL_MIN_WIDTH_REM: f32 = HIERARCHY_CELL_MIN_WIDTH / 16.0;
+
+pub fn hierarchy_cell_height(rem_size: f32) -> f32 {
+    HIERARCHY_CELL_HEIGHT_REM * rem_size
+}
+
+pub fn hierarchy_cell_min_width(rem_size: f32) -> f32 {
+    HIERARCHY_CELL_MIN_WIDTH_REM * rem_size
+}
+
+/// Kept continuous with the minimum, as the constant is: one maximum-width cell
+/// occupies exactly the space of two minimum-width cells.
+pub fn hierarchy_cell_max_width(rem_size: f32) -> f32 {
+    hierarchy_cell_min_width(rem_size) * 2.0 + HIERARCHY_CELL_MARGIN * 2.0
+}
+
+/// The covers are fixed art and the name is text, so only the name's block
+/// follows the font. At the default 16px this is the contract's stated height.
+pub fn author_row_height(rem_size: f32) -> f32 {
+    AUTHOR_ROW_COVER_HEIGHT + BOOK_CARD_TITLE_HEIGHT_REM * rem_size + AUTHOR_ROW_CONTENT_GAP + AUTHOR_ROW_HORIZONTAL_PADDING * 2.0
+}
 /// Leave a small amount of unused row width so fractional pixels and borders
 /// can never make the layout wider than its measured container.
 pub const HIERARCHY_LAYOUT_SAFETY: f32 = 4.0;
 pub const FOLDER_GRID_GAP: f32 = SPACE_XS;
 
-/// Catalogue controls are shorter than the app's 40 px actions: a toolbar that
-/// carries a search field, a browse menu and one dropdown per facet has to fit
-/// on one line, and that line is spent before any book is drawn.
-pub const CATALOG_CONTROL_HEIGHT: f32 = 32.0;
+/// Store topbar controls share the hierarchy topbar's action height so search,
+/// dropdowns, navigation, and paging align when the pages are switched.
+pub const CATALOG_CONTROL_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT;
 pub const CATALOG_CHIP_HEIGHT: f32 = 24.0;
 pub const CATALOG_SEARCH_WIDTH: f32 = 240.0;
 /// Wide enough for a facet label beside its count, narrow enough that moving
@@ -216,21 +249,22 @@ pub const SETTINGS_CONTROL_GAP: f32 = 1.0;
 /// whole range between those thresholds is deliberate hysteresis. Once the
 /// available children occupy their columns, their cells keep growing to fill
 /// the row instead of turning the remaining width into an outer margin.
-pub fn hierarchy_grid_layout(available_width: f32, child_count: usize, previous_columns: usize) -> (usize, f32) {
-    let outer_margin = HIERARCHY_CELL_MARGIN * 2.0;
-    let outer_minimum = HIERARCHY_CELL_MIN_WIDTH + outer_margin;
-    let outer_maximum = HIERARCHY_CELL_MAX_WIDTH + outer_margin;
+pub fn hierarchy_grid_layout(available_width: f32, child_count: usize, previous_columns: usize, rem_size: f32) -> (usize, f32) {
+    let minimum_width = hierarchy_cell_min_width(rem_size);
+    let gap = HIERARCHY_CELL_MARGIN * 2.0;
+    let minimum_layout_width = |columns: usize| columns as f32 * minimum_width + columns.saturating_sub(1) as f32 * gap;
+    let maximum_layout_width = |columns: usize| columns as f32 * hierarchy_cell_max_width(rem_size) + columns.saturating_sub(1) as f32 * gap;
     let maximum_columns = child_count.max(1);
     let mut columns = previous_columns.clamp(1, maximum_columns);
 
-    while columns < maximum_columns && available_width >= columns as f32 * outer_maximum {
+    while columns < maximum_columns && available_width >= maximum_layout_width(columns) {
         columns += 1;
     }
-    while columns > 1 && available_width < columns as f32 * outer_minimum {
+    while columns > 1 && available_width < minimum_layout_width(columns) {
         columns -= 1;
     }
 
-    let width = (available_width / columns as f32 - outer_margin).max(HIERARCHY_CELL_MIN_WIDTH);
+    let width = ((available_width - columns.saturating_sub(1) as f32 * gap) / columns as f32).max(minimum_width);
     (columns, width)
 }
 
@@ -253,15 +287,35 @@ mod tests {
 
     #[test]
     fn hierarchy_columns_use_full_minimum_to_maximum_hysteresis() {
-        let outer_minimum = HIERARCHY_CELL_MIN_WIDTH + HIERARCHY_CELL_MARGIN * 2.0;
-        let outer_maximum = HIERARCHY_CELL_MAX_WIDTH + HIERARCHY_CELL_MARGIN * 2.0;
+        let gap = HIERARCHY_CELL_MARGIN * 2.0;
+        let two_column_minimum = HIERARCHY_CELL_MIN_WIDTH * 2.0 + gap;
+        let one_column_maximum = HIERARCHY_CELL_MAX_WIDTH;
+        let two_column_maximum = HIERARCHY_CELL_MAX_WIDTH * 2.0 + gap;
 
-        assert_eq!(hierarchy_grid_layout(outer_maximum - 1.0, 4, 1).0, 1);
-        assert_eq!(hierarchy_grid_layout(outer_maximum, 4, 1).0, 2);
-        assert_eq!(hierarchy_grid_layout(outer_minimum * 2.0, 4, 2).0, 2);
-        assert_eq!(hierarchy_grid_layout(outer_minimum * 2.0 - 1.0, 4, 2).0, 1);
-        assert_eq!(hierarchy_grid_layout(outer_maximum * 2.0 - 1.0, 4, 2).0, 2);
-        assert_eq!(hierarchy_grid_layout(outer_maximum * 2.0, 4, 2).0, 3);
-        assert_eq!(hierarchy_grid_layout(outer_minimum * 4.0, 1, 4), (1, outer_minimum * 4.0 - HIERARCHY_CELL_MARGIN * 2.0));
+        assert_eq!(hierarchy_grid_layout(one_column_maximum - 1.0, 4, 1, 16.0).0, 1);
+        assert_eq!(hierarchy_grid_layout(one_column_maximum, 4, 1, 16.0).0, 2);
+        assert_eq!(hierarchy_grid_layout(two_column_minimum, 4, 2, 16.0).0, 2);
+        assert_eq!(hierarchy_grid_layout(two_column_minimum - 1.0, 4, 2, 16.0).0, 1);
+        assert_eq!(hierarchy_grid_layout(two_column_maximum - 1.0, 4, 2, 16.0).0, 2);
+        assert_eq!(hierarchy_grid_layout(two_column_maximum, 4, 2, 16.0).0, 3);
+        assert_eq!(hierarchy_grid_layout(two_column_minimum * 2.0, 1, 4, 16.0), (1, two_column_minimum * 2.0));
+    }
+
+    #[test]
+    fn hierarchy_geometry_tracks_the_window_font_size() {
+        // At the default the helpers reproduce the contract exactly, so nothing
+        // moves for a reader who never touches the setting.
+        assert_eq!(hierarchy_cell_height(16.0), HIERARCHY_CELL_HEIGHT);
+        assert_eq!(hierarchy_cell_min_width(16.0), HIERARCHY_CELL_MIN_WIDTH);
+        assert_eq!(hierarchy_cell_max_width(16.0), HIERARCHY_CELL_MAX_WIDTH);
+        assert_eq!(author_row_height(16.0), AUTHOR_ROW_HEIGHT);
+
+        // Larger interface text widens the cells, so a fixed width fits fewer
+        // of them rather than truncating the labels inside them.
+        assert!(hierarchy_cell_min_width(24.0) > HIERARCHY_CELL_MIN_WIDTH);
+        assert!(hierarchy_cell_height(24.0) > HIERARCHY_CELL_HEIGHT);
+        assert!(author_row_height(24.0) > AUTHOR_ROW_HEIGHT);
+        let wide = 4.0 * (HIERARCHY_CELL_MIN_WIDTH + HIERARCHY_CELL_MARGIN * 2.0);
+        assert!(hierarchy_grid_layout(wide, 8, 4, 24.0).0 < hierarchy_grid_layout(wide, 8, 4, 16.0).0);
     }
 }

@@ -163,18 +163,21 @@ impl ReaderToolbar {
             )
             .child(
                 components::reader_settings_section("Page layout", theme)
-                    .child(components::reader_setting_row("Column width").child(components::reader_stepper_group(
-                        components::reader_stepper_button("column-width-smaller", "−", theme).tooltip("Decrease column width (Ctrl+Alt+-)").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnWidth(-40.0)))),
-                        format!("{:.0}px", current.column_width),
-                        components::reader_stepper_button("column-width-larger", "+", theme).tooltip("Increase column width (Ctrl+Alt++)").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnWidth(40.0)))),
-                        theme,
-                    )))
-                    .child(components::reader_setting_row("Fit columns").child(components::reader_stepper_group(
-                        components::reader_stepper_button("fit-columns-fewer", "−", theme).tooltip("Fit fewer columns in the current reader width").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnCount(-1)))),
-                        self.model.column_count.to_string(),
-                        components::reader_stepper_button("fit-columns-more", "+", theme).tooltip("Fit more columns in the current reader width").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnCount(1)))),
-                        theme,
-                    )))
+                    .when(!cfg!(feature = "kobo"), |section| {
+                        section
+                            .child(components::reader_setting_row("Column width").child(components::reader_stepper_group(
+                                components::reader_stepper_button("column-width-smaller", "−", theme).tooltip("Decrease column width (Ctrl+Alt+-)").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnWidth(-40.0)))),
+                                format!("{:.0}px", current.column_width),
+                                components::reader_stepper_button("column-width-larger", "+", theme).tooltip("Increase column width (Ctrl+Alt++)").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnWidth(40.0)))),
+                                theme,
+                            )))
+                            .child(components::reader_setting_row("Fit columns").child(components::reader_stepper_group(
+                                components::reader_stepper_button("fit-columns-fewer", "−", theme).tooltip("Fit fewer columns in the current reader width").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnCount(-1)))),
+                                self.model.column_count.to_string(),
+                                components::reader_stepper_button("fit-columns-more", "+", theme).tooltip("Fit more columns in the current reader width").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustColumnCount(1)))),
+                                theme,
+                            )))
+                    })
                     .child(components::reader_setting_row("Zoom").child(components::reader_stepper_group(
                         components::reader_stepper_button("reader-zoom-out", "−", theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::AdjustScale(-0.1)))),
                         format!("{:.1}x", current.scale),

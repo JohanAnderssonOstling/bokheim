@@ -1,4 +1,4 @@
-use reqwest::{redirect::Policy, Client, Url};
+use reqwest::{Client, Url, redirect::Policy};
 use serde::Serialize;
 use serde_json::Value;
 use std::net::IpAddr;
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:8092/";
 const DEFAULT_METADATA_URL: &str = "http://127.0.0.1:8091/";
 const RESPONSE_LIMIT: usize = 1024 * 1024;
+const REVIEW_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct OperationalServices {
@@ -49,6 +50,43 @@ impl OperationalServices {
     pub(crate) async fn snapshot(&self) -> OperationalSnapshot {
         let (catalogue, metadata) = tokio::join!(self.fetch(self.catalog_url.as_ref(), "internal/operations"), self.fetch(self.metadata_url.as_ref(), "internal/operations"));
         OperationalSnapshot { catalogue, metadata }
+    }
+
+    pub(crate) async fn catalog_identity_reviews(&self, source_id: Option<&str>, status: Option<&str>, limit: u16) -> Result<Value, String> {
+        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
+        let mut url = base.join("internal/identity-reviews").map_err(|_| "invalid catalogue review endpoint")?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(source_id) = source_id.filter(|value| !value.is_empty()) {
+                query.append_pair("source_id", source_id);
+            }
+            if let Some(status) = status.filter(|value| !value.is_empty()) {
+                query.append_pair("status", status);
+            }
+            query.append_pair("limit", &limit.to_string());
+        }
+        self.catalog_json(self.client.get(url), REVIEW_RESPONSE_LIMIT).await
+    }
+
+    pub(crate) async fn catalog_identity_review_action(&self, review_id: &str, action: &Value) -> Result<Value, String> {
+        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
+        let url = base.join(&format!("internal/identity-reviews/{review_id}")).map_err(|_| "invalid catalogue review endpoint")?;
+        self.catalog_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
+    }
+
+    async fn catalog_json(&self, request: reqwest::RequestBuilder, limit: usize) -> Result<Value, String> {
+        let response = request.header(reqwest::header::ACCEPT, "application/json").send().await.map_err(|_| "catalogue service request failed")?;
+        if !response.status().is_success() {
+            return Err("catalogue service returned an error".to_owned());
+        }
+        if response.content_length().is_some_and(|length| length > limit as u64) {
+            return Err("catalogue service response is too large".to_owned());
+        }
+        let bytes = response.bytes().await.map_err(|_| "catalogue service response failed")?;
+        if bytes.len() > limit {
+            return Err("catalogue service response is too large".to_owned());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "catalogue service returned invalid JSON".to_owned())
     }
 
     async fn fetch(&self, base: Option<&Url>, path: &str) -> RemoteService {

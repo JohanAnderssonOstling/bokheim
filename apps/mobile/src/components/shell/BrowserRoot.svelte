@@ -33,10 +33,10 @@
   <AdaptiveNavigation {active} {libraryName} {onnavigate} {onlibraries} {onaccount} {onsettings} />
   <div class="app-column">
     {#if !detailMode}<AppTopbar
-      {pageTitle} {libraryName} folders={breadcrumbs}
+      {pageTitle} folders={breadcrumbs}
       showBreadcrumb={active === "folders" || active === "subjects"}
       showLibraryActions={active === "folders"}
-      {addingBook} importingFolder={importingFolderArchive} {onlibraries} {onaddbook}
+      {addingBook} importingFolder={importingFolderArchive} {onaddbook}
       onnewfolder={onnewfolder} {onimportfolder} onfolder={onbreadcrumb}
     />{/if}
     <main class:player-open={playerOpen} class:detail-view={detailMode} class:library-view={!detailMode && (active === "folders" || active === "subjects")} class:authors-view={!detailMode && active === "authors"} class:store-view={!detailMode && active === "store"} class="content">

@@ -291,11 +291,31 @@ export async function applyWebSyncExchange(libraryId: string, response: Exchange
 }
 
 export async function synchronizeWebLibrary(libraryId: string): Promise<void> {
+  const { db } = await getWebDatabase();
+  const storedTaxonomyRows = db.exec({
+    sql: "SELECT kind,entity_key,value_json FROM web_sync_cells WHERE library_id=? AND kind IN ('metadata','book_lifecycle') ORDER BY entity_key,kind",
+    bind: [libraryId], rowMode: "array", returnValue: "resultRows",
+  }) as Array<[string, string, string]>;
+  if (storedTaxonomyRows.length) {
+    const storedMutations = storedTaxonomyRows.map(([kind, entityKey, json]) => ({ kind, entityKey, value: JSON.parse(json) as unknown }));
+    await hydrateMutationTaxonomy(storedMutations).catch((reason) => console.warn("Continuing synchronization without refreshing stored taxonomy detail", reason));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const mutation of storedMutations) db.exec({
+        sql: "UPDATE web_sync_cells SET value_json=? WHERE library_id=? AND kind=? AND entity_key=?",
+        bind: [JSON.stringify(mutation.value), libraryId, mutation.kind, mutation.entityKey],
+      });
+      for (const entityKey of new Set(storedMutations.map((mutation) => mutation.entityKey))) projectBook(db, libraryId, entityKey);
+      db.exec("COMMIT");
+    } catch (reason) {
+      db.exec("ROLLBACK");
+      throw reason;
+    }
+  }
   await enrichWebLibraryRich(libraryId, Number.MAX_SAFE_INTEGER, 30_000)
     .catch((reason) => console.warn("Continuing web library sync without rich metadata enrichment", reason));
   await enrichWebLibraryAuthors(libraryId, Number.MAX_SAFE_INTEGER, 20_000)
     .catch((reason) => console.warn("Continuing web library sync without author enrichment", reason));
-  const { db } = await getWebDatabase();
   db.exec({ sql: "INSERT INTO web_sync_state (library_id, replica_id) VALUES (?, ?) ON CONFLICT (library_id) DO NOTHING", bind: [libraryId, crypto.randomUUID()] });
   let hasMore = true;
   let page = 0;

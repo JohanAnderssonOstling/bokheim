@@ -495,18 +495,18 @@
   {#if !selected}
     {#if subjectBrowse}
       <div class="catalog-bar">
-        <button class="back" type="button" onclick={closeSubjects}>← <span>{STORE_CONTRACT.catalogs_label}</span></button>
-        <strong class="catalog-source-name">Browse by subject</strong>
-        {#if subjectLevels.length > 1}<FolderBreadcrumbs rootLabel={subjectLevels[1].title} levels={subjectLevels.slice(2).map((level) => ({ name: level.title }))} onselect={(level) => void goToSubjectLevel(level + 1)} />{/if}
+        <FolderBreadcrumbs
+          rootLabel="Store"
+          levels={[{ name: "Subjects" }, ...subjectLevels.slice(1).map((level) => ({ name: level.title }))]}
+          onselect={(level) => level === 0 ? closeSubjects() : void goToSubjectLevel(level - 1)}
+        />
       </div>
       <div class="store-toolbar subject-toolbar">
-        {#if subjectLevels.length > 1}
-          <form class="wide-search" onsubmit={searchSubjects}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
-            <input type="search" bind:value={subjectQuery} placeholder="Search in this subject" aria-label="Search in this subject" autocomplete="off" />
-            <button type="submit" disabled={loading}>Search</button>
-          </form>
-        {/if}
+        <form class="wide-search" onsubmit={searchSubjects}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.15a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0"></path></svg>
+          <input type="search" bind:value={subjectQuery} placeholder={subjectLevels.length > 1 ? "Search in this subject" : "Search subjects"} aria-label={subjectLevels.length > 1 ? "Search in this subject" : "Search subjects"} autocomplete="off" />
+          <button type="submit" disabled={loading}>Search</button>
+        </form>
         <details class="toolbar-menu source-menu">
           <summary class:active={subjectSourceIds.length > 0}>{subjectSourceLabel}<span aria-hidden="true">⌄</span></summary>
           <div class="toolbar-menu-popover" role="menu" aria-label="Included catalogues">
@@ -602,9 +602,14 @@
     {/if}
   {:else}
     <div class="catalog-bar">
-      <button class="back" type="button" onclick={() => { selected = null; catalog = null; error = ""; }}>← <span>{STORE_CONTRACT.catalogs_label}</span></button>
-      <strong class="catalog-source-name">{selected.title}</strong>
-      {#if levels.length > 1}<FolderBreadcrumbs rootLabel={catalogPageTitle(selected.title, levels[1].title)} levels={levels.slice(2).map((level) => ({ name: catalogPageTitle(selected!.title, level.title) }))} onselect={(level) => void goToLevel(level + 1)} />{/if}
+      <FolderBreadcrumbs
+        rootLabel="Store"
+        levels={[{ name: selected.title }, ...levels.slice(1).map((level) => ({ name: catalogPageTitle(selected!.title, level.title) }))]}
+        onselect={(level) => {
+          if (level === 0) { selected = null; catalog = null; error = ""; }
+          else void goToLevel(level - 1);
+        }}
+      />
     </div>
 
     {#if needsExternalAuthentication && !catalog}
@@ -701,6 +706,9 @@
   .toolbar-menu-popover button { min-height: 2.25rem; padding: .45rem .65rem; border: 0; color: var(--color-ink-text); background: transparent; text-align: left; font-size: .72rem; cursor: pointer; }
   .toolbar-menu-popover button:hover { background-image: linear-gradient(var(--color-hover-overlay), var(--color-hover-overlay)); }
   .toolbar-menu-popover button[aria-checked="true"] { color: var(--color-accent); font-weight: 750; }
+  .language-menu .toolbar-menu-popover button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .75rem; }
+  .language-menu .toolbar-menu-popover button[aria-checked="true"] { background-color: var(--color-active-highlight); box-shadow: inset 3px 0 0 var(--color-accent); }
+  .language-menu .toolbar-menu-popover button[aria-checked="true"]::after { content: "✓"; color: var(--color-accent); font-size: .82rem; font-weight: 800; }
   .source-error { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .source-error button { flex: none; min-height: 2.25rem; padding: .4rem .7rem; border: 1px solid currentColor; border-radius: 0; color: inherit; background: transparent; font-weight: 750; cursor: pointer; }
   .wide-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .3rem 0 1rem; }
@@ -726,10 +734,7 @@
   .source-copy strong { color: var(--color-ink-text); font-size: .9rem; }
   .source-copy small { color: var(--color-subtle-text); font-size: .72rem; line-height: 1.35; }
   .chevron { color: var(--color-subtle-text); font-size: 1.4rem; }
-  .back { display: inline-flex; align-items: center; gap: .35rem; padding: .5rem 0; border: 0; color: var(--color-accent); background: transparent; font-weight: 750; cursor: pointer; }
   .catalog-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
-  .catalog-bar .back { min-height: 2.5rem; padding: .45rem .25rem; color: var(--color-ink-text); font-size: .72rem; }
-  .catalog-source-name { flex: none; color: var(--color-ink-text); font-size: .82rem; }
   .credentials { display: grid; max-width: 32rem; gap: .9rem; padding: 1.15rem; border: 1px solid var(--color-border); border-radius: 0; background: var(--color-raised-bg); }
   .catalog-search input { min-width: 0; border: 1px solid var(--color-border); color: inherit; background: var(--color-surface-bg); outline: none; }
   .primary, .retry, .pagination button, .catalog-pagination button { width: max-content; min-height: 2.55rem; padding: .55rem .9rem; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font-weight: 750; cursor: pointer; }
@@ -749,7 +754,7 @@
   .catalog-group > header small { color: var(--color-subtle-text); font-size: .66rem; }
   .catalog-group > header button { margin-left: auto; padding: .3rem .15rem; border: 0; color: var(--color-accent); background: transparent; font-size: .7rem; font-weight: 750; cursor: pointer; }
   .catalog-group .catalog-folders { margin: 0; }
-  .catalog-books { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(var(--store-publication-min-width), 100%), 1fr)); gap: 16px; overflow-x: auto; }
+  .catalog-books { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(max(var(--store-publication-min-width), calc(var(--book-cover-width) + 20rem + 48px)), 100%), 1fr)); gap: 8px; overflow-x: auto; }
   button:disabled { cursor: default; opacity: .55; }
   .loading, .empty { display: flex; align-items: center; gap: .65rem; min-height: 5rem; color: var(--color-subtle-text); font-size: .82rem; }
   .loading span { width: 1rem; height: 1rem; border: 2px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin .8s linear infinite; }

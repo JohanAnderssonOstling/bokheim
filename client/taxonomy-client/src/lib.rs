@@ -1,7 +1,8 @@
 use library_model::{project_subject_codes, unified_has_exact_source_code, PublicationSubject, UnifiedConceptDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use taxonomy_contract::{TaxonomyBatchRequest, TaxonomyBatchResponse, TaxonomyCode, TaxonomyConcept, TaxonomySystem, MAX_CODES_PER_REQUEST, MAX_CODE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use url::Url;
 
@@ -9,7 +10,17 @@ use url::Url;
 pub struct TaxonomyClient {
     http: reqwest::Client,
     base_url: Url,
+    release_cache: Arc<Mutex<Option<CachedRelease>>>,
 }
+
+#[derive(Clone, Debug)]
+struct CachedRelease {
+    release_id: String,
+    etag: String,
+    checked_at: Instant,
+}
+
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaxonomyClientError(String);
@@ -40,7 +51,38 @@ impl TaxonomyClient {
             .user_agent(format!("Bokheim/{} taxonomy-client", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| TaxonomyClientError::new(error.to_string()))?;
-        Ok(Self { http, base_url })
+        Ok(Self { http, base_url, release_cache: Arc::new(Mutex::new(None)) })
+    }
+
+    /// Checks the server's content-derived release ETag. Repeated hydration
+    /// operations reuse the result for six hours; after that the conditional
+    /// HEAD normally returns 304 without a response body.
+    pub async fn current_release_id(&self) -> Result<String, TaxonomyClientError> {
+        let cached = self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))?.clone();
+        if cached.as_ref().is_some_and(|cached| cached.checked_at.elapsed() < RELEASE_CHECK_INTERVAL) {
+            return Ok(cached.expect("checked above").release_id);
+        }
+        let mut request = self.http.head(self.endpoint("v1/taxonomy")?);
+        if let Some(cached) = &cached {
+            request = request.header(reqwest::header::IF_NONE_MATCH, &cached.etag);
+        }
+        let response = request.send().await.map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            let Some(mut cached) = cached else {
+                return Err(TaxonomyClientError::new("taxonomy server returned 304 without a cached release"));
+            };
+            cached.checked_at = Instant::now();
+            let release_id = cached.release_id.clone();
+            *self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))? = Some(cached);
+            return Ok(release_id);
+        }
+        if !response.status().is_success() {
+            return Err(TaxonomyClientError::new(format!("taxonomy release check returned HTTP {}", response.status())));
+        }
+        let etag = response.headers().get(reqwest::header::ETAG).and_then(|value| value.to_str().ok()).ok_or_else(|| TaxonomyClientError::new("taxonomy release check omitted its ETag"))?.to_owned();
+        let release_id = etag.strip_prefix('"').and_then(|value| value.strip_suffix('"')).filter(|value| !value.is_empty()).ok_or_else(|| TaxonomyClientError::new("taxonomy release check returned an invalid ETag"))?.to_owned();
+        *self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))? = Some(CachedRelease { release_id: release_id.clone(), etag, checked_at: Instant::now() });
+        Ok(release_id)
     }
 
     /// Collects classifications not covered by the currently installed local

@@ -414,7 +414,7 @@ impl Render for AudiobookPlayer {
                 });
             })
             .child(
-                div().relative().w_full().h(px(6.0)).rounded(px(ui_components::RADIUS_SM)).bg(theme.surface_alt).child(div().absolute().left_0().top_0().h_full().w(relative(progress)).rounded(px(ui_components::RADIUS_SM)).bg(theme.accent)),
+                div().relative().w_full().h(px(6.0)).rounded(px(ui_components::RADIUS_SM)).bg(theme.raised_bg).child(div().absolute().left_0().top_0().h_full().w(relative(progress)).rounded(px(ui_components::RADIUS_SM)).bg(theme.accent)),
             );
         let progress_row = div()
             .w_full()
@@ -604,14 +604,12 @@ impl Render for AudiobookDock {
 
         if self.expanded {
             return div()
-                .w_full()
-                .h(px(560.0))
+                .absolute()
+                .inset_0()
+                .size_full()
                 .min_h_0()
-                .flex_none()
                 .flex()
                 .flex_col()
-                .border_t_1()
-                .border_color(theme.border)
                 .bg(theme.page_bg)
                 .child(
                     div()
@@ -624,7 +622,7 @@ impl Render for AudiobookDock {
                         .px(px(12.0))
                         .border_b_1()
                         .border_color(theme.border)
-                        .child(div().id("audiobook-collapse").cursor_pointer().px(px(12.0)).py(px(7.0)).font_weight(FontWeight::SEMIBOLD).child("Collapse player").on_click(move |_, _, cx| {
+                        .child(div().id("audiobook-collapse").cursor_pointer().size(px(32.0)).flex().items_center().justify_center().child(Icon::new(IconName::ChevronDown).size(px(16.0))).on_click(move |_, _, cx| {
                             let _ = expand_dock.update(cx, |dock, cx| dock.toggle_expanded(cx));
                         }))
                         .child(div().id("audiobook-close-expanded").cursor_pointer().size(px(32.0)).flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
@@ -701,8 +699,9 @@ impl Render for AudiobookDock {
         let progress_track = div()
             .id("audiobook-dock-progress")
             .relative()
-            .w_full()
-            .h(px(18.0))
+            .flex_1()
+            .min_w_0()
+            .h(px(16.0))
             .cursor_pointer()
             .flex()
             .items_center()
@@ -721,18 +720,20 @@ impl Render for AudiobookDock {
                     cx.notify();
                 });
             })
-            .child(div().relative().w_full().h(px(5.0)).bg(theme.surface_alt).child(div().absolute().left_0().top_0().h_full().w(relative(progress)).bg(theme.accent)));
+            .child(
+                div().relative().w_full().h(px(6.0)).rounded(px(ui_components::RADIUS_SM)).bg(theme.raised_bg).child(div().absolute().left_0().top_0().h_full().w(relative(progress)).rounded(px(ui_components::RADIUS_SM)).bg(theme.accent)),
+            );
 
         let speed_menu = playback_speed_menu(player_target, current_rate, theme);
 
         div()
             .w_full()
-            .h(px(176.0))
+            .h(px(96.0))
             .relative()
             .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(4.0))
+            .items_center()
+            .gap(px(16.0))
             .px(px(12.0))
             .py(px(8.0))
             .border_t_1()
@@ -741,11 +742,16 @@ impl Render for AudiobookDock {
             .text_color(theme.text)
             .child(
                 div()
-                    .w_full()
-                    .min_h(px(56.0))
+                    .id("audiobook-book-details")
+                    .w(px(240.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let _ = expand_dock.update(cx, |dock, cx| dock.toggle_expanded(cx));
+                    })
                     .child(cover)
                     .child(
                         div()
@@ -756,71 +762,86 @@ impl Render for AudiobookDock {
                             .gap(px(3.0))
                             .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).child(book.title.clone()))
                             .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.0)).text_color(theme.text_muted).child(chapter_title)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(2.0))
+                            .child(transport_control("dock-previous-chapter", chapter_icon(false, theme), theme).on_click(move |_, _, cx| {
+                                let _ = previous_target.update(cx, |player, cx| {
+                                    player.previous_chapter();
+                                    cx.notify();
+                                });
+                            }))
+                            .child(transport_control("dock-seek-back", skip_icon(false, "15"), theme).on_click(move |_, _, cx| {
+                                let _ = back_target.update(cx, |player, cx| {
+                                    player.seek_by(-15.0);
+                                    cx.notify();
+                                });
+                            }))
+                            .child(transport_control("dock-toggle-play", Icon::new(if playing { IconName::Pause } else { IconName::Play }).size(px(20.0)), theme).bg(theme.accent).text_color(theme.page_bg).on_click(move |_, _, cx| {
+                                let _ = play_target.update(cx, |player, cx| {
+                                    player.toggle_playback();
+                                    cx.notify();
+                                });
+                            }))
+                            .child(transport_control("dock-seek-forward", skip_icon(true, "30"), theme).on_click(move |_, _, cx| {
+                                let _ = forward_target.update(cx, |player, cx| {
+                                    player.seek_by(30.0);
+                                    cx.notify();
+                                });
+                            }))
+                            .child(transport_control("dock-next-chapter", chapter_icon(true, theme), theme).on_click(move |_, _, cx| {
+                                let _ = next_target.update(cx, |player, cx| {
+                                    player.next_chapter();
+                                    cx.notify();
+                                });
+                            }))
+                            .child(div().relative().ml(px(6.0)).when(speed_menu_open, |wrapper| wrapper.child(speed_menu)).child(speed_control(format_playback_rate(current_rate), speed_menu_open, theme).on_click(move |_, _, cx| {
+                                let _ = rate_target.update(cx, |player, cx| {
+                                    player.toggle_speed_menu();
+                                    cx.notify();
+                                });
+                            }))),
                     )
-                    .child(div().id("audiobook-expand").cursor_pointer().px(px(10.0)).py(px(8.0)).font_weight(FontWeight::SEMIBOLD).child("Chapters").on_click(move |_, _, cx| {
-                        let _ = expand_dock.update(cx, |dock, cx| dock.toggle_expanded(cx));
-                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(div().w(px(58.0)).flex_none().text_right().child(format_time(chapter_position)))
+                            .child(progress_track)
+                            .child(div().w(px(58.0)).flex_none().child(format_time(chapter_duration))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
                     .child(div().id("audiobook-close").cursor_pointer().size(px(36.0)).flex_none().flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
                         let _ = close_dock.update(cx, |dock, cx| dock.close(cx));
                     })),
             )
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .min_h(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.0))
-                    .child(transport_control("dock-previous-chapter", chapter_icon(false, theme), theme).on_click(move |_, _, cx| {
-                        let _ = previous_target.update(cx, |player, cx| {
-                            player.previous_chapter();
-                            cx.notify();
-                        });
-                    }))
-                    .child(transport_control("dock-seek-back", skip_icon(false, "15"), theme).on_click(move |_, _, cx| {
-                        let _ = back_target.update(cx, |player, cx| {
-                            player.seek_by(-15.0);
-                            cx.notify();
-                        });
-                    }))
-                    .child(transport_control("dock-toggle-play", Icon::new(if playing { IconName::Pause } else { IconName::Play }).size(px(20.0)), theme).bg(theme.accent).text_color(theme.page_bg).on_click(move |_, _, cx| {
-                        let _ = play_target.update(cx, |player, cx| {
-                            player.toggle_playback();
-                            cx.notify();
-                        });
-                    }))
-                    .child(transport_control("dock-seek-forward", skip_icon(true, "30"), theme).on_click(move |_, _, cx| {
-                        let _ = forward_target.update(cx, |player, cx| {
-                            player.seek_by(30.0);
-                            cx.notify();
-                        });
-                    }))
-                    .child(transport_control("dock-next-chapter", chapter_icon(true, theme), theme).on_click(move |_, _, cx| {
-                        let _ = next_target.update(cx, |player, cx| {
-                            player.next_chapter();
-                            cx.notify();
-                        });
-                    }))
-                    .child(div().relative().ml(px(6.0)).when(speed_menu_open, |wrapper| wrapper.child(speed_menu)).child(speed_control(format_playback_rate(current_rate), speed_menu_open, theme).on_click(move |_, _, cx| {
-                        let _ = rate_target.update(cx, |player, cx| {
-                            player.toggle_speed_menu();
-                            cx.notify();
-                        });
-                    }))),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(progress_track)
-                    .child(div().flex().justify_between().text_size(px(11.0)).text_color(theme.text_muted).child(format_time(chapter_position)).child(format_time(chapter_duration))),
-            )
-            .when_some(error, |dock, error| dock.child(div().absolute().left(px(16.0)).bottom(px(180.0)).p(px(8.0)).bg(theme.raised_bg).text_color(theme.danger).child(error)))
+            .when_some(error, |dock, error| dock.child(div().absolute().left(px(16.0)).bottom(px(104.0)).p(px(8.0)).bg(theme.raised_bg).text_color(theme.danger).child(error)))
             .into_any_element()
     }
 }

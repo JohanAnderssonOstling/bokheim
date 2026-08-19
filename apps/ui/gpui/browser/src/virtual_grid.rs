@@ -51,7 +51,7 @@ impl ResponsiveColumns {
         self.state.read(cx).width
     }
 
-    pub(crate) fn geometry(&self, item_count: usize, maximum_single_row_width: f32, cx: &Context<impl Render>) -> (usize, f32) {
+    pub(crate) fn geometry(&self, item_count: usize, maximum_single_row_width: f32, cx: &Context<impl Render>) -> (usize, f32, f32) {
         let state = self.state.read(cx);
         match self.policy {
             ColumnPolicy::MinimumItemWidth { width: minimum, gap } => grid_geometry(state.width, state.columns, item_count, minimum, maximum_single_row_width, gap),
@@ -89,10 +89,16 @@ pub(crate) fn columns_for_width(width: f32, minimum_item_width: f32, gap: f32) -
     (((width + gap) / (minimum_item_width + gap)).floor() as usize).max(1)
 }
 
-/// Resolves a fixed-width grid. Viewport width changes the number of columns,
-/// never the card geometry; an incomplete row simply retains empty slots.
-pub(crate) fn grid_geometry(_width: f32, capacity: usize, _item_count: usize, minimum_item_width: f32, _maximum_single_row_width: f32, _gap: f32) -> (usize, f32) {
-    (capacity.max(1), minimum_item_width)
+/// Resolves a fixed-card-width grid. Full grids distribute their inter-column
+/// gap so the outside cards align with the content edges above them. A lone
+/// partial row stays compact instead of stretching a handful of books across
+/// the whole page.
+pub(crate) fn grid_geometry(width: f32, capacity: usize, item_count: usize, minimum_item_width: f32, _maximum_single_row_width: f32, gap: f32) -> (usize, f32, f32) {
+    let columns = capacity.max(1);
+    let rows = row_count(item_count, columns);
+    let distribute = columns > 1 && (rows > 1 || item_count == columns);
+    let resolved_gap = if distribute { ((width - minimum_item_width * columns as f32) / columns.saturating_sub(1) as f32).max(gap) } else { gap };
+    (columns, minimum_item_width, resolved_gap)
 }
 
 pub(crate) fn row_count(item_count: usize, columns: usize) -> usize {
@@ -113,8 +119,8 @@ fn spanned_item_width(span: usize, unit_width: f32, gap: f32) -> f32 {
 
 /// A fixed-width row for heterogeneous cards. Multi-unit cards include the
 /// gaps of the units they replace, while unused units are retained as an
-/// invisible spacer. Consequently viewport remainder changes only the outer
-/// margins, never card width or row alignment.
+/// invisible spacer. Rows start at the content edge so publication cards and
+/// hierarchy navigation above them share the same alignment.
 pub(crate) fn fixed_spanned_entity_row<T: Render + 'static>(cards: &[(Entity<T>, usize)], units: usize, unit_width: f32, height: f32, gap: f32) -> Div {
     let occupied = cards.iter().map(|(_, span)| *span).sum::<usize>().min(units);
     div()
@@ -123,7 +129,8 @@ pub(crate) fn fixed_spanned_entity_row<T: Render + 'static>(cards: &[(Entity<T>,
         .flex_none()
         .flex()
         .flex_row()
-        .justify_center()
+        .items_start()
+        .justify_start()
         .gap(px(gap))
         .children(cards.iter().map(|(card, span)| div().w(px(spanned_item_width(*span, unit_width, gap))).h(px(height)).flex_none().child(card.clone())))
         .when(occupied < units, |row| row.child(div().w(px(spanned_item_width(units - occupied, unit_width, gap))).h(px(height)).flex_none()))
@@ -167,9 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn book_cards_remain_fixed_width_in_partial_rows() {
-        assert_eq!(grid_geometry(1200.0, 5, 2, 200.0, 428.0, 28.0), (5, 200.0));
-        assert_eq!(grid_geometry(656.0, 3, 3, 200.0, 428.0, 28.0), (3, 200.0));
+    fn book_cards_distribute_only_full_or_multi_row_grids() {
+        assert_eq!(grid_geometry(1200.0, 5, 2, 200.0, 428.0, 28.0), (5, 200.0, 28.0));
+        assert_eq!(grid_geometry(1200.0, 5, 6, 200.0, 428.0, 28.0), (5, 200.0, 50.0));
+        assert_eq!(grid_geometry(700.0, 3, 3, 200.0, 428.0, 28.0), (3, 200.0, 50.0));
     }
 
     #[test]

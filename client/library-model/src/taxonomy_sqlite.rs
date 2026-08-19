@@ -1,5 +1,5 @@
-use crate::subjects::{UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
-use rusqlite::{params, Connection, OpenFlags};
+use crate::subjects::{DEFAULT_UNIFIED_TAXONOMY_SQLITE, UnifiedConceptDefinition};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -12,6 +12,38 @@ pub(crate) fn read_embedded_unified_taxonomy() -> Result<Vec<UnifiedConceptDefin
 pub fn read_unified_taxonomy_sqlite(path: &Path) -> Result<Vec<UnifiedConceptDefinition>, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
     read_connection(&connection, &path.display().to_string())
+}
+
+/// Checks whether the device-local copy contains server-provided concepts.
+/// The bundled image has no such marker, allowing startup to avoid reading all
+/// taxonomy rows merely to discover that it is identical to the embedded one.
+pub fn has_unified_taxonomy_overlay(path: &Path) -> Result<bool, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
+    let format_version =
+        connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read taxonomy database format {}: {error}", path.display()))?;
+    if format_version != "2" {
+        return Err(format!("unsupported unified taxonomy database format {format_version} in {}", path.display()));
+    }
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM taxonomy_meta WHERE key='server_release_id')", [], |row| row.get::<_, bool>(0)).map_err(|error| format!("failed to inspect taxonomy overlay marker {}: {error}", path.display()))
+}
+
+pub fn is_unified_taxonomy_client_seed(path: &Path) -> Result<bool, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
+    connection
+        .query_row("SELECT value='2' FROM taxonomy_meta WHERE key='client_seed_depth'", [], |row| row.get::<_, bool>(0))
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(|error| format!("failed to inspect taxonomy client seed marker {}: {error}", path.display()))
+}
+
+/// Returns the authoritative server release associated with the cached
+/// overlay. A seed-only database has no server release.
+pub fn unified_taxonomy_server_release_id(path: &Path) -> Result<Option<String>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open local unified taxonomy database {}: {error}", path.display()))?;
+    connection.query_row("SELECT value FROM taxonomy_meta WHERE key='server_release_id'", [], |row| row.get(0)).optional().map_err(|error| format!("failed to read taxonomy server release {}: {error}", path.display()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +74,7 @@ impl UnifiedCodeResolution {
 /// Returns precise system/code pairs previously resolved by the taxonomy
 /// server. A row with no matched concepts is still a completed resolution.
 pub fn read_resolved_unified_taxonomy_codes(path: &Path, candidates: &[(String, String)]) -> Result<BTreeSet<(String, String)>, String> {
-    if candidates.is_empty() {
+    if candidates.is_empty() || !path.is_file() {
         return Ok(BTreeSet::new());
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open local unified taxonomy database {}: {error}", path.display()))?;
@@ -237,10 +269,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_client_taxonomy_is_the_bounded_second_level_seed() {
+        let concepts = read_embedded_unified_taxonomy().unwrap();
+        assert!((1_000..=2_000).contains(&concepts.len()));
+        assert!(DEFAULT_UNIFIED_TAXONOMY_SQLITE.len() < 2 * 1024 * 1024);
+    }
+
+    #[test]
     fn server_slice_is_persisted_as_an_ancestor_closed_local_overlay() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("taxonomy.sqlite3");
         std::fs::write(&path, DEFAULT_UNIFIED_TAXONOMY_SQLITE).unwrap();
+        assert!(!has_unified_taxonomy_overlay(&path).unwrap());
         let existing = read_unified_taxonomy_sqlite(&path).unwrap();
         let humanities = existing.iter().find(|concept| concept.preferred_label() == "Humanities" && concept.parent_ids().is_empty()).unwrap();
         let fetched = UnifiedConceptDefinition::new(
@@ -251,6 +291,7 @@ mod tests {
             vec!["Server detail source caption".to_owned()],
         );
         merge_unified_taxonomy_sqlite(&path, "server-release", &[fetched]).unwrap();
+        assert!(has_unified_taxonomy_overlay(&path).unwrap());
         let merged = read_unified_taxonomy_sqlite(&path).unwrap();
         let inserted = merged.iter().find(|concept| concept.concept_id() == "test:server-detail").unwrap();
         assert_eq!(inserted.parent_ids(), &[humanities.concept_id()]);

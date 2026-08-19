@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import { browsingLayoutStyle as browsingLayoutStyleFrom } from "./lib/layout-tokens.ts";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
@@ -34,7 +35,6 @@
   import {
     ACCOUNT_CONTRACT,
     BROWSING_CONTENT_CONTRACT,
-    BROWSING_LAYOUT_CONTRACT,
     BROWSING_STATES_CONTRACT,
     DEFAULT_READER_PREFERENCES,
     DEFAULT_BROWSING_PREFERENCES,
@@ -148,61 +148,7 @@
   function sortedLibraries(entries: LibraryEntry[]) {
     return [...entries].sort((left, right) => naturalCompare(left.library_name, right.library_name));
   }
-  const browsingLayoutStyle = [
-    `--layout-sidebar-width: max(${BROWSING_LAYOUT_CONTRACT.sidebar_width_px}px, ${BROWSING_LAYOUT_CONTRACT.sidebar_width_px / 16}rem)`,
-    `--navigation-label-size: ${BROWSING_LAYOUT_CONTRACT.navigation_label_size_px / 16}rem`,
-    `--navigation-label-weight: ${BROWSING_LAYOUT_CONTRACT.navigation_label_weight}`,
-    `--navigation-icon-size: ${BROWSING_LAYOUT_CONTRACT.navigation_icon_size_px / 16}rem`,
-    `--navigation-icon-label-gap: ${BROWSING_LAYOUT_CONTRACT.navigation_icon_label_gap_px}px`,
-    `--navigation-item-min-height: ${BROWSING_LAYOUT_CONTRACT.navigation_item_min_height_px}px`,
-    `--navigation-touch-item-min-height: ${BROWSING_LAYOUT_CONTRACT.navigation_touch_item_min_height_px}px`,
-    `--layout-topbar-height: ${BROWSING_LAYOUT_CONTRACT.topbar_height_px}px`,
-    `--layout-topbar-action-height: ${BROWSING_LAYOUT_CONTRACT.topbar_action_height_px}px`,
-    `--topbar-action-label-weight: ${BROWSING_LAYOUT_CONTRACT.topbar_action_label_weight}`,
-    `--layout-topbar-action-gap: ${BROWSING_LAYOUT_CONTRACT.topbar_action_gap_px}px`,
-    `--layout-topbar-action-horizontal-padding: ${BROWSING_LAYOUT_CONTRACT.topbar_action_horizontal_padding_px}px`,
-    `--layout-content-padding: ${BROWSING_LAYOUT_CONTRACT.content_padding_px}px`,
-    `--surface-corner-radius: ${BROWSING_LAYOUT_CONTRACT.surface_corner_radius_px}px`,
-    `--book-cover-width: ${BROWSING_LAYOUT_CONTRACT.book_cover_width_px}px`,
-    `--book-cover-height: ${BROWSING_LAYOUT_CONTRACT.book_cover_height_px}px`,
-    `--book-card-height: ${BROWSING_LAYOUT_CONTRACT.book_card_height_px}px`,
-    `--book-grid-column-gap: ${BROWSING_LAYOUT_CONTRACT.book_grid_column_gap_px}px`,
-    `--book-grid-row-height: ${BROWSING_LAYOUT_CONTRACT.book_grid_row_height_px}px`,
-    `--book-card-title-size: ${BROWSING_LAYOUT_CONTRACT.book_card_title_size_px / 16}rem`,
-    `--book-card-title-weight: ${BROWSING_LAYOUT_CONTRACT.book_card_title_weight}`,
-    `--book-card-title-line-height: ${BROWSING_LAYOUT_CONTRACT.book_card_title_line_height_px / BROWSING_LAYOUT_CONTRACT.book_card_title_size_px}`,
-    `--book-card-title-block-height: ${(BROWSING_LAYOUT_CONTRACT.book_card_title_line_height_px * BROWSING_LAYOUT_CONTRACT.book_card_title_lines) / 16}rem`,
-    `--book-card-title-lines: ${BROWSING_LAYOUT_CONTRACT.book_card_title_lines}`,
-    `--book-card-author-size: ${BROWSING_LAYOUT_CONTRACT.book_card_author_size_px / 16}rem`,
-    `--book-card-author-line-height: ${BROWSING_LAYOUT_CONTRACT.book_card_author_line_height_px / BROWSING_LAYOUT_CONTRACT.book_card_author_size_px}`,
-    `--book-card-author-block-height: ${BROWSING_LAYOUT_CONTRACT.book_card_author_line_height_px / 16}rem`,
-    `--book-card-cover-content-gap: ${BROWSING_LAYOUT_CONTRACT.book_card_cover_content_gap_px}px`,
-    `--book-card-text-gap: ${BROWSING_LAYOUT_CONTRACT.book_card_text_gap_px}px`,
-    `--book-card-progress-height: ${BROWSING_LAYOUT_CONTRACT.book_card_progress_height_px}px`,
-    `--book-grid-row-trailing-space: ${BROWSING_LAYOUT_CONTRACT.book_grid_row_trailing_space_px}px`,
-    `--carousel-title-size: ${BROWSING_LAYOUT_CONTRACT.carousel_title_size_px / 16}rem`,
-    `--carousel-title-weight: ${BROWSING_LAYOUT_CONTRACT.carousel_title_weight}`,
-    `--carousel-section-gap: ${BROWSING_LAYOUT_CONTRACT.carousel_section_gap_px}px`,
-    `--carousel-content-gap: ${BROWSING_LAYOUT_CONTRACT.carousel_content_gap_px}px`,
-    `--carousel-control-gap: ${BROWSING_LAYOUT_CONTRACT.carousel_control_gap_px}px`,
-    `--carousel-arrow-size: ${BROWSING_LAYOUT_CONTRACT.carousel_arrow_size_px}px`,
-    `--author-row-cover-width: ${BROWSING_LAYOUT_CONTRACT.author_row_cover_width_px}px`,
-    `--author-row-cover-height: ${BROWSING_LAYOUT_CONTRACT.author_row_cover_height_px}px`,
-    `--author-row-height: ${BROWSING_LAYOUT_CONTRACT.author_row_height_px}px`,
-    `--author-row-cover-gap: ${BROWSING_LAYOUT_CONTRACT.author_row_cover_gap_px}px`,
-    `--author-row-content-gap: ${BROWSING_LAYOUT_CONTRACT.author_row_content_gap_px}px`,
-    `--author-row-horizontal-padding: ${BROWSING_LAYOUT_CONTRACT.author_row_horizontal_padding_px}px`,
-    `--author-row-font-size: ${BROWSING_LAYOUT_CONTRACT.author_row_label_size_px / 16}rem`,
-    // A hierarchy cell is a row of text, so its geometry is emitted in rem and
-    // follows the UI font size the reader picked. Leaving it in px froze the
-    // row while the label inside it kept growing.
-    `--hierarchy-cell-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_height_px / 16}rem`,
-    `--hierarchy-touch-cell-min-height: ${BROWSING_LAYOUT_CONTRACT.hierarchy_touch_cell_min_height_px / 16}rem`,
-    `--hierarchy-cell-min-width: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_min_width_px}px`,
-    `--hierarchy-cell-gap: ${BROWSING_LAYOUT_CONTRACT.hierarchy_cell_gap_px}px`,
-    `--hierarchy-icon-size: ${BROWSING_LAYOUT_CONTRACT.hierarchy_icon_size_px / 16}rem`,
-    `--hierarchy-label-size: ${BROWSING_LAYOUT_CONTRACT.hierarchy_label_size_px / 16}rem`,
-  ].join("; ");
+  const browsingLayoutStyle = browsingLayoutStyleFrom();
 
   const libraryState = new LibraryStateStore();
   const libraries = $derived(libraryState.entries);

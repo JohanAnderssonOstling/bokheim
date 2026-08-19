@@ -20,6 +20,7 @@
         <a href="/admin/traffic" data-nav-page="traffic">Traffic</a>
         <a href="/admin/accounts" data-nav-page="accounts">Accounts</a>
         <a href="/admin/catalogue" data-nav-page="catalogue">Catalogue</a>
+        <a href="/admin/catalogue-review" data-nav-page="catalogue-review">Manual review</a>
         <a href="/admin/metadata" data-nav-page="metadata">Metadata</a>
         <a href="/admin/security" data-nav-page="security">Security</a>
       </nav>
@@ -55,6 +56,20 @@
             </svg>
             <div class="legend"><span><i class="request-dot"></i>Requests</span><span><i class="error-dot"></i>Errors</span><span id="chart-period"></span></div>
           </div>
+        </section>
+
+        <section class="panel" data-page="catalogue-review">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Catalogue enrichment</p><h2>Edition identity review</h2></div>
+            <span>Candidate evidence and decisions are retained in the private catalogue cache</span>
+          </div>
+          <div class="review-filters">
+            <label>Source<select id="review-source"><option value="">All sources</option></select></label>
+            <label>Status<select id="review-status"><option value="">All pending</option><option value="ambiguous">Ambiguous</option><option value="no_match">No match</option><option value="insufficient_metadata">Insufficient metadata</option><option value="failed">Failed</option></select></label>
+          </div>
+          <div id="review-cards" class="cards"></div>
+          <p id="reviews-empty" class="empty">No identity reviews match these filters.</p>
+          <div id="reviews" class="review-list"></div>
         </section>
 
         <section class="panel compact-chart" data-page="traffic">

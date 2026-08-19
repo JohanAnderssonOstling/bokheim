@@ -12,11 +12,11 @@ mod sync;
 mod traffic;
 
 use axum::{
+    Router,
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
     middleware,
     routing::{delete, get, head, post},
-    Router,
 };
 use server_account::PostgresAccountService;
 use server_asset_store::FsAssetStore;
@@ -150,6 +150,8 @@ pub fn router_with_operational_limits(
         .route("/api/admin/requests", get(admin::requests))
         .route("/api/admin/engagement", get(admin::engagement))
         .route("/api/admin/services", get(admin::services))
+        .route("/api/admin/catalog-identity-reviews", get(admin::catalog_identity_reviews))
+        .route("/api/admin/catalog-identity-reviews/:review_id", post(admin::catalog_identity_review_action).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/admin/login", post(admin::login).layer(DefaultBodyLimit::max(16 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);

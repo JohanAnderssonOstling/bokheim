@@ -107,7 +107,7 @@ impl BookGrid {
         let query = container_query(move |size, _, _| {
             let width = f32::from(size.width);
             let capacity = virtual_grid::columns_for_width(width, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
-            let (columns, item_width) = virtual_grid::grid_geometry(width, capacity, card_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
+            let (columns, item_width, column_gap) = virtual_grid::grid_geometry(width, capacity, card_views.len(), components::BOOK_COVER_WIDTH, components::BOOK_COVER_WIDTH, components::BOOK_GRID_GAP);
             let row_height = components::book_grid_row_height_for_cover_width(item_width, rem_size);
             let row_count = virtual_grid::row_count(card_views.len(), columns);
             let cards = card_views.clone();
@@ -115,7 +115,7 @@ impl BookGrid {
                 range
                     .map(|row| {
                         let range = virtual_grid::row_range(row, columns, cards.len());
-                        virtual_grid::flexible_entity_row(&cards, range, columns, item_width, row_height, components::BOOK_GRID_GAP)
+                        virtual_grid::flexible_entity_row(&cards, range, columns, item_width, row_height, column_gap)
                     })
                     .collect::<Vec<_>>()
             });
@@ -137,12 +137,12 @@ impl BookGrid {
     /// the full-height grid is virtualized only adds machinery.
     pub(crate) fn render_static<P: Render + 'static>(&self, grid_id: impl Into<SharedString>, window: &mut Window, cx: &mut Context<P>) -> AnyElement {
         let responsive = virtual_grid::ResponsiveColumns::for_element(grid_id.into(), virtual_grid::ColumnPolicy::MinimumItemWidth { width: components::BOOK_COVER_WIDTH, gap: components::BOOK_GRID_GAP }, window, cx);
-        let (columns, item_width) = responsive.geometry(self.all_views.len(), components::BOOK_COVER_WIDTH, cx);
+        let (columns, item_width, column_gap) = responsive.geometry(self.all_views.len(), components::BOOK_COVER_WIDTH, cx);
         let row_height = components::book_grid_row_height_for_cover_width(item_width, f32::from(window.rem_size()));
         let card_views = self.all_views.clone();
         let rows = (0..virtual_grid::row_count(card_views.len(), columns)).map(|row| {
             let range = virtual_grid::row_range(row, columns, card_views.len());
-            virtual_grid::flexible_entity_row(&card_views, range, columns, item_width, row_height, components::BOOK_GRID_GAP)
+            virtual_grid::flexible_entity_row(&card_views, range, columns, item_width, row_height, column_gap)
         });
         responsive.track(div().w_full().flex().flex_col().children(rows)).into_any_element()
     }

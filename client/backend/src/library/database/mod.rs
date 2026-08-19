@@ -514,11 +514,15 @@ fn seed_lcc_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error
 }
 
 fn seed_unified_subject_assignments(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let release_id = library_model::unified_taxonomy_release_id();
+    // Most launches open an already-projected database. Comparing its release
+    // against the bundled constant must not construct the 49k-concept matcher.
+    let expected_release_id = library_model::loaded_unified_taxonomy_release_id().unwrap_or_else(|| library_model::BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID.to_owned());
     let stored = conn.query_row("SELECT version,matcher_version FROM subject_system WHERE id=?1", [UNIFIED_SYSTEM_ID], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).ok();
-    if stored.as_ref().is_some_and(|(version, matcher)| version == &release_id && *matcher == UNIFIED_MATCHER_VERSION) {
+    if stored.as_ref().is_some_and(|(version, matcher)| version == &expected_release_id && *matcher == UNIFIED_MATCHER_VERSION) {
         return Ok(());
     }
+
+    let release_id = library_model::unified_taxonomy_release_id();
 
     let declarations = {
         let mut statement = conn.prepare("SELECT book_row_id,position,name,source,authority,code FROM book_subject ORDER BY book_row_id,position")?;

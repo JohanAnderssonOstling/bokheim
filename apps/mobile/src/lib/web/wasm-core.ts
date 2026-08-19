@@ -21,6 +21,7 @@ interface WebCoreExports extends WebAssembly.Exports {
   bokheim_project_directories(input: number, inputLength: number): number;
   bokheim_ddc_subject_path(input: number, inputLength: number): number;
   bokheim_lcc_subject_path(input: number, inputLength: number): number;
+  bokheim_project_subject_codes(input: number, inputLength: number): number;
   bokheim_unified_subject_paths(input: number, inputLength: number): number;
   bokheim_unified_has_exact_source_code(input: number, inputLength: number): number;
   bokheim_install_taxonomy_overlay(input: number, inputLength: number): number;
@@ -130,6 +131,13 @@ export async function unifiedSubjectPaths(systemId: "bisac" | "ddc" | "lcc", cod
   return JSON.parse(new TextDecoder().decode(value)) as string[];
 }
 
+export async function projectSubjectCodes(subjects: unknown[]): Promise<Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>> {
+  const input = new TextEncoder().encode(JSON.stringify(subjects));
+  const value = await transformWithStoredResult(input, (core, pointer, length) =>
+    core.bokheim_project_subject_codes(pointer, length));
+  return JSON.parse(new TextDecoder().decode(value)) as Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>;
+}
+
 export async function unifiedHasExactSourceCode(systemId: "bisac" | "ddc" | "lcc", code: string): Promise<boolean> {
   const input = new TextEncoder().encode(JSON.stringify({ system_id: systemId, code }));
   const value = await transformWithStoredResult(input, (core, pointer, length) =>
@@ -171,6 +179,7 @@ export interface PublicationMetadata {
   description: string | null;
   subjects: string[];
   subject_paths: string[];
+  subject_codes: Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>;
   isbns: string[];
   cover: Uint8Array | null;
   toc: Array<{ title: string; target: string; children: PublicationMetadata["toc"] }>;
@@ -237,10 +246,10 @@ export async function inspectEpubPublication(bytes: Uint8Array): Promise<Publica
     const resultPointer = core.bokheim_result_pointer();
     const resultLength = core.bokheim_result_length();
     const result = new Uint8Array(core.memory.buffer, resultPointer, resultLength).slice();
-    if (result.length < 32) throw new Error("The EPUB metadata result is invalid");
-    const header = new DataView(result.buffer, result.byteOffset, 32);
-    const lengths = Array.from({ length: 8 }, (_, index) => header.getUint32(index * 4, true));
-    let offset = 32;
+    if (result.length < 36) throw new Error("The EPUB metadata result is invalid");
+    const header = new DataView(result.buffer, result.byteOffset, 36);
+    const lengths = Array.from({ length: 9 }, (_, index) => header.getUint32(index * 4, true));
+    let offset = 36;
     const take = (length: number): Uint8Array | null => {
       if (length === 0xffffffff) return null;
       const end = offset + length;
@@ -254,9 +263,10 @@ export async function inspectEpubPublication(bytes: Uint8Array): Promise<Publica
     const description = take(lengths[2]);
     const subjects = take(lengths[3]);
     const subjectPaths = take(lengths[4]);
-    const isbns = take(lengths[5]);
-    const cover = take(lengths[6]);
-    const toc = take(lengths[7]);
+    const subjectCodes = take(lengths[5]);
+    const isbns = take(lengths[6]);
+    const cover = take(lengths[7]);
+    const toc = take(lengths[8]);
     if (offset !== result.length) throw new Error("The EPUB metadata result has trailing data");
     const decoder = new TextDecoder();
     return {
@@ -265,6 +275,7 @@ export async function inspectEpubPublication(bytes: Uint8Array): Promise<Publica
       description: description === null ? null : decoder.decode(description),
       subjects: subjects === null ? [] : JSON.parse(decoder.decode(subjects)),
       subject_paths: subjectPaths === null ? [] : JSON.parse(decoder.decode(subjectPaths)),
+      subject_codes: subjectCodes === null ? [] : JSON.parse(decoder.decode(subjectCodes)),
       isbns: isbns === null ? [] : JSON.parse(decoder.decode(isbns)),
       cover,
       toc: toc === null ? [] : JSON.parse(decoder.decode(toc)),

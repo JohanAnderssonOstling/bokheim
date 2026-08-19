@@ -54,18 +54,10 @@ enum AnnotationAnchorBinary {
 mod annotation_anchor_binary {
     use super::{AnnotationAnchor, AnnotationAnchorBinary};
     pub fn serialize<S: serde::Serializer>(value: &AnnotationAnchor, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            serde::Serialize::serialize(value, serializer)
-        } else {
-            AnnotationAnchorBinary::serialize(value, serializer)
-        }
+        if serializer.is_human_readable() { serde::Serialize::serialize(value, serializer) } else { AnnotationAnchorBinary::serialize(value, serializer) }
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AnnotationAnchor, D::Error> {
-        if deserializer.is_human_readable() {
-            serde::Deserialize::deserialize(deserializer)
-        } else {
-            AnnotationAnchorBinary::deserialize(deserializer)
-        }
+        if deserializer.is_human_readable() { serde::Deserialize::deserialize(deserializer) } else { AnnotationAnchorBinary::deserialize(deserializer) }
     }
 }
 

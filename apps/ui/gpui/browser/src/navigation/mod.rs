@@ -127,7 +127,10 @@ impl Render for NavigationView {
         // destination cannot appear here without every frontend accounting for
         // it. Only the icon and element id stay local: the contract does not
         // know about GPUI icons.
-        let library = app_contract::LIBRARY_FEATURES.map(|feature| (library_feature_element_id(feature), library_feature_icon(feature), SharedString::from(feature.label()), library_feature_route(feature)));
+        let library = app_contract::LIBRARY_FEATURES
+            .into_iter()
+            .filter(|feature| *feature != LibraryFeature::Trash)
+            .map(|feature| (library_feature_element_id(feature), library_feature_icon(feature), SharedString::from(feature.label()), library_feature_route(feature)));
         let universal = app_contract::UNIVERSAL_FEATURES.map(|feature| {
             // The account destination is the one label the contract does not
             // own: it changes with the configured sync service.

@@ -1,15 +1,25 @@
 use super::ddc::canonical_ddc_notation;
 use super::lcc::{compare_lcc_key, parse_lcc_call};
-use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION};
+use super::{DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION, compact_whitespace};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
-pub const DEFAULT_UNIFIED_TAXONOMY_SQLITE: &[u8] = include_bytes!("../../data/unified-taxonomy-v2.sqlite3");
+/// The bundled runtime taxonomy. Ordinary client builds contain an
+/// ancestor-closed seed through the second level; server builds enable the
+/// `authoritative-taxonomy` feature and bundle the complete database.
+pub const DEFAULT_UNIFIED_TAXONOMY_SQLITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-client-v2.sqlite3"));
+/// Release identifier of the bundled taxonomy image. Keep this cheap constant
+/// separate from the runtime so an already-projected library can be opened
+/// without materializing the complete taxonomy matcher.
+pub const BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID: &str = include_str!(concat!(env!("OUT_DIR"), "/unified-taxonomy-release-id.txt"));
 
 static RUNTIME: OnceLock<RwLock<Arc<UnifiedTaxonomyRuntime>>> = OnceLock::new();
 
 pub(super) struct UnifiedTaxonomyRuntime {
-    pub(super) concepts: Arc<Vec<UnifiedConceptDefinition>>,
+    /// Persisted overlays retain their definitions so another overlay can be
+    /// composed in memory. The immutable bundled taxonomy discards this
+    /// redundant source representation after building its lookup indexes.
+    concepts: Option<Arc<Vec<UnifiedConceptDefinition>>>,
     pub(super) routes: Arc<BTreeMap<String, UnifiedConceptRoute>>,
     pub(super) paths_by_concept: Arc<BTreeMap<String, Vec<String>>>,
     selectors: Arc<BTreeMap<String, SelectorIndex>>,
@@ -26,7 +36,7 @@ pub struct UnifiedTaxonomy {
 
 impl UnifiedTaxonomy {
     pub fn from_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<Self, String> {
-        Ok(Self { runtime: Arc::new(build_runtime(concepts)?) })
+        Ok(Self { runtime: Arc::new(build_runtime(concepts, false)?) })
     }
 
     pub fn release_id(&self) -> &str {
@@ -147,11 +157,14 @@ pub(super) fn current() -> Arc<UnifiedTaxonomyRuntime> {
 }
 
 pub fn unified_concept_definitions() -> Vec<UnifiedConceptDefinition> {
-    current().concepts.as_ref().clone()
+    let Some(runtime) = RUNTIME.get() else {
+        return default_concepts();
+    };
+    runtime.read().ok().and_then(|runtime| runtime.concepts.as_deref().cloned()).unwrap_or_else(default_concepts)
 }
 
 pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
-    let replacement = Arc::new(build_runtime(concepts)?);
+    let replacement = Arc::new(build_runtime(concepts, true)?);
     let runtime = RUNTIME.get_or_init(|| RwLock::new(replacement.clone()));
     *runtime.write().map_err(|_| "unified taxonomy runtime lock is poisoned".to_owned())? = replacement;
     Ok(())
@@ -160,7 +173,7 @@ pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>
 /// Rebuilds the runtime from the embedded client snapshot plus a persisted
 /// on-demand overlay. This also removes concepts from an obsolete overlay.
 pub fn install_unified_taxonomy_overlay(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
-    let mut merged = default_runtime().concepts.iter().cloned().map(|concept| (concept.concept_id().to_owned(), concept)).collect::<BTreeMap<_, _>>();
+    let mut merged = default_concepts().into_iter().map(|concept| (concept.concept_id().to_owned(), concept)).collect::<BTreeMap<_, _>>();
     for concept in concepts {
         merged.insert(concept.concept_id().to_owned(), concept);
     }
@@ -169,6 +182,12 @@ pub fn install_unified_taxonomy_overlay(concepts: Vec<UnifiedConceptDefinition>)
 
 pub fn unified_taxonomy_release_id() -> String {
     current().release_id.clone()
+}
+
+/// Returns the active release only when a matcher has already been built.
+/// This is intentionally non-initializing for startup-sensitive callers.
+pub fn loaded_unified_taxonomy_release_id() -> Option<String> {
+    RUNTIME.get().and_then(|runtime| runtime.read().ok().map(|runtime| runtime.release_id.clone()))
 }
 
 pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
@@ -277,12 +296,24 @@ pub(super) fn normalize_source_label(value: &str) -> String {
 }
 
 fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
-    Arc::new(build_runtime(default_concepts()).expect("embedded unified taxonomy must be valid"))
+    let runtime = build_runtime(default_concepts(), false).expect("embedded unified taxonomy must be valid");
+    debug_assert_eq!(runtime.release_id, BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, "bundled taxonomy release constant must track the embedded database");
+    Arc::new(runtime)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn default_concepts() -> Vec<UnifiedConceptDefinition> {
     crate::taxonomy_sqlite::read_embedded_unified_taxonomy().expect("embedded unified taxonomy SQLite must be readable")
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn install_authoritative_taxonomy_for_tests() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/unified-taxonomy-v2.sqlite3");
+        let concepts = crate::taxonomy_sqlite::read_unified_taxonomy_sqlite(&path).expect("authoritative taxonomy fixture must be readable");
+        install_unified_taxonomy_concepts(concepts).expect("authoritative taxonomy fixture must be valid");
+    });
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -305,7 +336,7 @@ fn default_concepts() -> Vec<UnifiedConceptDefinition> {
         .collect()
 }
 
-fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedTaxonomyRuntime, String> {
+fn build_runtime(concepts: Vec<UnifiedConceptDefinition>, retain_concepts: bool) -> Result<UnifiedTaxonomyRuntime, String> {
     validate(&concepts)?;
     let mut fingerprint = String::new();
     for concept in &concepts {
@@ -331,6 +362,7 @@ fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedTaxon
     }
     const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0xa7, 0xed, 0x9f, 0x7d, 0xa1, 0x2a, 0x59, 0xf5, 0xb5, 0x3d, 0x67, 0x4d, 0xe0, 0x80, 0x7c, 0x66]);
     let release_id = format!("{UNIFIED_VERSION}:{}", uuid::Uuid::new_v5(&NAMESPACE, fingerprint.as_bytes()));
+    let concepts = retain_concepts.then_some(concepts);
     Ok(UnifiedTaxonomyRuntime { concepts, routes, paths_by_concept: Arc::new(paths_by_concept), selectors, source_labels: Arc::new(source_labels), release_id })
 }
 
@@ -524,6 +556,11 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn bundled_release_constant_tracks_embedded_taxonomy() {
+        assert_eq!(default_runtime().release_id, BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID);
+    }
+
     fn concept(id: &str, label: &str, parents: &[&str], lcc: &[&str]) -> UnifiedConceptDefinition {
         let source_selectors = if lcc.is_empty() { BTreeMap::new() } else { BTreeMap::from([(LCC_SYSTEM_ID.to_owned(), lcc.iter().map(|value| (*value).to_owned()).collect())]) };
         UnifiedConceptDefinition::new(id.to_owned(), label.to_owned(), parents.iter().map(|value| (*value).to_owned()).collect(), source_selectors, Vec::new())
@@ -567,6 +604,7 @@ mod tests {
 
     #[test]
     fn similarity_keys_follow_unified_taxonomy_branches_across_source_systems() {
+        install_authoritative_taxonomy_for_tests();
         let greek_lcc = unified_subject_similarity_keys(LCC_SYSTEM_ID, "PA3404");
         let greek_ddc = unified_subject_similarity_keys(DDC_SYSTEM_ID, "888");
         let french_lcc = unified_subject_similarity_keys(LCC_SYSTEM_ID, "PQ3434");
@@ -578,6 +616,7 @@ mod tests {
 
     #[test]
     fn detailed_lcc_business_ranges_follow_the_curated_hierarchy() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("HF5601", "Business / Accounting"),
             ("HF5469.3", "Business / Retail Trade / Convenience Stores"),
@@ -595,6 +634,7 @@ mod tests {
 
     #[test]
     fn subject_bibliography_topics_are_contextual_and_grouped() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("Z6658", "Subject bibliography / Medicine, Health & Disability / Medicine"),
             ("Z6201", "Subject bibliography / Humanities & Culture / History"),
@@ -613,6 +653,7 @@ mod tests {
 
     #[test]
     fn protestant_denomination_detail_reuses_concepts_and_skips_filing_guides() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("BX6201", "Other Protestant denominations / Historic Denominational Traditions / Baptist"),
             ("BX7601", "Other Protestant denominations / Brethren, Friends & Peace Churches / Quaker"),
@@ -631,6 +672,7 @@ mod tests {
 
     #[test]
     fn decorative_arts_lcc_detail_routes_to_existing_concepts() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("NK3700", "Other arts and art industries / Ceramics"),
             ("NK5100", "Other arts and art industries / Glass"),
@@ -648,6 +690,7 @@ mod tests {
 
     #[test]
     fn electricity_and_magnetism_expand_as_physics_not_engineering() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("QC570", "Electricity & Electromagnetism / Electricity / Electrostatics & Electric Current / Electrostatics & Frictional Electricity"),
             ("QC679", "Electricity / Electrodynamics, Waves & Quantum Effects / Quantum Electrodynamics"),
@@ -669,6 +712,7 @@ mod tests {
 
     #[test]
     fn veterinary_medicine_is_unified_and_contextually_expanded() {
+        install_authoritative_taxonomy_for_tests();
         let bisac_paths = unified_subject_paths("bisac", "MED089000");
         assert!(bisac_paths.iter().any(|path| path.ends_with("Clinical Specialties / Veterinary Medicine")));
         assert!(bisac_paths.iter().any(|path| path.ends_with("Veterinary Health & Surgery / Veterinary Medicine")));
@@ -691,6 +735,7 @@ mod tests {
 
     #[test]
     fn library_science_has_distinct_discipline_and_collection_routes() {
+        install_authoritative_taxonomy_for_tests();
         let expected = [
             ("Z666.5", "Library & Information Science / Organization & Information Systems / Information Organization"),
             ("Z674.2", "Library & Information Science / Organization & Information Systems / Information services. Information centers"),

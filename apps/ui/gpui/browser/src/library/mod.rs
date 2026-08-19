@@ -32,6 +32,7 @@ use self::pages::subjects::{SubjectsPage, SubjectsPageEvent};
 use self::pages::trash::TrashPage;
 use self::services::LibraryContext;
 use self::widgets::CoverInvalidationRegistry;
+pub(crate) use self::widgets::{LoadedCover, loaded_cover_from_jpeg};
 use crate::model::{FolderCrumb, SubjectCrumb};
 use crate::route::LibraryRoute;
 

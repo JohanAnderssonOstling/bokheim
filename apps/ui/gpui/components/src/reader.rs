@@ -4,8 +4,8 @@ use std::sync::Arc;
 use app_contract::{ReaderSettingsAnchor, ReaderSettingsPresentationContract};
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful,
-    Style, StyledImage, Window,
+    App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style,
+    StyledImage, Window, div, img, px,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::list::ListItem;
@@ -15,8 +15,8 @@ use gpui_component::{Disableable, ElementExt, Selectable};
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    action_button, browser_theme, scroll::Scrollable, BrowserTheme, ScrollableElement, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
-    SPACE_XXS, TEXT_LG, TEXT_SM, TEXT_XS,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, action_button,
+    browser_theme, scroll::Scrollable,
 };
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
@@ -44,18 +44,21 @@ pub fn reader_control_button_state(id: impl Into<ElementId>, label: impl Into<Sh
     reader_control_button(id, label, theme).disabled(!enabled)
 }
 
-pub fn reader_sidebar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool, theme: BrowserTheme) -> Button {
-    action_button(id, label).icon(icon).disabled(!enabled).h(px(34.0)).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border)
+pub fn reader_sidebar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Button {
+    // Keep sidebar actions on the same native button path as the rest of the
+    // application. Size, padding, focus, hover, and disabled treatment then
+    // come from GPUI Component and the active application theme.
+    action_button(id, label).icon(icon).disabled(!enabled)
 }
 
 pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
     // Selected segments use the primary/accent treatment; unselected segments
     // remain neutral secondary controls.
-    action_button(id, label).h(px(SETTINGS_CONTROL_HEIGHT)).flex_1().rounded(px(RADIUS_SM)).selected(selected).px(px(SPACE_SM)).when(selected, |button| button.primary())
+    action_button(id, label).h(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0)).flex_1().rounded(px(RADIUS_SM)).selected(selected).px(gpui::rems(SPACE_SM / 16.0)).when(selected, |button| button.primary())
 }
 
 pub fn reader_choice_button_group(id: impl Into<ElementId>, buttons: impl IntoIterator<Item = Button>) -> ButtonGroup {
-    ButtonGroup::new(id).children(buttons).outline().w(px(240.0)).flex_none()
+    ButtonGroup::new(id).children(buttons).outline().w(gpui::rems(240.0 / 16.0)).flex_none()
 }
 
 pub fn reader_square_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
@@ -186,32 +189,32 @@ pub fn reader_settings_dropdown(theme: BrowserTheme) -> Scrollable<Div> {
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
-        .w(px(f32::from(presentation.max_width_px)))
-        .max_h(px(f32::from(presentation.max_height_px)))
+        .w(gpui::rems(f32::from(presentation.max_width_px) / 16.0))
+        .max_h(gpui::rems(f32::from(presentation.max_height_px) / 16.0))
         .overflow_y_scrollbar()
         .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(theme.border)
         .shadow(crate::overlay_shadow(theme))
-        .p(px(f32::from(presentation.padding_px)))
+        .p(gpui::rems(f32::from(presentation.padding_px) / 16.0))
         .flex()
         .flex_col()
-        .gap(px(f32::from(presentation.gap_px)))
+        .gap(gpui::rems(f32::from(presentation.gap_px) / 16.0))
         .bg(theme.surface)
 }
 
 pub fn reader_settings_section(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().flex().flex_col().gap(px(SPACE_XS)).child(div().pb(px(SPACE_XXS)).text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(label.into()))
+    div().w_full().flex().flex_col().gap(gpui::rems(SPACE_XS / 16.0)).child(div().pb(gpui::rems(SPACE_XXS / 16.0)).text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(label.into()))
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
-    div().w_full().min_h(px(38.0)).flex().items_center().gap(px(SPACE_SM)).child(div().w(px(112.0)).flex_none().text_size(gpui::rems(TEXT_SM / 16.0)).child(label.into())).child(div().flex_1())
+    div().w_full().min_h(gpui::rems(38.0 / 16.0)).flex().items_center().gap(gpui::rems(SPACE_SM / 16.0)).child(div().w(gpui::rems(112.0 / 16.0)).flex_none().text_size(gpui::rems(TEXT_SM / 16.0)).child(label.into())).child(div().flex_1())
 }
 
 pub fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div()
-        .w(px(SETTINGS_STEPPER_VALUE_WIDTH))
-        .h(px(SETTINGS_CONTROL_HEIGHT))
+        .w(gpui::rems(SETTINGS_STEPPER_VALUE_WIDTH / 16.0))
+        .h(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0))
         .flex()
         .items_center()
         .justify_center()
@@ -223,7 +226,7 @@ pub fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme)
 }
 
 pub fn reader_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    action_button(id, label).w(px(SETTINGS_CONTROL_HEIGHT)).h(px(SETTINGS_CONTROL_HEIGHT)).px_0().rounded(px(0.0)).border_0().bg(theme.surface).text_size(gpui::rems(TEXT_LG / 16.0))
+    action_button(id, label).w(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0)).h(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0)).px_0().rounded(px(0.0)).border_0().bg(theme.surface).text_size(gpui::rems(TEXT_LG / 16.0))
 }
 
 pub fn reader_stepper_group(decrement: Button, value: impl Into<SharedString>, increment: Button, theme: BrowserTheme) -> Div {
@@ -231,7 +234,7 @@ pub fn reader_stepper_group(decrement: Button, value: impl Into<SharedString>, i
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(SETTINGS_CONTROL_GAP))
+        .gap(gpui::rems(SETTINGS_CONTROL_GAP / 16.0))
         .overflow_hidden()
         .rounded(px(RADIUS_SM))
         .border_1()

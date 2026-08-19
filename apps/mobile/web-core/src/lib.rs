@@ -17,9 +17,16 @@ pub struct PublicationMetadata {
     pub description: Option<String>,
     pub subjects: Vec<String>,
     pub subject_paths: Vec<String>,
+    pub subject_codes: Vec<PublicationTaxonomyCode>,
     pub isbns: Vec<String>,
     pub cover: Option<Vec<u8>>,
     pub toc: Vec<BookTocEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct PublicationTaxonomyCode {
+    pub system: String,
+    pub code: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -41,6 +48,35 @@ pub fn content_hash(input: &[u8]) -> String {
     blake3::hash(input).to_hex().to_string()
 }
 
+fn project_subject_codes(input: &[u8]) -> Result<Vec<u8>, String> {
+    #[derive(Deserialize)]
+    struct Subject {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(alias = "value")]
+        name: String,
+        #[serde(default = "default_subject_source")]
+        source: String,
+        #[serde(default)]
+        authority: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    }
+    #[derive(Serialize)]
+    struct Code<'a> {
+        system: &'a str,
+        code: &'a str,
+    }
+    fn default_subject_source() -> String {
+        "dc:subject".to_owned()
+    }
+
+    let subjects = serde_json::from_slice::<Vec<Subject>>(input).map_err(|error| error.to_string())?;
+    let subjects = subjects.into_iter().map(|subject| library_model::PublicationSubject::new(subject.id, subject.name, subject.source, subject.authority, subject.code)).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let codes = library_model::project_subject_codes(&subjects);
+    serde_json::to_vec(&codes.iter().map(|code| Code { system: code.system_id(), code: code.code() }).collect::<Vec<_>>()).map_err(|error| error.to_string())
+}
+
 pub fn inspect_epub(input: &[u8]) -> io::Result<PublicationMetadata> {
     let provider = epub_provider::EpubProvider::try_from_reader(Cursor::new(input.to_vec()))?;
     let metadata = provider.metadata()?;
@@ -51,6 +87,7 @@ pub fn inspect_epub(input: &[u8]) -> io::Result<PublicationMetadata> {
     let subjects = metadata.subjects.iter().filter_map(|subject| non_empty(subject.value.clone())).collect::<Vec<_>>();
     let model_subjects = metadata.subjects.iter().filter_map(|subject| library_model::PublicationSubject::new(subject.id.clone(), &subject.value, &subject.source, subject.authority.clone(), subject.code.clone()).ok()).collect::<Vec<_>>();
     let subject_paths = library_model::project_unified_subjects(&model_subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect();
+    let subject_codes = library_model::project_subject_codes(&model_subjects).into_iter().map(|classification| PublicationTaxonomyCode { system: classification.system_id().to_owned(), code: classification.code().to_owned() }).collect();
     let mut isbns = metadata.identifiers.iter().filter(|identifier| identifier.scheme == epub_provider::IdentifierScheme::ISBN).filter_map(|identifier| library_model::canonical_isbn(&identifier.value)).collect::<Vec<_>>();
     isbns.sort();
     isbns.dedup();
@@ -59,7 +96,7 @@ pub fn inspect_epub(input: &[u8]) -> io::Result<PublicationMetadata> {
         None => None,
     };
     let toc = provider.toc()?.unwrap_or_default().into_iter().map(toc_entry).collect();
-    Ok(PublicationMetadata { title, author, description, subjects, subject_paths, isbns, cover, toc })
+    Ok(PublicationMetadata { title, author, description, subjects, subject_paths, subject_codes, isbns, cover, toc })
 }
 
 pub fn apply_reader_preference_patch(preferences: &[u8], patch: &[u8]) -> Result<Vec<u8>, String> {
@@ -445,14 +482,17 @@ fn encode_metadata(metadata: PublicationMetadata) -> Vec<u8> {
     let description = metadata.description.as_deref().map(str::as_bytes);
     let subjects = serde_json::to_vec(&metadata.subjects).expect("EPUB subjects serialize");
     let subject_paths = serde_json::to_vec(&metadata.subject_paths).expect("EPUB subject paths serialize");
+    let subject_codes = serde_json::to_vec(&metadata.subject_codes).expect("EPUB subject codes serialize");
     let isbns = serde_json::to_vec(&metadata.isbns).expect("EPUB ISBNs serialize");
     let cover = metadata.cover.as_deref();
     let toc = serde_json::to_vec(&metadata.toc).expect("EPUB TOC serializes");
-    let mut output = Vec::with_capacity(32 + title.map_or(0, <[u8]>::len) + author.map_or(0, <[u8]>::len) + description.map_or(0, <[u8]>::len) + subjects.len() + subject_paths.len() + isbns.len() + cover.map_or(0, <[u8]>::len) + toc.len());
-    for value in [title, author, description, Some(subjects.as_slice()), Some(subject_paths.as_slice()), Some(isbns.as_slice()), cover, Some(toc.as_slice())] {
+    let mut output = Vec::with_capacity(
+        36 + title.map_or(0, <[u8]>::len) + author.map_or(0, <[u8]>::len) + description.map_or(0, <[u8]>::len) + subjects.len() + subject_paths.len() + subject_codes.len() + isbns.len() + cover.map_or(0, <[u8]>::len) + toc.len(),
+    );
+    for value in [title, author, description, Some(subjects.as_slice()), Some(subject_paths.as_slice()), Some(subject_codes.as_slice()), Some(isbns.as_slice()), cover, Some(toc.as_slice())] {
         output.extend_from_slice(&value.map_or(u32::MAX, |bytes| bytes.len() as u32).to_le_bytes());
     }
-    for value in [title, author, description, Some(subjects.as_slice()), Some(subject_paths.as_slice()), Some(isbns.as_slice()), cover, Some(toc.as_slice())].into_iter().flatten() {
+    for value in [title, author, description, Some(subjects.as_slice()), Some(subject_paths.as_slice()), Some(subject_codes.as_slice()), Some(isbns.as_slice()), cover, Some(toc.as_slice())].into_iter().flatten() {
         output.extend_from_slice(value);
     }
     output
@@ -670,6 +710,19 @@ pub unsafe extern "C" fn bokheim_unified_subject_paths(input: *const u8, input_l
     store_result(result)
 }
 
+/// Projects raw publication subjects into every supported taxonomy code.
+/// Inferred BISAC headings and explicit BISAC, DDC, and LCC classifications
+/// are accumulated independently; finding one system never suppresses another.
+///
+/// # Safety
+/// Input must reference UTF-8 JSON containing an array of publication subjects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bokheim_project_subject_codes(input: *const u8, input_length: usize) -> u32 {
+    // SAFETY: guaranteed by the caller as documented above.
+    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
+    store_result(project_subject_codes(input))
+}
+
 /// Reports whether the embedded-plus-overlay taxonomy names an exact code.
 ///
 /// # Safety
@@ -773,6 +826,21 @@ mod tests {
     #[test]
     fn uses_the_native_blake3_identity() {
         assert_eq!(content_hash(b"abc"), "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85");
+    }
+
+    #[test]
+    fn browser_subject_projection_accumulates_inferred_bisac_ddc_and_lcc() {
+        let input = br#"[
+          {"name":"History"},
+          {"name":"United States"},
+          {"name":"20th Century"},
+          {"name":"973","authority":"ddc","code":"973"},
+          {"name":"E184","authority":"lcc","code":"E184"}
+        ]"#;
+        let codes = serde_json::from_slice::<Vec<serde_json::Value>>(&project_subject_codes(input).unwrap()).unwrap();
+        assert!(codes.iter().any(|code| code["system"] == "bisac" && code["code"].as_str().is_some_and(|code| code.starts_with("HIS036"))));
+        assert!(codes.iter().any(|code| code["system"] == "ddc" && code["code"] == "973"));
+        assert!(codes.iter().any(|code| code["system"] == "lcc" && code["code"] == "E184"));
     }
 
     #[test]

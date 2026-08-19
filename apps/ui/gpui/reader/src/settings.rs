@@ -113,7 +113,10 @@ impl ReaderPreferences {
 
 pub(crate) fn library_paint_palette(cx: &App) -> html_view_core::ReaderPaintPalette {
     let theme = ui_components::browser_theme(cx);
-    html_view_core::ReaderPaintPalette { foreground: Some(u32::from(gpui::Rgba::from(theme.text))), background: Some(u32::from(gpui::Rgba::from(theme.page_bg))) }
+    // A paint-time foreground replaces the computed color of every text run,
+    // including colors explicitly supplied by the publication. Leave it unset
+    // so EPUB styles reach the painter; the reader theme still owns the canvas.
+    html_view_core::ReaderPaintPalette { foreground: None, background: Some(u32::from(gpui::Rgba::from(theme.page_bg))) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

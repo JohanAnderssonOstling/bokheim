@@ -14,6 +14,7 @@
 //!   [`library::LibraryRoot`] whenever the active library changes.
 
 mod catalog;
+mod description;
 mod library;
 mod model;
 mod navigation;

@@ -11,6 +11,7 @@ workspace = true
 catalog-contract = { path = "../catalog-contract" }
 catalog-model = { path = "../catalog-model" }
 library-model = { path = "../../client/library-model" }
+metadata-contract = { path = "../metadata-contract" }
 opds = { path = "../opds" }
 thumbnail = { path = "../../client/thumbnail", default-features = false }
 wire = { path = "../wire" }
@@ -23,6 +24,7 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.31"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sys-locale = "0.3.2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 url = "2"

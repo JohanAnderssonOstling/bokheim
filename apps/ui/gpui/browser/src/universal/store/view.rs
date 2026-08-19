@@ -27,7 +27,10 @@ fn catalog_page_title<'a>(catalogue: &str, title: &'a str) -> &'a str {
 
 const STORE_SECTION_ROW_HEIGHT: f32 = 58.0;
 const STORE_SOURCE_ROW_HEIGHT: f32 = 66.0;
-const STORE_LINK_ROW_HEIGHT: f32 = components::HIERARCHY_CELL_HEIGHT + components::HIERARCHY_CELL_MARGIN * 2.0;
+/// A link row is a hierarchy cell, so it follows the reader's UI font size.
+fn store_link_row_height(rem_size: f32) -> f32 {
+    components::hierarchy_cell_height(rem_size) + components::HIERARCHY_CELL_MARGIN * 2.0
+}
 const STORE_STATUS_ROW_HEIGHT: f32 = 66.0;
 
 #[derive(Clone)]
@@ -47,12 +50,12 @@ pub(super) struct StoreVirtualRows {
 }
 
 impl StoreVirtualRow {
-    fn height(&self, publication_height: f32) -> f32 {
+    fn height(&self, publication_height: f32, link_row_height: f32) -> f32 {
         match self {
             Self::SectionHeader { .. } => STORE_SECTION_ROW_HEIGHT,
             Self::SourceHeader(_) => STORE_SOURCE_ROW_HEIGHT,
             Self::Publications(_) => publication_height,
-            Self::Links { rows, .. } => STORE_LINK_ROW_HEIGHT * rows.len() as f32,
+            Self::Links { rows, .. } => link_row_height * rows.len() as f32,
             Self::Status { .. } => STORE_STATUS_ROW_HEIGHT,
         }
     }
@@ -134,7 +137,7 @@ impl StorePage {
     }
 
     fn search_controls(&self) -> Div {
-        components::catalog_toolbar_search().child(Input::new(&self.search_input))
+        components::catalog_toolbar_search().child(components::catalog_search_input(&self.search_input))
     }
 
     /// Catalogue-wide search uses one persisted language at a time. The
@@ -269,7 +272,7 @@ impl StorePage {
         }
     }
 
-    fn build_virtual_rows(&self, columns: usize, link_columns: usize) -> Option<StoreVirtualRows> {
+    fn build_virtual_rows(&self, columns: usize, link_columns: usize, publication_height: f32, link_row_height: f32) -> Option<StoreVirtualRows> {
         let mut rows = Vec::new();
         match &self.mode {
             StoreMode::Catalogues => return None,
@@ -333,27 +336,26 @@ impl StorePage {
                 }
             }
         }
-        let publication_height = self.services.contracts.store.publication_height_px as f32;
         let measurement_index = rows.iter().position(|row| !matches!(row, StoreVirtualRow::Publications(_))).unwrap_or(0);
-        let sizes = Rc::new(rows.iter().map(|row| size(px(0.0), px(row.height(publication_height)))).collect());
+        let sizes = Rc::new(rows.iter().map(|row| size(px(0.0), px(row.height(publication_height, link_row_height)))).collect());
         Some(StoreVirtualRows { rows: Rc::new(rows), sizes, measurement_index })
     }
 
-    fn retained_virtual_rows(&mut self, columns: usize, link_columns: usize) -> Option<StoreVirtualRows> {
+    fn retained_virtual_rows(&mut self, columns: usize, link_columns: usize, publication_height: f32, link_row_height: f32) -> Option<StoreVirtualRows> {
         let columns = columns.max(1);
         let link_columns = link_columns.max(1);
-        let key = (columns, link_columns);
+        let key = (columns, link_columns, publication_height.to_bits(), link_row_height.to_bits());
         if !self.virtual_rows.contains_key(&key) {
-            if let Some(rows) = self.build_virtual_rows(columns, link_columns) {
+            if let Some(rows) = self.build_virtual_rows(columns, link_columns, publication_height, link_row_height) {
                 self.virtual_rows.insert(key, rows);
             }
         }
         self.virtual_rows.get(&key).cloned()
     }
 
-    fn virtual_rows(&self, id: &'static str, retained: StoreVirtualRows, columns: usize, link_width: f32, catalogue: Option<String>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
-        let publication_height = self.services.contracts.store.publication_height_px as f32;
-        let publication_unit_width = crate::catalog::catalog_grid_unit_width(self.services.contracts.store.publication_min_width_px);
+    fn virtual_rows(
+        &self, id: &'static str, retained: StoreVirtualRows, columns: usize, publication_unit_width: f32, publication_height: f32, link_width: f32, catalogue: Option<String>, theme: components::BrowserTheme, cx: &mut Context<Self>,
+    ) -> AnyElement {
         let rows = retained.rows;
         let list = v_virtual_list(cx.entity(), id, retained.sizes, move |page, range, _, cx| {
             if range.end.saturating_add(2) >= rows.len() && !page.loading {
@@ -442,20 +444,21 @@ impl Render for StorePage {
         let settings = &contracts.settings;
         let browsing_contract = &contracts.browsing_preferences;
         let preferences = self.preferences.read(cx).browsing();
-        let publication_grid = virtual_grid::ResponsiveColumns::for_element(
-            "store-publication-grid",
-            virtual_grid::ColumnPolicy::MinimumItemWidth { width: crate::catalog::catalog_grid_unit_width(contract.publication_min_width_px), gap: STORE_GRID_GAP },
-            window,
-            cx,
-        );
+        let (description_min_width, description_max_width) = crate::catalog::catalog_description_width_bounds(window, crate::stores::interface_font(cx));
+        let publication_min_unit_width = crate::catalog::catalog_grid_unit_width_for_description(contract.publication_min_width_px, description_min_width);
+        let publication_max_unit_width = crate::catalog::catalog_grid_unit_width_for_description(contract.publication_min_width_px, description_max_width);
+        let publication_height = crate::catalog::catalog_publication_height(contract.publication_height_px, f32::from(window.rem_size()));
+        let publication_grid = virtual_grid::ResponsiveColumns::for_element("store-publication-grid", virtual_grid::ColumnPolicy::MinimumItemWidth { width: publication_min_unit_width, gap: STORE_GRID_GAP }, window, cx);
         let source_min_width = (contract.catalog_two_column_breakpoint_px as f32 - STORE_GRID_GAP) / 2.0;
         let source_grid_columns = virtual_grid::ResponsiveColumns::for_element("store-source-grid", virtual_grid::ColumnPolicy::MinimumItemWidth { width: source_min_width, gap: STORE_GRID_GAP }, window, cx);
         let publication_columns = publication_grid.columns(cx);
+        let publication_unit_width = crate::catalog::catalog_grid_unit_width_for_available(publication_grid.width(cx), publication_columns, publication_min_unit_width, publication_max_unit_width, STORE_GRID_GAP);
         let content_width = f32::from(window.viewport_size().width) - components::nav_rail_width(f32::from(window.rem_size())) - components::CONTENT_PADDING * 2.0;
-        let hierarchy_width = (content_width - components::HIERARCHY_LAYOUT_SAFETY).max(components::HIERARCHY_CELL_MIN_WIDTH);
-        let (link_columns, link_width) = components::hierarchy_grid_layout(hierarchy_width, self.maximum_link_count(), self.catalog_link_columns.get());
+        let rem_size = f32::from(window.rem_size());
+        let hierarchy_width = (content_width - components::HIERARCHY_LAYOUT_SAFETY).max(components::hierarchy_cell_min_width(rem_size));
+        let (link_columns, link_width) = components::hierarchy_grid_layout(hierarchy_width, self.maximum_link_count(), self.catalog_link_columns.get(), rem_size);
         self.catalog_link_columns.set(link_columns);
-        let retained_rows = self.retained_virtual_rows(publication_columns, link_columns);
+        let retained_rows = self.retained_virtual_rows(publication_columns, link_columns, publication_height, store_link_row_height(rem_size));
 
         let mut content = div().w_full().mx_auto().flex_1().min_h_0().flex().flex_col().gap(px(components::SPACE_LG));
 
@@ -475,39 +478,53 @@ impl Render for StorePage {
 
         if let StoreMode::Subjects(subjects) = &self.mode {
             let levels = subjects.levels.clone();
-            let entity = cx.entity();
-            let mut identity = components::catalog_bar()
-                .child(components::catalog_back_button("store-subject-back", contract.catalogs_label.clone()).on_click(move |_, _, cx| entity.update(cx, |page, cx| page.show_catalogues(cx))))
-                .child(components::catalog_source_name("Browse by subject"));
-            if levels.len() > 1 {
-                let mut breadcrumbs = components::folder_breadcrumb();
-                for (index, (title, locator)) in levels.iter().enumerate().skip(1) {
-                    let current = index + 1 == levels.len();
-                    let item = components::folder_breadcrumb_item(title.clone(), current);
-                    breadcrumbs = if current || self.loading {
-                        breadcrumbs.child(item)
-                    } else {
-                        let title = title.clone();
-                        let locator = locator.clone();
-                        let entity = cx.entity();
-                        breadcrumbs.child(item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_subjects(locator.clone(), Some(title.clone()), cx))))
-                    };
-                }
-                identity = identity.child(breadcrumbs);
+            let mut breadcrumbs = components::folder_breadcrumb();
+            let store_item = components::folder_breadcrumb_item("Store", false);
+            breadcrumbs = if self.loading {
+                breadcrumbs.child(store_item)
+            } else {
+                let entity = cx.entity();
+                breadcrumbs.child(store_item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.show_catalogues(cx))))
+            };
+            let subjects_current = levels.len() <= 1;
+            let subjects_item = components::folder_breadcrumb_item("Subjects", subjects_current);
+            breadcrumbs = if subjects_current || self.loading {
+                breadcrumbs.child(subjects_item)
+            } else {
+                let entity = cx.entity();
+                breadcrumbs.child(subjects_item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_subjects(None, None, cx))))
+            };
+            for (index, (title, locator)) in levels.iter().enumerate().skip(1) {
+                let current = index + 1 == levels.len();
+                let item = components::folder_breadcrumb_item(title.clone(), current);
+                breadcrumbs = if current || self.loading {
+                    breadcrumbs.child(item)
+                } else {
+                    let title = title.clone();
+                    let locator = locator.clone();
+                    let entity = cx.entity();
+                    breadcrumbs.child(item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_subjects(locator.clone(), Some(title.clone()), cx))))
+                };
             }
-            content = content.child(identity);
+            content = content.child(components::catalog_bar().child(breadcrumbs));
             let entity = cx.entity();
-            let mut controls = div().w_full().flex().items_center().gap(px(8.0));
-            if levels.len() > 1 {
-                controls = controls.child(div().flex_1().min_w_0().max_w(px(480.0)).child(Input::new(&self.subject_search_input))).child(
+            let controls =
+                div().w_full().flex().items_center().gap(px(8.0)).child(div().flex_1().min_w_0().max_w(px(480.0)).h(px(components::CATALOG_CONTROL_HEIGHT)).child(components::catalog_search_input(&self.subject_search_input))).child(
                     components::secondary_action_button("store-subject-search", "Search", IconName::Search, self.loading).on_click(move |_, _, cx| {
                         entity.update(cx, |page, cx| page.search_subjects(cx));
                     }),
                 );
-            } else {
-                controls = controls.child(div().flex_1());
-            }
-            content = content.child(controls.child(self.subject_source_dropdown(theme, cx))).child(self.virtual_rows("store-subject-results", retained_rows.expect("subject browse rows"), publication_columns, link_width, None, theme, cx));
+            content = content.child(controls.child(self.subject_source_dropdown(theme, cx))).child(self.virtual_rows(
+                "store-subject-results",
+                retained_rows.expect("subject browse rows"),
+                publication_columns,
+                publication_unit_width,
+                publication_height,
+                link_width,
+                None,
+                theme,
+                cx,
+            ));
             return components::folder_dashboard().child(publication_grid.track(content)).into_any_element();
         }
 
@@ -519,7 +536,7 @@ impl Render for StorePage {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(div().flex_1().min_w_0().max_w(px(480.0)).child(Input::new(&self.wide_search_input)))
+                    .child(div().flex_1().min_w_0().max_w(px(480.0)).h(px(components::CATALOG_CONTROL_HEIGHT)).child(components::catalog_search_input(&self.wide_search_input)))
                     .child(components::secondary_action_button("store-subjects", "Browse by subject", IconName::Folder, self.loading).on_click(move |_, _, cx| {
                         entity.update(cx, |page, cx| page.load_subjects(None, None, cx));
                     }))
@@ -535,7 +552,7 @@ impl Render for StorePage {
                         });
                     }),
                 ));
-                content = content.child(self.virtual_rows("store-wide-results", retained_rows.expect("wide search rows"), publication_columns, link_width, None, theme, cx));
+                content = content.child(self.virtual_rows("store-wide-results", retained_rows.expect("wide search rows"), publication_columns, publication_unit_width, publication_height, link_width, None, theme, cx));
                 return components::folder_dashboard().child(publication_grid.track(content)).into_any_element();
             } else {
                 let source_columns = source_grid_columns.columns(cx);
@@ -589,30 +606,35 @@ impl Render for StorePage {
 
         let StoreMode::Catalogue(page) = &self.mode else { unreachable!() };
 
-        let entity = cx.entity();
-        let mut identity = components::catalog_bar()
-            .child(components::catalog_back_button("store-back", contract.catalogs_label.clone()).on_click(move |_, _, cx| {
-                entity.update(cx, |page, cx| {
-                    page.show_catalogues(cx);
-                });
-            }))
-            .child(components::catalog_source_name(page.source.title.clone()));
-        if !page.levels.is_empty() {
-            let mut breadcrumbs = components::folder_breadcrumb();
-            for (index, (title, locator)) in page.levels.iter().enumerate().skip(1) {
-                let current = index + 1 == page.levels.len();
-                let item = components::folder_breadcrumb_item(catalog_page_title(&page.source.title, title).to_owned(), current);
-                breadcrumbs = if current || self.loading {
-                    breadcrumbs.child(item)
-                } else {
-                    let locator = locator.clone();
-                    let entity = cx.entity();
-                    breadcrumbs.child(item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_page(Some(locator.clone()), cx))))
-                };
-            }
-            identity = identity.child(breadcrumbs);
+        let mut breadcrumbs = components::folder_breadcrumb();
+        let store_item = components::folder_breadcrumb_item("Store", false);
+        breadcrumbs = if self.loading {
+            breadcrumbs.child(store_item)
+        } else {
+            let entity = cx.entity();
+            breadcrumbs.child(store_item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.show_catalogues(cx))))
+        };
+        let source_current = page.levels.len() <= 1;
+        let source_item = components::folder_breadcrumb_item(page.source.title.clone(), source_current);
+        breadcrumbs = if source_current || self.loading {
+            breadcrumbs.child(source_item)
+        } else {
+            let locator = page.levels.first().map(|(_, locator)| locator.clone());
+            let entity = cx.entity();
+            breadcrumbs.child(source_item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_page(locator.clone(), cx))))
+        };
+        for (index, (title, locator)) in page.levels.iter().enumerate().skip(1) {
+            let current = index + 1 == page.levels.len();
+            let item = components::folder_breadcrumb_item(catalog_page_title(&page.source.title, title).to_owned(), current);
+            breadcrumbs = if current || self.loading {
+                breadcrumbs.child(item)
+            } else {
+                let locator = locator.clone();
+                let entity = cx.entity();
+                breadcrumbs.child(item.on_click(move |_, _, cx| entity.update(cx, |page, cx| page.load_page(Some(locator.clone()), cx))))
+            };
         }
-        content = content.child(identity);
+        content = content.child(components::catalog_bar().child(breadcrumbs));
 
         {
             let mut section = div().w_full().flex_1().min_h_0().flex().flex_col().gap(px(components::SPACE_SM));
@@ -632,7 +654,8 @@ impl Render for StorePage {
                 section = section.child(chips);
             }
 
-            section = section.child(self.virtual_rows("store-catalog-results", retained_rows.expect("catalogue rows"), publication_columns, link_width, Some(page.source.title.clone()), theme, cx));
+            section =
+                section.child(self.virtual_rows("store-catalog-results", retained_rows.expect("catalogue rows"), publication_columns, publication_unit_width, publication_height, link_width, Some(page.source.title.clone()), theme, cx));
 
             content = content.child(section);
         }
