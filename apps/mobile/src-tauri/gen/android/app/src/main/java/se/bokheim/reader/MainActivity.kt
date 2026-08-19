@@ -696,17 +696,27 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    // BuildConfig.APK_UPDATER_ENABLED is false in the Google Play build, which
+    // may not install APKs itself. Every entry point is gated, not just the
+    // availability probe, so a stale web view cannot reach the installer.
     @JavascriptInterface
-    fun isApkUpdaterAvailable(): Boolean = !BuildConfig.DEBUG
+    fun isApkUpdaterAvailable(): Boolean = BuildConfig.APK_UPDATER_ENABLED && !BuildConfig.DEBUG
 
     @JavascriptInterface
-    fun checkForApkUpdate(force: Boolean) = this@MainActivity.checkForApkUpdate(force)
+    fun checkForApkUpdate(force: Boolean) {
+      if (!BuildConfig.APK_UPDATER_ENABLED) return
+      this@MainActivity.checkForApkUpdate(force)
+    }
 
     @JavascriptInterface
-    fun downloadAndInstallApk(url: String, sha256: String, fileName: String) = this@MainActivity.downloadAndInstallApk(url, sha256, fileName)
+    fun downloadAndInstallApk(url: String, sha256: String, fileName: String) {
+      if (!BuildConfig.APK_UPDATER_ENABLED) return
+      this@MainActivity.downloadAndInstallApk(url, sha256, fileName)
+    }
 
     @JavascriptInterface
     fun openApkInstallSettings() {
+      if (!BuildConfig.APK_UPDATER_ENABLED) return
       runOnUiThread {
         startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
       }

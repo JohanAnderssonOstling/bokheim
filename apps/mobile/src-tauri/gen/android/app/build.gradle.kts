@@ -21,6 +21,18 @@ val keystoreProperties = Properties().apply {
     }
 }
 
+// Google Play forbids apps that download and install APKs themselves, so the
+// build destined for the Play Store drops the self-updater. The Tauri CLI owns
+// the Gradle task names (the abi flavours arm/arm64/universal come from the
+// `rust` plugin), so this is a plain build-time switch rather than a product
+// flavour: set BOKHEIM_PLAY_STORE=1 in the environment, or pass
+// -Pbokheim.playStore=true.
+val playStoreBuild =
+    (providers.environmentVariable("BOKHEIM_PLAY_STORE").orNull ?: "")
+        .lowercase() in setOf("1", "true", "yes") ||
+        (providers.gradleProperty("bokheim.playStore").orNull ?: "")
+            .lowercase() in setOf("1", "true", "yes")
+
 android {
     compileSdk = 36
     namespace = "se.bokheim.reader"
@@ -31,6 +43,13 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        buildConfigField("boolean", "APK_UPDATER_ENABLED", (!playStoreBuild).toString())
+    }
+    if (playStoreBuild) {
+        // Merged on top of the main manifest to remove
+        // REQUEST_INSTALL_PACKAGES. The FileProvider stays: Tauri's generated
+        // RustWebChromeClient also uses it for file uploads.
+        sourceSets.getByName("release").manifest.srcFile("src/play/AndroidManifest.xml")
     }
     if (keystorePropertiesFile.exists()) {
         signingConfigs {
