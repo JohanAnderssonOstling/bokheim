@@ -168,8 +168,12 @@ impl AdaptiveCrawlWriteBatch {
         self.bytes = self.bytes.saturating_add(bytes);
     }
 
-    fn should_flush(&self) -> bool {
-        self.pages.len() >= self.page_limit || self.publications >= CRAWL_WRITE_BATCH_MAX_PUBLICATIONS || self.bytes >= CRAWL_WRITE_BATCH_MAX_BYTES || self.started_at.is_some_and(|started| started.elapsed() >= CRAWL_WRITE_BATCH_MAX_AGE)
+    fn reached_capacity(&self) -> bool {
+        self.pages.len() >= self.page_limit || self.publications >= CRAWL_WRITE_BATCH_MAX_PUBLICATIONS || self.bytes >= CRAWL_WRITE_BATCH_MAX_BYTES
+    }
+
+    fn should_flush_incremental(&self) -> bool {
+        self.reached_capacity() || self.started_at.is_some_and(|started| started.elapsed() >= CRAWL_WRITE_BATCH_MAX_AGE)
     }
 
     fn take_pages(&mut self) -> Vec<CatalogPageWrite> {
@@ -550,9 +554,10 @@ impl CatalogService {
         let pages = batch.take_pages();
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
         let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
+        let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
         let cache_crawl = crawl.clone();
         let started = Instant::now();
-        self.cache_write_call(move |cache| cache.stage_pages(&cache_crawl, &pages)).await?;
+        self.cache_write_call(move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
         batch.record_commit(started.elapsed());
         for publications in publication_counts {
             self.record_crawl_page(source_id, publications).await;
@@ -588,10 +593,11 @@ impl CatalogService {
         let pages = enriched_pages;
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
         let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
+        let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
         let cache_source = source_id.clone();
         let cache_root = source_url.to_owned();
         let started = Instant::now();
-        self.cache_write_call(move |cache| cache.put_pages(&cache_source, &cache_root, &pages)).await?;
+        self.cache_write_call(move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
         batch.record_commit(started.elapsed());
         drop(_update);
         for publications in publication_counts {
@@ -696,7 +702,7 @@ impl CatalogService {
                     let publications = page_publication_count(&page) as usize;
                     let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
                     write_batch.push(CatalogPageWrite { page, etag: validators.etag, last_modified: validators.last_modified }, publications, bytes);
-                    if write_batch.should_flush() {
+                    if write_batch.reached_capacity() {
                         self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
                     }
                 }
@@ -769,7 +775,7 @@ impl CatalogService {
                     let publications = page_publication_count(&page) as usize;
                     let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
                     write_batch.push(CatalogPageWrite { page, etag: None, last_modified: None }, publications, bytes);
-                    if write_batch.should_flush() {
+                    if write_batch.should_flush_incremental() {
                         self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
                     }
                 }
@@ -2631,6 +2637,9 @@ mod tests {
         assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_MIN_PAGES);
         batch.record_commit(CRAWL_WRITE_BATCH_SLOW_COMMIT + Duration::from_millis(1));
         assert_eq!(batch.page_limit, CRAWL_WRITE_BATCH_MIN_PAGES);
+        batch.started_at = Some(Instant::now() - CRAWL_WRITE_BATCH_MAX_AGE - Duration::from_millis(1));
+        assert!(!batch.reached_capacity(), "replacement crawls ignore age and flush only at bounded capacity");
+        assert!(batch.should_flush_incremental(), "incremental crawls retain their visibility deadline");
     }
 
     fn endpoint(url: String) -> OpdsEndpoint {

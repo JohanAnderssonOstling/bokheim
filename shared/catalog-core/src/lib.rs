@@ -4,6 +4,7 @@ mod language;
 pub use cache::{
     CachedCatalogPage, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogEpubExtractionInventory, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewCandidate,
     CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogPageWrite, CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory,
+    PreparedCatalogPageWrite,
     CatalogSourceState, SequencedCatalogPublication,
 };
 pub use language::CatalogLanguageFilter;
