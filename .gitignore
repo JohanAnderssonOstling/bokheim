@@ -6,6 +6,9 @@
 # it can grow to several gigabytes.
 /target-mobile-deploy/
 /target-android-deploy/
+# Cargo target directory for the statically linked musl catalogue build; like
+# the entries above, its name does not match the standard `target/` rule.
+/.catalog-musl-target/
 /.android-tmp.*/
 /.deploy-tmp/
 /release/
