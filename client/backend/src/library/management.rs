@@ -361,20 +361,22 @@ impl LibraryBackend {
     pub(super) fn load_folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
         let mut statement = conn.prepare(
-            "WITH RECURSIVE tree(id,path) AS (
-                 SELECT id,'' FROM dir WHERE id='00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL
+            "WITH RECURSIVE tree(id,parent_id,label,path) AS (
+                 SELECT id,NULL,'Library','' FROM dir WHERE id='00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL
                  UNION ALL
-                 SELECT child.id,CASE WHEN tree.path='' THEN child.name ELSE tree.path||' / '||child.name END
+                 SELECT child.id,child.parent_id,child.name,CASE WHEN tree.path='' THEN child.name ELSE tree.path||' / '||child.name END
                  FROM dir child JOIN tree ON child.parent_id=tree.id
                  WHERE child.id!=child.parent_id AND child.deleted_at IS NULL
-             ) SELECT id,path FROM tree ORDER BY portable_name_key(path),id",
+             ) SELECT id,parent_id,label,path FROM tree ORDER BY portable_name_key(path),id",
         )?;
         let destinations = statement
             .query_map([], |row| {
                 let raw_id: String = row.get(0)?;
                 let id = DirId::parse_str(&raw_id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
-                let path: String = row.get(1)?;
-                Ok(LibraryFolderDestination { id, path: if path.is_empty() { "Library".to_owned() } else { path } })
+                let parent_id = row.get::<_, Option<String>>(1)?.map(|raw| DirId::parse_str(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))).transpose()?;
+                let label = row.get(2)?;
+                let path: String = row.get(3)?;
+                Ok(LibraryFolderDestination { id, parent_id, label, path: if path.is_empty() { "Library".to_owned() } else { path } })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(destinations)

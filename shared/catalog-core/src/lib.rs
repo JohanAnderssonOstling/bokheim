@@ -2,10 +2,10 @@ mod cache;
 mod language;
 
 pub use cache::{
-    CachedCatalogPage, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogEpubExtractionInventory, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewCandidate,
-    CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPageWrite, CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory, CatalogSubjectAssignment, prepare_catalog_subject_assignments,
-    PreparedCatalogPageWrite,
-    CatalogSourceState, SequencedCatalogPublication,
+    prepare_catalog_subject_assignments, CachedCatalogPage, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogDescriptionBackfillInventory, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate,
+    CatalogEpubExtractionInventory, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewCandidate, CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillIndexedJob,
+    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPageWrite,
+    CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory, CatalogSourceState, CatalogSubjectAssignment, PreparedCatalogPageWrite, SequencedCatalogPublication,
 };
 pub use language::CatalogLanguageFilter;
 
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 use url::Url;
 
 const OPDS_SOURCE_PREFIX: &str = "opds-";

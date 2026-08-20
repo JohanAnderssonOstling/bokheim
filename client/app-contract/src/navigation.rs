@@ -3,6 +3,18 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+/// Stable persisted location within a hierarchical browser page.
+///
+/// The previous session shape stored full hierarchy rows, including changing
+/// inventory counts. `name` is accepted when reading those sessions so the
+/// navigation itself survives this narrower representation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NavigationCrumb<Id> {
+    pub id: Id,
+    #[serde(alias = "name")]
+    pub label: String,
+}
+
 /// The hierarchy paths visited in one library.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "FolderCrumb: serde::Serialize, SubjectCrumb: serde::Serialize", deserialize = "FolderCrumb: serde::Deserialize<'de>, SubjectCrumb: serde::Deserialize<'de>"))]
@@ -50,5 +62,24 @@ where
 
     pub fn retain_places(&mut self, present: impl Fn(&LibraryId) -> bool) {
         self.places.retain(|library_id, _| present(library_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NavigationCrumb;
+
+    #[test]
+    fn persisted_navigation_crumb_reads_the_previous_hierarchy_row_shape() {
+        let crumb: NavigationCrumb<String> = serde_json::from_value(serde_json::json!({
+            "id": "child",
+            "name": "Child",
+            "book_count": 42,
+            "downloaded_book_count": 7
+        }))
+        .unwrap();
+
+        assert_eq!(crumb, NavigationCrumb { id: "child".to_owned(), label: "Child".to_owned() });
+        assert_eq!(serde_json::to_value(crumb).unwrap(), serde_json::json!({ "id": "child", "label": "Child" }));
     }
 }

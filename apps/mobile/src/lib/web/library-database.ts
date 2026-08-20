@@ -3196,12 +3196,12 @@ export async function updateWebPdfReadingPosition(
   libraryId: string,
   contentHash: string,
   page: number,
-  fullPagePosition: number,
+  fullPagePosition: number | null,
 ): Promise<void> {
   await updateWebReadingPosition(
     libraryId,
     contentHash,
-    `pdfpage(${Math.max(0, Math.floor(page))},${Math.max(0, Number.isFinite(fullPagePosition) ? fullPagePosition : 0)})`,
+    `pdfpage(${Math.max(0, Math.floor(page))},${Math.max(0, typeof fullPagePosition === "number" && Number.isFinite(fullPagePosition) ? fullPagePosition : 0)})`,
     null,
   );
 }

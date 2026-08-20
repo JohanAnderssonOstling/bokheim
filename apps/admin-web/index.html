@@ -102,6 +102,10 @@
               <div class="panel-heading subsection"><div><p class="eyebrow">Enrichment</p><h2>Metadata backfill</h2></div><span>Local metadata enrichment from previously extracted publication data</span></div>
               <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>Recorded failures</th><th>Last error</th></tr></thead><tbody id="catalogue-metadata-backfill-status"></tbody></table></div>
             </div>
+            <div id="catalogue-description-backfill" hidden>
+              <div class="panel-heading subsection"><div><p class="eyebrow">Enrichment</p><h2>Description backfill</h2></div><span>Open Library descriptions processed separately from regular metadata enrichment</span></div>
+              <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>No OL description</th><th>Progress</th><th>Speed</th><th>Last error</th></tr></thead><tbody id="catalogue-description-backfill-status"></tbody></table></div>
+            </div>
             <div class="panel-heading subsection"><div><p class="eyebrow">Live</p><h2>Current crawl</h2></div><span>Sources actively being fetched right now</span></div>
             <p id="catalogue-current-crawl-empty" class="empty">No source is crawling right now.</p>
             <div id="catalogue-current-crawl-wrap" class="table-wrap" hidden><table><thead><tr><th>Source</th><th>Started</th><th>Speed</th><th>Pages waiting</th><th>Cached pages</th><th>Publications found</th><th>Enrichment queue</th></tr></thead><tbody id="catalogue-current-crawl"></tbody></table></div>

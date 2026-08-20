@@ -1,12 +1,12 @@
 //! Universal preference state.
 //!
-//! `backend` stores browsing and transfer preferences per account, not per
-//! library — neither getter takes a library id, and browsing changes enqueue to
-//! the signed-in account. So this store lives at the root and is injected
-//! downward. Settings edits it, and appearance refreshes all windows.
+//! `backend` stores browsing preferences per account, not per library — the
+//! getter takes no library id, and browsing changes enqueue to the signed-in
+//! account. So this store lives at the root and is injected downward. Settings
+//! edits it, and appearance refreshes all windows.
 
-use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, TransferPreferencePatch, TransferPreferences};
-use gpui::{App, Context, EventEmitter, SharedString, px};
+use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences};
+use gpui::{App, Context, SharedString, px};
 use gpui_component::{Theme, ThemeTokens};
 
 use crate::services::AppServices;
@@ -20,11 +20,6 @@ pub(crate) fn system_prefers_dark(cx: &App) -> bool {
     matches!(cx.window_appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
 }
 
-/// The book display preference changed, so retained grids need to switch
-/// presentation; the same cards are drawn a different way, with no
-/// re-querying needed.
-pub(crate) struct LibraryDisplayChanged(pub(crate) app_contract::preferences::LibraryView);
-
 pub(crate) fn interface_font(cx: &App) -> SharedString {
     Theme::global(cx).font_family.clone()
 }
@@ -32,10 +27,7 @@ pub(crate) fn interface_font(cx: &App) -> SharedString {
 pub(crate) struct Preferences {
     services: AppServices,
     browsing: BrowsingPreferences,
-    transfer: TransferPreferences,
 }
-
-impl EventEmitter<LibraryDisplayChanged> for Preferences {}
 
 impl Preferences {
     pub(crate) fn new(services: AppServices, cx: &mut App) -> Self {
@@ -43,20 +35,12 @@ impl Preferences {
             log::error!("failed to load browsing preferences: {error}");
             BrowsingPreferences::default()
         });
-        let transfer = services.backend.transfer_preferences().unwrap_or_else(|error| {
-            log::error!("failed to load transfer preferences: {error}");
-            TransferPreferences::default()
-        });
         apply_browsing_appearance(browsing.clone(), cx);
-        Self { services, browsing, transfer }
+        Self { services, browsing }
     }
 
     pub(crate) fn browsing(&self) -> BrowsingPreferences {
         self.browsing.clone()
-    }
-
-    pub(crate) const fn transfer(&self) -> TransferPreferences {
-        self.transfer
     }
 
     pub(crate) fn interface_font_name(&self) -> SharedString {
@@ -81,22 +65,11 @@ impl Preferences {
                 if appearance_changed {
                     apply_browsing_appearance(self.browsing.clone(), cx);
                 }
-                if previous.library_view() != self.browsing.library_view() {
-                    cx.emit(LibraryDisplayChanged(self.browsing.library_view()));
-                }
+                cx.notify();
                 Ok(())
             }
             Err(error) => Err(error.to_string()),
         }
-    }
-
-    pub(crate) fn set_transfer(&mut self, preferences: TransferPreferences) {
-        self.transfer = preferences;
-    }
-
-    pub(crate) fn transfer_patch(&self, patch: TransferPreferencePatch) -> impl std::future::Future<Output = Result<TransferPreferences, String>> + 'static {
-        let core = self.services.backend.clone();
-        async move { core.update_transfer_preference(patch).await.map_err(|error| error.to_string()) }
     }
 }
 

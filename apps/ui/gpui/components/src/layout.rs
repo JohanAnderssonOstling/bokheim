@@ -1,16 +1,39 @@
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Div, FontWeight, SharedString, Window};
-use gpui_component::alert::Alert;
+use gpui::{AnyElement, App, Div, FontWeight, SharedString, Window, div, px};
 use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::Size;
 use gpui_component::Theme;
+use gpui_component::alert::Alert;
 
-use crate::{BrowserTheme, Scrollable, ScrollableElement, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_SM, TEXT_XS, TITLE_MD};
+use crate::{BrowserTheme, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, TITLE_MD};
+
+/// Fills the parent's layout box and permits both axes to shrink inside flex
+/// parents. GPUI's `size_full` alone retains the default minimum size, which can
+/// make nested panes or virtual-list viewports overflow instead of shrinking.
+pub fn full_size() -> Div {
+    div().size_full().min_h_0().min_w_0()
+}
+
+/// A full-size vertical flex boundary for page and viewport content.
+pub fn full_size_column() -> Div {
+    full_size().flex().flex_col()
+}
+
+/// Takes the remaining height in a vertical flex parent and establishes a new
+/// vertical flex boundary for its content.
+pub fn remaining_space_column() -> Div {
+    div().w_full().flex_1().min_h_0().min_w_0().flex().flex_col()
+}
+
+/// Covers the nearest positioned ancestor.
+pub fn absolute_full_size() -> Div {
+    div().absolute().inset_0().size_full()
+}
 
 /// The window-sized application root shared by browser views.
 pub fn app_page(font_family: impl Into<SharedString>, font_size_px: u8, theme: BrowserTheme) -> Div {
-    div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
+    full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
 }
 
 /// A reader-window root using the application-wide interface typography.
@@ -19,7 +42,7 @@ pub fn reader_app_page(window: &mut Window, cx: &App, theme: BrowserTheme) -> Di
     let font_size = application_theme.font_size;
     let font_family = application_theme.font_family.clone();
     window.set_rem_size(font_size);
-    div().size_full().min_h_0().min_w_0().relative().flex().flex_col().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(font_size)
+    full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(font_size)
 }
 
 pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedString, theme: BrowserTheme, body: AnyElement, on_retry: impl Fn(&mut App) + 'static) -> AnyElement {
@@ -27,11 +50,7 @@ pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedStri
         return body;
     };
     let retry = crate::topbar_action_button("retry-section", retry_label, IconName::Redo2, theme).on_click(move |_, _, cx| on_retry(cx));
-    div()
-        .size_full()
-        .min_h_0()
-        .flex()
-        .flex_col()
+    full_size_column()
         .gap(px(SPACE_SM))
         .child(div().w_full().flex().items_center().justify_between().gap(px(SPACE_SM)).child(Alert::error("browser-error", error).with_size(Size::Small)).child(retry))
         .child(div().flex_1().min_h_0().child(body))
@@ -49,7 +68,7 @@ pub fn section_title(text: impl Into<SharedString>) -> Div {
 }
 
 pub fn scrollable_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().p(px(SPACE_LG)).overflow_y_scrollbar()
+    full_size().p(px(SPACE_LG)).overflow_y_scrollbar()
 }
 
 pub fn centered_page_content() -> Div {

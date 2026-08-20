@@ -185,6 +185,14 @@ function render(overview, history, requestHistory, engagement, services, identit
   if (catalogue) {
     const extractions = catalogue.epub_extractions;
     const metadataBackfill = catalogue.metadata_backfill;
+    const descriptionBackfill = catalogue.description_backfill;
+    const descriptionMetrics = catalogue.description_backfill_metrics;
+    const descriptionBackfillAvailable = catalogue.description_backfill_available !== false;
+    const descriptionWithoutOpenLibraryText = descriptionBackfill?.no_description ?? 0;
+    const descriptionFinished = descriptionBackfill ? descriptionBackfill.succeeded + descriptionWithoutOpenLibraryText : 0;
+    const descriptionTotal = descriptionBackfill ? descriptionFinished + descriptionBackfill.pending + descriptionBackfill.running : 0;
+    const descriptionProgress = descriptionTotal ? descriptionFinished / descriptionTotal * 100 : 100;
+    const descriptionsPerMinute = descriptionMetrics ? descriptionMetrics.jobs_per_second * 60 : null;
     const currentCrawls = catalogue.sources.filter((source) => source.crawl_status === "running");
     const crawlRates = currentCrawls.map((source) => ({
       pages:perMinute(source.crawl_pages_fetched, source.crawl_elapsed_seconds),
@@ -199,6 +207,7 @@ function render(overview, history, requestHistory, engagement, services, identit
       card("Catalogue latency", `${number(services.catalogue.latency_ms)} ms`, "Operations snapshot response"),
       card("EPUB extraction queue", number(extractions.pending + extractions.running), `${number(extractions.succeeded)} succeeded · ${number(extractions.failed)} failed`),
       ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded · ${number(catalogue.identity_reviews?.failed ?? 0)} recorded failures`)] : []),
+      ...(descriptionBackfill ? [card("Description backfill", descriptionBackfillAvailable ? `${descriptionProgress.toFixed(1)}%` : "Waiting", descriptionBackfillAvailable ? `${number(descriptionBackfill.pending + descriptionBackfill.running)} queued · ${rate(descriptionsPerMinute)} books/min · ${number(descriptionWithoutOpenLibraryText)} without an OL description` : "Metadata snapshot does not contain Open Library descriptions yet")] : []),
       card("Registry revision", number(catalogue.registry_revision), catalogue.metadata_enrichment_configured ? "Metadata enrichment configured" : "Metadata enrichment disabled"),
       card("Crawl speed", currentCrawls.length ? `${rate(measuredRates.length ? pagesPerMinute : null)} pages/min` : "Idle", currentCrawls.length ? `${rate(measuredRates.length ? publicationsPerMinute : null)} publication entries/min across ${number(currentCrawls.length)} sources` : "No source is currently crawling"),
     );
@@ -211,6 +220,29 @@ function render(overview, history, requestHistory, engagement, services, identit
         row.append(cell);
       }
       elements["catalogue-metadata-backfill-status"].replaceChildren(row);
+    }
+    elements["catalogue-description-backfill"].hidden = !descriptionBackfill;
+    if (descriptionBackfill) {
+      const row = document.createElement("tr");
+      const speed = !descriptionBackfillAvailable
+        ? "Paused"
+        : descriptionBackfill.pending + descriptionBackfill.running === 0 && !descriptionMetrics?.jobs
+        ? "Idle"
+        : `${rate(descriptionsPerMinute)} books/min`;
+      for (const value of [
+        descriptionBackfill.pending,
+        descriptionBackfill.running,
+        descriptionBackfill.succeeded,
+        descriptionWithoutOpenLibraryText,
+        descriptionBackfillAvailable ? `${descriptionProgress.toFixed(1)}%` : "Waiting for snapshot",
+        speed,
+        descriptionBackfill.last_error || "None",
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = typeof value === "number" ? number(value) : value;
+        row.append(cell);
+      }
+      elements["catalogue-description-backfill-status"].replaceChildren(row);
     }
     elements["catalogue-current-crawl-empty"].hidden = currentCrawls.length !== 0;
     elements["catalogue-current-crawl-wrap"].hidden = currentCrawls.length === 0;

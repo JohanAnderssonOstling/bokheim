@@ -1,4 +1,3 @@
-mod registry;
 mod session;
 #[cfg(not(feature = "kobo"))]
 mod update_notice;
@@ -20,17 +19,17 @@ use std::time::Duration;
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, BrowserRoot, OpenReader};
-use epub_svelte_lib::app::BackendContext;
 use epub_svelte_lib::app::preferences::ReaderPreferencePatch;
-use epub_svelte_lib::platform::scanner::LibraryEvent;
-use gpui::{App, AppContext, Bounds, Entity, SharedString, WeakEntity, WindowBounds, WindowOptions, px, size};
+use epub_svelte_lib::app::{AppBackend, BackendContext};
+#[cfg(feature = "audiobooks")]
+use gpui::WeakEntity;
+use gpui::{App, AppContext, Bounds, Entity, SharedString, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 #[cfg(feature = "kobo")]
 use gpui_kobo::KoboKeyboardRoot;
 use reader_ui::{ReaderPreferences, ReaderWindowGeometry, SaveReaderSettings};
 use ui_runtime::BlockingWorker;
 
-use registry::LibraryRegistry;
 use session::{SessionSaveScheduler, UiSession, session_path};
 
 #[cfg(not(feature = "kobo"))]
@@ -116,17 +115,10 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         value
     };
 
-    let library_entries = match backend_context.try_get_library_entries() {
-        Ok(entries) => entries,
-        Err(error) => {
-            log::error!("failed to load library entries: {error}");
-            Vec::new()
-        }
-    };
-    let registry = LibraryRegistry::open(&backend_context);
-    let library_events = registry.events();
-    let backend = registry.core();
-    cx.set_global(registry);
+    let backend = AppBackend::new_deferred_scanning(backend_context.clone()).expect("failed to initialize shared application backend");
+    backend.ensure_default_library().expect("failed to initialize a default library");
+    let library_entries = backend.libraries().expect("failed to load library entries");
+    let book_removals = backend.book_removals();
 
     match backend.reader_preferences() {
         Ok(preferences) => {
@@ -322,8 +314,6 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     } else {
         WindowBounds::Windowed(Bounds { origin: gpui::point(px(0.0), px(0.0)), size: size(px(300.0), px(400.0)) })
     };
-    let browser_out = Rc::new(RefCell::new(None));
-    let browser_for_window = browser_out.clone();
     #[cfg(not(feature = "kobo"))]
     let (app_id, icon) = desktop_window_identity();
     #[cfg(feature = "kobo")]
@@ -340,9 +330,9 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
             },
             move |window, cx| {
                 #[cfg(feature = "kobo")]
-                let services = AppServices::new(backend, open_reader, None, save_kobo_auto_rotate.clone(), window);
+                let services = AppServices::new(backend, open_reader, None, save_kobo_auto_rotate.clone());
                 #[cfg(not(feature = "kobo"))]
-                let services = AppServices::new(backend, open_reader, desktop_updater, window);
+                let services = AppServices::new(backend, open_reader, desktop_updater);
                 #[cfg(feature = "kobo")]
                 let browser = cx.new(|cx| BrowserRoot::new(library_entries, services, kobo_auto_rotate, window, cx));
                 #[cfg(not(feature = "kobo"))]
@@ -351,19 +341,17 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
                 {
                     *audiobook_browser.borrow_mut() = Some(browser.downgrade());
                 }
-                *browser_for_window.borrow_mut() = Some(browser.clone());
                 let content = platform_content(browser, cx);
                 cx.new(|cx| Root::new(content, window, cx))
             },
         )
         .expect("failed to open browsing window");
 
-    let browser: Entity<BrowserRoot> = browser_out.borrow_mut().take().expect("browser window always constructs its view");
     #[cfg(not(feature = "kobo"))]
     update_notice::check_for_update(desktop_updater_for_check, browser_window.into(), cx);
     #[cfg(feature = "kobo")]
     let _ = browser_window;
-    forward_library_events(browser.downgrade(), library_events, cx);
+    forward_book_removals(book_removals, cx);
 
     let quit_session_saves = session_saves.clone();
     cx.on_app_quit(move |_| {
@@ -374,16 +362,11 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     cx.activate(true);
 }
 
-fn forward_library_events(browser: WeakEntity<BrowserRoot>, events: async_channel::Receiver<(epub_svelte_lib::LibraryId, LibraryEvent)>, cx: &mut App) {
+fn forward_book_removals(removals: async_channel::Receiver<(epub_svelte_lib::LibraryId, epub_svelte_lib::ContentHash)>, cx: &mut App) {
     cx.spawn(async move |cx| {
-        while let Ok((library_id, event)) = events.recv().await {
+        while let Ok((library_id, content_hash)) = removals.recv().await {
             cx.update(|cx| {
-                if let LibraryEvent::BookRemoved { content_hash, .. } = &event {
-                    reader_ui::handle_book_removed(&library_id, content_hash.clone(), cx);
-                }
-                let _ = browser.update(cx, |browser, cx| {
-                    browser.handle_library_event(&library_id, &event, cx);
-                });
+                reader_ui::handle_book_removed(&library_id, content_hash, cx);
             });
         }
     })

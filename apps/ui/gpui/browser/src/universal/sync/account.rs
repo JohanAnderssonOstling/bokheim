@@ -3,16 +3,14 @@
 use std::future::Future;
 
 use epub_svelte_lib::LibraryTransfers;
-use epub_svelte_lib::app::LibraryEntry;
 use epub_svelte_lib::app::{AccountStatus, AccountStorageUsage, AppBackend, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 use gpui::Context;
 
-use super::{SyncPage, SyncPageEvent};
+use super::SyncPage;
 
 pub(super) struct CloudSnapshot {
     pub(super) account: AccountStatus,
     pub(super) storage_usage: Option<AccountStorageUsage>,
-    pub(super) libraries: Vec<LibraryEntry>,
     pub(super) sync_statuses: Vec<LibrarySyncStatus>,
     pub(super) local_storage_usage: Vec<LocalLibraryStorageUsage>,
     /// `None` from a server without the per-library storage endpoint.
@@ -27,7 +25,7 @@ pub(super) async fn load_cloud_snapshot(core: &AppBackend) -> Result<CloudSnapsh
     let local_storage_usage = core.scan_local_library_storage_usage().await.map_err(|error| error.to_string())?;
     let server_storage_usage = if account.signed_in() { core.account_library_storage_usage_if_supported().await.map_err(|error| error.to_string())? } else { None };
     let transfers = core.transfer_statuses().map_err(|error| error.to_string())?;
-    Ok(CloudSnapshot { account, storage_usage, libraries: library_list.libraries, sync_statuses: library_list.sync_statuses, local_storage_usage, server_storage_usage, transfers })
+    Ok(CloudSnapshot { account, storage_usage, sync_statuses: library_list.sync_statuses, local_storage_usage, server_storage_usage, transfers })
 }
 
 impl SyncPage {
@@ -71,7 +69,6 @@ impl SyncPage {
         self.message = message.map(Into::into);
         let refresh_again = self.refresh_pending;
         self.refresh_pending = false;
-        cx.emit(SyncPageEvent::LibraryListUpdated(snapshot.libraries));
         cx.notify();
         if refresh_again {
             self.schedule_refresh(cx);

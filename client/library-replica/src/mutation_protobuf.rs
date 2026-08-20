@@ -170,11 +170,7 @@ fn encode_reading_position(value: &ReadingPositionState) -> pb::ReadingPosition 
         ReadingPosition::Epub(_) => Location::EpubCfi(value.location.as_str()),
         ReadingPosition::Pdf(page) => Location::PdfPage(*page),
         ReadingPosition::PdfAtPoint { page, full_page_position } => {
-            return pb::ReadingPosition {
-                location: Some(Location::PdfPage(*page)),
-                pdf_full_page_position: Some(full_page_position.max(0.0)),
-                progress: value.progress,
-            };
+            return pb::ReadingPosition { location: Some(Location::PdfPage(*page)), pdf_full_page_position: Some(full_page_position.max(0.0)), progress: value.progress };
         }
         ReadingPosition::Audiobook(millis) => Location::AudiobookMillis(*millis),
     };
@@ -187,9 +183,7 @@ fn decode_reading_position(value: pb::ReadingPosition) -> Result<ReadingPosition
     let location = match required(value.location, "reading location")? {
         Location::EpubCfi(value) => ReadingPosition::epub_cfi(&value).map_err(|_| decode_error("invalid EPUB reading position"))?,
         Location::PdfPage(page) => match full_page_position {
-            Some(full_page_position) if full_page_position.is_finite() => {
-                ReadingPosition::pdf_page_at_point(page, full_page_position.max(0.0))
-            }
+            Some(full_page_position) if full_page_position.is_finite() => ReadingPosition::pdf_page_at_point(page, full_page_position.max(0.0)),
             Some(_) => return Err(decode_error("invalid PDF full-page position")),
             None => ReadingPosition::pdf_page(page),
         },

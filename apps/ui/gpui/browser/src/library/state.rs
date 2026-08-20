@@ -5,19 +5,15 @@
 
 use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::LibraryEntry;
-use gpui::{Context, EventEmitter};
-
-pub(crate) struct LibraryStateChanged;
+use gpui::Context;
 
 pub(crate) struct LibraryState {
     entries: Vec<LibraryEntry>,
-    library_id: Option<LibraryId>,
+    library_id: LibraryId,
 }
 
-impl EventEmitter<LibraryStateChanged> for LibraryState {}
-
 impl LibraryState {
-    pub(crate) fn new(entries: Vec<LibraryEntry>, library_id: Option<LibraryId>) -> Self {
+    pub(crate) fn new(entries: Vec<LibraryEntry>, library_id: LibraryId) -> Self {
         Self { entries, library_id }
     }
 
@@ -25,19 +21,14 @@ impl LibraryState {
         &self.entries
     }
 
-    pub(crate) fn library_id(&self) -> Option<&LibraryId> {
-        self.library_id.as_ref()
+    pub(crate) fn library_id(&self) -> &LibraryId {
+        &self.library_id
     }
 
-    pub(crate) fn is_configured(&self) -> bool {
-        !self.entries.is_empty()
-    }
-
-    pub(crate) fn replace(&mut self, entries: Vec<LibraryEntry>, library_id: Option<LibraryId>, cx: &mut Context<Self>) {
+    pub(crate) fn replace(&mut self, entries: Vec<LibraryEntry>, library_id: LibraryId, cx: &mut Context<Self>) {
         self.entries = entries;
         self.library_id = library_id;
         cx.notify();
-        cx.emit(LibraryStateChanged);
     }
 
     pub(crate) fn set_entries(&mut self, entries: Vec<LibraryEntry>, cx: &mut Context<Self>) {
@@ -47,6 +38,5 @@ impl LibraryState {
         }
         self.entries = entries;
         cx.notify();
-        cx.emit(LibraryStateChanged);
     }
 }

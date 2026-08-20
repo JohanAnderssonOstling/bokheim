@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::{error::Error, fmt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_util::io::ReaderStream;
 use urlencoding::encode;
 
 use crate::library::database as db;
 use crate::{BlobKind, BookPlacement, ContentHash, DownloadProgress, ServerUrl, TransferJobKind};
+use sync_common::api::assets::{ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, MAX_THUMBNAIL_BATCH_ENTRIES};
 use sync_common::LibraryId;
-use sync_common::api::assets::{MAX_THUMBNAIL_BATCH_ENTRIES, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest};
 
 pub use app_contract::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
 
@@ -1121,10 +1121,10 @@ fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::RelativeBookPath;
-    use axum::Router;
     use axum::body::Body;
     use axum::http::{HeaderMap, Response, StatusCode};
     use axum::routing::get;
+    use axum::Router;
     use r2d2::Pool;
     use r2d2_sqlite::SqliteConnectionManager;
     use std::sync::atomic::{AtomicBool, Ordering};

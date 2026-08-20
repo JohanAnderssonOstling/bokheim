@@ -113,10 +113,7 @@ pub fn open_reader_window(locator: BookLocator, title: String, initial_target: O
             #[cfg(feature = "pdf")]
             ReaderFormat::Pdf => {
                 let phase_started = Instant::now();
-                let (initial_page, initial_full_page_position) = library
-                    .pdf_reading_position(prepare_locator.content_hash())
-                    .map_err(|error| format!("stage=reading_position: {error}"))?
-                    .unwrap_or((0, 0.0));
+                let (initial_page, initial_full_page_position) = library.pdf_reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
                 startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
                 PreparedBook::Pdf { book, initial_page: initial_page as usize, initial_full_page_position }
             }
@@ -206,15 +203,7 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, initial_targ
             }
             #[cfg(feature = "pdf")]
             PreparedBook::Pdf { book, initial_page, initial_full_page_position } => {
-                let reader = cx.new(|cx| PdfReaderView::new(PendingPdfReader {
-                    id,
-                    locator: locator_for_window,
-                    title,
-                    library: library_for_window,
-                    book,
-                    initial_page,
-                    initial_full_page_position,
-                }, window, cx));
+                let reader = cx.new(|cx| PdfReaderView::new(PendingPdfReader { id, locator: locator_for_window, title, library: library_for_window, book, initial_page, initial_full_page_position }, window, cx));
                 *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Pdf(reader.downgrade()));
                 cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
             }

@@ -126,6 +126,7 @@ impl From<metadata_contract::EditionIdentityMatch> for EditionIdentityReviewCand
             .flat_map(|classification| match classification.scheme {
                 ClassificationScheme::LibraryOfCongress => library_model::unified_lcc_subject_paths(&classification.notation),
                 ClassificationScheme::DeweyDecimal => library_model::unified_ddc_subject_paths(&classification.notation),
+                ClassificationScheme::Bisac => library_model::unified_subject_paths(library_model::BISAC_SYSTEM_ID, &classification.notation),
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -206,7 +207,12 @@ pub struct SubjectEnrichmentOutcome {
 }
 
 impl LibraryBackend {
-    pub fn edition_identity_reviews(&self) -> Result<Vec<EditionIdentityReview>, BackendError> {
+    pub async fn prepared_edition_identity_reviews(&self) -> Result<Vec<EditionIdentityReview>, BackendError> {
+        self.refresh_edition_identity_candidate_classifications().await?;
+        self.edition_identity_reviews()
+    }
+
+    fn edition_identity_reviews(&self) -> Result<Vec<EditionIdentityReview>, BackendError> {
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::edition_identity_reviews(&connection, OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER)
             .map(|reviews| {
@@ -249,7 +255,7 @@ impl LibraryBackend {
     /// servers by looking up the stored candidate ISBNs through the rich batch
     /// endpoint. The Open Library work id keeps classifications from a
     /// different work with the same ISBN out of the review candidate.
-    pub async fn refresh_edition_identity_candidate_classifications(&self) -> Result<usize, BackendError> {
+    async fn refresh_edition_identity_candidate_classifications(&self) -> Result<usize, BackendError> {
         let pending = {
             let connection = self.db.get().map_err(BackendError::operation)?;
             db::edition_identity_reviews(&connection, OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER)
@@ -491,7 +497,7 @@ impl LibraryBackend {
             } else {
                 let work_count = matched_records.iter().filter_map(|matched| matched.open_library_work_id.as_deref()).collect::<BTreeSet<_>>().len();
                 let mut matched = if matched_records.is_empty() {
-                    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications: Vec::new(), authors: Vec::new(), places: Vec::new(), people: Vec::new(), popularity: None }
+                    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications: Vec::new(), authors: Vec::new(), places: Vec::new(), people: Vec::new(), popularity: None, description: None }
                 } else {
                     merge_rich_matches(matched_records.iter().collect())
                 };
@@ -903,6 +909,7 @@ fn classification_similarity_keys(scheme: ClassificationScheme, notation: &str) 
     let system_id = match scheme {
         ClassificationScheme::LibraryOfCongress => library_model::LCC_SYSTEM_ID,
         ClassificationScheme::DeweyDecimal => library_model::DDC_SYSTEM_ID,
+        ClassificationScheme::Bisac => library_model::BISAC_SYSTEM_ID,
     };
     library_model::unified_subject_similarity_keys(system_id, notation)
 }
@@ -913,6 +920,7 @@ fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<PublicationSubje
         let authority = match classification.scheme {
             ClassificationScheme::LibraryOfCongress => "lcc",
             ClassificationScheme::DeweyDecimal => "ddc",
+            ClassificationScheme::Bisac => "bisac",
         };
         let source = match classification.source {
             ClassificationSource::ExactEdition => "openlibrary:metadata:exact-edition",
@@ -1082,6 +1090,7 @@ mod tests {
             places: Vec::new(),
             people: Vec::new(),
             popularity: None,
+            description: None,
         };
         let mut support = std::collections::BTreeMap::new();
         let mut first = vec![matched("OL1W", "OL1M", "PR4034.P7 1995")];
@@ -1105,6 +1114,7 @@ mod tests {
             places: Vec::new(),
             people: Vec::new(),
             popularity: None,
+            description: None,
         };
         let second = RichWorkMetadataMatch {
             open_library_work_id: Some("OL2W".to_owned()),
@@ -1114,6 +1124,7 @@ mod tests {
             places: vec![EntityReference { wikidata_id: None, name: "Developing countries".to_owned(), source: EntitySource::Work }],
             people: Vec::new(),
             popularity: None,
+            description: None,
         };
 
         let merged = merge_rich_matches(vec![&first, &second]);

@@ -78,71 +78,123 @@ SELECT path FROM dir_paths ORDER BY path;
 
 -- name: get_sub_dirs?
 -- param: dir_id: &str
-WITH RECURSIVE descendants(root_id, id) AS (
-    SELECT directory.id, directory.id
-    FROM dir AS directory
-    WHERE directory.parent_id = :dir_id
-      AND directory.id != :dir_id
-      AND directory.deleted_at IS NULL
+-- param: normalized_query: &str
+-- param: file_type: i32
+WITH RECURSIVE
+scope(id) AS (
+    SELECT id
+    FROM dir
+    WHERE id = :dir_id AND deleted_at IS NULL
     UNION
-    SELECT descendants.root_id, child.id
-    FROM descendants
-    JOIN dir AS child ON child.parent_id = descendants.id
-    WHERE child.id != descendants.id
-      AND child.deleted_at IS NULL
+    SELECT child.id
+    FROM dir AS child
+    JOIN scope AS parent ON child.parent_id = parent.id
+    WHERE child.id != parent.id AND child.deleted_at IS NULL
+),
+candidate_dirs(id,name) AS (
+    SELECT directory.id,directory.name
+    FROM dir AS directory
+    JOIN scope ON scope.id=directory.id
+    WHERE directory.id != :dir_id
+      AND (
+          (:normalized_query = '' AND directory.parent_id = :dir_id)
+          OR (:normalized_query != '' AND instr(normalize_search_text(COALESCE(directory.name, '')), :normalized_query) > 0)
+      )
+),
+candidate_descendants(root_id,id) AS (
+    SELECT id,id FROM candidate_dirs
+    UNION
+    SELECT descendants.root_id,child.id
+    FROM candidate_descendants AS descendants
+    JOIN dir AS child ON child.parent_id=descendants.id
+    WHERE child.id != descendants.id AND child.deleted_at IS NULL
+),
+folder_rows AS (
+    SELECT
+        candidate.id,
+        candidate.name,
+        COUNT(DISTINCT book.row_id) AS book_count,
+        COUNT(DISTINCT CASE WHEN placement.is_downloaded=1 THEN book.row_id END) AS downloaded_book_count
+    FROM candidate_dirs AS candidate
+    JOIN candidate_descendants AS descendants ON descendants.root_id=candidate.id
+    LEFT JOIN book_dir AS placement ON placement.dir_id=descendants.id AND placement.deleted_at IS NULL
+    LEFT JOIN book ON book.row_id=placement.book_row_id
+        AND book.deleted_at IS NULL
+        AND book.hidden_at IS NULL
+        AND (
+            :file_type = 0
+            OR (:file_type = 1 AND LOWER(book.format) NOT IN ('pdf','m4b'))
+            OR (:file_type = 2 AND LOWER(book.format) = 'pdf')
+            OR (:file_type = 3 AND LOWER(book.format) = 'm4b')
+        )
+    GROUP BY candidate.id,candidate.name
+    HAVING :file_type = 0 OR COUNT(DISTINCT book.row_id) > 0
 )
-SELECT
-    root.id,
-    root.name,
-    COUNT(DISTINCT book.row_id) AS book_count,
-    COUNT(DISTINCT CASE WHEN placement.is_downloaded = 1 THEN book.row_id END) AS downloaded_book_count
-FROM dir AS root
-JOIN descendants ON descendants.root_id = root.id
-LEFT JOIN book_dir AS placement ON placement.dir_id = descendants.id AND placement.deleted_at IS NULL
-LEFT JOIN book ON book.row_id = placement.book_row_id AND book.deleted_at IS NULL AND book.hidden_at IS NULL
-WHERE root.parent_id = :dir_id
-  AND root.id != :dir_id
-  AND root.deleted_at IS NULL
-GROUP BY root.id, root.name;
+SELECT id,name,book_count,downloaded_book_count
+FROM folder_rows
+ORDER BY normalize_search_text(name),name,id;
 
 -- Card-shaped reads share the book_cards view; each query only owns scope and ordering.
 
 -- name: get_subject_children?
 -- param: parent_path: &str
+-- param: normalized_query: &str
+-- param: file_type: i32
 WITH RECURSIVE
-assigned_paths(path,parent_path,book_row_id,downloaded) AS (
-    SELECT route.path,route.parent_path,assignment.book_row_id,MAX(placement.is_downloaded)
-    FROM book_unified_concept assignment
-    JOIN book
-      ON book.row_id=assignment.book_row_id
-     AND book.deleted_at IS NULL
-     AND book.hidden_at IS NULL
-    JOIN book_dir placement INDEXED BY idx_book_dir_book
-      ON placement.book_row_id=book.row_id
-     AND placement.deleted_at IS NULL
-    -- CROSS JOIN fixes the small assignment set as the driving input. Without
-    -- it SQLite may scan the complete taxonomy before probing assignments.
-    CROSS JOIN unified_concept_route route INDEXED BY idx_unified_concept_route_concept
-      ON route.concept_id=assignment.concept_id
-    GROUP BY route.path,route.parent_path,assignment.book_row_id
-), ancestors(path,parent_path,book_row_id,downloaded) AS (
-    SELECT path,parent_path,book_row_id,downloaded
-    FROM assigned_paths
+scope(path,parent_path,concept_id) AS (
+    SELECT route.path,route.parent_path,route.concept_id
+    FROM unified_concept_route AS route
+    WHERE route.path=:parent_path OR route.parent_path=:parent_path
+    UNION
+    SELECT child.path,child.parent_path,child.concept_id
+    FROM unified_concept_route AS child
+    JOIN scope AS parent ON child.parent_path=parent.path
+),
+candidate_subjects(path,label) AS (
+    SELECT route.path,route.label
+    FROM unified_concept_route AS route
+    JOIN scope ON scope.path=route.path
+    WHERE route.path != :parent_path
+      AND (
+          (:normalized_query = '' AND route.parent_path=:parent_path)
+          OR (:normalized_query != '' AND instr(normalize_search_text(COALESCE(route.label, '')), :normalized_query) > 0)
+      )
+),
+candidate_descendants(root_path,path,concept_id) AS (
+    SELECT candidate.path,route.path,route.concept_id
+    FROM candidate_subjects AS candidate
+    JOIN unified_concept_route AS route ON route.path=candidate.path
     UNION ALL
-    SELECT parent.path,parent.parent_path,child.book_row_id,child.downloaded
-    FROM ancestors child
-    JOIN unified_concept_route parent ON parent.path=child.parent_path
+    SELECT descendants.root_path,child.path,child.concept_id
+    FROM candidate_descendants AS descendants
+    JOIN unified_concept_route AS child ON child.parent_path=descendants.path
+),
+subject_rows AS (
+    SELECT
+        candidate.path,
+        candidate.label,
+        COUNT(DISTINCT book.row_id) AS book_count,
+        COUNT(DISTINCT CASE WHEN card.downloaded THEN book.row_id END) AS downloaded_book_count
+    FROM candidate_subjects AS candidate
+    JOIN candidate_descendants AS descendants ON descendants.root_path=candidate.path
+    LEFT JOIN book_unified_concept AS assignment ON assignment.concept_id=descendants.concept_id
+    LEFT JOIN book ON book.row_id=assignment.book_row_id
+        AND book.deleted_at IS NULL
+        AND book.hidden_at IS NULL
+        AND (
+            :file_type = 0
+            OR (:file_type = 1 AND LOWER(book.format) NOT IN ('pdf','m4b'))
+            OR (:file_type = 2 AND LOWER(book.format) = 'pdf')
+            OR (:file_type = 3 AND LOWER(book.format) = 'm4b')
+        )
+        AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL)
+    LEFT JOIN book_cards AS card ON card.book_row_id=book.row_id
+    GROUP BY candidate.path,candidate.label
+    HAVING :file_type = 0 OR COUNT(DISTINCT book.row_id) > 0
 )
-SELECT
-    root.path,
-    root.label,
-    COUNT(DISTINCT ancestors.book_row_id) AS book_count,
-    COUNT(DISTINCT CASE WHEN ancestors.downloaded = 1 THEN ancestors.book_row_id END) AS downloaded_book_count
-FROM unified_concept_route root
-LEFT JOIN ancestors ON ancestors.path=root.path
-WHERE root.parent_path=:parent_path
-GROUP BY root.path,root.label
-ORDER BY LOWER(root.label),root.path;
+SELECT path,label,book_count,downloaded_book_count
+FROM subject_rows
+ORDER BY normalize_search_text(label),path;
 
 -- name: get_uncategorized_subject_counts?
 SELECT
@@ -180,16 +232,47 @@ WHERE book.deleted_at IS NULL AND book.hidden_at IS NULL
 -- name: get_book_cards_in_subject?
 -- param: subject_path: &str
 -- param: downloaded_only: i32
+-- param: normalized_query: &str
+-- param: file_type: i32
+WITH RECURSIVE scope(path,concept_id) AS (
+    SELECT route.path,route.concept_id
+    FROM unified_concept_route AS route
+    WHERE route.path=:subject_path OR route.parent_path=:subject_path
+    UNION
+    SELECT child.path,child.concept_id
+    FROM unified_concept_route AS child
+    JOIN scope AS parent ON child.parent_path=parent.path
+)
 SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
        card.audiobook_duration_ms, card.audiobook_chapter_count,
-       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
+       COALESCE(book.added_at, 0)
 FROM book_cards card
+JOIN book ON book.row_id=card.book_row_id
 JOIN book_unified_concept assignment ON assignment.book_row_id=card.book_row_id
-JOIN unified_concept_route route ON route.concept_id=assignment.concept_id
-WHERE route.path=:subject_path
-  AND (:downloaded_only=0 OR card.downloaded)
-ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
+JOIN scope ON scope.concept_id=assignment.concept_id
+WHERE (:downloaded_only=0 OR card.downloaded)
+  AND (
+      :file_type = 0
+      OR (:file_type = 1 AND LOWER(book.format) NOT IN ('pdf','m4b'))
+      OR (:file_type = 2 AND LOWER(book.format) = 'pdf')
+      OR (:file_type = 3 AND LOWER(book.format) = 'm4b')
+  )
+  AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL)
+  AND (
+      (:normalized_query = '' AND scope.path=:subject_path)
+      OR (
+          :normalized_query != ''
+          AND (
+              instr(normalize_search_text(COALESCE(card.title, '')), :normalized_query) > 0
+              OR instr(normalize_search_text(COALESCE(card.author, '')), :normalized_query) > 0
+          )
+      )
+  )
+ORDER BY
+    CASE WHEN instr(normalize_search_text(COALESCE(card.title, '')), :normalized_query) > 0 THEN 0 ELSE 1 END,
+    normalize_search_text(COALESCE(card.title, '')),
+    card.content_hash;
 
 -- name: get_uncategorized_book_cards?
 -- param: downloaded_only: i32
@@ -251,15 +334,46 @@ ORDER BY normalize_search_text(COALESCE(title, '')), content_hash;
 -- name: get_book_cards_in_dir?
 -- param: dir_id: &str
 -- param: downloaded_only: i32
+-- param: normalized_query: &str
+-- param: file_type: i32
+WITH RECURSIVE scope(id) AS (
+    SELECT id FROM dir WHERE id=:dir_id AND deleted_at IS NULL
+    UNION
+    SELECT child.id
+    FROM dir AS child
+    JOIN scope AS parent ON child.parent_id=parent.id
+    WHERE child.id != parent.id AND child.deleted_at IS NULL
+)
 SELECT DISTINCT card.content_hash, card.title, card.author, card.description, card.progress,
        card.downloaded, card.download_requested, card.audiobook,
        card.audiobook_duration_ms, card.audiobook_chapter_count,
-       COALESCE((SELECT added_at FROM book WHERE row_id=card.book_row_id), 0)
+       COALESCE(book.added_at, 0)
 FROM book_cards card
+JOIN book ON book.row_id=card.book_row_id
 JOIN book_dir placement ON placement.book_row_id = card.book_row_id
-WHERE placement.dir_id = :dir_id AND placement.deleted_at IS NULL
+JOIN scope ON scope.id=placement.dir_id
+WHERE placement.deleted_at IS NULL
   AND (:downloaded_only = 0 OR card.downloaded)
-ORDER BY LOWER(COALESCE(card.title, '')), card.content_hash;
+  AND (
+      :file_type = 0
+      OR (:file_type = 1 AND LOWER(book.format) NOT IN ('pdf','m4b'))
+      OR (:file_type = 2 AND LOWER(book.format) = 'pdf')
+      OR (:file_type = 3 AND LOWER(book.format) = 'm4b')
+  )
+  AND (
+      (:normalized_query = '' AND placement.dir_id=:dir_id)
+      OR (
+          :normalized_query != ''
+          AND (
+              instr(normalize_search_text(COALESCE(card.title, '')), :normalized_query) > 0
+              OR instr(normalize_search_text(COALESCE(card.author, '')), :normalized_query) > 0
+          )
+      )
+  )
+ORDER BY
+    CASE WHEN instr(normalize_search_text(COALESCE(card.title, '')), :normalized_query) > 0 THEN 0 ELSE 1 END,
+    normalize_search_text(COALESCE(card.title, '')),
+    card.content_hash;
 
 -- name: get_book_cards_by_author?
 -- param: stable_id: &str

@@ -2,10 +2,11 @@
 
 use epub_svelte_lib::library::{LibraryTrashView, TrashedBook, TrashedFolder};
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, Render, SharedString, Window, div, px};
+use gpui::{Context, IntoElement, Render, SharedString, Task, Window, div, px};
 use gpui_component::IconName;
 use ui_components as components;
 
+use crate::library::pages::library_empty_state;
 use crate::library::services::{LatestRequest, LibraryContext};
 
 pub(crate) struct TrashPage {
@@ -13,11 +14,21 @@ pub(crate) struct TrashPage {
     contents: Option<LibraryTrashView>,
     error: Option<SharedString>,
     request: LatestRequest,
+    _updates: Task<()>,
 }
 
 impl TrashPage {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
-        let mut page = Self { ui, contents: None, error: None, request: LatestRequest::default() };
+        let updates = ui.updates();
+        let update_task = cx.spawn(async move |page, cx| {
+            while let Ok(update) = updates.recv().await {
+                let _ = page.update(cx, |page, cx| match update {
+                    epub_svelte_lib::app::LibraryUpdate::Contents => page.refresh(cx),
+                    epub_svelte_lib::app::LibraryUpdate::Covers(_) => {}
+                });
+            }
+        });
+        let mut page = Self { ui, contents: None, error: None, request: LatestRequest::default(), _updates: update_task };
         page.refresh(cx);
         page
     }
@@ -145,10 +156,7 @@ impl TrashPage {
 impl Render for TrashPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let Some(contents) = self.contents.as_ref() else {
-            return components::browser_loading_message("Loading Trash…", theme).into_any_element();
-        };
-        let empty = contents.books.is_empty() && contents.folders.is_empty();
+        let empty = self.contents.as_ref().is_some_and(|contents| contents.books.is_empty() && contents.folders.is_empty());
         let page = cx.entity();
         let header =
             components::browser_topbar(theme).child(components::browser_topbar_left().child(div().text_xl().font_weight(gpui::FontWeight::SEMIBOLD).child("Trash"))).child(components::browser_topbar_right().when(!empty, |actions| {
@@ -157,17 +165,19 @@ impl Render for TrashPage {
                 }))
             }));
         let mut body = components::browser_settings_page();
-        if empty {
-            body = body.child(components::browser_actionable_empty("Trash is empty", "Deleted books and folders will appear here.", div(), theme));
-        } else {
-            let mut sections = components::browser_settings_sections();
-            if !contents.folders.is_empty() {
-                sections = sections.child(components::browser_settings_fieldset("Folders", theme).children(contents.folders.iter().map(|folder| self.render_folder(folder, theme, cx))));
+        match self.contents.as_ref() {
+            None => body = body.child(components::browser_loading_message("Loading Trash…", theme)),
+            Some(_) if empty => body = body.child(library_empty_state(theme)),
+            Some(contents) => {
+                let mut sections = components::browser_settings_sections();
+                if !contents.folders.is_empty() {
+                    sections = sections.child(components::browser_settings_fieldset("Folders", theme).children(contents.folders.iter().map(|folder| self.render_folder(folder, theme, cx))));
+                }
+                if !contents.books.is_empty() {
+                    sections = sections.child(components::browser_settings_fieldset("Books", theme).children(contents.books.iter().map(|book| self.render_book(book, theme, cx))));
+                }
+                body = body.child(sections);
             }
-            if !contents.books.is_empty() {
-                sections = sections.child(components::browser_settings_fieldset("Books", theme).children(contents.books.iter().map(|book| self.render_book(book, theme, cx))));
-            }
-            body = body.child(sections);
         }
         components::library_section_content()
             .child(header)

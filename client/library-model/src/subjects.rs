@@ -10,13 +10,13 @@ mod runtime;
 use crate::PublicationSubject;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use bisac::{SubjectAssignment, SubjectNode, SubjectSystem, bisac_code_for_path, bisac_subject_system, match_bisac_subjects};
+pub use bisac::{bisac_code_for_path, bisac_subject_system, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment, SubjectNode, SubjectSystem};
 pub use ddc::ddc_subject_path;
 pub use lcc::{canonical_lcc_notation, lcc_subject_path};
 pub use runtime::{
-    BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, install_unified_taxonomy_concepts, install_unified_taxonomy_overlay,
-    loaded_unified_taxonomy_release_id, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code, unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys,
-    unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes,
+    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, loaded_unified_taxonomy_release_id, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code,
+    unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy,
+    BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
 };
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
@@ -28,6 +28,7 @@ pub const DDC_MATCHER_VERSION: i64 = 2;
 pub const LCC_SYSTEM_ID: &str = "lcc";
 pub const LCC_VERSION: &str = "2024-outline-r2";
 pub const LCC_MATCHER_VERSION: i64 = 2;
+pub const ROOT_SUBJECT_PATH: &str = "Subject";
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
 pub const UNIFIED_VERSION: &str = "6";
 pub const UNIFIED_MATCHER_VERSION: i64 = 20;

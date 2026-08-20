@@ -11,7 +11,6 @@ use gpui::{AnyElement, AppContext, Context, Entity, IntoElement};
 mod detail;
 mod pages;
 mod services;
-mod setup;
 mod state;
 mod title_filter;
 mod widgets;
@@ -20,14 +19,12 @@ use self::detail::BookDetailPage;
 use self::widgets::CoverInvalidationRegistry;
 
 pub(crate) use self::pages::authors::AuthorsPage;
-pub(crate) use self::pages::folders::FoldersPage;
+pub(crate) use self::pages::browse_next::{folder as new_folder_browse_page, store as new_store_browse_page, subject as new_subject_browse_page};
 pub(crate) use self::pages::home::HomePage;
-pub(crate) use self::pages::subjects::SubjectsPage;
 pub(crate) use self::pages::trash::TrashPage;
 pub(crate) use self::services::LibraryContext;
-pub(crate) use self::state::{LibraryState, LibraryStateChanged};
+pub(crate) use self::state::LibraryState;
 pub(crate) use self::widgets::{LoadedCover, loaded_cover_from_jpeg};
-pub(crate) use setup::{LibrarySetup, LibrarySetupEvent};
 
 pub(crate) fn invalidate_covers(library_id: epub_svelte_lib::LibraryId, content_hashes: &[epub_svelte_lib::ContentHash], cx: &mut gpui::App) {
     CoverInvalidationRegistry::invalidate(library_id, content_hashes, cx);

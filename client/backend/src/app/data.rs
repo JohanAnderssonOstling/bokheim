@@ -67,13 +67,6 @@ impl BackendContext {
         self.app_data_root.as_path().join(UNIFIED_TAXONOMY_RELATIVE_PATH)
     }
 
-    pub fn reload_unified_taxonomy_from_disk(&self) -> Result<String, String> {
-        let path = self.ensure_unified_taxonomy_file(&self.unified_taxonomy_path())?;
-        let concepts = library_model::read_unified_taxonomy_sqlite(&path)?;
-        library_model::install_unified_taxonomy_concepts(concepts).map_err(|error| format!("failed to install unified taxonomy database {}: {error}", path.display()))?;
-        Ok(library_model::unified_taxonomy_release_id())
-    }
-
     /// Persists an ancestor-closed server slice and atomically replaces the
     /// process-wide matcher with the resulting device-local taxonomy.
     pub(crate) fn unresolved_taxonomy_codes(&self, codes: Vec<taxonomy_contract::TaxonomyCode>) -> Result<Vec<taxonomy_contract::TaxonomyCode>, String> {

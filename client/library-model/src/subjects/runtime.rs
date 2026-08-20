@@ -1,6 +1,6 @@
 use super::ddc::canonical_ddc_notation;
 use super::lcc::{compare_lcc_key, parse_lcc_call};
-use super::{DDC_SYSTEM_ID, LCC_SYSTEM_ID, UNIFIED_VERSION, compact_whitespace};
+use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID, ROOT_SUBJECT_PATH, UNIFIED_VERSION};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -466,7 +466,7 @@ fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String
             continue;
         }
         let path = concept.preferred_label.clone();
-        routes.insert(path.clone(), UnifiedConceptRoute { concept_id: concept.concept_id.clone(), path: path.clone(), parent_path: String::new(), label: concept.preferred_label.clone(), sort_order: 0 });
+        routes.insert(path.clone(), UnifiedConceptRoute { concept_id: concept.concept_id.clone(), path: path.clone(), parent_path: ROOT_SUBJECT_PATH.to_owned(), label: concept.preferred_label.clone(), sort_order: 0 });
         known.entry(concept.concept_id.clone()).or_default().push(path);
         routed_concepts.insert(concept.concept_id.clone());
     }

@@ -58,7 +58,7 @@ include_sql!("src/library/database/sql/views.sql");
 // uses integer row IDs for every local relationship. Pre-15 databases are
 // intentionally rebuilt by LibraryBackend::open; there is no compatibility
 // representation or mixed-key migration.
-pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 21;
+pub(crate) const LIBRARY_SCHEMA_VERSION: i64 = 22;
 
 pub(crate) fn directory_exists(conn: &Connection, directory_id: &str) -> rusqlite::Result<bool> {
     let mut exists = false;
@@ -556,7 +556,7 @@ fn seed_unified_subject_assignments(conn: &Connection) -> Result<(), rusqlite::E
     }
     for route in &routes {
         transaction.execute("INSERT INTO unified_concept_route(path,concept_id,parent_path,label) VALUES(?1,?2,?3,?4)", rusqlite::params![route.path(), route.concept_id(), route.parent_path(), route.label()])?;
-        if !route.parent_path().is_empty() {
+        if route.parent_path() != library_model::ROOT_SUBJECT_PATH {
             transaction.execute(
                 "INSERT OR IGNORE INTO unified_concept_edge(parent_concept_id,child_concept_id,relationship,sort_order) VALUES(?1,?2,'broader',0)",
                 rusqlite::params![library_model::unified_concept_id(route.parent_path()), route.concept_id()],

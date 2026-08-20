@@ -73,6 +73,8 @@ message WorkMatch {
   repeated EntityReference places = 5;
   repeated EntityReference people = 6;
   optional WorkPopularity popularity = 7;
+  // Plain-text Open Library work description, when the snapshot has one.
+  optional string description = 8;
 }
 
 // Aggregated public activity for a work. No patron-level rows leave the
@@ -97,6 +99,7 @@ message Author {
   repeated AuthorIdentifier identifiers = 3;
   AuthorSource source = 4;
   uint32 position = 5;
+  optional string biography = 6;
 }
 
 message AuthorIdentifier {
@@ -156,6 +159,7 @@ enum ClassificationScheme {
   CLASSIFICATION_SCHEME_UNSPECIFIED = 0;
   CLASSIFICATION_SCHEME_LIBRARY_OF_CONGRESS = 1;
   CLASSIFICATION_SCHEME_DEWEY_DECIMAL = 2;
+  CLASSIFICATION_SCHEME_BISAC = 3;
 }
 
 enum ClassificationSource {

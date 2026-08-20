@@ -27,9 +27,9 @@ pub(super) fn read_book_card_row(row: &rusqlite::Row<'_>) -> Result<BookCardRow,
     })
 }
 
-pub(crate) fn get_book_cards_in_dir_scoped(conn: &Connection, dir_id: &str, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
+pub(crate) fn get_book_cards_in_dir_scoped(conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_type: app_contract::library::LibraryFileTypeFilter) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     let mut cards = Vec::new();
-    conn.get_book_cards_in_dir(dir_id, i32::from(downloaded_only), |row| {
+    conn.get_book_cards_in_dir(dir_id, i32::from(downloaded_only), normalized_query, super::browse::file_type_query_value(file_type), |row| {
         cards.push(read_book_card_row(row)?);
         Ok(())
     })?;

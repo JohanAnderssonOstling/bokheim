@@ -1,15 +1,16 @@
-//! Appearance, library presentation and transfer policy.
+//! Appearance, library presentation and desktop update settings.
 //!
 //! Universal: everything it edits is account-scoped rather than library-scoped,
 //! so it edits the shared [`Preferences`] store and every library page observes
 //! the result.
 
-use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, TransferPreferencePatch};
+use epub_svelte_lib::app::preferences::BrowsingPreferencePatch;
 use gpui::prelude::*;
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Window};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::group_box::{GroupBox, GroupBoxVariants};
+#[cfg(feature = "kobo")]
 use gpui_component::switch::Switch;
 use ui_components as components;
 
@@ -52,25 +53,6 @@ impl SettingsPage {
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
         self.error = result.err().map(|error| SharedString::from(format!("Could not save setting: {error}")));
         cx.notify();
-    }
-
-    fn update_transfer(&mut self, patch: TransferPreferencePatch, cx: &mut Context<Self>) {
-        let operation = self.preferences.read(cx).transfer_patch(patch);
-        let preferences = self.preferences.clone();
-        cx.spawn(async move |page, cx| {
-            let result = operation.await;
-            let _ = page.update(cx, |page, cx| {
-                match result {
-                    Ok(updated) => {
-                        preferences.update(cx, |preferences, _| preferences.set_transfer(updated));
-                        page.error = None;
-                    }
-                    Err(error) => page.error = Some(format!("Could not save transfer setting: {error}").into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn check_desktop_update(&mut self, cx: &mut Context<Self>) {
@@ -142,7 +124,6 @@ impl Render for SettingsPage {
         let settings = self.services.contracts.settings.clone();
         let contract = self.services.contracts.browsing_preferences.clone();
         let preferences = self.preferences.read(cx).browsing();
-        let transfer = self.preferences.read(cx).transfer();
         let entity = cx.entity();
 
         let current_font_size = preferences.ui_font_size_px();
@@ -193,42 +174,6 @@ impl Render for SettingsPage {
         });
         let font_size = components::browser_settings_font_size_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
-        let network = self.services.backend.network_status();
-        let network_label = settings.network_transports.iter().find(|definition| definition.transport == network.transport).map(|definition| definition.label.as_str()).unwrap_or("Network unknown");
-        let network_description = format!(
-            "{}: {network_label}{}{} · {}",
-            settings.current_network_label,
-            if network.metered == Some(true) { " · metered" } else { "" },
-            if network.validated == Some(false) && network.connected { " · no internet access" } else { "" },
-            settings.background_metered_description
-        );
-
-        let auto_limit = transfer.auto_download_limit_mb().unwrap_or(0);
-        let decrease_auto_entity = entity.clone();
-        let decrease_auto = components::browser_settings_font_size_button("decrease-auto-download-limit", "-", auto_limit == 0, theme).on_click(move |_, _, cx| {
-            let value = auto_limit.saturating_sub(1);
-            decrease_auto_entity.update(cx, |page, cx| page.update_transfer(TransferPreferencePatch::AutoDownloadLimitMb((value > 0).then_some(value)), cx));
-        });
-        let increase_auto_entity = entity.clone();
-        let increase_auto = components::browser_settings_font_size_button("increase-auto-download-limit", "+", auto_limit == u32::MAX, theme).on_click(move |_, _, cx| {
-            let value = auto_limit.saturating_add(1);
-            increase_auto_entity.update(cx, |page, cx| page.update_transfer(TransferPreferencePatch::AutoDownloadLimitMb(Some(value)), cx));
-        });
-        let auto_limit_label = if auto_limit == 0 { "Off".to_owned() } else { format!("{auto_limit} MB") };
-        let auto_choices = components::browser_settings_font_size_stepper(decrease_auto, auto_limit_label, increase_auto, theme);
-
-        let metered_entity = entity.clone();
-        let transfer_policy = components::browser_settings_fieldset(settings.transfers_section_label.clone(), theme)
-            .child(components::browser_settings_row(
-                settings.background_metered_label.clone(),
-                network_description,
-                Switch::new("allow-background-on-metered").checked(transfer.allow_background_on_metered()).on_click(move |enabled, _, cx| {
-                    metered_entity.update(cx, |page, cx| page.update_transfer(TransferPreferencePatch::AllowBackgroundOnMetered(*enabled), cx));
-                }),
-                theme,
-            ))
-            .child(components::browser_settings_row(settings.auto_download_label.clone(), settings.auto_download_description.clone(), auto_choices, theme));
-
         // "Book display" reads the same shared preference the grids do, so the
         // desktop and mobile settings screens cannot drift apart on it.
         let mut book_display = components::browser_settings_button_group(theme);
@@ -245,8 +190,7 @@ impl Render for SettingsPage {
             .child(appearance_settings)
             .child(book_display)
             .child(components::browser_settings_font_row(settings.interface_font_label.clone(), interface_fonts, theme))
-            .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme))
-            .child(transfer_policy);
+            .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme));
 
         if let Some(updater) = self.services.desktop_updater.as_ref() {
             let current_version = updater.current_version().to_owned();

@@ -564,7 +564,7 @@ async function executeCommand(request: WorkerCommandRequest): Promise<unknown> {
         stringArg(request, 0, "library_id"),
         stringArg(request, 1, "content_hash"),
         numberArg(request, 2, "page"),
-        numberArg(request, 3, "full_page_position"),
+        nullableNumberArg(request, 3, "full_page_position"),
       );
       scheduleMutationSync();
       return null;

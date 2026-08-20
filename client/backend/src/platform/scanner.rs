@@ -37,15 +37,41 @@ pub use crate::DownloadState;
 
 #[derive(Debug, Clone, Serialize)]
 pub enum LibraryEvent {
-    BookAdded { content_hash: ContentHash, path: String },
-    BookRemoved { content_hash: ContentHash, path: String },
-    DirectoryAdded { path: String },
-    DirectoryRemoved { path: String },
-    ThumbnailGenerated { content_hash: ContentHash },
-    ThumbnailBatchProcessed { content_hashes: Vec<ContentHash>, finished: bool },
-    SubjectEnrichmentBatchProcessed { processed: usize, updated: usize, finished: bool },
-    DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
-    FolderDownloadStatusChanged { dir_id: crate::DirId, downloaded_books: usize, total_books: usize },
+    BookAdded {
+        content_hash: ContentHash,
+        path: String,
+    },
+    BookRemoved {
+        content_hash: ContentHash,
+        path: String,
+    },
+    DirectoryAdded {
+        path: String,
+    },
+    DirectoryRemoved {
+        path: String,
+    },
+    ThumbnailGenerated {
+        content_hash: ContentHash,
+    },
+    ThumbnailBatchProcessed {
+        content_hashes: Vec<ContentHash>,
+        finished: bool,
+    },
+    SubjectEnrichmentBatchProcessed {
+        processed: usize,
+        updated: usize,
+        finished: bool,
+    },
+    DownloadStatusChanged {
+        content_hash: ContentHash,
+        state: DownloadState,
+    },
+    FolderDownloadStatusChanged {
+        dir_id: crate::DirId,
+        downloaded_books: usize,
+        total_books: usize,
+    },
     TransferStatusChanged,
     /// The device-global set of configured libraries or its metadata changed.
     LibraryListChanged,

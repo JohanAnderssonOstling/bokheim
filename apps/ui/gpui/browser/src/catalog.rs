@@ -5,14 +5,12 @@
 
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
-use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::app::executor::BackendTask;
 use epub_svelte_lib::catalog::{CatalogDescription, CatalogImportRequest, CatalogPublication, CatalogPublicationAction, CatalogPublicationKey, CatalogSource, CatalogSourceId};
 use gpui::prelude::*;
-use gpui::{AnyElement, AppContext, Context, Entity, FontWeight, IntoElement, Render, SharedString, Task, TextRun, Window, div, font, px};
+use gpui::{AppContext, Context, Entity, FontWeight, IntoElement, Render, SharedString, Task, TextRun, Window, div, font, px};
 use gpui_component::ElementExt as _;
 use gpui_component::IconName;
 use html_view_core::RendererInitialConfig;
@@ -130,7 +128,7 @@ impl CatalogCardServices {
             let card = cx.new(|cx| CatalogPublicationCardView::new(source, publication, show_source, services, cx));
             cards.push(CatalogCardItem { card, span: if expanded { 2 } else { 1 } });
         }
-        CatalogCardGroup { cards, contracts: self.app.contracts.clone() }
+        CatalogCardGroup { cards }
     }
 
     fn load_cover(&self, source_id: CatalogSourceId, image_url: String) -> BackendTask<Result<Vec<u8>, String>> {
@@ -138,14 +136,13 @@ impl CatalogCardServices {
     }
 
     pub(crate) fn empty_group(&self) -> CatalogCardGroup {
-        CatalogCardGroup { cards: Vec::new(), contracts: self.app.contracts.clone() }
+        CatalogCardGroup { cards: Vec::new() }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct CatalogCardGroup {
     cards: Vec<CatalogCardItem>,
-    contracts: Arc<FrontendContract>,
 }
 
 #[derive(Clone)]
@@ -163,27 +160,16 @@ impl CatalogCardGroup {
         self.cards.len()
     }
 
+    pub(crate) fn spanned_views(&self) -> Rc<Vec<(Entity<CatalogPublicationCardView>, usize)>> {
+        Rc::new(self.cards.iter().map(|item| (item.card.clone(), item.span)).collect())
+    }
+
     pub(crate) fn packed_rows(&self, units: usize) -> Vec<Vec<CatalogCardItem>> {
         pack_card_rows(&self.cards, units)
     }
 
     pub(crate) fn append(&mut self, mut other: CatalogCardGroup) {
         self.cards.append(&mut other.cards);
-    }
-
-    pub(crate) fn grid(&self, columns: usize) -> AnyElement {
-        let contract = &self.contracts.store;
-        let unit_width = catalog_grid_unit_width(contract.publication_min_width_px);
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(STORE_GRID_GAP))
-            .children(self.packed_rows(columns).into_iter().map(|row| {
-                let cards = row.into_iter().map(|item| (item.card, item.span)).collect::<Vec<_>>();
-                crate::virtual_grid::fixed_spanned_entity_row(&cards, columns, unit_width, contract.publication_height_px as f32, STORE_GRID_GAP)
-            }))
-            .into_any_element()
     }
 }
 
@@ -360,11 +346,15 @@ impl Render for CatalogCoverView {
         let mut frame = div().w(px(components::BOOK_COVER_WIDTH)).h(px(components::BOOK_COVER_HEIGHT)).flex_none().relative();
         if let Some(cover) = self.image.clone() {
             frame = frame.child(
-                div().w_full().min_w(px(components::BOOK_COVER_WIDTH)).aspect_ratio(components::BOOK_COVER_WIDTH / components::BOOK_COVER_HEIGHT).flex().flex_col().items_center().justify_start().child(components::book_cover_image(
-                    cover.image,
-                    cover.aspect_ratio,
-                    theme,
-                )),
+                div()
+                    .w_full()
+                    .min_w(px(components::BOOK_COVER_WIDTH))
+                    .aspect_ratio(components::BOOK_COVER_WIDTH / components::BOOK_COVER_HEIGHT)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_start()
+                    .child(components::book_cover_image(cover.image, theme)),
             );
         } else {
             frame = frame.child(components::missing_book_cover(self.initial.clone(), theme));

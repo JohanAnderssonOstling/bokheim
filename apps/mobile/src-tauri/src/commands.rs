@@ -1,6 +1,6 @@
 use epub_svelte_lib::FrontendContract;
 use specta_typescript::Typescript;
-use tauri_specta::{Builder, ErrorHandlingMode, collect_commands};
+use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
 /// The complete native IPC surface, kept separate from application startup.
 /// The generated TypeScript bindings continue to come from this same registry.

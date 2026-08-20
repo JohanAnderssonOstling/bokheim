@@ -1,13 +1,13 @@
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
+use crate::shell::annotation_editor;
 use crate::shell::chrome;
+use crate::shell::state_panel;
 use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NavigateHistoryBack, NavigateHistoryForward, NextLine, NextPage, NextSection, PreviousLine,
     PreviousPage, PreviousSection, ToggleFullscreen, ToggleSearch, ToggleToc,
 };
-use crate::shell::state_panel;
-use crate::shell::annotation_editor;
 use std::rc::Rc;
 
 use app_contract::{READER_NAVIGATION_SHORTCUTS, ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut};
@@ -29,9 +29,7 @@ const KOBO_READER_EDGE_INSET: f32 = 2.0;
 /// column width and the renderer fits as many as will go, capped by the
 /// reader's preference. The panel has to land on the same column the click did,
 /// so that arithmetic is repeated here before the shared placement runs.
-fn annotation_popup_geometry(
-    anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, requested_column_width: f32, scale: f32, maximum_columns: u8,
-) -> annotation_editor::Geometry {
+fn annotation_popup_geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, requested_column_width: f32, scale: f32, maximum_columns: u8) -> annotation_editor::Geometry {
     let document_width = annotation_editor::document_width(viewport_width, sidebar_width);
     let scale = scale.max(0.01);
     let minimum_gap = 20.0 * scale;
@@ -66,12 +64,17 @@ impl ReaderView {
     fn render_reader_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let tabs_target = cx.entity();
-        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, cx)).child(
-            crate::shell::state_panel::reader_state_tabs("reader-state-tabs", &tabs_target, self.reader_state_bookmarks, &self.marks, cx, |showing_bookmarks, this, cx| {
+        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, cx)).child(crate::shell::state_panel::reader_state_tabs(
+            "reader-state-tabs",
+            &tabs_target,
+            self.reader_state_bookmarks,
+            &self.marks,
+            cx,
+            |showing_bookmarks, this, cx| {
                 this.reader_state_bookmarks = showing_bookmarks;
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            }),
-        );
+            },
+        ));
 
         let wording = state_panel::StatePanelWording {
             bookmark_tooltip: "Bookmark the current location",

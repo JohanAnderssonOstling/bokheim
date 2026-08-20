@@ -27,9 +27,9 @@ upstreams remain XML or JSON, and covers are canonical JPEG thumbnails. The
 `/api/web` façade uses the provider-neutral contract's JSON representation so
 ordinary browsers do not need a second implementation of the protobuf codec.
 
-The service stores complete catalog generations in SQLite. One task per catalog
-crawls from its root and follows the current same-origin catalog graph. Catalogs
-refresh concurrently on a fixed 24-hour cycle. Conditional upstream
+The service stores complete catalog generations in SQLite. Catalogs refresh one
+at a time on a fixed 24-hour cycle, each crawling from its root and following
+the current same-origin catalog graph. Conditional upstream
 requests reuse unchanged pages, while a successful crawl activates as one
 transaction; failures retain the previous generation. Page and search HTTP
 requests read SQLite only and never wait on an upstream catalog.
@@ -68,16 +68,15 @@ weighted canonical subject paths; the client derives this profile locally and
 filters owned publications locally, so titles in a reader's library are not
 sent to this public service.
 
-Publication extraction is drained by independent persistent workers. Four
-download workers stream directly to disk into a four-item bounded queue, while
-one extraction worker parses metadata and artwork. This overlaps network waits
-without allowing multiple ZIP/image decoders to raise the transient memory
-ceiling. Temporary files are deleted after extraction. A restart
+Publication extraction is drained by one persistent serial worker. It downloads
+one publication to a bounded temporary file, extracts its metadata and artwork,
+commits the result, and then moves to the next source. Temporary files are
+deleted after extraction. A restart
 changes interrupted jobs back to pending and resumes them from the active
 catalogue generations without resetting successful payloads or retrying failed
 downloads in a tight loop. Completed crawls can still schedule a bounded retry
-of failed jobs. Workers rotate their starting source, preventing a large provider
-from holding all download capacity while smaller catalogues wait. Retryable
+of failed jobs. Each pass visits every source before taking another publication
+from the same source. Retryable
 failures use 15-minute, one-hour, six-hour, and then daily backoff. Permanent
 format, access, missing-resource, and safety-limit failures remain terminal
 until their catalogue record or enrichment version changes.
@@ -90,7 +89,8 @@ endpoint because third-party book hosts commonly reject cross-origin browser
 requests. The endpoint re-fetches the registered catalogue page, verifies the
 publication identity, exact URL, free acquisition kind, and format, downloads
 into a bounded temporary file, and streams it without adding it to the cache.
-At most four upstream acquisitions run concurrently.
+At most two interactive browser acquisitions run concurrently, independently
+of the single background extraction download.
 
 The registry contains only curated feeds. User-defined catalogs are not proxied,
 and the acquisition endpoint accepts a structured catalogue action rather than

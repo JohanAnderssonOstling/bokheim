@@ -6,13 +6,13 @@ use crate::catalog::{
     CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationKey, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSource,
     CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogWideSearchResult,
 };
-use crate::library::BookImportDestination;
 use crate::library::database as db;
+use crate::library::BookImportDestination;
 use crate::platform::scanner::LibraryEvent;
 use crate::sync::{AssetSync, ReadingPositionSync, SyncPolicy};
 use crate::{AuthorId, ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
 use catalog_client::CatalogClient;
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use metadata_client::MetadataClient;
 use serde::Serialize;
 use specta::Type;
@@ -29,6 +29,82 @@ use sync_common::api::notifications::NotificationMessage;
 use taxonomy_client::TaxonomyClient;
 
 use crate::library::LibraryBackend;
+
+/// A change relevant to a currently displayed library page.
+#[derive(Clone, Debug)]
+pub enum LibraryUpdate {
+    Contents,
+    Covers(Vec<ContentHash>),
+}
+
+#[derive(Default)]
+struct AppEventSubscribers {
+    all: Option<Sender<AppEvent>>,
+    libraries: Vec<(LibraryId, async_channel::Sender<LibraryUpdate>)>,
+    library_contents: Vec<(LibraryId, async_channel::Sender<()>)>,
+    library_lists: Vec<async_channel::Sender<()>>,
+    transfers: Vec<async_channel::Sender<()>>,
+    book_removals: Vec<async_channel::Sender<(LibraryId, ContentHash)>>,
+}
+
+#[derive(Clone, Default)]
+struct AppEventBus(Arc<Mutex<AppEventSubscribers>>);
+
+impl AppEventBus {
+    fn send(&self, app_event: AppEvent) {
+        let mut subscribers = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if subscribers.all.as_ref().is_some_and(|sender| sender.send(app_event.clone()).is_err()) {
+            subscribers.all = None;
+        }
+
+        match &app_event.event {
+            LibraryEvent::ThumbnailGenerated { content_hash } => {
+                send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Covers(vec![content_hash.clone()]));
+            }
+            LibraryEvent::ThumbnailBatchProcessed { content_hashes, .. } => {
+                send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Covers(content_hashes.clone()));
+            }
+            LibraryEvent::DownloadStatusChanged { .. } => {}
+            LibraryEvent::TransferStatusChanged => {
+                subscribers.transfers.retain(|sender| sender.try_send(()).is_ok());
+            }
+            LibraryEvent::LibraryListChanged => {
+                subscribers.library_lists.retain(|sender| sender.try_send(()).is_ok());
+            }
+            LibraryEvent::BookRemoved { content_hash, .. } => {
+                subscribers.book_removals.retain(|sender| sender.try_send((app_event.library_id.clone(), content_hash.clone())).is_ok());
+                send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Contents);
+                send_library_contents_changed(&mut subscribers.library_contents, &app_event.library_id);
+            }
+            LibraryEvent::BookAdded { .. }
+            | LibraryEvent::DirectoryAdded { .. }
+            | LibraryEvent::DirectoryRemoved { .. }
+            | LibraryEvent::SubjectEnrichmentBatchProcessed { .. }
+            | LibraryEvent::FolderDownloadStatusChanged { .. }
+            | LibraryEvent::LibraryChanged
+            | LibraryEvent::ScanComplete => {
+                send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Contents);
+                send_library_contents_changed(&mut subscribers.library_contents, &app_event.library_id);
+            }
+        }
+    }
+}
+
+fn send_library_update(subscribers: &mut Vec<(LibraryId, async_channel::Sender<LibraryUpdate>)>, library_id: &LibraryId, update: LibraryUpdate) {
+    subscribers.retain(|(subscribed_id, sender)| subscribed_id != library_id || sender.try_send(update.clone()).is_ok());
+}
+
+fn send_library_contents_changed(subscribers: &mut Vec<(LibraryId, async_channel::Sender<()>)>, library_id: &LibraryId) {
+    subscribers.retain(|(subscribed_id, sender)| {
+        if subscribed_id != library_id {
+            return true;
+        }
+        match sender.try_send(()) {
+            Ok(()) | Err(async_channel::TrySendError::Full(())) => true,
+            Err(async_channel::TrySendError::Closed(())) => false,
+        }
+    });
+}
 
 const BACKGROUND_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const BACKGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -168,8 +244,8 @@ pub(crate) struct AppState {
     taxonomy: TaxonomyClient,
     taxonomy_updates: tokio::sync::Mutex<()>,
     librarything: Option<LibraryThingClient>,
-    event_tx: Sender<AppEvent>,
-    event_rx: Mutex<Option<Receiver<AppEvent>>>,
+    events: AppEventBus,
+    events_taken: AtomicBool,
     sync_wake_tx: Sender<()>,
     pending_sync: Arc<Mutex<PendingSyncWork>>,
     sync_stop: Arc<AtomicBool>,
@@ -456,7 +532,7 @@ impl AppBackend {
     }
 
     fn new_with_executor(backend: BackendContext, executor: BackendExecutor, library_scanning_enabled: bool) -> Result<Self, BackendError> {
-        let (event_tx, event_rx) = unbounded();
+        let events = AppEventBus::default();
         let (sync_wake_tx, sync_wake_rx) = bounded(1);
         let pending_sync = Arc::new(Mutex::new(PendingSyncWork::default()));
         let sync_stop = Arc::new(AtomicBool::new(false));
@@ -494,8 +570,8 @@ impl AppBackend {
                 taxonomy,
                 taxonomy_updates: tokio::sync::Mutex::new(()),
                 librarything,
-                event_tx,
-                event_rx: Mutex::new(Some(event_rx)),
+                events,
+                events_taken: AtomicBool::new(false),
                 sync_wake_tx,
                 pending_sync,
                 sync_stop,
@@ -525,7 +601,42 @@ impl AppBackend {
     }
 
     pub fn take_events(&self) -> Result<Receiver<AppEvent>, BackendError> {
-        self.lock(&self.state.event_rx)?.take().ok_or_else(|| BackendError::message("application event receiver has already been taken"))
+        if self.state.events_taken.swap(true, Ordering::AcqRel) {
+            return Err(BackendError::message("application event receiver has already been taken"));
+        }
+        let (sender, receiver) = unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).all = Some(sender);
+        Ok(receiver)
+    }
+
+    pub fn library_updates(&self, library_id: LibraryId) -> async_channel::Receiver<LibraryUpdate> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).libraries.push((library_id, sender));
+        receiver
+    }
+
+    pub fn library_contents_changes(&self, library_id: LibraryId) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library_contents.push((library_id, sender));
+        receiver
+    }
+
+    pub fn library_list_changes(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library_lists.push(sender);
+        receiver
+    }
+
+    pub fn transfer_changes(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).transfers.push(sender);
+        receiver
+    }
+
+    pub fn book_removals(&self) -> async_channel::Receiver<(LibraryId, ContentHash)> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).book_removals.push(sender);
+        receiver
     }
 
     pub fn libraries(&self) -> Result<Vec<LibraryEntry>, BackendError> {
@@ -537,9 +648,30 @@ impl AppBackend {
             let _guard = self.lock(&self.state.library_list_updates)?;
             self.state.backend.create_library(name, root).map_err(BackendError::operation)?
         };
+        self.finish_created_library(entry)
+    }
+
+    /// Ensures the application always has a local library to select.
+    ///
+    /// The check and creation share the library-list lock so concurrent startup
+    /// or reconciliation work cannot create two defaults from the same empty
+    /// snapshot.
+    pub fn ensure_default_library(&self) -> Result<LibraryEntry, BackendError> {
+        let entry = {
+            let _guard = self.lock(&self.state.library_list_updates)?;
+            if let Some(entry) = self.state.backend.try_get_library_entries().map_err(BackendError::operation)?.into_iter().next() {
+                return Ok(entry);
+            }
+            self.state.backend.create_library("Library".to_owned(), None).map_err(BackendError::operation)?
+        };
+        self.finish_created_library(entry)
+    }
+
+    fn finish_created_library(&self, entry: LibraryEntry) -> Result<LibraryEntry, BackendError> {
         if self.lock(&self.state.active_library)?.as_ref().is_some_and(|library| library.id() == entry.library_id()) {
             *self.lock(&self.state.active_library)? = None;
         }
+        self.state.events.send(AppEvent { library_id: *entry.library_id(), event: LibraryEvent::LibraryListChanged });
         let Some(session) = self.current_account()? else {
             return Ok(entry);
         };
@@ -551,14 +683,18 @@ impl AppBackend {
     }
 
     pub fn remove_library_from_device(&self, library_id: &LibraryId) -> Result<(), BackendError> {
-        let _guard = self.lock(&self.state.library_list_updates)?;
-        let entry = self.library_entry(library_id)?;
-        if self.lock(&self.state.active_library)?.as_ref().is_some_and(|library| library.id() == library_id) {
-            *self.lock(&self.state.active_library)? = None;
+        {
+            let _guard = self.lock(&self.state.library_list_updates)?;
+            let entry = self.library_entry(library_id)?;
+            if self.lock(&self.state.active_library)?.as_ref().is_some_and(|library| library.id() == library_id) {
+                *self.lock(&self.state.active_library)? = None;
+            }
+            self.lock(&self.state.open_libraries)?.remove(library_id);
+            self.state.backend.remove_library(&entry.library_path().to_string_lossy()).map_err(BackendError::operation)?;
         }
-        self.lock(&self.state.open_libraries)?.remove(library_id);
-        self.state.backend.remove_library(&entry.library_path().to_string_lossy()).map_err(BackendError::operation)?;
-        Ok(())
+        let replacement = self.ensure_default_library();
+        self.state.events.send(AppEvent { library_id: *library_id, event: LibraryEvent::LibraryListChanged });
+        replacement.map(|_| ())
     }
 
     pub async fn delete_library(&self, library_id: &LibraryId) -> Result<(), BackendError> {
@@ -1122,7 +1258,7 @@ impl AppBackend {
         }
         drop(_guard);
         if let Some(library_id) = changed_library_id {
-            let _ = self.state.event_tx.send(AppEvent { library_id, event: LibraryEvent::LibraryListChanged });
+            self.state.events.send(AppEvent { library_id, event: LibraryEvent::LibraryListChanged });
         }
         Ok(remote_ids)
     }
@@ -1514,11 +1650,11 @@ impl AppBackend {
         self.update_browser_session(|session| session.active_library_id = library_id)
     }
 
-    pub fn save_library_folder_path(&self, library_id: crate::LibraryId, path: Vec<crate::library::LibraryFolderEntry>) -> Result<(), BackendError> {
+    pub fn save_library_folder_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<crate::DirId>>) -> Result<(), BackendError> {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().folder_path = path)
     }
 
-    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<crate::library::LibrarySubjectEntry>) -> Result<(), BackendError> {
+    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<crate::library::SubjectPath>>) -> Result<(), BackendError> {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().subject_path = path)
     }
 
@@ -1575,7 +1711,7 @@ impl AppBackend {
         // batches that changed nothing.
         const SUBJECT_ENRICHMENT_NOTIFY_THRESHOLD: usize = 100;
         let library_id = *library.id();
-        let event_tx = self.state.event_tx.clone();
+        let event_tx = self.state.events.clone();
         let sync_wake_tx = self.state.sync_wake_tx.clone();
         let pending_sync = self.state.pending_sync.clone();
         let executor = self.state.executor.clone();
@@ -1624,7 +1760,7 @@ impl AppBackend {
                                 unreported_updated += batch_updated;
                                 unreported_processed += outcomes.len();
                                 if unreported_updated >= SUBJECT_ENRICHMENT_NOTIFY_THRESHOLD {
-                                    let _ = enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: unreported_processed, updated: unreported_updated, finished: false } });
+                                    enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: unreported_processed, updated: unreported_updated, finished: false } });
                                     unreported_updated = 0;
                                     unreported_processed = 0;
                                 }
@@ -1639,7 +1775,7 @@ impl AppBackend {
                             Ok(_) => {}
                             Err(error) => log::warn!("Library of Congress subject enrichment paused: {error}"),
                         }
-                        let _ = enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: 0, updated: 0, finished: true } });
+                        enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: 0, updated: 0, finished: true } });
                         enrichment_running.store(false, Ordering::Release);
                     });
                 }
@@ -1659,9 +1795,7 @@ impl AppBackend {
                     pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id.clone(), assets);
                     let _ = sync_wake_tx.try_send(());
                 }
-                if event_tx.send(AppEvent { library_id: library_id.clone(), event }).is_err() {
-                    break;
-                }
+                event_tx.send(AppEvent { library_id: library_id.clone(), event });
             }
         });
     }
@@ -1675,10 +1809,10 @@ impl AppBackend {
 mod tests {
     use super::super::preferences::{ApplicationTheme, BrowsingPreferencePatch, UiFontFamily};
     use super::*;
-    use lopdf::{Document, Object, Stream, dictionary};
+    use lopdf::{dictionary, Document, Object, Stream};
     use std::path::Path;
-    use std::sync::Barrier;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Barrier;
     use test_support::fixture_library_id;
 
     fn write_test_pdf(path: &Path) {
@@ -1801,6 +1935,34 @@ mod tests {
         let root_id = sync_common::ROOT_DIR_ID;
         let created = library.create_directory(&root_id, "Shelf").unwrap();
         assert_eq!(library.folder(&root_id).unwrap().children[0].id, *created.id());
+    }
+
+    #[test]
+    fn ensure_default_library_creates_only_one_managed_library() {
+        let root = tempfile::tempdir().unwrap();
+        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
+
+        let first = core.ensure_default_library().unwrap();
+        let second = core.ensure_default_library().unwrap();
+        let libraries = core.libraries().unwrap();
+
+        assert_eq!(first.library_id(), second.library_id());
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0].library_name(), "Library");
+    }
+
+    #[test]
+    fn removing_the_only_library_creates_a_new_default() {
+        let root = tempfile::tempdir().unwrap();
+        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
+        let removed = core.ensure_default_library().unwrap();
+
+        core.remove_library_from_device(removed.library_id()).unwrap();
+        let libraries = core.libraries().unwrap();
+
+        assert_eq!(libraries.len(), 1);
+        assert_ne!(libraries[0].library_id(), removed.library_id());
+        assert_eq!(libraries[0].library_name(), "Library");
     }
 
     #[test]

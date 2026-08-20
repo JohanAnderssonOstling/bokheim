@@ -12,10 +12,9 @@ mod view;
 
 use std::sync::Arc;
 
-use epub_svelte_lib::app::LibraryEntry;
 use epub_svelte_lib::app::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LibrarySyncSummary, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 use gpui::prelude::*;
-use gpui::{Context, Div, Entity, EventEmitter, IntoElement, Render, SharedString, Task, Window, div, px};
+use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div, px};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::form::{Field, Form};
@@ -32,12 +31,6 @@ use crate::services::AppServices;
 
 use self::authentication::AuthenticationInputs;
 use self::transfers::TransferState;
-
-#[derive(Clone)]
-pub(crate) enum SyncPageEvent {
-    /// The configured libraries changed while updating account state.
-    LibraryListUpdated(Vec<LibraryEntry>),
-}
 
 pub(crate) struct SyncPage {
     services: AppServices,
@@ -65,9 +58,9 @@ pub(crate) struct SyncPage {
     refresh_scheduled: bool,
     refresh_pending: bool,
     authentication: AuthenticationInputs,
+    _transfer_updates: Task<()>,
+    _active_library_subscription: Subscription,
 }
-
-impl EventEmitter<SyncPageEvent> for SyncPage {}
 
 impl SyncPage {
     pub(crate) fn new(services: AppServices, active_library: Entity<LibraryState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -76,6 +69,13 @@ impl SyncPage {
             AccountStatus::default()
         });
         let authentication = AuthenticationInputs::new(window, cx);
+        let active_library_subscription = cx.observe(&active_library, |_, _, cx| cx.notify());
+        let transfer_changes = services.backend.transfer_changes();
+        let transfer_updates = cx.spawn(async move |page, cx| {
+            while transfer_changes.recv().await.is_ok() {
+                let _ = page.update(cx, |page, cx| page.schedule_refresh(cx));
+            }
+        });
         let mut page = Self {
             services,
             active_library,
@@ -96,6 +96,8 @@ impl SyncPage {
             refresh_scheduled: false,
             refresh_pending: false,
             authentication,
+            _transfer_updates: transfer_updates,
+            _active_library_subscription: active_library_subscription,
         };
         page.refresh(cx);
         page

@@ -1305,6 +1305,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_kobo",
+ "gpui_platform",
  "html-engine",
  "html-view-core",
  "html-view-gpui",
@@ -3343,6 +3344,7 @@ name = "epub-svelte"
 version = "0.1.0"
 dependencies = [
  "app-contract",
+ "async-channel",
  "axum",
  "blake3",
  "book-metadata",

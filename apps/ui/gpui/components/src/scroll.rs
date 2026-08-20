@@ -2,8 +2,8 @@ use std::panic::Location;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, UniformList, UniformListScrollHandle,
-    Window,
+    App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, UniformList, UniformListScrollHandle, Window,
+    div,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_component::{StyledExt, VirtualListScrollHandle};
@@ -342,7 +342,7 @@ fn outer_layout_style<E: Styled>(element: &mut E) -> StyleRefinement {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
-    use gpui::{px, Position};
+    use gpui::{Position, px};
 
     #[test]
     fn outer_layout_style_moves_absolute_positioning_to_the_scroll_wrapper() {

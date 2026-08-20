@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{px, ElementId, Length, SharedString};
+use gpui::{ElementId, Length, SharedString, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 

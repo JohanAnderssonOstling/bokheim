@@ -1,5 +1,5 @@
-use crate::subjects::{DEFAULT_UNIFIED_TAXONOMY_SQLITE, UnifiedConceptDefinition};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use crate::subjects::{UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 

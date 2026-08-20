@@ -1,25 +1,25 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::transfer::{TransferJob, TransferOrigin, TransferQueue, TransferRuntime, TransferWorker};
-use crate::RelativeDirPath;
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
+use crate::RelativeDirPath;
 use crate::{BlobKind, BookPlacement, ContentHash, RelativeBookPath, ServerUrl};
 use crossbeam_channel::Sender;
-use library_replica::{MutationBody, StateMutation, coalesce_mutations_for_push};
+use library_replica::{coalesce_mutations_for_push, MutationBody, StateMutation};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse, MAX_BLOB_MANIFEST_ENTRIES};
 #[cfg(test)]
 use sync_common::SyncExchangeResponse;
-use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse, MAX_BLOB_MANIFEST_ENTRIES};
 use sync_common::{DirId, LibraryId, PullStateResponse, PushMutationsResponse, ReplicaId};
 
-use sync_client::{PushResponseError, validate_pull_batch, validate_push_response};
+use sync_client::{validate_pull_batch, validate_push_response, PushResponseError};
 
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 

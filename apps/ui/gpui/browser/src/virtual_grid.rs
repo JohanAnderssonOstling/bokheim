@@ -74,15 +74,6 @@ impl ResponsiveColumns {
             }
         })
     }
-
-    /// Hosts a viewport-filling child whose height is supplied by flex growth.
-    ///
-    /// Keeping this wrapper here prevents responsive virtual grids from
-    /// accidentally placing a `flex_1` list under a non-flex parent, which
-    /// resolves the list to zero height even when it contains rows.
-    pub(crate) fn track_virtual_viewport(&self, content: impl IntoElement) -> Div {
-        self.track(div().size_full().min_h_0().min_w_0().flex().flex_col().child(content))
-    }
 }
 
 pub(crate) fn columns_for_width(width: f32, minimum_item_width: f32, gap: f32) -> usize {
@@ -134,6 +125,17 @@ pub(crate) fn fixed_spanned_entity_row<T: Render + 'static>(cards: &[(Entity<T>,
         .gap(px(gap))
         .children(cards.iter().map(|(card, span)| div().w(px(spanned_item_width(*span, unit_width, gap))).h(px(height)).flex_none().child(card.clone())))
         .when(occupied < units, |row| row.child(div().w(px(spanned_item_width(units - occupied, unit_width, gap))).h(px(height)).flex_none()))
+}
+
+pub(crate) fn spanned_entity_grid_row<T: Render + 'static>(cards: &[(Entity<T>, usize)], columns: usize, width: f32, height: f32, gap: f32) -> Div {
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .grid()
+        .grid_cols(columns.min(u16::MAX as usize) as u16)
+        .gap(px(gap))
+        .children(cards.iter().map(|(card, span)| div().w_full().h(px(height)).col_span((*span).min(columns).min(u16::MAX as usize) as u16).child(card.clone())))
 }
 
 pub(crate) fn flexible_entity_row<T: Render + 'static>(cards: &[Entity<T>], range: Range<usize>, columns: usize, item_width: f32, height: f32, gap: f32) -> Div {

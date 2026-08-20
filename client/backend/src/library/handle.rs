@@ -71,14 +71,6 @@ impl LibraryBackend {
         self._scanner.start_scanning();
     }
 
-    pub fn reload_unified_taxonomy(&self) -> Result<String, BackendError> {
-        let release_id = self.context.reload_unified_taxonomy_from_disk().map_err(BackendError::operation)?;
-        let connection = self.db.get().map_err(BackendError::operation)?;
-        db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
-        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
-        Ok(release_id)
-    }
-
     pub(crate) fn recorded_taxonomy_codes(&self, content_hash: &ContentHash) -> Result<Vec<taxonomy_contract::TaxonomyCode>, BackendError> {
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::recorded_taxonomy_codes(&connection, content_hash).map_err(BackendError::operation)
@@ -152,18 +144,8 @@ impl LibraryBackend {
         self.notify_library_changed(self.create_directory_on_disk(parent_id, name).map_err(BackendError::operation))
     }
 
-    pub fn create_directory_task(&self, parent_id: DirId, name: String) -> BackendTask<Result<(), BackendError>> {
-        let library = self.clone();
-        self.app().expect("a library task requires its application").spawn(move |_| async move { library.create_directory(&parent_id, &name).map(|_| ()) })
-    }
-
     pub fn rename_directory(&self, directory_id: &DirId, name: &str) -> Result<String, BackendError> {
         self.notify_library_changed(self.rename_directory_on_disk(directory_id, name).map_err(BackendError::operation))
-    }
-
-    pub fn rename_directory_task(&self, directory_id: DirId, name: String) -> BackendTask<Result<String, BackendError>> {
-        let library = self.clone();
-        self.app().expect("a library task requires its application").spawn(move |_| async move { library.rename_directory(&directory_id, &name) })
     }
 
     pub fn move_directory(&self, directory_id: &DirId, parent_id: &DirId) -> Result<String, BackendError> {
@@ -236,17 +218,6 @@ impl LibraryBackend {
     pub(crate) fn owned_catalog_publications(&self, source_id: &CatalogSourceId, identities: &[CatalogPublicationIdentity]) -> Result<Vec<CatalogPublicationIdentity>, BackendError> {
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::owned_catalog_publications(&connection, source_id, identities).map_err(BackendError::operation)
-    }
-
-    pub fn import_book_task(&self, parent_id: DirId, source_path: std::path::PathBuf, file_name: String) -> BackendTask<Result<(), BackendError>> {
-        let library = self.clone();
-        self.app().expect("a library task requires its application").spawn(move |app| async move {
-            let content_hash = library.import_book(&parent_id, &source_path, &file_name)?;
-            if let Err(error) = app.hydrate_taxonomy_for_book(&library, &content_hash).await {
-                log::warn!("book was imported, but missing taxonomy codes could not be hydrated: {error}");
-            }
-            Ok(())
-        })
     }
 
     pub async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchView, BackendError> {
@@ -445,5 +416,10 @@ pub struct LibraryTrashView {
 pub struct LibraryFolderDestination {
     #[specta(type = String)]
     pub id: DirId,
+    #[specta(type = Option<String>)]
+    pub parent_id: Option<DirId>,
+    pub label: String,
+    /// Human-readable path for clients that present a flat destination list.
+    /// Hierarchical pickers must use `parent_id`, not parse this string.
     pub path: String,
 }

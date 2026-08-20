@@ -64,6 +64,7 @@ futures-util = "0.3"
 html-publication = { path = "../../apps/renderers/html/crates/html-publication" }
 epub_provider = { path = "../../apps/renderers/html/epub_provider" }
 crossbeam-channel = "0.5"
+async-channel = "2"
 sync-common = { path = "../../shared/sync-common" }
 urlencoding = "2"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

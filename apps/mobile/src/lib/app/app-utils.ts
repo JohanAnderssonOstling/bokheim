@@ -25,8 +25,15 @@ export interface BrowserSession {
   snapshot(libraryId?: string): AppUiSession | null;
 }
 
+const READER_ROUTE_KINDS = new Map<string, "epub" | "pdf">([
+  ["/reader/epub/[bookId]", "epub"],
+  ["/reader/pdf/[bookId]", "pdf"],
+  ["/reader/v2/epub/[bookId]", "epub"],
+  ["/reader/v2/pdf/[bookId]", "pdf"],
+]);
+
 export function isReaderRoute(routeId: string | null) {
-  return routeId === "/reader/epub/[bookId]" || routeId === "/reader/pdf/[bookId]";
+  return routeId !== null && READER_ROUTE_KINDS.has(routeId);
 }
 
 export function loadWebBrowsingPreferencesFallback(
@@ -77,11 +84,12 @@ export function sessionFromRoute({
 }): AppUiSession | null {
   const libraryId =
     (route.readerLibraryId || route.libraryId || undefined)?.trim() || undefined;
-  if (isReaderRoute(route.id) && route.bookId?.trim()) {
+  const readerKind = route.id === null ? undefined : READER_ROUTE_KINDS.get(route.id);
+  if (readerKind && route.bookId?.trim()) {
     return {
       kind: "reader",
       content_hash: route.bookId,
-      reader_kind: route.id === "/reader/pdf/[bookId]" ? "pdf" : "epub",
+      reader_kind: readerKind,
       library_id: libraryId,
     };
   }

@@ -12,12 +12,12 @@ use ui_components as components;
 use std::rc::Rc;
 
 use crate::epub::ReaderWindowId;
-use crate::shell::marks::MarksState;
 use crate::invalidation::Component;
 use crate::pdf::toc::{PdfTocState, nest_pdf_outline, pdf_toc_tree_items};
 use crate::settings::{PdfZoomModePreference, ReaderPreferences, ReaderSettings};
 use crate::shell::annotation_editor;
 use crate::shell::chrome;
+use crate::shell::marks::MarksState;
 use crate::shell::persistence::{self, PositionWriter};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ToggleSearch, ToggleToc};
 
@@ -156,9 +156,7 @@ impl PdfReaderView {
         let positions = PositionWriter::new(
             cx,
             "persist PDF page",
-            move |library, (page, full_page_position): &(usize, f32)| {
-                library.update_pdf_reading_position(page_content_hash.clone(), *page as u32, *full_page_position).map_err(|error| error.to_string())
-            },
+            move |library, (page, full_page_position): &(usize, f32)| library.update_pdf_reading_position(page_content_hash.clone(), *page as u32, *full_page_position).map_err(|error| error.to_string()),
             library.clone(),
         );
         Self {
@@ -502,12 +500,17 @@ impl PdfReaderView {
     fn render_annotations(&self, outline_available: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let tabs_target = cx.entity();
-        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, outline_available, cx)).child(
-            crate::shell::state_panel::reader_state_tabs("pdf-state-tabs", &tabs_target, self.showing_bookmarks, &self.marks, cx, |showing_bookmarks, this, cx| {
+        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, outline_available, cx)).child(crate::shell::state_panel::reader_state_tabs(
+            "pdf-state-tabs",
+            &tabs_target,
+            self.showing_bookmarks,
+            &self.marks,
+            cx,
+            |showing_bookmarks, this, cx| {
                 this.showing_bookmarks = showing_bookmarks;
                 crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
-            }),
-        );
+            },
+        ));
 
         let wording = crate::shell::state_panel::StatePanelWording {
             bookmark_tooltip: "Bookmark the current page",

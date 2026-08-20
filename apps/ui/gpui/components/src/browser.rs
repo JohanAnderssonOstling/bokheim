@@ -1,12 +1,12 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, FontWeight, SharedString, Stateful};
+use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, Scrollable, ScrollableElement, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
-    SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
+    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, Scrollable,
+    ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -112,7 +112,7 @@ pub fn browser_topbar_right() -> Div {
 }
 
 pub fn browser_search_page() -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_LG)).p(px(SPACE_LG))
+    crate::full_size_column().gap(px(SPACE_LG)).p(px(SPACE_LG))
 }
 
 /// Centred, quiet status text for a section that is still loading.
@@ -231,7 +231,7 @@ pub fn topbar_icon_action_button(id: impl Into<ElementId>, label: impl Into<Shar
 }
 
 pub fn browser_settings_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().items_center().p(px(SPACE_LG)).overflow_y_scrollbar()
+    crate::full_size_column().items_center().p(px(SPACE_LG)).overflow_y_scrollbar()
 }
 
 pub fn browser_settings_content() -> Div {

@@ -1,4 +1,4 @@
-use super::{BISAC_SYSTEM_ID, BISAC_VERSION, compact_whitespace, normalize_path, normalize_term, split_path};
+use super::{compact_whitespace, normalize_path, normalize_term, split_path, BISAC_SYSTEM_ID, BISAC_VERSION};
 use crate::PublicationSubject;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -34,6 +34,10 @@ pub struct SubjectSystem {
     nodes: Vec<SubjectNode>,
     path_index: HashMap<String, usize>,
     code_index: HashMap<String, usize>,
+    /// Narrows hierarchy matching to nodes whose leaf component is present in
+    /// the input. This keeps dump-scale matching proportional to the supplied
+    /// headings instead of scanning the complete BISAC tree for every work.
+    tail_component_index: HashMap<String, Vec<usize>>,
 }
 
 impl SubjectSystem {
@@ -111,7 +115,13 @@ fn parse_bisac(csv: &str) -> SubjectSystem {
     let nodes = nodes.into_values().collect::<Vec<_>>();
     let path_index = nodes.iter().enumerate().map(|(index, node)| (normalize_path(&node.path), index)).collect();
     let code_index = nodes.iter().enumerate().filter_map(|(index, node)| node.code.as_ref().map(|code| (code.to_ascii_uppercase(), index))).collect();
-    SubjectSystem { id: BISAC_SYSTEM_ID, version: BISAC_VERSION, nodes, path_index, code_index }
+    let mut tail_component_index = HashMap::<String, Vec<usize>>::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(component) = node.normalized_components.last() {
+            tail_component_index.entry(component.clone()).or_default().push(index);
+        }
+    }
+    SubjectSystem { id: BISAC_SYSTEM_ID, version: BISAC_VERSION, nodes, path_index, code_index, tail_component_index }
 }
 
 pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssignment> {
@@ -150,7 +160,9 @@ pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssig
             matches.entry(node.path.clone()).or_default().insert(position);
         }
     }
-    for node in system.nodes() {
+    let candidate_nodes = component_evidence.keys().filter_map(|component| system.tail_component_index.get(component)).flatten().copied().collect::<BTreeSet<_>>();
+    for node_index in candidate_nodes {
+        let node = &system.nodes[node_index];
         let mut evidence = BTreeSet::<usize>::new();
         if node.normalized_components.iter().all(|component| {
             component_evidence.get(component).is_some_and(|positions| {
@@ -175,4 +187,73 @@ pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssig
         })
         .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
         .collect()
+}
+
+/// Matches a BISAC node only when the combined subject evidence supports at
+/// least `minimum_adjacent` consecutive components of that node's hierarchy.
+/// Unrelated and unmatched headings do not invalidate supported branches.
+pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[PublicationSubject], minimum_adjacent: usize) -> Vec<SubjectAssignment> {
+    if minimum_adjacent == 0 {
+        return match_bisac_subjects(subjects);
+    }
+    let system = bisac_subject_system();
+    let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
+    let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
+    for (position, subject) in subjects.iter().enumerate() {
+        for component in split_path(subject.name()) {
+            component_evidence.entry(normalize_term(&component)).or_default().insert(position);
+        }
+        let authority = subject.authority().map(str::trim).filter(|authority| !authority.is_empty());
+        let declared_code = subject.code().or_else(|| authority.is_some_and(|authority| authority.eq_ignore_ascii_case(BISAC_SYSTEM_ID)).then_some(subject.name()));
+        if let Some(node) = declared_code.and_then(|code| system.node_by_code(code)) {
+            matches.entry(node.path.clone()).or_default().insert(position);
+        }
+    }
+    let candidate_nodes = component_evidence.keys().filter_map(|component| system.tail_component_index.get(component)).flatten().copied().collect::<BTreeSet<_>>();
+    for node_index in candidate_nodes {
+        let node = &system.nodes[node_index];
+        if node.normalized_components.len() < minimum_adjacent {
+            continue;
+        }
+        let window = &node.normalized_components[node.normalized_components.len() - minimum_adjacent..];
+        let mut evidence = BTreeSet::<usize>::new();
+        if window.iter().all(|component| {
+            component_evidence.get(component).is_some_and(|positions| {
+                evidence.extend(positions);
+                true
+            })
+        }) {
+            matches.entry(node.path.clone()).or_default().extend(evidence);
+        }
+    }
+    let candidate_paths = matches.keys().cloned().collect::<Vec<_>>();
+    matches
+        .into_iter()
+        .filter(|(path, _)| !candidate_paths.iter().any(|candidate| candidate.starts_with(&format!("{path} / "))))
+        .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
+        .collect()
+}
+
+#[cfg(test)]
+mod adjacent_tests {
+    use super::*;
+
+    fn subject(value: &str) -> PublicationSubject {
+        PublicationSubject::new(None, value, "openlibrary:subject", None, None).unwrap()
+    }
+
+    #[test]
+    fn three_adjacent_subjects_match_without_requiring_unrelated_headings() {
+        let subjects = [subject("History"), subject("Europe"), subject("Great Britain"), subject("Unrelated noisy heading")];
+        let matches = match_bisac_subjects_with_minimum_adjacent(&subjects, 3);
+
+        assert!(matches.iter().any(|assignment| assignment.node_path() == "History / Europe / Great Britain"));
+        assert!(!matches.iter().flat_map(|assignment| assignment.evidence_positions()).any(|position| *position == 3));
+    }
+
+    #[test]
+    fn two_adjacent_subjects_do_not_infer_a_bisac_branch() {
+        let subjects = [subject("History"), subject("Europe")];
+        assert!(match_bisac_subjects_with_minimum_adjacent(&subjects, 3).is_empty());
+    }
 }

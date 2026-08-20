@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, Stateful};
+use gpui::{Div, ElementId, Stateful, div, px};
 
 use crate::{BrowserTheme, RADIUS_MD};
 

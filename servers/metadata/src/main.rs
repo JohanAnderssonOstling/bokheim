@@ -1,4 +1,4 @@
-use metadata_server::{add_popularity_to_snapshot, app, import_rich_snapshot_with_popularity, import_snapshot, import_snapshot_with_popularity, MetadataService};
+use metadata_server::{add_popularity_to_snapshot, app, import_author_profile_snapshot, import_description_snapshot, import_rich_snapshot_with_popularity, import_snapshot, import_snapshot_with_popularity, MetadataService};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -42,16 +42,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         add_popularity_to_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), Path::new(&arguments[3]), Path::new(&arguments[4]), limit)?;
         return Ok(());
     }
+    if arguments.first().is_some_and(|argument| argument == "import-descriptions") {
+        if arguments.len() < 4 || arguments.len() > 5 {
+            return Err(invalid_usage().into());
+        }
+        let limit = arguments.get(4).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        import_description_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), &arguments[3].to_string_lossy(), limit)?;
+        return Ok(());
+    }
+    if arguments.first().is_some_and(|argument| argument == "import-author-profiles") {
+        if arguments.len() < 4 || arguments.len() > 5 {
+            return Err(invalid_usage().into());
+        }
+        let limit = arguments.get(4).map(|value| value.to_string_lossy().parse::<usize>()).transpose().map_err(|_| invalid_usage())?;
+        import_author_profile_snapshot(Path::new(&arguments[1]), Path::new(&arguments[2]), &arguments[3].to_string_lossy(), limit)?;
+        return Ok(());
+    }
     if !arguments.is_empty() {
         return Err(invalid_usage().into());
     }
 
     let database = std::env::var_os("BOKHEIM_METADATA_DATABASE").map(PathBuf::from).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_METADATA_DATABASE is required"))?;
+    let description_database = std::env::var_os("BOKHEIM_METADATA_DESCRIPTION_DATABASE").map(PathBuf::from).or_else(|| database.parent().map(|parent| parent.join("descriptions-current.sqlite")).filter(|path| path.is_file()));
+    let author_profile_database = std::env::var_os("BOKHEIM_METADATA_AUTHOR_PROFILE_DATABASE").map(PathBuf::from).or_else(|| database.parent().map(|parent| parent.join("authors-current.sqlite")).filter(|path| path.is_file()));
     let bind: SocketAddr = std::env::var("BOKHEIM_METADATA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_owned()).parse().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid BOKHEIM_METADATA_BIND: {error}")))?;
     if !bind.ip().is_loopback() && std::env::var("BOKHEIM_METADATA_ALLOW_PUBLIC_HTTP").as_deref() != Ok("true") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "non-loopback plain HTTP requires BOKHEIM_METADATA_ALLOW_PUBLIC_HTTP=true; use a TLS reverse proxy in production").into());
     }
-    let service = MetadataService::open(database)?;
+    let service = MetadataService::open_with_supplements(database, description_database, author_profile_database)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(address = %listener.local_addr()?, "metadata server listening");
     axum::serve(listener, app(service)).with_graceful_shutdown(shutdown_signal()).await?;
@@ -61,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn invalid_usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: metadata-server import EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-popularity EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server add-popularity SOURCE.sqlite RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-rich EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz WIKIDATA.json.bz2 RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server  # configured with BOKHEIM_METADATA_DATABASE",
+        "usage: metadata-server import EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-descriptions WORKS.txt.gz OUTPUT.sqlite DUMP_DATE [MAX_RECORDS]\n       metadata-server import-author-profiles AUTHORS.txt.gz OUTPUT.sqlite DUMP_DATE [MAX_RECORDS]\n       metadata-server import-popularity EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server add-popularity SOURCE.sqlite RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server import-rich EDITIONS.txt.gz WORKS.txt.gz AUTHORS.txt.gz WIKIDATA.json.bz2 RATINGS.txt.gz READING-LOG.txt.gz OUTPUT.sqlite [MAX_RECORDS]\n       metadata-server  # configured with BOKHEIM_METADATA_DATABASE",
     )
 }
 

@@ -11,7 +11,6 @@ use html_view_gpui::HtmlView;
 use crate::epub::audio::AudioMode;
 use crate::epub::audio::AudioState;
 use crate::epub::marks::{self, Selection};
-use crate::shell::marks::MarksState;
 use crate::epub::progress::ProgressState;
 use crate::epub::search::{SearchFilters, SearchState};
 use crate::epub::toc::TocState;
@@ -19,6 +18,7 @@ use crate::epub::toolbar::{AudioAffordance, ReaderToolbar, ToolbarEvent, Toolbar
 use crate::epub::{LoadState, PendingReader, ReaderView};
 use crate::invalidation::Component;
 use crate::settings::{ReaderPreferences, ReaderServices, ReaderSettings, library_paint_palette};
+use crate::shell::marks::MarksState;
 use crate::shell::persistence::{self, PositionWriter};
 use epub_svelte_lib::app::preferences::{COLUMN_COUNT_MAX, COLUMN_COUNT_MIN, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, ReaderFontFamily, ReaderTextAlignment, ZOOM_MAX, ZOOM_MIN};
 

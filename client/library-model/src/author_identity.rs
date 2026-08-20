@@ -186,7 +186,11 @@ pub type AuthorIdentityError = AgentIdentityError;
 
 fn bounded_identifier(value: &str) -> Result<&str, AgentIdentityError> {
     let value = value.trim();
-    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) { Err(AgentIdentityError("external agent id must be non-empty, bounded text")) } else { Ok(value) }
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        Err(AgentIdentityError("external agent id must be non-empty, bounded text"))
+    } else {
+        Ok(value)
+    }
 }
 
 fn canonical_wikidata_id(value: &str) -> Result<String, AgentIdentityError> {

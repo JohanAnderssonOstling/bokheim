@@ -5,7 +5,7 @@ use std::sync::Arc;
 use epub_svelte_lib::BookLocator;
 use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::app::AppBackend;
-use gpui::{AnyWindowHandle, App, Window};
+use gpui::App;
 
 pub type OpenReader = Rc<dyn Fn(BookLocator, String, Option<String>, &mut App)>;
 #[cfg(feature = "kobo")]
@@ -70,11 +70,10 @@ pub struct AppServices {
     pub(crate) desktop_updater: Option<DesktopUpdater>,
     #[cfg(feature = "kobo")]
     pub(crate) save_kobo_auto_rotate: SaveKoboAutoRotate,
-    window: AnyWindowHandle,
 }
 
 impl AppServices {
-    pub fn new(backend: AppBackend, open_reader: OpenReader, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate, window: &Window) -> Self {
+    pub fn new(backend: AppBackend, open_reader: OpenReader, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate) -> Self {
         Self {
             backend,
             contracts: Arc::new(FrontendContract::default()),
@@ -82,11 +81,6 @@ impl AppServices {
             desktop_updater,
             #[cfg(feature = "kobo")]
             save_kobo_auto_rotate,
-            window: window.window_handle(),
         }
-    }
-
-    pub(crate) fn with_window<R>(&self, cx: &mut App, body: impl FnOnce(&mut Window, &mut App) -> R) -> Option<R> {
-        self.window.update(cx, |_, window, cx| body(window, cx)).ok()
     }
 }

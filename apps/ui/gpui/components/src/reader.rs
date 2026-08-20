@@ -4,8 +4,8 @@ use std::sync::Arc;
 use app_contract::{ReaderSettingsAnchor, ReaderSettingsPresentationContract};
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful,
-    Style, StyledImage, Window,
+    App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style,
+    StyledImage, Window, div, img, px,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::list::ListItem;
@@ -15,8 +15,8 @@ use gpui_component::{Disableable, ElementExt, Selectable};
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    browser_theme, outlined_text_button, scroll::Scrollable, BrowserTheme, ScrollableElement, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
-    SPACE_XXS, TEXT_LG, TEXT_SM, TEXT_XS,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, browser_theme,
+    outlined_text_button, scroll::Scrollable,
 };
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {

@@ -138,6 +138,27 @@ test("a reader route reports the book instead of a browse place", () => {
   });
 });
 
+test("V2 EPUB and PDF routes report their own reader kind", () => {
+  const contentHash = "c".repeat(64);
+  for (const readerKind of ["epub", "pdf"] as const) {
+    const result = sessionFromRoute({
+      route: {
+        id: `/reader/v2/${readerKind}/[bookId]`,
+        bookId: contentHash,
+        readerLibraryId: LIBRARY,
+      },
+      activeLibraryId: LIBRARY,
+      browserSession: recordingSession(),
+    });
+    assert.deepEqual(result, {
+      kind: "reader",
+      content_hash: contentHash,
+      reader_kind: readerKind,
+      library_id: LIBRARY,
+    });
+  }
+});
+
 test("a browse session reopens the route it was recorded from", () => {
   const cases = [
     ["/library/[libraryId]", {}, `/library/${LIBRARY}`],

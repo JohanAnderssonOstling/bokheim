@@ -17,7 +17,7 @@ mod virtual_grid;
 
 use gpui::{App, KeyBinding, actions};
 
-pub use model::{BrowserSession, FolderCrumb, SubjectCrumb};
+pub use model::BrowserSession;
 pub use root::BrowserRoot;
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
@@ -42,7 +42,7 @@ impl Default for Route {
     }
 }
 
-actions!(bokheim_browser, [DismissSettings, FocusPreviousListItem, FocusNextListItem, ActivateAuthor]);
+actions!(bokheim_browser, [DismissSettings, ShowSettings, FocusPreviousListItem, FocusNextListItem, ActivateAuthor]);
 
 pub fn bind_keys(cx: &mut App) {
     // Number shortcuts follow the order drawn by the navigation rail.

@@ -831,16 +831,11 @@ impl Render for AudiobookDock {
                             .child(div().w(px(58.0)).flex_none().child(format_time(chapter_duration))),
                     ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(div().id("audiobook-close").cursor_pointer().size(px(36.0)).flex_none().flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
-                        let _ = close_dock.update(cx, |dock, cx| dock.close(cx));
-                    })),
-            )
+            .child(div().flex_none().flex().items_center().gap(px(2.0)).child(
+                div().id("audiobook-close").cursor_pointer().size(px(36.0)).flex_none().flex().items_center().justify_center().child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| {
+                    let _ = close_dock.update(cx, |dock, cx| dock.close(cx));
+                }),
+            ))
             .when_some(error, |dock, error| dock.child(div().absolute().left(px(16.0)).bottom(px(104.0)).p(px(8.0)).bg(theme.raised_bg).text_color(theme.danger).child(error)))
             .into_any_element()
     }

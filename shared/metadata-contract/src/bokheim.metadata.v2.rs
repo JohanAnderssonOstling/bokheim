@@ -114,6 +114,9 @@ pub struct WorkMatch {
     pub people: ::prost::alloc::vec::Vec<EntityReference>,
     #[prost(message, optional, tag = "7")]
     pub popularity: ::core::option::Option<WorkPopularity>,
+    /// Plain-text Open Library work description, when the snapshot has one.
+    #[prost(string, optional, tag = "8")]
+    pub description: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Aggregated public activity for a work. No patron-level rows leave the
 /// snapshot importer.
@@ -151,6 +154,8 @@ pub struct Author {
     pub source: i32,
     #[prost(uint32, tag = "5")]
     pub position: u32,
+    #[prost(string, optional, tag = "6")]
+    pub biography: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthorIdentifier {
@@ -265,9 +270,7 @@ impl EditionIdentityStatus {
             "EDITION_IDENTITY_STATUS_MATCHED" => Some(Self::Matched),
             "EDITION_IDENTITY_STATUS_NO_MATCH" => Some(Self::NoMatch),
             "EDITION_IDENTITY_STATUS_AMBIGUOUS" => Some(Self::Ambiguous),
-            "EDITION_IDENTITY_STATUS_INSUFFICIENT_METADATA" => {
-                Some(Self::InsufficientMetadata)
-            }
+            "EDITION_IDENTITY_STATUS_INSUFFICIENT_METADATA" => Some(Self::InsufficientMetadata),
             _ => None,
         }
     }
@@ -310,6 +313,7 @@ pub enum ClassificationScheme {
     Unspecified = 0,
     LibraryOfCongress = 1,
     DeweyDecimal = 2,
+    Bisac = 3,
 }
 impl ClassificationScheme {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -321,6 +325,7 @@ impl ClassificationScheme {
             Self::Unspecified => "CLASSIFICATION_SCHEME_UNSPECIFIED",
             Self::LibraryOfCongress => "CLASSIFICATION_SCHEME_LIBRARY_OF_CONGRESS",
             Self::DeweyDecimal => "CLASSIFICATION_SCHEME_DEWEY_DECIMAL",
+            Self::Bisac => "CLASSIFICATION_SCHEME_BISAC",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -329,6 +334,7 @@ impl ClassificationScheme {
             "CLASSIFICATION_SCHEME_UNSPECIFIED" => Some(Self::Unspecified),
             "CLASSIFICATION_SCHEME_LIBRARY_OF_CONGRESS" => Some(Self::LibraryOfCongress),
             "CLASSIFICATION_SCHEME_DEWEY_DECIMAL" => Some(Self::DeweyDecimal),
+            "CLASSIFICATION_SCHEME_BISAC" => Some(Self::Bisac),
             _ => None,
         }
     }

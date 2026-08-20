@@ -137,6 +137,9 @@ pub struct RichWorkMetadataMatch {
     pub places: Vec<EntityReference>,
     pub people: Vec<EntityReference>,
     pub popularity: Option<WorkPopularity>,
+    /// Plain-text description from the matched Open Library work.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -166,6 +169,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
     let mut places = BTreeMap::<(Option<String>, String), EntitySource>::new();
     let mut people = BTreeMap::<(Option<String>, String), EntitySource>::new();
     let mut popularity = None;
+    let mut descriptions = BTreeSet::new();
     for matched in matches {
         work_ids.extend(matched.open_library_work_id.iter().cloned());
         edition_ids.extend(matched.exact_edition_ids.iter().cloned());
@@ -178,6 +182,9 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
                 .and_modify(|existing| {
                     if existing.name.is_none() {
                         existing.name = author.name.clone();
+                    }
+                    if existing.biography.is_none() {
+                        existing.biography = author.biography.clone();
                     }
                     for identifier in &author.identifiers {
                         if !existing.identifiers.contains(identifier) {
@@ -198,6 +205,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         if matched.popularity.as_ref().is_some_and(|candidate| popularity.as_ref().is_none_or(|current: &WorkPopularity| (candidate.reading_log_count(), candidate.rating_count) > (current.reading_log_count(), current.rating_count))) {
             popularity = matched.popularity.clone();
         }
+        descriptions.extend(matched.description.iter().cloned());
     }
     let classifications = filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { scheme, notation, source }), similarity_keys);
     RichWorkMetadataMatch {
@@ -208,6 +216,9 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         places: places.into_iter().map(|((wikidata_id, name), source)| EntityReference { wikidata_id, name, source }).collect(),
         people: people.into_iter().map(|((wikidata_id, name), source)| EntityReference { wikidata_id, name, source }).collect(),
         popularity,
+        // Ambiguous ISBNs can point at unrelated works. Only expose a
+        // description when all available Open Library evidence agrees.
+        description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
     }
 }
 
@@ -300,6 +311,9 @@ pub struct WorkMetadataMatch {
 pub struct AuthorMetadata {
     pub open_library_author_id: String,
     pub name: Option<String>,
+    /// Plain-text Open Library author biography, when available.
+    #[serde(default)]
+    pub biography: Option<String>,
     pub identifiers: Vec<AuthorIdentifier>,
     pub source: AuthorSource,
     pub position: u32,
@@ -330,6 +344,7 @@ pub struct Classification {
 pub enum ClassificationScheme {
     LibraryOfCongress,
     DeweyDecimal,
+    Bisac,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -385,6 +400,10 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
                 }
             }
             Some(format!("{letters}{}", &value[number_start..cursor]))
+        }
+        ClassificationScheme::Bisac => {
+            let value = notation.trim().to_ascii_uppercase();
+            (value.len() == 9 && value[..3].bytes().all(|byte| byte.is_ascii_alphabetic()) && value[3..].bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
         }
     }
 }
@@ -542,6 +561,7 @@ fn protobuf_classification(value: &Classification) -> protobuf_v2::Classificatio
         scheme: match value.scheme {
             ClassificationScheme::LibraryOfCongress => 1,
             ClassificationScheme::DeweyDecimal => 2,
+            ClassificationScheme::Bisac => 3,
         },
         notation: value.notation.clone(),
         source: match value.source {
@@ -556,6 +576,7 @@ fn domain_classification(value: protobuf_v2::Classification) -> Result<Classific
         scheme: match value.scheme {
             1 => ClassificationScheme::LibraryOfCongress,
             2 => ClassificationScheme::DeweyDecimal,
+            3 => ClassificationScheme::Bisac,
             scheme => return Err(invalid_enum("classification scheme", scheme)),
         },
         notation: value.notation,
@@ -653,6 +674,7 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
                 scheme: match classification.scheme {
                     ClassificationScheme::LibraryOfCongress => 1,
                     ClassificationScheme::DeweyDecimal => 2,
+                    ClassificationScheme::Bisac => 3,
                 },
                 notation: classification.notation.clone(),
                 source: match classification.source {
@@ -667,6 +689,7 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
             .map(|author| protobuf_v2::Author {
                 open_library_author_id: author.open_library_author_id.clone(),
                 name: author.name.clone(),
+                biography: author.biography.clone(),
                 identifiers: author.identifiers.iter().map(|identifier| protobuf_v2::AuthorIdentifier { authority: identifier.authority.clone(), value: identifier.value.clone() }).collect(),
                 source: match author.source {
                     AuthorSource::ExactEdition => 1,
@@ -684,6 +707,7 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
             rating_count: popularity.rating_count,
             rating_sum: popularity.rating_sum,
         }),
+        description: value.description.clone(),
     }
 }
 
@@ -769,6 +793,7 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
                     scheme: match classification.scheme {
                         1 => ClassificationScheme::LibraryOfCongress,
                         2 => ClassificationScheme::DeweyDecimal,
+                        3 => ClassificationScheme::Bisac,
                         value => return Err(invalid_enum("classification scheme", value)),
                     },
                     notation: classification.notation,
@@ -787,6 +812,7 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
                 Ok(AuthorMetadata {
                     open_library_author_id: author.open_library_author_id,
                     name: author.name,
+                    biography: author.biography,
                     identifiers: author.identifiers.into_iter().map(|identifier| AuthorIdentifier { authority: identifier.authority, value: identifier.value }).collect(),
                     source: match author.source {
                         1 => AuthorSource::ExactEdition,
@@ -806,6 +832,7 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
             rating_count: popularity.rating_count,
             rating_sum: popularity.rating_sum,
         }),
+        description: value.description,
     })
 }
 
@@ -877,11 +904,22 @@ mod tests {
                 matches: vec![RichWorkMetadataMatch {
                     open_library_work_id: Some("OL10W".to_owned()),
                     exact_edition_ids: vec!["OL1M".to_owned()],
-                    classifications: vec![Classification { scheme: ClassificationScheme::DeweyDecimal, notation: "883".to_owned(), source: ClassificationSource::Work }],
-                    authors: Vec::new(),
+                    classifications: vec![
+                        Classification { scheme: ClassificationScheme::DeweyDecimal, notation: "883".to_owned(), source: ClassificationSource::Work },
+                        Classification { scheme: ClassificationScheme::Bisac, notation: "HIS015000".to_owned(), source: ClassificationSource::Work },
+                    ],
+                    authors: vec![AuthorMetadata {
+                        open_library_author_id: "OL20A".to_owned(),
+                        name: Some("Alex Smith".to_owned()),
+                        biography: Some("Author biography".to_owned()),
+                        identifiers: vec![AuthorIdentifier { authority: "viaf".to_owned(), value: "123".to_owned() }],
+                        source: AuthorSource::Work,
+                        position: 0,
+                    }],
                     places: vec![EntityReference { wikidata_id: Some("Q90".to_owned()), name: "Paris".to_owned(), source: EntitySource::Work }],
                     people: Vec::new(),
                     popularity: Some(WorkPopularity { want_to_read_count: 12, currently_reading_count: 3, already_read_count: 8, rating_count: 4, rating_sum: 17 }),
+                    description: Some("A description from Open Library.".to_owned()),
                 }],
             }],
             places: vec![PlaceEntity {
@@ -902,8 +940,10 @@ mod tests {
         assert_eq!(decoded.snapshot.dump_date, "2026-08-01");
         assert_eq!(decoded.places, value.places);
         assert_eq!(decoded.results[0].matches[0].classifications, value.results[0].matches[0].classifications);
+        assert_eq!(decoded.results[0].matches[0].authors, value.results[0].matches[0].authors);
         assert_eq!(decoded.results[0].matches[0].places, value.results[0].matches[0].places);
         assert_eq!(decoded.results[0].matches[0].popularity, value.results[0].matches[0].popularity);
+        assert_eq!(decoded.results[0].matches[0].description, value.results[0].matches[0].description);
 
         let request = MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] };
         assert_eq!(decode_v2_request(&encode_v2_request(&request).unwrap(), MAX_REQUEST_BYTES).unwrap().isbns, request.isbns);

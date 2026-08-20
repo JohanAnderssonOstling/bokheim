@@ -60,12 +60,7 @@ pub(crate) fn geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewp
     let room_above = (anchor_y - GAP - INSET).max(1.0);
     let room_below = (document_height - anchor_y - GAP - INSET).max(1.0);
     let above = room_above > room_below;
-    Geometry {
-        left,
-        edge_offset: if above { document_height - anchor_y + GAP } else { anchor_y + GAP },
-        max_height: (if above { room_above } else { room_below }).min(MAX_HEIGHT),
-        above,
-    }
+    Geometry { left, edge_offset: if above { document_height - anchor_y + GAP } else { anchor_y + GAP }, max_height: (if above { room_above } else { room_below }).min(MAX_HEIGHT), above }
 }
 
 /// One button in the editor's action rows.

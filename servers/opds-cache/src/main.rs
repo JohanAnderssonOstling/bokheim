@@ -79,19 +79,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
-    // Give the one-time FTS rebuild first access to the serialized SQLite
-    // writer. Public health remains available while the existing cache is
-    // indexed, and searches use the compatibility query until it is ready.
-    let search_index_service = service.clone();
-    tokio::spawn(async move { search_index_service.refresh_search_index().await });
     let refresh_service = service.clone();
     tokio::spawn(async move { refresh_service.run_refresh_loop().await });
     let registry_service = service.clone();
     tokio::spawn(async move { registry_service.run_registry_refresh_loop().await });
-    let extraction_service = service.clone();
-    tokio::spawn(async move { extraction_service.run_epub_extraction_loop().await });
-    let subject_projection_service = service.clone();
-    tokio::spawn(async move { subject_projection_service.refresh_unified_subject_assignments().await });
+    // Keep startup indexing and durable enrichment on one maintenance path so
+    // they cannot compete for the serialized SQLite writer.
+    let maintenance_service = service.clone();
+    tokio::spawn(async move {
+        maintenance_service.refresh_search_index().await;
+        maintenance_service.refresh_unified_subject_assignments().await;
+        maintenance_service.run_epub_extraction_loop().await;
+    });
     tracing::info!(address = %listener.local_addr()?, "public unauthenticated catalog server listening");
     tracing::info!(address = %operations_listener.local_addr()?, "loopback catalogue operations server listening");
     let public_server = axum::serve(listener, app(service.clone()));

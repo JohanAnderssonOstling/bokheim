@@ -6,4 +6,4 @@
 
 pub(crate) mod preferences;
 
-pub(crate) use preferences::{LibraryDisplayChanged, Preferences, interface_font};
+pub(crate) use preferences::{Preferences, interface_font};

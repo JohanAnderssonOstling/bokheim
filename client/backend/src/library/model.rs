@@ -101,7 +101,7 @@ mod tests {
 
     fn imported_card(library: &LibraryBackend, content_hash: ContentHash) -> db::BookCardRow {
         let conn = library.db.get().unwrap();
-        db::get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false).unwrap().into_iter().find(|card| card.content_hash == content_hash).unwrap()
+        db::get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false, "", app_contract::library::LibraryFileTypeFilter::All).unwrap().into_iter().find(|card| card.content_hash == content_hash).unwrap()
     }
 
     #[test]
@@ -214,7 +214,10 @@ mod tests {
 
         assert!(matches!(library.remove_local_book_copy(content_hash).unwrap(), DownloadState::NotDownloaded));
         assert!(!local_path.exists());
-        assert!(db::get_book_cards_in_dir_scoped(&library.db.get().unwrap(), "00000000-0000-0000-0000-000000000000", false).unwrap().iter().any(|candidate| candidate.content_hash == content_hash));
+        assert!(db::get_book_cards_in_dir_scoped(&library.db.get().unwrap(), "00000000-0000-0000-0000-000000000000", false, "", app_contract::library::LibraryFileTypeFilter::All)
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.content_hash == content_hash));
     }
 
     #[test]

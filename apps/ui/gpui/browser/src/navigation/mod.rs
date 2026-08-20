@@ -5,12 +5,12 @@
 mod switcher;
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window};
+use gpui::{Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window};
 use gpui_component::{Icon, IconName};
 use ui_components as components;
 
 use crate::Route;
-use crate::library::{LibraryState, LibraryStateChanged};
+use crate::library::LibraryState;
 use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::AppBackend;
 
@@ -18,10 +18,6 @@ use epub_svelte_lib::app::AppBackend;
 pub(crate) enum NavEvent {
     Select(Route),
     SelectLibrary(LibraryId),
-    LibraryRemoved,
-    OpenLibrary,
-    LibrarySwitcherVisibilityChanged,
-    Quit,
 }
 
 pub(crate) struct NavigationView {
@@ -52,11 +48,8 @@ impl EventEmitter<NavEvent> for NavigationView {}
 
 impl NavigationView {
     pub(crate) fn new(route: Route, sync_label: SharedString, backend: AppBackend, state: Entity<LibraryState>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.subscribe(&state, |navigation: &mut Self, _, _: &LibraryStateChanged, cx| {
+        let subscription = cx.observe(&state, |_: &mut Self, _, cx| {
             cx.notify();
-            if navigation.switcher_open {
-                cx.emit(NavEvent::LibrarySwitcherVisibilityChanged);
-            }
         });
         Self { route, sync_label, backend, library_state: state, switcher_open: false, _library_state_subscription: subscription }
     }
@@ -79,11 +72,6 @@ impl NavigationView {
         }
         self.switcher_open = false;
         cx.notify();
-        cx.emit(NavEvent::LibrarySwitcherVisibilityChanged);
-    }
-
-    pub(crate) fn library_switcher_overlay(&self, emitter: Entity<Self>, cx: &App) -> Option<gpui::AnyElement> {
-        self.switcher_open.then(|| self.render_library_switcher_overlay(emitter, cx))
     }
 }
 
@@ -95,14 +83,11 @@ impl Render for NavigationView {
 
         let sidebar_width = components::nav_rail_width(f32::from(window.rem_size()));
         let mut sidebar = components::sidebar(sidebar_width, theme).child(self.render_library_switcher_trigger(emitter.clone(), cx));
-        for target in [Route::Home, Route::Folders, Route::Subjects, Route::Authors, Route::Store, Route::Account, Route::Settings] {
+        for target in [Route::Home, Route::Folders, Route::Subjects, Route::Authors, Route::Trash, Route::Store, Route::Account, Route::Settings] {
             if target == Route::Store {
                 sidebar = sidebar.child(gpui::div().flex_1().min_h_0()).child(components::nav_rail_divider(theme));
                 if cfg!(feature = "kobo") {
-                    let emitter = emitter.clone();
-                    sidebar = sidebar.child(components::nav_rail_item("exit-kobo", IconName::WindowClose, "Exit to Kobo", false, theme).on_click(move |_, _, cx| {
-                        emitter.update(cx, |_, cx| cx.emit(NavEvent::Quit));
-                    }));
+                    sidebar = sidebar.child(components::nav_rail_item("exit-kobo", IconName::WindowClose, "Exit to Kobo", false, theme).on_click(|_, _, cx| cx.quit()));
                 }
             }
             let (id, icon) = route_definition(target);
@@ -112,6 +97,6 @@ impl Render for NavigationView {
                 emitter.update(cx, |_, cx| cx.emit(NavEvent::Select(target)));
             }));
         }
-        sidebar
+        gpui::div().w(gpui::px(sidebar_width)).h_full().flex_none().child(sidebar)
     }
 }

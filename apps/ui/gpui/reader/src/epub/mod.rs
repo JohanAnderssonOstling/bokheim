@@ -19,10 +19,10 @@ use html_view_gpui::HtmlView;
 
 use crate::epub::audio::AudioState;
 use crate::epub::marks::Selection;
-use crate::shell::marks::MarksState;
 use crate::epub::progress::ProgressState;
 use crate::epub::search::SearchState;
 use crate::epub::toc::TocState;
+use crate::shell::marks::MarksState;
 use crate::shell::persistence::PositionWriter;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

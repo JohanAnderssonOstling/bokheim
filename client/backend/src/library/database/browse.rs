@@ -2,7 +2,10 @@ use super::assets::get_dir_path_components;
 use super::books::{get_book_cards_by_author_scoped, get_book_cards_in_dir_scoped};
 use super::*;
 use crate::app::BackendError;
-use crate::library::{AuthorSort, AuthorSummary, LibraryAuthorsView, LibraryBackend, LibraryFolderEntry, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectEntry, LibrarySubjectView, SubjectPath};
+use crate::library::{
+    AuthorSort, AuthorSummary, BrowseContents, BrowseRow, LibraryAuthorsView, LibraryBackend, LibraryFolderEntry, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectEntry, LibrarySubjectView, SubjectPath,
+    ROOT_SUBJECT_PATH,
+};
 use app_contract::catalog::{CatalogAuthorDiscoveryRequest, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme};
 use app_contract::library::FolderSort;
 use app_contract::library::{BookDetail, BookDetailAuthor, BookTocEntry, LibraryFileTypeFilter};
@@ -14,6 +17,15 @@ pub const UNCATEGORIZED_SUBJECT_PATH: &str = "__uncategorized__";
 pub const OTHER_SUBJECT_SYSTEMS_PATH: &str = "__other_subject_systems__";
 pub const PLACES_SUBJECT_PATH: &str = "__places__";
 pub const PEOPLE_SUBJECT_PATH: &str = "__people__";
+
+pub(super) fn file_type_query_value(filter: LibraryFileTypeFilter) -> i32 {
+    match filter {
+        LibraryFileTypeFilter::All => 0,
+        LibraryFileTypeFilter::Book => 1,
+        LibraryFileTypeFilter::Pdf => 2,
+        LibraryFileTypeFilter::Audiobook => 3,
+    }
+}
 
 pub(super) struct FileTypeScope {
     filter: LibraryFileTypeFilter,
@@ -178,6 +190,31 @@ impl LibraryBackend {
         Ok(directories)
     }
 
+    /// Direct database contents for `folder_id`, or scoped search results.
+    ///
+    /// Both queries use the same connection. No application sorting,
+    /// filtering, or view-model conversion is applied.
+    pub fn folder_contents(&self, folder_id: &str, query: &str, file_type: LibraryFileTypeFilter) -> Result<BrowseContents, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        let folder_id = DirId::parse_str(folder_id).map_err(BackendError::operation)?.to_string();
+        let normalized_query = library_model::normalize_search_text(query);
+        let children = get_folder_list_rows(&conn, &folder_id, &normalized_query, file_type).map_err(BackendError::operation)?;
+        let books = get_book_cards_in_dir_scoped(&conn, &folder_id, false, &normalized_query, file_type).map_err(BackendError::operation)?;
+        Ok(BrowseContents { children, books })
+    }
+
+    /// Direct database contents for one regular subject location, or scoped search results.
+    ///
+    /// Both queries use the same connection. No application sorting,
+    /// filtering, compaction, or view-model conversion is applied.
+    pub fn subject_contents(&self, subject_path: &str, query: &str, file_type: LibraryFileTypeFilter) -> Result<BrowseContents, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        let normalized_query = library_model::normalize_search_text(query);
+        let children = get_subject_browse_rows(&conn, subject_path, &normalized_query, file_type).map_err(BackendError::operation)?;
+        let books = get_book_cards_in_subject_scoped(&conn, subject_path, false, &normalized_query, file_type).map_err(BackendError::operation)?;
+        Ok(BrowseContents { children, books })
+    }
+
     pub fn directory_path(&self, directory_id: &DirId) -> Result<Vec<Dir>, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         get_dir_path_components(&conn, &directory_id.to_string()).map(|components| components.into_iter().map(|component| Dir::new(component.id, component.name, 0, 0)).collect()).map_err(BackendError::operation)
@@ -188,10 +225,6 @@ impl LibraryBackend {
         search_book_cards_scoped(&conn, query, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)
     }
 
-    pub fn search_folder(&self, directory_id: &DirId, query: &str) -> Result<LibrarySearchResult, BackendError> {
-        self.search_folder_filtered(directory_id, query, LibraryFileTypeFilter::All)
-    }
-
     pub fn search_folder_filtered(&self, directory_id: &DirId, query: &str, file_type: LibraryFileTypeFilter) -> Result<LibrarySearchResult, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         let mut result = search_book_cards_scoped(&conn, query, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
@@ -199,10 +232,6 @@ impl LibraryBackend {
         let allowed = get_descendant_content_hashes(&conn, &directory_id.to_string()).map_err(BackendError::operation)?.into_iter().filter(|hash| scope.matching.contains(hash)).collect::<HashSet<_>>();
         retain_search_results(&mut result, &allowed);
         Ok(result)
-    }
-
-    pub fn search_subject(&self, subject_path: Option<&str>, query: &str) -> Result<LibrarySearchResult, BackendError> {
-        self.search_subject_filtered(subject_path, query, LibraryFileTypeFilter::All)
     }
 
     pub fn search_subject_filtered(&self, subject_path: Option<&str>, query: &str, file_type: LibraryFileTypeFilter) -> Result<LibrarySearchResult, BackendError> {
@@ -284,7 +313,7 @@ impl LibraryBackend {
         let directory_id = directory_id.to_string();
         let mut directories = get_child_directories(&conn, &directory_id).map_err(BackendError::operation)?;
         FolderSort::Name.sort(&mut directories);
-        let mut books = get_book_cards_in_dir_scoped(&conn, &directory_id, self.app()?.downloaded_books_only()?).map_err(BackendError::operation)?;
+        let mut books = get_book_cards_in_dir_scoped(&conn, &directory_id, self.app()?.downloaded_books_only()?, "", LibraryFileTypeFilter::All).map_err(BackendError::operation)?;
         scope.retain_books(&mut books);
         let mut filtered = Vec::with_capacity(directories.len());
         for directory in directories {
@@ -296,10 +325,6 @@ impl LibraryBackend {
         }
         let directories = filtered;
         Ok(LibraryFolderView { children: directories, books })
-    }
-
-    pub fn subjects(&self, subject_path: Option<&str>) -> Result<LibrarySubjectView, BackendError> {
-        self.subjects_filtered(subject_path, LibraryFileTypeFilter::All)
     }
 
     pub fn subjects_filtered(&self, subject_path: Option<&str>, file_type: LibraryFileTypeFilter) -> Result<LibrarySubjectView, BackendError> {
@@ -322,8 +347,8 @@ impl LibraryBackend {
         if subject_path.is_some_and(|path| path == PEOPLE_SUBJECT_PATH || path.starts_with(&format!("{PEOPLE_SUBJECT_PATH}/"))) {
             return external_people(&conn, subject_path.expect("checked above"), downloaded_only, &scope).map_err(BackendError::operation);
         }
-        let parent_path = subject_path.unwrap_or("");
-        let mut books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
+        let parent_path = subject_path.unwrap_or(ROOT_SUBJECT_PATH);
+        let mut books = subject_path.map(|path| get_book_cards_in_subject_scoped(&conn, path, downloaded_only, "", LibraryFileTypeFilter::All).map_err(BackendError::operation)).transpose()?.unwrap_or_default();
         scope.retain_books(&mut books);
         let (mut subjects, hoisted_books) = compact_subject_children(&conn, parent_path, downloaded_only, &scope).map_err(BackendError::operation)?;
         let mut seen_books = books.iter().map(|book| book.content_hash.clone()).collect::<HashSet<_>>();
@@ -368,13 +393,13 @@ impl LibraryBackend {
 /// bypassed or replaced by their books. Root categories are never compacted.
 pub(super) fn compact_subject_children(conn: &Connection, parent_path: &str, downloaded_only: bool, scope: &FileTypeScope) -> Result<(Vec<LibrarySubjectEntry>, Vec<BookCardRow>), rusqlite::Error> {
     let mut children = populated_subject_children(conn, parent_path, downloaded_only, scope)?;
-    if parent_path.is_empty() || children.len() != 1 {
+    if parent_path == ROOT_SUBJECT_PATH || children.len() != 1 {
         return Ok((children, Vec::new()));
     }
 
     let mut display = children.remove(0);
     loop {
-        let mut exact_books = get_book_cards_in_subject_scoped(conn, display.id.as_str(), downloaded_only)?;
+        let mut exact_books = get_book_cards_in_subject_scoped(conn, display.id.as_str(), downloaded_only, "", LibraryFileTypeFilter::All)?;
         scope.retain_books(&mut exact_books);
         if !exact_books.is_empty() {
             return if display.book_count == 1 && exact_books.len() == 1 { Ok((Vec::new(), exact_books)) } else { Ok((vec![display], Vec::new())) };
@@ -465,7 +490,7 @@ pub fn is_book_file_tombstoned(conn: &Connection, dir_id: &DirId, file_name: &Fi
 }
 pub(super) fn get_child_directories(conn: &Connection, dir_path: &str) -> Result<Vec<Dir>, rusqlite::Error> {
     let mut sub_dirs: Vec<Dir> = Vec::new();
-    conn.get_sub_dirs(dir_path, |row| {
+    conn.get_sub_dirs(dir_path, "", file_type_query_value(LibraryFileTypeFilter::All), |row| {
         let raw_id: String = row.get(0)?;
         let raw_name: String = row.get(1)?;
         let raw_book_count: i64 = row.get(2)?;
@@ -480,9 +505,42 @@ pub(super) fn get_child_directories(conn: &Connection, dir_path: &str) -> Result
     Ok(sub_dirs)
 }
 
+fn get_folder_list_rows(conn: &Connection, parent_id: &str, normalized_query: &str, file_type: LibraryFileTypeFilter) -> Result<Vec<BrowseRow>, rusqlite::Error> {
+    let mut folders = Vec::new();
+    conn.get_sub_dirs(parent_id, normalized_query, file_type_query_value(file_type), |row| {
+        let raw_id: String = row.get(0)?;
+        let raw_book_count: i64 = row.get(2)?;
+        let raw_downloaded_book_count: i64 = row.get(3)?;
+        folders.push(BrowseRow {
+            id: parse_uuid_column(raw_id, 0)?.to_string(),
+            name: row.get(1)?,
+            book_count: usize::try_from(raw_book_count).map_err(|_| invalid_integer_column(2, "folder book count must not be negative"))?,
+            downloaded_book_count: usize::try_from(raw_downloaded_book_count).map_err(|_| invalid_integer_column(3, "downloaded folder book count must not be negative"))?,
+        });
+        Ok(())
+    })?;
+    Ok(folders)
+}
+
+fn get_subject_browse_rows(conn: &Connection, parent_path: &str, normalized_query: &str, file_type: LibraryFileTypeFilter) -> Result<Vec<BrowseRow>, rusqlite::Error> {
+    let mut subjects = Vec::new();
+    conn.get_subject_children(parent_path, normalized_query, file_type_query_value(file_type), |row| {
+        let raw_book_count: i64 = row.get(2)?;
+        let raw_downloaded_book_count: i64 = row.get(3)?;
+        subjects.push(BrowseRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            book_count: usize::try_from(raw_book_count).map_err(|_| invalid_integer_column(2, "subject book count must not be negative"))?,
+            downloaded_book_count: usize::try_from(raw_downloaded_book_count).map_err(|_| invalid_integer_column(3, "downloaded subject book count must not be negative"))?,
+        });
+        Ok(())
+    })?;
+    Ok(subjects)
+}
+
 pub(super) fn get_subject_children(conn: &Connection, parent_path: &str) -> Result<Vec<LibrarySubjectEntry>, rusqlite::Error> {
     let mut subjects = Vec::new();
-    conn.get_subject_children(parent_path, |row| {
+    conn.get_subject_children(parent_path, "", file_type_query_value(LibraryFileTypeFilter::All), |row| {
         let raw_book_count: i64 = row.get(2)?;
         let raw_downloaded_book_count: i64 = row.get(3)?;
         subjects.push(LibrarySubjectEntry {
@@ -496,37 +554,9 @@ pub(super) fn get_subject_children(conn: &Connection, parent_path: &str) -> Resu
     Ok(subjects)
 }
 
-pub(super) fn get_uncategorized_counts(conn: &Connection) -> Result<(usize, usize), rusqlite::Error> {
-    let mut counts = (0, 0);
-    conn.get_uncategorized_subject_counts(|row| {
-        let total = row.get::<_, i64>(0)?;
-        let downloaded = row.get::<_, i64>(1)?;
-        counts = (
-            usize::try_from(total).map_err(|_| invalid_integer_column(0, "uncategorized book count must not be negative"))?,
-            usize::try_from(downloaded).map_err(|_| invalid_integer_column(1, "downloaded uncategorized book count must not be negative"))?,
-        );
-        Ok(())
-    })?;
-    Ok(counts)
-}
-
-pub(super) fn get_other_subject_system_counts(conn: &Connection) -> Result<(usize, usize), rusqlite::Error> {
-    let mut counts = (0, 0);
-    conn.get_other_subject_system_counts(|row| {
-        let total = row.get::<_, i64>(0)?;
-        let downloaded = row.get::<_, i64>(1)?;
-        counts = (
-            usize::try_from(total).map_err(|_| invalid_integer_column(0, "other-system book count must not be negative"))?,
-            usize::try_from(downloaded).map_err(|_| invalid_integer_column(1, "downloaded other-system book count must not be negative"))?,
-        );
-        Ok(())
-    })?;
-    Ok(counts)
-}
-
-pub(super) fn get_book_cards_in_subject_scoped(conn: &Connection, subject_path: &str, downloaded_only: bool) -> Result<Vec<BookCardRow>, rusqlite::Error> {
+pub(super) fn get_book_cards_in_subject_scoped(conn: &Connection, subject_path: &str, downloaded_only: bool, normalized_query: &str, file_type: LibraryFileTypeFilter) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     let mut cards = Vec::new();
-    conn.get_book_cards_in_subject(subject_path, i32::from(downloaded_only), |row| {
+    conn.get_book_cards_in_subject(subject_path, i32::from(downloaded_only), normalized_query, file_type_query_value(file_type), |row| {
         cards.push(read_book_card_row(row)?);
         Ok(())
     })?;
@@ -735,6 +765,7 @@ pub(super) fn retain_search_results(result: &mut LibrarySearchResult, allowed: &
     result.title_matches.retain(|book| allowed.contains(&book.content_hash));
     result.author_matches.retain(|book| allowed.contains(&book.content_hash));
 }
+
 pub(super) fn get_authors_scoped(conn: &Connection, downloaded_only: bool) -> Result<Vec<(AuthorId, String, Option<String>, usize)>, rusqlite::Error> {
     let mut authors = Vec::new();
     conn.get_authors(i32::from(downloaded_only), |row| {

@@ -128,11 +128,9 @@ fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
     assert_eq!(architecture_routes, (2, 1), "one concept can be exposed beneath multiple parents");
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM book_unified_concept", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT mapping_type FROM source_concept_mapping WHERE source_system_id='bisac' AND source_code='HIS036060'", [], |row| row.get::<_, String>(0)).unwrap(), "exact");
-    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities", false).unwrap().len(), 0, "book grids use exact assignments");
-    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities / History / Americas / North America / United States / 20th Century", false).unwrap().len(), 1);
-    assert_eq!(get_uncategorized_counts(&conn).unwrap(), (1, 1), "only books with no subject metadata are uncategorized");
+    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities", false, "", LibraryFileTypeFilter::All).unwrap().len(), 0, "book grids use exact assignments");
+    assert_eq!(get_book_cards_in_subject_scoped(&conn, "Humanities / History / Americas / North America / United States / 20th Century", false, "", LibraryFileTypeFilter::All).unwrap().len(), 1);
     assert_eq!(get_uncategorized_book_cards_scoped(&conn, false).unwrap().len(), 1);
-    assert_eq!(get_other_subject_system_counts(&conn).unwrap(), (1, 1), "unmapped LCSH metadata stays available in the fallback facet");
     assert_eq!(get_other_subject_system_book_cards_scoped(&conn, false).unwrap().len(), 1);
 }
 
@@ -444,7 +442,7 @@ fn dir_card_rows_match_the_per_book_accessors_they_replace() {
     )
     .unwrap();
 
-    let cards = get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false).unwrap();
+    let cards = get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false, "", LibraryFileTypeFilter::All).unwrap();
     assert_eq!(cards.len(), 3, "hidden books stay excluded");
 
     let downloaded = cards.iter().find(|card| card.content_hash == fixture_content_hash(1)).expect("book 1 is listed");
@@ -492,7 +490,7 @@ fn downloaded_only_scope_is_applied_inside_browsing_queries() {
     assert_eq!(get_recently_read_cards(&conn, 1, true, FINISHED_THRESHOLD).unwrap()[0].content_hash, fixture_content_hash(1), "scope must be applied before LIMIT");
     assert_eq!(get_recently_added_cards(&conn, 1, true).unwrap()[0].content_hash, fixture_content_hash(1), "scope must be applied before LIMIT");
     assert_eq!(search_book_cards_scoped(&conn, "book", true).unwrap().title_matches.iter().map(|card| card.content_hash).collect::<Vec<_>>(), vec![fixture_content_hash(1)]);
-    assert_eq!(get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", true).unwrap().iter().map(|card| card.content_hash).collect::<Vec<_>>(), vec![fixture_content_hash(1)]);
+    assert_eq!(get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", true, "", LibraryFileTypeFilter::All).unwrap().iter().map(|card| card.content_hash).collect::<Vec<_>>(), vec![fixture_content_hash(1)]);
 
     let authors = get_authors_scoped(&conn, true).unwrap();
     assert_eq!(authors.len(), 1);
@@ -513,7 +511,7 @@ fn a_requested_download_is_reported_by_the_card_projection() {
     )
     .unwrap();
 
-    let cards = get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false).unwrap();
+    let cards = get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false, "", LibraryFileTypeFilter::All).unwrap();
     assert!(!cards[0].downloaded);
     assert!(cards[0].download_requested);
 }
@@ -567,6 +565,12 @@ fn subdirectory_book_counts_include_descendants_without_double_counting_books() 
     let directories = get_child_directories(&conn, "00000000-0000-0000-0000-000000000000").unwrap();
     let counts = directories.into_iter().map(|directory| (directory.name().as_str().to_owned(), (directory.book_count(), directory.downloaded_book_count()))).collect::<HashMap<_, _>>();
 
+    assert_eq!(counts.get("A"), Some(&(2, 1)));
+    assert_eq!(counts.get("B"), Some(&(1, 1)));
+    assert_eq!(counts.get("Empty"), Some(&(0, 0)));
+
+    let rows = get_folder_list_rows(&conn, "00000000-0000-0000-0000-000000000000").unwrap();
+    let counts = rows.into_iter().map(|row| (row.name, (row.book_count, row.downloaded_book_count))).collect::<HashMap<_, _>>();
     assert_eq!(counts.get("A"), Some(&(2, 1)));
     assert_eq!(counts.get("B"), Some(&(1, 1)));
     assert_eq!(counts.get("Empty"), Some(&(0, 0)));
@@ -1152,6 +1156,7 @@ fn rich_enrichment_persists_entity_graph_and_synchronized_subject_references() {
         ],
         people: vec![metadata_contract::EntityReference { wikidata_id: Some("Q7259".to_owned()), name: "Ada Lovelace".to_owned(), source: metadata_contract::EntitySource::Work }],
         popularity: None,
+        description: None,
     };
     let places = vec![
         metadata_contract::PlaceEntity {

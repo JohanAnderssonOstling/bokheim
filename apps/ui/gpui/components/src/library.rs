@@ -1,15 +1,15 @@
 use gpui::prelude::*;
-use gpui::{canvas, div, img, point, px, AnyElement, Div, ElementId, FontWeight, ImageSource, Img, ObjectFit, PathBuilder, SharedString, Stateful, StyledImage};
+use gpui::{AnyElement, Div, ElementId, FontWeight, ImageSource, Img, ObjectFit, PathBuilder, SharedString, Stateful, StyledImage, canvas, div, img, point, px};
 use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, Scrollable, ScrollableElement, AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HORIZONTAL_PADDING,
-    AUTHOR_ROW_LABEL_SIZE, BOOK_CARD_AUTHOR_HEIGHT_REM, BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_SIZE,
-    BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT, BOOK_COVER_WIDTH, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT,
-    CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH, DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD,
-    RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
+    AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HORIZONTAL_PADDING, AUTHOR_ROW_LABEL_SIZE, BOOK_CARD_AUTHOR_HEIGHT_REM,
+    BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT,
+    BOOK_COVER_WIDTH, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT, CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH,
+    DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -32,23 +32,16 @@ pub fn book_cover_frame() -> Div {
     div().relative().w_full().min_w(px(BOOK_COVER_WIDTH)).aspect_ratio(BOOK_COVER_WIDTH / BOOK_COVER_HEIGHT).cursor_pointer()
 }
 
-/// Cover art, whole.
-///
-/// The image element uses the JPEG's real ratio inside the standard cover slot.
-/// Wide covers fill the slot's width; tall covers fill its height. Consequently
-/// the element's border follows the painted cover instead of outlining the card
-/// or an invisible letterbox, while the parent bottom-aligns every cover.
-pub fn book_cover_image(source: impl Into<ImageSource>, aspect_ratio: f32, theme: BrowserTheme) -> Img {
-    let frame_ratio = BOOK_COVER_WIDTH / BOOK_COVER_HEIGHT;
-    img(source)
-        .flex_none()
+/// Cover art cropped to the standard 1:1.6 cover frame.
+pub fn book_cover_image(source: impl Into<ImageSource>, theme: BrowserTheme) -> Div {
+    div()
+        .size_full()
+        .overflow_hidden()
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(theme.border)
         .shadow(vec![gpui_component::box_shadow(px(0.0), px(4.0), px(12.0), px(0.0), theme.shadow)])
-        .object_fit(ObjectFit::Contain)
-        .when(aspect_ratio >= frame_ratio, |image| image.w(px(BOOK_COVER_WIDTH)).h(px(BOOK_COVER_WIDTH / aspect_ratio)))
-        .when(aspect_ratio < frame_ratio, |image| image.w(px(BOOK_COVER_HEIGHT * aspect_ratio)).h(px(BOOK_COVER_HEIGHT)))
+        .child(img(source).size_full().object_fit(ObjectFit::Cover))
 }
 
 pub fn book_row_cover_image(source: impl Into<ImageSource>) -> Img {
@@ -113,7 +106,7 @@ pub fn book_card_author(theme: BrowserTheme) -> Div {
 }
 
 pub fn home_page() -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(CAROUSEL_SECTION_GAP)).p(px(crate::CONTENT_PADDING)).overflow_y_scrollbar()
+    crate::full_size_column().gap(px(CAROUSEL_SECTION_GAP)).p(px(crate::CONTENT_PADDING)).overflow_y_scrollbar()
 }
 
 /// A heading and the row it names. The gap inside a section is smaller than
@@ -309,14 +302,14 @@ pub fn author_discovery_disclosure(id: impl Into<ElementId>, title: impl Into<Sh
 }
 
 pub fn folder_dashboard() -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_LG)).p(px(crate::CONTENT_PADDING))
+    crate::full_size_column().gap(px(SPACE_LG)).p(px(crate::CONTENT_PADDING))
 }
 
 /// Stable full-page host for both hierarchy variants. Folders may append its
 /// picker as an overlay child; Subjects uses the same sizing contract without
 /// an overlay.
 pub fn hierarchy_page_host(content: impl IntoElement) -> Div {
-    div().relative().size_full().min_h_0().min_w_0().flex().flex_col().child(content)
+    crate::full_size_column().relative().child(content)
 }
 
 pub fn folder_breadcrumb() -> Breadcrumb {
