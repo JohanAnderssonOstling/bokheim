@@ -30,6 +30,25 @@
 		-Server
 	}
 
+	# Covers the proxied API and any static file the build left without a
+	# sibling. Static assets are answered from their precompressed sidecars
+	# below, which is both smaller and free of per-request work.
+	encode zstd gzip
+
+	# Everything under this prefix carries a content hash, so the name changes
+	# whenever the bytes do and the response never needs revalidating.
+	@immutable path /_app/immutable/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	# The shell names those hashed files, and the assets outside the prefix are
+	# unhashed, so neither may outlive a deploy: revalidate every time and let
+	# the 304 keep it cheap. Without this the browser invents its own freshness
+	# and can serve an index that points at assets the release replaced.
+	@revalidate not {
+		path /_app/immutable/* /api/* /admin/*
+	}
+	header @revalidate Cache-Control "no-cache"
+
 	handle /api/* {
 		reverse_proxy unix//run/bokheim/sync.sock
 	}
@@ -49,7 +68,12 @@
 	handle {
 		root * /usr/local/share/bokheim-web/current
 		try_files {path} /index.html
-		file_server
+		# `npm run build:web` writes a .br next to each artifact. Caddy serves
+		# it when the client accepts brotli and falls back to the origin file
+		# otherwise, where `encode` compresses on the fly.
+		file_server {
+			precompressed br
+		}
 	}
 }
 

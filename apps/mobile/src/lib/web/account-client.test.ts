@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { getWebAccountStatus } from "./account-client.ts";
 import { getWebDatabase } from "./database.ts";
-import { createWebLibrary, getWebLibraryHome, listWebLibraries } from "./library-database.ts";
+import {
+  createWebLibrary,
+  getWebLibraryHome,
+  listWebLibraries,
+} from "./library-database.ts";
 
 test("browser login persistence stores profile metadata without bearer tokens", async () => {
   const { db } = await getWebDatabase();
@@ -17,7 +21,14 @@ test("browser login persistence stores profile metadata without bearer tokens", 
     server_url: "https://api.bokheim.se",
     email: "reader@example.com",
   });
-  assert.deepEqual(db.exec({ sql: "SELECT name FROM sqlite_schema WHERE type='table' AND name='web_account_session'", rowMode: 0, returnValue: "resultRows" }), []);
+  assert.deepEqual(
+    db.exec({
+      sql: "SELECT name FROM sqlite_schema WHERE type='table' AND name='web_account_session'",
+      rowMode: 0,
+      returnValue: "resultRows",
+    }),
+    [],
+  );
 });
 
 test("browser libraries remain isolated when a different account signs in", async () => {
@@ -34,14 +45,27 @@ test("browser libraries remain isolated when a different account signs in", asyn
     sql: "UPDATE web_account_profile SET user_id=?,email=? WHERE singleton=1",
     bind: [secondUser, "second@example.com"],
   });
-  assert.equal((await listWebLibraries()).some(({ library_id }) => library_id === firstLibrary.library_id), false);
+  assert.equal(
+    (await listWebLibraries()).some(
+      ({ library_id }) => library_id === firstLibrary.library_id,
+    ),
+    false,
+  );
   await assert.rejects(getWebLibraryHome(firstLibrary.library_id), /does not exist/);
 
   db.exec({
     sql: "UPDATE web_account_profile SET user_id=?,email=? WHERE singleton=1",
     bind: [firstUser, "first@example.com"],
   });
-  assert.equal((await listWebLibraries()).some(({ library_id }) => library_id === firstLibrary.library_id), true);
+  assert.equal(
+    (await listWebLibraries()).some(
+      ({ library_id }) => library_id === firstLibrary.library_id,
+    ),
+    true,
+  );
 
-  db.exec({ sql: "DELETE FROM libraries WHERE library_id=?", bind: [firstLibrary.library_id] });
+  db.exec({
+    sql: "DELETE FROM libraries WHERE library_id=?",
+    bind: [firstLibrary.library_id],
+  });
 });

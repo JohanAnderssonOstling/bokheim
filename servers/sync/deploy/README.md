@@ -53,6 +53,37 @@ root. Routine deployments then need only the SSH key. The script does not
 modify Caddy, replace credentials, or delete asset files; it does replace the
 `bokheim` database as described above.
 
+### Debian-compatible release binaries
+
+The production host is Debian 11-era and may provide an older glibc than the
+development machine. Do not copy host-native release binaries when the build
+machine reports a newer glibc requirement; a binary requiring `GLIBC_2.43`, for
+example, will not start on the host.
+
+The host has the musl toolchain installed. Build portable server artifacts with
+the musl target:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl -p sync-server
+cargo build --release --target x86_64-unknown-linux-musl -p catalog-server
+cargo build --release --target x86_64-unknown-linux-musl -p metadata-server
+```
+
+Artifacts are written below `target/x86_64-unknown-linux-musl/release/`.
+Verify linkage before staging:
+
+```sh
+file target/x86_64-unknown-linux-musl/release/catalog-server
+ldd target/x86_64-unknown-linux-musl/release/catalog-server || true
+```
+
+The release helper currently builds host-native artifacts itself. When
+deploying from a different libc environment, stage the musl artifacts through
+the target host's passwordless activation workflow, or update the helper to
+build and select the configured target. Never activate a binary until its
+linkage has been checked against the target host.
+
 This deployment exposes only Caddy to the Internet. The Rust server accepts
 requests through `/run/bokheim/sync.sock`, whose filesystem permissions allow
 access only to the `bokheim` user and members of the `bokheim` group. PostgreSQL

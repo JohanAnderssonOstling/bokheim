@@ -1,39 +1,13 @@
 //! Device and synchronized application preferences.
 
 pub use app_contract::preferences::*;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use uuid::Uuid;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
 
 const PREFERENCES_FILE: &str = "reader_preferences.json";
 const BROWSING_PREFERENCES_FILE: &str = "browsing_preferences.json";
-const TRANSFER_PREFERENCES_FILE: &str = "transfer_preferences.json";
 impl crate::app::BackendContext {
-    pub fn transfer_preferences_path(&self) -> PathBuf {
-        self.app_data_dir().join(TRANSFER_PREFERENCES_FILE)
-    }
-
-    pub fn load_transfer_preferences(&self) -> io::Result<TransferPreferences> {
-        match fs::read(self.transfer_preferences_path()) {
-            Ok(bytes) => serde_json::from_slice::<TransferPreferences>(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(TransferPreferences::default()),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub fn save_transfer_preferences(&self, preferences: TransferPreferences) -> io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        write_preferences_atomic(&self.transfer_preferences_path(), &bytes)
-    }
-
-    pub fn apply_transfer_preference_patch(&self, patch: TransferPreferencePatch) -> io::Result<TransferPreferences> {
-        let mut preferences = self.load_transfer_preferences()?;
-        patch.apply(&mut preferences);
-        self.save_transfer_preferences(preferences)?;
-        Ok(preferences)
-    }
-
     pub fn browsing_preferences_path(&self) -> PathBuf {
         self.app_data_dir().join(BROWSING_PREFERENCES_FILE)
     }
@@ -48,7 +22,7 @@ impl crate::app::BackendContext {
 
     pub fn save_browsing_preferences(&self, preferences: &BrowsingPreferences) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        write_preferences_atomic(&self.browsing_preferences_path(), &bytes)
+        super::persistence::write_json_atomic(&self.browsing_preferences_path(), &bytes)
     }
 
     pub fn apply_browsing_preference_patch(&self, patch: BrowsingPreferencePatch) -> io::Result<BrowsingPreferences> {
@@ -72,7 +46,7 @@ impl crate::app::BackendContext {
 
     pub fn save_reader_preferences(&self, preferences: ReaderPreferences) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        write_preferences_atomic(&self.reader_preferences_path(), &bytes)
+        super::persistence::write_json_atomic(&self.reader_preferences_path(), &bytes)
     }
 
     pub fn apply_reader_preference_patch(&self, patch: ReaderPreferencePatch) -> io::Result<ReaderPreferences> {
@@ -82,26 +56,6 @@ impl crate::app::BackendContext {
         Ok(preferences)
     }
 }
-fn write_preferences_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preferences path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".preferences-{}.tmp", Uuid::new_v4()));
-    let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        #[cfg(unix)]
-        fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,24 +159,13 @@ mod tests {
     fn atomic_preferences_write_replaces_the_complete_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reader_preferences.json");
-        write_preferences_atomic(&path, br#"{"font_size_px":20.0}"#).unwrap();
-        write_preferences_atomic(&path, br#"{"font_size_px":24.0}"#).unwrap();
+        super::super::persistence::write_json_atomic(&path, br#"{"font_size_px":20.0}"#).unwrap();
+        super::super::persistence::write_json_atomic(&path, br#"{"font_size_px":24.0}"#).unwrap();
         assert_eq!(fs::read(&path).unwrap(), br#"{"font_size_px":24.0}"#);
         assert!(fs::read_dir(directory.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
     }
 
     #[test]
-    fn background_metered_policy_is_device_local_and_persisted() {
-        let directory = tempfile::tempdir().unwrap();
-        let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
-        assert!(!context.load_transfer_preferences().unwrap().allow_background_on_metered());
-
-        let saved = context.apply_transfer_preference_patch(TransferPreferencePatch::AllowBackgroundOnMetered(true)).unwrap();
-        assert!(saved.allow_background_on_metered());
-        assert!(context.load_transfer_preferences().unwrap().allow_background_on_metered());
-        assert!(context.transfer_preferences_path().starts_with(context.app_data_dir()));
-    }
-
     #[test]
     fn client_preference_contexts_do_not_leak_state_between_instances() {
         let first_dir = tempfile::tempdir().unwrap();

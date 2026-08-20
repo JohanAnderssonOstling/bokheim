@@ -71,6 +71,26 @@ struct ServiceState {
     total_duration_ms: AtomicU64,
     processed_items: AtomicU64,
     item_processing_duration_ms: AtomicU64,
+    edition_identities: EndpointMetrics,
+    classifications: EndpointMetrics,
+    enrichment: EndpointMetrics,
+}
+
+#[derive(Default)]
+struct EndpointMetrics {
+    requests: AtomicU64,
+    errors: AtomicU64,
+    in_flight: AtomicU64,
+    total_duration_ms: AtomicU64,
+}
+
+#[derive(Serialize)]
+struct EndpointMetricsSnapshot {
+    requests: u64,
+    errors: u64,
+    in_flight: u64,
+    total_duration_ms: u64,
+    average_duration_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -94,6 +114,7 @@ struct OperationalStats {
     pool_connections: u32,
     pool_idle_connections: u32,
     metrics: BTreeMap<String, i64>,
+    endpoint_metrics: BTreeMap<&'static str, EndpointMetricsSnapshot>,
 }
 
 #[derive(Debug)]
@@ -250,6 +271,9 @@ impl MetadataService {
                 total_duration_ms: AtomicU64::new(0),
                 processed_items: AtomicU64::new(0),
                 item_processing_duration_ms: AtomicU64::new(0),
+                edition_identities: EndpointMetrics::default(),
+                classifications: EndpointMetrics::default(),
+                enrichment: EndpointMetrics::default(),
             }),
         })
     }
@@ -368,15 +392,29 @@ pub fn app(service: MetadataService) -> Router {
 }
 
 async fn record_request_metrics(State(service): State<MetadataService>, request: Request, next: Next) -> Response {
-    let tracked = matches!(request.uri().path(), "/v2/classifications" | "/v2/enrichment" | "/v2/edition-identities");
+    let endpoint = match request.uri().path() {
+        "/v2/classifications" => Some(&service.state.classifications),
+        "/v2/enrichment" => Some(&service.state.enrichment),
+        "/v2/edition-identities" => Some(&service.state.edition_identities),
+        _ => None,
+    };
     let started = Instant::now();
+    if let Some(endpoint) = endpoint {
+        endpoint.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
     let response = next.run(request).await;
-    if tracked {
+    if let Some(endpoint) = endpoint {
+        endpoint.in_flight.fetch_sub(1, Ordering::Relaxed);
+        endpoint.requests.fetch_add(1, Ordering::Relaxed);
+        if !response.status().is_success() {
+            endpoint.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        endpoint.total_duration_ms.fetch_add(duration_ms, Ordering::Relaxed);
         service.state.requests.fetch_add(1, Ordering::Relaxed);
         if !response.status().is_success() {
             service.state.errors.fetch_add(1, Ordering::Relaxed);
         }
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         service.state.total_duration_ms.fetch_add(duration_ms, Ordering::Relaxed);
     }
     response
@@ -412,6 +450,13 @@ fn load_operational_stats(state: &ServiceState) -> Result<OperationalStats, Meta
     let processed_items = state.processed_items.load(Ordering::Relaxed);
     let item_processing_duration_ms = state.item_processing_duration_ms.load(Ordering::Relaxed);
     let pool_state = state.pool.state();
+    let endpoint_metrics = [
+        ("edition_identities", endpoint_metrics_snapshot(&state.edition_identities)),
+        ("classifications", endpoint_metrics_snapshot(&state.classifications)),
+        ("enrichment", endpoint_metrics_snapshot(&state.enrichment)),
+    ]
+    .into_iter()
+    .collect();
     Ok(OperationalStats {
         status: "available",
         uptime_seconds: state.started_at.elapsed().as_secs(),
@@ -432,7 +477,20 @@ fn load_operational_stats(state: &ServiceState) -> Result<OperationalStats, Meta
         pool_connections: pool_state.connections,
         pool_idle_connections: pool_state.idle_connections,
         metrics,
+        endpoint_metrics,
     })
+}
+
+fn endpoint_metrics_snapshot(metrics: &EndpointMetrics) -> EndpointMetricsSnapshot {
+    let requests = metrics.requests.load(Ordering::Relaxed);
+    let total_duration_ms = metrics.total_duration_ms.load(Ordering::Relaxed);
+    EndpointMetricsSnapshot {
+        requests,
+        errors: metrics.errors.load(Ordering::Relaxed),
+        in_flight: metrics.in_flight.load(Ordering::Relaxed),
+        total_duration_ms,
+        average_duration_ms: if requests == 0 { 0.0 } else { total_duration_ms as f64 / requests as f64 },
+    }
 }
 
 async fn edition_identities(State(service): State<MetadataService>, headers: HeaderMap, body: Bytes) -> Response {
@@ -1473,6 +1531,14 @@ fn author_match_keys(value: &str) -> BTreeSet<String> {
     keys
 }
 
+fn author_match_tokens(value: &str) -> BTreeSet<String> {
+    author_match_keys(value)
+        .into_iter()
+        .flat_map(|key| key.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|token| token.len() > 1 && !matches!(token.as_str(), "jr" | "sr" | "ii" | "iii" | "iv" | "v"))
+        .collect()
+}
+
 fn publication_year(value: &str) -> Option<i32> {
     let mut years = BTreeSet::new();
     for run in value.split(|character: char| !character.is_ascii_digit()) {
@@ -2073,6 +2139,7 @@ fn open_library_json_line(line: &str) -> Option<&str> {
 struct PreparedEditionQuery {
     query: EditionIdentityQuery,
     author_keys: BTreeSet<String>,
+    author_tokens: BTreeSet<String>,
     publisher_keys: BTreeSet<String>,
 }
 
@@ -2097,6 +2164,7 @@ fn resolve_edition_batch(connection: &Connection, queries: Vec<EditionIdentityQu
         }
         let title_keys = title_substring_keys(&title_without_parenthetical_segments(&query.title));
         let author_keys = query.authors.iter().flat_map(|author| author_match_keys(author)).collect::<BTreeSet<_>>();
+        let author_tokens = query.authors.iter().flat_map(|author| author_match_tokens(author)).collect::<BTreeSet<_>>();
         let publisher_keys = query.publishers.iter().map(|publisher| bibliographic_match_key(publisher)).filter(|key| !key.is_empty()).collect::<BTreeSet<_>>();
         if title_keys.is_empty() {
             completed.push(Some(identity_result(&query.query_id, EditionIdentityStatus::InsufficientMetadata, None, Vec::new(), false)));
@@ -2107,7 +2175,7 @@ fn resolve_edition_batch(connection: &Connection, queries: Vec<EditionIdentityQu
             title_rows.push((query_index, title, specificity));
         }
         completed.push(None);
-        prepared.push(Some(PreparedEditionQuery { query, author_keys, publisher_keys }));
+        prepared.push(Some(PreparedEditionQuery { query, author_keys, author_tokens, publisher_keys }));
     }
 
     let mut candidates = load_edition_candidates(connection, &title_rows)?;
@@ -2164,14 +2232,26 @@ fn edition_candidate_query(title_rows: usize) -> String {
              JOIN candidate_specificity score ON score.query_index=source.query_index AND score.edition_id=source.edition_id AND score.specificity=source.specificity
              GROUP BY source.query_index,source.edition_id,score.specificity
          ),
+         eligible_candidate AS (
+             SELECT candidate.*
+             FROM candidate
+             WHERE EXISTS (SELECT 1 FROM edition_classification WHERE edition_id=candidate.edition_id)
+                OR EXISTS (
+                    SELECT 1
+                    FROM edition
+                    WHERE edition.edition_id=candidate.edition_id
+                      AND (EXISTS (SELECT 1 FROM work_classification WHERE work_id=edition.work_id)
+                        OR EXISTS (SELECT 1 FROM edition_work_classification WHERE work_id=edition.work_id))
+                )
+         ),
          query_best_specificity AS (
              SELECT query_index,MAX(specificity) AS specificity
-             FROM candidate GROUP BY query_index
+             FROM eligible_candidate GROUP BY query_index
          ),
          ranked AS (
              SELECT candidate.query_index,candidate.edition_id,candidate.specificity,candidate.edition_match,candidate.work_match,
                     ROW_NUMBER() OVER (PARTITION BY candidate.query_index ORDER BY candidate.edition_id) AS candidate_number
-             FROM candidate
+             FROM eligible_candidate candidate
              JOIN query_best_specificity best ON best.query_index=candidate.query_index AND best.specificity=candidate.specificity
          )
          SELECT ranked.query_index,edition.edition_id,edition.work_id,bibliography.title,work_bibliography.title,bibliography.publication_year,ranked.specificity,ranked.edition_match,ranked.work_match
@@ -2300,7 +2380,10 @@ fn resolve_prepared_edition_query(
     let mut editions = Vec::<(usize, bool, usize, EditionIdentityMatch)>::new();
     for candidate in candidates {
         let authors = edition_authors.get(&candidate.edition_id).filter(|authors| !authors.is_empty()).or_else(|| candidate.work_id.and_then(|work_id| work_authors.get(&work_id))).cloned().unwrap_or_default();
-        let matched_author = !prepared.author_keys.is_empty() && authors.iter().any(|author| author_match_keys(author).iter().any(|key| prepared.author_keys.contains(key)));
+        let matched_author = !prepared.author_tokens.is_empty() && authors.iter().any(|author| author_match_tokens(author).iter().any(|token| prepared.author_tokens.contains(token)));
+        if !prepared.author_tokens.is_empty() && !matched_author {
+            continue;
+        }
         let publisher_rows = publishers.get(&candidate.edition_id).cloned().unwrap_or_default();
         let matched_publisher = !prepared.publisher_keys.is_empty() && publisher_rows.iter().any(|(_, key)| prepared.publisher_keys.contains(key));
         let matched_publication_year = prepared.query.publication_year.is_some() && prepared.query.publication_year == candidate.publication_year;
@@ -2324,6 +2407,11 @@ fn resolve_prepared_edition_query(
             }
         }
         let classifications = metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { scheme, notation, source }), classification_similarity_keys);
+        // Classification-free OpenLibrary candidates are not useful for
+        // enrichment, even when title/author matching is otherwise strong.
+        if classifications.is_empty() {
+            continue;
+        }
         editions.push((
             candidate.title_specificity,
             matched_author,
@@ -3264,7 +3352,7 @@ mod tests {
             &[serde_json::json!({
                 "key": "/books/OL1M", "authors": [{"key": "/authors/OL100A"}],
                 "title": "Standalone Edition", "publishers": ["North Wind Press"], "publish_date": "2004",
-                "isbn_13": ["9780306406157"]
+                "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
             })],
             &[],
             &[serde_json::json!({"key": "/authors/OL100A", "name": "Alex Smith"})],
@@ -3279,6 +3367,24 @@ mod tests {
         assert_eq!(matched.title_match, EditionTitleMatch::Edition);
     }
 
+    #[test]
+    fn edition_identity_rejects_an_edition_without_lcc_or_ddc() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = snapshot_from(
+            temporary.path(),
+            &[serde_json::json!({
+                "key": "/books/OL1M", "title": "Unclassified Edition", "isbn_13": ["9780306406157"]
+            })],
+            &[],
+            &[],
+        );
+        let service = MetadataService::open(&database).unwrap();
+
+        let response = service.resolve_editions(edition_query("Unclassified Edition", Vec::new(), None)).unwrap();
+        assert_eq!(response.results[0].status, EditionIdentityStatus::NoMatch);
+        assert!(response.results[0].matched.is_none());
+    }
+
     /// An untitled sibling edition of the same work has no `edition_bibliography`
     /// row, so its title-comparison column is NULL. One such row in the
     /// candidate set must not destroy the lookup for the edition that does match.
@@ -3291,11 +3397,11 @@ mod tests {
                 serde_json::json!({
                     "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
                     "title": "The Example Book", "publishers": ["North Wind Press"], "publish_date": "2004",
-                    "isbn_13": ["9780306406157"]
+                    "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                    "isbn_13": ["9780821338278"]
+                    "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[serde_json::json!({"key": "/works/OL10W", "title": "Canonical Example Work", "authors": [{"author": {"key": "/authors/OL100A"}}]})],
@@ -3321,7 +3427,7 @@ mod tests {
             &[serde_json::json!({
                 "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
                 "title": "The Example Book", "publishers": ["North Wind Press"], "publish_date": "2004",
-                "isbn_13": ["9780306406157"], "isbn_10": ["0821338277"]
+                "isbn_13": ["9780306406157"], "isbn_10": ["0821338277"], "dewey_decimal_class": ["005.1"]
             })],
             &[serde_json::json!({"key": "/works/OL10W", "title": "Canonical Example Work", "authors": [{"author": {"key": "/authors/OL100A"}}]})],
             &[serde_json::json!({"key": "/authors/OL100A", "name": "Alex Smith"})],
@@ -3342,7 +3448,7 @@ mod tests {
             temporary.path(),
             &[serde_json::json!({
                 "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                "title": "The Example Book", "publishers": ["Old Press"], "publish_date": "2004", "isbn_13": ["9780306406157"]
+                "title": "The Example Book", "publishers": ["Old Press"], "publish_date": "2004", "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
             })],
             &[serde_json::json!({"key": "/works/OL10W", "title": "The Example Book", "authors": [{"author": {"key": "/authors/OL100A"}}]})],
             &[serde_json::json!({"key": "/authors/OL100A", "name": "Alex Smith"})],
@@ -3366,7 +3472,7 @@ mod tests {
                     "key": format!("/books/OL{edition_id}M"),
                     "authors": [{"key": "/authors/OL100A"}],
                     "title": "Physical Chemistry",
-                    "isbn_13": ["9780306406157"]
+                    "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 })
             })
             .collect::<Vec<_>>();
@@ -3374,7 +3480,7 @@ mod tests {
             "key": "/books/OL1000M",
             "authors": [{"key": "/authors/OL100A"}],
             "title": "Physical Chemistry: A Very Short Introduction",
-            "isbn_13": ["9780821338278"]
+            "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
         }));
         let database = snapshot_from(temporary.path(), &editions, &[], &[serde_json::json!({"key": "/authors/OL100A", "name": "Alex Smith"})]);
         let service = MetadataService::open(&database).unwrap();
@@ -3393,11 +3499,11 @@ mod tests {
             &[
                 serde_json::json!({
                     "key": "/books/OL1M", "authors": [{"key": "/authors/OL100A"}],
-                    "title": "A Concise History of Spain", "publishers": ["First Press"], "isbn_13": ["9780306406157"]
+                    "title": "A Concise History of Spain", "publishers": ["First Press"], "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "authors": [{"key": "/authors/OL200A"}],
-                    "title": "A Concise History of Spain", "publishers": ["Preferred Press"], "isbn_13": ["9780821338278"]
+                    "title": "A Concise History of Spain", "publishers": ["Preferred Press"], "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[],
@@ -3427,7 +3533,7 @@ mod tests {
             temporary.path(),
             &[serde_json::json!({
                 "key": "/books/OL1M", "authors": [{"key": "/authors/OL200A"}],
-                "title": "Complete Works Of", "isbn_13": ["9780306406157"]
+                "title": "Complete Works Of", "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
             })],
             &[],
             &[serde_json::json!({"key": "/authors/OL200A", "name": "Jamie Jones"})],
@@ -3440,10 +3546,9 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(response.results[0].status, EditionIdentityStatus::Ambiguous);
+        assert_eq!(response.results[0].status, EditionIdentityStatus::NoMatch);
         assert!(response.results[0].matched.is_none());
-        assert_eq!(response.results[0].candidates.len(), 1);
-        assert_eq!(response.results[0].candidates[0].open_library_edition_id, "OL1M");
+        assert!(response.results[0].candidates.is_empty());
     }
 
     #[test]
@@ -3454,11 +3559,11 @@ mod tests {
             &[
                 serde_json::json!({
                     "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                    "title": "Complete Works of Homer", "publishers": ["First Press"], "isbn_13": ["9780306406157"]
+                    "title": "Complete Works of Homer", "publishers": ["First Press"], "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                    "title": "Complete Works of Homer", "publishers": ["Second Press"], "isbn_13": ["9780821338278"]
+                    "title": "Complete Works of Homer", "publishers": ["Second Press"], "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[serde_json::json!({"key": "/works/OL10W", "title": "Complete Works of Homer", "authors": [{"author": {"key": "/authors/OL100A"}}]})],
@@ -3491,15 +3596,15 @@ mod tests {
             &[
                 serde_json::json!({
                     "key": "/books/OL1M", "authors": [{"key": "/authors/OL100A"}],
-                    "title": "Algorithms", "publish_date": "1999", "isbn_13": ["9780306406157"]
+                    "title": "Algorithms", "publish_date": "1999", "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "authors": [{"key": "/authors/OL100A"}],
-                    "title": "Algorithms", "publish_date": "2019", "isbn_13": ["9780821338278"]
+                    "title": "Algorithms", "publish_date": "2019", "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL3M", "authors": [{"key": "/authors/OL200A"}],
-                    "title": "Algorithms", "publish_date": "2019", "isbn_13": ["9781501168697"]
+                    "title": "Algorithms", "publish_date": "2019", "isbn_13": ["9781501168697"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[],
@@ -3523,11 +3628,11 @@ mod tests {
             &[
                 serde_json::json!({
                     "key": "/books/OL1M", "authors": [{"key": "/authors/OL100A"}],
-                    "title": "First Book", "isbn_13": ["9780306406157"]
+                    "title": "First Book", "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "authors": [{"key": "/authors/OL100A"}],
-                    "title": "Second Book", "isbn_13": ["9780821338278"]
+                    "title": "Second Book", "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[],
@@ -3557,11 +3662,11 @@ mod tests {
             &[
                 serde_json::json!({
                     "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                    "title": "The Example Book", "publishers": ["Old Press"], "publish_date": "2004", "isbn_13": ["9780306406157"]
+                    "title": "The Example Book", "publishers": ["Old Press"], "publish_date": "2004", "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
                 }),
                 serde_json::json!({
                     "key": "/books/OL2M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
-                    "title": "The Example Book", "publishers": ["Preferred Press"], "publish_date": "2010", "isbn_13": ["9780821338278"]
+                    "title": "The Example Book", "publishers": ["Preferred Press"], "publish_date": "2010", "isbn_13": ["9780821338278"], "dewey_decimal_class": ["005.1"]
                 }),
             ],
             &[serde_json::json!({"key": "/works/OL10W", "title": "The Example Book", "authors": [{"author": {"key": "/authors/OL100A"}}]})],
@@ -3596,7 +3701,9 @@ mod tests {
         );
         let service = MetadataService::open(&database).unwrap();
 
-        let response = service.resolve_editions(edition_query("The Example Book", Vec::new(), None)).unwrap();
+        let response = service
+            .resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: "The Example Book".to_owned(), authors: Vec::new(), publishers: Vec::new(), publication_year: None }] })
+            .unwrap();
         assert_eq!(response.results[0].status, EditionIdentityStatus::Ambiguous);
         assert_eq!(response.results[0].candidates.len(), 1);
         assert_eq!(response.results[0].candidates[0].open_library_work_id.as_deref(), Some("OL10W"));

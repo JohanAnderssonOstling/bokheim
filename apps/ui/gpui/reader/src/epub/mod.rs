@@ -18,7 +18,8 @@ use gpui_component::tree::TreeState;
 use html_view_gpui::HtmlView;
 
 use crate::epub::audio::AudioState;
-use crate::epub::marks::MarksState;
+use crate::epub::marks::Selection;
+use crate::shell::marks::MarksState;
 use crate::epub::progress::ProgressState;
 use crate::epub::search::SearchState;
 use crate::epub::toc::TocState;
@@ -58,6 +59,8 @@ pub(crate) struct ReaderView {
     pub(crate) progress: ProgressState,
     pub(crate) toolbar_view: Entity<toolbar::ReaderToolbar>,
     pub(crate) marks: MarksState,
+    /// The text the reader has selected, which only an EPUB anchors by CFI.
+    pub(crate) selection: Option<Selection>,
     pub(crate) reader_state_visible: bool,
     pub(crate) reader_state_bookmarks: bool,
     pub(crate) annotation_note_input: Entity<InputState>,

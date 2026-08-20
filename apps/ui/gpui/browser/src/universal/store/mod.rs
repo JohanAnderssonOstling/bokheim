@@ -166,7 +166,7 @@ impl StorePage {
         let import_library = library.clone();
         let import = Rc::new(move |request| Ok(import_library.spawn(move |library| async move { library.import_catalog_book(epub_svelte_lib::ROOT_DIR_ID, &request).await.map(|_| ()).map_err(|error| error.to_string()) })));
         let cards = CatalogCardServices::new(&services, import);
-        Self {
+        let mut page = Self {
             services,
             preferences,
             library,
@@ -186,7 +186,9 @@ impl StorePage {
             _subject_search_subscription: subject_search_subscription,
             virtual_rows: HashMap::new(),
             catalog_link_columns: Cell::new(1),
-        }
+        };
+        page.refresh(cx);
+        page
     }
 
     fn set_mode(&mut self, mode: StoreMode) {

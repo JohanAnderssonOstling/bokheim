@@ -1,25 +1,25 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::transfer::{TransferJob, TransferOrigin, TransferQueue, TransferRuntime, TransferWorker};
+use crate::RelativeDirPath;
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
-use crate::RelativeDirPath;
 use crate::{BlobKind, BookPlacement, ContentHash, RelativeBookPath, ServerUrl};
 use crossbeam_channel::Sender;
-use library_replica::{coalesce_mutations_for_push, MutationBody, StateMutation};
+use library_replica::{MutationBody, StateMutation, coalesce_mutations_for_push};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse, MAX_BLOB_MANIFEST_ENTRIES};
 #[cfg(test)]
 use sync_common::SyncExchangeResponse;
+use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse, MAX_BLOB_MANIFEST_ENTRIES};
 use sync_common::{DirId, LibraryId, PullStateResponse, PushMutationsResponse, ReplicaId};
 
-use sync_client::{validate_pull_batch, validate_push_response, PushResponseError};
+use sync_client::{PushResponseError, validate_pull_batch, validate_push_response};
 
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 
@@ -457,11 +457,6 @@ impl SyncManager {
         let remote_thumbnail_hashes = db::get_remote_asset_hashes(&conn, BlobKind::Thumbnail)?;
         let pending_thumbnail_jobs = self.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let pending_requests = db::get_asset_requests(&conn, BlobKind::Book)?;
-        let auto_download_candidates: HashSet<_> = if self.transfer_runtime.auto_download_limit_bytes().is_some() && self.transfer_runtime.allows_background_transfers() {
-            assets.iter().filter(|asset| !Path::new(&self.resolve_book_path(&asset.rel_path)).exists()).map(|asset| asset.content_hash.clone()).collect()
-        } else {
-            HashSet::new()
-        };
         drop(conn);
 
         let manifest = upload_blobs.iter().map(|(content_hash, _, size_bytes)| BlobManifestEntry { content_hash: content_hash.clone(), size_bytes: *size_bytes }).collect();
@@ -496,6 +491,9 @@ impl SyncManager {
         // A requested download is itself the authoritative presence check: a
         // successful GET records present and a 404 records missing.
         for (content_hash, origin) in pending_requests {
+            if origin != TransferOrigin::UserInitiated {
+                continue;
+            }
             let conn = self.db_pool.get()?;
             if db::is_blob_local(&conn, BlobKind::Book, &content_hash)? {
                 db::complete_asset_request(&conn, BlobKind::Book, &content_hash)?;
@@ -505,31 +503,6 @@ impl SyncManager {
                 Ok(Some(job)) => jobs.push(job),
                 Ok(None) => {}
                 Err(error) => log::warn!("Skipping invalid requested book download {content_hash}: {error}"),
-            }
-        }
-
-        if let Some(limit) = self.transfer_runtime.auto_download_limit_bytes() {
-            for content_hash in auto_download_candidates {
-                let conn = self.db_pool.get()?;
-                if db::is_blob_local(&conn, BlobKind::Book, &content_hash)? {
-                    continue;
-                }
-                drop(conn);
-                let Some(size) = self.remote_blob_size(&content_hash).await? else {
-                    let conn = self.db_pool.get()?;
-                    db::forget_remote_asset(&conn, BlobKind::Book, &content_hash)?;
-                    continue;
-                };
-                let conn = self.db_pool.get()?;
-                db::record_remote_asset(&conn, BlobKind::Book, &content_hash)?;
-                if size > limit {
-                    continue;
-                }
-                match self.download_job(&conn, &content_hash, TransferOrigin::Background) {
-                    Ok(Some(job)) => jobs.push(job),
-                    Ok(None) => {}
-                    Err(error) => log::warn!("Skipping invalid automatic book download {content_hash}: {error}"),
-                }
             }
         }
 
@@ -579,17 +552,6 @@ impl SyncManager {
 
     pub fn request_download(&self, content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
         self.request_downloads(std::slice::from_ref(&content_hash))
-    }
-
-    async fn remote_blob_size(&self, content_hash: &ContentHash) -> Result<Option<u64>, Box<dyn std::error::Error>> {
-        let token = self.current_session().ok_or("authentication is required")?.token().to_owned();
-        let endpoint = self.server_url.endpoint(&format!("api/libraries/{}/blobs/{}", self.library_id, urlencoding::encode(content_hash.as_str())));
-        let response = self.http_client.head(endpoint).bearer_auth(token).send().await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let response = response.error_for_status()?;
-        Ok(response.content_length())
     }
 
     pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
@@ -2142,7 +2104,7 @@ mod tests {
 
         let library_id = fixture_library_id("backend-e2e-assets");
         sync_client::upsert_library(&publisher_session, library_id.clone(), "Backend asset E2E".to_owned()).await.expect("create E2E library");
-        assert_eq!(tokio::time::timeout(Duration::from_secs(2), notifications.next()).await.unwrap().unwrap(), Some(sync_common::api::notifications::NotificationMessage::CatalogueChanged));
+        assert_eq!(tokio::time::timeout(Duration::from_secs(2), notifications.next()).await.unwrap().unwrap(), Some(sync_common::api::notifications::NotificationMessage::LibrariesChanged));
         notifications.close().await;
         assert!(sync_client::list_libraries(&observer_session).await.unwrap().iter().any(|library| library.library_id == library_id));
 

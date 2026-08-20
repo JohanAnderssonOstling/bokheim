@@ -194,8 +194,6 @@ impl Render for SettingsPage {
         let font_size = components::browser_settings_font_size_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
         let network = self.services.backend.network_status();
-        let signed_in = self.services.backend.account_status().map(|status| status.signed_in()).unwrap_or(false);
-        let server_connected = signed_in && network.connected && network.validated != Some(false);
         let network_label = settings.network_transports.iter().find(|definition| definition.transport == network.transport).map(|definition| definition.label.as_str()).unwrap_or("Network unknown");
         let network_description = format!(
             "{}: {network_label}{}{} · {}",
@@ -249,18 +247,6 @@ impl Render for SettingsPage {
             .child(components::browser_settings_font_row(settings.interface_font_label.clone(), interface_fonts, theme))
             .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme))
             .child(transfer_policy);
-
-        if server_connected {
-            let unavailable_entity = entity.clone();
-            sections = sections.child(components::browser_settings_fieldset(settings.library_section_label.clone(), theme).child(components::browser_settings_row(
-                settings.show_unavailable_books_label.clone(),
-                "Include server books whose local file is currently unavailable.",
-                Switch::new("show-unavailable-books").checked(preferences.show_unavailable_books()).on_click(move |enabled, _, cx| {
-                    unavailable_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::ShowUnavailableBooks(*enabled), cx));
-                }),
-                theme,
-            )));
-        }
 
         if let Some(updater) = self.services.desktop_updater.as_ref() {
             let current_version = updater.current_version().to_owned();

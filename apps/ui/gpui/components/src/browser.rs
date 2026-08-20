@@ -1,12 +1,12 @@
 use gpui::prelude::*;
-use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui::{div, px, Div, ElementId, FontWeight, SharedString, Stateful};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::radio::Radio;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BrowserTheme, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable,
-    ScrollableElement, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
+    BrowserTheme, Scrollable, ScrollableElement, CONTENT_PADDING, RADIUS_MD, RADIUS_SM, SETTINGS_CHOICE_SEGMENT_WIDTH, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HORIZONTAL_PADDING, TOPBAR_HEIGHT,
 };
 
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -178,31 +178,15 @@ pub fn library_switcher_panel() -> Div {
 }
 
 pub fn library_switcher_overlay() -> Div {
-    div().absolute().inset_0().size_full().occlude().flex().items_center().justify_center().p(px(SPACE_XL))
+    crate::modal_overlay().occlude()
 }
 
 pub fn library_switcher_scrim(theme: BrowserTheme) -> Stateful<Div> {
-    div().id("library-switcher-scrim").absolute().inset_0().size_full().occlude().bg(theme.overlay_scrim).cursor_default()
+    crate::modal_scrim("library-switcher-scrim", theme)
 }
 
 pub fn library_switcher_dialog(theme: BrowserTheme) -> Scrollable<Div> {
-    div()
-        .relative()
-        .w(px(328.0))
-        .max_w_full()
-        .h_auto()
-        .max_h_full()
-        .occlude()
-        .overflow_y_scrollbar()
-        .pt(px(SPACE_LG))
-        .pr(px(SPACE_LG))
-        .pb(px(SPACE_LG))
-        .pl(px(SPACE_LG - SPACE_SM))
-        .rounded(px(RADIUS_MD))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface)
-        .shadow(crate::overlay_shadow(theme))
+    crate::modal_surface(theme).w(px(328.0)).max_w_full().h_auto().max_h_full().overflow_y_scrollbar().pt(px(SPACE_LG)).pr(px(SPACE_LG)).pb(px(SPACE_LG)).pl(px(SPACE_LG - SPACE_SM))
 }
 
 pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -210,7 +194,7 @@ pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserThe
 }
 
 pub fn library_switcher_add_button(theme: BrowserTheme) -> Button {
-    Button::new("library-switcher-add").icon(IconName::Plus).secondary().outline().small().w(px(40.0)).h(px(40.0)).border_color(theme.border).bg(theme.surface).tooltip("Add library")
+    crate::outlined_icon_button("library-switcher-add", "Add library", IconName::Plus, px(40.0), RADIUS_MD, theme).small().bg(theme.surface)
 }
 
 pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
@@ -235,20 +219,15 @@ pub fn library_switcher_row(library: impl IntoElement, delete: impl IntoElement)
 
 pub fn library_switcher_delete_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let label = label.into();
-    Button::new(id).icon(navigation_icon(app_contract::NavigationIcon::Trash2)).secondary().outline().small().flex_none().w(px(40.0)).h(px(40.0)).border_color(theme.border).bg(theme.surface).tooltip(format!("Delete {label}"))
+    crate::outlined_icon_button(id, format!("Delete {label}"), navigation_icon(app_contract::NavigationIcon::Trash2), px(40.0), RADIUS_MD, theme).small().flex_none().bg(theme.surface)
 }
 
 pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    browser_action_button_base(id, label, icon, theme).h(px(TOPBAR_ACTION_HEIGHT)).px(px(TOPBAR_ACTION_HORIZONTAL_PADDING)).rounded(px(RADIUS_MD))
+    crate::outlined_action_button(id, label, icon, theme).h(px(TOPBAR_ACTION_HEIGHT)).px(px(TOPBAR_ACTION_HORIZONTAL_PADDING)).rounded(px(RADIUS_MD))
 }
 
 pub fn topbar_icon_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    Button::new(id).icon(icon).secondary().outline().border_color(theme.border).text_color(theme.accent).w(px(TOPBAR_ACTION_HEIGHT)).h(px(TOPBAR_ACTION_HEIGHT)).rounded(px(RADIUS_MD)).tooltip(label)
-}
-
-fn browser_action_button_base(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id).label(label).icon(icon).secondary().outline().border_color(theme.border).text_color(theme.accent).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
+    crate::outlined_icon_button(id, label, icon, px(TOPBAR_ACTION_HEIGHT), RADIUS_MD, theme).text_color(theme.accent)
 }
 
 pub fn browser_settings_page() -> Scrollable<Div> {

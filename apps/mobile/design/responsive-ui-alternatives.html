@@ -2,12 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
     <title>Bokheim responsive UI alternatives</title>
     <style>
       :root {
         color-scheme: light;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
         color: #282621;
         background: #e9e5dc;
         font-synthesis: none;
@@ -632,11 +642,16 @@
       <p class="eyebrow">Static responsive sketches</p>
       <h1>Three shells for the same Bokheim UI</h1>
       <p class="intro">
-        These frames contain only structural placeholders. They compare how navigation, browsing space, and optional detail areas adapt from phone to tablet and wide web layouts.
+        These frames contain only structural placeholders. They compare how navigation,
+        browsing space, and optional detail areas adapt from phone to tablet and wide web
+        layouts.
       </p>
     </header>
 
-    <nav class="jump-links" aria-label="Sketch alternatives">
+    <nav
+      class="jump-links"
+      aria-label="Sketch alternatives"
+    >
       <a href="#adaptive">A · Adaptive navigation</a>
       <a href="#canvas">B · Content canvas</a>
       <a href="#master-detail">C · Master detail</a>
@@ -644,56 +659,132 @@
     </nav>
 
     <main>
-      <section class="concept recommended" id="adaptive">
+      <section
+        class="concept recommended"
+        id="adaptive"
+      >
         <header class="concept-heading">
           <div>
             <h2>A. Adaptive navigation shell</h2>
-            <p>One information architecture expressed as phone tabs, a tablet rail, and a desktop sidebar. This is the strongest starting point because the components and navigation model stay shared.</p>
+            <p>
+              One information architecture expressed as phone tabs, a tablet rail, and a
+              desktop sidebar. This is the strongest starting point because the components
+              and navigation model stay shared.
+            </p>
           </div>
           <span class="badge">Recommended start</span>
         </header>
 
         <div class="device-grid">
           <div class="device-column">
-            <div class="device-label"><span>Phone</span><small>bottom navigation</small></div>
+            <div class="device-label">
+              <span>Phone</span><small>bottom navigation</small>
+            </div>
             <div class="device phone">
               <div class="screen a-phone">
-                <header class="topbar region" data-region="Header">
+                <header
+                  class="topbar region"
+                  data-region="Header"
+                >
                   <span class="brand-dot"></span>
-                  <span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span>
+                  <span class="title-stack"
+                    ><i class="line dark medium"></i><i class="line short"></i
+                  ></span>
                   <span class="nav-dot"></span>
                 </header>
-                <section class="canvas region" data-region="Browse">
+                <section
+                  class="canvas region"
+                  data-region="Browse"
+                >
                   <div class="search-box"></div>
-                  <div class="section-lines" style="margin-top: 18px"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <div
+                    class="section-lines"
+                    style="margin-top: 18px"
+                  >
+                    <i class="line dark medium"></i><i class="line short"></i>
+                  </div>
                   <div class="cover-grid">
-                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i><i class="line short"></i></div>
-                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i><i class="line medium"></i></div>
-                    <div class="book-placeholder"><span class="cover"></span><i class="line"></i><i class="line short"></i></div>
-                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i><i class="line medium"></i></div>
+                    <div class="book-placeholder">
+                      <span class="cover warm"></span><i class="line"></i
+                      ><i class="line short"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover alt"></span><i class="line"></i
+                      ><i class="line medium"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover"></span><i class="line"></i
+                      ><i class="line short"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover warm"></span><i class="line"></i
+                      ><i class="line medium"></i>
+                    </div>
                   </div>
                 </section>
-                <nav class="bottom-nav region" data-region="Tabs"><span></span><span></span><span></span><span></span></nav>
+                <nav
+                  class="bottom-nav region"
+                  data-region="Tabs"
+                >
+                  <span></span><span></span><span></span><span></span>
+                </nav>
               </div>
             </div>
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Tablet</span><small>navigation rail</small></div>
+            <div class="device-label">
+              <span>Tablet</span><small>navigation rail</small>
+            </div>
             <div class="device tablet">
               <div class="screen a-tablet">
-                <nav class="rail region" data-region="Rail"><span class="brand-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span><span class="nav-dot"></span></nav>
+                <nav
+                  class="rail region"
+                  data-region="Rail"
+                >
+                  <span class="brand-dot"></span><span class="nav-dot"></span
+                  ><span class="nav-dot"></span><span class="nav-dot"></span
+                  ><span class="nav-dot"></span>
+                </nav>
                 <div class="app-main">
-                  <header class="topbar region" data-region="Header"><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="search-box" style="width: 42%"></span><span class="nav-dot"></span></header>
-                  <section class="canvas region" data-region="Browse grid">
-                    <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <header
+                    class="topbar region"
+                    data-region="Header"
+                  >
+                    <span class="title-stack"
+                      ><i class="line dark medium"></i><i class="line short"></i></span
+                    ><span
+                      class="search-box"
+                      style="width: 42%"
+                    ></span
+                    ><span class="nav-dot"></span>
+                  </header>
+                  <section
+                    class="canvas region"
+                    data-region="Browse grid"
+                  >
+                    <div class="section-lines">
+                      <i class="line dark medium"></i><i class="line short"></i>
+                    </div>
                     <div class="cover-grid">
-                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                      <div class="book-placeholder">
+                        <span class="cover warm"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover alt"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover alt"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover warm"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover"></span><i class="line"></i>
+                      </div>
                     </div>
                   </section>
                 </div>
@@ -702,50 +793,122 @@
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Wide web</span><small>sidebar + optional context</small></div>
+            <div class="device-label">
+              <span>Wide web</span><small>sidebar + optional context</small>
+            </div>
             <div class="device desktop">
               <div class="screen a-desktop">
-                <nav class="sidebar region" data-region="Sidebar"><span class="brand-dot"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span></nav>
+                <nav
+                  class="sidebar region"
+                  data-region="Sidebar"
+                >
+                  <span class="brand-dot"></span><span class="nav-row"></span
+                  ><span class="nav-row"></span><span class="nav-row"></span
+                  ><span class="nav-row"></span>
+                </nav>
                 <div class="app-main">
-                  <header class="topbar region" data-region="Toolbar"><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="search-box" style="width: 46%"></span><span class="nav-dot"></span></header>
-                  <section class="canvas region" data-region="Browse grid">
-                    <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <header
+                    class="topbar region"
+                    data-region="Toolbar"
+                  >
+                    <span class="title-stack"
+                      ><i class="line dark medium"></i><i class="line short"></i></span
+                    ><span
+                      class="search-box"
+                      style="width: 46%"
+                    ></span
+                    ><span class="nav-dot"></span>
+                  </header>
+                  <section
+                    class="canvas region"
+                    data-region="Browse grid"
+                  >
+                    <div class="section-lines">
+                      <i class="line dark medium"></i><i class="line short"></i>
+                    </div>
                     <div class="cover-grid">
-                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
-                      <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                      <div class="book-placeholder">
+                        <span class="cover warm"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover alt"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover"></span><i class="line"></i>
+                      </div>
+                      <div class="book-placeholder">
+                        <span class="cover warm"></span><i class="line"></i>
+                      </div>
                     </div>
                   </section>
                 </div>
-                <aside class="side-panel region" data-region="Context"><div class="detail-block"><i class="line dark"></i><i class="line"></i><i class="line medium"></i></div><div class="detail-block"><i class="line dark medium"></i><i class="line"></i><i class="line"></i></div></aside>
+                <aside
+                  class="side-panel region"
+                  data-region="Context"
+                >
+                  <div class="detail-block">
+                    <i class="line dark"></i><i class="line"></i
+                    ><i class="line medium"></i>
+                  </div>
+                  <div class="detail-block">
+                    <i class="line dark medium"></i><i class="line"></i
+                    ><i class="line"></i>
+                  </div>
+                </aside>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="concept" id="canvas">
+      <section
+        class="concept"
+        id="canvas"
+      >
         <header class="concept-heading">
           <div>
             <h2>B. Content-first canvas</h2>
-            <p>Navigation stays in a compact top bar while recommendations and collections dominate the screen. It feels editorial and calm, but deep library navigation is less immediately visible.</p>
+            <p>
+              Navigation stays in a compact top bar while recommendations and collections
+              dominate the screen. It feels editorial and calm, but deep library
+              navigation is less immediately visible.
+            </p>
           </div>
         </header>
 
         <div class="device-grid">
           <div class="device-column">
-            <div class="device-label"><span>Phone</span><small>editorial feed</small></div>
+            <div class="device-label">
+              <span>Phone</span><small>editorial feed</small>
+            </div>
             <div class="device phone">
               <div class="screen b-phone">
-                <header class="topbar region" data-region="Compact header"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i></span><span class="nav-dot"></span></header>
-                <section class="canvas region" data-region="Content canvas">
+                <header
+                  class="topbar region"
+                  data-region="Compact header"
+                >
+                  <span class="brand-dot"></span
+                  ><span class="title-stack"><i class="line dark medium"></i></span
+                  ><span class="nav-dot"></span>
+                </header>
+                <section
+                  class="canvas region"
+                  data-region="Content canvas"
+                >
                   <div class="hero-placeholder"></div>
-                  <div class="category-row"><span></span><span></span><span></span><span></span></div>
-                  <div class="section-lines"><i class="line dark medium"></i><i class="line short"></i></div>
+                  <div class="category-row">
+                    <span></span><span></span><span></span><span></span>
+                  </div>
+                  <div class="section-lines">
+                    <i class="line dark medium"></i><i class="line short"></i>
+                  </div>
                   <div class="cover-grid">
-                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
-                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
+                    <div class="book-placeholder">
+                      <span class="cover alt"></span><i class="line"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover warm"></span><i class="line"></i>
+                    </div>
                   </div>
                 </section>
               </div>
@@ -753,17 +916,43 @@
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Tablet</span><small>top navigation</small></div>
+            <div class="device-label">
+              <span>Tablet</span><small>top navigation</small>
+            </div>
             <div class="device tablet">
               <div class="screen b-tablet">
-                <header class="topbar region" data-region="Top navigation"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i></span><span class="top-links"><span></span><span></span><span></span></span></header>
-                <section class="canvas region" data-region="Centered canvas">
-                  <div class="hero-placeholder" style="min-height: 138px"></div>
-                  <div class="category-row" style="margin: 14px 0"><span></span><span></span><span></span><span></span></div>
+                <header
+                  class="topbar region"
+                  data-region="Top navigation"
+                >
+                  <span class="brand-dot"></span
+                  ><span class="title-stack"><i class="line dark medium"></i></span
+                  ><span class="top-links"><span></span><span></span><span></span></span>
+                </header>
+                <section
+                  class="canvas region"
+                  data-region="Centered canvas"
+                >
+                  <div
+                    class="hero-placeholder"
+                    style="min-height: 138px"
+                  ></div>
+                  <div
+                    class="category-row"
+                    style="margin: 14px 0"
+                  >
+                    <span></span><span></span><span></span><span></span>
+                  </div>
                   <div class="cover-grid">
-                    <div class="book-placeholder"><span class="cover warm"></span><i class="line"></i></div>
-                    <div class="book-placeholder"><span class="cover alt"></span><i class="line"></i></div>
-                    <div class="book-placeholder"><span class="cover"></span><i class="line"></i></div>
+                    <div class="book-placeholder">
+                      <span class="cover warm"></span><i class="line"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover alt"></span><i class="line"></i>
+                    </div>
+                    <div class="book-placeholder">
+                      <span class="cover"></span><i class="line"></i>
+                    </div>
                   </div>
                 </section>
               </div>
@@ -771,13 +960,41 @@
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Wide web</span><small>centered editorial surface</small></div>
+            <div class="device-label">
+              <span>Wide web</span><small>centered editorial surface</small>
+            </div>
             <div class="device desktop">
               <div class="screen b-desktop">
-                <header class="topbar region" data-region="Top navigation"><span class="brand-dot"></span><span class="title-stack" style="max-width: 160px"><i class="line dark medium"></i></span><span class="top-links"><span></span><span></span><span></span><span></span></span><span class="search-box" style="width: 210px"></span></header>
-                <section class="canvas region" data-region="Centered canvas">
-                  <div class="hero-placeholder" style="min-height: 142px"></div>
-                  <div class="section-lines" style="margin-top: 16px"><i class="line dark medium"></i><i class="line short"></i></div>
+                <header
+                  class="topbar region"
+                  data-region="Top navigation"
+                >
+                  <span class="brand-dot"></span
+                  ><span
+                    class="title-stack"
+                    style="max-width: 160px"
+                    ><i class="line dark medium"></i></span
+                  ><span class="top-links"
+                    ><span></span><span></span><span></span><span></span></span
+                  ><span
+                    class="search-box"
+                    style="width: 210px"
+                  ></span>
+                </header>
+                <section
+                  class="canvas region"
+                  data-region="Centered canvas"
+                >
+                  <div
+                    class="hero-placeholder"
+                    style="min-height: 142px"
+                  ></div>
+                  <div
+                    class="section-lines"
+                    style="margin-top: 16px"
+                  >
+                    <i class="line dark medium"></i><i class="line short"></i>
+                  </div>
                   <div class="cover-grid">
                     <div class="book-placeholder"><span class="cover warm"></span></div>
                     <div class="book-placeholder"><span class="cover alt"></span></div>
@@ -792,77 +1009,214 @@
         </div>
       </section>
 
-      <section class="concept" id="master-detail">
+      <section
+        class="concept"
+        id="master-detail"
+      >
         <header class="concept-heading">
           <div>
             <h2>C. Library master-detail</h2>
-            <p>Browsing is list-oriented and larger screens gain a persistent preview pane. This handles large, deeply organized libraries well, but feels denser and less cover-focused on phones.</p>
+            <p>
+              Browsing is list-oriented and larger screens gain a persistent preview pane.
+              This handles large, deeply organized libraries well, but feels denser and
+              less cover-focused on phones.
+            </p>
           </div>
         </header>
 
         <div class="device-grid">
           <div class="device-column">
-            <div class="device-label"><span>Phone</span><small>stacked list screens</small></div>
+            <div class="device-label">
+              <span>Phone</span><small>stacked list screens</small>
+            </div>
             <div class="device phone">
               <div class="screen c-phone">
-                <header class="topbar region" data-region="Header"><span class="brand-dot"></span><span class="title-stack"><i class="line dark medium"></i><i class="line short"></i></span><span class="nav-dot"></span></header>
-                <section class="list-stack region" data-region="Library list">
+                <header
+                  class="topbar region"
+                  data-region="Header"
+                >
+                  <span class="brand-dot"></span
+                  ><span class="title-stack"
+                    ><i class="line dark medium"></i><i class="line short"></i></span
+                  ><span class="nav-dot"></span>
+                </header>
+                <section
+                  class="list-stack region"
+                  data-region="Library list"
+                >
                   <div class="search-box"></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line short"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line short"></i></span
+                    ><i class="line"></i>
+                  </div>
                 </section>
               </div>
             </div>
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Tablet</span><small>list + preview</small></div>
+            <div class="device-label">
+              <span>Tablet</span><small>list + preview</small>
+            </div>
             <div class="device tablet">
               <div class="screen c-tablet">
-                <section class="list-stack region" data-region="Browse list">
+                <section
+                  class="list-stack region"
+                  data-region="Browse list"
+                >
                   <div class="search-box"></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line short"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
                 </section>
-                <section class="preview region" data-region="Book preview"><span class="cover warm"></span><div class="preview-copy"><i class="line dark"></i><i class="line medium"></i><i class="line"></i><i class="line short"></i></div><span class="action-placeholder"></span></section>
+                <section
+                  class="preview region"
+                  data-region="Book preview"
+                >
+                  <span class="cover warm"></span>
+                  <div class="preview-copy">
+                    <i class="line dark"></i><i class="line medium"></i
+                    ><i class="line"></i><i class="line short"></i>
+                  </div>
+                  <span class="action-placeholder"></span>
+                </section>
               </div>
             </div>
           </div>
 
           <div class="device-column">
-            <div class="device-label"><span>Wide web</span><small>three-pane workspace</small></div>
+            <div class="device-label">
+              <span>Wide web</span><small>three-pane workspace</small>
+            </div>
             <div class="device desktop">
               <div class="screen c-desktop">
-                <nav class="sidebar region" data-region="Navigation"><span class="brand-dot"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span><span class="nav-row"></span></nav>
-                <section class="list-stack region" data-region="Browse list">
+                <nav
+                  class="sidebar region"
+                  data-region="Navigation"
+                >
+                  <span class="brand-dot"></span><span class="nav-row"></span
+                  ><span class="nav-row"></span><span class="nav-row"></span
+                  ><span class="nav-row"></span>
+                </nav>
+                <section
+                  class="list-stack region"
+                  data-region="Browse list"
+                >
                   <div class="search-box"></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line medium"></i></span><i class="line"></i></div>
-                  <div class="list-row"><span class="thumb"></span><span class="row-copy"><i class="line dark"></i><i class="line short"></i></span><i class="line"></i></div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line short"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line medium"></i></span
+                    ><i class="line"></i>
+                  </div>
+                  <div class="list-row">
+                    <span class="thumb"></span
+                    ><span class="row-copy"
+                      ><i class="line dark"></i><i class="line short"></i></span
+                    ><i class="line"></i>
+                  </div>
                 </section>
-                <section class="preview region" data-region="Book preview"><span class="cover alt"></span><div class="preview-copy"><i class="line dark"></i><i class="line medium"></i><i class="line"></i><i class="line"></i><i class="line short"></i></div><span class="action-placeholder"></span></section>
+                <section
+                  class="preview region"
+                  data-region="Book preview"
+                >
+                  <span class="cover alt"></span>
+                  <div class="preview-copy">
+                    <i class="line dark"></i><i class="line medium"></i
+                    ><i class="line"></i><i class="line"></i><i class="line short"></i>
+                  </div>
+                  <span class="action-placeholder"></span>
+                </section>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="comparison" id="comparison" aria-label="Alternative comparison">
+      <section
+        class="comparison"
+        id="comparison"
+        aria-label="Alternative comparison"
+      >
         <article>
           <h2>A. Adaptive navigation</h2>
-          <dl><dt>Strength</dt><dd>Best cross-device continuity</dd><dt>Tablet</dt><dd>Excellent use of space</dd><dt>Complexity</dt><dd>Moderate</dd></dl>
+          <dl>
+            <dt>Strength</dt>
+            <dd>Best cross-device continuity</dd>
+            <dt>Tablet</dt>
+            <dd>Excellent use of space</dd>
+            <dt>Complexity</dt>
+            <dd>Moderate</dd>
+          </dl>
         </article>
         <article>
           <h2>B. Content canvas</h2>
-          <dl><dt>Strength</dt><dd>Calm and editorial</dd><dt>Tablet</dt><dd>Good, but less structured</dd><dt>Complexity</dt><dd>Lowest</dd></dl>
+          <dl>
+            <dt>Strength</dt>
+            <dd>Calm and editorial</dd>
+            <dt>Tablet</dt>
+            <dd>Good, but less structured</dd>
+            <dt>Complexity</dt>
+            <dd>Lowest</dd>
+          </dl>
         </article>
         <article>
           <h2>C. Master detail</h2>
-          <dl><dt>Strength</dt><dd>Powerful for large libraries</dd><dt>Tablet</dt><dd>Strong preview workflow</dd><dt>Complexity</dt><dd>Highest</dd></dl>
+          <dl>
+            <dt>Strength</dt>
+            <dd>Powerful for large libraries</dd>
+            <dt>Tablet</dt>
+            <dd>Strong preview workflow</dd>
+            <dt>Complexity</dt>
+            <dd>Highest</dd>
+          </dl>
         </article>
       </section>
     </main>

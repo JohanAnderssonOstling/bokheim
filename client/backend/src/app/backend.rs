@@ -1,18 +1,18 @@
 use super::data::{AppDataLocation, BackendContext, LibraryEntry};
 use super::executor::{BackendExecutor, BackendTask};
 use super::librarything::LibraryThingClient;
-use super::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
+use super::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences};
 use crate::catalog::{
     CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationKey, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSource,
     CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogWideSearchResult,
 };
-use crate::library::database as db;
 use crate::library::BookImportDestination;
+use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
 use crate::sync::{AssetSync, ReadingPositionSync, SyncPolicy};
 use crate::{AuthorId, ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
 use catalog_client::CatalogClient;
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 use metadata_client::MetadataClient;
 use serde::Serialize;
 use specta::Type;
@@ -96,7 +96,7 @@ pub struct AccountSessionSummary {
 }
 
 #[derive(Clone, Debug, Serialize, Type)]
-pub struct LibraryCatalogueState {
+pub struct LibraryListState {
     pub libraries: Vec<LibraryEntry>,
     pub sync_statuses: Vec<LibrarySyncStatus>,
 }
@@ -158,8 +158,9 @@ pub(crate) struct AppState {
     active_library: Mutex<Option<LibraryBackend>>,
     open_libraries: Mutex<HashMap<LibraryId, LibraryBackend>>,
     library_scanning_enabled: AtomicBool,
-    catalogue_updates: Mutex<()>,
+    library_list_updates: Mutex<()>,
     preference_updates: Mutex<()>,
+    browser_session_updates: Mutex<()>,
     account: Mutex<Option<crate::auth::Session>>,
     account_refresh: tokio::sync::Mutex<()>,
     catalogs: CatalogClient,
@@ -184,7 +185,7 @@ struct LibrarySyncWork {
 #[derive(Clone, Debug, Default)]
 struct PendingSyncWork {
     full_reconcile: bool,
-    catalogue: bool,
+    library_list: bool,
     libraries: HashMap<LibraryId, LibrarySyncWork>,
     reading_positions: HashMap<LibraryId, Instant>,
 }
@@ -200,7 +201,7 @@ impl PendingSyncWork {
     }
 
     fn take_ready(&mut self, now: Instant) -> PendingSyncWork {
-        let mut ready = PendingSyncWork { full_reconcile: std::mem::take(&mut self.full_reconcile), catalogue: std::mem::take(&mut self.catalogue), libraries: std::mem::take(&mut self.libraries), reading_positions: HashMap::new() };
+        let mut ready = PendingSyncWork { full_reconcile: std::mem::take(&mut self.full_reconcile), library_list: std::mem::take(&mut self.library_list), libraries: std::mem::take(&mut self.libraries), reading_positions: HashMap::new() };
         self.reading_positions.retain(|library_id, deadline| {
             if *deadline > now {
                 return true;
@@ -217,7 +218,7 @@ impl PendingSyncWork {
 
     fn merge(&mut self, other: PendingSyncWork) {
         self.full_reconcile |= other.full_reconcile;
-        self.catalogue |= other.catalogue;
+        self.library_list |= other.library_list;
         for (library_id, work) in other.libraries {
             self.library(library_id, work.assets);
         }
@@ -349,7 +350,7 @@ async fn run_notification_stream(state: Weak<AppState>, stop: Arc<AtomicBool>) {
             match notification {
                 NotificationMessage::Hello { .. } => {}
                 NotificationMessage::LibraryChanged { library_id } => core.request_library_sync(library_id, false),
-                NotificationMessage::CatalogueChanged => core.request_catalogue_sync(),
+                NotificationMessage::LibrariesChanged => core.request_library_list_sync(),
                 NotificationMessage::Reconcile => core.request_background_sync(),
             }
         }
@@ -421,8 +422,8 @@ impl AppBackend {
         let _ = self.state.sync_wake_tx.try_send(());
     }
 
-    fn request_catalogue_sync(&self) {
-        self.state.pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).catalogue = true;
+    fn request_library_list_sync(&self) {
+        self.state.pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library_list = true;
         let _ = self.state.sync_wake_tx.try_send(());
     }
 
@@ -470,15 +471,12 @@ impl AppBackend {
             }
         }
         let resume_sync = account.is_some();
-        let transfer_preferences = backend.load_transfer_preferences().map_err(BackendError::operation)?;
         let browsing_preferences = backend.load_browsing_preferences().map_err(BackendError::operation)?;
         let catalogs = CatalogClient::with_persistent_cache(crate::catalog_server_url().as_str(), backend.app_data_dir()).map_err(BackendError::operation)?;
         let metadata = MetadataClient::new(crate::metadata_server_url().as_str()).map_err(BackendError::operation)?;
         let taxonomy = TaxonomyClient::new(crate::taxonomy_server_url().as_str()).map_err(BackendError::operation)?;
         let librarything = LibraryThingClient::from_environment().map_err(BackendError::operation)?;
         catalogs.set_supported_languages(browsing_preferences.included_catalog_languages()).map_err(BackendError::operation)?;
-        backend.transfer_runtime().set_allow_background_on_metered(transfer_preferences.allow_background_on_metered());
-        backend.transfer_runtime().set_auto_download_limit_mb(transfer_preferences.auto_download_limit_mb());
         let core = Self {
             state: Arc::new(AppState {
                 executor,
@@ -486,8 +484,9 @@ impl AppBackend {
                 active_library: Mutex::new(None),
                 open_libraries: Mutex::new(HashMap::new()),
                 library_scanning_enabled: AtomicBool::new(library_scanning_enabled),
-                catalogue_updates: Mutex::new(()),
+                library_list_updates: Mutex::new(()),
                 preference_updates: Mutex::new(()),
+                browser_session_updates: Mutex::new(()),
                 account: Mutex::new(account),
                 account_refresh: tokio::sync::Mutex::new(()),
                 catalogs,
@@ -535,7 +534,7 @@ impl AppBackend {
 
     pub fn create_library(&self, name: String, root: Option<PathBuf>) -> Result<LibraryEntry, BackendError> {
         let entry = {
-            let _guard = self.lock(&self.state.catalogue_updates)?;
+            let _guard = self.lock(&self.state.library_list_updates)?;
             self.state.backend.create_library(name, root).map_err(BackendError::operation)?
         };
         if self.lock(&self.state.active_library)?.as_ref().is_some_and(|library| library.id() == entry.library_id()) {
@@ -552,7 +551,7 @@ impl AppBackend {
     }
 
     pub fn remove_library_from_device(&self, library_id: &LibraryId) -> Result<(), BackendError> {
-        let _guard = self.lock(&self.state.catalogue_updates)?;
+        let _guard = self.lock(&self.state.library_list_updates)?;
         let entry = self.library_entry(library_id)?;
         if self.lock(&self.state.active_library)?.as_ref().is_some_and(|library| library.id() == library_id) {
             *self.lock(&self.state.active_library)? = None;
@@ -1060,7 +1059,7 @@ impl AppBackend {
     }
 
     pub async fn bootstrap_remote_libraries(&self) -> Result<Vec<LibraryEntry>, BackendError> {
-        self.reconcile_library_catalogue().await?;
+        self.reconcile_libraries().await?;
         let session = self.require_account()?;
         self.enroll_default_libraries(&session)?;
         let mut attached = Vec::new();
@@ -1073,17 +1072,17 @@ impl AppBackend {
         Ok(attached)
     }
 
-    pub async fn reconcile_library_catalogue(&self) -> Result<LibraryCatalogueState, BackendError> {
+    pub async fn reconcile_libraries(&self) -> Result<LibraryListState, BackendError> {
         let Some(_) = self.current_account()? else {
-            return self.catalogue_state(None, None);
+            return self.library_list_state(None, None);
         };
         self.flush_pending_library_deletions().await?;
         let deleted = self.authenticated_request(|session| Box::pin(crate::auth::list_deleted_libraries(session))).await?;
         self.apply_remote_library_deletions(&deleted.library_ids)?;
         let remote = self.authenticated_request(|session| Box::pin(crate::auth::list_libraries(session))).await?;
         let session = self.require_account()?;
-        let remote_ids = self.attach_remote_catalogue(&remote)?;
-        self.catalogue_state(Some(&session), Some(&remote_ids))
+        let remote_ids = self.attach_remote_libraries(&remote)?;
+        self.library_list_state(Some(&session), Some(&remote_ids))
     }
 
     async fn flush_pending_library_deletions(&self) -> Result<(), BackendError> {
@@ -1103,9 +1102,9 @@ impl AppBackend {
         Ok(())
     }
 
-    fn attach_remote_catalogue(&self, remote: &[sync_common::api::libraries::LibrarySummary]) -> Result<std::collections::HashSet<LibraryId>, BackendError> {
+    fn attach_remote_libraries(&self, remote: &[sync_common::api::libraries::LibrarySummary]) -> Result<std::collections::HashSet<LibraryId>, BackendError> {
         let existing = self.state.backend.try_get_library_entries().map_err(BackendError::operation)?.into_iter().map(|entry| (*entry.library_id(), entry.library_name().to_owned())).collect::<HashMap<_, _>>();
-        let _guard = self.lock(&self.state.catalogue_updates)?;
+        let _guard = self.lock(&self.state.library_list_updates)?;
         let mut remote_ids = std::collections::HashSet::with_capacity(remote.len());
         let mut changed_library_id = None;
         for library in remote {
@@ -1116,19 +1115,19 @@ impl AppBackend {
             if existing.get(&library.library_id).map(String::as_str) != Some(library.library_name.as_str()) {
                 changed_library_id.get_or_insert(library.library_id);
             }
-            // Catalogue reconciliation updates registry metadata only. A live
+            // Library-list reconciliation updates registry metadata only. A live
             // Library owns expensive shared resources (pool, scanner, sync manager,
             // event forwarding) and must survive metadata refreshes unchanged.
             self.state.backend.attach_remote_library(&library.library_id, &library.library_name).map_err(BackendError::operation)?;
         }
         drop(_guard);
         if let Some(library_id) = changed_library_id {
-            let _ = self.state.event_tx.send(AppEvent { library_id, event: LibraryEvent::CatalogueChanged });
+            let _ = self.state.event_tx.send(AppEvent { library_id, event: LibraryEvent::LibraryListChanged });
         }
         Ok(remote_ids)
     }
 
-    fn catalogue_state(&self, session: Option<&crate::auth::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryCatalogueState, BackendError> {
+    fn library_list_state(&self, session: Option<&crate::auth::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
         let libraries = self.libraries()?;
         let sync_statuses = libraries
             .iter()
@@ -1161,7 +1160,7 @@ impl AppBackend {
                 })
             })
             .collect::<Result<Vec<_>, BackendError>>()?;
-        Ok(LibraryCatalogueState { libraries, sync_statuses })
+        Ok(LibraryListState { libraries, sync_statuses })
     }
 
     pub async fn sync_all_libraries(&self) -> Result<(), BackendError> {
@@ -1211,7 +1210,7 @@ impl AppBackend {
             None
         };
         let session = self.current_account()?;
-        Ok(self.catalogue_state(session.as_ref(), remote.as_ref())?.sync_statuses)
+        Ok(self.library_list_state(session.as_ref(), remote.as_ref())?.sync_statuses)
     }
 
     pub fn transfer_statuses(&self) -> Result<Vec<LibraryTransfers>, BackendError> {
@@ -1266,27 +1265,6 @@ impl AppBackend {
         Ok(self.network_status())
     }
 
-    pub fn transfer_preferences(&self) -> Result<TransferPreferences, BackendError> {
-        let _guard = self.lock(&self.state.preference_updates)?;
-        self.state.backend.load_transfer_preferences().map_err(BackendError::operation)
-    }
-
-    pub async fn update_transfer_preference(&self, patch: TransferPreferencePatch) -> Result<TransferPreferences, BackendError> {
-        let preferences = {
-            let _guard = self.lock(&self.state.preference_updates)?;
-            self.state.backend.apply_transfer_preference_patch(patch).map_err(BackendError::operation)?
-        };
-        let became_allowed = self.state.backend.transfer_runtime().set_allow_background_on_metered(preferences.allow_background_on_metered());
-        let auto_download_changed = self.state.backend.transfer_runtime().set_auto_download_limit_mb(preferences.auto_download_limit_mb());
-        if became_allowed {
-            self.resume_transfers().await?;
-        }
-        if auto_download_changed {
-            self.request_background_sync();
-        }
-        Ok(preferences)
-    }
-
     async fn resume_transfers(&self) -> Result<(), BackendError> {
         if self.lock(&self.state.account)?.is_none() {
             return Ok(());
@@ -1307,7 +1285,7 @@ impl AppBackend {
             pending.take_ready(Instant::now())
         };
         work.full_reconcile |= periodic;
-        if !work.full_reconcile && !work.catalogue && work.libraries.is_empty() {
+        if !work.full_reconcile && !work.library_list && work.libraries.is_empty() {
             return Ok(());
         }
         let retry = work.clone();
@@ -1320,22 +1298,22 @@ impl AppBackend {
 
     async fn execute_background_sync(&self, work: &PendingSyncWork) -> Result<(), BackendError> {
         let Some(_session) = self.refresh_account_if_needed().await? else { return Ok(()) };
-        if work.full_reconcile || work.catalogue {
-            self.reconcile_library_catalogue().await?;
+        if work.full_reconcile || work.library_list {
+            self.reconcile_libraries().await?;
         }
         let entries = self.libraries()?;
         let mut publish_failed = HashSet::new();
         if work.full_reconcile {
             // Advertise every library before starting potentially long-running
             // asset transfers, so another device never waits behind uploads to
-            // discover later libraries in this catalogue.
+            // discover libraries added later.
             for entry in &entries {
                 let library = self.library_handle(entry.library_id(), true)?;
                 if let Err(error) = self.publish_library(&library).await {
                     log::warn!("failed to publish {} during background synchronization: {error}", entry.library_name());
                     publish_failed.insert(*entry.library_id());
                     let mut pending = self.state.pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    pending.catalogue = true;
+                    pending.library_list = true;
                     pending.library(*entry.library_id(), true);
                 }
             }
@@ -1520,6 +1498,34 @@ impl AppBackend {
         self.state.backend.load_reader_preferences().map_err(BackendError::operation)
     }
 
+    pub fn browser_session(&self) -> Result<crate::BrowserSession, BackendError> {
+        let _guard = self.lock(&self.state.browser_session_updates)?;
+        self.state.backend.load_browser_session().map_err(BackendError::operation)
+    }
+
+    fn update_browser_session(&self, update: impl FnOnce(&mut crate::BrowserSession)) -> Result<(), BackendError> {
+        let _guard = self.lock(&self.state.browser_session_updates)?;
+        let mut session = self.state.backend.load_browser_session().map_err(BackendError::operation)?;
+        update(&mut session);
+        self.state.backend.save_browser_session(&session).map_err(BackendError::operation)
+    }
+
+    pub fn save_active_library_id(&self, library_id: Option<crate::LibraryId>) -> Result<(), BackendError> {
+        self.update_browser_session(|session| session.active_library_id = library_id)
+    }
+
+    pub fn save_library_folder_path(&self, library_id: crate::LibraryId, path: Vec<crate::library::LibraryFolderEntry>) -> Result<(), BackendError> {
+        self.update_browser_session(|session| session.places.entry(library_id).or_default().folder_path = path)
+    }
+
+    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<crate::library::LibrarySubjectEntry>) -> Result<(), BackendError> {
+        self.update_browser_session(|session| session.places.entry(library_id).or_default().subject_path = path)
+    }
+
+    pub fn retain_browser_session_libraries(&self, library_ids: &[crate::LibraryId]) -> Result<(), BackendError> {
+        self.update_browser_session(|session| session.places.retain(|library_id, _| library_ids.contains(library_id)))
+    }
+
     pub fn browsing_preferences(&self) -> Result<BrowsingPreferences, BackendError> {
         let _guard = self.lock(&self.state.preference_updates)?;
         self.state.backend.load_browsing_preferences().map_err(BackendError::operation)
@@ -1646,7 +1652,8 @@ impl AppBackend {
                     | LibraryEvent::FolderDownloadStatusChanged { .. }
                     | LibraryEvent::SubjectEnrichmentBatchProcessed { .. }
                     | LibraryEvent::TransferStatusChanged
-                    | LibraryEvent::CatalogueChanged => None,
+                    | LibraryEvent::LibraryListChanged
+                    | LibraryEvent::LibraryChanged => None,
                 };
                 if let Some(assets) = sync_assets {
                     pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id.clone(), assets);
@@ -1668,10 +1675,10 @@ impl AppBackend {
 mod tests {
     use super::super::preferences::{ApplicationTheme, BrowsingPreferencePatch, UiFontFamily};
     use super::*;
-    use lopdf::{dictionary, Document, Object, Stream};
+    use lopdf::{Document, Object, Stream, dictionary};
     use std::path::Path;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Barrier;
+    use std::sync::atomic::AtomicUsize;
     use test_support::fixture_library_id;
 
     fn write_test_pdf(path: &Path) {
@@ -1763,7 +1770,7 @@ mod tests {
         assert_eq!(pending.libraries.len(), 1);
         assert!(pending.libraries[&library].assets);
         assert!(!pending.full_reconcile);
-        assert!(!pending.catalogue);
+        assert!(!pending.library_list);
         assert!(pending.reading_positions.is_empty());
     }
 
@@ -1968,7 +1975,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_catalogue_updates_metadata_without_invalidating_live_handles() {
+    fn remote_library_list_updates_metadata_without_invalidating_live_handles() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let local = core.create_library("Local name".to_owned(), Some(root.path().join("library"))).unwrap();
@@ -1980,13 +1987,13 @@ mod tests {
             sync_common::api::libraries::LibrarySummary { library_id: remote_only_id.clone(), library_name: "Remote only".to_owned() },
         ];
 
-        let remote_ids = core.attach_remote_catalogue(&remote).unwrap();
-        let state = core.catalogue_state(Some(&session), Some(&remote_ids)).unwrap();
+        let remote_ids = core.attach_remote_libraries(&remote).unwrap();
+        let state = core.library_list_state(Some(&session), Some(&remote_ids)).unwrap();
         assert_eq!(state.libraries.len(), 2);
         assert!(state.sync_statuses.iter().all(|status| status.state == LibrarySyncState::Synced));
         assert_eq!(core.library_entry(local.library_id()).unwrap().library_name(), "Server name");
         assert_eq!(core.library_entry(&remote_only_id).unwrap().library_name(), "Remote only");
-        assert_eq!(open_library.id(), core.library(local.library_id()).unwrap().id(), "unchanged catalogue metadata must not rebuild the active library handle");
+        assert_eq!(open_library.id(), core.library(local.library_id()).unwrap().id(), "unchanged library metadata must not rebuild the active library handle");
     }
 
     #[test]
@@ -1999,13 +2006,13 @@ mod tests {
         let destination_path = root.path().join("destination");
         let destination = AppBackend::initialize(AppDataLocation::PlatformLocal(destination_path.clone())).unwrap();
         let events = destination.take_events().unwrap();
-        destination.attach_remote_catalogue(std::slice::from_ref(&advertisement)).unwrap();
+        destination.attach_remote_libraries(std::slice::from_ref(&advertisement)).unwrap();
         let event = events.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(event.library_id, advertisement.library_id);
-        assert!(matches!(event.event, LibraryEvent::CatalogueChanged));
+        assert!(matches!(event.event, LibraryEvent::LibraryListChanged));
         assert_eq!(destination.libraries().unwrap().iter().map(LibraryEntry::library_id).copied().collect::<Vec<_>>(), vec![advertisement.library_id]);
 
-        destination.attach_remote_catalogue(std::slice::from_ref(&advertisement)).unwrap();
+        destination.attach_remote_libraries(std::slice::from_ref(&advertisement)).unwrap();
         assert!(matches!(events.try_recv(), Err(crossbeam_channel::TryRecvError::Empty)));
         drop(destination);
 

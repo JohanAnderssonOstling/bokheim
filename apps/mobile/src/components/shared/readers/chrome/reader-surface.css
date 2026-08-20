@@ -1,0 +1,22 @@
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+}
+
+.reader-shell {
+  --chrome: var(--color-surface-bg);
+  --chrome-strong: var(--color-border);
+  --ink: var(--color-ink-text);
+  --accent: var(--color-accent);
+  width: 100%;
+  height: 100dvh;
+  position: relative;
+  color: var(--ink);
+  background: var(--color-surface-bg);
+}

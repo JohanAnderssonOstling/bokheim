@@ -308,12 +308,12 @@ mod tests {
     async fn account_channels_filter_origins_and_report_lag() {
         let hub = NotificationHub::new(NotificationConfig::default());
         let mut receiver = hub.subscribe("account-1").unwrap();
-        hub.publish("other-account", None, NotificationMessage::CatalogueChanged);
+        hub.publish("other-account", None, NotificationMessage::LibrariesChanged);
         assert!(receiver.receiver.try_recv().is_err());
-        hub.publish("account-1", Some(Arc::from("credential-a")), NotificationMessage::CatalogueChanged);
+        hub.publish("account-1", Some(Arc::from("credential-a")), NotificationMessage::LibrariesChanged);
         let event = receiver.recv().await.unwrap();
         assert_eq!(event.origin_credential.as_deref(), Some("credential-a"));
-        assert_eq!(event.message, NotificationMessage::CatalogueChanged);
+        assert_eq!(event.message, NotificationMessage::LibrariesChanged);
     }
 
     #[test]

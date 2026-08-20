@@ -27,6 +27,9 @@ pub use sync::blob::{BlobKey, BlobKind, TransferJobKind};
 pub use sync::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
 pub use sync_common::{ContentHash, DirId, LibraryId, ROOT_DIR_ID};
 
+pub type BrowserSession = app_contract::BrowserSession<LibraryId, library::LibraryFolderEntry, library::LibrarySubjectEntry>;
+pub type LibraryPlace = app_contract::LibraryPlace<library::LibraryFolderEntry, library::LibrarySubjectEntry>;
+
 /// Stable runtime identity for a book within one configured local library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BookLocator {

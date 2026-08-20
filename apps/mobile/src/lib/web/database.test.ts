@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getWebDatabase, getWebDatabaseHealth, initializeWebDatabase } from "./database.ts";
+import {
+  getWebDatabase,
+  getWebDatabaseHealth,
+  initializeWebDatabase,
+} from "./database.ts";
 
 test("SQLite WASM initializes and applies the web schema", async () => {
   const health = await getWebDatabaseHealth();
@@ -24,7 +28,12 @@ test("SQLite WASM initializes and applies the web schema", async () => {
     rowMode: "array",
     returnValue: "resultRows",
   });
-  assert.deepEqual(bookColumns, [["bytes", 0], ["cover_bytes", 0], ["description", 1], ["storage_key", 0]]);
+  assert.deepEqual(bookColumns, [
+    ["bytes", 0],
+    ["cover_bytes", 0],
+    ["description", 1],
+    ["storage_key", 0],
+  ]);
 
   const trashTables = db.exec({
     sql: "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('web_trash_books', 'web_trash_folders') ORDER BY name",
@@ -60,7 +69,11 @@ test("SQLite WASM initializes and applies the web schema", async () => {
     rowMode: 0,
     returnValue: "resultRows",
   });
-  assert.deepEqual(richMetadataTables, ["web_book_external_entities", "web_external_entities", "web_external_place_edges"]);
+  assert.deepEqual(richMetadataTables, [
+    "web_book_external_entities",
+    "web_external_entities",
+    "web_external_place_edges",
+  ]);
 });
 
 test("schema migration adds account ownership without retaining unscoped deletions", async () => {
@@ -75,14 +88,22 @@ test("schema migration adds account ownership without retaining unscoped deletio
       INSERT INTO web_library_tombstones (library_id,deleted_at) VALUES ('legacy-library',1);
     `);
     initializeWebDatabase(legacy);
-    assert.deepEqual(legacy.exec({
-      sql: "SELECT name FROM pragma_table_info('web_library_tombstones') ORDER BY cid",
-      rowMode: 0, returnValue: "resultRows",
-    }), ["library_id", "deleted_at", "account_id"]);
-    assert.equal(legacy.exec({
-      sql: "SELECT count(*) FROM web_library_tombstones",
-      rowMode: 0, returnValue: "resultRows",
-    })[0], 0);
+    assert.deepEqual(
+      legacy.exec({
+        sql: "SELECT name FROM pragma_table_info('web_library_tombstones') ORDER BY cid",
+        rowMode: 0,
+        returnValue: "resultRows",
+      }),
+      ["library_id", "deleted_at", "account_id"],
+    );
+    assert.equal(
+      legacy.exec({
+        sql: "SELECT count(*) FROM web_library_tombstones",
+        rowMode: 0,
+        returnValue: "resultRows",
+      })[0],
+      0,
+    );
   } finally {
     legacy.close();
   }
@@ -110,10 +131,14 @@ test("schema migration promotes the scalar sync cursor to both channels", async 
       VALUES ('legacy-library','legacy-replica',42);
     `);
     initializeWebDatabase(legacy);
-    assert.deepEqual(legacy.exec({
-      sql: "SELECT last_state_revision,last_reading_revision FROM web_sync_state WHERE library_id='legacy-library'",
-      rowMode: "array", returnValue: "resultRows",
-    }), [[42, 42]]);
+    assert.deepEqual(
+      legacy.exec({
+        sql: "SELECT last_state_revision,last_reading_revision FROM web_sync_state WHERE library_id='legacy-library'",
+        rowMode: "array",
+        returnValue: "resultRows",
+      }),
+      [[42, 42]],
+    );
   } finally {
     legacy.close();
   }

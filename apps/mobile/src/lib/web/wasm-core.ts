@@ -1,4 +1,10 @@
-import type { BrowsingPreferencePatch, BrowsingPreferences, LibraryFolderDestination, ReaderPreferencePatch, ReaderPreferences } from "../bindings.ts";
+import type {
+  BrowsingPreferencePatch,
+  BrowsingPreferences,
+  LibraryFolderDestination,
+  ReaderPreferencePatch,
+  ReaderPreferences,
+} from "../bindings.ts";
 
 const wasmUrl = new URL("./generated/bokheim_web_core.wasm", import.meta.url);
 
@@ -7,20 +13,51 @@ interface WebCoreExports extends WebAssembly.Exports {
   bokheim_alloc(length: number): number;
   bokheim_dealloc(pointer: number, length: number): void;
   bokheim_blake3_hex(input: number, inputLength: number, output: number): void;
-  bokheim_normalize_search_text(input: number, inputLength: number, output: number, outputCapacity: number): number;
+  bokheim_normalize_search_text(
+    input: number,
+    inputLength: number,
+    output: number,
+    outputCapacity: number,
+  ): number;
   bokheim_inspect_epub(input: number, inputLength: number): number;
   bokheim_result_pointer(): number;
   bokheim_result_length(): number;
-  bokheim_apply_reader_preference_patch(preferences: number, preferencesLength: number, patch: number, patchLength: number): number;
-  bokheim_apply_browsing_preference_patch(preferences: number, preferencesLength: number, patch: number, patchLength: number): number;
-  bokheim_encode_account_request(kind: number, input: number, inputLength: number): number;
-  bokheim_decode_account_response(kind: number, input: number, inputLength: number): number;
-  bokheim_decode_blob_manifest_response(input: number, inputLength: number, request: number, requestLength: number): number;
+  bokheim_apply_reader_preference_patch(
+    preferences: number,
+    preferencesLength: number,
+    patch: number,
+    patchLength: number,
+  ): number;
+  bokheim_apply_browsing_preference_patch(
+    preferences: number,
+    preferencesLength: number,
+    patch: number,
+    patchLength: number,
+  ): number;
+  bokheim_encode_account_request(
+    kind: number,
+    input: number,
+    inputLength: number,
+  ): number;
+  bokheim_decode_account_response(
+    kind: number,
+    input: number,
+    inputLength: number,
+  ): number;
+  bokheim_decode_blob_manifest_response(
+    input: number,
+    inputLength: number,
+    request: number,
+    requestLength: number,
+  ): number;
   bokheim_encode_sync_exchange(input: number, inputLength: number): number;
-  bokheim_decode_sync_exchange(input: number, inputLength: number, validation: number, validationLength: number): number;
+  bokheim_decode_sync_exchange(
+    input: number,
+    inputLength: number,
+    validation: number,
+    validationLength: number,
+  ): number;
   bokheim_project_directories(input: number, inputLength: number): number;
-  bokheim_ddc_subject_path(input: number, inputLength: number): number;
-  bokheim_lcc_subject_path(input: number, inputLength: number): number;
   bokheim_project_subject_codes(input: number, inputLength: number): number;
   bokheim_unified_subject_paths(input: number, inputLength: number): number;
   bokheim_unified_has_exact_source_code(input: number, inputLength: number): number;
@@ -39,9 +76,12 @@ async function transformWithStoredResult(
     new Uint8Array(core.memory.buffer, pointer, input.length).set(input);
     const status = transform(core, pointer, input.length);
     const result = new Uint8Array(
-      core.memory.buffer, core.bokheim_result_pointer(), core.bokheim_result_length(),
+      core.memory.buffer,
+      core.bokheim_result_pointer(),
+      core.bokheim_result_length(),
     ).slice();
-    if (status !== 0) throw new Error(new TextDecoder().decode(result) || "The WASM operation failed");
+    if (status !== 0)
+      throw new Error(new TextDecoder().decode(result) || "The WASM operation failed");
     return result;
   } finally {
     core.bokheim_dealloc(pointer, input.length);
@@ -51,7 +91,13 @@ async function transformWithStoredResult(
 async function transformWithValidation(
   input: Uint8Array,
   validation: unknown,
-  transform: (core: WebCoreExports, inputPointer: number, inputLength: number, validationPointer: number, validationLength: number) => number,
+  transform: (
+    core: WebCoreExports,
+    inputPointer: number,
+    inputLength: number,
+    validationPointer: number,
+    validationLength: number,
+  ) => number,
 ): Promise<Uint8Array> {
   const core = await loadCore();
   const validationJson = new TextEncoder().encode(JSON.stringify(validation));
@@ -59,96 +105,140 @@ async function transformWithValidation(
   try {
     const validationPointer = pointer + input.length;
     new Uint8Array(core.memory.buffer, pointer, input.length).set(input);
-    new Uint8Array(core.memory.buffer, validationPointer, validationJson.length).set(validationJson);
-    const status = transform(core, pointer, input.length, validationPointer, validationJson.length);
-    const result = new Uint8Array(core.memory.buffer, core.bokheim_result_pointer(), core.bokheim_result_length()).slice();
-    if (status !== 0) throw new Error(new TextDecoder().decode(result) || "The WASM operation failed");
+    new Uint8Array(core.memory.buffer, validationPointer, validationJson.length).set(
+      validationJson,
+    );
+    const status = transform(
+      core,
+      pointer,
+      input.length,
+      validationPointer,
+      validationJson.length,
+    );
+    const result = new Uint8Array(
+      core.memory.buffer,
+      core.bokheim_result_pointer(),
+      core.bokheim_result_length(),
+    ).slice();
+    if (status !== 0)
+      throw new Error(new TextDecoder().decode(result) || "The WASM operation failed");
     return result;
   } finally {
     core.bokheim_dealloc(pointer, input.length + validationJson.length);
   }
 }
 
-export async function encodeAccountRequest(kind: number, value: unknown): Promise<Uint8Array> {
+export async function encodeAccountRequest(
+  kind: number,
+  value: unknown,
+): Promise<Uint8Array> {
   const input = new TextEncoder().encode(JSON.stringify(value));
   return transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_encode_account_request(kind, pointer, length));
+    core.bokheim_encode_account_request(kind, pointer, length),
+  );
 }
 
-export async function decodeAccountResponse<T>(kind: number, bytes: Uint8Array): Promise<T> {
+export async function decodeAccountResponse<T>(
+  kind: number,
+  bytes: Uint8Array,
+): Promise<T> {
   const json = await transformWithStoredResult(bytes, (core, pointer, length) =>
-    core.bokheim_decode_account_response(kind, pointer, length));
+    core.bokheim_decode_account_response(kind, pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as T;
 }
 
-export async function decodeBlobManifestResponse<T>(bytes: Uint8Array, request: unknown): Promise<T> {
-  const json = await transformWithValidation(bytes, request, (core, input, inputLength, validation, validationLength) =>
-    core.bokheim_decode_blob_manifest_response(input, inputLength, validation, validationLength));
+export async function decodeBlobManifestResponse<T>(
+  bytes: Uint8Array,
+  request: unknown,
+): Promise<T> {
+  const json = await transformWithValidation(
+    bytes,
+    request,
+    (core, input, inputLength, validation, validationLength) =>
+      core.bokheim_decode_blob_manifest_response(
+        input,
+        inputLength,
+        validation,
+        validationLength,
+      ),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as T;
 }
 
 export async function encodeSyncExchange(value: unknown): Promise<Uint8Array> {
   const input = new TextEncoder().encode(JSON.stringify(value));
-  return transformWithStoredResult(input, (core, pointer, length) => core.bokheim_encode_sync_exchange(pointer, length));
+  return transformWithStoredResult(input, (core, pointer, length) =>
+    core.bokheim_encode_sync_exchange(pointer, length),
+  );
 }
 
-export async function decodeSyncExchange<T>(bytes: Uint8Array, validation: unknown): Promise<T> {
-  const json = await transformWithValidation(bytes, validation, (core, input, inputLength, validationPointer, validationLength) =>
-    core.bokheim_decode_sync_exchange(input, inputLength, validationPointer, validationLength));
+export async function decodeSyncExchange<T>(
+  bytes: Uint8Array,
+  validation: unknown,
+): Promise<T> {
+  const json = await transformWithValidation(
+    bytes,
+    validation,
+    (core, input, inputLength, validationPointer, validationLength) =>
+      core.bokheim_decode_sync_exchange(
+        input,
+        inputLength,
+        validationPointer,
+        validationLength,
+      ),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as T;
 }
 
 export async function projectDirectories<T>(intents: unknown): Promise<T> {
   const input = new TextEncoder().encode(JSON.stringify(intents));
-  const json = await transformWithStoredResult(input, (core, pointer, length) => core.bokheim_project_directories(pointer, length));
+  const json = await transformWithStoredResult(input, (core, pointer, length) =>
+    core.bokheim_project_directories(pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as T;
 }
 
-export async function ddcSubjectPath(notation: string): Promise<string | null> {
-  const input = new TextEncoder().encode(notation);
-  try {
-    const value = await transformWithStoredResult(input, (core, pointer, length) => core.bokheim_ddc_subject_path(pointer, length));
-    return new TextDecoder().decode(value);
-  } catch {
-    return null;
-  }
-}
-
-export async function lccSubjectPath(notation: string): Promise<string | null> {
-  const input = new TextEncoder().encode(notation);
-  try {
-    const value = await transformWithStoredResult(input, (core, pointer, length) => core.bokheim_lcc_subject_path(pointer, length));
-    return new TextDecoder().decode(value);
-  } catch {
-    return null;
-  }
-}
-
-export async function unifiedSubjectPaths(systemId: "bisac" | "ddc" | "lcc", code: string): Promise<string[]> {
+export async function unifiedSubjectPaths(
+  systemId: "bisac" | "ddc" | "lcc",
+  code: string,
+): Promise<string[]> {
   const input = new TextEncoder().encode(JSON.stringify({ system_id: systemId, code }));
   const value = await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_unified_subject_paths(pointer, length));
+    core.bokheim_unified_subject_paths(pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(value)) as string[];
 }
 
-export async function projectSubjectCodes(subjects: unknown[]): Promise<Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>> {
+export async function projectSubjectCodes(
+  subjects: unknown[],
+): Promise<Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>> {
   const input = new TextEncoder().encode(JSON.stringify(subjects));
   const value = await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_project_subject_codes(pointer, length));
-  return JSON.parse(new TextDecoder().decode(value)) as Array<{ system: "bisac" | "ddc" | "lcc"; code: string }>;
+    core.bokheim_project_subject_codes(pointer, length),
+  );
+  return JSON.parse(new TextDecoder().decode(value)) as Array<{
+    system: "bisac" | "ddc" | "lcc";
+    code: string;
+  }>;
 }
 
-export async function unifiedHasExactSourceCode(systemId: "bisac" | "ddc" | "lcc", code: string): Promise<boolean> {
+export async function unifiedHasExactSourceCode(
+  systemId: "bisac" | "ddc" | "lcc",
+  code: string,
+): Promise<boolean> {
   const input = new TextEncoder().encode(JSON.stringify({ system_id: systemId, code }));
   const value = await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_unified_has_exact_source_code(pointer, length));
+    core.bokheim_unified_has_exact_source_code(pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(value)) as boolean;
 }
 
 export async function installTaxonomyOverlay(concepts: unknown[]): Promise<void> {
   const input = new TextEncoder().encode(JSON.stringify(concepts));
   await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_install_taxonomy_overlay(pointer, length));
+    core.bokheim_install_taxonomy_overlay(pointer, length),
+  );
 }
 
 export type FolderDestinationPolicy =
@@ -156,20 +246,25 @@ export type FolderDestinationPolicy =
   | { kind: "move_folder"; source_parent_id: string; source_path: string };
 
 export async function selectFolderDestinations(
-  destinations: LibraryFolderDestination[], policy: FolderDestinationPolicy,
+  destinations: LibraryFolderDestination[],
+  policy: FolderDestinationPolicy,
 ): Promise<LibraryFolderDestination[]> {
   const input = new TextEncoder().encode(JSON.stringify({ destinations, policy }));
   const json = await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_select_folder_destinations(pointer, length));
+    core.bokheim_select_folder_destinations(pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as LibraryFolderDestination[];
 }
 
 export async function chooseLibraryName(
-  kind: "folder" | "file", requested: string, occupied: string[],
+  kind: "folder" | "file",
+  requested: string,
+  occupied: string[],
 ): Promise<string> {
   const input = new TextEncoder().encode(JSON.stringify({ kind, requested, occupied }));
   const json = await transformWithStoredResult(input, (core, pointer, length) =>
-    core.bokheim_choose_library_name(pointer, length));
+    core.bokheim_choose_library_name(pointer, length),
+  );
   return JSON.parse(new TextDecoder().decode(json)) as string;
 }
 
@@ -187,18 +282,40 @@ export interface PublicationMetadata {
 
 let corePromise: Promise<WebCoreExports> | undefined;
 
-async function loadCore(): Promise<WebCoreExports> {
-  if (!corePromise) {
-    const moduleBytes = wasmUrl.protocol === "file:" && typeof process !== "undefined"
-      ? process.getBuiltinModule("node:fs").promises.readFile(wasmUrl)
-      : fetch(wasmUrl).then((response) => {
-          if (!response.ok) throw new Error(`Could not load the web core (${response.status})`);
-          return response.arrayBuffer();
-        });
-    corePromise = moduleBytes
-      .then((module) => WebAssembly.instantiate(module, {}))
-      .then(({ instance }) => instance.exports as WebCoreExports);
+async function instantiateCore(): Promise<WebAssembly.Instance> {
+  // Tests run this module under Node, where the core sits on disk and there is
+  // no response to stream.
+  if (wasmUrl.protocol === "file:" && typeof process !== "undefined") {
+    const bytes = await process.getBuiltinModule("node:fs").promises.readFile(wasmUrl);
+    return (await WebAssembly.instantiate(bytes, {})).instance;
   }
+
+  const response = await fetch(wasmUrl);
+  if (!response.ok) throw new Error(`Could not load the web core (${response.status})`);
+
+  // Streaming instantiation is what lets the browser cache the *compiled*
+  // module against the URL, so a repeat visit skips compiling several
+  // megabytes as well as downloading them. It is only valid for an
+  // `application/wasm` response, so read the bytes ourselves when a host
+  // serves the module under some other type.
+  const contentType = response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (
+    contentType === "application/wasm" &&
+    typeof WebAssembly.instantiateStreaming === "function"
+  ) {
+    return (await WebAssembly.instantiateStreaming(response, {})).instance;
+  }
+  return (await WebAssembly.instantiate(await response.arrayBuffer(), {})).instance;
+}
+
+async function loadCore(): Promise<WebCoreExports> {
+  corePromise ??= instantiateCore().then(
+    (instance) => instance.exports as WebCoreExports,
+  );
   return corePromise;
 }
 
@@ -210,7 +327,9 @@ export async function hashPublication(bytes: Uint8Array): Promise<string> {
     const outputPointer = inputPointer + bytes.length;
     new Uint8Array(core.memory.buffer, inputPointer, bytes.length).set(bytes);
     core.bokheim_blake3_hex(inputPointer, bytes.length, outputPointer);
-    return new TextDecoder("ascii").decode(new Uint8Array(core.memory.buffer, outputPointer, 64));
+    return new TextDecoder("ascii").decode(
+      new Uint8Array(core.memory.buffer, outputPointer, 64),
+    );
   } finally {
     core.bokheim_dealloc(inputPointer, allocationLength);
   }
@@ -226,16 +345,24 @@ export async function normalizeSearchText(value: string): Promise<string> {
     const outputPointer = pointer + input.length;
     new Uint8Array(core.memory.buffer, pointer, input.length).set(input);
     const outputLength = core.bokheim_normalize_search_text(
-      pointer, input.length, outputPointer, outputCapacity,
+      pointer,
+      input.length,
+      outputPointer,
+      outputCapacity,
     );
-    if (outputLength > outputCapacity) throw new Error("Normalized search text exceeded the WASM output buffer");
-    return new TextDecoder().decode(new Uint8Array(core.memory.buffer, outputPointer, outputLength));
+    if (outputLength > outputCapacity)
+      throw new Error("Normalized search text exceeded the WASM output buffer");
+    return new TextDecoder().decode(
+      new Uint8Array(core.memory.buffer, outputPointer, outputLength),
+    );
   } finally {
     core.bokheim_dealloc(pointer, allocationLength);
   }
 }
 
-export async function inspectEpubPublication(bytes: Uint8Array): Promise<PublicationMetadata> {
+export async function inspectEpubPublication(
+  bytes: Uint8Array,
+): Promise<PublicationMetadata> {
   const core = await loadCore();
   const pointer = core.bokheim_alloc(bytes.length);
   try {
@@ -245,10 +372,16 @@ export async function inspectEpubPublication(bytes: Uint8Array): Promise<Publica
     }
     const resultPointer = core.bokheim_result_pointer();
     const resultLength = core.bokheim_result_length();
-    const result = new Uint8Array(core.memory.buffer, resultPointer, resultLength).slice();
+    const result = new Uint8Array(
+      core.memory.buffer,
+      resultPointer,
+      resultLength,
+    ).slice();
     if (result.length < 36) throw new Error("The EPUB metadata result is invalid");
     const header = new DataView(result.buffer, result.byteOffset, 36);
-    const lengths = Array.from({ length: 9 }, (_, index) => header.getUint32(index * 4, true));
+    const lengths = Array.from({ length: 9 }, (_, index) =>
+      header.getUint32(index * 4, true),
+    );
     let offset = 36;
     const take = (length: number): Uint8Array | null => {
       if (length === 0xffffffff) return null;
@@ -267,15 +400,18 @@ export async function inspectEpubPublication(bytes: Uint8Array): Promise<Publica
     const isbns = take(lengths[6]);
     const cover = take(lengths[7]);
     const toc = take(lengths[8]);
-    if (offset !== result.length) throw new Error("The EPUB metadata result has trailing data");
+    if (offset !== result.length)
+      throw new Error("The EPUB metadata result has trailing data");
     const decoder = new TextDecoder();
     return {
       title: title === null ? null : decoder.decode(title),
       author: author === null ? null : decoder.decode(author),
       description: description === null ? null : decoder.decode(description),
       subjects: subjects === null ? [] : JSON.parse(decoder.decode(subjects)),
-      subject_paths: subjectPaths === null ? [] : JSON.parse(decoder.decode(subjectPaths)),
-      subject_codes: subjectCodes === null ? [] : JSON.parse(decoder.decode(subjectCodes)),
+      subject_paths:
+        subjectPaths === null ? [] : JSON.parse(decoder.decode(subjectPaths)),
+      subject_codes:
+        subjectCodes === null ? [] : JSON.parse(decoder.decode(subjectCodes)),
       isbns: isbns === null ? [] : JSON.parse(decoder.decode(isbns)),
       cover,
       toc: toc === null ? [] : JSON.parse(decoder.decode(toc)),
@@ -297,13 +433,20 @@ export async function applyReaderPreferencePatch(
   const pointer = core.bokheim_alloc(allocationLength);
   try {
     const patchPointer = pointer + preferencesJson.length;
-    new Uint8Array(core.memory.buffer, pointer, preferencesJson.length).set(preferencesJson);
+    new Uint8Array(core.memory.buffer, pointer, preferencesJson.length).set(
+      preferencesJson,
+    );
     new Uint8Array(core.memory.buffer, patchPointer, patchJson.length).set(patchJson);
     const status = core.bokheim_apply_reader_preference_patch(
-      pointer, preferencesJson.length, patchPointer, patchJson.length,
+      pointer,
+      preferencesJson.length,
+      patchPointer,
+      patchJson.length,
     );
     const result = new Uint8Array(
-      core.memory.buffer, core.bokheim_result_pointer(), core.bokheim_result_length(),
+      core.memory.buffer,
+      core.bokheim_result_pointer(),
+      core.bokheim_result_length(),
     ).slice();
     const value = new TextDecoder().decode(result);
     if (status !== 0) throw new Error(value || "Reader preference is invalid");
@@ -325,10 +468,21 @@ export async function applyBrowsingPreferencePatch(
   const pointer = core.bokheim_alloc(allocationLength);
   try {
     const patchPointer = pointer + preferencesJson.length;
-    new Uint8Array(core.memory.buffer, pointer, preferencesJson.length).set(preferencesJson);
+    new Uint8Array(core.memory.buffer, pointer, preferencesJson.length).set(
+      preferencesJson,
+    );
     new Uint8Array(core.memory.buffer, patchPointer, patchJson.length).set(patchJson);
-    const status = core.bokheim_apply_browsing_preference_patch(pointer, preferencesJson.length, patchPointer, patchJson.length);
-    const result = new Uint8Array(core.memory.buffer, core.bokheim_result_pointer(), core.bokheim_result_length()).slice();
+    const status = core.bokheim_apply_browsing_preference_patch(
+      pointer,
+      preferencesJson.length,
+      patchPointer,
+      patchJson.length,
+    );
+    const result = new Uint8Array(
+      core.memory.buffer,
+      core.bokheim_result_pointer(),
+      core.bokheim_result_length(),
+    ).slice();
     const value = new TextDecoder().decode(result);
     if (status !== 0) throw new Error(value || "Browsing preference is invalid");
     return JSON.parse(value) as BrowsingPreferences;

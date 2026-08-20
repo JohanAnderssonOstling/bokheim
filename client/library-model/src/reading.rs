@@ -56,10 +56,11 @@ fn valid_epub_cfi_shape(value: &str) -> bool {
 }
 
 /// A canonical reading location shared by all reader formats.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ReadingPosition {
     Epub(ReadingEpubCfi),
     Pdf(u32),
+    PdfAtPoint { page: u32, full_page_position: f32 },
     Audiobook(u64),
 }
 
@@ -77,7 +78,10 @@ impl ReadingPosition {
         if valid_epub_cfi(value) {
             return Ok(Self::Epub(ReadingEpubCfi(value.to_owned())));
         }
-        if let Some(page) = pdf_page_from_reading_position(value) {
+        if let Some((page, full_page_position)) = parse_pdf_page_position(value) {
+            if let Some(full_page_position) = full_page_position {
+                return Ok(Self::PdfAtPoint { page, full_page_position });
+            }
             return Ok(Self::Pdf(page));
         }
         if let Some(millis) = audiobook_position_millis(value) {
@@ -94,6 +98,10 @@ impl ReadingPosition {
         Self::Pdf(page_index)
     }
 
+    pub const fn pdf_page_at_point(page_index: u32, full_page_position: f32) -> Self {
+        Self::PdfAtPoint { page: page_index, full_page_position }
+    }
+
     pub const fn audiobook_millis(millis: u64) -> Self {
         Self::Audiobook(millis)
     }
@@ -102,6 +110,7 @@ impl ReadingPosition {
         match self {
             Self::Epub(cfi) => cfi.0.clone(),
             Self::Pdf(page) => pdf_page_reading_position(*page),
+            Self::PdfAtPoint { page, full_page_position } => pdf_page_position_reading_position(*page, *full_page_position),
             Self::Audiobook(millis) => audiobook_reading_position(*millis),
         }
     }
@@ -116,6 +125,14 @@ impl ReadingPosition {
     pub fn pdf_page_index(&self) -> Option<u32> {
         match self {
             Self::Pdf(page) => Some(*page),
+            Self::PdfAtPoint { page, .. } => Some(*page),
+            _ => None,
+        }
+    }
+
+    pub fn pdf_page_position(&self) -> Option<f32> {
+        match self {
+            Self::PdfAtPoint { full_page_position, .. } => Some(*full_page_position),
             _ => None,
         }
     }
@@ -124,6 +141,32 @@ impl ReadingPosition {
         match self {
             Self::Audiobook(millis) => Some(*millis),
             _ => None,
+        }
+    }
+}
+
+impl Eq for ReadingPosition {}
+
+impl std::hash::Hash for ReadingPosition {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Epub(value) => {
+                0_u8.hash(state);
+                value.hash(state);
+            }
+            Self::Pdf(page) => {
+                1_u8.hash(state);
+                page.hash(state);
+            }
+            Self::PdfAtPoint { page, full_page_position } => {
+                2_u8.hash(state);
+                page.hash(state);
+                full_page_position.to_bits().hash(state);
+            }
+            Self::Audiobook(millis) => {
+                3_u8.hash(state);
+                millis.hash(state);
+            }
         }
     }
 }
@@ -158,15 +201,42 @@ pub fn valid_reading_position(value: &str) -> bool {
 }
 
 pub fn pdf_page_from_reading_position(value: &str) -> Option<u32> {
+    parse_pdf_page_position(value).map(|(page, _)| page)
+}
+
+pub fn pdf_page_position_from_reading_position(value: &str) -> Option<f32> {
+    parse_pdf_page_position(value).and_then(|(_, full_page_position)| full_page_position)
+}
+
+fn parse_pdf_page_position(value: &str) -> Option<(u32, Option<f32>)> {
     let page = value.strip_prefix("pdfpage(")?.strip_suffix(')')?;
     if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
         return None;
     }
-    page.parse().ok()
+    if let Some((page, full_page_position)) = page.split_once(',') {
+        if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
+            return None;
+        }
+        let page = page.parse::<u32>().ok()?;
+        let full_page_position = parse_full_page_position(full_page_position)?;
+        return Some((page, Some(full_page_position)));
+    }
+    page.parse().ok().map(|page| (page, None))
+}
+
+fn parse_full_page_position(value: &str) -> Option<f32> {
+    let full_page_position = value.parse::<f32>().ok()?;
+    if !full_page_position.is_finite() {
+        return None;
+    }
+    Some(full_page_position.max(0.0))
 }
 
 pub fn pdf_page_reading_position(page_index: u32) -> String {
     format!("pdfpage({page_index})")
+}
+pub fn pdf_page_position_reading_position(page_index: u32, full_page_position: f32) -> String {
+    format!("pdfpage({page_index},{full_page_position})")
 }
 
 pub fn audiobook_position_millis(value: &str) -> Option<u64> {
@@ -257,7 +327,7 @@ mod tests {
 
     #[test]
     fn canonical_positions_round_trip_for_every_reader_format() {
-        for value in ["epubcfi(/6/4)", "pdfpage(17)", "audiopos(1234567)"] {
+        for value in ["epubcfi(/6/4)", "pdfpage(17)", "pdfpage(17,0.25)", "audiopos(1234567)"] {
             let position = ReadingPosition::parse(value).unwrap();
             assert_eq!(position.as_str(), value);
             let encoded = serde_json::to_string(&position).unwrap();
@@ -265,6 +335,12 @@ mod tests {
             assert_eq!(decoded, position);
         }
         assert!(ReadingPosition::parse("pdfpage(01)").is_err());
+        let negative = ReadingPosition::parse("pdfpage(17,-0.5)").unwrap();
+        assert_eq!(negative.as_str(), "pdfpage(17,0)");
+        assert_eq!(negative.pdf_page_position(), Some(0.0));
+        assert!(ReadingPosition::parse("pdfpage(17,NaN)").is_err());
+        assert!(ReadingPosition::parse("pdfpage(17,)").is_err());
+        assert!(ReadingPosition::parse("pdfpage(17,0,5)").is_err());
         assert!(ReadingPosition::parse("audiopos(-1)").is_err());
         assert!(ReadingPosition::parse("epubcfi(/6/4[unclosed)").is_ok());
         assert!(EpubCfi::parse("epubcfi(/6/4[unclosed)").is_err());

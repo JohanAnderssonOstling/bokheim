@@ -1,12 +1,15 @@
-//! What the reader has marked in a book: highlights, bookmarks, and the text
-//! selection a new highlight would be made from.
+//! The EPUB half of marking up a book: the text selection a new highlight
+//! would be made from, and the translation from a stored annotation to the
+//! overlay the renderer paints.
 //!
-//! The library owns the durable copy; this is the in-memory mirror kept in
-//! step with it, plus the translation from a stored annotation to the overlay
-//! the renderer paints.
+//! The marks themselves are shared with the other readers and live in
+//! [`crate::shell::marks`]. What is here depends on EPUB CFIs, which no other
+//! reader has.
 
-use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
+use epub_svelte_lib::library::marks::ReaderAnnotation;
 use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
+
+use crate::shell::marks::MarksState;
 
 /// Highlight fill used when an annotation's colour cannot be parsed.
 const DEFAULT_HIGHLIGHT: [u8; 4] = [246, 201, 69, HIGHLIGHT_ALPHA];
@@ -22,57 +25,19 @@ pub(crate) struct Selection {
     pub(crate) text: String,
 }
 
-#[derive(Default)]
-pub(crate) struct MarksState {
-    pub(crate) annotations: Vec<ReaderAnnotation>,
-    pub(crate) bookmarks: Vec<ReaderBookmark>,
-    pub(crate) selection: Option<Selection>,
-    /// The annotation whose note editor is open, if any.
-    pub(crate) selected_id: Option<String>,
+/// Records a new selection, reporting whether it differs from the last one so
+/// an unchanged re-report does not repaint.
+pub(crate) fn set_selection(current: &mut Option<Selection>, selection: Selection) -> bool {
+    if current.as_ref() == Some(&selection) {
+        return false;
+    }
+    *current = Some(selection);
+    true
 }
 
-impl MarksState {
-    /// Records a new selection, reporting whether it differs from the last one
-    /// so an unchanged re-report does not repaint.
-    pub(crate) fn set_selection(&mut self, selection: Selection) -> bool {
-        if self.selection.as_ref() == Some(&selection) {
-            return false;
-        }
-        self.selection = Some(selection);
-        true
-    }
-
-    pub(crate) fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    pub(crate) fn annotation(&self, id: &str) -> Option<&ReaderAnnotation> {
-        self.annotations.iter().find(|annotation| annotation.id == id)
-    }
-
-    /// Replaces a stored annotation in place, or does nothing if it is gone.
-    pub(crate) fn replace(&mut self, annotation: ReaderAnnotation) {
-        if let Some(existing) = self.annotations.iter_mut().find(|item| item.id == annotation.id) {
-            *existing = annotation;
-        }
-    }
-
-    /// Forgets an annotation, also closing its editor if it was open.
-    pub(crate) fn remove_annotation(&mut self, id: &str) {
-        self.annotations.retain(|item| item.id != id);
-        if self.selected_id.as_deref() == Some(id) {
-            self.selected_id = None;
-        }
-    }
-
-    pub(crate) fn remove_bookmark(&mut self, id: &str) {
-        self.bookmarks.retain(|item| item.id != id);
-    }
-
-    /// Overlays for every annotation the renderer can place.
-    pub(crate) fn overlays(&self) -> Vec<RendererAnnotation> {
-        self.annotations.iter().filter_map(renderer_annotation).collect()
-    }
+/// Overlays for every annotation the renderer can place.
+pub(crate) fn overlays(marks: &MarksState) -> Vec<RendererAnnotation> {
+    marks.annotations.iter().filter_map(renderer_annotation).collect()
 }
 
 /// Translates a stored annotation into a renderer overlay.
@@ -129,38 +94,10 @@ mod tests {
 
     #[test]
     fn re_reporting_the_same_selection_does_not_repaint() {
-        let mut marks = MarksState::default();
-        assert!(marks.set_selection(selection("a furrow")));
-        assert!(!marks.set_selection(selection("a furrow")));
-        assert!(marks.set_selection(selection("a deeper furrow")));
-    }
-
-    #[test]
-    fn deleting_the_open_annotation_closes_its_editor() {
-        let mut marks = MarksState { annotations: vec![annotation("a", "#f6c945"), annotation("b", "#f6c945")], selected_id: Some("a".to_owned()), ..MarksState::default() };
-
-        marks.remove_annotation("a");
-
-        assert_eq!(marks.annotations.len(), 1);
-        assert_eq!(marks.selected_id, None, "the editor must not stay open on a deleted annotation");
-    }
-
-    #[test]
-    fn deleting_another_annotation_leaves_the_editor_open() {
-        let mut marks = MarksState { annotations: vec![annotation("a", "#f6c945"), annotation("b", "#f6c945")], selected_id: Some("a".to_owned()), ..MarksState::default() };
-
-        marks.remove_annotation("b");
-
-        assert_eq!(marks.selected_id.as_deref(), Some("a"));
-    }
-
-    #[test]
-    fn replacing_a_missing_annotation_adds_nothing() {
-        let mut marks = MarksState { annotations: vec![annotation("a", "#f6c945")], ..MarksState::default() };
-
-        marks.replace(annotation("gone", "#f6c945"));
-
-        assert_eq!(marks.annotations.len(), 1);
+        let mut current = None;
+        assert!(set_selection(&mut current, selection("a furrow")));
+        assert!(!set_selection(&mut current, selection("a furrow")));
+        assert!(set_selection(&mut current, selection("a deeper furrow")));
     }
 
     #[test]
@@ -189,7 +126,7 @@ mod tests {
         pdf_annotation.anchor = AnnotationAnchor::pdf(anchor);
         let marks = MarksState { annotations: vec![annotation("epub", "#f6c945"), pdf_annotation], ..MarksState::default() };
 
-        let overlays = marks.overlays();
+        let overlays = overlays(&marks);
 
         assert_eq!(overlays.len(), 1, "a PDF annotation shares the table but has no EPUB CFI");
         assert_eq!(overlays[0].id, "epub");

@@ -3,7 +3,7 @@ mod language;
 
 pub use cache::{
     CachedCatalogPage, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogEpubExtractionInventory, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewCandidate,
-    CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogPageWrite, CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory,
+    CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPageWrite, CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory, CatalogSubjectAssignment, prepare_catalog_subject_assignments,
     PreparedCatalogPageWrite,
     CatalogSourceState, SequencedCatalogPublication,
 };

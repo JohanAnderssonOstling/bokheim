@@ -7,10 +7,7 @@ use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::app::AppBackend;
 use gpui::{AnyWindowHandle, App, Window};
 
-use crate::model::{BrowserSession, BrowserWindowGeometry};
-
 pub type OpenReader = Rc<dyn Fn(BookLocator, String, Option<String>, &mut App)>;
-pub type SaveBrowserState = Rc<dyn Fn(BrowserSession, Option<BrowserWindowGeometry>, &mut App)>;
 #[cfg(feature = "kobo")]
 pub type SaveKoboAutoRotate = Rc<dyn Fn(bool, &mut App)>;
 
@@ -70,7 +67,6 @@ pub struct AppServices {
     pub(crate) backend: AppBackend,
     pub(crate) contracts: Arc<FrontendContract>,
     pub(crate) open_reader: OpenReader,
-    pub(crate) save_state: SaveBrowserState,
     pub(crate) desktop_updater: Option<DesktopUpdater>,
     #[cfg(feature = "kobo")]
     pub(crate) save_kobo_auto_rotate: SaveKoboAutoRotate,
@@ -78,13 +74,11 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(backend: AppBackend, open_reader: OpenReader, save_state: SaveBrowserState, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate, window: &Window) -> Self {
+    pub fn new(backend: AppBackend, open_reader: OpenReader, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate, window: &Window) -> Self {
         Self {
             backend,
             contracts: Arc::new(FrontendContract::default()),
             open_reader,
-            save_state,
             desktop_updater,
             #[cfg(feature = "kobo")]
             save_kobo_auto_rotate,

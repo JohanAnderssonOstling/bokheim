@@ -3,6 +3,7 @@ const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((
 let hours = 24;
 let refreshing = false;
 let refreshPromise;
+const dashboardRequestTimeoutMs = 10_000;
 
 const pageDefinitions = {
   overview: ["Operations overview", "/admin/"],
@@ -62,23 +63,35 @@ function path(values) {
 
 function refreshSession() {
   if (!refreshPromise) {
-    refreshPromise = fetch("/api/auth/web/refresh", { method:"POST", credentials:"same-origin", headers:{ Accept:wireMediaType } })
+    refreshPromise = fetchWithTimeout("/api/auth/web/refresh", { method:"POST", credentials:"same-origin", headers:{ Accept:wireMediaType } })
       .then((response) => response.ok)
       .finally(() => { refreshPromise = undefined; });
   }
   return refreshPromise;
 }
+async function fetchWithTimeout(pathname, options) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), dashboardRequestTimeoutMs);
+  try {
+    return await fetch(pathname, { ...options, signal:controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(`Dashboard API request timed out: ${pathname}`);
+    throw new Error(`Dashboard API request failed: ${pathname}`);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 async function request(pathname, retry = true) {
-  let response = await fetch(pathname, { credentials:"same-origin", headers:{ Accept:"application/json" } });
+  let response = await fetchWithTimeout(pathname, { credentials:"same-origin", headers:{ Accept:"application/json" } });
   if (response.status === 401 && retry) {
-    if (await refreshSession()) response = await fetch(pathname, { credentials:"same-origin", headers:{ Accept:"application/json" } });
+    if (await refreshSession()) response = await fetchWithTimeout(pathname, { credentials:"same-origin", headers:{ Accept:"application/json" } });
   }
   return response;
 }
 async function post(pathname, body, retry = true) {
-  let response = await fetch(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
+  let response = await fetchWithTimeout(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
   if (response.status === 401 && retry) {
-    if (await refreshSession()) response = await fetch(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
+    if (await refreshSession()) response = await fetchWithTimeout(pathname, { method:"POST", credentials:"same-origin", headers:{ Accept:"application/json", "Content-Type":"application/json" }, body:JSON.stringify(body) });
   }
   return response;
 }
@@ -185,14 +198,14 @@ function render(overview, history, requestHistory, engagement, services, identit
       card("Importable EPUBs", number(catalogue.active_epub_count), `${number(catalogue.sources.length)} configured sources`),
       card("Catalogue latency", `${number(services.catalogue.latency_ms)} ms`, "Operations snapshot response"),
       card("EPUB extraction queue", number(extractions.pending + extractions.running), `${number(extractions.succeeded)} succeeded · ${number(extractions.failed)} failed`),
-      ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded`)] : []),
+      ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded · ${number(catalogue.identity_reviews?.failed ?? 0)} recorded failures`)] : []),
       card("Registry revision", number(catalogue.registry_revision), catalogue.metadata_enrichment_configured ? "Metadata enrichment configured" : "Metadata enrichment disabled"),
       card("Crawl speed", currentCrawls.length ? `${rate(measuredRates.length ? pagesPerMinute : null)} pages/min` : "Idle", currentCrawls.length ? `${rate(measuredRates.length ? publicationsPerMinute : null)} publication entries/min across ${number(currentCrawls.length)} sources` : "No source is currently crawling"),
     );
     elements["catalogue-metadata-backfill"].hidden = !metadataBackfill;
     if (metadataBackfill) {
       const row = document.createElement("tr");
-      for (const value of [metadataBackfill.pending, metadataBackfill.running, metadataBackfill.succeeded, metadataBackfill.last_error || "None"]) {
+      for (const value of [metadataBackfill.pending, metadataBackfill.running, metadataBackfill.succeeded, catalogue.identity_reviews?.failed ?? 0, metadataBackfill.last_error || "None"]) {
         const cell = document.createElement("td");
         cell.textContent = typeof value === "number" ? number(value) : value;
         row.append(cell);
@@ -414,8 +427,8 @@ async function load() {
     elements.dashboard.hidden = false;
     elements.logout.hidden = false;
     elements.updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  } catch {
-    showError("The dashboard could not reach the operational API.", false);
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "The dashboard could not reach the operational API.", false);
   } finally {
     refreshing = false;
     elements.refresh.disabled = false;

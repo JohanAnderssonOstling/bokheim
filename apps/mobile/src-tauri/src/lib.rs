@@ -1,38 +1,31 @@
-use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences, TransferPreferencePatch, TransferPreferences};
+mod commands;
+mod events;
+mod state;
+
+use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences};
 use epub_svelte_lib::app::{
-    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryCatalogueState, LibrarySyncStatus, LocalLibraryStorageUsage,
-    ServerLibraryStorageUsage,
+    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryListState, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage,
 };
 use epub_svelte_lib::app::{AppDataLocation, LibraryEntry};
 use epub_svelte_lib::catalog::{CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest};
+use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::library::links::BookLink;
 use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
-use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::library::{
     AudiobookChapter, AuthorSort, BookDetail, BookImportDestination, Dir, EditionIdentityReview, LibraryAuthorsView, LibraryFileTypeFilter, LibraryFolderView, LibraryHomeView, LibrarySearchResult, LibrarySubjectView, LibraryTrashView,
 };
-use epub_svelte_lib::platform::scanner::LibraryEvent;
-use epub_svelte_lib::FrontendContract;
 use epub_svelte_lib::{DownloadState, FolderDownloadStatus, LibraryTransfers, NetworkStatus};
 use specta::Type;
-use specta_typescript::Typescript;
-use std::collections::HashMap;
-use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tauri::ipc::{InvokeResponseBody, IpcResponse};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
-use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
 
-struct AppState {
-    core: AppBackend,
-    remote_epub_readers: Arc<Mutex<HashMap<String, epub_svelte_lib::library::ResolvedBook>>>,
-    next_remote_epub_reader_id: AtomicU64,
-}
+use state::AppState;
 
 #[derive(Type)]
 #[specta(type = Vec<u8>)]
@@ -85,34 +78,6 @@ fn library(core: &AppBackend, library_id: &str) -> Result<LibraryBackend, String
 
 fn parse_content_hash(value: &str) -> Result<epub_svelte_lib::ContentHash, String> {
     Ok(epub_svelte_lib::ContentHash::new(&value))
-}
-
-fn library_event_name(event: &LibraryEvent) -> &'static str {
-    match event {
-        LibraryEvent::BookAdded { .. } => "library:book-added",
-        LibraryEvent::BookRemoved { .. } => "library:book-removed",
-        LibraryEvent::DirectoryAdded { .. } => "library:directory-added",
-        LibraryEvent::DirectoryRemoved { .. } => "library:directory-removed",
-        LibraryEvent::ThumbnailGenerated { .. } => "library:thumbnail-generated",
-        LibraryEvent::ThumbnailBatchProcessed { .. } => "library:thumbnail-batch-processed",
-        LibraryEvent::SubjectEnrichmentBatchProcessed { .. } => "library:subject-enrichment-batch-processed",
-        LibraryEvent::DownloadStatusChanged { .. } => "library:download-status",
-        LibraryEvent::FolderDownloadStatusChanged { .. } => "library:folder-download-status",
-        LibraryEvent::TransferStatusChanged => "library:transfer-status",
-        LibraryEvent::CatalogueChanged => "library:catalogue-changed",
-        LibraryEvent::ScanComplete => "library:scan-complete",
-    }
-}
-
-fn spawn_library_event_forwarder(app_handle: AppHandle, event_rx: crossbeam_channel::Receiver<AppEvent>) {
-    std::thread::spawn(move || {
-        while let Ok(app_event) = event_rx.recv() {
-            let event_name = library_event_name(&app_event.event);
-            if let Err(e) = app_handle.emit(event_name, &app_event) {
-                log::error!("Failed to emit event {}: {}", event_name, e);
-            }
-        }
-    });
 }
 
 #[tauri::command]
@@ -222,8 +187,8 @@ async fn get_library_sync_statuses(state: State<'_, AppState>) -> Result<Vec<Lib
 
 #[tauri::command]
 #[specta::specta]
-async fn reconcile_library_catalogue(state: State<'_, AppState>) -> Result<LibraryCatalogueState, String> {
-    state.core.reconcile_library_catalogue().await.map_err(|error| error.to_string())
+async fn reconcile_libraries(state: State<'_, AppState>) -> Result<LibraryListState, String> {
+    state.core.reconcile_libraries().await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -250,19 +215,6 @@ fn get_network_status(state: State<'_, AppState>) -> NetworkStatus {
 #[specta::specta]
 async fn update_network_status(state: State<'_, AppState>, status: NetworkStatus) -> Result<NetworkStatus, String> {
     state.core.update_network_status(status).await.map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn get_transfer_preferences(state: State<'_, AppState>) -> Result<TransferPreferences, String> {
-    let core = state.core.clone();
-    run_blocking("get_transfer_preferences", move || core.transfer_preferences().map_err(|error| error.to_string())).await
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn update_transfer_preference(state: State<'_, AppState>, patch: TransferPreferencePatch) -> Result<TransferPreferences, String> {
-    state.core.update_transfer_preference(patch).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -715,48 +667,53 @@ async fn open_book(app: AppHandle, state: State<'_, AppState>, library_id: Strin
 
 #[tauri::command]
 #[specta::specta]
-async fn open_remote_epub(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Option<RemoteEpubSession>, String> {
+async fn open_pdf_range_session(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<RemoteEpubSession, String> {
+    // PDF.js is routed through this IPC-backed range reader instead of Tauri's
+    // asset protocol (which `open_book` uses for EPUB/other formats) because
+    // some Android system WebViews fail to serve `asset://`/`http://asset.localhost`
+    // byte-range requests to the PDF.js worker, leaving PDFs unable to open.
     let library = library(&state.core, &library_id)?;
     let content_hash = parse_content_hash(&content_hash)?;
-    if !library.is_epub(content_hash.clone()).map_err(|error| error.to_string())? {
-        return Ok(None);
-    }
-    let readers = Arc::clone(&state.remote_epub_readers);
-    let id = state.next_remote_epub_reader_id.fetch_add(1, Ordering::Relaxed).to_string();
-    run_blocking("open_remote_epub", move || {
+    let readers = Arc::clone(&state.range_reader_sessions);
+    let id = state.next_range_reader_id.fetch_add(1, Ordering::Relaxed).to_string();
+    run_blocking("open_pdf_range_session", move || {
         let mut book = library.resolve_book_for_reader(content_hash).map_err(|error| error.to_string())?;
         let size = book.reader.seek(SeekFrom::End(0)).map_err(|error| error.to_string())?;
         book.reader.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
-        readers.lock().map_err(|_| "remote EPUB reader lock is poisoned".to_owned())?.insert(id.clone(), book);
-        Ok(Some(RemoteEpubSession { id, size }))
+        readers.lock().map_err(|_| "range reader lock is poisoned".to_owned())?.insert(id.clone(), book);
+        Ok(RemoteEpubSession { id, size })
     })
     .await
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn read_remote_epub_range(state: State<'_, AppState>, session_id: String, offset: f64, length: u32) -> Result<BinaryBytes, String> {
+async fn read_pdf_range(state: State<'_, AppState>, session_id: String, offset: f64, length: u32) -> Result<BinaryBytes, String> {
+    read_range_session(&state, "PDF", session_id, offset, length).await
+}
+
+#[tauri::command]
+#[specta::specta]
+fn close_pdf_range_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.range_reader_sessions.lock().map_err(|_| "range reader lock is poisoned".to_owned())?.remove(&session_id);
+    Ok(())
+}
+
+async fn read_range_session(state: &State<'_, AppState>, label: &'static str, session_id: String, offset: f64, length: u32) -> Result<BinaryBytes, String> {
     if !offset.is_finite() || offset < 0.0 || offset.fract() != 0.0 || offset > u64::MAX as f64 {
-        return Err("remote EPUB range offset is invalid".to_owned());
+        return Err(format!("{label} range offset is invalid"));
     }
     let offset = offset as u64;
-    let readers = Arc::clone(&state.remote_epub_readers);
-    run_blocking("read_remote_epub_range", move || {
-        let mut readers = readers.lock().map_err(|_| "remote EPUB reader lock is poisoned".to_owned())?;
-        let book = readers.get_mut(&session_id).ok_or_else(|| "remote EPUB reader session has expired".to_owned())?;
+    let readers = Arc::clone(&state.range_reader_sessions);
+    run_blocking("read_range_session", move || {
+        let mut readers = readers.lock().map_err(|_| "range reader lock is poisoned".to_owned())?;
+        let book = readers.get_mut(&session_id).ok_or_else(|| format!("{label} reader session has expired"))?;
         let mut bytes = vec![0; length as usize];
         book.reader.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
         book.reader.read_exact(&mut bytes).map_err(|error| error.to_string())?;
         Ok(BinaryBytes(bytes))
     })
     .await
-}
-
-#[tauri::command]
-#[specta::specta]
-fn close_remote_epub(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.remote_epub_readers.lock().map_err(|_| "remote EPUB reader lock is poisoned".to_owned())?.remove(&session_id);
-    Ok(())
 }
 
 #[tauri::command]
@@ -777,10 +734,10 @@ async fn get_book_reading_position(state: State<'_, AppState>, library_id: Strin
 
 #[tauri::command]
 #[specta::specta]
-async fn get_pdf_reading_page(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Option<u32>, String> {
+async fn get_pdf_reading_position(state: State<'_, AppState>, library_id: String, content_hash: String) -> Result<Option<(u32, f32)>, String> {
     let library = library(&state.core, &library_id)?;
     let content_hash = parse_content_hash(&content_hash)?;
-    run_blocking("get_pdf_reading_page", move || library.pdf_reading_page(content_hash).map_err(|error| error.to_string())).await
+    run_blocking("get_pdf_reading_position", move || library.pdf_reading_position(content_hash).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -793,10 +750,10 @@ async fn update_reading_position(state: State<'_, AppState>, library_id: String,
 
 #[tauri::command]
 #[specta::specta]
-async fn update_pdf_reading_page(state: State<'_, AppState>, library_id: String, content_hash: String, page: u32) -> Result<(), String> {
+async fn update_pdf_reading_position(state: State<'_, AppState>, library_id: String, content_hash: String, page: u32, full_page_position: f32) -> Result<(), String> {
     let library = library(&state.core, &library_id)?;
     let content_hash = parse_content_hash(&content_hash)?;
-    run_blocking("update_pdf_reading_page", move || library.update_pdf_reading_page(content_hash, page).map_err(|error| error.to_string())).await
+    run_blocking("update_pdf_reading_position", move || library.update_pdf_reading_position(content_hash, page, full_page_position).map_err(|error| error.to_string())).await
 }
 
 #[tauri::command]
@@ -934,128 +891,13 @@ fn backend_link_status() -> String {
     "Backend crate linked and Rust logging is active.".to_string()
 }
 
-fn command_builder() -> Builder<tauri::Wry> {
-    Builder::new()
-        .commands(collect_commands![
-            init_logging,
-            backend_link_status,
-            get_libraries,
-            get_account_status,
-            get_account_storage_usage,
-            get_server_library_storage_usage,
-            get_account_sessions,
-            revoke_account_session,
-            revoke_other_account_sessions,
-            login,
-            request_public_registration,
-            resend_verification,
-            verify_email,
-            request_password_reset,
-            reset_password,
-            bootstrap_remote_libraries,
-            sync_all_libraries,
-            get_library_sync_statuses,
-            reconcile_library_catalogue,
-            get_transfer_statuses,
-            get_local_library_storage_usage,
-            get_network_status,
-            update_network_status,
-            get_transfer_preferences,
-            update_transfer_preference,
-            logout,
-            get_reader_preferences,
-            update_reader_preference,
-            get_browsing_preferences,
-            update_browsing_preference,
-            create_library,
-            open_library_folder,
-            remove_library,
-            get_library_folder,
-            get_library_subjects,
-            get_edition_identity_reviews,
-            select_edition_identity_candidate,
-            apply_manual_edition_identity,
-            reject_edition_identity_candidates,
-            retry_edition_identity,
-            get_child_directories,
-            get_library_folder_path,
-            create_directory,
-            get_folder_destinations,
-            rename_folder,
-            move_folder,
-            copy_book_to_folder,
-            move_book_to_folder,
-            remove_book_from_folder,
-            get_library_trash,
-            move_book_to_trash,
-            move_folder_to_trash,
-            restore_trashed_book,
-            purge_trashed_book,
-            restore_trashed_folder,
-            purge_trashed_folder,
-            empty_library_trash,
-            import_book,
-            get_catalog_sources,
-            refresh_catalog_sources,
-            get_custom_catalog_sources,
-            add_custom_catalog,
-            remove_custom_catalog,
-            search_catalogs,
-            get_catalog_page,
-            get_catalog_subjects,
-            get_catalog_subject_recommendations,
-            search_catalog,
-            get_catalog_cover,
-            import_catalog_book,
-            get_library_home,
-            get_book_detail,
-            search_library,
-            search_library_folder,
-            search_library_subject,
-            get_library_authors,
-            discover_catalog_author_books,
-            get_book_thumbnail,
-            open_book,
-            open_remote_epub,
-            read_remote_epub_range,
-            close_remote_epub,
-            get_book_file_name,
-            get_book_reading_position,
-            get_pdf_reading_page,
-            update_reading_position,
-            update_pdf_reading_page,
-            get_audiobook_reading_position,
-            get_audiobook_chapters,
-            update_audiobook_reading_position,
-            get_annotations,
-            upsert_annotation,
-            delete_annotation,
-            get_bookmarks,
-            create_bookmark,
-            delete_bookmark,
-            get_book_links,
-            upsert_book_link,
-            delete_book_link,
-            download_book,
-            remove_local_book_copy,
-            download_folder
-        ])
-        .typ::<FrontendContract>()
-        .constant("FRONTEND_CONTRACT", FrontendContract::default())
-        .error_handling(ErrorHandlingMode::Throw)
-}
-
 pub fn export_bindings(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let path = path.as_ref();
-    command_builder().export(Typescript::default(), path)?;
-    let generated = fs::read_to_string(path)?;
-    fs::write(path, format!("{}\n", generated.trim_end()))?;
-    Ok(())
+    commands::export_bindings(path)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let command_builder = command_builder();
+    let command_builder = commands::builder();
     #[cfg(all(debug_assertions, desktop))]
     export_bindings(Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/bindings.ts")).expect("failed to export Tauri bindings");
 
@@ -1072,8 +914,8 @@ pub fn run() {
 
             let core = AppBackend::initialize_on_tokio_runtime(app_data_location, tauri::async_runtime::handle().inner().clone()).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             let events = core.take_events()?;
-            app.manage(AppState { core, remote_epub_readers: Arc::new(Mutex::new(HashMap::new())), next_remote_epub_reader_id: AtomicU64::new(1) });
-            spawn_library_event_forwarder(app.handle().clone(), events);
+            app.manage(AppState::new(core));
+            events::spawn_library_event_forwarder(app.handle().clone(), events);
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())

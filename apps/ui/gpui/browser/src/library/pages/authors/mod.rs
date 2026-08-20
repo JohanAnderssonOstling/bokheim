@@ -21,12 +21,14 @@ use epub_svelte_lib::library::AuthorSort;
 use crate::library::services::{AuthorBrowseRows, LatestRequest, LibraryContext};
 use crate::library::title_filter::normalize_filter;
 use crate::library::widgets::{AuthorRowView, BookGrid};
+use crate::library::{DetailOwner, context_with_page_detail, detail::BookDetailPage, page_detail};
 use crate::{FocusNextListItem, FocusPreviousListItem};
 
 use self::discovery::AuthorDiscoveryView;
 
 pub(crate) struct AuthorsPage {
     ui: LibraryContext,
+    detail: Option<Entity<BookDetailPage>>,
     filter_input: Entity<InputState>,
     /// How the index is ordered. Filing order groups under letters; book count
     /// does not, so the dividers go with it.
@@ -52,6 +54,7 @@ pub(crate) struct AuthorsPage {
 
 impl AuthorsPage {
     pub(crate) fn new(ui: LibraryContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ui = context_with_page_detail(ui, cx);
         let filter_input = cx.new(|cx| InputState::new(window, cx));
         let books = BookGrid::browsable(ui.clone(), false, ui.library_view());
         let discovery = cx.new(|_| AuthorDiscoveryView::new(ui.clone()));
@@ -62,8 +65,9 @@ impl AuthorsPage {
             }
         });
         let discovery_subscription = cx.observe(&discovery, |_, _, cx| cx.notify());
-        Self {
+        let mut page = Self {
             ui,
+            detail: None,
             filter_input,
             sort: AuthorSort::default(),
             rows: Vec::new(),
@@ -77,7 +81,9 @@ impl AuthorsPage {
             books_request: LatestRequest::default(),
             _input_subscription: input_subscription,
             _discovery_subscription: discovery_subscription,
-        }
+        };
+        page.refresh(cx);
+        page
     }
 
     /// Rebuilds the retained rows from a fresh author list. Rows are recreated
@@ -361,6 +367,9 @@ impl AuthorsPage {
 
 impl Render for AuthorsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(detail) = page_detail(self) {
+            return detail;
+        }
         let theme = components::browser_theme(cx);
         let page = if self.selected.is_some() { self.render_books(window, cx) } else { self.render_index(window, cx) };
         let split = components::authors_split_page().child(page);
@@ -369,5 +378,15 @@ impl Render for AuthorsPage {
         components::browser_error_banner(self.error.clone(), retry_label.into(), theme, split.into_any_element(), move |cx| {
             entity.update(cx, |page, cx| page.refresh(cx));
         })
+    }
+}
+
+impl DetailOwner for AuthorsPage {
+    fn detail(&self) -> Option<&Entity<BookDetailPage>> {
+        self.detail.as_ref()
+    }
+
+    fn detail_mut(&mut self) -> &mut Option<Entity<BookDetailPage>> {
+        &mut self.detail
     }
 }

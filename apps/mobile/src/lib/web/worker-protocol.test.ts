@@ -11,11 +11,14 @@ test("generated command method names map to worker command names", () => {
 });
 
 test("reactive proxy command arguments become structured-clone-safe plain data", () => {
-  const request = new Proxy({
-    source_id: "opds-litteraturbanken",
-    publication: new Proxy({ edition_id: "lb1728740", work_id: null }, {}),
-    formats: ["epub"],
-  }, {});
+  const request = new Proxy(
+    {
+      source_id: "opds-litteraturbanken",
+      publication: new Proxy({ edition_id: "lb1728740", work_id: null }, {}),
+      formats: ["epub"],
+    },
+    {},
+  );
   const result = toCloneableWorkerValue([request, new Uint8Array([1, 2, 3])]);
   assert.notEqual(result[0], request);
   assert.deepEqual(result[0], {

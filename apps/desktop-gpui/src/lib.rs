@@ -1,5 +1,7 @@
 mod registry;
 mod session;
+#[cfg(not(feature = "kobo"))]
+mod update_notice;
 #[cfg(all(not(feature = "kobo"), target_os = "linux"))]
 mod updater;
 #[cfg(all(not(feature = "kobo"), target_os = "windows"))]
@@ -17,7 +19,7 @@ use std::time::Duration;
 
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
-use browser_ui::{AppServices, BrowserRoot, BrowserWindowGeometry, OpenReader, SaveBrowserState};
+use browser_ui::{AppServices, BrowserRoot, OpenReader};
 use epub_svelte_lib::app::BackendContext;
 use epub_svelte_lib::app::preferences::ReaderPreferencePatch;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
@@ -97,6 +99,8 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
     let desktop_updater = windows_updater::windows_installer_updater(blocking_worker.clone());
     #[cfg(all(not(feature = "kobo"), not(any(target_os = "linux", target_os = "windows"))))]
     let desktop_updater: Option<browser_ui::DesktopUpdater> = None;
+    #[cfg(not(feature = "kobo"))]
+    let desktop_updater_for_check = desktop_updater.clone();
     let session_saves = SessionSaveScheduler::new(saved_session.clone(), session_path, persistence_worker.clone());
     #[cfg(feature = "kobo")]
     let kobo_auto_rotate = {
@@ -313,69 +317,52 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, cx: &m
         reader_ui::open_reader_window(locator, title, initial_target, library, cx);
     });
 
-    let browser_settings = saved_session.clone();
-    let browser_session_saves = session_saves.clone();
-    let save_browser_state: SaveBrowserState = Rc::new(move |browser, geometry: Option<BrowserWindowGeometry>, cx| {
-        let mut session = browser_settings.borrow_mut();
-        let browser_changed = session.browser != browser;
-        let geometry_changed = options.persist_window_geometry && geometry.is_some_and(|geometry| session.browser_window != Some(geometry));
-        if !browser_changed && !geometry_changed {
-            return;
-        }
-        session.browser = browser;
-        if options.persist_window_geometry && geometry.is_some() {
-            session.browser_window = geometry;
-        }
-        drop(session);
-        browser_session_saves.schedule(cx);
-    });
-
     let browser_bounds = if options.persist_window_geometry {
-        saved_session
-            .borrow()
-            .browser_window
-            .map(|geometry| WindowBounds::Windowed(Bounds { origin: gpui::point(px(geometry.x), px(geometry.y)), size: size(px(geometry.width), px(geometry.height)) }))
-            .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1240.0), px(820.0)), cx)))
+        WindowBounds::Windowed(Bounds::centered(None, size(px(1240.0), px(820.0)), cx))
     } else {
         WindowBounds::Windowed(Bounds { origin: gpui::point(px(0.0), px(0.0)), size: size(px(300.0), px(400.0)) })
     };
-    let browser_session = saved_session.borrow().browser.clone();
     let browser_out = Rc::new(RefCell::new(None));
     let browser_for_window = browser_out.clone();
     #[cfg(not(feature = "kobo"))]
     let (app_id, icon) = desktop_window_identity();
     #[cfg(feature = "kobo")]
     let (app_id, icon) = (None, None);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(browser_bounds),
-            titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(epub_svelte_lib::APP_NAME)), ..Default::default() }),
-            focus: true,
-            app_id,
-            icon,
-            ..Default::default()
-        },
-        move |window, cx| {
-            #[cfg(feature = "kobo")]
-            let services = AppServices::new(backend, open_reader, save_browser_state, None, save_kobo_auto_rotate.clone(), window);
-            #[cfg(not(feature = "kobo"))]
-            let services = AppServices::new(backend, open_reader, save_browser_state, desktop_updater, window);
-            #[cfg(feature = "kobo")]
-            let browser = cx.new(|cx| BrowserRoot::new(library_entries, browser_session, services, kobo_auto_rotate, window, cx));
-            #[cfg(not(feature = "kobo"))]
-            let browser = cx.new(|cx| BrowserRoot::new(library_entries, browser_session, services, window, cx));
-            #[cfg(feature = "audiobooks")]
-            {
-                *audiobook_browser.borrow_mut() = Some(browser.downgrade());
-            }
-            *browser_for_window.borrow_mut() = Some(browser.clone());
-            let content = platform_content(browser, cx);
-            cx.new(|cx| Root::new(content, window, cx))
-        },
-    )
-    .expect("failed to open browsing window");
+    let browser_window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(browser_bounds),
+                titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(epub_svelte_lib::APP_NAME)), ..Default::default() }),
+                focus: true,
+                app_id,
+                icon,
+                ..Default::default()
+            },
+            move |window, cx| {
+                #[cfg(feature = "kobo")]
+                let services = AppServices::new(backend, open_reader, None, save_kobo_auto_rotate.clone(), window);
+                #[cfg(not(feature = "kobo"))]
+                let services = AppServices::new(backend, open_reader, desktop_updater, window);
+                #[cfg(feature = "kobo")]
+                let browser = cx.new(|cx| BrowserRoot::new(library_entries, services, kobo_auto_rotate, window, cx));
+                #[cfg(not(feature = "kobo"))]
+                let browser = cx.new(|cx| BrowserRoot::new(library_entries, services, window, cx));
+                #[cfg(feature = "audiobooks")]
+                {
+                    *audiobook_browser.borrow_mut() = Some(browser.downgrade());
+                }
+                *browser_for_window.borrow_mut() = Some(browser.clone());
+                let content = platform_content(browser, cx);
+                cx.new(|cx| Root::new(content, window, cx))
+            },
+        )
+        .expect("failed to open browsing window");
 
     let browser: Entity<BrowserRoot> = browser_out.borrow_mut().take().expect("browser window always constructs its view");
+    #[cfg(not(feature = "kobo"))]
+    update_notice::check_for_update(desktop_updater_for_check, browser_window.into(), cx);
+    #[cfg(feature = "kobo")]
+    let _ = browser_window;
     forward_library_events(browser.downgrade(), library_events, cx);
 
     let quit_session_saves = session_saves.clone();

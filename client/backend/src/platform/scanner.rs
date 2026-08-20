@@ -47,7 +47,10 @@ pub enum LibraryEvent {
     DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
     FolderDownloadStatusChanged { dir_id: crate::DirId, downloaded_books: usize, total_books: usize },
     TransferStatusChanged,
-    CatalogueChanged,
+    /// The device-global set of configured libraries or its metadata changed.
+    LibraryListChanged,
+    /// Browsable content inside one library changed.
+    LibraryChanged,
     ScanComplete,
 }
 

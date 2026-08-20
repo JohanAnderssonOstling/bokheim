@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use browser_ui::{BrowserSession, BrowserWindowGeometry};
 use gpui::App;
 use reader_ui::{ReaderPreferences, ReaderWindowGeometry};
 use serde::{Deserialize, Serialize};
@@ -19,8 +18,6 @@ fn default_kobo_auto_rotate() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSession {
     version: u32,
-    pub browser: BrowserSession,
-    pub browser_window: Option<BrowserWindowGeometry>,
     #[serde(default = "default_kobo_auto_rotate")]
     pub kobo_auto_rotate: bool,
     pub reader_preferences: ReaderPreferences,
@@ -29,7 +26,7 @@ pub struct UiSession {
 
 impl Default for UiSession {
     fn default() -> Self {
-        Self { version: SESSION_VERSION, browser: BrowserSession::default(), browser_window: None, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), reader_window: None }
+        Self { version: SESSION_VERSION, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), reader_window: None }
     }
 }
 

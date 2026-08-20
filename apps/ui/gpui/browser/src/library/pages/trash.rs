@@ -16,8 +16,10 @@ pub(crate) struct TrashPage {
 }
 
 impl TrashPage {
-    pub(crate) fn new(ui: LibraryContext) -> Self {
-        Self { ui, contents: None, error: None, request: LatestRequest::default() }
+    pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
+        let mut page = Self { ui, contents: None, error: None, request: LatestRequest::default() };
+        page.refresh(cx);
+        page
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {

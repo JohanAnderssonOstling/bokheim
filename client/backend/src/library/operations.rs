@@ -2,7 +2,7 @@
 
 use super::covers::generate_thumbnail_for_sync;
 use super::handle::LibraryBackend;
-use super::model::{generate_content_hash_blake3, Dir, LibraryAccountState, ReaderFormat, ResolvedBook};
+use super::model::{Dir, LibraryAccountState, ReaderFormat, ResolvedBook, generate_content_hash_blake3};
 use crate::app::BackendError;
 use crate::catalog::{CatalogPublicationIdentity, CatalogSourceId};
 use crate::library::database as db;
@@ -110,10 +110,6 @@ impl LibraryBackend {
             };
             let session = self.sync_manager.current_session().ok_or("authentication is required to open an uncached server book")?;
             let reader = remote_reader::RemoteAssetReader::open(&self.context.app_data_dir().join("remote-book-cache"), session.user_id(), &self.id, content_hash.clone(), self.sync_manager.server_url(), session.token().to_owned())?;
-            let preferences = self.context.load_transfer_preferences()?;
-            if preferences.auto_download_limit_mb().is_some_and(|limit| reader.len() <= u64::from(limit) * 1024 * 1024) {
-                self.request_book_download(content_hash)?;
-            }
             return Ok(ResolvedBook { path, publication_path, format, reader: Box::new(reader) });
         }
     }

@@ -1,4 +1,7 @@
-import sqlite3InitModule, { type Database, type Sqlite3Static } from "@sqlite.org/sqlite-wasm";
+import sqlite3InitModule, {
+  type Database,
+  type Sqlite3Static,
+} from "@sqlite.org/sqlite-wasm";
 
 const WEB_SCHEMA_VERSION = 15;
 const WEB_SCHEMA = `
@@ -287,12 +290,15 @@ const BACKUP_KEY = "bokheim-web-v4.sqlite3";
 const OPFS_BACKUP_KEY = "bokheim-web-v4.backup.sqlite3";
 
 function unavailableFileStorage(reason: unknown): boolean {
-  return reason instanceof DOMException && [
-    "SecurityError",
-    "NotAllowedError",
-    "NotSupportedError",
-    "InvalidStateError",
-  ].includes(reason.name);
+  return (
+    reason instanceof DOMException &&
+    [
+      "SecurityError",
+      "NotAllowedError",
+      "NotSupportedError",
+      "InvalidStateError",
+    ].includes(reason.name)
+  );
 }
 
 async function backupFile(create: boolean): Promise<FileSystemFileHandle | null> {
@@ -302,7 +308,8 @@ async function backupFile(create: boolean): Promise<FileSystemFileHandle | null>
     const root = await storage.getDirectory();
     return await root.getFileHandle(OPFS_BACKUP_KEY, { create });
   } catch (reason) {
-    if (!create && reason instanceof DOMException && reason.name === "NotFoundError") return null;
+    if (!create && reason instanceof DOMException && reason.name === "NotFoundError")
+      return null;
     if (unavailableFileStorage(reason)) return null;
     throw reason;
   }
@@ -314,7 +321,8 @@ function indexedDbBackupDatabase(): Promise<IDBDatabase | null> {
     const request = indexedDB.open(BACKUP_DATABASE_NAME, 1);
     request.onupgradeneeded = () => request.result.createObjectStore(BACKUP_STORE_NAME);
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not open the browser database backup"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("Could not open the browser database backup"));
   });
 }
 
@@ -333,12 +341,22 @@ async function loadDatabaseBackup(): Promise<Uint8Array | null> {
   if (!backup) return null;
   try {
     return await new Promise((resolve, reject) => {
-      const request = backup.transaction(BACKUP_STORE_NAME).objectStore(BACKUP_STORE_NAME).get(BACKUP_KEY);
+      const request = backup
+        .transaction(BACKUP_STORE_NAME)
+        .objectStore(BACKUP_STORE_NAME)
+        .get(BACKUP_KEY);
       request.onsuccess = () => {
         const value = request.result;
-        resolve(value instanceof Uint8Array ? value : value instanceof ArrayBuffer ? new Uint8Array(value) : null);
+        resolve(
+          value instanceof Uint8Array
+            ? value
+            : value instanceof ArrayBuffer
+              ? new Uint8Array(value)
+              : null,
+        );
       };
-      request.onerror = () => reject(request.error ?? new Error("Could not read the browser database backup"));
+      request.onerror = () =>
+        reject(request.error ?? new Error("Could not read the browser database backup"));
     });
   } finally {
     backup.close();
@@ -365,10 +383,18 @@ async function saveDatabaseBackup(bytes: Uint8Array): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       const transaction = backup.transaction(BACKUP_STORE_NAME, "readwrite");
       const request = transaction.objectStore(BACKUP_STORE_NAME).put(bytes, BACKUP_KEY);
-      request.onerror = () => reject(request.error ?? new Error("Could not save the browser database backup"));
+      request.onerror = () =>
+        reject(request.error ?? new Error("Could not save the browser database backup"));
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error ?? new Error("Could not save the browser database backup"));
-      transaction.onabort = () => reject(transaction.error ?? new Error("Saving the browser database backup was aborted"));
+      transaction.onerror = () =>
+        reject(
+          transaction.error ?? new Error("Could not save the browser database backup"),
+        );
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            new Error("Saving the browser database backup was aborted"),
+        );
     });
     return true;
   } finally {
@@ -381,33 +407,49 @@ export function initializeWebDatabase(db: Database): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(WEB_SCHEMA);
-    const bookColumns = new Set(db.exec({
-      sql: "SELECT name FROM pragma_table_info('books')",
-      rowMode: 0,
-      returnValue: "resultRows",
-    }).map(String));
+    const bookColumns = new Set(
+      db
+        .exec({
+          sql: "SELECT name FROM pragma_table_info('books')",
+          rowMode: 0,
+          returnValue: "resultRows",
+        })
+        .map(String),
+    );
     if (!bookColumns.has("description")) {
       db.exec("ALTER TABLE books ADD COLUMN description TEXT NOT NULL DEFAULT ''");
     }
-    const tombstoneColumns = new Set(db.exec({
-      sql: "SELECT name FROM pragma_table_info('web_library_tombstones')",
-      rowMode: 0,
-      returnValue: "resultRows",
-    }).map(String));
+    const tombstoneColumns = new Set(
+      db
+        .exec({
+          sql: "SELECT name FROM pragma_table_info('web_library_tombstones')",
+          rowMode: 0,
+          returnValue: "resultRows",
+        })
+        .map(String),
+    );
     if (!tombstoneColumns.has("account_id")) {
       db.exec("ALTER TABLE web_library_tombstones ADD COLUMN account_id TEXT");
     }
-    const syncColumns = new Set(db.exec({
-      sql: "SELECT name FROM pragma_table_info('web_sync_state')",
-      rowMode: 0,
-      returnValue: "resultRows",
-    }).map(String));
+    const syncColumns = new Set(
+      db
+        .exec({
+          sql: "SELECT name FROM pragma_table_info('web_sync_state')",
+          rowMode: 0,
+          returnValue: "resultRows",
+        })
+        .map(String),
+    );
     if (!syncColumns.has("last_state_revision")) {
-      db.exec("ALTER TABLE web_sync_state ADD COLUMN last_state_revision INTEGER CHECK (last_state_revision IS NULL OR last_state_revision > 0)");
+      db.exec(
+        "ALTER TABLE web_sync_state ADD COLUMN last_state_revision INTEGER CHECK (last_state_revision IS NULL OR last_state_revision > 0)",
+      );
       db.exec("UPDATE web_sync_state SET last_state_revision=last_server_revision");
     }
     if (!syncColumns.has("last_reading_revision")) {
-      db.exec("ALTER TABLE web_sync_state ADD COLUMN last_reading_revision INTEGER CHECK (last_reading_revision IS NULL OR last_reading_revision > 0)");
+      db.exec(
+        "ALTER TABLE web_sync_state ADD COLUMN last_reading_revision INTEGER CHECK (last_reading_revision IS NULL OR last_reading_revision > 0)",
+      );
       db.exec("UPDATE web_sync_state SET last_reading_revision=last_server_revision");
     }
     // Legacy tombstones have no trustworthy account identity. Retaining them
@@ -445,8 +487,13 @@ async function openDatabase(): Promise<WebDatabase> {
     if (backup?.length) {
       const pointer = sqlite3.wasm.allocFromTypedArray(backup);
       const result = sqlite3.capi.sqlite3_deserialize(
-        db.pointer!, "main", pointer, backup.length, backup.length,
-        sqlite3.capi.SQLITE_DESERIALIZE_FREEONCLOSE | sqlite3.capi.SQLITE_DESERIALIZE_RESIZEABLE,
+        db.pointer!,
+        "main",
+        pointer,
+        backup.length,
+        backup.length,
+        sqlite3.capi.SQLITE_DESERIALIZE_FREEONCLOSE |
+          sqlite3.capi.SQLITE_DESERIALIZE_RESIZEABLE,
       );
       if (result !== sqlite3.capi.SQLITE_OK) {
         sqlite3.wasm.dealloc(pointer);
@@ -460,7 +507,7 @@ async function openDatabase(): Promise<WebDatabase> {
 }
 
 export function getWebDatabase(): Promise<WebDatabase> {
-  return databasePromise ??= openDatabase();
+  return (databasePromise ??= openDatabase());
 }
 
 /** Flushes the in-memory SQLite fallback to durable IndexedDB storage. */
@@ -470,9 +517,12 @@ export async function persistWebDatabaseFallback(): Promise<void> {
   if (persistence !== "indexeddb") return;
   if (!db.pointer) throw new Error("The browser database is closed");
   const bytes = sqlite3.capi.sqlite3_js_db_export(db.pointer);
-  backupWriteQueue = backupWriteQueue.catch(() => undefined).then(async () => {
-    if (!await saveDatabaseBackup(bytes)) throw new Error("Persistent browser storage is unavailable");
-  });
+  backupWriteQueue = backupWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (!(await saveDatabaseBackup(bytes)))
+        throw new Error("Persistent browser storage is unavailable");
+    });
   await backupWriteQueue;
 }
 
@@ -484,7 +534,8 @@ export async function getWebDatabaseHealth(): Promise<WebDatabaseHealth> {
     returnValue: "resultRows",
   });
   const schemaVersion = Number(rows[0]);
-  if (!Number.isSafeInteger(schemaVersion)) throw new Error("The web database schema version is invalid");
+  if (!Number.isSafeInteger(schemaVersion))
+    throw new Error("The web database schema version is invalid");
   return {
     sqlite_version: sqlite3.version.libVersion,
     schema_version: schemaVersion,

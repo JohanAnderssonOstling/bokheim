@@ -668,29 +668,7 @@ pub unsafe extern "C" fn bokheim_project_directories(input: *const u8, input_len
     store_result(project_browser_directories(input))
 }
 
-/// Resolves one DDC notation through the embedded DDC 23 summaries.
-///
-/// # Safety
-/// Input must reference valid UTF-8 bytes for the stated length.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_ddc_subject_path(input: *const u8, input_length: usize) -> u32 {
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    let result = std::str::from_utf8(input).map_err(|error| error.to_string()).and_then(|notation| library_model::ddc_subject_path(notation).ok_or_else(|| "invalid or unassigned DDC notation".to_owned())).map(String::into_bytes);
-    store_result(result)
-}
 
-/// Resolves one LCC call number through the embedded official outline.
-///
-/// # Safety
-/// Input must reference valid UTF-8 bytes for the stated length.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_lcc_subject_path(input: *const u8, input_length: usize) -> u32 {
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    let result = std::str::from_utf8(input).map_err(|error| error.to_string()).and_then(|notation| library_model::lcc_subject_path(notation).ok_or_else(|| "invalid LCC call number".to_owned())).map(String::into_bytes);
-    store_result(result)
-}
 
 /// Resolves a retained controlled-vocabulary code into unified browse paths.
 ///

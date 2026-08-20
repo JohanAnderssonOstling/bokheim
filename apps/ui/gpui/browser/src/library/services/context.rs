@@ -23,9 +23,9 @@ pub(crate) use epub_svelte_lib::library::{
 
 /// Capabilities scoped to one selected library.
 ///
-/// This is a plain value, not a GPUI entity: replacing `LibraryRoot` replaces
-/// every clone. Pages use its typed operations instead of assembling backend
-/// calls from several service wrappers.
+/// This is a plain value, not a GPUI entity. `BrowserRoot` creates one for the
+/// current page from the selected backend. Pages use its typed operations
+/// instead of assembling backend calls from several service wrappers.
 #[derive(Clone)]
 pub(crate) struct LibraryContext {
     app: AppServices,
@@ -84,6 +84,18 @@ impl LibraryContext {
 
     pub(crate) fn scanner_running(&self) -> bool {
         self.library.scanner_running()
+    }
+
+    pub(crate) fn persist_folder_path(&self, path: Vec<crate::model::FolderCrumb>) {
+        if let Err(error) = self.app.backend.save_library_folder_path(self.library.id().clone(), path) {
+            log::warn!("failed to persist folder path: {error}");
+        }
+    }
+
+    pub(crate) fn persist_subject_path(&self, path: Vec<crate::model::SubjectCrumb>) {
+        if let Err(error) = self.app.backend.save_library_subject_path(self.library.id().clone(), path) {
+            log::warn!("failed to persist subject path: {error}");
+        }
     }
 
     pub(crate) fn sync_server_connected(&self) -> bool {

@@ -1,7 +1,6 @@
 use crate::account::LibrarySyncState;
 use crate::library::LibraryFileTypeFilter;
 use crate::preferences::{BrowsingPreferencesContract, ReaderPreferencesContract, WebPreferenceProfilesContract};
-use crate::transfer::NetworkTransport;
 use account_contract::{EMAIL_MAX_BYTES, EMAIL_VERIFICATION_PIN_DIGITS, ONE_TIME_TOKEN_BYTES, PASSWORD_MAX_BYTES, PASSWORD_MIN_CHARACTERS};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -576,17 +575,10 @@ impl Default for AccountContract {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
-pub struct NetworkTransportDefinition {
-    pub transport: NetworkTransport,
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Type)]
 pub struct SettingsContract {
     pub navigation_label: String,
     pub title: String,
     pub appearance_section_label: String,
-    pub transfers_section_label: String,
     pub catalogues_section_label: String,
     pub included_catalog_languages_label: String,
     pub included_catalog_languages_description: String,
@@ -594,36 +586,15 @@ pub struct SettingsContract {
     pub application_theme_label: String,
     pub interface_font_label: String,
     pub ui_font_size_label: String,
-    pub library_section_label: String,
     pub library_view_label: String,
-    pub show_unavailable_books_label: String,
-    pub background_metered_label: String,
-    pub background_metered_description: String,
-    pub auto_download_label: String,
-    pub auto_download_description: String,
-    pub current_network_label: String,
-    pub network_transports: Vec<NetworkTransportDefinition>,
 }
 
 impl Default for SettingsContract {
     fn default() -> Self {
-        let network_transports = [
-            (NetworkTransport::Offline, "Offline"),
-            (NetworkTransport::Wifi, "Wi-Fi"),
-            (NetworkTransport::Cellular, "Mobile data"),
-            (NetworkTransport::Ethernet, "Ethernet"),
-            (NetworkTransport::Vpn, "VPN"),
-            (NetworkTransport::Other, "Connected"),
-            (NetworkTransport::Unknown, "Network unknown"),
-        ]
-        .into_iter()
-        .map(|(transport, label)| NetworkTransportDefinition { transport, label: label.to_owned() })
-        .collect();
         Self {
             navigation_label: "Settings".to_owned(),
             title: "Settings".to_owned(),
             appearance_section_label: "Appearance".to_owned(),
-            transfers_section_label: "Batch jobs".to_owned(),
             catalogues_section_label: "Catalogues".to_owned(),
             included_catalog_languages_label: "Included languages".to_owned(),
             included_catalog_languages_description: "Limits catalogue-wide search. Catalogue providers remain available in the Store.".to_owned(),
@@ -631,25 +602,12 @@ impl Default for SettingsContract {
             application_theme_label: "Application theme".to_owned(),
             interface_font_label: "Interface font".to_owned(),
             ui_font_size_label: "UI font size".to_owned(),
-            library_section_label: "Library".to_owned(),
             library_view_label: "Book display".to_owned(),
-            show_unavailable_books_label: "Show books not on this device".to_owned(),
-            background_metered_label: "Background transfers on metered connections".to_owned(),
-            background_metered_description: "Manual uploads and downloads always continue.".to_owned(),
-            auto_download_label: "Automatic book downloads".to_owned(),
-            auto_download_description: "Download server books up to this size on this device.".to_owned(),
-            current_network_label: "Current network".to_owned(),
-            network_transports,
         }
     }
 }
 
-/// A destination whose contents belong to the selected library.
-///
-/// Split from [`UniversalFeature`] rather than tagging one flat list with a
-/// scope, so that a library-scoped destination cannot be listed among the
-/// app-scoped ones by mistake. This mirrors the `LibraryRoute`/`UniversalRoute`
-/// split the desktop frontend already makes one layer down.
+/// A destination whose contents use the selected library.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryFeature {
@@ -1103,7 +1061,6 @@ mod tests {
         assert_eq!(contract.account.validation.password_min_characters, 12);
         assert_eq!(contract.account.sync_states.len(), 5);
         assert_eq!(contract.settings.navigation_label, "Settings");
-        assert_eq!(contract.settings.network_transports.len(), 7);
     }
 
     #[test]

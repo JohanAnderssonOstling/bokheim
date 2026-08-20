@@ -151,7 +151,7 @@ pub mod notifications {
     pub enum NotificationMessage {
         Hello { heartbeat_seconds: u64, timeout_seconds: u64 },
         LibraryChanged { library_id: LibraryId },
-        CatalogueChanged,
+        LibrariesChanged,
         Reconcile,
     }
 }
@@ -222,7 +222,7 @@ mod tests {
     fn notification_contract_is_granular_without_carrying_state() {
         let message = notifications::NotificationMessage::LibraryChanged { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap() };
         assert_eq!(round_trip(&message), message);
-        let encoded = crate::transport::encode(&notifications::NotificationMessage::CatalogueChanged).unwrap();
-        assert_eq!(crate::transport::decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::CatalogueChanged);
+        let encoded = crate::transport::encode(&notifications::NotificationMessage::LibrariesChanged).unwrap();
+        assert_eq!(crate::transport::decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::LibrariesChanged);
     }
 }

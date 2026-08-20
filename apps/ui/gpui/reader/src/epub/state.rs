@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{App, Context, FocusHandle, ScrollStrategy, Window};
@@ -10,7 +10,8 @@ use html_view_gpui::HtmlView;
 
 use crate::epub::audio::AudioMode;
 use crate::epub::audio::AudioState;
-use crate::epub::marks::{self, MarksState, Selection};
+use crate::epub::marks::{self, Selection};
+use crate::shell::marks::MarksState;
 use crate::epub::progress::ProgressState;
 use crate::epub::search::{SearchFilters, SearchState};
 use crate::epub::toc::TocState;
@@ -103,6 +104,7 @@ impl ReaderView {
             progress: ProgressState::default(),
             toolbar_view,
             marks: MarksState::default(),
+            selection: None,
             reader_state_visible: false,
             reader_state_bookmarks: false,
             annotation_note_input,
@@ -205,7 +207,7 @@ impl ReaderView {
             |this, cx, (annotations, bookmarks)| {
                 this.marks.annotations = annotations;
                 this.marks.bookmarks = bookmarks;
-                let overlays = this.marks.overlays();
+                let overlays = marks::overlays(&this.marks);
                 this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetAnnotations(overlays), cx));
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
             },
@@ -213,9 +215,9 @@ impl ReaderView {
     }
 
     pub(crate) fn highlight_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(selection) = self.marks.selection.clone() else { return };
+        let Some(selection) = self.selection.clone() else { return };
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0);
+        let now = crate::shell::state_panel::now_millis();
         let annotation = epub_svelte_lib::library::marks::ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
             content_hash: self.locator.content_hash(),
@@ -237,7 +239,7 @@ impl ReaderView {
                 let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
                 this.marks.selected_id = Some(annotation.id.clone());
                 this.marks.annotations.push(annotation);
-                this.marks.clear_selection();
+                this.selection = None;
                 this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
                 this.invalidate_toolbar("selection_cleared", cx);
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
@@ -247,12 +249,8 @@ impl ReaderView {
 
     pub(crate) fn copy_selection_citation(&self, cx: &mut Context<Self>) {
         let title = self.display_title();
-        let cfi = self.marks.selection.as_ref().map(|selection| selection.cfi_range.clone()).or_else(|| self.current_cfi.clone());
+        let cfi = self.selection.as_ref().map(|selection| selection.cfi_range.clone()).or_else(|| self.current_cfi.clone());
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::CopySelectionCitation { title, cfi }, cx));
-    }
-
-    fn now_millis() -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
     }
 
     pub(crate) fn select_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -273,14 +271,22 @@ impl ReaderView {
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetCfiPosition(Some(cfi)), cx));
     }
 
-    pub(crate) fn save_selected_annotation(&mut self, style: Option<epub_svelte_lib::library::marks::AnnotationStyle>, cx: &mut Context<Self>) {
+    /// Writes the open annotation back, optionally restyling or recolouring it.
+    ///
+    /// The editor stays open afterwards so several styles or colours can be
+    /// tried against the text; [`Self::close_annotation_popup`] is what
+    /// dismisses it.
+    pub(crate) fn save_selected_annotation(&mut self, style: Option<epub_svelte_lib::library::marks::AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
         let Some(id) = self.marks.selected_id.clone() else { return };
         let Some(mut annotation) = self.marks.annotation(&id).cloned() else { return };
         annotation.note = self.annotation_note_input.read(cx).value().to_string();
         if let Some(style) = style {
             annotation.style = style;
         }
-        annotation.modified_at = Self::now_millis();
+        if let Some(color) = color {
+            annotation.color = color.to_owned();
+        }
+        annotation.modified_at = crate::shell::state_panel::now_millis();
         let stored = annotation.clone();
         persistence::write(
             cx,
@@ -292,15 +298,13 @@ impl ReaderView {
                     this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
                 }
                 this.marks.replace(annotation);
-                this.marks.selected_id = None;
-                this.annotation_popup_anchor = None;
                 crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
             },
         );
     }
 
     pub(crate) fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
-        let modified_at = Self::now_millis();
+        let modified_at = crate::shell::state_panel::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
@@ -318,7 +322,7 @@ impl ReaderView {
 
     pub(crate) fn add_bookmark(&mut self, cx: &mut Context<Self>) {
         let Some(cfi) = self.current_cfi.clone() else { return };
-        let now = Self::now_millis();
+        let now = crate::shell::state_panel::now_millis();
         let bookmark = epub_svelte_lib::library::marks::ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi, label: self.display_title(), created_at: now, modified_at: now };
         let stored = bookmark.clone();
         persistence::write(
@@ -336,7 +340,7 @@ impl ReaderView {
     }
 
     pub(crate) fn delete_bookmark(&mut self, id: String, cx: &mut Context<Self>) {
-        let deleted_at = Self::now_millis();
+        let deleted_at = crate::shell::state_panel::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
@@ -412,8 +416,10 @@ impl ReaderView {
             RendererEvent::ScaleChanged(scale) => ReaderSettings::update(cx, |preferences| {
                 preferences.scale = *scale;
             }),
-            RendererEvent::ReadingProgress { fraction, location, total_locations, doc, doc_count } => {
-                if !self.progress.update(*fraction, *location, *total_locations, *doc, *doc_count) {
+            RendererEvent::ReadingProgress { fraction, location, total_locations, doc, doc_count, .. } => {
+                // TODO(2026-08-19): wire this to the renderer's `doc_fraction`
+                // field once HtmlViewCore has been updated to emit it.
+                if !self.progress.update(*fraction, 0.0, *location, *total_locations, *doc, *doc_count) {
                     return;
                 }
                 if let Some(cfi) = self.current_cfi.clone() {
@@ -422,7 +428,7 @@ impl ReaderView {
                 false
             }
             RendererEvent::SelectionFinished { cfi_range, exact_text, prefix, suffix, .. } => {
-                if !self.marks.set_selection(Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
+                if !marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
                     return;
                 }
                 self.annotation_popup_anchor = Some(window.mouse_position());

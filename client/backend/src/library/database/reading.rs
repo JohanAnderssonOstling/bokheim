@@ -13,6 +13,11 @@ impl LibraryBackend {
         get_pdf_reading_page(&conn, content_hash).map_err(BackendError::operation)
     }
 
+    pub fn pdf_reading_position(&self, content_hash: ContentHash) -> Result<Option<(u32, f32)>, BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        get_pdf_reading_position(&conn, content_hash).map_err(BackendError::operation)
+    }
+
     pub fn audiobook_reading_position(&self, content_hash: ContentHash) -> Result<Option<u64>, BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         get_audiobook_reading_position(&conn, content_hash).map_err(BackendError::operation)
@@ -30,6 +35,13 @@ impl LibraryBackend {
     pub fn update_pdf_reading_page(&self, content_hash: ContentHash, page: u32) -> Result<(), BackendError> {
         let conn = self.db.get().map_err(BackendError::operation)?;
         update_pdf_reading_page(&conn, content_hash, page).map_err(BackendError::operation)?;
+        self.app()?.request_reading_position_sync(self.id().clone());
+        Ok(())
+    }
+
+    pub fn update_pdf_reading_position(&self, content_hash: ContentHash, page: u32, full_page_position: f32) -> Result<(), BackendError> {
+        let conn = self.db.get().map_err(BackendError::operation)?;
+        update_pdf_reading_position(&conn, content_hash, page, full_page_position).map_err(BackendError::operation)?;
         self.app()?.request_reading_position_sync(self.id().clone());
         Ok(())
     }
@@ -67,12 +79,23 @@ pub(crate) fn get_pdf_reading_page(conn: &Connection, content_hash: ContentHash)
     })
 }
 
+pub(crate) fn get_pdf_reading_position(conn: &Connection, content_hash: ContentHash) -> Result<Option<(u32, f32)>, rusqlite::Error> {
+    Ok(match get_stored_reading_position(conn, content_hash)? {
+        Some(position) => position.pdf_page_index().map(|page_index| (page_index, position.pdf_page_position().unwrap_or(0.0))),
+        _ => None,
+    })
+}
+
 pub fn update_reading_position(conn: &Connection, content_hash: ContentHash, cfi: &EpubCfi, progress: ReadProgress) -> Result<(), rusqlite::Error> {
     conn.update_reading_position(content_hash.as_str(), cfi.as_str(), progress.value())?;
     Ok(())
 }
 pub fn update_pdf_reading_page(conn: &Connection, content_hash: ContentHash, page_index: u32) -> Result<(), rusqlite::Error> {
-    let position = library_model::pdf_page_reading_position(page_index);
+    update_pdf_reading_position(conn, content_hash, page_index, 0.0)
+}
+
+pub fn update_pdf_reading_position(conn: &Connection, content_hash: ContentHash, page_index: u32, full_page_position: f32) -> Result<(), rusqlite::Error> {
+    let position = library_model::pdf_page_position_reading_position(page_index, full_page_position.max(0.0));
     conn.update_pdf_reading_position(content_hash.as_str(), &position)?;
     Ok(())
 }

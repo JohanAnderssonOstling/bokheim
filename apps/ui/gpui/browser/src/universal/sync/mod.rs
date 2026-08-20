@@ -2,7 +2,7 @@
 //!
 //! Universal in full: it holds account identity and aggregates *across* every
 //! library, so it must outlive any one selected-library root. Reconciling the
-//! catalogue is reported upward so the root can update the shared
+//! library list is reported upward so the root can update the shared
 //! [`LibraryState`] rather than this page reaching into the library UI tree.
 
 mod account;
@@ -35,8 +35,8 @@ use self::transfers::TransferState;
 
 #[derive(Clone)]
 pub(crate) enum SyncPageEvent {
-    /// The library catalogue was re-read from the backend.
-    CatalogueReconciled(Vec<LibraryEntry>),
+    /// The configured libraries changed while updating account state.
+    LibraryListUpdated(Vec<LibraryEntry>),
 }
 
 pub(crate) struct SyncPage {
@@ -76,7 +76,7 @@ impl SyncPage {
             AccountStatus::default()
         });
         let authentication = AuthenticationInputs::new(window, cx);
-        Self {
+        let mut page = Self {
             services,
             active_library,
             account_status,
@@ -96,6 +96,8 @@ impl SyncPage {
             refresh_scheduled: false,
             refresh_pending: false,
             authentication,
-        }
+        };
+        page.refresh(cx);
+        page
     }
 }

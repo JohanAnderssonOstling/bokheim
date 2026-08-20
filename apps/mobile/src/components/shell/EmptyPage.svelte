@@ -1,4 +1,7 @@
 <script lang="ts">
+  import PrimaryButton from "../shared/buttons/PrimaryButton.svelte";
+  import SecondaryButton from "../shared/buttons/SecondaryButton.svelte";
+
   let {
     title = "",
     description = "",
@@ -20,18 +23,44 @@
   {#if title}<strong>{title}</strong>{/if}
   {#if description}<p>{description}</p>{/if}
   {#if primaryLabel || secondaryLabel}
-    <div class="actions">
-      {#if primaryLabel}<button type="button" onclick={() => void onprimary()}>{primaryLabel}</button>{/if}
-      {#if secondaryLabel}<button class="secondary" type="button" onclick={() => void onsecondary()}>{secondaryLabel}</button>{/if}
+    <div class="empty-page-actions">
+      {#if primaryLabel}<PrimaryButton onclick={() => void onprimary()}
+          >{primaryLabel}</PrimaryButton
+        >{/if}
+      {#if secondaryLabel}<SecondaryButton onclick={() => void onsecondary()}
+          >{secondaryLabel}</SecondaryButton
+        >{/if}
     </div>
   {/if}
 </section>
 
 <style>
-  .empty-page { display: grid; width: 100%; min-height: 240px; place-content: center; justify-items: center; gap: 9px; padding: 18px; text-align: center; }
-  strong { color: var(--color-ink-text); font: 600 1.3125rem/1.3 var(--font-interface-family); }
-  p { max-width: 420px; margin: 0; color: var(--color-subtle-text); font-size: .8125rem; line-height: 1.5; }
-  .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 5px; }
-  button { min-height: 40px; padding: 0 14px; border: 1px solid var(--color-accent); border-radius: 0; color: var(--color-raised-bg); background: var(--color-accent); font: 600 .8125rem var(--font-interface-family); cursor: pointer; }
-  button.secondary { color: var(--color-accent); background: transparent; }
+  .empty-page {
+    display: grid;
+    width: 100%;
+    min-height: 240px;
+    place-content: center;
+    justify-items: center;
+    gap: 9px;
+    padding: 18px;
+    text-align: center;
+  }
+  strong {
+    color: var(--color-ink-text);
+    font: 600 1.3125rem/1.3 var(--font-interface-family);
+  }
+  p {
+    max-width: 420px;
+    margin: 0;
+    color: var(--color-subtle-text);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+  .empty-page-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.55rem;
+    margin-top: 5px;
+  }
 </style>

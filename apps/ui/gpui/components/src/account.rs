@@ -6,7 +6,7 @@
 //! is evidence for that conclusion and stays quiet.
 
 use gpui::prelude::*;
-use gpui::{Div, FontWeight, Hsla, SharedString, div, px, relative};
+use gpui::{div, px, relative, Div, FontWeight, Hsla, SharedString};
 
 use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS, TITLE_LG, TITLE_MD};
 

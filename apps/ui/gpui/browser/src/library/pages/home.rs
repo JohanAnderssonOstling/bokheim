@@ -3,12 +3,13 @@
 use std::collections::HashSet;
 
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, Render, SharedString, Window};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Window};
 use gpui_component::VirtualListScrollHandle;
 use ui_components as components;
 
 use crate::library::services::{HomeBrowseRows, LatestRequest, LibraryContext};
 use crate::library::widgets::BookGrid;
+use crate::library::{DetailOwner, context_with_page_detail, detail::BookDetailPage, page_detail};
 
 /// One carousel. Each owns its own [`BookGrid`] so a card belongs to exactly
 /// one section and cover patches land in the right place, and its own scroll
@@ -21,6 +22,7 @@ struct HomeSection {
 
 pub(crate) struct HomePage {
     ui: LibraryContext,
+    detail: Option<Entity<BookDetailPage>>,
     sections: Vec<HomeSection>,
     error: Option<SharedString>,
     refresh: LatestRequest,
@@ -33,7 +35,8 @@ pub(crate) struct HomePage {
 }
 
 impl HomePage {
-    pub(crate) fn new(ui: LibraryContext, _cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
+        let ui = context_with_page_detail(ui, cx);
         let recently_read = BookGrid::new(ui.clone(), true);
         // A finished book's bar is full on every card in the section, so it
         // draws the same mark for every book and separates none of them; the
@@ -45,7 +48,9 @@ impl HomePage {
             HomeSection { title: "Finished".into(), books: finished, scroll: VirtualListScrollHandle::new() },
             HomeSection { title: "Recently added".into(), books: recently_added, scroll: VirtualListScrollHandle::new() },
         ];
-        Self { ui, sections, error: None, refresh: LatestRequest::default(), loaded: false }
+        let mut page = Self { ui, detail: None, sections, error: None, refresh: LatestRequest::default(), loaded: false };
+        page.refresh(cx);
+        page
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -117,6 +122,9 @@ impl HomePage {
 
 impl Render for HomePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(detail) = page_detail(self) {
+            return detail;
+        }
         let theme = components::browser_theme(cx);
 
         let mut page = components::home_page();
@@ -150,5 +158,15 @@ impl Render for HomePage {
         components::browser_error_banner(self.error.clone(), retry_label.into(), theme, page.into_any_element(), move |cx| {
             entity.update(cx, |page, cx| page.refresh(cx));
         })
+    }
+}
+
+impl DetailOwner for HomePage {
+    fn detail(&self) -> Option<&Entity<BookDetailPage>> {
+        self.detail.as_ref()
+    }
+
+    fn detail_mut(&mut self) -> &mut Option<Entity<BookDetailPage>> {
+        &mut self.detail
     }
 }

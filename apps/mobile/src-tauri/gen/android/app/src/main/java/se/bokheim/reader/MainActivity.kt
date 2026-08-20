@@ -229,7 +229,6 @@ class MainActivity : TauriActivity() {
     return JSONObject().apply {
       put("transport", transport)
       put("connected", connected)
-      put("metered", if (connected) connectivityManager.isActiveNetworkMetered else JSONObject.NULL)
       put("validated", if (connected) capabilities!!.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) else false)
     }
   }

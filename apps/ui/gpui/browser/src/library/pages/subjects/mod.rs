@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, AppContext, Context, Entity, EventEmitter, FontWeight, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Render, Styled, StyledImage, Subscription, Task, WeakEntity, Window, div, img, px, uniform_list};
+use gpui::{AnyElement, AppContext, Context, Entity, FontWeight, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, Render, Styled, StyledImage, Subscription, Task, WeakEntity, Window, div, img, px, uniform_list};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -13,6 +13,7 @@ use ui_components as components;
 
 use super::hierarchy::{HierarchySplits, HierarchyState};
 use crate::library::services::{LatestRequest, LibraryContext};
+use crate::library::{DetailOwner, context_with_page_detail, detail::BookDetailPage, page_detail};
 use crate::model::SubjectCrumb;
 
 const UNCATEGORIZED_SUBJECT_PATH: &str = "__uncategorized__";
@@ -71,13 +72,9 @@ impl Render for ReviewCoverView {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum SubjectsPageEvent {
-    PathChanged(Vec<SubjectCrumb>),
-}
-
 pub(crate) struct SubjectsPage {
     ui: LibraryContext,
+    detail: Option<Entity<BookDetailPage>>,
     hierarchy: HierarchyState<SubjectCrumb>,
     refresh_request: LatestRequest,
     search_request: LatestRequest,
@@ -98,18 +95,18 @@ pub(crate) struct SubjectsPage {
     splits: HierarchySplits<SubjectsPage>,
 }
 
-impl EventEmitter<SubjectsPageEvent> for SubjectsPage {}
-
 impl SubjectsPage {
     pub(crate) fn new(ui: LibraryContext, path: Vec<SubjectCrumb>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_pane(ui, path, None, 0, window, cx)
     }
 
     fn new_pane(ui: LibraryContext, path: Vec<SubjectCrumb>, split_root: Option<WeakEntity<SubjectsPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ui = context_with_page_detail(ui, cx);
         let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, None, |page: &mut Self, cx| page.search(cx), window, cx);
-        Self {
+        let mut page = Self {
             hierarchy,
             ui,
+            detail: None,
             refresh_request: LatestRequest::default(),
             search_request: LatestRequest::default(),
             taxonomy_reload_request: LatestRequest::default(),
@@ -127,7 +124,9 @@ impl SubjectsPage {
             review_covers: HashMap::new(),
             _filter_subscription: filter_subscription,
             splits: HierarchySplits::new(split_root, pane_id),
-        }
+        };
+        page.refresh(cx);
+        page
     }
 
     fn selected_path(&self) -> Option<&str> {
@@ -136,7 +135,9 @@ impl SubjectsPage {
 
     fn set_path(&mut self, path: Vec<SubjectCrumb>, window: &mut Window, cx: &mut Context<Self>) {
         if self.hierarchy.set_path(path, window, cx) {
-            cx.emit(SubjectsPageEvent::PathChanged(self.hierarchy.path().to_vec()));
+            if !self.splits.is_secondary() {
+                self.ui.persist_subject_path(self.hierarchy.path().to_vec());
+            }
             self.refresh(cx);
         }
     }
@@ -227,7 +228,7 @@ impl SubjectsPage {
     }
 
     fn refresh_reviews(&mut self, cx: &mut Context<Self>) {
-        // Scanner and enrichment batches can emit several catalogue events while
+        // Scanner and enrichment batches can emit several library events while
         // this read is in flight. Replacing the request for every event aborts
         // each future before it can publish its result, leaving the review page
         // permanently on its loading state. The active query observes the latest
@@ -483,10 +484,6 @@ impl SubjectsPage {
             });
         });
         self.search_request.install(task);
-    }
-
-    pub(crate) fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.hierarchy.focus_search(window, cx);
     }
 
     fn set_file_type(&mut self, file_type: epub_svelte_lib::library::LibraryFileTypeFilter, cx: &mut Context<Self>) {
@@ -836,6 +833,9 @@ impl SubjectsPage {
 
 impl Render for SubjectsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(detail) = page_detail(self) {
+            return detail;
+        }
         let review_only = self.selected_path() == Some(UNCATEGORIZED_SUBJECT_PATH);
         let empty = self.render_empty(cx);
         let breadcrumb_actions = self.split_actions(cx);
@@ -869,5 +869,15 @@ impl Render for SubjectsPage {
         );
         let pane = components::hierarchy_page_host(hierarchy);
         self.splits.render(pane.into_any_element(), window, cx)
+    }
+}
+
+impl DetailOwner for SubjectsPage {
+    fn detail(&self) -> Option<&Entity<BookDetailPage>> {
+        self.detail.as_ref()
+    }
+
+    fn detail_mut(&mut self) -> &mut Option<Entity<BookDetailPage>> {
+        &mut self.detail
     }
 }

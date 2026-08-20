@@ -3,8 +3,7 @@
 //! `backend` stores browsing and transfer preferences per account, not per
 //! library — neither getter takes a library id, and browsing changes enqueue to
 //! the signed-in account. So this store lives at the root and is injected
-//! downward. Settings edits it, appearance refreshes all windows, and the
-//! selected-library root observes only availability-policy changes.
+//! downward. Settings edits it, and appearance refreshes all windows.
 
 use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences, TransferPreferencePatch, TransferPreferences};
 use gpui::{App, Context, EventEmitter, SharedString, px};
@@ -21,13 +20,9 @@ pub(crate) fn system_prefers_dark(cx: &App) -> bool {
     matches!(cx.window_appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
 }
 
-/// The backend's availability policy changed, so ordinary browse queries are
-/// stale. Appearance changes use GPUI's window refresh instead.
-pub(crate) struct LibraryAvailabilityChanged;
-
 /// The book display preference changed, so retained grids need to switch
-/// presentation. Separate from [`LibraryAvailabilityChanged`] because nothing
-/// needs re-querying: the same cards are drawn a different way.
+/// presentation; the same cards are drawn a different way, with no
+/// re-querying needed.
 pub(crate) struct LibraryDisplayChanged(pub(crate) app_contract::preferences::LibraryView);
 
 pub(crate) fn interface_font(cx: &App) -> SharedString {
@@ -40,7 +35,6 @@ pub(crate) struct Preferences {
     transfer: TransferPreferences,
 }
 
-impl EventEmitter<LibraryAvailabilityChanged> for Preferences {}
 impl EventEmitter<LibraryDisplayChanged> for Preferences {}
 
 impl Preferences {
@@ -86,9 +80,6 @@ impl Preferences {
                     || previous.ui_font_size_px() != self.browsing.ui_font_size_px();
                 if appearance_changed {
                     apply_browsing_appearance(self.browsing.clone(), cx);
-                }
-                if previous.show_unavailable_books() != self.browsing.show_unavailable_books() {
-                    cx.emit(LibraryAvailabilityChanged);
                 }
                 if previous.library_view() != self.browsing.library_view() {
                     cx.emit(LibraryDisplayChanged(self.browsing.library_view()));

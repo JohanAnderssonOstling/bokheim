@@ -1,14 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import App from "../App.svelte";
-  import { applyApplicationAppearance } from "../lib/application-appearance";
-  import { DEFAULT_BROWSING_PREFERENCES } from "../lib/types";
+  import { applyApplicationAppearance } from "../lib/app/application-appearance";
+  import { reportBackendHostMismatch } from "../lib/app/platform";
+  import { DEFAULT_BROWSING_PREFERENCES } from "../lib/shared/types";
   import "virtual:design-tokens.css";
+  import "../app.css";
 
   let { children } = $props();
 
-  onMount(() => applyApplicationAppearance(DEFAULT_BROWSING_PREFERENCES));
+  onMount(() => {
+    // Paint the default palette before the stored preferences arrive, so the
+    // first frame is styled rather than unstyled.
+    applyApplicationAppearance(DEFAULT_BROWSING_PREFERENCES);
+    reportBackendHostMismatch();
+  });
 </script>
 
-<App />
-<div hidden aria-hidden="true">{@render children()}</div>
+<App>
+  {#snippet routeContent()}
+    {@render children()}
+  {/snippet}
+</App>

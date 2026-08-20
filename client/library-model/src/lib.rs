@@ -35,7 +35,7 @@ pub use publication::{
 };
 pub use reader_state::{BookLinkState, BookmarkState};
 pub use reading::{
-    EpubCfi, InvalidEpubCfi, InvalidReadProgress, InvalidReadingPosition, ReadProgress, ReadingEpubCfi, ReadingPosition, audiobook_position_millis, audiobook_reading_position, pdf_page_from_reading_position, pdf_page_reading_position,
+    EpubCfi, InvalidEpubCfi, InvalidReadProgress, InvalidReadingPosition, ReadProgress, ReadingEpubCfi, ReadingPosition, audiobook_position_millis, audiobook_reading_position, pdf_page_from_reading_position, pdf_page_position_from_reading_position, pdf_page_position_reading_position, pdf_page_reading_position,
     valid_epub_cfi, valid_reading_position,
 };
 pub use subjects::{

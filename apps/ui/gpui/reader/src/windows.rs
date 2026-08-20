@@ -54,6 +54,7 @@ enum PreparedBook {
     Pdf {
         book: ResolvedBook,
         initial_page: usize,
+        initial_full_page_position: f32,
     },
     #[cfg(feature = "audiobooks")]
     Audiobook {
@@ -112,9 +113,12 @@ pub fn open_reader_window(locator: BookLocator, title: String, initial_target: O
             #[cfg(feature = "pdf")]
             ReaderFormat::Pdf => {
                 let phase_started = Instant::now();
-                let initial_page = library.pdf_reading_page(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0) as usize;
+                let (initial_page, initial_full_page_position) = library
+                    .pdf_reading_position(prepare_locator.content_hash())
+                    .map_err(|error| format!("stage=reading_position: {error}"))?
+                    .unwrap_or((0, 0.0));
                 startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
-                PreparedBook::Pdf { book, initial_page }
+                PreparedBook::Pdf { book, initial_page: initial_page as usize, initial_full_page_position }
             }
             #[cfg(feature = "audiobooks")]
             ReaderFormat::Audiobook => {
@@ -201,8 +205,16 @@ fn open_prepared_reader_window(locator: BookLocator, title: String, initial_targ
                 cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
             }
             #[cfg(feature = "pdf")]
-            PreparedBook::Pdf { book, initial_page } => {
-                let reader = cx.new(|cx| PdfReaderView::new(PendingPdfReader { id, locator: locator_for_window, title, library: library_for_window, book, initial_page }, window, cx));
+            PreparedBook::Pdf { book, initial_page, initial_full_page_position } => {
+                let reader = cx.new(|cx| PdfReaderView::new(PendingPdfReader {
+                    id,
+                    locator: locator_for_window,
+                    title,
+                    library: library_for_window,
+                    book,
+                    initial_page,
+                    initial_full_page_position,
+                }, window, cx));
                 *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Pdf(reader.downgrade()));
                 cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
             }

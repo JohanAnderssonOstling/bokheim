@@ -318,36 +318,12 @@ impl Render for BookDetailPage {
                             .flex()
                             .justify_end()
                             .gap(px(6.0))
-                            .child(
-                                div()
-                                    .id("book-description-previous")
-                                    .cursor_pointer()
-                                    .px(px(10.0))
-                                    .flex()
-                                    .items_center()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .rounded(px(components::RADIUS_SM))
-                                    .child("‹")
-                                    .on_click(move |_, _, cx| {
-                                        let _ = previous.update(cx, |view, cx| view.previous_page(cx));
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("book-description-next")
-                                    .cursor_pointer()
-                                    .px(px(10.0))
-                                    .flex()
-                                    .items_center()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .rounded(px(components::RADIUS_SM))
-                                    .child("›")
-                                    .on_click(move |_, _, cx| {
-                                        let _ = next.update(cx, |view, cx| view.next_page(cx));
-                                    }),
-                            ),
+                            .child(div().id("book-description-previous").cursor_pointer().px(px(10.0)).flex().items_center().border_1().border_color(theme.border).rounded(px(components::RADIUS_SM)).child("‹").on_click(move |_, _, cx| {
+                                let _ = previous.update(cx, |view, cx| view.previous_page(cx));
+                            }))
+                            .child(div().id("book-description-next").cursor_pointer().px(px(10.0)).flex().items_center().border_1().border_color(theme.border).rounded(px(components::RADIUS_SM)).child("›").on_click(move |_, _, cx| {
+                                let _ = next.update(cx, |view, cx| view.next_page(cx));
+                            })),
                     ),
                 )
             })

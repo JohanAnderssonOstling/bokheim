@@ -22,7 +22,8 @@ pub enum LibraryEvent {
     DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
     FolderDownloadStatusChanged { dir_id: crate::DirId, downloaded_books: usize, total_books: usize },
     TransferStatusChanged,
-    CatalogueChanged,
+    LibraryListChanged,
+    LibraryChanged,
     ScanComplete,
 }
 

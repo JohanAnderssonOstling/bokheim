@@ -3,7 +3,7 @@
 use epub_svelte_lib::library::LibraryFolderDestination;
 use epub_svelte_lib::{ContentHash, DirId, FolderDestinationPolicy, ROOT_DIR_ID};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, AppContext, Context, Entity, EventEmitter, ExternalPaths, Focusable, IntoElement, MouseButton, Render, Subscription, WeakEntity, Window, div, px};
+use gpui::{AnyElement, App, AppContext, Context, Entity, ExternalPaths, Focusable, IntoElement, MouseButton, Render, Subscription, WeakEntity, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -17,13 +17,8 @@ use ui_components::ScrollableElement as BokheimScrollableElement;
 use super::hierarchy::{HierarchyCrumb, HierarchySplits, HierarchyState};
 use crate::library::services::{LatestRequest, LibraryContext};
 use crate::library::widgets::{BookManagement, BookManagementAction, LibraryDrag};
+use crate::library::{DetailOwner, context_with_page_detail, detail::BookDetailPage, page_detail};
 use crate::model::FolderCrumb;
-
-#[derive(Clone)]
-pub(crate) enum FoldersPageEvent {
-    PathChanged(Vec<FolderCrumb>),
-    ContentsChanged,
-}
 
 #[derive(Clone)]
 enum FolderPickerOperation {
@@ -69,6 +64,7 @@ struct FolderRenameEditor {
 
 pub(crate) struct FoldersPage {
     ui: LibraryContext,
+    detail: Option<Entity<BookDetailPage>>,
     hierarchy: HierarchyState<FolderCrumb>,
     refresh_request: LatestRequest,
     search_request: LatestRequest,
@@ -80,18 +76,18 @@ pub(crate) struct FoldersPage {
     splits: HierarchySplits<FoldersPage>,
 }
 
-impl EventEmitter<FoldersPageEvent> for FoldersPage {}
-
 impl FoldersPage {
     pub(crate) fn new(ui: LibraryContext, path: Vec<FolderCrumb>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_pane(ui, path, None, 0, window, cx)
     }
 
     fn new_pane(ui: LibraryContext, path: Vec<FolderCrumb>, split_root: Option<WeakEntity<FoldersPage>>, pane_id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ui = context_with_page_detail(ui, cx);
         let (hierarchy, filter_subscription) = HierarchyState::new(ui.clone(), path, Some("Search books or authors in this folder"), |page: &mut Self, cx| page.search(cx), window, cx);
-        Self {
+        let mut page = Self {
             hierarchy,
             ui,
+            detail: None,
             refresh_request: LatestRequest::default(),
             search_request: LatestRequest::default(),
             _filter_subscription: filter_subscription,
@@ -100,7 +96,9 @@ impl FoldersPage {
             rename_editor: None,
             rename_subscription: None,
             splits: HierarchySplits::new(split_root, pane_id),
-        }
+        };
+        page.refresh(cx);
+        page
     }
 
     fn folder_id(&self) -> DirId {
@@ -109,7 +107,9 @@ impl FoldersPage {
 
     fn set_path(&mut self, path: Vec<FolderCrumb>, window: &mut Window, cx: &mut Context<Self>) {
         if self.hierarchy.set_path(path, window, cx) {
-            cx.emit(FoldersPageEvent::PathChanged(self.hierarchy.path().to_vec()));
+            if !self.splits.is_secondary() {
+                self.ui.persist_folder_path(self.hierarchy.path().to_vec());
+            }
             self.refresh(cx);
         }
     }
@@ -159,6 +159,14 @@ impl FoldersPage {
         }
     }
 
+    fn refresh_after_change(&mut self, cx: &mut Context<Self>) {
+        if let Some(root) = self.splits.root().cloned() {
+            let _ = root.update(cx, |root, cx| root.refresh(cx));
+        } else {
+            self.refresh(cx);
+        }
+    }
+
     fn request_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(root) = self.splits.root() {
             let _ = root.update(cx, |root, cx| root.add_split(window, cx));
@@ -172,13 +180,7 @@ impl FoldersPage {
         let ui = self.ui.clone();
         let root = cx.entity().downgrade();
         let split_page = cx.new(|cx| Self::new_pane(ui, Vec::new(), Some(root), pane_id, window, cx));
-        let subscription = cx.subscribe(&split_page, |page: &mut Self, _, event: &FoldersPageEvent, cx| {
-            if matches!(event, FoldersPageEvent::ContentsChanged) {
-                page.refresh(cx);
-            }
-        });
-        split_page.update(cx, |page, cx| page.refresh(cx));
-        self.splits.push(pane_id, split_page, vec![subscription]);
+        self.splits.push(pane_id, split_page, Vec::new());
         cx.notify();
     }
 
@@ -229,10 +231,6 @@ impl FoldersPage {
             });
         });
         self.search_request.install(task);
-    }
-
-    pub(crate) fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.hierarchy.focus_search(window, cx);
     }
 
     fn set_file_type(&mut self, file_type: epub_svelte_lib::library::LibraryFileTypeFilter, cx: &mut Context<Self>) {
@@ -323,8 +321,7 @@ impl FoldersPage {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(()) => {
-                    page.refresh(cx);
-                    cx.emit(FoldersPageEvent::ContentsChanged);
+                    page.refresh_after_change(cx);
                 }
                 Err(error) => page.hierarchy.set_error(format!("Could not {action}: {error}"), cx),
             });
@@ -555,8 +552,7 @@ impl FoldersPage {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(_) => {
-                    page.refresh(cx);
-                    cx.emit(FoldersPageEvent::ContentsChanged);
+                    page.refresh_after_change(cx);
                 }
                 Err(error) => page.hierarchy.set_error(format!("Could not move folder: {error}"), cx),
             });
@@ -617,8 +613,7 @@ impl FoldersPage {
             }
             let _ = page.update(cx, |page, cx| {
                 if imported > 0 {
-                    page.refresh(cx);
-                    cx.emit(FoldersPageEvent::ContentsChanged);
+                    page.refresh_after_change(cx);
                 }
                 if !failures.is_empty() {
                     page.hierarchy.set_error(format!("Could not import {}", failures.join("; ")), cx);
@@ -643,8 +638,7 @@ impl FoldersPage {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(()) => {
-                    page.refresh(cx);
-                    cx.emit(FoldersPageEvent::ContentsChanged);
+                    page.refresh_after_change(cx);
                 }
                 Err(error) => page.hierarchy.set_error(format!("Could not move folder to Trash: {error}"), cx),
             });
@@ -732,6 +726,9 @@ impl FoldersPage {
 
 impl Render for FoldersPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(detail) = page_detail(self) {
+            return detail;
+        }
         let theme = components::browser_theme(cx);
         let empty = self.render_empty(cx);
         let breadcrumb_actions = self.header_actions(cx);
@@ -858,5 +855,15 @@ impl Render for FoldersPage {
         });
         let pane = components::hierarchy_page_host(background_menu).child(hierarchy).children(picker);
         self.splits.render(pane.into_any_element(), window, cx)
+    }
+}
+
+impl DetailOwner for FoldersPage {
+    fn detail(&self) -> Option<&Entity<BookDetailPage>> {
+        self.detail.as_ref()
+    }
+
+    fn detail_mut(&mut self) -> &mut Option<Entity<BookDetailPage>> {
+        &mut self.detail
     }
 }

@@ -6,6 +6,24 @@ import { extname, join, normalize } from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
 const webApiProxy = process.env.BOKHEIM_WEB_API_PROXY ?? "https://api.bokheim.se";
+
+// Which backend this bundle talks to. Native builds reach the Rust backend over
+// Tauri IPC and must not carry the browser one: `isNativeApp` folds to a literal
+// so every web-only branch — and the whole SQLite worker graph behind it —
+// becomes unreachable and is never emitted.
+const backend = process.env.BOKHEIM_BACKEND ?? "web";
+if (backend !== "native" && backend !== "web") {
+  throw new Error(`BOKHEIM_BACKEND must be "native" or "web", got "${backend}"`);
+}
+const nativeBackend = backend === "native";
+
+const webBackendDirectory = fileURLToPath(new URL("./src/lib/web/", import.meta.url));
+const webBackend = fileURLToPath(new URL("./src/lib/web/web-commands.ts", import.meta.url));
+const webBackendStub = fileURLToPath(new URL("./src/lib/web/web-commands.native.ts", import.meta.url));
+const sharedIcons = fileURLToPath(new URL("./src/components/shared/icons", import.meta.url));
+const phosphorIcons = fileURLToPath(
+  new URL("../ui/design-tokens/assets/phosphor-light", import.meta.url),
+);
 const designTokens = JSON.parse(readFileSync(fileURLToPath(new URL("../ui/design-tokens/design_tokens.json", import.meta.url)), "utf8"));
 
 function tokenVariables(tokens) {
@@ -30,6 +48,42 @@ function tokenVariables(tokens) {
   const fallback = palette("greco_futuristic", "light");
   return `:root{${foundations}${fallback}--font-interface-family:sans-serif;--font-heading-family:serif;}` + rules.join("");
 }
+
+// Keeps the browser backend out of native bundles, and proves it stayed out.
+//
+// Redirecting the backend module is what severs the graph: `worker-client`, the
+// SQLite worker, the TypeScript library database and both WASM payloads hang off
+// it and nothing else in the app reaches them.
+//
+// The check runs on emitted chunks rather than on the module graph, because a
+// module can be in the graph and still be tree-shaken away — and, more to the
+// point, a *dynamically* imported module is dropped from the graph's static
+// edges but still written to disk, so it would still ship inside the APK.
+// Output is the only stage that answers what the APK actually carries.
+const nativeBackendOnly = {
+  name: "native-backend-only",
+  enforce: "pre",
+  apply: () => nativeBackend,
+  async resolveId(source, importer, options) {
+    const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+    return resolved && normalize(resolved.id) === webBackend ? webBackendStub : null;
+  },
+  generateBundle(_options, bundle) {
+    const leaked = new Set();
+    for (const chunk of Object.values(bundle)) {
+      for (const id of Object.keys(chunk.modules ?? {})) {
+        const path = normalize(id);
+        if (path.startsWith(webBackendDirectory) && path !== webBackendStub) leaked.add(path);
+      }
+    }
+    if (leaked.size) {
+      throw new Error(
+        `The native bundle must not ship the browser backend, but it emits:\n  ${[...leaked].join("\n  ")}\n` +
+          "Web-only code belongs behind `isWebApp`, which folds to `false` here so the branch is dropped.",
+      );
+    }
+  },
+};
 
 const sharedDesign = {
   name: "shared-design-contract",
@@ -109,7 +163,17 @@ const pdfjsAssets = (() => {
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sharedDesign, crossOriginIsolation, pdfjsAssets, sveltekit()],
+  plugins: [nativeBackendOnly, sharedDesign, crossOriginIsolation, pdfjsAssets, sveltekit()],
+  resolve: {
+    alias: {
+      "@icons/shared": sharedIcons,
+      "@icons/phosphor": phosphorIcons,
+    },
+  },
+
+  define: {
+    __BOKHEIM_NATIVE__: JSON.stringify(nativeBackend),
+  },
 
   // SQLite ships its own WASM loader and must remain outside Vite's dependency
   // pre-bundle so the same module can initialize inside the backend worker.

@@ -148,13 +148,12 @@ pub enum NetworkTransport {
 pub struct NetworkStatus {
     pub transport: NetworkTransport,
     pub connected: bool,
-    pub metered: Option<bool>,
     pub validated: Option<bool>,
 }
 
 impl Default for NetworkStatus {
     fn default() -> Self {
-        Self { transport: NetworkTransport::Unknown, connected: true, metered: None, validated: None }
+        Self { transport: NetworkTransport::Unknown, connected: true, validated: None }
     }
 }
 

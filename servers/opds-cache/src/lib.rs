@@ -10,8 +10,9 @@ use catalog_contract::{
     CatalogSubjectBrowseResponse, materialize_page,
 };
 use catalog_core::{
-    CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogCrawlGeneration, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillJob,
-    CatalogMetadataBackfillUpdate, CatalogPageWrite, CatalogPublicationPopularity, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import,
+    CatalogCache, CatalogCacheError, CatalogCoverCache, CatalogCoverPipeline, CatalogCrawlGeneration, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillIndexedJob,
+    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogPublicationPopularity, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, prepare_catalog_subject_assignments,
+    validate_opds_catalog_locator, validated_opds_import,
 };
 use futures_util::stream::{self, StreamExt};
 use library_model::{PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject, canonical_isbn};
@@ -21,12 +22,13 @@ use opds::{
 };
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
@@ -63,6 +65,7 @@ const CRAWL_ACTIVATION_BATCH: usize = 256;
 const EXTRACTION_RECONCILIATION_BATCH: usize = 256;
 const INACTIVE_GENERATION_CLEANUP_BATCH: usize = 256;
 const PRIORITY_CRAWL_SOURCE: &str = "litteraturbanken";
+const CRAWL_PAUSE_SENTINEL: &str = "/var/lib/bokheim-deploy/catalog-crawls-disabled";
 // Downloads stream to disk and are cheap in heap terms. Keep extraction and
 // image decoding serialized, but overlap several upstream transfers with it.
 const MAX_CONCURRENT_DOWNLOADS: usize = 4;
@@ -86,7 +89,7 @@ const EPUB_EXTRACTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // A job owns the complete saved EPUB metadata graph, including its navigation
 // tree. Keep only a small set live so one run cannot establish a large heap
 // high-water mark while the backlog is drained.
-const METADATA_BACKFILL_BATCH_SIZE: usize = 1;
+const METADATA_BACKFILL_BATCH_SIZE: usize = 32;
 const METADATA_IDENTITY_BACKFILL_BATCH_SIZE: usize = 16;
 const METADATA_IDENTITY_BACKFILL_CONCURRENCY: usize = 4;
 const REGISTRY_CACHE_CONTROL: &str = "public, max-age=300";
@@ -125,8 +128,125 @@ struct CatalogServiceState {
     acquisition_directory: PathBuf,
     metadata_endpoint: Option<Url>,
     metadata_client: reqwest::Client,
+    metadata_backfill_metrics: MetadataBackfillRuntimeMetrics,
+    writer_metrics: StdMutex<BTreeMap<String, WriterRuntimeMetric>>,
     max_crawl_pages: usize,
     started_at: Instant,
+}
+
+#[derive(Default)]
+struct MetadataBackfillRuntimeMetrics {
+    batches: AtomicU64,
+    jobs: AtomicU64,
+    failures: AtomicU64,
+    claim_ms: AtomicU64,
+    enrich_ms: AtomicU64,
+    writer_wait_ms: AtomicU64,
+    transaction_ms: AtomicU64,
+    commit_ms: AtomicU64,
+    subjects_ms: AtomicU64,
+    authors_ms: AtomicU64,
+    identity_review_ms: AtomicU64,
+    index_ms: AtomicU64,
+    status_ms: AtomicU64,
+    total_ms: AtomicU64,
+}
+
+#[derive(Default)]
+struct WriterRuntimeMetric {
+    calls: u64,
+    failures: u64,
+    wait_ms: u64,
+    hold_ms: u64,
+}
+
+#[derive(Serialize)]
+struct WriterRuntimeMetricResponse {
+    calls: u64,
+    failures: u64,
+    wait_ms: u64,
+    hold_ms: u64,
+    average_wait_ms: f64,
+    average_hold_ms: f64,
+}
+
+#[derive(Serialize)]
+struct MetadataBackfillRuntimeMetricsResponse {
+    batches: u64,
+    jobs: u64,
+    failures: u64,
+    claim_ms: u64,
+    enrich_ms: u64,
+    writer_wait_ms: u64,
+    transaction_ms: u64,
+    commit_ms: u64,
+    subjects_ms: u64,
+    authors_ms: u64,
+    identity_review_ms: u64,
+    index_ms: u64,
+    status_ms: u64,
+    total_ms: u64,
+    jobs_per_second: f64,
+}
+
+impl MetadataBackfillRuntimeMetrics {
+    fn snapshot(&self) -> MetadataBackfillRuntimeMetricsResponse {
+        let batches = self.batches.load(Ordering::Relaxed);
+        let jobs = self.jobs.load(Ordering::Relaxed);
+        let failures = self.failures.load(Ordering::Relaxed);
+        let claim_ms = self.claim_ms.load(Ordering::Relaxed);
+        let enrich_ms = self.enrich_ms.load(Ordering::Relaxed);
+        let writer_wait_ms = self.writer_wait_ms.load(Ordering::Relaxed);
+        let transaction_ms = self.transaction_ms.load(Ordering::Relaxed);
+        let commit_ms = self.commit_ms.load(Ordering::Relaxed);
+        let subjects_ms = self.subjects_ms.load(Ordering::Relaxed);
+        let authors_ms = self.authors_ms.load(Ordering::Relaxed);
+        let identity_review_ms = self.identity_review_ms.load(Ordering::Relaxed);
+        let index_ms = self.index_ms.load(Ordering::Relaxed);
+        let status_ms = self.status_ms.load(Ordering::Relaxed);
+        let total_ms = self.total_ms.load(Ordering::Relaxed);
+        MetadataBackfillRuntimeMetricsResponse {
+            batches,
+            jobs,
+            failures,
+            claim_ms,
+            enrich_ms,
+            writer_wait_ms,
+            transaction_ms,
+            commit_ms,
+            subjects_ms,
+            authors_ms,
+            identity_review_ms,
+            index_ms,
+            status_ms,
+            total_ms,
+            jobs_per_second: if total_ms == 0 { 0.0 } else { jobs as f64 * 1_000.0 / total_ms as f64 },
+        }
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn writer_metrics_snapshot(metrics: &StdMutex<BTreeMap<String, WriterRuntimeMetric>>) -> BTreeMap<String, WriterRuntimeMetricResponse> {
+    let Ok(metrics) = metrics.lock() else { return BTreeMap::new() };
+    metrics
+        .iter()
+        .map(|(name, metric)| {
+            (
+                name.clone(),
+                WriterRuntimeMetricResponse {
+                    calls: metric.calls,
+                    failures: metric.failures,
+                    wait_ms: metric.wait_ms,
+                    hold_ms: metric.hold_ms,
+                    average_wait_ms: if metric.calls == 0 { 0.0 } else { metric.wait_ms as f64 / metric.calls as f64 },
+                    average_hold_ms: if metric.calls == 0 { 0.0 } else { metric.hold_ms as f64 / metric.calls as f64 },
+                },
+            )
+        })
+        .collect()
 }
 
 enum RegistrySource {
@@ -318,6 +438,8 @@ struct CatalogInventoryResponse {
     active_epub_count: u64,
     epub_extractions: EpubExtractionInventoryResponse,
     metadata_backfill: MetadataBackfillInventoryResponse,
+    metadata_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
+    writer_metrics: BTreeMap<String, WriterRuntimeMetricResponse>,
     identity_reviews: catalog_core::CatalogIdentityReviewInventory,
     sources: Vec<CatalogSourceInventoryResponse>,
 }
@@ -531,9 +653,20 @@ impl CatalogService {
         T: Send + 'static,
         F: Fn(&CatalogCache) -> Result<T, CatalogCacheError> + Send + Sync + 'static,
     {
+        self.cache_write_call_named("other", operation).await
+    }
+
+    async fn cache_write_call_named<T, F>(&self, name: &'static str, operation: F) -> Result<T, CatalogServiceError>
+    where
+        T: Send + 'static,
+        F: Fn(&CatalogCache) -> Result<T, CatalogCacheError> + Send + Sync + 'static,
+    {
+        let wait_started = Instant::now();
         let _writer = self.state.cache_write_lock.lock().await;
+        let wait_ms = duration_millis(wait_started.elapsed());
+        let hold_started = Instant::now();
         let cache = self.state.cache.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             for delay in SQLITE_LOCK_RETRY_DELAYS {
                 match operation(&cache) {
                     Err(error) if error.is_database_locked() => std::thread::sleep(delay),
@@ -543,8 +676,41 @@ impl CatalogService {
             operation(&cache)
         })
         .await
-        .map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))?
-        .map_err(cache_error)
+        .map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))
+        .and_then(|result| result.map_err(cache_error));
+        let hold_ms = duration_millis(hold_started.elapsed());
+        let failures = u64::from(result.is_err());
+        if let Ok(mut metrics) = self.state.writer_metrics.lock() {
+            let metric = metrics.entry(name.to_owned()).or_default();
+            metric.calls = metric.calls.saturating_add(1);
+            metric.failures = metric.failures.saturating_add(failures);
+            metric.wait_ms = metric.wait_ms.saturating_add(wait_ms);
+            metric.hold_ms = metric.hold_ms.saturating_add(hold_ms);
+        }
+        result
+    }
+
+    async fn finish_metadata_backfill_indexed_batch_timed(&self, updates: Vec<CatalogMetadataBackfillIndexedUpdate>) -> Result<(u64, CatalogMetadataBackfillWriteTimings), CatalogServiceError> {
+        let prepared_assignments = updates.iter().map(|update| prepare_catalog_subject_assignments(&update.subjects)).collect::<Vec<_>>();
+        let wait_started = Instant::now();
+        let _writer = self.state.cache_write_lock.lock().await;
+        let writer_wait_ms = duration_millis(wait_started.elapsed());
+        let hold_started = Instant::now();
+        let cache = self.state.cache.clone();
+        let result = tokio::task::spawn_blocking(move || cache.finish_metadata_backfill_indexed_batch_timed(&updates, &prepared_assignments))
+            .await
+            .map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))
+            .and_then(|result| result.map_err(cache_error));
+        let hold_ms = duration_millis(hold_started.elapsed());
+        if let Ok(mut metrics) = self.state.writer_metrics.lock() {
+            let metric = metrics.entry("backfill_finish".to_owned()).or_default();
+            metric.calls = metric.calls.saturating_add(1);
+            metric.failures = metric.failures.saturating_add(u64::from(result.is_err()));
+            metric.wait_ms = metric.wait_ms.saturating_add(writer_wait_ms);
+            metric.hold_ms = metric.hold_ms.saturating_add(hold_ms);
+        }
+        let timings = result?;
+        Ok((writer_wait_ms, timings))
     }
 
     async fn flush_replacement_crawl_batch(&self, crawl: &CatalogCrawlGeneration, source_id: &CatalogSourceId, batch: &mut AdaptiveCrawlWriteBatch) -> Result<(), CatalogServiceError> {
@@ -557,7 +723,7 @@ impl CatalogService {
         let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
         let cache_crawl = crawl.clone();
         let started = Instant::now();
-        self.cache_write_call(move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
+        self.cache_write_call_named("crawl_page_write", move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
         batch.record_commit(started.elapsed());
         for publications in publication_counts {
             self.record_crawl_page(source_id, publications).await;
@@ -597,7 +763,7 @@ impl CatalogService {
         let cache_source = source_id.clone();
         let cache_root = source_url.to_owned();
         let started = Instant::now();
-        self.cache_write_call(move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
+        self.cache_write_call_named("crawl_page_write", move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
         batch.record_commit(started.elapsed());
         drop(_update);
         for publications in publication_counts {
@@ -611,7 +777,7 @@ impl CatalogService {
     async fn cleanup_inactive_generations(&self, source_id: CatalogSourceId) {
         loop {
             let cache_source = source_id.clone();
-            match self.cache_write_call(move |cache| cache.cleanup_inactive_generation_batch(&cache_source, INACTIVE_GENERATION_CLEANUP_BATCH)).await {
+            match self.cache_write_call_named("cleanup", move |cache| cache.cleanup_inactive_generation_batch(&cache_source, INACTIVE_GENERATION_CLEANUP_BATCH)).await {
                 Ok(true) => tokio::time::sleep(Duration::from_millis(10)).await,
                 Ok(false) => return,
                 Err(error) => {
@@ -625,7 +791,7 @@ impl CatalogService {
     async fn reconcile_active_epub_extractions(&self, source_id: CatalogSourceId) -> Result<(), CatalogServiceError> {
         loop {
             let cache_source = source_id.clone();
-            let more = self.cache_write_call(move |cache| cache.reconcile_active_epub_extractions_batch(&cache_source, EXTRACTION_RECONCILIATION_BATCH)).await?;
+            let more = self.cache_write_call_named("epub_reconcile", move |cache| cache.reconcile_active_epub_extractions_batch(&cache_source, EXTRACTION_RECONCILIATION_BATCH)).await?;
             if !more {
                 self.state.extraction_notify.notify_waiters();
                 return Ok(());
@@ -648,7 +814,7 @@ impl CatalogService {
         let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        self.cache_write_call(move |cache| cache.ensure_source(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not reconcile crawl source: {error}")))?;
+        self.cache_write_call_named("crawl_setup", move |cache| cache.ensure_source(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not reconcile crawl source: {error}")))?;
         let cache_source = source_id.clone();
         let has_pages = self.cache_call(move |cache| cache.has_pages(&cache_source)).await.map_err(|error| CatalogServiceError(format!("could not inspect cached crawl pages: {error}")))?;
         let cache_source = source_id.clone();
@@ -664,7 +830,7 @@ impl CatalogService {
         let _update = update_lock.lock().await;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        let crawl = self.cache_write_call(move |cache| cache.begin_crawl(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not start replacement crawl: {error}")))?;
+        let crawl = self.cache_write_call_named("crawl_begin", move |cache| cache.begin_crawl(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not start replacement crawl: {error}")))?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
         let mut write_batch = AdaptiveCrawlWriteBatch::default();
@@ -679,6 +845,23 @@ impl CatalogService {
                     let cache_source = source_id.clone();
                     let cache_locator = locator.clone();
                     let cached = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await?;
+                    // A cached leaf cannot lead us to any newly discovered
+                    // catalogue pages. Re-stage it without contacting the
+                    // upstream server so it remains part of the replacement
+                    // generation, while avoiding recurring requests for the
+                    // (typically large) book-only collections.
+                    if let Some(cached_page) = cached.as_ref() {
+                        if internal_page_links(&root_url, &cached_page.page)?.is_empty() {
+                            let page = cached_page.page.clone();
+                            let publications = page_publication_count(&page) as usize;
+                            let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
+                            write_batch.push(CatalogPageWrite { page, etag: cached_page.etag.clone(), last_modified: cached_page.last_modified.clone() }, publications, bytes);
+                            if write_batch.reached_capacity() {
+                                self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
+                            }
+                            continue;
+                        }
+                    }
                     let validators = cached.as_ref().map(|page| OpdsHttpValidators { etag: page.etag.clone(), last_modified: page.last_modified.clone() }).unwrap_or_default();
                     let (mut page, validators) = match self.state.opds.fetch_catalog_conditional(&locator, &validators).await.map_err(|error| CatalogServiceError(error.to_string()))? {
                         OpdsConditionalCatalog::NotModified => {
@@ -710,14 +893,14 @@ impl CatalogService {
             self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
             loop {
                 let cache_crawl = crawl.clone();
-                let more = self.cache_write_call(move |cache| cache.prepare_crawl_activation_batch(&cache_crawl, CRAWL_ACTIVATION_BATCH)).await?;
+                let more = self.cache_write_call_named("crawl_activation", move |cache| cache.prepare_crawl_activation_batch(&cache_crawl, CRAWL_ACTIVATION_BATCH)).await?;
                 if !more {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
             let cache_crawl = crawl.clone();
-            self.cache_write_call(move |cache| cache.finalize_crawl_activation(&cache_crawl)).await?;
+            self.cache_write_call_named("crawl_finalize", move |cache| cache.finalize_crawl_activation(&cache_crawl)).await?;
             self.reconcile_active_epub_extractions(source_id.clone()).await?;
             let cleanup_service = self.clone();
             let cleanup_source = source_id.clone();
@@ -731,7 +914,7 @@ impl CatalogService {
         if let Err(error) = &result {
             let message = error.to_string();
             let cache_crawl = crawl.clone();
-            let _ = self.cache_write_call(move |cache| cache.abandon_crawl_with_error(&cache_crawl, Some(&message))).await;
+            let _ = self.cache_write_call_named("crawl_abandon", move |cache| cache.abandon_crawl_with_error(&cache_crawl, Some(&message))).await;
             let cleanup_service = self.clone();
             let cleanup_source = source_id.clone();
             tokio::spawn(async move { cleanup_service.cleanup_inactive_generations(cleanup_source).await });
@@ -744,7 +927,7 @@ impl CatalogService {
         let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        self.cache_write_call(move |cache| cache.begin_incremental_crawl(&cache_source, &cache_root)).await?;
+        self.cache_write_call_named("crawl_begin_incremental", move |cache| cache.begin_incremental_crawl(&cache_source, &cache_root)).await?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
         let mut fetched = 0usize;
@@ -786,7 +969,7 @@ impl CatalogService {
         .await;
         let complete = result.as_ref().copied().unwrap_or(false);
         let cache_source = source_id.clone();
-        self.cache_write_call(move |cache| cache.finish_incremental_crawl(&cache_source, complete)).await?;
+        self.cache_write_call_named("crawl_finish_incremental", move |cache| cache.finish_incremental_crawl(&cache_source, complete)).await?;
         let service = self.clone();
         let enrichment_source = source_id.clone();
         tokio::spawn(async move { service.enrich_active_source(enrichment_source, true).await });
@@ -795,7 +978,11 @@ impl CatalogService {
 
     pub async fn run_refresh_loop(self) {
         loop {
-            self.refresh_all_sources().await;
+            if !catalog_crawls_disabled() {
+                self.refresh_all_sources().await;
+            } else {
+                tracing::info!(sentinel = CRAWL_PAUSE_SENTINEL, "catalog crawls are paused");
+            }
             tokio::time::sleep(CRAWL_CYCLE).await;
         }
     }
@@ -812,13 +999,26 @@ impl CatalogService {
     /// `running` rows are changed back to `pending` when the cache opens.
     pub async fn run_epub_extraction_loop(self) {
         loop {
-            tokio::join!(self.resume_pending_epub_extractions(), self.resume_metadata_backfill());
+            tokio::join!(self.resume_pending_epub_extractions(), self.resume_metadata_index(), self.resume_metadata_backfill());
             tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL).await;
         }
     }
 
+    async fn resume_metadata_index(&self) {
+        loop {
+            match self.cache_call(|cache| cache.migrate_metadata_index_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
+                Ok(count) if count == METADATA_BACKFILL_BATCH_SIZE => tokio::task::yield_now().await,
+                Ok(_) => return,
+                Err(error) => {
+                    tracing::warn!(%error, "could not migrate saved catalogue metadata index");
+                    return;
+                }
+            }
+        }
+    }
+
     pub async fn refresh_search_index(&self) {
-        match self.cache_write_call(|cache| cache.refresh_search_index()).await {
+        match self.cache_write_call_named("search_index_refresh", |cache| cache.refresh_search_index()).await {
             Ok(true) => tracing::info!("catalogue full-text search index is ready"),
             Ok(false) => {}
             Err(error) => tracing::error!(%error, "failed to refresh catalogue full-text search index"),
@@ -826,14 +1026,14 @@ impl CatalogService {
     }
 
     pub async fn refresh_unified_subject_assignments(&self) {
-        if let Err(error) = self.cache_write_call(|cache| cache.refresh_unified_subject_assignments()).await {
+        if let Err(error) = self.cache_write_call_named("subject_refresh", |cache| cache.refresh_unified_subject_assignments()).await {
             tracing::error!(%error, "failed to refresh unified catalogue subject assignments");
         }
     }
 
     async fn resume_metadata_backfill(&self) {
         loop {
-            match self.cache_write_call(|cache| cache.schedule_metadata_backfill()).await {
+            match self.cache_write_call_named("backfill_schedule", |cache| cache.schedule_metadata_backfill()).await {
                 Ok(1000) => tokio::task::yield_now().await,
                 Ok(_) => break,
                 Err(error) => {
@@ -843,7 +1043,9 @@ impl CatalogService {
             }
         }
         loop {
-            let jobs = match self.cache_write_call(|cache| cache.claim_metadata_backfill_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
+            let batch_started = Instant::now();
+            let claim_started = Instant::now();
+            let jobs = match self.cache_write_call_named("backfill_claim", |cache| cache.claim_metadata_backfill_indexed_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(jobs) if jobs.is_empty() => return,
                 Ok(jobs) => jobs,
                 Err(error) => {
@@ -851,22 +1053,43 @@ impl CatalogService {
                     return;
                 }
             };
+            self.state.metadata_backfill_metrics.claim_ms.fetch_add(duration_millis(claim_started.elapsed()), Ordering::Relaxed);
+            self.state.metadata_backfill_metrics.batches.fetch_add(1, Ordering::Relaxed);
+            self.state.metadata_backfill_metrics.jobs.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+            let enrich_started = Instant::now();
             match self.enrich_saved_metadata_batch(&jobs).await {
                 Ok(updates) => {
-                    if let Err(error) = self.cache_write_call(move |cache| cache.finish_metadata_backfill_batch(&updates)).await {
+                    self.state.metadata_backfill_metrics.enrich_ms.fetch_add(duration_millis(enrich_started.elapsed()), Ordering::Relaxed);
+                    if let Err(error) = self.finish_metadata_backfill_indexed_batch_timed(updates).await.map(|(writer_wait_ms, timings)| {
+                        self.state.metadata_backfill_metrics.writer_wait_ms.fetch_add(writer_wait_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.transaction_ms.fetch_add(timings.transaction_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.commit_ms.fetch_add(timings.commit_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.subjects_ms.fetch_add(timings.subjects_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.authors_ms.fetch_add(timings.authors_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.identity_review_ms.fetch_add(timings.identity_review_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.index_ms.fetch_add(timings.index_ms, Ordering::Relaxed);
+                        self.state.metadata_backfill_metrics.status_ms.fetch_add(timings.status_ms, Ordering::Relaxed);
+                    }) {
+                        self.state.metadata_backfill_metrics.total_ms.fetch_add(duration_millis(batch_started.elapsed()), Ordering::Relaxed);
                         tracing::warn!(%error, "could not commit saved catalogue metadata backfill batch");
                         let release = jobs.clone();
                         let message = error.to_string();
-                        let _ = self.cache_write_call(move |cache| cache.release_metadata_backfill_batch(&release, &message)).await;
+                        let _ = self.cache_write_call(move |cache| cache.release_metadata_backfill_indexed_batch(&release, &message)).await;
                         return;
                     }
+                    self.state.metadata_backfill_metrics.total_ms.fetch_add(duration_millis(batch_started.elapsed()), Ordering::Relaxed);
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "saved catalogue metadata backfill batch failed");
+                    self.state.metadata_backfill_metrics.enrich_ms.fetch_add(duration_millis(enrich_started.elapsed()), Ordering::Relaxed);
+                    self.state.metadata_backfill_metrics.failures.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+                    self.state.metadata_backfill_metrics.total_ms.fetch_add(duration_millis(batch_started.elapsed()), Ordering::Relaxed);
+                    tracing::warn!(%error, "saved catalogue metadata backfill job failed; recording and continuing");
                     let release = jobs.clone();
                     let message = error.to_string();
-                    let _ = self.cache_write_call(move |cache| cache.release_metadata_backfill_batch(&release, &message)).await;
-                    return;
+                    if let Err(release_error) = self.cache_write_call(move |cache| cache.release_metadata_backfill_indexed_batch(&release, &message)).await {
+                        tracing::warn!(%release_error, "could not record saved catalogue metadata backfill failure");
+                        return;
+                    }
                 }
             }
         }
@@ -983,7 +1206,7 @@ impl CatalogService {
         let cache_source = source_id.clone();
         let root = endpoint.url.clone();
         let cached_page = page.clone();
-        self.cache_write_call(move |cache| cache.put_page(&cache_source, &root, &cached_page, None, None)).await?;
+        self.cache_write_call_named("crawl_page_write", move |cache| cache.put_page(&cache_source, &root, &cached_page, None, None)).await?;
         self.remember_browser_covers(source_id, &page).await;
         let service = self.clone();
         let enrichment_source = source_id.clone();
@@ -1300,22 +1523,8 @@ impl CatalogService {
         tokio::time::timeout(CATALOG_METADATA_DOWNLOAD_TIMEOUT, operation).await.map_err(|_| CatalogServiceError(format!("publication download exceeded {} seconds", CATALOG_METADATA_DOWNLOAD_TIMEOUT.as_secs())))?
     }
 
-    async fn enrich_saved_metadata_batch(&self, jobs: &[CatalogMetadataBackfillJob]) -> Result<Vec<CatalogMetadataBackfillUpdate>, CatalogServiceError> {
-        let mut isbn_groups = jobs
-            .iter()
-            .map(|job| {
-                job.metadata
-                    .book
-                    .publication
-                    .identifiers
-                    .iter()
-                    .filter(|identifier| identifier.scheme() == &PublicationIdentifierScheme::Isbn)
-                    .filter_map(PublicationIdentifier::canonical_value)
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+    async fn enrich_saved_metadata_batch(&self, jobs: &[CatalogMetadataBackfillIndexedJob]) -> Result<Vec<CatalogMetadataBackfillIndexedUpdate>, CatalogServiceError> {
+        let mut isbn_groups = jobs.iter().map(|job| job.index.isbns.clone()).collect::<Vec<_>>();
         let mut identity_results = vec![None; jobs.len()];
 
         let queries = jobs
@@ -1323,13 +1532,13 @@ impl CatalogService {
             .enumerate()
             .filter(|(index, _)| isbn_groups[*index].is_empty())
             .filter_map(|(index, job)| {
-                let metadata = &job.metadata.book;
-                (!metadata.title.trim().is_empty()).then(|| EditionIdentityQuery {
+                let metadata_index = &job.index;
+                (!metadata_index.title.trim().is_empty()).then(|| EditionIdentityQuery {
                     query_id: index.to_string(),
-                    title: metadata.title.clone(),
-                    authors: metadata.authors().map(|author| author.name().to_owned()).collect(),
-                    publishers: metadata.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect(),
-                    publication_year: library_model::unique_publication_year(metadata.publication.dates.iter().map(|date| date.value())),
+                    title: metadata_index.title.clone(),
+                    authors: metadata_index.authors.clone(),
+                    publishers: metadata_index.publishers.clone(),
+                    publication_year: metadata_index.publication_year,
                 })
             })
             .collect::<Vec<_>>();
@@ -1364,21 +1573,22 @@ impl CatalogService {
         for ((job, isbns), identity_result) in jobs.iter().zip(isbn_groups).zip(identity_results) {
             let records = isbns.iter().filter_map(|isbn| matches_by_isbn.get(isbn)).flatten().collect::<Vec<_>>();
             let matched = catalog_metadata_match(records, &snapshot_date);
-            let mut subjects = job.metadata.book.publication.subjects.clone();
-            subjects.extend(matched.subjects);
+            let mut subjects = matched.subjects;
             subjects.sort_by(|left, right| (left.authority(), left.name(), left.code()).cmp(&(right.authority(), right.name(), right.code())));
             subjects.dedup();
-            let mut metadata = job.metadata.clone();
+            let mut index = job.index.clone();
             if let Some(isbn) = identity_result.as_ref().and_then(|result| result.matched.as_ref()).map(|matched| matched.canonical_isbn13.as_str()) {
-                add_catalog_identity_isbn(&mut metadata, isbn)?;
+                if !index.isbns.iter().any(|candidate| candidate == isbn) {
+                    index.isbns.push(isbn.to_owned());
+                }
             }
-            updates.push(CatalogMetadataBackfillUpdate {
+            updates.push(CatalogMetadataBackfillIndexedUpdate {
                 source_id: job.source_id.clone(),
                 publication: job.publication.clone(),
                 acquisition_url: job.acquisition_url.clone(),
                 subjects,
                 popularity: matched.popularity,
-                metadata,
+                index,
                 identity_result,
             });
         }
@@ -1722,6 +1932,8 @@ impl CatalogService {
                 acquisition_directory: std::env::temp_dir().join("bokheim-catalog-acquisitions"),
                 metadata_endpoint: configured_metadata_endpoint()?,
                 metadata_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(15)).build().map_err(|error| CatalogServiceError(error.to_string()))?,
+                metadata_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
+                writer_metrics: StdMutex::new(BTreeMap::new()),
                 max_crawl_pages: configured_max_crawl_pages()?,
             }),
         })
@@ -2177,6 +2389,7 @@ pub fn operations_app(service: CatalogService) -> Router {
         .route("/internal/operations", get(catalog_operations))
         .route("/internal/subject-audit", get(catalog_subject_audit))
         .route("/internal/identity-reviews", get(catalog_identity_reviews))
+        .route("/internal/identity-reviews/retry-ambiguous", post(catalog_retry_ambiguous_identity_reviews))
         .route("/internal/identity-reviews/:review_id", post(catalog_identity_review_action))
         .with_state(service)
 }
@@ -2302,6 +2515,16 @@ async fn catalog_operations(State(service): State<CatalogService>) -> Result<Res
     json_response(&CatalogOperationsResponse { inventory, extraction_failures }, "no-store")
 }
 
+async fn catalog_retry_ambiguous_identity_reviews(State(service): State<CatalogService>) -> Result<Response, ApiError> {
+    let count = service
+        .cache_write_call_named("identity_review_requeue", |cache| cache.retry_ambiguous_identity_reviews())
+        .await
+        .map_err(ApiError::unavailable)?;
+    let worker = service.clone();
+    tokio::spawn(async move { worker.resume_metadata_backfill().await });
+    json_response(&serde_json::json!({ "requeued": count }), "no-store")
+}
+
 async fn catalog_subject_audit(State(service): State<CatalogService>) -> Result<Response, ApiError> {
     let audit = service.cache_call(CatalogCache::subject_projection_audit).await.map_err(ApiError::unavailable)?;
     json_response(&audit, "no-store")
@@ -2383,6 +2606,8 @@ async fn catalog_inventory_response(service: &CatalogService) -> Result<CatalogI
             succeeded: inventory.metadata_backfill.succeeded,
             last_error: inventory.metadata_backfill.last_error,
         },
+        metadata_backfill_metrics: service.state.metadata_backfill_metrics.snapshot(),
+        writer_metrics: writer_metrics_snapshot(&service.state.writer_metrics),
         identity_reviews: inventory.identity_reviews,
         sources: inventory
             .sources
@@ -2609,6 +2834,10 @@ fn configured_max_crawl_pages() -> Result<usize, CatalogServiceError> {
     Ok(pages)
 }
 
+fn catalog_crawls_disabled() -> bool {
+    std::env::var_os("BOKHEIM_CATALOG_DISABLE_CRAWLS").is_some() || std::path::Path::new(CRAWL_PAUSE_SENTINEL).exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2675,6 +2904,8 @@ mod tests {
                 acquisition_directory: directory.join("acquisitions"),
                 metadata_endpoint: None,
                 metadata_client: reqwest::Client::new(),
+                metadata_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
+                writer_metrics: StdMutex::new(BTreeMap::new()),
                 max_crawl_pages: DEFAULT_MAX_CRAWL_PAGES,
                 started_at: Instant::now(),
             }),
@@ -3267,6 +3498,60 @@ mod tests {
             service.search_response(&source_id, CatalogSearchRequest { query: "harry".to_owned(), supported_languages: vec!["en".to_owned()], epoch: Some(response.epoch), known_publications: response.title_matches }).await.unwrap();
         assert!(second.payloads.is_empty());
         assert_eq!(requests.load(Ordering::SeqCst), before_search);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn replacement_crawl_reuses_cached_leaf_pages_without_fetching_them() {
+        let root_requests = Arc::new(AtomicUsize::new(0));
+        let leaf_requests = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                "/root",
+                get({
+                    let root_requests = root_requests.clone();
+                    move || {
+                        let root_requests = root_requests.clone();
+                        async move {
+                            root_requests.fetch_add(1, Ordering::SeqCst);
+                            (
+                                [(header::CONTENT_TYPE, "application/opds+json")],
+                                r#"{"metadata":{"title":"Root"},"navigation":[{"title":"Books","href":"/books","type":"application/opds+json"}]}"#,
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/books",
+                get({
+                    let leaf_requests = leaf_requests.clone();
+                    move || {
+                        let leaf_requests = leaf_requests.clone();
+                        async move {
+                            leaf_requests.fetch_add(1, Ordering::SeqCst);
+                            (
+                                [(header::CONTENT_TYPE, "application/opds+json")],
+                                r#"{"metadata":{"title":"Books"},"publications":[{"metadata":{"identifier":"one","title":"One","language":"en"},"links":[{"rel":"http://opds-spec.org/acquisition/open-access","href":"/one.epub","type":"application/epub+zip"}]}]}"#,
+                            )
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let temporary = tempfile::tempdir().unwrap();
+        let service = service(endpoint(format!("http://{address}/root")), temporary.path());
+        let source_id = CatalogSourceId::parse("opds-test").unwrap();
+
+        service.crawl_source(&source_id).await.unwrap();
+        service.crawl_source(&source_id).await.unwrap();
+
+        assert_eq!(root_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(leaf_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(service.state.cache.inventory().unwrap().active_page_count, 2);
+        assert_eq!(service.search_response(&source_id, CatalogSearchRequest { query: "one".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().title_matches.len(), 1);
         task.abort();
     }
 

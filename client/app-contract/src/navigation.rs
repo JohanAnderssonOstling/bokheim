@@ -3,14 +3,10 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::frontend::LibraryFeature;
-
-/// The last library-owned page and hierarchy paths visited in one library.
+/// The hierarchy paths visited in one library.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "FolderCrumb: serde::Serialize, SubjectCrumb: serde::Serialize", deserialize = "FolderCrumb: serde::Deserialize<'de>, SubjectCrumb: serde::Deserialize<'de>"))]
 pub struct LibraryPlace<FolderCrumb, SubjectCrumb> {
-    #[serde(default)]
-    pub route: LibraryFeature,
     #[serde(default)]
     pub folder_path: Vec<FolderCrumb>,
     #[serde(default)]
@@ -19,13 +15,12 @@ pub struct LibraryPlace<FolderCrumb, SubjectCrumb> {
 
 impl<FolderCrumb, SubjectCrumb> Default for LibraryPlace<FolderCrumb, SubjectCrumb> {
     fn default() -> Self {
-        Self { route: LibraryFeature::default(), folder_path: Vec::new(), subject_path: Vec::new() }
+        Self { folder_path: Vec::new(), subject_path: Vec::new() }
     }
 }
 
 /// Browser state shared by native hosts and mirrored by generated web types.
-/// Universal pages are deliberately absent: they never replace the library
-/// place underneath them.
+/// Each page persists only its own nested place within a library.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(bound(
     serialize = "LibraryId: serde::Serialize + Eq + Hash, FolderCrumb: serde::Serialize, SubjectCrumb: serde::Serialize",

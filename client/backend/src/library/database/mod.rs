@@ -727,8 +727,8 @@ pub(crate) use assets::{
 /// Durable reader progress for EPUB, PDF, and audiobook formats.
 pub(crate) mod reading;
 #[cfg(test)]
-pub(crate) use reading::{get_audiobook_reading_position, get_book_reading_position, get_pdf_reading_page};
-pub(crate) use reading::{update_pdf_reading_page, update_reading_position};
+pub(crate) use reading::{get_audiobook_reading_position, get_book_reading_position, get_pdf_reading_page, get_pdf_reading_position};
+pub(crate) use reading::{update_pdf_reading_page, update_pdf_reading_position, update_reading_position};
 
 /// Synchronization outbox, scan generations, tombstones, and filesystem work.
 pub(crate) mod sync_state;

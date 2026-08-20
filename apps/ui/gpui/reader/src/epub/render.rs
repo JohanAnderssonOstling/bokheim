@@ -6,105 +6,59 @@ use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NavigateHistoryBack, NavigateHistoryForward, NextLine, NextPage, NextSection, PreviousLine,
     PreviousPage, PreviousSection, ToggleFullscreen, ToggleSearch, ToggleToc,
 };
+use crate::shell::state_panel;
+use crate::shell::annotation_editor;
+use std::rc::Rc;
+
 use app_contract::{READER_NAVIGATION_SHORTCUTS, ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut};
+use epub_svelte_lib::library::marks::{AnnotationStyle, ReaderAnnotation, ReaderBookmark};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window, px};
-use gpui_component::Sizable;
 use gpui_component::input::Input;
 use gpui_component::menu::ContextMenuExt;
-use gpui_component::tab::TabBar;
-use gpui_component::tree::tree;
 use ui_components as components;
 
 const READER_TOOLBAR_HEIGHT: f32 = 58.0;
 /// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
 /// This is a renderer guard band, not an authored EPUB margin.
 const KOBO_READER_EDGE_INSET: f32 = 2.0;
-const ANNOTATION_POPUP_WIDTH: f32 = 360.0;
-const ANNOTATION_POPUP_MAX_HEIGHT: f32 = 420.0;
-const ANNOTATION_POPUP_INSET: f32 = 12.0;
-const ANNOTATION_POPUP_GAP: f32 = 10.0;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct AnnotationPopupGeometry {
-    left: f32,
-    edge_offset: f32,
-    max_height: f32,
-    above: bool,
-}
-
-fn annotation_popup_geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, requested_column_width: f32, scale: f32, maximum_columns: u8) -> AnnotationPopupGeometry {
-    let document_width = (viewport_width - sidebar_width).max(1.0);
-    let document_height = (viewport_height - READER_TOOLBAR_HEIGHT).max(1.0);
+/// Places the annotation editor, deriving the column count the way the
+/// renderer does.
+///
+/// The EPUB view is not told how many columns it ended up with — it asks for a
+/// column width and the renderer fits as many as will go, capped by the
+/// reader's preference. The panel has to land on the same column the click did,
+/// so that arithmetic is repeated here before the shared placement runs.
+fn annotation_popup_geometry(
+    anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, requested_column_width: f32, scale: f32, maximum_columns: u8,
+) -> annotation_editor::Geometry {
+    let document_width = annotation_editor::document_width(viewport_width, sidebar_width);
     let scale = scale.max(0.01);
     let minimum_gap = 20.0 * scale;
     let requested_column_width = requested_column_width.max(1.0) * scale;
     let derived_columns = ((document_width + minimum_gap) / (requested_column_width + minimum_gap)).floor().max(1.0) as u8;
     let column_count = derived_columns.min(maximum_columns.max(1));
-    let column_width = document_width / f32::from(column_count);
-
-    let (anchor_x, anchor_y) = anchor.map(|point| (f32::from(point.x) - sidebar_width, f32::from(point.y) - READER_TOOLBAR_HEIGHT)).unwrap_or((column_width / 2.0, document_height / 3.0));
-    let anchor_x = anchor_x.clamp(0.0, document_width - f32::EPSILON);
-    let anchor_y = anchor_y.clamp(0.0, document_height);
-    let column = (anchor_x / column_width).floor().min(f32::from(column_count - 1));
-    let column_center = (column + 0.5) * column_width;
-    let panel_width = ANNOTATION_POPUP_WIDTH.min((document_width - ANNOTATION_POPUP_INSET * 2.0).max(1.0));
-    let maximum_left = (document_width - panel_width).max(0.0);
-    let side_inset = ANNOTATION_POPUP_INSET.min(maximum_left / 2.0);
-    let left = (column_center - panel_width / 2.0).clamp(side_inset, maximum_left - side_inset);
-
-    let room_above = (anchor_y - ANNOTATION_POPUP_GAP - ANNOTATION_POPUP_INSET).max(1.0);
-    let room_below = (document_height - anchor_y - ANNOTATION_POPUP_GAP - ANNOTATION_POPUP_INSET).max(1.0);
-    let above = room_above > room_below;
-    AnnotationPopupGeometry {
-        left,
-        edge_offset: if above { document_height - anchor_y + ANNOTATION_POPUP_GAP } else { anchor_y + ANNOTATION_POPUP_GAP },
-        max_height: (if above { room_above } else { room_below }).min(ANNOTATION_POPUP_MAX_HEIGHT),
-        above,
-    }
+    annotation_editor::geometry(anchor, viewport_width, viewport_height, sidebar_width, READER_TOOLBAR_HEIGHT, usize::from(column_count))
 }
 
 impl ReaderView {
     fn render_sidebar_tabs(&self, show_annotations: bool, cx: &mut Context<Self>) -> AnyElement {
-        let target = cx.entity();
-        TabBar::new("reader-sidebar-tabs")
-            .segmented()
-            .small()
-            .selected_index(usize::from(show_annotations))
-            .child("Contents")
-            .child("Annotations")
-            .on_click(move |index, _, cx| {
-                target.update(cx, |this, cx| {
-                    let annotations = *index == 1;
-                    this.reader_state_visible = annotations;
-                    this.set_toc_visible(!annotations, cx);
-                    crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_tab_changed");
-                });
-            })
-            .into_any_element()
+        crate::shell::state_panel::reader_sidebar_tabs("reader-sidebar-tabs", &cx.entity(), show_annotations, true, cx, |annotations, this, cx| {
+            this.reader_state_visible = annotations;
+            this.set_toc_visible(!annotations, cx);
+            crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_tab_changed");
+        })
     }
 
     fn render_toc(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
-        let toc = tree(&self.toc_tree, move |index, entry, _selected, _window, _cx| {
-            let item = entry.item();
-            let link = item.id.to_string();
-            let navigation_target = entity.clone();
-            let title = components::reader_toc_title(("toc-tree-title", index), item.label.clone(), theme).on_click(move |_, window, cx| {
-                navigation_target.update(cx, |this, cx| {
-                    this.navigate_to(link.clone(), cx);
-                    // The tree binds the arrow keys for its own selection, so
-                    // it holds focus while it is being used. Following an entry
-                    // means "take me there to read", so hand the keyboard back
-                    // to the document rather than leaving paging keys dead.
-                    this.focus_document(window, cx);
-                    #[cfg(feature = "kobo")]
-                    {
-                        this.toc_visible = false;
-                        crate::invalidation::notify(cx, Component::ReaderShell, "toc_navigated");
-                    }
-                });
-            });
-            components::reader_toc_tree_item(("toc-tree-item", index), ("toc-tree-disclosure", index), entry.depth(), entry.is_folder(), entry.is_expanded(), title, theme)
+        let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |link, window, this: &mut Self, cx| {
+            this.navigate_to(link.to_owned(), cx);
+            this.focus_document(window, cx);
+            #[cfg(feature = "kobo")]
+            {
+                this.toc_visible = false;
+                crate::invalidation::notify(cx, Component::ReaderShell, "toc_navigated");
+            }
         });
         components::reader_toc(theme).child(self.render_sidebar_tabs(false, cx)).child(toc).into_any_element()
     }
@@ -112,74 +66,33 @@ impl ReaderView {
     fn render_reader_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let tabs_target = cx.entity();
-        let mut panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, cx)).child(
-            TabBar::new("reader-state-tabs")
-                .segmented()
-                .small()
-                .selected_index(usize::from(self.reader_state_bookmarks))
-                .child(format!("Highlights ({})", self.marks.annotations.len()))
-                .child(format!("Bookmarks ({})", self.marks.bookmarks.len()))
-                .on_click(move |index, _, cx| {
-                    tabs_target.update(cx, |this, cx| {
-                        this.reader_state_bookmarks = *index == 1;
-                        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-                    });
-                }),
+        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, cx)).child(
+            crate::shell::state_panel::reader_state_tabs("reader-state-tabs", &tabs_target, self.reader_state_bookmarks, &self.marks, cx, |showing_bookmarks, this, cx| {
+                this.reader_state_bookmarks = showing_bookmarks;
+                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+            }),
         );
 
-        if self.reader_state_bookmarks {
-            panel = panel.child(
-                components::reader_sidebar_action_button("reader-bookmark-current", "Bookmark here", gpui_component::IconName::Star, self.current_cfi.is_some())
-                    .tooltip("Bookmark the current location")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
-            );
-            if self.marks.bookmarks.is_empty() {
-                panel = panel.child(components::reader_state_note("No bookmarks yet. Use Bookmark here to save this location.", theme));
-            }
-            for (index, bookmark) in self.marks.bookmarks.iter().cloned().enumerate() {
-                let cfi = bookmark.cfi.clone();
-                let id = bookmark.id.clone();
-                panel = panel.child(
-                    components::reader_state_card(("reader-bookmark", index), false, theme).child(components::reader_state_quote(bookmark.label)).child(
-                        components::reader_state_actions()
-                            .child(components::reader_sidebar_action_button(("reader-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))))
-                            .child(
-                                components::reader_sidebar_action_button(("reader-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true).on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
-                            ),
-                    ),
-                );
-            }
-        } else {
-            if self.marks.annotations.is_empty() {
-                panel = panel.child(components::reader_state_note("Select text, then use Highlight to create an annotation.", theme));
-            }
-            for (index, annotation) in self.marks.annotations.iter().cloned().enumerate() {
-                let selected = self.marks.selected_id.as_deref() == Some(annotation.id.as_str());
-                let cfi = annotation.anchor.epub_cfi_value().unwrap_or_default().to_owned();
-                let id = annotation.id.clone();
-                let delete_id = annotation.id.clone();
-                let note = annotation.note.clone();
-                let card = components::reader_state_card(("reader-annotation", index), selected, theme)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.annotation_popup_anchor = None;
-                        this.select_annotation(id.clone(), window, cx);
-                    }))
-                    .child(components::reader_state_quote(format!("\u{201C}{}\u{201D}", annotation.exact_text)))
-                    .when(!note.is_empty(), |card| card.child(components::reader_state_note(note, theme)))
-                    .child(
-                        components::reader_state_actions()
-                            .child(
-                                components::reader_sidebar_action_button(("reader-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_cfi(cfi.clone(), cx))),
-                            )
-                            .child(
-                                components::reader_sidebar_action_button(("reader-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true)
-                                    .on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx))),
-                            ),
-                    );
-                panel = panel.child(card);
-            }
-        }
-        panel.into_any_element()
+        let wording = state_panel::StatePanelWording {
+            bookmark_tooltip: "Bookmark the current location",
+            no_bookmarks: "No bookmarks yet. Use Bookmark here to save this location.",
+            no_annotations: "Select text, then use Highlight to create an annotation.",
+        };
+        let actions = state_panel::StatePanelActions {
+            add_bookmark: Rc::new(|this: &mut Self, cx| this.add_bookmark(cx)),
+            go_to_bookmark: Rc::new(|bookmark: &ReaderBookmark, this: &mut Self, cx| this.navigate_to_cfi(bookmark.cfi.clone(), cx)),
+            delete_bookmark: Rc::new(|id, this: &mut Self, cx| this.delete_bookmark(id, cx)),
+            select_annotation: Rc::new(|id, window, this: &mut Self, cx| {
+                this.annotation_popup_anchor = None;
+                this.select_annotation(id, window, cx);
+            }),
+            go_to_annotation: Rc::new(|annotation: &ReaderAnnotation, this: &mut Self, cx| this.navigate_to_cfi(annotation.anchor.epub_cfi_value().unwrap_or_default().to_owned(), cx)),
+            delete_annotation: Rc::new(|id, this: &mut Self, cx| this.delete_annotation(id, cx)),
+        };
+        // A bookmark records where the reader is, so there has to be a position
+        // to record before the button means anything.
+        let can_bookmark = self.current_cfi.is_some();
+        panel.children(state_panel::reader_state_rows(&cx.entity(), &self.marks, self.reader_state_bookmarks, can_bookmark, &wording, &actions, theme)).into_any_element()
     }
 
     fn on_previous_page(&mut self, _: &PreviousPage, _: &mut Window, cx: &mut Context<Self>) {
@@ -319,7 +232,7 @@ impl Render for ReaderView {
                     .child(renderer.clone())
                     .context_menu(move |menu, window, cx| {
                         let position = window.mouse_position();
-                        let selection_hit = selection_owner.read(cx).marks.selection.is_some() && selection_renderer.read(cx).selection_contains(position);
+                        let selection_hit = selection_owner.read(cx).selection.is_some() && selection_renderer.read(cx).selection_contains(position);
                         let table_hit = table_renderer.read(cx).table_at(position);
                         let image_hit = image_renderer.read(cx).image_at(position);
                         let mut menu = components::ReaderContextMenu::new(menu);
@@ -373,21 +286,51 @@ impl Render for ReaderView {
             let viewport = window.viewport_size();
             let preferences = ReaderSettings::preferences(cx);
             let popup = annotation_popup_geometry(self.annotation_popup_anchor, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, preferences.column_width as f32, preferences.scale as f32, self.desired_column_count);
-            document_body = document_body.child(
-                components::reader_annotation_editor(theme)
-                    .absolute()
-                    .left(px(popup.left))
-                    .max_h(px(popup.max_height))
-                    .when(popup.above, |panel| panel.bottom(px(popup.edge_offset)))
-                    .when(!popup.above, |panel| panel.top(px(popup.edge_offset)))
-                    .child(components::reader_state_quote(format!("“{}”", annotation.exact_text)))
-                    .child(components::reader_annotation_note_editor(theme).child(Input::new(&self.annotation_note_input).appearance(false).size_full()))
-                    .child(
-                        components::reader_state_actions()
-                            .child(components::reader_control_button("reader-annotation-popup-save", "Save", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, cx))))
-                            .child(components::reader_control_button("reader-annotation-popup-delete", "Delete", theme).on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx)))),
-                    ),
-            );
+            // Saving a style or a colour leaves the editor open so several can
+            // be tried; only closing and deleting dismiss it. Those two have to
+            // hand the keyboard back, because the note input inside the editor
+            // may be what holds it, and focus left on an element that no longer
+            // renders puts every key binding out of reach.
+            let save = |id: &'static str, label: &'static str, style: Option<AnnotationStyle>, color: Option<&'static str>| {
+                let target = entity.clone();
+                annotation_editor::Action::new(id, label, move |_, cx| {
+                    let style = style.clone();
+                    target.update(cx, |this, cx| this.save_selected_annotation(style, color, cx));
+                })
+            };
+            let close_target = entity.clone();
+            let delete_target = entity.clone();
+            let rows = vec![
+                vec![
+                    save("reader-annotation-popup-save", "Save", None, None),
+                    annotation_editor::Action::new("reader-annotation-popup-close", "Close", move |window, cx| {
+                        close_target.update(cx, |this, cx| {
+                            this.close_annotation_popup(cx);
+                            this.focus_document(window, cx);
+                        });
+                    }),
+                    annotation_editor::Action::new("reader-annotation-popup-delete", "Delete", move |window, cx| {
+                        let id = delete_id.clone();
+                        delete_target.update(cx, |this, cx| {
+                            this.delete_annotation(id, cx);
+                            this.focus_document(window, cx);
+                        });
+                    }),
+                ],
+                vec![
+                    save("reader-annotation-popup-highlight", "Highlight", Some(AnnotationStyle::Highlight), None),
+                    save("reader-annotation-popup-underline", "Underline", Some(AnnotationStyle::Underline), None),
+                    save("reader-annotation-popup-squiggly", "Squiggly", Some(AnnotationStyle::Squiggly), None),
+                    save("reader-annotation-popup-strike", "Strike", Some(AnnotationStyle::Strikethrough), None),
+                ],
+                vec![
+                    save("reader-annotation-popup-yellow", "Yellow", None, Some("#f6c945")),
+                    save("reader-annotation-popup-blue", "Blue", None, Some("#60a5fa")),
+                    save("reader-annotation-popup-pink", "Pink", None, Some("#f472b6")),
+                    save("reader-annotation-popup-green", "Green", None, Some("#4ade80")),
+                ],
+            ];
+            document_body = document_body.child(annotation_editor::editor(popup, &annotation.exact_text, &self.annotation_note_input, rows, theme));
         }
         if self.search.active {
             let (current, total) = self.search.match_position.unwrap_or((0, 0));
@@ -460,9 +403,19 @@ impl Render for ReaderView {
             document_body.into_any_element()
         };
 
+        // The page container is only focusable while the publication is
+        // loading, when it is the one thing that can hold the keyboard. A
+        // focusable container steals focus from the document on any click that
+        // reaches it — a margin, the toolbar's background, the sidebar — and
+        // navigation is bound in the document's key context, so the paging keys
+        // would go dead until the text was clicked again. Dropping the handle
+        // once the document exists leaves clicks on the chrome harmless; the
+        // container still sits on the dispatch path, so `Reader` bindings keep
+        // firing.
+        let document_ready = self.document_focus(cx).is_some();
         let page = components::reader_app_page(window, cx, theme)
             .key_context("Reader")
-            .track_focus(&self.focus)
+            .when(!document_ready, |page| page.track_focus(&self.focus))
             .on_action(cx.listener(Self::on_previous_page))
             .on_action(cx.listener(Self::on_next_page))
             .on_action(cx.listener(Self::on_toggle_toc))

@@ -1,27 +1,27 @@
 //! Window-level owner and router.
 //!
-//! Connects navigation/setup intents to [`LibraryHost`], which controls
-//! selected-library state and lifetime. The active screen determines the route.
+//! Owns application navigation, the selected library, and the current flat
+//! library page. Nested navigation and book detail stay inside each page.
 
+use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::LibraryEntry;
+use epub_svelte_lib::library::LibraryBackend;
 use epub_svelte_lib::platform::scanner::LibraryEvent;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, Window, px};
-use gpui_component::button::{Button, ButtonVariants};
+use gpui::{AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SharedString, Subscription, Window, px};
 use gpui_component::notification::Notification;
-use gpui_component::{IconName, Root, WindowExt};
+use gpui_component::{Root, WindowExt};
 use ui_components as components;
 
-use crate::library::{LibraryHost, LibraryHostEvent, LibrarySetup, LibrarySetupEvent};
+use crate::library::{AuthorsPage, FoldersPage, HomePage, LibraryContext, LibrarySetup, LibrarySetupEvent, LibraryState, SubjectsPage, TrashPage};
 use crate::model::BrowserSession;
 use crate::navigation::{NavEvent, NavigationView};
-use crate::route::{LibraryRoute, Route, UniversalRoute};
-use crate::services::{AppServices, SaveBrowserState};
-use crate::stores::{LibraryAvailabilityChanged, LibraryDisplayChanged, Preferences, interface_font};
+use crate::services::AppServices;
+use crate::stores::{LibraryDisplayChanged, Preferences};
 use crate::universal::settings::SettingsPage;
 use crate::universal::store::StorePage;
 use crate::universal::sync::{SyncPage, SyncPageEvent};
-use crate::{DismissSettings, FocusSearch, ShowAuthors, ShowFolders, ShowHome, ShowSettings, ShowStore, ShowSubjects, ShowSync};
+use crate::{DismissSettings, Route};
 
 #[cfg(feature = "audiobooks")]
 struct ActiveAudiobook {
@@ -31,10 +31,12 @@ struct ActiveAudiobook {
 
 pub struct BrowserRoot {
     services: AppServices,
-    save_state: SaveBrowserState,
     preferences: Entity<Preferences>,
-    screen: BrowserScreen,
-    library_host: Entity<LibraryHost>,
+    library_state: Entity<LibraryState>,
+    library: Option<LibraryBackend>,
+    route: Route,
+    page: Option<AnyView>,
+    page_subscription: Option<Subscription>,
     library_setup: Entity<LibrarySetup>,
     navigation: Entity<NavigationView>,
     focus: FocusHandle,
@@ -45,58 +47,37 @@ pub struct BrowserRoot {
     kobo_auto_rotate: bool,
 }
 
-enum UniversalPage {
-    Store(Entity<StorePage>),
-    Sync { page: Entity<SyncPage>, _subscription: Subscription },
-    Settings(Entity<SettingsPage>),
-}
-
-enum BrowserScreen {
-    Library,
-    Universal(UniversalPage),
-}
-
-impl UniversalPage {
-    fn route(&self) -> UniversalRoute {
-        match self {
-            Self::Store(_) => UniversalRoute::Store,
-            Self::Sync { .. } => UniversalRoute::Account,
-            Self::Settings(_) => UniversalRoute::Settings,
-        }
-    }
-
-    fn element(&self) -> gpui::AnyElement {
-        match self {
-            Self::Store(page) => page.clone().into_any_element(),
-            Self::Sync { page, .. } => page.clone().into_any_element(),
-            Self::Settings(page) => page.clone().into_any_element(),
-        }
-    }
-}
-
 impl BrowserRoot {
-    pub fn new(libraries: Vec<LibraryEntry>, session: BrowserSession, services: AppServices, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let save_state = services.save_state.clone();
+    pub fn new(libraries: Vec<LibraryEntry>, services: AppServices, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let session = services.backend.browser_session().unwrap_or_else(|error| {
+            log::warn!("failed to restore browser session: {error}");
+            BrowserSession::default()
+        });
         let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
-        let library_host = cx.new(|cx| LibraryHost::new(libraries, &session, services.clone(), window, cx));
-        let library_state = library_host.read(cx).state();
+        let requested_id = session.active_library_id.filter(|id| libraries.iter().any(|entry| entry.library_id() == id)).or_else(|| libraries.first().map(|entry| *entry.library_id()));
+        let selected = requested_id.and_then(|library_id| match resolve_library(&services, &library_id) {
+            Ok(library) => Some((library_id, library)),
+            Err(error) => {
+                log::error!("failed to restore library selection: {error}");
+                None
+            }
+        });
+        let active_library_id = selected.as_ref().map(|(library_id, _)| library_id.clone());
+        let library = selected.map(|(_, library)| library);
+        let library_state = cx.new(|_| LibraryState::new(libraries, active_library_id));
         let sync_label = services.contracts.account.navigation_label.clone();
-        // The host has already resolved which library is actually selected, so
-        // ask it rather than re-deriving the route from the session.
-        let restored_route = library_host.read(cx).route(cx);
-        let navigation = cx.new(|cx| NavigationView::new(Route::Library(restored_route), sync_label.into(), library_state.clone(), cx));
+        let restored_route = Route::Folders;
+        let navigation = cx.new(|cx| NavigationView::new(restored_route, sync_label.into(), services.backend.clone(), library_state.clone(), cx));
         let library_setup = cx.new(|_| LibrarySetup::new(services.clone()));
         let subscriptions = vec![
-            cx.subscribe(&navigation, |root: &mut Self, _, event, cx| root.handle_navigation(event, cx)),
-            cx.subscribe(&library_host, |root: &mut Self, _, event, cx| root.handle_host(event, cx)),
-            cx.subscribe(&library_setup, |root: &mut Self, _, event, cx| root.handle_setup(event, cx)),
-            cx.subscribe(&preferences, |root: &mut Self, _, _: &LibraryAvailabilityChanged, cx| {
-                root.library_host.update(cx, |host, cx| host.refresh_active(cx));
-            }),
-            // A display change needs no re-query, only a different presentation
-            // of cards the grids already hold.
-            cx.subscribe(&preferences, |root: &mut Self, _, event: &LibraryDisplayChanged, cx| {
-                root.library_host.update(cx, |host, cx| host.set_library_view(event.0, cx));
+            cx.subscribe_in(&navigation, window, |root: &mut Self, _, event, window, cx| root.handle_navigation(event, window, cx)),
+            cx.subscribe_in(&library_setup, window, |root: &mut Self, _, event, window, cx| root.handle_setup(event, window, cx)),
+            // The current page is cheap to recreate and reads the new display
+            // preference while rebuilding its grids.
+            cx.subscribe_in(&preferences, window, |root: &mut Self, _, _: &LibraryDisplayChanged, window, cx| {
+                if matches!(root.route, Route::Home | Route::Authors | Route::Folders | Route::Subjects | Route::Trash) {
+                    root.show_page(root.route, window, cx);
+                }
             }),
         ];
 
@@ -115,35 +96,21 @@ impl BrowserRoot {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
 
-        let reconciliation = services.backend.spawn(|core| async move { core.reconcile_library_catalogue().await.map(|catalogue| catalogue.libraries).map_err(|error| error.to_string()) });
+        let reconciliation = services.backend.spawn(|core| async move { core.reconcile_libraries().await.map(|state| state.libraries).map_err(|error| error.to_string()) });
         cx.spawn(async move |root, cx| {
             let Ok(Ok(libraries)) = reconciliation.await else { return };
-            let _ = root.update_in(cx, |root, window, cx| root.apply_catalogue(libraries, None, None, true, window, cx));
+            let _ = root.update_in(cx, |root, window, cx| root.update_library_list(libraries, window, cx));
         })
         .detach();
 
-        if let Some(updater) = services.desktop_updater.clone() {
-            let update_check = updater.check();
-            cx.spawn(async move |root, cx| {
-                let outcome = update_check.recv().await.unwrap_or_else(|_| Err("The desktop update worker stopped unexpectedly".to_owned()));
-                match outcome {
-                    Ok(Some(update)) => {
-                        updater.set_available_update(Some(update.clone()));
-                        let _ = root.update_in(cx, |root, window, cx| root.notify_update_available(update, window, cx));
-                    }
-                    Ok(None) => updater.set_available_update(None),
-                    Err(error) => log::warn!("automatic desktop update check failed: {error}"),
-                }
-            })
-            .detach();
-        }
-
-        Self {
+        let mut root = Self {
             services,
-            save_state,
             preferences,
-            screen: BrowserScreen::Library,
-            library_host,
+            library_state,
+            library,
+            route: restored_route,
+            page: None,
+            page_subscription: None,
             library_setup,
             navigation,
             focus,
@@ -152,7 +119,12 @@ impl BrowserRoot {
             audiobook: None,
             #[cfg(feature = "kobo")]
             kobo_auto_rotate,
+        };
+        root.show_page(restored_route, window, cx);
+        if root.library.is_some() {
+            root.start_library_scanning(window, cx);
         }
+        root
     }
 
     #[cfg(feature = "audiobooks")]
@@ -166,185 +138,72 @@ impl BrowserRoot {
         cx.notify();
     }
 
-    fn handle_navigation(&mut self, event: &NavEvent, cx: &mut Context<Self>) {
+    fn handle_navigation(&mut self, event: &NavEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            NavEvent::Select(route) => self.navigate_later(*route, cx),
+            NavEvent::Select(route) => self.navigate(*route, window, cx),
             NavEvent::SelectLibrary(library_id) => self.activate_library_later(library_id.clone(), cx),
-            NavEvent::RemoveLibrary(library_id) => self.remove_library_later(library_id.clone(), cx),
+            NavEvent::LibraryRemoved => {
+                let result = self.services.backend.libraries().map_err(|error| error.to_string()).and_then(|libraries| self.replace_libraries(libraries, None, window, cx));
+                match result {
+                    Ok(changed) => {
+                        if changed {
+                            self.show_selected_library(cx);
+                        }
+                    }
+                    Err(error) => self.notify_error(error.into(), window, cx),
+                }
+            }
             NavEvent::OpenLibrary => self.library_setup.update(cx, |setup, cx| setup.choose_library_folders(cx)),
             NavEvent::LibrarySwitcherVisibilityChanged => cx.notify(),
             NavEvent::Quit => cx.quit(),
         }
     }
 
-    fn handle_host(&mut self, event: &LibraryHostEvent, cx: &mut Context<Self>) {
+    fn handle_setup(&mut self, event: &LibrarySetupEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            LibraryHostEvent::SessionChanged => self.persist(cx),
-        }
-    }
-
-    fn handle_setup(&mut self, event: &LibrarySetupEvent, cx: &mut Context<Self>) {
-        match event {
-            LibrarySetupEvent::CatalogueReady { libraries, activate_library_id, warning } => {
-                self.apply_catalogue_later(libraries.clone(), activate_library_id.clone(), warning.clone(), false, cx);
+            LibrarySetupEvent::LibrariesAdded { libraries, activate_library_id, warning } => {
+                self.add_libraries(libraries.clone(), activate_library_id.clone(), warning.clone(), window, cx);
             }
+            LibrarySetupEvent::OpenSettings => self.navigate(Route::Settings, window, cx),
+            LibrarySetupEvent::OpenAccount => self.navigate(Route::Account, window, cx),
             LibrarySetupEvent::Error(error) => self.notify_error_later(error.clone(), cx),
         }
     }
 
-    fn handle_sync(&mut self, event: &SyncPageEvent, cx: &mut Context<Self>) {
+    fn handle_sync(&mut self, event: &SyncPageEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            SyncPageEvent::CatalogueReconciled(libraries) => self.apply_catalogue_later(libraries.clone(), None, None, true, cx),
+            SyncPageEvent::LibraryListUpdated(libraries) => self.update_library_list(libraries.clone(), window, cx),
         }
-    }
-
-    pub fn session(&self, cx: &App) -> BrowserSession {
-        self.session_for(cx)
-    }
-
-    fn session_for(&self, cx: &App) -> BrowserSession {
-        self.library_host.read(cx).session(cx)
-    }
-
-    fn persist(&self, cx: &mut App) {
-        (self.save_state)(self.session_for(cx), None, cx);
-    }
-
-    fn navigate_later(&mut self, route: Route, cx: &mut Context<Self>) {
-        cx.spawn(async move |root, cx| {
-            let _ = root.update_in(cx, |root, window, cx| root.navigate(route, window, cx));
-        })
-        .detach();
     }
 
     fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
-        // Book details are transient and deliberately absent from `Route`.
-        // Clear them before comparing routes: clicking the already-selected
-        // sidebar item must still leave the detail page, and navigating to a
-        // universal page must not retain its renderer invisibly.
-        self.library_host.update(cx, |host, cx| {
-            host.dismiss_detail(cx);
-        });
-        if self.current_route(cx) == route {
+        if self.route == route {
             return;
         }
-        if let Some(library_route) = route.library() {
-            self.screen = BrowserScreen::Library;
-            self.library_host.update(cx, |host, cx| host.set_route(library_route, window, cx));
-        } else if let Some(universal_route) = route.universal() {
-            let Some(page) = self.open_universal_page(universal_route, window, cx) else { return };
-            self.screen = BrowserScreen::Universal(page);
-        }
+        self.show_page(route, window, cx);
         self.navigation.update(cx, |navigation, cx| navigation.set_route(route, cx));
         cx.notify();
-        self.persist(cx);
-    }
-
-    fn open_universal_page(&mut self, route: UniversalRoute, window: &mut Window, cx: &mut Context<Self>) -> Option<UniversalPage> {
-        let state = self.library_host.read(cx).state();
-        Some(match route {
-            UniversalRoute::Store => {
-                let library = self.library_host.read(cx).library(cx)?;
-                let page = cx.new(|cx| StorePage::new(self.services.clone(), self.preferences.clone(), library, window, cx));
-                page.update(cx, |page, cx| page.refresh(cx));
-                UniversalPage::Store(page)
-            }
-            UniversalRoute::Account => {
-                let page = cx.new(|cx| SyncPage::new(self.services.clone(), state, window, cx));
-                let subscription = cx.subscribe(&page, |root: &mut Self, _, event, cx| root.handle_sync(event, cx));
-                page.update(cx, |page, cx| page.refresh(cx));
-                UniversalPage::Sync { page, _subscription: subscription }
-            }
-            UniversalRoute::Settings => {
-                let page = cx.new(|cx| {
-                    SettingsPage::new(
-                        self.services.clone(),
-                        self.preferences.clone(),
-                        #[cfg(feature = "kobo")]
-                        self.kobo_auto_rotate,
-                        cx,
-                    )
-                });
-                UniversalPage::Settings(page)
-            }
-        })
     }
 
     fn activate_library_later(&mut self, library_id: epub_svelte_lib::LibraryId, cx: &mut Context<Self>) {
         cx.spawn(async move |root, cx| {
-            let _ = root.update_in(cx, |root, window, cx| root.activate_library(library_id, window, cx));
+            let _ = root.update_in(cx, |root, window, cx| match root.activate_library(library_id, window, cx) {
+                Ok(changed) => {
+                    if changed {
+                        root.show_selected_library(cx);
+                    }
+                }
+                Err(error) => root.notify_error(error.into(), window, cx),
+            });
         })
         .detach();
     }
 
-    fn remove_library_later(&mut self, library_id: epub_svelte_lib::LibraryId, cx: &mut Context<Self>) {
-        cx.spawn(async move |root, cx| {
-            let Ok(answer) = root.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Warning,
-                    "Delete this library?",
-                    Some("Local database and state are removed immediately. Server deletion happens now when possible, or automatically after the next sign-in. Local files and stored server blobs are kept."),
-                    &["Delete library", "Cancel"],
-                    cx,
-                )
-            }) else {
-                return;
-            };
-            if answer.await.ok() != Some(0) {
-                return;
-            }
-            let Ok(backend) = root.update(cx, |root, _| root.services.backend.clone()) else {
-                return;
-            };
-            let deletion = backend.spawn(move |core| async move { core.delete_library(&library_id).await.map_err(|error| error.to_string()) });
-            let result = deletion.await.unwrap_or_else(|error| Err(error.to_string()));
-            if let Err(error) = result {
-                let _ = root.update_in(cx, |root, window, cx| root.notify_error(error.into(), window, cx));
-                return;
-            }
-            let _ = root.update_in(cx, |root, window, cx| root.finish_library_removal(window, cx));
-        })
-        .detach();
-    }
-
-    fn finish_library_removal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let result = self.library_host.update(cx, |host, cx| host.refresh_after_library_removal(window, cx));
-        match result {
+    fn add_libraries(&mut self, libraries: Vec<LibraryEntry>, activate_library_id: Option<epub_svelte_lib::LibraryId>, warning: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        match self.replace_libraries(libraries, activate_library_id, window, cx) {
             Ok(changed) => {
                 if changed {
                     self.show_selected_library(cx);
-                }
-            }
-            Err(error) => self.notify_error(error.into(), window, cx),
-        }
-    }
-
-    fn activate_library(&mut self, library_id: epub_svelte_lib::LibraryId, window: &mut Window, cx: &mut Context<Self>) {
-        match self.library_host.update(cx, |host, cx| host.activate_library(library_id, window, cx)) {
-            Ok(changed) => {
-                if changed {
-                    self.show_selected_library(cx);
-                }
-            }
-            Err(error) => self.notify_error(error.into(), window, cx),
-        }
-    }
-
-    fn apply_catalogue_later(&mut self, libraries: Vec<LibraryEntry>, activate_library_id: Option<epub_svelte_lib::LibraryId>, warning: Option<SharedString>, refresh_active: bool, cx: &mut Context<Self>) {
-        cx.spawn(async move |root, cx| {
-            let _ = root.update_in(cx, |root, window, cx| root.apply_catalogue(libraries, activate_library_id, warning, refresh_active, window, cx));
-        })
-        .detach();
-    }
-
-    fn apply_catalogue(&mut self, libraries: Vec<LibraryEntry>, activate_library_id: Option<epub_svelte_lib::LibraryId>, warning: Option<SharedString>, refresh_active: bool, window: &mut Window, cx: &mut Context<Self>) {
-        match self.library_host.update(cx, |host, cx| host.replace_catalogue(libraries, activate_library_id, window, cx)) {
-            Ok(changed) => {
-                if changed {
-                    self.show_selected_library(cx);
-                }
-                if refresh_active {
-                    self.library_host.update(cx, |host, cx| host.refresh_active(cx));
                 }
                 if let Some(warning) = warning {
                     self.notify_warning(warning, window, cx);
@@ -354,12 +213,143 @@ impl BrowserRoot {
         }
     }
 
-    fn show_selected_library(&mut self, cx: &mut Context<Self>) {
-        let route = self.library_host.read(cx).route(cx);
-        self.screen = BrowserScreen::Library;
-        self.navigation.update(cx, |navigation, cx| navigation.set_route(Route::Library(route), cx));
+    fn update_library_list(&mut self, libraries: Vec<LibraryEntry>, window: &mut Window, cx: &mut Context<Self>) {
+        match self.replace_libraries(libraries, None, window, cx) {
+            Ok(true) => self.show_selected_library(cx),
+            Ok(false) => self.show_page(self.route, window, cx),
+            Err(error) => self.notify_error(error.into(), window, cx),
+        }
+    }
+
+    fn activate_library(&mut self, library_id: LibraryId, window: &mut Window, cx: &mut Context<Self>) -> Result<bool, String> {
+        if self.library_state.read(cx).library_id() == Some(&library_id) {
+            return Ok(false);
+        }
+        let library = resolve_library(&self.services, &library_id)?;
+        let entries = self.library_state.read(cx).entries().to_vec();
+        self.services.backend.save_active_library_id(Some(library_id.clone())).map_err(|error| error.to_string())?;
+        self.library_state.update(cx, |state, cx| state.replace(entries, Some(library_id.clone()), cx));
+        self.library = Some(library);
+        self.show_page(Route::Folders, window, cx);
+        self.start_library_scanning(window, cx);
+        Ok(true)
+    }
+
+    fn replace_libraries(&mut self, libraries: Vec<LibraryEntry>, preferred_library_id: Option<LibraryId>, window: &mut Window, cx: &mut Context<Self>) -> Result<bool, String> {
+        let library_ids = libraries.iter().map(|entry| entry.library_id().clone()).collect::<Vec<_>>();
+        self.services.backend.retain_browser_session_libraries(&library_ids).map_err(|error| error.to_string())?;
+        let current_id = self.library_state.read(cx).library_id().cloned();
+        let target_id = preferred_library_id
+            .filter(|id| libraries.iter().any(|entry| entry.library_id() == id))
+            .or_else(|| current_id.clone().filter(|id| libraries.iter().any(|entry| entry.library_id() == id)))
+            .or_else(|| libraries.first().map(|entry| entry.library_id().clone()));
+
+        if target_id == current_id && current_id.is_some() {
+            self.library_state.update(cx, |state, cx| state.set_entries(libraries, cx));
+            return Ok(false);
+        }
+
+        let Some(target_id) = target_id else {
+            self.services.backend.save_active_library_id(None).map_err(|error| error.to_string())?;
+            self.library_state.update(cx, |state, cx| state.replace(libraries, None, cx));
+            self.library = None;
+            self.page = None;
+            self.page_subscription = None;
+            cx.notify();
+            return Ok(current_id.is_some());
+        };
+        let library = resolve_library(&self.services, &target_id)?;
+        self.services.backend.save_active_library_id(Some(target_id.clone())).map_err(|error| error.to_string())?;
+        self.library_state.update(cx, |state, cx| state.replace(libraries, Some(target_id.clone()), cx));
+        self.library = Some(library);
+        self.show_page(Route::Folders, window, cx);
+        self.start_library_scanning(window, cx);
+        Ok(true)
+    }
+
+    fn start_library_scanning(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let backend = self.services.backend.clone();
+        cx.on_next_frame(window, move |_, _, _| {
+            if let Err(error) = backend.enable_library_scanning() {
+                log::error!("failed to start library scanning after the first frame: {error}");
+            }
+        });
+    }
+
+    /// Creates the selected flat page. Only library pages receive a
+    /// `LibraryContext`; each page owns its nested behavior and persistence.
+    fn show_page(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        self.route = route;
+        self.page_subscription = None;
+
+        self.page = Some(match route {
+            Route::Home => {
+                let Some(context) = self.library.clone().map(|library| LibraryContext::new(self.services.clone(), library)) else {
+                    self.page = None;
+                    return;
+                };
+                cx.new(|cx| HomePage::new(context, cx)).into()
+            }
+            Route::Authors => {
+                let Some(context) = self.library.clone().map(|library| LibraryContext::new(self.services.clone(), library)) else {
+                    self.page = None;
+                    return;
+                };
+                cx.new(|cx| AuthorsPage::new(context, window, cx)).into()
+            }
+            Route::Folders => {
+                let Some(context) = self.library.clone().map(|library| LibraryContext::new(self.services.clone(), library)) else {
+                    self.page = None;
+                    return;
+                };
+                let place = self.services.backend.browser_session().map(|session| session.place(context.library.id())).unwrap_or_default();
+                cx.new(|cx| FoldersPage::new(context, place.folder_path, window, cx)).into()
+            }
+            Route::Subjects => {
+                let Some(context) = self.library.clone().map(|library| LibraryContext::new(self.services.clone(), library)) else {
+                    self.page = None;
+                    return;
+                };
+                let place = self.services.backend.browser_session().map(|session| session.place(context.library.id())).unwrap_or_default();
+                cx.new(|cx| SubjectsPage::new(context, place.subject_path, window, cx)).into()
+            }
+            Route::Trash => {
+                let Some(context) = self.library.clone().map(|library| LibraryContext::new(self.services.clone(), library)) else {
+                    self.page = None;
+                    return;
+                };
+                cx.new(|cx| TrashPage::new(context, cx)).into()
+            }
+            Route::Store => {
+                let Some(library) = self.library.clone() else {
+                    self.page = None;
+                    return;
+                };
+                cx.new(|cx| StorePage::new(self.services.clone(), self.preferences.clone(), library, window, cx)).into()
+            }
+            Route::Account => {
+                let page = cx.new(|cx| SyncPage::new(self.services.clone(), self.library_state.clone(), window, cx));
+                self.page_subscription = Some(cx.subscribe_in(&page, window, |root, _, event, window, cx| root.handle_sync(event, window, cx)));
+                page.into()
+            }
+            Route::Settings => cx
+                .new(|cx| {
+                    SettingsPage::new(
+                        self.services.clone(),
+                        self.preferences.clone(),
+                        #[cfg(feature = "kobo")]
+                        self.kobo_auto_rotate,
+                        cx,
+                    )
+                })
+                .into(),
+        });
         cx.notify();
-        self.persist(cx);
+    }
+
+    fn show_selected_library(&mut self, cx: &mut Context<Self>) {
+        self.navigation.update(cx, |navigation, cx| navigation.set_route(self.route, cx));
+        cx.notify();
     }
 
     /// Reports a failed action.
@@ -379,26 +369,11 @@ impl BrowserRoot {
         window.push_notification(Notification::warning(warning).id1::<Self>("browser-warning"), cx);
     }
 
-    fn notify_update_available(&self, update: crate::services::DesktopUpdate, window: &mut Window, cx: &mut Context<Self>) {
-        let root = cx.entity();
-        let version = update.version;
-        window.push_notification(
-            Notification::info(format!("Bokheim {version} is ready to download.")).id1::<Self>("desktop-update-available").title("Update available").action(move |_, _, notification_cx| {
-                let root = root.clone();
-                Button::new("view-desktop-update").primary().label("View update").on_click(notification_cx.listener(move |notification, _, window, cx| {
-                    notification.dismiss(window, cx);
-                    let _ = root.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Settings), cx));
-                }))
-            }),
-            cx,
-        );
-    }
-
     /// Reports a failure raised where no window is in scope.
     ///
     /// Subscription callbacks receive only a context, so the notification is
     /// pushed on the next update that has a window — the same deferral the
-    /// navigation and catalogue paths already use.
+    /// navigation and library-list paths already use.
     fn notify_error_later(&self, error: SharedString, cx: &mut Context<Self>) {
         cx.spawn(async move |root, cx| {
             let _ = root.update_in(cx, |root, window, cx| root.notify_error(error, window, cx));
@@ -407,110 +382,54 @@ impl BrowserRoot {
     }
 
     pub fn handle_library_event(&mut self, library_id: &epub_svelte_lib::LibraryId, event: &LibraryEvent, cx: &mut Context<Self>) {
-        if matches!(event, LibraryEvent::CatalogueChanged) {
-            let catalogue = self.services.backend.spawn(|core| async move { core.libraries().map_err(|error| error.to_string()) });
+        if matches!(event, LibraryEvent::LibraryListChanged) {
+            let library_list = self.services.backend.spawn(|core| async move { core.libraries().map_err(|error| error.to_string()) });
             cx.spawn(async move |root, cx| {
-                let Ok(Ok(libraries)) = catalogue.await else { return };
-                let _ = root.update_in(cx, |root, window, cx| root.apply_catalogue(libraries, None, None, true, window, cx));
+                let Ok(Ok(libraries)) = library_list.await else { return };
+                let _ = root.update_in(cx, |root, window, cx| root.update_library_list(libraries, window, cx));
             })
             .detach();
             return;
         }
         if matches!(event, LibraryEvent::TransferStatusChanged) {
-            if let BrowserScreen::Universal(UniversalPage::Sync { page, .. }) = &self.screen {
+            if let Some(page) = self.page.clone().and_then(|page| page.downcast::<SyncPage>().ok()) {
                 page.update(cx, |page, cx| page.schedule_refresh(cx));
             }
             return;
         }
-        self.library_host.update(cx, |host, cx| host.handle_library_event(library_id, event, cx));
-    }
-
-    /// The search box belongs to the folder and subject pages now. From
-    /// anywhere else this lands on Folders, whose box at the root searches the
-    /// whole library — the scope the Search page used to have.
-    fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.current_route(cx), Route::Library(LibraryRoute::Folders | LibraryRoute::Subjects)) {
-            self.navigate(Route::Library(LibraryRoute::Folders), window, cx);
+        if self.library_state.read(cx).library_id() != Some(library_id) {
+            return;
         }
-        self.library_host.update(cx, |host, cx| host.focus_search(window, cx));
-    }
-
-    fn on_show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Library(LibraryRoute::Home), window, cx);
-    }
-    fn on_show_authors(&mut self, _: &ShowAuthors, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Library(LibraryRoute::Authors), window, cx);
-    }
-    fn on_show_folders(&mut self, _: &ShowFolders, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Library(LibraryRoute::Folders), window, cx);
-    }
-    fn on_show_subjects(&mut self, _: &ShowSubjects, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Library(LibraryRoute::Subjects), window, cx);
-    }
-    fn on_show_store(&mut self, _: &ShowStore, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Universal(UniversalRoute::Store), window, cx);
-    }
-    fn on_show_sync(&mut self, _: &ShowSync, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Universal(UniversalRoute::Account), window, cx);
-    }
-    fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Universal(UniversalRoute::Settings), window, cx);
+        match event {
+            LibraryEvent::ThumbnailGenerated { content_hash } => crate::library::invalidate_covers(library_id.clone(), std::slice::from_ref(content_hash), cx),
+            LibraryEvent::ThumbnailBatchProcessed { content_hashes, .. } => crate::library::invalidate_covers(library_id.clone(), content_hashes, cx),
+            LibraryEvent::DownloadStatusChanged { .. } | LibraryEvent::TransferStatusChanged | LibraryEvent::LibraryListChanged => {}
+            _ if matches!(self.route, Route::Home | Route::Authors | Route::Folders | Route::Subjects | Route::Trash) => {
+                cx.spawn(async move |root, cx| {
+                    let _ = root.update_in(cx, |root, window, cx| root.show_page(root.route, window, cx));
+                })
+                .detach();
+            }
+            _ => {}
+        }
     }
 
     fn on_dismiss(&mut self, _: &DismissSettings, window: &mut Window, cx: &mut Context<Self>) {
-        if self.navigation.read(cx).is_library_switcher_open(cx) {
+        if self.navigation.read(cx).is_library_switcher_open() {
             self.navigation.update(cx, |navigation, cx| navigation.close_library_switcher(cx));
             return;
         }
-        if matches!(self.screen, BrowserScreen::Universal(_)) {
-            let route = self.library_host.read(cx).route(cx);
-            self.navigate(Route::Library(route), window, cx);
+        if matches!(self.route, Route::Store | Route::Account | Route::Settings) {
+            self.navigate(Route::Folders, window, cx);
         }
     }
+}
 
-    fn current_route(&self, cx: &App) -> Route {
-        match &self.screen {
-            BrowserScreen::Library => Route::Library(self.library_host.read(cx).route(cx)),
-            BrowserScreen::Universal(page) => Route::Universal(page.route()),
-        }
-    }
-
-    fn render_first_run(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = components::browser_theme(cx);
-        let states = &self.services.contracts.browsing_states;
-        let root = cx.entity();
-        let create = root.clone();
-        let open = root.clone();
-        let settings = root.clone();
-        let sync = root;
-        let buttons = components::action_row()
-            .child(components::primary_action_button("first-run-create", states.create_library_label.clone(), IconName::Plus, false).on_click(move |_, _, cx| {
-                create.update(cx, |root, cx| root.library_setup.update(cx, |setup, cx| setup.show_create_dialog(cx)));
-            }))
-            .child(components::primary_action_button("first-run-open", "Open folder…", IconName::FolderOpen, false).on_click(move |_, _, cx| {
-                open.update(cx, |root, cx| root.library_setup.update(cx, |setup, cx| setup.choose_library_folders(cx)));
-            }));
-        let secondary = components::action_row()
-            .child(components::secondary_action_button("first-run-settings", "Settings", IconName::Settings, false).on_click(move |_, _, cx| {
-                settings.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Settings), cx));
-            }))
-            .child(components::secondary_action_button("first-run-sync", "Sign in", IconName::User, false).on_click(move |_, _, cx| {
-                sync.update(cx, |root, cx| root.navigate_later(Route::Universal(UniversalRoute::Account), cx));
-            }));
-        gpui::div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(18.0))
-            .bg(theme.page_bg)
-            .child(gpui::div().text_size(gpui::rems(28.0 / 16.0)).font_family(interface_font(cx)).font_weight(gpui::FontWeight::BOLD).text_color(theme.text).child(states.no_libraries_title.clone()))
-            .child(gpui::div().max_w(px(420.0)).text_align(gpui::TextAlign::Center).text_color(theme.text_muted).child(states.no_libraries_description.clone()))
-            .child(buttons)
-            .child(secondary)
-            .into_any_element()
-    }
+fn resolve_library(services: &AppServices, library_id: &LibraryId) -> Result<LibraryBackend, String> {
+    services.backend.library(library_id).map_err(|error| {
+        log::error!("failed to select library {library_id}: {error}");
+        format!("Could not open library: {error}")
+    })
 }
 
 impl Focusable for BrowserRoot {
@@ -528,39 +447,18 @@ impl Render for BrowserRoot {
         // basis synchronized with the preference so explicit component text
         // sizes and their responsive containers change together.
         window.set_rem_size(px(ui_font_size as f32));
-        let page = components::app_page(preferences.interface_font_name(), ui_font_size, theme)
-            .key_context("Browser")
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::on_focus_search))
-            .on_action(cx.listener(Self::on_show_home))
-            .on_action(cx.listener(Self::on_show_authors))
-            .on_action(cx.listener(Self::on_show_folders))
-            .on_action(cx.listener(Self::on_show_subjects))
-            .on_action(cx.listener(Self::on_show_store))
-            .on_action(cx.listener(Self::on_show_sync))
-            .on_action(cx.listener(Self::on_show_settings))
-            .on_action(cx.listener(Self::on_dismiss));
+        let page = components::app_page(preferences.interface_font_name(), ui_font_size, theme).key_context("Browser").track_focus(&self.focus).on_action(cx.listener(Self::on_dismiss));
 
-        if !self.library_host.read(cx).is_configured(cx) {
-            let content = components::library_section_content().child(self.render_first_run(cx));
-            #[cfg(feature = "audiobooks")]
-            let content = content.when_some(self.audiobook.as_ref().map(|active| active.dock.clone()), |content, dock| content.child(dock));
-            return page.child(content).children(Root::render_notification_layer(window, cx)).children(Root::render_dialog_layer(window, cx)).into_any_element();
-        }
-
-        let body = match &self.screen {
-            BrowserScreen::Universal(page) => page.element(),
-            BrowserScreen::Library => self.library_host.clone().into_any_element(),
-        };
+        let library_configured = self.library_state.read(cx).is_configured();
+        let application_page = matches!(self.route, Route::Store | Route::Account | Route::Settings);
+        let body = if library_configured || application_page { self.page.clone().map(IntoElement::into_any_element).unwrap_or_else(|| gpui::div().into_any_element()) } else { self.library_setup.clone().into_any_element() };
 
         let content = components::library_section_content().child(body);
         #[cfg(feature = "audiobooks")]
         let content = content.when_some(self.audiobook.as_ref().map(|active| active.dock.clone()), |content, dock| content.child(dock));
 
-        page.child(components::browser_body().child(self.navigation.clone()).child(content))
-            .children(self.navigation.read(cx).library_switcher_overlay(cx))
-            .children(Root::render_notification_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .into_any_element()
+        let page = if library_configured || application_page { page.child(components::browser_body().child(self.navigation.clone()).child(content)) } else { page.child(content) };
+
+        page.children(self.navigation.read(cx).library_switcher_overlay(self.navigation.clone(), cx)).children(Root::render_notification_layer(window, cx)).children(Root::render_dialog_layer(window, cx)).into_any_element()
     }
 }

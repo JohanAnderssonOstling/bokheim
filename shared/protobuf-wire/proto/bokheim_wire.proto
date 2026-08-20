@@ -106,6 +106,10 @@ message ReadingPosition {
     uint64 audiobook_millis = 3;
   }
   float progress = 4;
+  // For PDF readers, this stores the document-space full-page y-offset used for
+  // precise restore and must be finite when provided. Negative values can be
+  // clamped to 0 by restorers.
+  optional float pdf_full_page_position = 5;
 }
 
 message Annotation {

@@ -156,6 +156,8 @@ pub struct ReadingPosition {
     pub progress: f32,
     #[prost(oneof = "reading_position::Location", tags = "1, 2, 3")]
     pub location: ::core::option::Option<reading_position::Location>,
+    #[prost(float, optional, tag = "5")]
+    pub pdf_full_page_position: ::core::option::Option<f32>,
 }
 /// Nested message and enum types in `ReadingPosition`.
 pub mod reading_position {

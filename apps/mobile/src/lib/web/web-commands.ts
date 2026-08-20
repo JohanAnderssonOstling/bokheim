@@ -1,5 +1,5 @@
 import type { commands as nativeCommands } from "../bindings";
-import { takeBrowserImport } from "../epub-picker";
+import { takeBrowserImport } from "../library/epub-picker";
 import { callWebBackend } from "./worker-client";
 import { renderPdfFirstPageJpeg } from "./pdf-thumbnail";
 import { toWorkerCommandName } from "./worker-protocol";
@@ -23,7 +23,10 @@ export const webCommands = new Proxy({} as CommandClient, {
     }
     if (property === "openBook") {
       return async (libraryId: string, contentHash: string) => {
-        const source = await callWebBackend<Blob | string>("open_book_blob", [libraryId, contentHash]);
+        const source = await callWebBackend<Blob | string>("open_book_blob", [
+          libraryId,
+          contentHash,
+        ]);
         return typeof source === "string" ? source : URL.createObjectURL(source);
       };
     }

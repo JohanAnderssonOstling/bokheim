@@ -1,21 +1,23 @@
 //! Shared presentation primitives for the GPUI desktop interface.
 
-mod account;
-mod assets;
-mod browser;
-mod common;
-mod library;
-mod panels;
-mod reader;
-mod scroll;
-mod tokens;
+pub mod account;
+pub mod assets;
+pub mod browser;
+pub mod buttons;
+pub mod layout;
+pub mod library;
+pub mod modal;
+pub mod reader;
+pub mod scroll;
+pub mod tokens;
 
 pub use account::*;
 pub use assets::*;
 pub use browser::*;
-pub use common::*;
+pub use buttons::*;
+pub use layout::*;
 pub use library::*;
-pub use panels::*;
+pub use modal::*;
 pub use reader::*;
 pub use scroll::*;
 pub use tokens::*;

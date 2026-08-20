@@ -1,23 +1,22 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use epub_svelte_lib::library::ResolvedBook;
 use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use epub_svelte_lib::{BookLocator, LibraryBackend};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, Render, ScrollStrategy, Subscription, Window, px};
-use gpui_component::Sizable;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::tab::TabBar;
-use gpui_component::tree::{TreeItem, TreeState, tree};
+use gpui_component::tree::{TreeItem, TreeState};
 use pdf_reader_core::{NormalizedRect, PdfOutlineEntry};
 use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfAnnotationOverlay, PdfAnnotationStyle, PdfView, PdfViewEvent, PdfZoomMode};
 use ui_components as components;
 
+use std::rc::Rc;
+
 use crate::epub::ReaderWindowId;
-use crate::epub::marks::MarksState;
+use crate::shell::marks::MarksState;
 use crate::invalidation::Component;
 use crate::pdf::toc::{PdfTocState, nest_pdf_outline, pdf_toc_tree_items};
 use crate::settings::{PdfZoomModePreference, ReaderPreferences, ReaderSettings};
+use crate::shell::annotation_editor;
 use crate::shell::chrome;
 use crate::shell::persistence::{self, PositionWriter};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ToggleSearch, ToggleToc};
@@ -25,43 +24,6 @@ use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLi
 const PDF_READER_TOOLBAR_HEIGHT: f32 = 58.0;
 /// One zoom step, in pixels per PDF point.
 const ZOOM_STEP: f32 = 0.1;
-const PDF_ANNOTATION_POPUP_WIDTH: f32 = 360.0;
-const PDF_ANNOTATION_POPUP_MAX_HEIGHT: f32 = 420.0;
-const PDF_ANNOTATION_POPUP_INSET: f32 = 12.0;
-const PDF_ANNOTATION_POPUP_GAP: f32 = 10.0;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PdfAnnotationPopupGeometry {
-    left: f32,
-    edge_offset: f32,
-    max_height: f32,
-    above: bool,
-}
-
-fn pdf_annotation_popup_geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, column_count: usize) -> PdfAnnotationPopupGeometry {
-    let document_width = (viewport_width - sidebar_width).max(1.0);
-    let document_height = (viewport_height - PDF_READER_TOOLBAR_HEIGHT).max(1.0);
-    let column_count = column_count.max(1) as f32;
-    let column_width = document_width / column_count;
-    let (anchor_x, anchor_y) = anchor.map(|point| (f32::from(point.x) - sidebar_width, f32::from(point.y) - PDF_READER_TOOLBAR_HEIGHT)).unwrap_or((column_width / 2.0, document_height / 3.0));
-    let anchor_x = anchor_x.clamp(0.0, document_width - f32::EPSILON);
-    let anchor_y = anchor_y.clamp(0.0, document_height);
-    let column = (anchor_x / column_width).floor().min(column_count - 1.0);
-    let column_center = (column + 0.5) * column_width;
-    let panel_width = PDF_ANNOTATION_POPUP_WIDTH.min((document_width - PDF_ANNOTATION_POPUP_INSET * 2.0).max(1.0));
-    let maximum_left = (document_width - panel_width).max(0.0);
-    let side_inset = PDF_ANNOTATION_POPUP_INSET.min(maximum_left / 2.0);
-    let left = (column_center - panel_width / 2.0).clamp(side_inset, (maximum_left - side_inset).max(side_inset));
-    let room_above = (anchor_y - PDF_ANNOTATION_POPUP_GAP - PDF_ANNOTATION_POPUP_INSET).max(1.0);
-    let room_below = (document_height - anchor_y - PDF_ANNOTATION_POPUP_GAP - PDF_ANNOTATION_POPUP_INSET).max(1.0);
-    let above = room_above > room_below;
-    PdfAnnotationPopupGeometry {
-        left,
-        edge_offset: if above { document_height - anchor_y + PDF_ANNOTATION_POPUP_GAP } else { anchor_y + PDF_ANNOTATION_POPUP_GAP },
-        max_height: (if above { room_above } else { room_below }).min(PDF_ANNOTATION_POPUP_MAX_HEIGHT),
-        above,
-    }
-}
 
 pub(crate) struct PendingPdfReader {
     pub(crate) id: ReaderWindowId,
@@ -70,6 +32,7 @@ pub(crate) struct PendingPdfReader {
     pub(crate) library: LibraryBackend,
     pub(crate) book: ResolvedBook,
     pub(crate) initial_page: usize,
+    pub(crate) initial_full_page_position: f32,
 }
 
 pub(crate) struct PdfReaderView {
@@ -96,7 +59,7 @@ pub(crate) struct PdfReaderView {
     annotation_popup_anchor: Option<Point<Pixels>>,
     current_page: usize,
     page_count: usize,
-    positions: PositionWriter<usize>,
+    positions: PositionWriter<(usize, f32)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -122,6 +85,7 @@ impl PdfReaderView {
             pdf.set_zoom_mode(zoom_mode, cx);
             pdf.set_trim_margins(trim_margins, cx);
             pdf.set_annotations(annotation_overlays(&annotations), cx);
+            pdf.set_full_page_position(pending.initial_full_page_position, cx);
             pdf
         });
         let search_input = cx.new(|cx| InputState::new(window, cx));
@@ -129,18 +93,24 @@ impl PdfReaderView {
         let annotation_note_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a note"));
         let pdf_subscription = cx.subscribe_in(&pdf, window, |this, pdf, event: &PdfViewEvent, window, cx| match event {
             PdfViewEvent::PageChanged { current, total } => {
+                let current_page = current.saturating_sub(1);
+                let full_page_position = pdf.read(cx).full_page_position();
                 if !this.toc.loaded {
                     let outline = pdf.read(cx).info().map(|info| info.outline().to_vec()).unwrap_or_default();
                     this.set_toc(&outline, cx);
+                    // The shell took the keyboard before there were pages to
+                    // focus. Hand it to the document now that one exists, so
+                    // paging works without clicking the page first.
+                    this.focus_document(window, cx);
                 }
-                let unchanged = this.current_page == *current && this.page_count == *total;
-                this.current_page = *current;
+                let unchanged = this.current_page == current_page && this.page_count == *total;
+                this.current_page = current_page;
                 this.page_count = *total;
-                this.update_active_toc(current.saturating_sub(1), cx);
+                this.update_active_toc(current_page, cx);
                 if unchanged {
                     return;
                 }
-                this.positions.record(current.saturating_sub(1), "PDF page");
+                this.positions.record((current_page, full_page_position), "PDF page");
                 crate::invalidation::notify(cx, Component::PdfShell, "page_changed");
             }
             PdfViewEvent::SearchChanged { current, total } => {
@@ -178,9 +148,19 @@ impl PdfReaderView {
         });
         let bounds_subscription = crate::shell::geometry::observe(window, cx);
         let focus = cx.focus_handle();
+        // Only the page elements establish `PdfReaderDocument`, and there are
+        // none until the document has been laid out, so the shell holds the
+        // keyboard until then. The first page report hands it over.
         focus.focus(window, cx);
         let page_content_hash = pending.locator.content_hash();
-        let positions = PositionWriter::new(cx, "persist PDF page", move |library, page: &usize| library.update_pdf_reading_page(page_content_hash.clone(), *page as u32).map_err(|error| error.to_string()), library.clone());
+        let positions = PositionWriter::new(
+            cx,
+            "persist PDF page",
+            move |library, (page, full_page_position): &(usize, f32)| {
+                library.update_pdf_reading_position(page_content_hash.clone(), *page as u32, *full_page_position).map_err(|error| error.to_string())
+            },
+            library.clone(),
+        );
         Self {
             id: pending.id,
             locator: pending.locator,
@@ -275,8 +255,19 @@ impl PdfReaderView {
         self.pdf.update(cx, |pdf, cx| {
             pdf.search(String::new(), cx);
         });
-        self.focus.focus(window, cx);
+        // Focus is still on the search input that is about to disappear.
+        self.focus_document(window, cx);
         crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+    }
+
+    /// Returns keyboard control to the page view.
+    ///
+    /// Navigation is bound in the `PdfReaderDocument` context, which only the
+    /// PDF view establishes while it holds focus, so anything that moves focus
+    /// elsewhere has to hand it back or the paging keys stop working until the
+    /// page is clicked.
+    fn focus_document(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pdf.read(cx).focus_handle().focus(window, cx);
     }
 
     /// Nudges the zoom, which also switches the layout to the mode where the
@@ -333,10 +324,6 @@ impl PdfReaderView {
         crate::invalidation::notify(cx, Component::PdfShell, "appearance_reset");
     }
 
-    fn now_millis() -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
-    }
-
     fn refresh_annotation_overlays(&self, cx: &mut Context<Self>) {
         let overlays = annotation_overlays(&self.marks.annotations);
         self.pdf.update(cx, |pdf, cx| pdf.set_annotations(overlays, cx));
@@ -347,7 +334,7 @@ impl PdfReaderView {
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
         let anchor = PdfAnnotationAnchor::new(selection.page_index as u32, rects, None);
         let anchor = AnnotationAnchor::pdf(anchor);
-        let now = Self::now_millis();
+        let now = crate::shell::state_panel::now_millis();
         let annotation = ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
             content_hash: self.locator.content_hash(),
@@ -411,7 +398,7 @@ impl PdfReaderView {
         if let Some(color) = color {
             annotation.color = color.to_owned();
         }
-        annotation.modified_at = Self::now_millis();
+        annotation.modified_at = crate::shell::state_panel::now_millis();
         let stored = annotation.clone();
         persistence::write(
             cx,
@@ -427,7 +414,7 @@ impl PdfReaderView {
     }
 
     fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
-        let modified_at = Self::now_millis();
+        let modified_at = crate::shell::state_panel::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
@@ -464,7 +451,7 @@ impl PdfReaderView {
     }
 
     fn add_bookmark(&mut self, cx: &mut Context<Self>) {
-        let now = Self::now_millis();
+        let now = crate::shell::state_panel::now_millis();
         let bookmark =
             ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi: pdf_page_cfi(self.current_page.saturating_sub(1)), label: self.bookmark_label(), created_at: now, modified_at: now };
         let stored = bookmark.clone();
@@ -483,7 +470,7 @@ impl PdfReaderView {
     }
 
     fn delete_bookmark(&mut self, id: String, cx: &mut Context<Self>) {
-        let deleted_at = Self::now_millis();
+        let deleted_at = crate::shell::state_panel::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
@@ -505,140 +492,99 @@ impl PdfReaderView {
     /// The annotations/bookmarks sidebar. Tabs mirror the EPUB reader so the
     /// two behave the same way.
     fn render_sidebar_tabs(&self, show_annotations: bool, outline_available: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let target = cx.entity();
-        let mut tabs = TabBar::new("pdf-sidebar-tabs").segmented().small().selected_index(if outline_available { usize::from(show_annotations) } else { 0 });
-        if outline_available {
-            tabs = tabs.child("Contents");
-        }
-        tabs.child("Annotations")
-            .on_click(move |index, _, cx| {
-                target.update(cx, |this, cx| {
-                    let annotations = !outline_available || *index == 1;
-                    this.annotations_visible = annotations;
-                    this.set_toc_visible(!annotations, cx);
-                    crate::invalidation::notify(cx, Component::PdfShell, "sidebar_tab_changed");
-                });
-            })
-            .into_any_element()
+        crate::shell::state_panel::reader_sidebar_tabs("pdf-sidebar-tabs", &cx.entity(), show_annotations, outline_available, cx, |annotations, this, cx| {
+            this.annotations_visible = annotations;
+            this.set_toc_visible(!annotations, cx);
+            crate::invalidation::notify(cx, Component::PdfShell, "sidebar_tab_changed");
+        })
     }
 
     fn render_annotations(&self, outline_available: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let tabs_target = cx.entity();
-        let mut panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, outline_available, cx)).child(
-            TabBar::new("pdf-state-tabs")
-                .segmented()
-                .small()
-                .selected_index(usize::from(self.showing_bookmarks))
-                .child(format!("Highlights ({})", self.marks.annotations.len()))
-                .child(format!("Bookmarks ({})", self.marks.bookmarks.len()))
-                .on_click(move |index, _, cx| {
-                    tabs_target.update(cx, |this, cx| {
-                        this.showing_bookmarks = *index == 1;
-                        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
-                    });
-                }),
+        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, outline_available, cx)).child(
+            crate::shell::state_panel::reader_state_tabs("pdf-state-tabs", &tabs_target, self.showing_bookmarks, &self.marks, cx, |showing_bookmarks, this, cx| {
+                this.showing_bookmarks = showing_bookmarks;
+                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+            }),
         );
 
-        if self.showing_bookmarks {
-            panel = panel.child(
-                components::reader_sidebar_action_button("pdf-bookmark-current", "Bookmark here", gpui_component::IconName::Star, true).tooltip("Bookmark the current page").on_click(cx.listener(|this, _, _, cx| this.add_bookmark(cx))),
-            );
-            if self.marks.bookmarks.is_empty() {
-                panel = panel.child(components::reader_state_note("No bookmarks yet. Use Bookmark here to save this page.", theme));
-            }
-            for (index, bookmark) in self.marks.bookmarks.iter().cloned().enumerate() {
-                let cfi = bookmark.cfi.clone();
-                let id = bookmark.id.clone();
-                panel = panel.child(
-                    components::reader_state_card(("pdf-bookmark", index), false, theme).child(components::reader_state_quote(bookmark.label)).child(
-                        components::reader_state_actions()
-                            .child(components::reader_sidebar_action_button(("pdf-bookmark-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(cx.listener(move |this, _, _, cx| this.navigate_to_bookmark(&cfi, cx))))
-                            .child(
-                                components::reader_sidebar_action_button(("pdf-bookmark-delete", index), "Delete", gpui_component::IconName::Delete, true).on_click(cx.listener(move |this, _, _, cx| this.delete_bookmark(id.clone(), cx))),
-                            ),
-                    ),
-                );
-            }
-            return panel.into_any_element();
-        }
-
-        if self.marks.annotations.is_empty() {
-            panel = panel.child(components::reader_state_note("Select PDF text, then use Highlight or Note.", theme));
-        }
-        for (index, annotation) in self.marks.annotations.iter().cloned().enumerate() {
-            let selected = self.marks.selected_id.as_deref() == Some(annotation.id.as_str());
-            let select_id = annotation.id.clone();
-            let delete_id = annotation.id.clone();
-            let navigate_annotation = annotation.clone();
-            let note = annotation.note.clone();
-            let card = components::reader_state_card(("pdf-annotation", index), selected, theme)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.annotation_popup_anchor = None;
-                    this.select_annotation(select_id.clone(), window, cx);
-                }))
-                .child(components::reader_state_quote(format!("“{}”", annotation.exact_text)))
-                .when(!note.is_empty(), |card| card.child(components::reader_state_note(note, theme)))
-                .child(
-                    components::reader_state_actions()
-                        .child(
-                            components::reader_sidebar_action_button(("pdf-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true)
-                                .on_click(cx.listener(move |this, _, _, cx| this.navigate_to_annotation(&navigate_annotation, cx))),
-                        )
-                        .child(
-                            components::reader_sidebar_action_button(("pdf-annotation-delete", index), "Delete", gpui_component::IconName::Delete, true)
-                                .on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx))),
-                        ),
-                );
-            panel = panel.child(card);
-        }
-        panel.into_any_element()
+        let wording = crate::shell::state_panel::StatePanelWording {
+            bookmark_tooltip: "Bookmark the current page",
+            no_bookmarks: "No bookmarks yet. Use Bookmark here to save this page.",
+            no_annotations: "Select PDF text, then use Highlight or Note.",
+        };
+        let actions = crate::shell::state_panel::StatePanelActions {
+            add_bookmark: Rc::new(|this: &mut Self, cx| this.add_bookmark(cx)),
+            go_to_bookmark: Rc::new(|bookmark: &ReaderBookmark, this: &mut Self, cx| this.navigate_to_bookmark(&bookmark.cfi, cx)),
+            delete_bookmark: Rc::new(|id, this: &mut Self, cx| this.delete_bookmark(id, cx)),
+            select_annotation: Rc::new(|id, window, this: &mut Self, cx| {
+                this.annotation_popup_anchor = None;
+                this.select_annotation(id, window, cx);
+            }),
+            go_to_annotation: Rc::new(|annotation: &ReaderAnnotation, this: &mut Self, cx| this.navigate_to_annotation(annotation, cx)),
+            delete_annotation: Rc::new(|id, this: &mut Self, cx| this.delete_annotation(id, cx)),
+        };
+        // A PDF always has a current page, so there is always somewhere for a
+        // bookmark to point.
+        panel.children(crate::shell::state_panel::reader_state_rows(&tabs_target, &self.marks, self.showing_bookmarks, true, &wording, &actions, theme)).into_any_element()
     }
 
-    fn render_annotation_popup(&self, annotation: ReaderAnnotation, geometry: PdfAnnotationPopupGeometry, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_annotation_popup(&self, annotation: ReaderAnnotation, geometry: annotation_editor::Geometry, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
+        let entity = cx.entity();
         let delete_id = annotation.id.clone();
-        components::reader_annotation_editor(theme)
-            .absolute()
-            .left(px(geometry.left))
-            .max_h(px(geometry.max_height))
-            .when(geometry.above, |panel| panel.bottom(px(geometry.edge_offset)))
-            .when(!geometry.above, |panel| panel.top(px(geometry.edge_offset)))
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(components::reader_state_quote(format!("“{}”", annotation.exact_text)))
-            .child(components::reader_annotation_note_editor(theme).child(Input::new(&self.annotation_note_input).appearance(false).size_full()))
-            .child(
-                components::reader_state_actions()
-                    .child(components::reader_control_button("pdf-popup-save", "Save", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, None, cx))))
-                    .child(components::reader_control_button("pdf-popup-close", "Close", theme).on_click(cx.listener(|this, _, _, cx| this.close_annotation_editor(cx))))
-                    .child(components::reader_control_button("pdf-popup-delete", "Delete", theme).on_click(cx.listener(move |this, _, _, cx| this.delete_annotation(delete_id.clone(), cx)))),
-            )
-            .child(
-                components::reader_state_actions()
-                    .child(components::reader_control_button("pdf-popup-highlight", "Highlight", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(Some(AnnotationStyle::Highlight), None, cx))))
-                    .child(components::reader_control_button("pdf-popup-underline", "Underline", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(Some(AnnotationStyle::Underline), None, cx))))
-                    .child(components::reader_control_button("pdf-popup-squiggly", "Squiggly", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(Some(AnnotationStyle::Squiggly), None, cx))))
-                    .child(components::reader_control_button("pdf-popup-strike", "Strike", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(Some(AnnotationStyle::Strikethrough), None, cx)))),
-            )
-            .child(
-                components::reader_state_actions()
-                    .child(components::reader_control_button("pdf-popup-yellow", "Yellow", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, Some("#f6c945"), cx))))
-                    .child(components::reader_control_button("pdf-popup-blue", "Blue", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, Some("#60a5fa"), cx))))
-                    .child(components::reader_control_button("pdf-popup-pink", "Pink", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, Some("#f472b6"), cx))))
-                    .child(components::reader_control_button("pdf-popup-green", "Green", theme).on_click(cx.listener(|this, _, _, cx| this.save_selected_annotation(None, Some("#4ade80"), cx)))),
-            )
-            .into_any_element()
+        // Saving a style or a colour leaves the editor open so several can be
+        // tried; only closing and deleting dismiss it. Those two have to hand
+        // the keyboard back, because the note input inside the editor may be
+        // what holds it, and focus left on an element that no longer renders
+        // puts every key binding out of reach.
+        let save = |id: &'static str, label: &'static str, style: Option<AnnotationStyle>, color: Option<&'static str>| {
+            let target = entity.clone();
+            annotation_editor::Action::new(id, label, move |_, cx| {
+                let style = style.clone();
+                target.update(cx, |this, cx| this.save_selected_annotation(style, color, cx));
+            })
+        };
+        let close_target = entity.clone();
+        let delete_target = entity.clone();
+        let rows = vec![
+            vec![
+                save("pdf-popup-save", "Save", None, None),
+                annotation_editor::Action::new("pdf-popup-close", "Close", move |window, cx| {
+                    close_target.update(cx, |this, cx| {
+                        this.close_annotation_editor(cx);
+                        this.focus_document(window, cx);
+                    });
+                }),
+                annotation_editor::Action::new("pdf-popup-delete", "Delete", move |window, cx| {
+                    let id = delete_id.clone();
+                    delete_target.update(cx, |this, cx| {
+                        this.delete_annotation(id, cx);
+                        this.focus_document(window, cx);
+                    });
+                }),
+            ],
+            vec![
+                save("pdf-popup-highlight", "Highlight", Some(AnnotationStyle::Highlight), None),
+                save("pdf-popup-underline", "Underline", Some(AnnotationStyle::Underline), None),
+                save("pdf-popup-squiggly", "Squiggly", Some(AnnotationStyle::Squiggly), None),
+                save("pdf-popup-strike", "Strike", Some(AnnotationStyle::Strikethrough), None),
+            ],
+            vec![
+                save("pdf-popup-yellow", "Yellow", None, Some("#f6c945")),
+                save("pdf-popup-blue", "Blue", None, Some("#60a5fa")),
+                save("pdf-popup-pink", "Pink", None, Some("#f472b6")),
+                save("pdf-popup-green", "Green", None, Some("#4ade80")),
+            ],
+        ];
+        annotation_editor::editor(geometry, &annotation.exact_text, &self.annotation_note_input, rows, theme)
     }
 
     fn render_toc(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let toc = tree(&self.toc_tree, move |index, entry, _selected, _window, _cx| {
-            let item = entry.item();
-            let id = item.id.to_string();
-            let navigation_target = entity.clone();
-            let title = components::reader_toc_title(("pdf-toc-tree-title", index), item.label.clone(), theme).on_click(move |_, _, cx| {
-                navigation_target.update(cx, |this, cx| this.navigate_to_toc(&id, cx));
-            });
-            components::reader_toc_tree_item(("pdf-toc-tree-item", index), ("pdf-toc-tree-disclosure", index), entry.depth(), entry.is_folder(), entry.is_expanded(), title, theme)
+        let toc = crate::shell::state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |id, window, this: &mut Self, cx| {
+            this.navigate_to_toc(id, cx);
+            this.focus_document(window, cx);
         });
         components::reader_toc(theme).child(self.render_sidebar_tabs(false, true, cx)).child(toc).into_any_element()
     }
@@ -776,8 +722,14 @@ impl PdfReaderView {
 }
 
 impl Focusable for PdfReaderView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    /// Focusing the reader means focusing the document.
+    ///
+    /// Navigation keys are bound in the `PdfReaderDocument` context, which only
+    /// the page elements establish, so anything that focuses this view has to
+    /// land on the document or the keyboard goes dead. Before a page has been
+    /// laid out there is nothing to focus, so the shell stands in.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.page_count > 0 { self.pdf.read(cx).focus_handle() } else { self.focus.clone() }
     }
 }
 
@@ -806,7 +758,7 @@ impl Render for PdfReaderView {
         let mut body = components::reader_document_body().child(components::reader_content().child(self.pdf.clone()));
         if let Some(annotation) = self.marks.selected_id.as_ref().and_then(|id| self.marks.annotation(id)).cloned() {
             let viewport = window.viewport_size();
-            let geometry = pdf_annotation_popup_geometry(self.annotation_popup_anchor, f32::from(viewport.width), f32::from(viewport.height), toc_width, visible_column_count);
+            let geometry = annotation_editor::geometry(self.annotation_popup_anchor, f32::from(viewport.width), f32::from(viewport.height), toc_width, PDF_READER_TOOLBAR_HEIGHT, visible_column_count);
             body = body.child(self.render_annotation_popup(annotation, geometry, cx));
         }
         if self.search_active {
@@ -867,9 +819,17 @@ impl Render for PdfReaderView {
             .child(components::reader_settings_popover(Some(&pdf_document_focus), theme).child(settings));
         let toolbar = components::reader_toolbar(theme).child(left).child(components::reader_toolbar_title(section_title)).child(right);
 
+        // The page container is only focusable until the document has pages of
+        // its own to hold the keyboard. A focusable container steals focus from
+        // the document on any click that reaches it — the toolbar's background,
+        // the sidebar, the margin around a page — and navigation is bound in
+        // the document's key context, so the paging keys would go dead until
+        // the page was clicked again. The container still sits on the dispatch
+        // path either way, so `Reader` bindings keep firing.
+        let document_ready = self.page_count > 0;
         let page = components::reader_app_page(window, cx, theme)
             .key_context("Reader")
-            .track_focus(&self.focus)
+            .when(!document_ready, |page| page.track_focus(&self.focus))
             .on_action(cx.listener(Self::on_previous_page))
             .on_action(cx.listener(Self::on_next_page))
             .on_action(cx.listener(Self::on_previous_line))
@@ -948,24 +908,21 @@ fn bookmark_label(page: usize, outline_title: Option<&str>) -> String {
     }
 }
 
-/// Encodes a zero-based page as the synthetic spine CFI used for page-indexed
-/// formats.
+/// Encodes a zero-based page as a PDF bookmark locator.
 ///
 /// `ReaderBookmark::cfi` is a durable, synchronized field, so paginated
-/// formats that have no real CFI share one scheme: spine step `(page + 1) * 2`,
-/// matching the CBZ reader. Bookmarks are scoped to a book, so the two formats
-/// never collide.
+/// PDF bookmarks do not use EPUB CFIs and instead store the page index directly.
 fn pdf_page_cfi(page_index: usize) -> String {
-    format!("epubcfi(/6/{})", page_index.saturating_add(1).saturating_mul(2))
+    page_index.to_string()
 }
 
-/// Reads a page back out of [`pdf_page_cfi`], returning `None` for anything
-/// that is not one of those synthetic locators.
+/// Reads a page index back out of [`pdf_page_cfi`], returning `None` for anything
+/// that is not a plain integer.
 fn pdf_page_from_cfi(value: &str) -> Option<usize> {
-    let start = value.find("/6/")?;
-    let digits = value[start + 3..].chars().take_while(char::is_ascii_digit).collect::<String>();
-    let step = digits.parse::<usize>().ok()?;
-    step.checked_div(2)?.checked_sub(1)
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<usize>().ok()
 }
 
 /// Rebuilds the layout mode from what was persisted.
@@ -1048,7 +1005,7 @@ pub(crate) fn bind_pdf_keys(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotation_color, bookmark_label, format_page_indicator, pdf_annotation_popup_geometry, pdf_page_cfi, pdf_page_from_cfi, pdf_progress};
+    use super::{annotation_color, bookmark_label, format_page_indicator, pdf_page_cfi, pdf_page_from_cfi, pdf_progress};
     use gpui::{point, px};
     use pdf_view_gpui::PdfAnnotationStyle;
 
@@ -1074,16 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn annotation_popup_tracks_the_clicked_pdf_column_and_available_height() {
-        let left = pdf_annotation_popup_geometry(Some(point(px(120.0), px(180.0))), 1200.0, 800.0, 0.0, 3);
-        let right = pdf_annotation_popup_geometry(Some(point(px(1020.0), px(700.0))), 1200.0, 800.0, 0.0, 3);
-        assert!(left.left < right.left);
-        assert!(!left.above);
-        assert!(right.above);
-        assert!(left.max_height <= 420.0 && right.max_height <= 420.0);
-    }
-
-    #[test]
     fn page_bookmarks_round_trip_through_their_locator() {
         for page in [0usize, 1, 41, 339] {
             assert_eq!(pdf_page_from_cfi(&pdf_page_cfi(page)), Some(page), "page {page} must survive a round trip");
@@ -1091,17 +1038,16 @@ mod tests {
     }
 
     #[test]
-    fn page_locators_match_the_cbz_scheme() {
-        // Both paginated readers write the same synthetic spine steps, so a
-        // locator stays readable if a book's format is ever reclassified.
-        assert_eq!(pdf_page_cfi(0), "epubcfi(/6/2)");
-        assert_eq!(pdf_page_cfi(4), "epubcfi(/6/10)");
+    fn page_locators_are_integer_page_indices() {
+        assert_eq!(pdf_page_cfi(0), "0");
+        assert_eq!(pdf_page_cfi(4), "4");
     }
 
     #[test]
     fn a_real_epub_locator_is_not_mistaken_for_a_page() {
         assert_eq!(pdf_page_from_cfi("not a locator"), None);
-        assert_eq!(pdf_page_from_cfi("epubcfi(/6/0)"), None, "spine step 0 is below the first page");
+        assert_eq!(pdf_page_from_cfi("epubcfi(/6/10)"), None, "PDF locators are integer page indices");
+        assert_eq!(pdf_page_from_cfi("0a"), None, "suffixes are not valid");
     }
 
     #[test]

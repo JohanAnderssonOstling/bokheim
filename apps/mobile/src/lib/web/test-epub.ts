@@ -63,7 +63,8 @@ export function storedZip(files: Record<string, string | Uint8Array>): Uint8Arra
 export function testEpub(title: string, author = ""): Uint8Array {
   return storedZip({
     mimetype: "application/epub+zip",
-    "META-INF/container.xml": '<container><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+    "META-INF/container.xml":
+      '<container><rootfiles><rootfile full-path="OPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
     "OPS/book.opf": `<package><metadata><dc:title>${title}</dc:title>${author ? `<dc:creator>${author}</dc:creator>` : ""}</metadata><manifest></manifest></package>`,
   });
 }

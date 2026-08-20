@@ -189,6 +189,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now bokheim-metadata.service
 ```
 
+### Debian and musl deployment builds
+
+The production host runs an older Debian glibc than some development machines.
+A host-native release built against newer glibc can fail before startup with an
+error such as `GLIBC_2.43 not found`. The host has musl installed, so build the
+metadata and catalogue binaries for the portable target when building off host:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl -p metadata-server
+cargo build --release --target x86_64-unknown-linux-musl -p catalog-server
+```
+
+Use the artifacts from
+`target/x86_64-unknown-linux-musl/release/metadata-server` and
+`target/x86_64-unknown-linux-musl/release/catalog-server`. Verify before
+staging:
+
+```sh
+file target/x86_64-unknown-linux-musl/release/metadata-server
+ldd target/x86_64-unknown-linux-musl/release/metadata-server || true
+```
+
+The passwordless metadata/catalogue activation helper validates service health
+after installation and rolls back on failure. A libc-loader error is a build
+artifact problem, not a service health problem; rebuild for musl (or build
+directly on the Debian host) before retrying activation.
+
 Production Caddy exposes only the bounded client endpoints at
 `https://meta.bokheim.se` and proxies them directly to this loopback service.
 Desktop clients therefore remain independent of catalogue availability. The

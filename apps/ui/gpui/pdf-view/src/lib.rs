@@ -320,6 +320,19 @@ impl PdfView {
         Some((columns.first()?.page_index(), columns.last()?.page_index()))
     }
 
+    pub fn full_page_position(&self) -> f32 {
+        self.current_page_position()
+    }
+
+    pub fn set_full_page_position(&mut self, full_page_position: f32, cx: &mut Context<Self>) {
+        self.pending_full_page_position = Some(full_page_position);
+        if !self.pages.is_empty() {
+            self.restore_page_position(full_page_position);
+        }
+        self.request_current_pages(cx);
+        cx.notify();
+    }
+
     pub fn next_page(&mut self, cx: &mut Context<Self>) {
         let target = self.keyboard_page_target(true);
         self.clear_selection();
@@ -1322,6 +1335,10 @@ impl Element for PdfPageElement {
             }
             mouse_down_target.update(cx, |view, cx| {
                 view.focus.focus(window, cx);
+                // Tell any focusable ancestor that focus is already spoken for,
+                // the way GPUI's own `track_focus` does, so a click on a page
+                // cannot cost the document its key context.
+                window.prevent_default();
                 let normalized = normalized_point(event.position, column_bounds);
                 if let Some((id, _)) = annotation_hits.iter().find(|(_, rect)| normalized_rect_contains(*rect, normalized)) {
                     cx.emit(PdfViewEvent::AnnotationActivated { id: id.clone(), position: event.position });

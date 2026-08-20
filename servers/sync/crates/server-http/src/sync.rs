@@ -23,7 +23,7 @@ pub(super) async fn upsert_library(State(state): State<AppState>, user: AuthUser
     let request: UpsertLibraryRequest = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
     let outcome = state.sync.upsert_library(&user.user_id, &request).await.map_err(sync_error)?.ok_or_else(|| sync_error(server_postgres::SyncError::LibraryOwnershipConflict))?;
     if outcome.changed {
-        state.notifications.publish(&user.user_id, Some(user.credential), NotificationMessage::CatalogueChanged);
+        state.notifications.publish(&user.user_id, Some(user.credential), NotificationMessage::LibrariesChanged);
     }
     server_wire_http::response(&headers, outcome.library)
 }
@@ -31,7 +31,7 @@ pub(super) async fn upsert_library(State(state): State<AppState>, user: AuthUser
 pub(super) async fn delete_library(State(state): State<AppState>, user: AuthUser, headers: HeaderMap, Path(library_id): Path<String>) -> Result<Response, axum::http::StatusCode> {
     let library_id = LibraryId::parse_str(&library_id).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
     if state.sync.delete_library(&user.user_id, &library_id).await.map_err(sync_error)? {
-        state.notifications.publish(&user.user_id, Some(user.credential), NotificationMessage::CatalogueChanged);
+        state.notifications.publish(&user.user_id, Some(user.credential), NotificationMessage::LibrariesChanged);
     }
     server_wire_http::response(&headers, DeleteLibraryResponse { library_id })
 }

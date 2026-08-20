@@ -1,15 +1,15 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, ElementId, FontWeight, ImageSource, Img, ObjectFit, PathBuilder, SharedString, Stateful, StyledImage, canvas, div, img, point, px};
+use gpui::{canvas, div, img, point, px, AnyElement, Div, ElementId, FontWeight, ImageSource, Img, ObjectFit, PathBuilder, SharedString, Stateful, StyledImage};
 use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HORIZONTAL_PADDING, AUTHOR_ROW_LABEL_SIZE, BOOK_CARD_AUTHOR_HEIGHT_REM,
-    BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT,
-    BOOK_COVER_WIDTH, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT, CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH,
-    DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
-    SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
+    BrowserTheme, Scrollable, ScrollableElement, AUTHOR_PAGE_MAX_WIDTH, AUTHOR_ROW_CONTENT_GAP, AUTHOR_ROW_COVER_COUNT, AUTHOR_ROW_COVER_GAP, AUTHOR_ROW_COVER_HEIGHT, AUTHOR_ROW_COVER_WIDTH, AUTHOR_ROW_HORIZONTAL_PADDING,
+    AUTHOR_ROW_LABEL_SIZE, BOOK_CARD_AUTHOR_HEIGHT_REM, BOOK_CARD_AUTHOR_LINE_HEIGHT, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_LINE_HEIGHT, BOOK_CARD_TITLE_SIZE,
+    BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_HEIGHT, BOOK_COVER_WIDTH, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CHIP_HEIGHT, CATALOG_CONTROL_HEIGHT,
+    CATALOG_FILTER_RAIL_WIDTH, CATALOG_SEARCH_WIDTH, DETAILED_ROW_DESCRIPTION_LINES, DETAILED_ROW_HEIGHT, DETAILED_ROW_TEXT_MEASURE, DETAILED_ROW_THUMBNAIL_HEIGHT, DETAILED_ROW_THUMBNAIL_WIDTH, DETAILED_ROW_VERTICAL_PADDING, RADIUS_MD,
+    RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -141,16 +141,7 @@ pub fn carousel_controls() -> Div {
 /// a horizontal row of cards is otherwise reachable only by a pointer that can
 /// scroll sideways.
 pub fn carousel_arrow_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id)
-        .icon(icon)
-        .secondary()
-        .outline()
-        .border_color(theme.border)
-        .text_color(theme.accent)
-        .w(gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0))
-        .h(gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0))
-        .rounded(px(RADIUS_SM))
-        .tooltip(label.into())
+    crate::outlined_icon_button(id, label, icon, gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0), RADIUS_SM, theme).text_color(theme.accent)
 }
 
 pub fn authors_split_page() -> Div {
@@ -468,19 +459,7 @@ pub fn folder_navigation_button(id: impl Into<ElementId>, label: impl Into<Share
 }
 
 fn folder_navigation_button_base(id: impl Into<ElementId>, label: SharedString, icon: IconName, theme: BrowserTheme) -> Button {
-    Button::new(id)
-        .secondary()
-        .outline()
-        .icon(icon)
-        .tooltip(format!("Open {label}"))
-        .overflow_hidden()
-        .h(px(41.0))
-        .px(px(SPACE_SM))
-        .rounded(px(RADIUS_MD))
-        .border_color(theme.border)
-        .bg(theme.surface)
-        .text_size(gpui::rems(TEXT_SM / 16.0))
-        .font_weight(FontWeight::BOLD)
+    crate::outlined_button(id, theme).icon(icon).tooltip(format!("Open {label}")).overflow_hidden().h(px(41.0)).px(px(SPACE_SM)).rounded(px(RADIUS_MD)).bg(theme.surface).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::BOLD)
 }
 
 pub fn catalog_facet_button(id: impl Into<ElementId>, label: impl Into<SharedString>, active: bool, disabled: bool) -> Button {

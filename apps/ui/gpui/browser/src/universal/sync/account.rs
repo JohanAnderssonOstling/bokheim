@@ -21,13 +21,13 @@ pub(super) struct CloudSnapshot {
 }
 
 pub(super) async fn load_cloud_snapshot(core: &AppBackend) -> Result<CloudSnapshot, String> {
-    let catalogue = core.reconcile_library_catalogue().await.map_err(|error| error.to_string())?;
+    let library_list = core.reconcile_libraries().await.map_err(|error| error.to_string())?;
     let account = core.account_status().map_err(|error| error.to_string())?;
     let storage_usage = if account.signed_in() { core.account_storage_usage_if_supported().await.map_err(|error| error.to_string())? } else { None };
     let local_storage_usage = core.scan_local_library_storage_usage().await.map_err(|error| error.to_string())?;
     let server_storage_usage = if account.signed_in() { core.account_library_storage_usage_if_supported().await.map_err(|error| error.to_string())? } else { None };
     let transfers = core.transfer_statuses().map_err(|error| error.to_string())?;
-    Ok(CloudSnapshot { account, storage_usage, libraries: catalogue.libraries, sync_statuses: catalogue.sync_statuses, local_storage_usage, server_storage_usage, transfers })
+    Ok(CloudSnapshot { account, storage_usage, libraries: library_list.libraries, sync_statuses: library_list.sync_statuses, local_storage_usage, server_storage_usage, transfers })
 }
 
 impl SyncPage {
@@ -71,7 +71,7 @@ impl SyncPage {
         self.message = message.map(Into::into);
         let refresh_again = self.refresh_pending;
         self.refresh_pending = false;
-        cx.emit(SyncPageEvent::CatalogueReconciled(snapshot.libraries));
+        cx.emit(SyncPageEvent::LibraryListUpdated(snapshot.libraries));
         cx.notify();
         if refresh_again {
             self.schedule_refresh(cx);

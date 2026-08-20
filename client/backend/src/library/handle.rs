@@ -39,9 +39,9 @@ pub struct LibraryBackend {
 }
 
 impl LibraryBackend {
-    fn notify_catalogue_changed<T>(&self, result: Result<T, BackendError>) -> Result<T, BackendError> {
+    fn notify_library_changed<T>(&self, result: Result<T, BackendError>) -> Result<T, BackendError> {
         if result.is_ok() {
-            let _ = self.event_tx.send(LibraryEvent::CatalogueChanged);
+            let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
         }
         result
     }
@@ -75,7 +75,7 @@ impl LibraryBackend {
         let release_id = self.context.reload_unified_taxonomy_from_disk().map_err(BackendError::operation)?;
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
-        let _ = self.event_tx.send(LibraryEvent::CatalogueChanged);
+        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
         Ok(release_id)
     }
 
@@ -92,7 +92,7 @@ impl LibraryBackend {
     pub(crate) fn reload_unified_subject_assignments(&self) -> Result<(), BackendError> {
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
-        let _ = self.event_tx.send(LibraryEvent::CatalogueChanged);
+        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
         Ok(())
     }
 
@@ -149,7 +149,7 @@ impl LibraryBackend {
     }
 
     pub fn create_directory(&self, parent_id: &DirId, name: &str) -> Result<Dir, BackendError> {
-        self.notify_catalogue_changed(self.create_directory_on_disk(parent_id, name).map_err(BackendError::operation))
+        self.notify_library_changed(self.create_directory_on_disk(parent_id, name).map_err(BackendError::operation))
     }
 
     pub fn create_directory_task(&self, parent_id: DirId, name: String) -> BackendTask<Result<(), BackendError>> {
@@ -158,7 +158,7 @@ impl LibraryBackend {
     }
 
     pub fn rename_directory(&self, directory_id: &DirId, name: &str) -> Result<String, BackendError> {
-        self.notify_catalogue_changed(self.rename_directory_on_disk(directory_id, name).map_err(BackendError::operation))
+        self.notify_library_changed(self.rename_directory_on_disk(directory_id, name).map_err(BackendError::operation))
     }
 
     pub fn rename_directory_task(&self, directory_id: DirId, name: String) -> BackendTask<Result<String, BackendError>> {
@@ -167,7 +167,7 @@ impl LibraryBackend {
     }
 
     pub fn move_directory(&self, directory_id: &DirId, parent_id: &DirId) -> Result<String, BackendError> {
-        self.notify_catalogue_changed(self.move_directory_on_disk(directory_id, Some(parent_id), None).map_err(BackendError::operation))
+        self.notify_library_changed(self.move_directory_on_disk(directory_id, Some(parent_id), None).map_err(BackendError::operation))
     }
 
     pub fn move_directory_task(&self, directory_id: DirId, parent_id: DirId) -> BackendTask<Result<String, BackendError>> {
@@ -176,41 +176,41 @@ impl LibraryBackend {
     }
 
     pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.notify_catalogue_changed(self.copy_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.copy_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
     }
 
     pub fn move_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.notify_catalogue_changed(self.move_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.move_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
     }
 
     /// Removes one placement. Returns `true` when it was the final placement
     /// and the book consequently moved to Trash.
     pub fn remove_book_from_directory(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, BackendError> {
-        self.notify_catalogue_changed(self.remove_book_placement_on_disk(content_hash, source_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.remove_book_placement_on_disk(content_hash, source_id).map_err(BackendError::operation))
     }
 
     pub fn move_book_to_trash(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.trash_book_on_disk(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.trash_book_on_disk(content_hash).map_err(BackendError::operation))
     }
 
     pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.restore_book_from_trash(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.restore_book_from_trash(content_hash).map_err(BackendError::operation))
     }
 
     pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.purge_book_from_trash(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.purge_book_from_trash(content_hash).map_err(BackendError::operation))
     }
 
     pub fn move_directory_to_trash(&self, directory_id: &DirId) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.trash_directory_on_disk(directory_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.trash_directory_on_disk(directory_id).map_err(BackendError::operation))
     }
 
     pub fn restore_directory(&self, directory_id: &DirId, parent_id: Option<&DirId>) -> Result<String, BackendError> {
-        self.notify_catalogue_changed(self.restore_directory_from_trash(directory_id, parent_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.restore_directory_from_trash(directory_id, parent_id).map_err(BackendError::operation))
     }
 
     pub fn purge_directory(&self, directory_id: &DirId) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.purge_directory_from_trash(directory_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.purge_directory_from_trash(directory_id).map_err(BackendError::operation))
     }
 
     pub fn trash(&self) -> Result<LibraryTrashView, BackendError> {
@@ -218,7 +218,7 @@ impl LibraryBackend {
     }
 
     pub fn empty_trash(&self) -> Result<(), BackendError> {
-        self.notify_catalogue_changed(self.empty_trash_on_disk().map_err(BackendError::operation))
+        self.notify_library_changed(self.empty_trash_on_disk().map_err(BackendError::operation))
     }
 
     pub fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, BackendError> {

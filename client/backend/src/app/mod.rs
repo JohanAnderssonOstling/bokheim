@@ -2,16 +2,18 @@
 
 pub mod account;
 mod backend;
+mod browser_session;
 pub(crate) mod data;
 pub mod executor;
 mod librarything;
 pub mod name;
+mod persistence;
 pub mod preferences;
 mod server_url;
 
 pub(crate) use backend::AppState;
 pub use backend::{
-    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryCatalogueState, LibrarySyncState,
+    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryListState, LibrarySyncState,
     LibrarySyncStatus, LibrarySyncSummary, LocalLibraryStorageUsage, ServerLibraryStorageUsage,
 };
 pub(crate) use data::read_library_manifest;

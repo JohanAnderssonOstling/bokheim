@@ -271,7 +271,6 @@ pub struct BrowsingPreferences {
     #[specta(type = u8)]
     ui_font_size_px: UiFontSize,
     library_view: LibraryView,
-    show_unavailable_books: bool,
     /// Empty means that catalogue searches include every language. New and
     /// pre-language-filter profiles start with English and can explicitly
     /// choose All languages from the catalogue dropdown.
@@ -311,7 +310,6 @@ impl Default for BrowsingPreferences {
             interface_font: UiFontFamily::SansSerif,
             ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT),
             library_view: LibraryView::Covers,
-            show_unavailable_books: false,
             included_catalog_languages: default_catalog_languages(),
         }
     }
@@ -336,9 +334,6 @@ impl BrowsingPreferences {
     pub fn library_view(&self) -> LibraryView {
         self.library_view
     }
-    pub fn show_unavailable_books(&self) -> bool {
-        self.show_unavailable_books
-    }
 
     pub fn included_catalog_languages(&self) -> &[String] {
         &self.included_catalog_languages
@@ -353,45 +348,7 @@ pub enum BrowsingPreferencePatch {
     UiFontSizePx(u8),
     Appearance(ApplicationAppearance),
     LibraryView(LibraryView),
-    ShowUnavailableBooks(bool),
     IncludedCatalogLanguages(Vec<String>),
-}
-
-/// Host-local policy for transfers started by background synchronization.
-/// Web hosts may persist it in an account-scoped form-factor profile. Explicit
-/// user actions are never suppressed by this preference.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(default)]
-#[specta(skip_attr = "serde")]
-pub struct TransferPreferences {
-    allow_background_on_metered: bool,
-    auto_download_limit_mb: Option<u32>,
-}
-
-impl TransferPreferences {
-    pub const fn allow_background_on_metered(self) -> bool {
-        self.allow_background_on_metered
-    }
-
-    pub const fn auto_download_limit_mb(self) -> Option<u32> {
-        self.auto_download_limit_mb
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "preference", content = "value", rename_all = "snake_case")]
-pub enum TransferPreferencePatch {
-    AllowBackgroundOnMetered(bool),
-    AutoDownloadLimitMb(Option<u32>),
-}
-
-impl TransferPreferencePatch {
-    pub fn apply(self, preferences: &mut TransferPreferences) {
-        match self {
-            Self::AllowBackgroundOnMetered(value) => preferences.allow_background_on_metered = value,
-            Self::AutoDownloadLimitMb(value) => preferences.auto_download_limit_mb = value,
-        }
-    }
 }
 
 impl BrowsingPreferencePatch {
@@ -402,7 +359,6 @@ impl BrowsingPreferencePatch {
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
             Self::Appearance(value) => preferences.appearance = value,
             Self::LibraryView(value) => preferences.library_view = value,
-            Self::ShowUnavailableBooks(value) => preferences.show_unavailable_books = value,
             Self::IncludedCatalogLanguages(mut value) => {
                 value.retain(|language| CATALOG_LANGUAGE_OPTIONS.iter().any(|option| option.0 == language));
                 value.sort();
@@ -605,11 +561,7 @@ struct UiFontSize(u8);
 
 impl UiFontSize {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("UI font size"))
-        }
+        if (UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("UI font size")) }
     }
 
     const fn get(self) -> u8 {
@@ -631,11 +583,7 @@ macro_rules! bounded_float {
 
         impl $name {
             fn new(value: $primitive) -> Result<Self, PreferenceValueError> {
-                if value.is_finite() && ($minimum..=$maximum).contains(&value) {
-                    Ok(Self(value))
-                } else {
-                    Err(PreferenceValueError($label))
-                }
+                if value.is_finite() && ($minimum..=$maximum).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError($label)) }
             }
 
             const fn get(self) -> $primitive {
@@ -663,11 +611,9 @@ struct ColumnCount(u8);
 
 impl ColumnCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (COLUMN_COUNT_MIN..=COLUMN_COUNT_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("column count"))
-        }
+        // Only a floor: how many columns fit is a question about the width
+        // available, which no contract here is in a position to answer.
+        if value >= COLUMN_COUNT_MIN { Ok(Self(value)) } else { Err(PreferenceValueError("column count")) }
     }
 
     const fn get(self) -> u8 {
@@ -687,11 +633,7 @@ struct PdfPageCount(u8);
 
 impl PdfPageCount {
     fn new(value: u8) -> Result<Self, PreferenceValueError> {
-        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(PreferenceValueError("PDF page count"))
-        }
+        if (PDF_PAGE_COUNT_MIN..=PDF_PAGE_COUNT_MAX).contains(&value) { Ok(Self(value)) } else { Err(PreferenceValueError("PDF page count")) }
     }
 
     const fn get(self) -> u8 {
@@ -948,7 +890,6 @@ pub struct ReaderPreferenceConstraints {
     pub max_line_width_px: [f64; 2],
     pub zoom: [f64; 2],
     pub line_height: [f32; 2],
-    pub max_column_count: [u8; 2],
     pub pdf_page_count: [u8; 2],
     pub pdf_zoom: [f32; 2],
 }
@@ -1015,7 +956,6 @@ impl Default for ReaderPreferenceConstraints {
             max_line_width_px: [LINE_WIDTH_MIN, LINE_WIDTH_MAX],
             zoom: [ZOOM_MIN, ZOOM_MAX],
             line_height: [LINE_HEIGHT_MIN, LINE_HEIGHT_MAX],
-            max_column_count: [COLUMN_COUNT_MIN, COLUMN_COUNT_MAX],
             pdf_page_count: [PDF_PAGE_COUNT_MIN, PDF_PAGE_COUNT_MAX],
             pdf_zoom: [PDF_ZOOM_MIN, PDF_ZOOM_MAX],
         }
@@ -1048,11 +988,7 @@ mod palette_tests {
     use super::*;
 
     fn channel(value: f64) -> f64 {
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
+        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
     }
 
     fn luminance(colour: u32) -> f64 {
@@ -1161,9 +1097,6 @@ mod tests {
 
         let languages = BrowsingPreferencePatch::IncludedCatalogLanguages(vec!["sv".to_owned(), "en".to_owned()]);
         assert_eq!(serde_json::to_value(languages).unwrap(), serde_json::json!({ "preference": "included_catalog_languages", "value": ["sv", "en"] }));
-
-        let transfer = TransferPreferencePatch::AutoDownloadLimitMb(Some(512));
-        assert_eq!(serde_json::to_value(transfer).unwrap(), serde_json::json!({ "preference": "auto_download_limit_mb", "value": 512 }));
 
         let reader = ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight);
         assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_zoom_mode", "value": "fit_height" }));

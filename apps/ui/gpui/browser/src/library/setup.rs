@@ -1,20 +1,24 @@
-//! Creation and folder-opening workflows for the application library catalogue.
+//! Creation and folder-opening workflows for the configured library list.
 
 use std::path::Path;
 
 use epub_svelte_lib::LibraryId;
 use epub_svelte_lib::app::LibraryEntry;
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, EventEmitter, PathPromptOptions, SharedString};
-use gpui_component::WindowExt;
+use gpui::{App, AppContext, Context, EventEmitter, IntoElement, PathPromptOptions, Render, SharedString, Window, px};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputState};
+use gpui_component::{IconName, WindowExt};
 
 use crate::services::AppServices;
+use crate::stores::interface_font;
+use ui_components as components;
 
 #[derive(Clone)]
 pub(crate) enum LibrarySetupEvent {
-    CatalogueReady { libraries: Vec<LibraryEntry>, activate_library_id: Option<LibraryId>, warning: Option<SharedString> },
+    LibrariesAdded { libraries: Vec<LibraryEntry>, activate_library_id: Option<LibraryId>, warning: Option<SharedString> },
+    OpenSettings,
+    OpenAccount,
     Error(SharedString),
 }
 
@@ -91,7 +95,7 @@ impl LibrarySetup {
             let Ok(result) = operation.await else { return };
             let _ = setup.update(cx, |_, cx| match result {
                 Ok((created_ids, libraries, errors)) => {
-                    cx.emit(LibrarySetupEvent::CatalogueReady { libraries, activate_library_id: created_ids.last().cloned(), warning: (!errors.is_empty()).then(|| format!("Some folders could not be added: {}", errors.join("; ")).into()) })
+                    cx.emit(LibrarySetupEvent::LibrariesAdded { libraries, activate_library_id: created_ids.last().cloned(), warning: (!errors.is_empty()).then(|| format!("Some folders could not be added: {}", errors.join("; ")).into()) })
                 }
                 Err(error) => cx.emit(LibrarySetupEvent::Error(format!("Could not add library folders: {error}").into())),
             });
@@ -109,11 +113,50 @@ impl LibrarySetup {
         cx.spawn(async move |setup, cx| {
             let Ok(result) = operation.await else { return };
             let _ = setup.update(cx, |_, cx| match result {
-                Ok((library_id, libraries)) => cx.emit(LibrarySetupEvent::CatalogueReady { libraries, activate_library_id: Some(library_id), warning: None }),
+                Ok((library_id, libraries)) => cx.emit(LibrarySetupEvent::LibrariesAdded { libraries, activate_library_id: Some(library_id), warning: None }),
                 Err(error) => cx.emit(LibrarySetupEvent::Error(format!("Could not create library: {error}").into())),
             });
         })
         .detach();
+    }
+}
+
+impl Render for LibrarySetup {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = components::browser_theme(cx);
+        let states = &self.services.contracts.browsing_states;
+        let setup = cx.entity();
+        let create = setup.clone();
+        let open = setup.clone();
+        let settings = setup.clone();
+        let account = setup;
+        let primary_actions = components::action_row()
+            .child(components::primary_action_button("first-run-create", states.create_library_label.clone(), IconName::Plus, false).on_click(move |_, _, cx| {
+                create.update(cx, |setup, cx| setup.show_create_dialog(cx));
+            }))
+            .child(components::primary_action_button("first-run-open", "Open folder…", IconName::FolderOpen, false).on_click(move |_, _, cx| {
+                open.update(cx, |setup, cx| setup.choose_library_folders(cx));
+            }));
+        let secondary_actions = components::action_row()
+            .child(components::secondary_action_button("first-run-settings", "Settings", IconName::Settings, false).on_click(move |_, _, cx| {
+                settings.update(cx, |_, cx| cx.emit(LibrarySetupEvent::OpenSettings));
+            }))
+            .child(components::secondary_action_button("first-run-sync", "Sign in", IconName::User, false).on_click(move |_, _, cx| {
+                account.update(cx, |_, cx| cx.emit(LibrarySetupEvent::OpenAccount));
+            }));
+
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(18.0))
+            .bg(theme.page_bg)
+            .child(gpui::div().text_size(gpui::rems(28.0 / 16.0)).font_family(interface_font(cx)).font_weight(gpui::FontWeight::BOLD).text_color(theme.text).child(states.no_libraries_title.clone()))
+            .child(gpui::div().max_w(px(420.0)).text_align(gpui::TextAlign::Center).text_color(theme.text_muted).child(states.no_libraries_description.clone()))
+            .child(primary_actions)
+            .child(secondary_actions)
     }
 }
 

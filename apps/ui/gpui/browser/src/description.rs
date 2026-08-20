@@ -33,7 +33,10 @@ pub(crate) fn description_document(description: &str) -> Vec<u8> {
     let lower = description.to_ascii_lowercase();
     let authored_html = ["<p", "<br", "<div", "<em", "<strong", "<ul", "<ol", "<blockquote", "<span", "<a "].iter().any(|tag| lower.contains(tag));
     let content = if authored_html { description.to_owned() } else { description.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('\n', "<br/>") };
-    format!("<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body,article{{margin:0;padding:0;background:transparent}} article{{text-align:justify;hyphens:auto}}</style></head><body><article>{content}</article></body></html>").into_bytes()
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body,article{{margin:0;padding:0;background:transparent}} article{{text-align:justify;hyphens:auto}}</style></head><body><article>{content}</article></body></html>"
+    )
+    .into_bytes()
 }
 
 pub(crate) fn description_provider(description: &str) -> Arc<dyn ResourceProvider> {

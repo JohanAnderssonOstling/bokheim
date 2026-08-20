@@ -10,71 +10,33 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::{error::Error, fmt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use tokio_util::io::ReaderStream;
 use urlencoding::encode;
 
 use crate::library::database as db;
 use crate::{BlobKind, BookPlacement, ContentHash, DownloadProgress, ServerUrl, TransferJobKind};
-use sync_common::api::assets::{ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest, MAX_THUMBNAIL_BATCH_ENTRIES};
 use sync_common::LibraryId;
+use sync_common::api::assets::{MAX_THUMBNAIL_BATCH_ENTRIES, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry, ThumbnailBatchUploadRequest};
 
 pub use app_contract::transfer::{LibraryTransfers, NetworkStatus, NetworkTransport, TransferOrigin, TransferState, TransferStatus};
 
-/// Process-local transfer conditions shared by every open library. Connectivity
-/// is supplied by the platform shell; the durable user preference is loaded by
-/// `AppBackend` and never enters a library's synchronized state.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TransferRuntime {
-    state: Arc<RwLock<TransferRuntimeState>>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct TransferRuntimeState {
-    network: NetworkStatus,
-    allow_background_on_metered: bool,
-    auto_download_limit_mb: Option<u32>,
+    state: Arc<RwLock<NetworkStatus>>,
 }
 
 impl TransferRuntime {
     pub(crate) fn network_status(&self) -> NetworkStatus {
-        self.state.read().map(|state| state.network).unwrap_or_default()
+        self.state.read().map(|status| *status).unwrap_or_default()
     }
 
     pub(crate) fn set_network_status(&self, status: NetworkStatus) -> bool {
-        let was_allowed = self.allows_background_transfers();
-        if let Ok(mut state) = self.state.write() {
-            state.network = status;
+        let was_connected = self.network_status().connected;
+        if let Ok(mut current) = self.state.write() {
+            *current = status;
         }
-        !was_allowed && self.allows_background_transfers()
-    }
-
-    pub(crate) fn set_allow_background_on_metered(&self, allow: bool) -> bool {
-        let was_allowed = self.allows_background_transfers();
-        if let Ok(mut state) = self.state.write() {
-            state.allow_background_on_metered = allow;
-        }
-        !was_allowed && self.allows_background_transfers()
-    }
-
-    pub(crate) fn set_auto_download_limit_mb(&self, limit_mb: Option<u32>) -> bool {
-        let previous = self.auto_download_limit_mb();
-        if let Ok(mut state) = self.state.write() {
-            state.auto_download_limit_mb = limit_mb;
-        }
-        previous != limit_mb
-    }
-
-    pub(crate) fn auto_download_limit_bytes(&self) -> Option<u64> {
-        self.state.read().ok()?.auto_download_limit_mb.map(|value| u64::from(value) * 1024 * 1024)
-    }
-
-    fn auto_download_limit_mb(&self) -> Option<u32> {
-        self.state.read().ok().and_then(|state| state.auto_download_limit_mb)
-    }
-
-    pub(crate) fn allows_background_transfers(&self) -> bool {
-        self.state.read().map(|state| state.network.connected && (state.allow_background_on_metered || state.network.metered != Some(true))).unwrap_or(true)
+        !was_connected && status.connected
     }
 }
 
@@ -287,35 +249,23 @@ impl TransferQueue {
         }
     }
 
-    fn claim_due(&self, allow_background_transfers: bool) -> Option<ClaimedTransferJob> {
+    fn claim_due(&self) -> Option<ClaimedTransferJob> {
         let now = unix_seconds();
         let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let id = jobs
-            .values()
-            .filter(|queued| matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying) && queued.next_retry_at <= now && (allow_background_transfers || queued.job.origin() == TransferOrigin::UserInitiated))
-            .min_by_key(|queued| (queued.job.priority(), queued.created_at, queued.id))?
-            .id;
+        let id = jobs.values().filter(|queued| matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying) && queued.next_retry_at <= now).min_by_key(|queued| (queued.job.priority(), queued.created_at, queued.id))?.id;
         let queued = jobs.get_mut(&id)?;
         queued.state = QueueJobState::Running;
         queued.updated_at = now;
         Some(ClaimedTransferJob { id, attempts: queued.attempts, job: queued.job.clone() })
     }
 
-    fn claim_due_batch(&self, allow_background_transfers: bool) -> Vec<ClaimedTransferJob> {
-        let Some(first) = self.claim_due(allow_background_transfers) else { return Vec::new() };
+    fn claim_due_batch(&self) -> Vec<ClaimedTransferJob> {
+        let Some(first) = self.claim_due() else { return Vec::new() };
         let Some(kind) = first.job.batch_kind() else { return vec![first] };
         let now = unix_seconds();
         let mut jobs = self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut ids = jobs
-            .values()
-            .filter(|queued| {
-                matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying)
-                    && queued.next_retry_at <= now
-                    && queued.job.batch_kind() == Some(kind)
-                    && (allow_background_transfers || queued.job.origin() == TransferOrigin::UserInitiated)
-            })
-            .map(|queued| queued.id)
-            .collect::<Vec<_>>();
+        let mut ids =
+            jobs.values().filter(|queued| matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying) && queued.next_retry_at <= now && queued.job.batch_kind() == Some(kind)).map(|queued| queued.id).collect::<Vec<_>>();
         ids.sort_unstable();
         ids.truncate(MAX_THUMBNAIL_BATCH_ENTRIES.saturating_sub(1));
         let mut claimed = vec![first];
@@ -397,13 +347,9 @@ impl TransferQueue {
         }
     }
 
-    fn has_due(&self, allow_background_transfers: bool) -> bool {
+    fn has_due(&self) -> bool {
         let now = unix_seconds();
-        self.jobs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .any(|queued| matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying) && queued.next_retry_at <= now && (allow_background_transfers || queued.job.origin() == TransferOrigin::UserInitiated))
+        self.jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().any(|queued| matches!(queued.state, QueueJobState::Queued | QueueJobState::Retrying) && queued.next_retry_at <= now)
     }
 
     pub(crate) fn statuses(&self) -> Vec<TransferStatus> {
@@ -549,12 +495,12 @@ impl TransferWorker {
                     Err(error) => batch_result = Err(format!("transfer worker task failed: {error}").into()),
                 }
             }
-            if batch_result.is_err() || !worker.queue.has_due(worker.runtime.allows_background_transfers()) {
+            if batch_result.is_err() || !worker.queue.has_due() {
                 break batch_result;
             }
         };
         worker.queue.draining.store(false, Ordering::Release);
-        if result.is_ok() && worker.queue.has_due(worker.runtime.allows_background_transfers()) {
+        if result.is_ok() && worker.queue.has_due() {
             schedule_queue_drain(Arc::new(worker.as_ref().clone()), Duration::ZERO);
         }
         result
@@ -562,7 +508,7 @@ impl TransferWorker {
 
     async fn run_queue(self: &Arc<Self>) -> Result<(), String> {
         loop {
-            let claimed = self.queue.claim_due_batch(self.runtime.allows_background_transfers());
+            let claimed = self.queue.claim_due_batch();
             if claimed.is_empty() {
                 break;
             }
@@ -1175,10 +1121,10 @@ fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::RelativeBookPath;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{HeaderMap, Response, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use r2d2::Pool;
     use r2d2_sqlite::SqliteConnectionManager;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1480,21 +1426,5 @@ mod tests {
         assert!(matches!(classify_failure(permanent("bad input").as_ref()), TransferFailure::Permanent(_)));
         let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "offline");
         assert!(matches!(classify_failure(&io_error), TransferFailure::Retryable(_)));
-    }
-
-    #[test]
-    fn runtime_policy_only_gates_background_transfer_claims() {
-        let runtime = TransferRuntime::default();
-        assert!(runtime.allows_background_transfers());
-
-        let became_allowed = runtime.set_network_status(NetworkStatus { transport: NetworkTransport::Cellular, connected: true, metered: Some(true), validated: Some(true) });
-        assert!(!became_allowed);
-        assert!(!runtime.allows_background_transfers());
-
-        assert!(runtime.set_allow_background_on_metered(true));
-        assert!(runtime.allows_background_transfers());
-
-        assert!(!runtime.set_network_status(NetworkStatus { transport: NetworkTransport::Offline, connected: false, metered: Some(false), validated: Some(false) }));
-        assert!(!runtime.allows_background_transfers());
     }
 }

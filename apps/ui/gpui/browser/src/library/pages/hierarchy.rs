@@ -5,7 +5,7 @@
 
 use epub_svelte_lib::library::BookCardRow;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Focusable, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, container_query, div, px, size};
+use gpui::{AnyElement, App, Context, Entity, IntoElement, ScrollHandle, Subscription, WeakEntity, Window, container_query, div, px, size};
 use gpui_component::IconName;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenu};
@@ -302,10 +302,6 @@ impl<C: HierarchyCrumb> HierarchyState<C> {
 
     pub(crate) fn set_book_management<P: 'static>(&mut self, management: Option<BookManagement>, cx: &mut Context<P>) {
         self.books.set_management(management, cx);
-    }
-
-    pub(crate) fn focus_search(&self, window: &mut Window, cx: &mut gpui::App) {
-        self.filter_input.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     pub(crate) fn query(&self, cx: &gpui::App) -> String {

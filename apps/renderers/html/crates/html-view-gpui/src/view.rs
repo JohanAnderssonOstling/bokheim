@@ -821,6 +821,12 @@ impl HtmlView {
             return;
         }
         self.focus.focus(window, cx);
+        // A click that lands on nothing selectable still leaves propagation
+        // running, and any focusable ancestor would then take the focus back
+        // and with it the document's key context. Claiming the default is how
+        // GPUI's own `track_focus` tells parents that focus is already spoken
+        // for, so the keyboard keeps working after a click on a margin.
+        window.prevent_default();
         let position = self.layout_point(event.position);
         let options = PointerDownOptions { selection_mode: selection_mode(event.modifiers.control), copy_image: false };
         self.pointer_active = self.renderer.pointer_down(position, options);
