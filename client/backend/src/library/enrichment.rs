@@ -2,6 +2,7 @@ use crate::app::BackendError;
 use crate::library::database as db;
 use crate::library::LibraryBackend;
 use crate::ContentHash;
+use app_contract::library::{EditionIdentityReview, EditionIdentityReviewCandidate, EditionIdentityReviewStatus};
 use book_metadata::external::{ExternalClassificationScheme, ExternalMetadataProviders, ExternalSubjectScheme};
 use book_metadata::library_of_congress::LibraryOfCongressProvider;
 use library_model::PublicationSubject;
@@ -94,78 +95,35 @@ fn global_alternative_edition_consensus(support: BTreeMap<(ClassificationScheme,
     support.into_iter().filter_map(|((scheme, notation), edition_groups)| (edition_groups.len() >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-pub enum EditionIdentityReviewStatus {
-    Ambiguous,
-    NoMatch,
-    Failed,
-}
-
-#[derive(Clone, Debug, serde::Serialize, specta::Type)]
-pub struct EditionIdentityReviewCandidate {
-    pub isbn13: String,
-    pub edition_id: String,
-    pub work_id: Option<String>,
-    pub title: String,
-    pub authors: Vec<String>,
-    pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
-    pub matched_publisher: bool,
-    pub matched_publication_year: bool,
-    /// External classifications resolved to paths in Bokheim's unified
-    /// taxonomy. Raw provider codes stay out of the review interface.
-    pub classifications: Vec<String>,
-}
-
-impl From<metadata_contract::EditionIdentityMatch> for EditionIdentityReviewCandidate {
-    fn from(candidate: metadata_contract::EditionIdentityMatch) -> Self {
-        let classifications = candidate
-            .classifications
-            .iter()
-            .flat_map(|classification| match classification.scheme {
-                ClassificationScheme::LibraryOfCongress => library_model::unified_lcc_subject_paths(&classification.notation),
-                ClassificationScheme::DeweyDecimal => library_model::unified_ddc_subject_paths(&classification.notation),
-                ClassificationScheme::Bisac => library_model::unified_subject_paths(library_model::BISAC_SYSTEM_ID, &classification.notation),
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        Self {
-            isbn13: candidate.canonical_isbn13,
-            edition_id: candidate.open_library_edition_id,
-            work_id: candidate.open_library_work_id,
-            title: candidate.title,
-            authors: candidate.authors,
-            publishers: candidate.publishers,
-            publication_year: candidate.publication_year,
-            matched_publisher: candidate.matched_publisher,
-            matched_publication_year: candidate.matched_publication_year,
-            classifications,
-        }
+fn edition_identity_review_candidate(candidate: metadata_contract::EditionIdentityMatch) -> EditionIdentityReviewCandidate {
+    let classifications = candidate
+        .classifications
+        .iter()
+        .flat_map(|classification| match classification.scheme {
+            ClassificationScheme::LibraryOfCongress => subject_projection::unified_lcc_subject_paths(&classification.notation),
+            ClassificationScheme::DeweyDecimal => subject_projection::unified_ddc_subject_paths(&classification.notation),
+            ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    EditionIdentityReviewCandidate {
+        isbn13: candidate.canonical_isbn13,
+        edition_id: candidate.open_library_edition_id,
+        work_id: candidate.open_library_work_id,
+        title: candidate.title,
+        authors: candidate.authors,
+        publishers: candidate.publishers,
+        publication_year: candidate.publication_year,
+        matched_publisher: candidate.matched_publisher,
+        matched_publication_year: candidate.matched_publication_year,
+        classifications,
     }
 }
 
 fn candidate_classification_rank(candidate: &EditionIdentityReviewCandidate) -> (usize, usize, usize) {
     let depths = candidate.classifications.iter().map(|path| path.split('/').filter(|part| !part.trim().is_empty()).count()).collect::<Vec<_>>();
     (depths.len(), depths.iter().sum(), depths.into_iter().max().unwrap_or(0))
-}
-
-#[derive(Clone, Debug, serde::Serialize, specta::Type)]
-pub struct EditionIdentityReview {
-    #[specta(type = String)]
-    pub content_hash: ContentHash,
-    pub title: String,
-    pub authors: Vec<String>,
-    pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
-    pub inferred_title: Option<String>,
-    pub inferred_author: Option<String>,
-    pub inferred_publication_year: Option<i32>,
-    pub status: EditionIdentityReviewStatus,
-    pub detail: Option<String>,
-    pub candidates: Vec<EditionIdentityReviewCandidate>,
-    pub candidates_truncated: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, specta::Type)]
@@ -225,7 +183,7 @@ impl LibraryBackend {
                             "failed" => EditionIdentityReviewStatus::Failed,
                             _ => return None,
                         };
-                        let mut candidates = review.candidates.into_iter().map(Into::into).collect::<Vec<_>>();
+                        let mut candidates = review.candidates.into_iter().map(edition_identity_review_candidate).collect::<Vec<_>>();
                         candidates.sort_by(|left, right| candidate_classification_rank(right).cmp(&candidate_classification_rank(left)));
                         let (query_title, inferred_author, inferred_year) = edition_identity_title_author_and_year(&review.title);
                         let inferred_title = (query_title.trim() != review.title.trim()).then_some(query_title);
@@ -907,11 +865,11 @@ fn merge_rich_matches(matches: Vec<&RichWorkMetadataMatch>) -> RichWorkMetadataM
 
 fn classification_similarity_keys(scheme: ClassificationScheme, notation: &str) -> Vec<String> {
     let system_id = match scheme {
-        ClassificationScheme::LibraryOfCongress => library_model::LCC_SYSTEM_ID,
-        ClassificationScheme::DeweyDecimal => library_model::DDC_SYSTEM_ID,
-        ClassificationScheme::Bisac => library_model::BISAC_SYSTEM_ID,
+        ClassificationScheme::LibraryOfCongress => subject_projection::LCC_SYSTEM_ID,
+        ClassificationScheme::DeweyDecimal => subject_projection::DDC_SYSTEM_ID,
+        ClassificationScheme::Bisac => subject_projection::BISAC_SYSTEM_ID,
     };
-    library_model::unified_subject_similarity_keys(system_id, notation)
+    subject_projection::unified_subject_similarity_keys(system_id, notation)
 }
 
 fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<PublicationSubject>, BackendError> {

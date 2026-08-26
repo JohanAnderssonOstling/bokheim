@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package bokheim.wire.v14;
+package bokheim.wire.v16;
 
 // A self-describing protobuf representation of the Serde value model. This
 // lets every existing Rust contract use one codec while retaining integer
@@ -235,23 +235,38 @@ message PublicationDate {
   optional string id = 1;
   string value = 2;
   optional string event = 3;
+  optional string source = 4;
 }
 message PublicationSubject {
   optional string id = 1;
   string name = 2;
   optional string authority = 3;
   optional string code = 4;
+  optional string source = 5;
+  repeated LocalizedText name_localizations = 6;
+  optional string sort_name = 7;
+  repeated LocalizedText sort_name_localizations = 8;
 }
 message PublicationCollection {
   string name = 1;
   optional string collection_type = 2;
   optional string position = 3;
+  repeated LocalizedText name_localizations = 4;
+  optional string sort_name = 5;
+  repeated LocalizedText sort_name_localizations = 6;
+  repeated string identifiers = 7;
+  optional string source = 8;
+}
+message LocalizedText {
+  string language = 1;
+  string value = 2;
 }
 message PublicationTitle {
   optional string id = 1;
   string value = 2;
   optional string title_type = 3;
   optional string sort_as = 4;
+  optional string source = 5;
 }
 message PublicationProperty {
   optional string id = 1;
@@ -260,4 +275,5 @@ message PublicationProperty {
   optional string refines = 4;
   optional string scheme = 5;
   optional string language = 6;
+  optional string source = 7;
 }

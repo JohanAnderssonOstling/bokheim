@@ -5,4 +5,4 @@
 
 mod formats;
 
-pub use formats::{PublicationLayout, PublicationSource, ReadingDirection, bundle_webpub};
+pub use formats::{PublicationFormat, PublicationLayout, PublicationSource};

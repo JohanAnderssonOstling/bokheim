@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
+use app_contract::reader_state::{ReaderAnnotation, ReaderBookmark};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, Window};
 use gpui_component::Sizable;
@@ -18,13 +18,16 @@ where
     F: Fn(bool, &mut C, &mut Context<C>) + 'static,
 {
     let target = target.clone();
-    let mut tabs = TabBar::new(id).segmented().small().selected_index(if outline_available { usize::from(show_annotations) } else { 0 });
+    let mut buttons = Vec::with_capacity(2);
     if outline_available {
-        tabs = tabs.child("Contents");
+        buttons.push(components::reader_choice_button("reader-sidebar-contents", "Contents", !show_annotations));
     }
-    tabs.child("Annotations")
-        .on_click(move |index, _, cx| {
-            let annotations = !outline_available || *index == 1;
+    buttons.push(components::reader_choice_button("reader-sidebar-annotations", "Annotations", show_annotations || !outline_available));
+
+    components::reader_choice_button_group(id, buttons)
+        .w_full()
+        .on_click(move |selected, _, cx| {
+            let annotations = !outline_available || selected.contains(&1);
             target.update(cx, |this, cx| {
                 on_toggle(annotations, this, cx);
             });
@@ -193,5 +196,5 @@ where
 }
 
 pub(crate) fn now_millis() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
 }

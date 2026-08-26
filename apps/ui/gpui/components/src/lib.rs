@@ -8,6 +8,7 @@ pub mod layout;
 pub mod library;
 pub mod modal;
 pub mod reader;
+pub mod responsive;
 pub mod scroll;
 pub mod tokens;
 
@@ -19,5 +20,6 @@ pub use layout::*;
 pub use library::*;
 pub use modal::*;
 pub use reader::*;
+pub use responsive::*;
 pub use scroll::*;
 pub use tokens::*;

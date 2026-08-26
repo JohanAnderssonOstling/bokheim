@@ -1,8 +1,12 @@
 use super::super::{
-    catalog_metadata_match, BackfillBatchMetrics, CatalogCache, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogService, CatalogServiceError, HashSet, Instant, Ordering, StatusCode, METADATA_BACKFILL_BATCH_SIZE,
+    catalog_metadata_match, BackfillBatchMetrics, CatalogCache, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogProcess, CatalogService, CatalogServiceError, HashSet, Instant, Ordering, StatusCode,
+    METADATA_BACKFILL_BATCH_SIZE,
 };
 impl CatalogService {
     pub(crate) async fn resume_description_backfill(&self) {
+        if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+            return;
+        }
         match self.metadata_descriptions_available().await {
             Ok(true) => self.state.description_backfill_available.store(true, Ordering::Relaxed),
             Ok(false) => {
@@ -20,6 +24,9 @@ impl CatalogService {
             return;
         }
         loop {
+            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+                return;
+            }
             let claim_started = Instant::now();
             let jobs = match self.cache_write_call_named("description_backfill_claim", |cache| cache.claim_description_backfill_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(jobs) if jobs.is_empty() => return,

@@ -86,14 +86,9 @@ test("derived containers still equal the contract at the default font size", () 
     layout.book_card_cover_content_gap_px +
     titleBlock +
     layout.book_card_text_gap_px +
-    layout.book_card_author_line_height_px +
-    layout.book_card_text_gap_px +
-    layout.book_card_progress_height_px;
+    layout.book_card_author_line_height_px;
   assert.equal(card, layout.book_card_height_px);
-  assert.equal(
-    card + layout.book_grid_row_trailing_space_px,
-    layout.book_grid_row_height_px,
-  );
+  assert.equal(card, layout.book_grid_row_height_px);
   assert.equal(
     layout.author_row_cover_height_px +
       titleBlock +

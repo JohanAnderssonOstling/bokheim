@@ -7,12 +7,12 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=14";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=16";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 14;
+const VERSION: u32 = 16;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -149,7 +149,7 @@ fn domain_value(value: protobuf::Value) -> Result<serde_value::Value, WireError>
 
 pub mod protobuf {
     // Generated from proto/bokheim_wire.proto by prost-build 0.14.4.
-    include!("bokheim.wire.v14.rs");
+    include!("bokheim.wire.v16.rs");
 }
 
 /// Encodes one typed mutation value without the generic transport envelope.
@@ -208,6 +208,7 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
+        assert_eq!(version(), 16);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
@@ -233,7 +234,8 @@ mod tests {
     #[test]
     fn media_type_requires_the_current_version() {
         assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=14"));
+        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=16"));
+        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=14"));
         assert!(!is_current_media_type(MEDIA_TYPE_BASE));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=2"));

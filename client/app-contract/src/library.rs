@@ -1,9 +1,140 @@
 use library_model::AuthorId;
+pub use library_model::BookFormat;
+pub use library_model::ROOT_SUBJECT_PATH;
 use library_model::{AuthorName, AuthorNameError};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::cmp::Reverse;
+use std::future::Future;
+use std::io::{Read, Seek};
+use std::pin::Pin;
 use sync_common::{ContentHash, DirId, LibraryId};
+
+/// Path-free identity presented in library lists and selectors.
+///
+/// A native backend resolves `library_id` to its registered filesystem root;
+/// frontends never receive or retain that root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LibrarySummary {
+    #[specta(type = String)]
+    library_id: LibraryId,
+    library_name: String,
+}
+
+impl LibrarySummary {
+    pub fn new(library_id: LibraryId, library_name: impl Into<String>) -> Self {
+        Self { library_id, library_name: library_name.into() }
+    }
+
+    pub fn library_id(&self) -> &LibraryId {
+        &self.library_id
+    }
+
+    pub fn library_name(&self) -> &str {
+        &self.library_name
+    }
+}
+
+/// Stable runtime identity for a book within one configured library.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct BookLocator {
+    #[specta(type = String)]
+    library_id: LibraryId,
+    #[specta(type = String)]
+    content_hash: ContentHash,
+}
+
+/// Seekable publication content opened by a library backend.
+///
+/// This is an I/O capability, not a storage location: the backend may provide
+/// a file, remote range reader, browser-backed source, or in-memory fixture.
+pub trait BookReader: Read + Seek + Send + Sync {}
+impl<T: Read + Seek + Send + Sync> BookReader for T {}
+
+pub type BoxedBookReader = Box<dyn BookReader>;
+
+/// A selected directory tree whose files can be opened one at a time while
+/// the backend imports them. Keeping the opener instead of an already-open
+/// reader bounds descriptor and memory use for large trees.
+pub struct DirectoryImport {
+    pub name: String,
+    pub directories: Vec<Vec<String>>,
+    pub files: Vec<DirectoryImportFile>,
+}
+
+pub type DirectoryImportReaderFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Read + Send>, String>> + 'static>>;
+
+pub struct DirectoryImportFile {
+    pub path: Vec<String>,
+    pub open: Box<dyn FnOnce() -> DirectoryImportReaderFuture + Send>,
+}
+
+/// Path-free content ready for the renderer-neutral publication layer.
+pub struct ReaderContent {
+    format: BookFormat,
+    reader: BoxedBookReader,
+}
+
+impl ReaderContent {
+    pub fn new(format: BookFormat, reader: BoxedBookReader) -> Self {
+        Self { format, reader }
+    }
+
+    pub fn format(&self) -> BookFormat {
+        self.format
+    }
+
+    pub fn into_reader(self) -> BoxedBookReader {
+        self.reader
+    }
+
+    pub fn into_parts(self) -> (BookFormat, BoxedBookReader) {
+        (self.format, self.reader)
+    }
+}
+
+impl BookLocator {
+    pub fn new(library_id: LibraryId, content_hash: ContentHash) -> Self {
+        Self { library_id, content_hash }
+    }
+
+    pub fn library_id(&self) -> &LibraryId {
+        &self.library_id
+    }
+
+    pub fn content_hash(&self) -> ContentHash {
+        self.content_hash.clone()
+    }
+}
+
+/// A change relevant to a currently displayed library page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum LibraryUpdate {
+    Contents,
+    Covers(#[specta(type = Vec<String>)] Vec<ContentHash>),
+}
+
+/// Stable identity for a location in Bokheim's subject hierarchy.
+/// This is a taxonomy path, not a filesystem path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct SubjectPath(String);
+
+impl SubjectPath {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SubjectPath {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
 /// Limits hierarchical library browsing to one broad publication family.
 /// `Book` intentionally means every supported reading format except PDF and
@@ -35,23 +166,104 @@ impl LibraryFileTypeFilter {
             Self::All => true,
             Self::Pdf => extension.eq_ignore_ascii_case("pdf"),
             Self::Audiobook => extension.eq_ignore_ascii_case("m4b"),
-            Self::Book => !extension.eq_ignore_ascii_case("pdf") && !extension.eq_ignore_ascii_case("m4b"),
+            Self::Book => matches!(extension.to_ascii_lowercase().as_str(), "epub" | "mobi" | "azw" | "azw3"),
         }
     }
 }
 
+/// Independent ordering for hierarchy chips on the shared browse page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseChipSort {
+    #[default]
+    Alphabetical,
+    BookCount,
+}
+
+impl BrowseChipSort {
+    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::BookCount];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Alphabetical => "Alphabetical",
+            Self::BookCount => "Book count",
+        }
+    }
+}
+
+/// Independent ordering for book cards on the shared browse page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseBookSort {
+    #[default]
+    Alphabetical,
+    RecentlyRead,
+}
+
+impl BrowseBookSort {
+    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::RecentlyRead];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Alphabetical => "Alphabetical",
+            Self::RecentlyRead => "Recently read",
+        }
+    }
+}
+
+/// One directly browsable child returned by a library hierarchy query.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BrowseRow {
+    pub id: String,
+    pub name: String,
+    /// Parent hierarchy for scoped search results; absent for direct children.
+    pub path: Option<String>,
+    #[specta(type = specta_typescript::Number)]
+    pub book_count: usize,
+    #[specta(type = specta_typescript::Number)]
+    pub downloaded_book_count: usize,
+}
+
+/// Direct contents for one hierarchy location.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+pub struct BrowseContents {
+    pub children: Vec<BrowseRow>,
+    pub books: Vec<BookCardRow>,
+}
+
+/// Typed input shared by folder and subject browsing implementations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LibraryBrowseQuery {
+    pub location: String,
+    pub search: String,
+    pub file_types: Vec<LibraryFileTypeFilter>,
+    pub chip_sort: BrowseChipSort,
+    pub book_sort: BrowseBookSort,
+    pub languages: Vec<String>,
+}
+
+/// A locally-polled frontend operation. Browser implementations do not need
+/// native threads or `Send`, while native implementations may still use them.
+pub type BrowseFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
+
 #[cfg(test)]
 mod file_type_filter_tests {
-    use super::LibraryFileTypeFilter;
+    use super::{LibraryFileTypeFilter, LibrarySummary};
 
     #[test]
     fn broad_book_filter_excludes_dedicated_pdf_and_audiobook_formats() {
         assert!(LibraryFileTypeFilter::Book.matches_extension("epub"));
-        assert!(LibraryFileTypeFilter::Book.matches_extension("cbz"));
+        assert!(!LibraryFileTypeFilter::Book.matches_extension("cbz"));
         assert!(!LibraryFileTypeFilter::Book.matches_extension("pdf"));
         assert!(!LibraryFileTypeFilter::Book.matches_extension("m4b"));
         assert!(LibraryFileTypeFilter::Pdf.matches_extension("PDF"));
         assert!(LibraryFileTypeFilter::Audiobook.matches_extension("M4B"));
+    }
+
+    #[test]
+    fn library_summary_contains_no_storage_location() {
+        let summary = LibrarySummary::new(sync_common::LibraryId::nil(), "Library");
+        assert_eq!(serde_json::to_value(summary).unwrap(), serde_json::json!({ "library_id": sync_common::LibraryId::nil(), "library_name": "Library" }));
     }
 }
 
@@ -118,7 +330,7 @@ pub struct AuthorSummary {
 }
 
 /// Everything a browsing card renders for one book.
-#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct BookCardRow {
     #[specta(type = String)]
     pub content_hash: ContentHash,
@@ -137,6 +349,97 @@ pub struct BookCardRow {
     /// Legacy rows without a timestamp use zero and sort after dated books.
     #[specta(type = specta_typescript::Number)]
     pub added_at: i64,
+    /// Concrete placement represented by a folder-browse result. Cards from
+    /// placement-neutral views such as Home and Subjects leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(type = Option<String>, optional)]
+    pub source_directory: Option<DirId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+pub struct LibraryHomeView {
+    /// Unfinished books ordered by progress, highest first.
+    #[serde(default)]
+    pub most_progress: Vec<BookCardRow>,
+    pub recently_read: Vec<BookCardRow>,
+    pub recently_added: Vec<BookCardRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TrashedBook {
+    #[specta(type = String)]
+    pub content_hash: ContentHash,
+    pub title: String,
+    pub format: String,
+    #[specta(type = f64)]
+    pub deleted_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TrashedFolder {
+    #[specta(type = String)]
+    pub id: DirId,
+    pub name: String,
+    #[specta(type = f64)]
+    pub deleted_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LibraryTrashView {
+    pub books: Vec<TrashedBook>,
+    pub folders: Vec<TrashedFolder>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LibraryFolderDestination {
+    #[specta(type = String)]
+    pub id: DirId,
+    #[specta(type = Option<String>)]
+    pub parent_id: Option<DirId>,
+    pub label: String,
+    /// Human-readable hierarchy for flat selectors. This is not a filesystem
+    /// location; hierarchical selectors must follow `parent_id`.
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum EditionIdentityReviewStatus {
+    Ambiguous,
+    NoMatch,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct EditionIdentityReviewCandidate {
+    pub isbn13: String,
+    pub edition_id: String,
+    pub work_id: Option<String>,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub publishers: Vec<String>,
+    pub publication_year: Option<i32>,
+    pub matched_publisher: bool,
+    pub matched_publication_year: bool,
+    /// External classifications resolved to Bokheim taxonomy paths.
+    pub classifications: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct EditionIdentityReview {
+    #[specta(type = String)]
+    pub content_hash: ContentHash,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub publishers: Vec<String>,
+    pub publication_year: Option<i32>,
+    pub inferred_title: Option<String>,
+    pub inferred_author: Option<String>,
+    pub inferred_publication_year: Option<i32>,
+    pub status: EditionIdentityReviewStatus,
+    pub detail: Option<String>,
+    pub candidates: Vec<EditionIdentityReviewCandidate>,
+    pub candidates_truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

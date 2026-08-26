@@ -1,8 +1,8 @@
 use super::{
-    apply_catalog_description_if_missing, apply_catalog_metadata, canonical_isbn, classify_catalog_failure, extraction_book_format, merge_catalog_popularity, metadata_publication_byte_limit, opds_catalog_source_id,
-    prepare_catalog_subject_assignments, publication_has_acquisition_url, CatalogAuthorCredit, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogPublicationIdentity, CatalogPublicationPopularity, CatalogService, CatalogServiceError,
-    CatalogSourceId, Deserialize, HashSet, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, Path, PublicationIdentifier, PublicationIdentifierScheme, PublicationSubject, Serialize, Url, CATALOG_METADATA_DOWNLOAD_TIMEOUT,
-    EPUB_COVER_KEY_PREFIX, MAX_EMBEDDED_DESCRIPTION_BYTES, MAX_EMBEDDED_METADATA_TEXT_BYTES, MAX_EXTRACTION_RESULT_BYTES,
+    apply_catalog_description_if_missing, apply_catalog_metadata, canonical_isbn, classify_catalog_failure, extraction_book_format, merge_catalog_epub_metadata, merge_catalog_popularity, metadata_publication_byte_limit,
+    opds_catalog_source_id, prepare_catalog_subject_assignments, publication_has_acquisition_url, CatalogAuthorCredit, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogProcess, CatalogPublicationIdentity, CatalogPublicationPopularity,
+    CatalogService, CatalogServiceError, CatalogSourceId, Deserialize, HashSet, Identifier, LanguageTag, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, Path, PublicationSubject, Scheme, Serialize, Url,
+    CATALOG_METADATA_DOWNLOAD_TIMEOUT, EPUB_COVER_KEY_PREFIX, MAX_EMBEDDED_DESCRIPTION_BYTES, MAX_EMBEDDED_METADATA_TEXT_BYTES, MAX_EXTRACTION_RESULT_BYTES,
 };
 #[cfg(not(test))]
 use super::{EXTRACTION_WORKER_CPU_SECONDS, EXTRACTION_WORKER_MEMORY_BYTES, EXTRACTION_WORKER_TIMEOUT};
@@ -20,6 +20,9 @@ struct PreparedCatalogEnrichment {
 
 impl CatalogService {
     pub(crate) async fn resume_pending_epub_extractions(&self) {
+        if !self.process_enabled(CatalogProcess::EpubEnrichment) {
+            return;
+        }
         let source_ids = self.state.endpoints.read().await.iter().map(|endpoint| opds_catalog_source_id(&endpoint.id)).collect::<Vec<_>>();
         for source_id in &source_ids {
             let cache_source = source_id.clone();
@@ -28,8 +31,14 @@ impl CatalogService {
             }
         }
         loop {
+            if !self.process_enabled(CatalogProcess::EpubEnrichment) {
+                return;
+            }
             let mut progressed = false;
             for source_id in &source_ids {
+                if !self.process_enabled(CatalogProcess::EpubEnrichment) {
+                    return;
+                }
                 progressed |= self.enrich_next_publication(source_id).await;
             }
             if !progressed {
@@ -93,6 +102,9 @@ impl CatalogService {
             if let Err(state_error) = self.cache_write_call(move |cache| cache.fail_epub_extraction(&cache_source, &cache_url, &message, category, retryable)).await {
                 tracing::warn!(source = source_id.as_str(), %state_error, "could not persist failed publication extraction");
             }
+        }
+        if result.is_ok() {
+            self.wake_process(CatalogProcess::CatalogueEnrichment);
         }
         self.state.extraction_notify.notify_waiters();
         result
@@ -201,10 +213,10 @@ impl CatalogService {
     }
 
     async fn commit_catalog_enrichment(&self, source_id: &CatalogSourceId, identity: CatalogPublicationIdentity, acquisition_url: &str, prepared: PreparedCatalogEnrichment) -> Result<(), CatalogServiceError> {
-        let cache_subjects = prepared.subjects;
+        let extracted_subjects = prepared.subjects;
         // Subject projection may initialize the embedded taxonomy, so do it
         // before taking either the source update lock or SQLite writer lock.
-        let assignments = prepare_catalog_subject_assignments(&cache_subjects);
+        let _ = prepare_catalog_subject_assignments(&extracted_subjects);
         // Activation and the final enriched update for one source must not
         // overlap. Re-read after locking so this targets the newest generation.
         let update_lock = self.source_update_lock(source_id).await;
@@ -216,6 +228,17 @@ impl CatalogService {
             return Err(CatalogServiceError("EPUB acquisition is no longer active".to_owned()));
         }
         apply_catalog_metadata(&mut publication, prepared.metadata);
+        if let Some(metadata) = prepared.saved_metadata.as_ref() {
+            merge_catalog_epub_metadata(&mut publication, metadata);
+        }
+        merge_catalog_publication_subjects(&mut publication, &extracted_subjects);
+        let cache_subjects = publication
+            .metadata
+            .subjects
+            .iter()
+            .map(|subject| PublicationSubject::new(None, &subject.name, &subject.source, subject.authority.clone(), subject.code.clone()).map_err(|error| CatalogServiceError(error.to_string())))
+            .collect::<Result<Vec<_>, _>>()?;
+        let assignments = prepare_catalog_subject_assignments(&cache_subjects);
         apply_catalog_description_if_missing(&mut publication, prepared.external_description);
         if prepared.cover_is_definitively_absent {
             publication.image_url = None;
@@ -264,6 +287,15 @@ impl CatalogService {
     }
 }
 
+fn merge_catalog_publication_subjects(publication: &mut catalog_contract::CatalogPublication, subjects: &[PublicationSubject]) {
+    for subject in subjects {
+        let candidate = subject.clone();
+        if !publication.metadata.subjects.contains(&candidate) {
+            publication.metadata.subjects.push(candidate);
+        }
+    }
+}
+
 pub(crate) fn is_synthetic_cover_key(value: &str) -> bool {
     value.starts_with(EPUB_COVER_KEY_PREFIX)
 }
@@ -285,7 +317,7 @@ pub(crate) struct ExtractedCatalogData {
 pub(crate) struct ExtractedCatalogMetadata {
     pub(crate) title: Option<String>,
     pub(crate) authors: Vec<CatalogAuthorCredit>,
-    pub(crate) languages: Vec<String>,
+    pub(crate) languages: Vec<LanguageTag>,
     pub(crate) description: Option<String>,
 }
 
@@ -371,10 +403,20 @@ pub(crate) fn extract_epub_catalog_metadata(path: &Path, extract_cover: bool) ->
     let inspected = book_metadata::inspect_epub(path).map_err(|error| error.to_string())?;
     let book = inspected.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
-    let authors = book.authors().map(|author| CatalogAuthorCredit { name: author.name().to_owned(), sort_name: author.sort_name().map(str::to_owned), identifiers: Vec::new(), provider_link: None }).collect();
-    let languages = book.publication.languages.iter().map(|language| language.as_str().to_owned()).collect();
+    let authors = book
+        .authors()
+        .map(|author| CatalogAuthorCredit {
+            name: author.name().to_owned(),
+            name_localizations: Vec::new(),
+            sort_name: author.sort_name().map(str::to_owned),
+            sort_name_localizations: Vec::new(),
+            identifiers: Vec::new(),
+            provider_link: None,
+        })
+        .collect();
+    let languages = book.publication.languages.clone();
     let description = bounded_embedded_text(&book.description, MAX_EMBEDDED_DESCRIPTION_BYTES, true);
-    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &PublicationIdentifierScheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect::<HashSet<_>>().into_iter().collect();
+    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect::<HashSet<_>>().into_iter().collect();
     let subjects = book.publication.subjects.clone();
     let metadata = ExtractedCatalogMetadata { title, authors, languages, description };
     let saved_metadata = Some(CatalogEpubMetadata { book, toc: inspected.toc });
@@ -392,8 +434,12 @@ pub(crate) fn extract_mobi_catalog_metadata(path: &Path, extract_cover: bool) ->
 
 pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCatalogMetadata, Vec<String>, Vec<PublicationSubject>) {
     let title = bounded_embedded_text(&mobi.title(), MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
-    let authors =
-        mobi.author().and_then(|author| bounded_embedded_text(&author, MAX_EMBEDDED_METADATA_TEXT_BYTES, false)).map(|name| CatalogAuthorCredit { name, sort_name: None, identifiers: Vec::new(), provider_link: None }).into_iter().collect();
+    let authors = mobi
+        .author()
+        .and_then(|author| bounded_embedded_text(&author, MAX_EMBEDDED_METADATA_TEXT_BYTES, false))
+        .map(|name| CatalogAuthorCredit { name, name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None })
+        .into_iter()
+        .collect();
     let description = mobi.description().and_then(|description| bounded_embedded_text(&description, MAX_EMBEDDED_DESCRIPTION_BYTES, true));
     let isbns = mobi.isbn().and_then(|isbn| canonical_isbn(&isbn)).into_iter().collect();
     let subjects = mobi
@@ -412,10 +458,20 @@ pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCata
 pub(crate) fn extract_pdf_catalog_metadata(path: &Path, extract_cover: bool) -> Result<ExtractedCatalogData, String> {
     let book = book_metadata::inspect_pdf(path).map_err(|error| error.to_string())?.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
-    let authors = book.authors().map(|author| CatalogAuthorCredit { name: author.name().to_owned(), sort_name: author.sort_name().map(str::to_owned), identifiers: Vec::new(), provider_link: None }).collect();
-    let languages = book.publication.languages.iter().map(|language| language.as_str().to_owned()).collect();
+    let authors = book
+        .authors()
+        .map(|author| CatalogAuthorCredit {
+            name: author.name().to_owned(),
+            name_localizations: Vec::new(),
+            sort_name: author.sort_name().map(str::to_owned),
+            sort_name_localizations: Vec::new(),
+            identifiers: Vec::new(),
+            provider_link: None,
+        })
+        .collect();
+    let languages = book.publication.languages.clone();
     let description = bounded_embedded_text(&book.description, MAX_EMBEDDED_DESCRIPTION_BYTES, true);
-    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &PublicationIdentifierScheme::Isbn).filter_map(PublicationIdentifier::canonical_value).collect::<HashSet<_>>().into_iter().collect();
+    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(Identifier::canonical_value).collect::<HashSet<_>>().into_iter().collect();
     let subjects = book.publication.subjects.clone();
     // PDF rasterization is not metadata extraction. It has a much larger and
     // less predictable native working set, so covers are handled only by the

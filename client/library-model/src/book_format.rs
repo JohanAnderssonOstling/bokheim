@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// File formats supported by the library's book workflows.
+/// Known persisted file formats, including legacy values retained for decoding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum BookFormat {
     Epub,
@@ -14,6 +14,9 @@ pub enum BookFormat {
 }
 
 impl BookFormat {
+    /// Parses every format that may already exist in a library or arrive from
+    /// an older synchronization peer. This is intentionally broader than the
+    /// formats accepted for new imports.
     pub fn from_extension(extension: &str) -> Option<Self> {
         match extension.to_ascii_lowercase().as_str() {
             "epub" => Some(Self::Epub),
@@ -25,6 +28,15 @@ impl BookFormat {
             "webpub" => Some(Self::WebPub),
             "m4b" => Some(Self::M4b),
             _ => None,
+        }
+    }
+
+    /// Parses formats accepted for a new user-initiated import.
+    pub fn from_import_extension(extension: &str) -> Option<Self> {
+        let format = Self::from_extension(extension)?;
+        match format {
+            Self::Epub | Self::Pdf | Self::Mobi | Self::M4b => Some(format),
+            Self::Fb2 | Self::Cbz | Self::Html | Self::WebPub => None,
         }
     }
 

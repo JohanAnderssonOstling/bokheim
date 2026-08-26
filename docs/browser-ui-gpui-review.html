@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A concept-level review of GPUI usage in browser-ui: architecture, entities, invalidation, events, async work, focus, and custom elements.">
+  <title>browser-ui — GPUI architecture review</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111311;
+      --surface: #181b18;
+      --surface-2: #202420;
+      --ink: #f2f0e9;
+      --muted: #aaa9a2;
+      --dim: #747871;
+      --line: #30352f;
+      --green: #aee86f;
+      --green-soft: rgba(174, 232, 111, .11);
+      --blue: #83cbd5;
+      --amber: #eab869;
+      --rose: #e58b9d;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --radius: 15px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 77% 3%, rgba(131, 203, 213, .08), transparent 31rem),
+        linear-gradient(90deg, rgba(255,255,255,.016) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,.016) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, 38px 38px, 38px 38px, auto;
+      font-family: var(--sans);
+      line-height: 1.62;
+    }
+
+    a { color: inherit; }
+    code { font-family: var(--mono); }
+    ::selection { color: #111; background: var(--green); }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 226px minmax(0, 820px);
+      gap: clamp(2rem, 6vw, 6rem);
+      width: min(1230px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 30px 0 100px;
+    }
+
+    aside {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
+      padding-right: 25px;
+      border-right: 1px solid var(--line);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      margin: 8px 0 38px;
+      font: 700 12px/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .brand-mark {
+      width: 25px;
+      height: 25px;
+      border: 1px solid var(--green);
+      border-radius: 8px;
+      box-shadow: inset 0 0 0 6px var(--green-soft);
+      transform: rotate(7deg);
+    }
+    nav { display: grid; gap: 4px; }
+    nav a {
+      position: relative;
+      padding: 8px 0 8px 17px;
+      color: var(--dim);
+      font: 500 12px/1.3 var(--mono);
+      text-decoration: none;
+      transition: color .16s ease;
+    }
+    nav a::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--line);
+      transform: translateY(-50%);
+    }
+    nav a:hover, nav a.active { color: var(--ink); }
+    nav a.active::before { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+    .progress { height: 2px; margin-top: auto; overflow: hidden; background: var(--line); }
+    .progress span { display: block; width: 0; height: 100%; background: var(--green); }
+    .aside-note { margin: 12px 0 0; color: var(--dim); font: 10.5px/1.5 var(--mono); }
+
+    main { min-width: 0; }
+    header { padding: clamp(58px, 10vw, 112px) 0 78px; }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 26px;
+      color: var(--green);
+      font: 600 11px/1 var(--mono);
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 35px; height: 1px; background: currentColor; }
+    h1 {
+      max-width: 780px;
+      margin: 0 0 28px;
+      font-size: clamp(3.1rem, 7vw, 6rem);
+      font-weight: 730;
+      letter-spacing: -.071em;
+      line-height: .93;
+    }
+    .lede { max-width: 720px; margin: 0; color: #c5c2bb; font-size: clamp(1.08rem, 2vw, 1.28rem); }
+    .verdict {
+      display: grid;
+      grid-template-columns: 135px 1fr;
+      gap: 24px;
+      align-items: center;
+      margin-top: 46px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(24, 27, 24, .78);
+    }
+    .score { color: var(--green); font: 720 3rem/1 var(--mono); letter-spacing: -.08em; }
+    .score small { color: var(--dim); font-size: 1rem; letter-spacing: 0; }
+    .verdict p { margin: 0; }
+
+    section { scroll-margin-top: 30px; padding: 67px 0; border-top: 1px solid var(--line); }
+    .kicker { color: var(--green); font: 600 10.5px/1 var(--mono); letter-spacing: .15em; text-transform: uppercase; }
+    h2 { margin: 13px 0 18px; font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -.047em; line-height: 1.05; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    p { margin: 0 0 18px; color: var(--muted); }
+    p strong { color: var(--ink); }
+    .compact { max-width: 720px; }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 30px 0; }
+    .metric { padding: 17px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+    .metric b { display: block; margin-bottom: 8px; color: var(--green); font: 650 11px/1.2 var(--mono); text-transform: uppercase; }
+    .metric span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+    .flow { display: grid; gap: 9px; margin: 30px 0; }
+    .flow-row { display: grid; grid-template-columns: 160px 30px 1fr; align-items: center; gap: 10px; }
+    .flow-label, .flow-body { padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+    .flow-label { color: var(--blue); font: 620 12px/1.3 var(--mono); }
+    .flow-body { color: var(--muted); font-size: 13px; }
+    .arrow { color: var(--dim); text-align: center; font: 18px/1 var(--mono); }
+
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 28px 0; }
+    .card { padding: 21px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, var(--surface-2), var(--surface)); }
+    .card h3 { color: var(--ink); }
+    .card p { margin: 0; font-size: 13px; }
+    .tag { display: inline-block; margin-bottom: 13px; padding: 5px 8px; border-radius: 999px; color: var(--green); background: var(--green-soft); font: 600 10px/1 var(--mono); text-transform: uppercase; }
+    .tag.blue { color: var(--blue); background: rgba(131, 203, 213, .1); }
+    .tag.amber { color: var(--amber); background: rgba(234, 184, 105, .1); }
+    .tag.rose { color: var(--rose); background: rgba(229, 139, 157, .1); }
+
+    .callout { margin: 27px 0; padding: 18px 20px; border-left: 2px solid var(--green); background: var(--green-soft); color: #d9e8ca; font-size: 14px; }
+    .callout.amber { border-color: var(--amber); background: rgba(234, 184, 105, .08); color: #e7d5b8; }
+    .callout code { color: var(--green); }
+
+    table { width: 100%; margin: 28px 0; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 14px 15px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--dim); background: var(--surface); font: 600 10.5px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    td { color: var(--muted); }
+    td:first-child { color: var(--ink); font-family: var(--mono); white-space: nowrap; }
+
+    .code-card { margin: 26px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: #0c0e0c; }
+    .code-head { display: flex; justify-content: space-between; padding: 12px 15px; border-bottom: 1px solid var(--line); color: var(--dim); font: 10.5px/1 var(--mono); }
+    pre { margin: 0; padding: 19px; overflow: auto; color: #d7d8d2; font: 12px/1.65 var(--mono); tab-size: 4; }
+    .good { color: var(--green); } .warn { color: var(--amber); } .type { color: var(--blue); } .comment { color: #687069; }
+
+    .roadmap { counter-reset: item; display: grid; gap: 12px; margin: 30px 0; }
+    .step { position: relative; padding: 20px 20px 20px 68px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .step::before { counter-increment: item; content: counter(item); position: absolute; left: 20px; top: 20px; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--green); border-radius: 50%; color: var(--green); font: 650 11px/1 var(--mono); }
+    .step h3 { font-size: 14px; }
+    .step p { margin: 5px 0 0; font-size: 13px; }
+
+    .checklist { display: grid; gap: 1px; margin: 28px 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--line); }
+    .check { display: grid; grid-template-columns: 28px 1fr; gap: 12px; padding: 14px 17px; background: var(--surface); }
+    .check span:first-child { color: var(--green); font: 700 14px/1.5 var(--mono); }
+    .check b { display: block; margin-bottom: 2px; font-size: 13px; }
+    .check small { color: var(--muted); font-size: 12px; }
+
+    footer { padding-top: 50px; color: var(--dim); font: 11px/1.6 var(--mono); border-top: 1px solid var(--line); }
+
+    @media (max-width: 850px) {
+      .shell { display: block; width: min(100% - 34px, 760px); }
+      aside { display: none; }
+      header { padding-top: 70px; }
+    }
+    @media (max-width: 610px) {
+      .verdict { grid-template-columns: 1fr; gap: 12px; }
+      .metrics, .grid { grid-template-columns: 1fr; }
+      .flow-row { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+      table { display: block; overflow-x: auto; }
+      h1 { font-size: 3rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><span class="brand-mark"></span>GPUI review</div>
+      <nav aria-label="Report sections">
+        <a href="#summary">Summary</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#entities">Entities & widgets</a>
+        <a href="#invalidation">Invalidation</a>
+        <a href="#events">Events & async</a>
+        <a href="#focus">Focus & input</a>
+        <a href="#elements">Custom elements</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="#checklist">Checklist</a>
+      </nav>
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <p class="aside-note">Static review · current working tree<br>browser-ui / GPUI-Fork</p>
+    </aside>
+
+    <main>
+      <header id="summary">
+        <div class="eyebrow">Architecture review · August 2026</div>
+        <h1>Good GPUI instincts, with a few retained-UI habits.</h1>
+        <p class="lede">The browser UI already treats state, events, rendering and background work as separate concerns. Its strongest ideas are architectural rather than cosmetic. The next step is to trust GPUI’s entity boundaries more fully and make rendering consistently free of state transitions.</p>
+        <div class="verdict">
+          <div class="score">8<small>/10</small></div>
+          <p><strong>Overall:</strong> structurally idiomatic and thoughtfully designed. Most opportunities are simplification and performance work—not a need to reorganize the application from scratch.</p>
+        </div>
+      </header>
+
+      <section aria-labelledby="overview-title">
+        <span class="kicker">At a glance</span>
+        <h2 id="overview-title">The code has a coherent design language.</h2>
+        <div class="metrics">
+          <div class="metric"><b>Ownership</b><span>Strong and explicit at root, page and widget levels.</span></div>
+          <div class="metric"><b>Entities</b><span>Used for durable state and independent invalidation.</span></div>
+          <div class="metric"><b>Async</b><span>Usually scoped, replaceable and protected from stale results.</span></div>
+          <div class="metric"><b>Rendering</b><span>Clear composition, but not always completely pure.</span></div>
+        </div>
+        <div class="callout">The important success is that <strong>backend state is not pretending to be UI state</strong>. Services remain plain capabilities, while state that must participate in GPUI’s reactive graph lives in entities.</div>
+      </section>
+
+      <section id="architecture" aria-labelledby="architecture-title">
+        <span class="kicker">01 · Architecture</span>
+        <h2 id="architecture-title">Ownership follows the lifetime of the interface.</h2>
+        <p class="compact"><code>BrowserRoot</code> owns window-wide state and routing. Pages own interaction state. Reusable widgets own only the state they need to update independently. Backend operations sit behind capability objects rather than leaking through the render tree.</p>
+
+        <div class="flow" aria-label="browser-ui ownership flow">
+          <div class="flow-row"><div class="flow-label">BrowserRoot</div><div class="arrow">→</div><div class="flow-body">Window lifetime, current route, selected library, preferences, navigation and top-level tasks.</div></div>
+          <div class="flow-row"><div class="flow-label">LibraryContext</div><div class="arrow">→</div><div class="flow-body">A plain, cloneable capability scoped to one library: operations, contracts and typed update access.</div></div>
+          <div class="flow-row"><div class="flow-label">Page entities</div><div class="arrow">→</div><div class="flow-body">Loading, error, filters, selection, navigation path and page-specific subscriptions.</div></div>
+          <div class="flow-row"><div class="flow-label">Widget entities</div><div class="arrow">→</div><div class="flow-body">Covers, paginator state, inputs and independently changing rows.</div></div>
+        </div>
+
+        <div class="grid">
+          <article class="card"><span class="tag">Idiomatic</span><h3>Heterogeneous pages through <code>AnyView</code></h3><p>The root can switch between unrelated page types without inventing a universal page enum containing every page’s state.</p></article>
+          <article class="card"><span class="tag">Idiomatic</span><h3>Backend truth remains authoritative</h3><p>Metadata lanes emit a semantic change event and the parent rebuilds from backend truth instead of manually moving state between siblings.</p></article>
+          <article class="card"><span class="tag blue">Good boundary</span><h3>Update bridge</h3><p>A receiver-owning entity translates backend messages into typed GPUI events. This prevents transport details from spreading across pages.</p></article>
+          <article class="card"><span class="tag amber">Tradeoff</span><h3>Route entities are recreated</h3><p>This keeps ownership simple but discards page-local search and scroll state. Cache routes only if preserving that state is a product requirement.</p></article>
+        </div>
+      </section>
+
+      <section id="entities" aria-labelledby="entities-title">
+        <span class="kicker">02 · Entities and widgets</span>
+        <h2 id="entities-title">Entity use is selective rather than contagious.</h2>
+        <p class="compact">You generally create an entity when something has identity, mutable state, subscriptions or independent invalidation. Plain values remain plain. That is the right default.</p>
+
+        <table>
+          <thead><tr><th>Tool</th><th>Best use</th><th>How browser-ui uses it</th></tr></thead>
+          <tbody>
+            <tr><td>Entity&lt;T&gt;</td><td>Durable state with identity, events or an independent repaint boundary.</td><td>Pages, navigation, preferences, covers, inputs and paginator state.</td></tr>
+            <tr><td>Plain struct</td><td>Capabilities, immutable configuration or state owned entirely by another entity.</td><td><code>LibraryContext</code>, service bundles, policies and presentation records.</td></tr>
+            <tr><td>RenderOnce</td><td>A stateless widget with named props and a coherent visual role.</td><td>Currently underused; many helper functions fill this role informally.</td></tr>
+            <tr><td>Element</td><td>Low-level measurement, placement, hit testing or painting not expressible through normal composition.</td><td>The paginator—an appropriate and well-contained use.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout amber"><strong>Do not make everything an entity.</strong> The opportunity is not more entities; it is clearer distinction between stateless widgets and helper functions. Small visual units with meaningful props can become <code>RenderOnce</code> components, while one-line layout helpers should remain functions.</div>
+
+        <div class="code-card">
+          <div class="code-head"><span>Decision rule</span><span>conceptual</span></div>
+          <pre><span class="comment">// Does it have durable mutable state or independent invalidation?</span>
+yes  → <span class="type">Entity&lt;T: Render&gt;</span>
+no   → does it represent a named reusable widget?
+       yes → <span class="type">RenderOnce</span>
+       no  → plain value or element-building function</pre>
+        </div>
+      </section>
+
+      <section id="invalidation" aria-labelledby="invalidation-title">
+        <span class="kicker">03 · Invalidation</span>
+        <h2 id="invalidation-title">Correct, but sometimes more explicit than necessary.</h2>
+        <p class="compact">State-changing methods normally call <code>cx.notify()</code>, avoid notifying on no-op changes, and use typed events when a state notification would not express enough intent. Those are solid habits.</p>
+
+        <div class="grid">
+          <article class="card"><span class="tag">Keep</span><h3>No-op guards</h3><p>Comparing routes, library lists and open/closed state before notifying reduces meaningless work and documents the mutation contract.</p></article>
+          <article class="card"><span class="tag">Keep</span><h3>Fine-grained cover entities</h3><p>A cover can settle and invalidate independently without forcing the entire page’s data model into one entity.</p></article>
+          <article class="card"><span class="tag rose">Simplify</span><h3>Parent observers for rendered children</h3><p>In GPUI-Fork, an embedded entity already participates in the rendered view graph. Explicitly observing it only to notify its visual parent is usually redundant.</p></article>
+          <article class="card"><span class="tag amber">Optimize selectively</span><h3>Cached entity views</h3><p>For a definite-size subtree such as the full-size paginator viewport, <code>Entity::cached</code> can prevent unrelated parent invalidations from rebuilding the child tree.</p></article>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>Notification ownership</span><span>preferred pattern</span></div>
+          <pre><span class="comment">// The method that mutates state owns invalidation.</span>
+<span class="good">fn set_filter(&amp;mut self, value, cx: &amp;mut Context&lt;Self&gt;) {</span>
+    if self.filter == value { return; }
+    self.filter = value;
+    self.reload(cx); <span class="comment">// reload owns its visible state notifications</span>
+}
+
+<span class="comment">// Forwarders should not add “just in case” notify calls.</span></pre>
+        </div>
+        <p><strong>Useful rule:</strong> use <code>observe/notify</code> for state dependency, and <code>subscribe/emit</code> for a meaningful occurrence. You already follow this well in navigation, library updates and metadata review.</p>
+      </section>
+
+      <section id="events" aria-labelledby="events-title">
+        <span class="kicker">04 · Events and asynchronous work</span>
+        <h2 id="events-title">Async ownership is one of the strongest parts.</h2>
+        <p class="compact">Most work is created from an entity context, captures the entity weakly, and updates state only if the entity still exists. Replaceable requests use both task cancellation and generation checks, protecting against stale completion.</p>
+
+        <div class="grid">
+          <article class="card"><span class="tag">Excellent</span><h3><code>LatestRequest</code></h3><p>One small type captures a recurring UI invariant: cancel the old task and reject any completion from an earlier generation.</p></article>
+          <article class="card"><span class="tag">Excellent</span><h3>Typed bridge events</h3><p>Library contents and cover changes are semantic events, not raw channel payloads leaking into every view.</p></article>
+          <article class="card"><span class="tag blue">Good</span><h3>Stored long-running tasks</h3><p>The root and update bridge retain receiver loops for exactly as long as their owning entity lives.</p></article>
+          <article class="card"><span class="tag rose">Improve</span><h3>Detached user mutations</h3><p>Restore, purge and folder-selection operations are memory-safe, but detached tasks without busy state allow duplicate user actions and hide operation lifetime.</p></article>
+        </div>
+
+        <div class="callout">Detaching is appropriate for a short one-shot effect whose result no longer matters to the initiating view. If the UI displays progress, disables controls, permits retry, or must reject duplicates, the task belongs in entity state.</div>
+      </section>
+
+      <section id="focus" aria-labelledby="focus-title">
+        <span class="kicker">05 · Focus and input</span>
+        <h2 id="focus-title">The mechanisms are right; ownership can be more deliberate.</h2>
+        <p class="compact">The application uses focus handles, key contexts, typed actions and input entities. The inconsistency is that browse pagination falls back to raw key-string handling and its page focus is not clearly activated when the route becomes current.</p>
+
+        <table>
+          <thead><tr><th>Concern</th><th>Current direction</th><th>More idiomatic direction</th></tr></thead>
+          <tbody>
+            <tr><td>Commands</td><td>Actions for application and list commands; raw events for paginator arrows.</td><td>Use actions consistently so keys are scoped, remappable and testable.</td></tr>
+            <tr><td>Focus</td><td>Root initially owns focus; search explicitly transfers it.</td><td>Give the active page focus on route activation and restore page focus after transient controls close.</td></tr>
+            <tr><td>Text input</td><td>An input entity plus a stored subscription and suppression for programmatic clearing.</td><td>Keep this pattern; initialize the field on construction or when search opens, not during render.</td></tr>
+            <tr><td>Propagation</td><td>Manual stopping when an arrow or Escape is handled.</td><td>Actions and key contexts make ownership visible before propagation logic is needed.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="elements" aria-labelledby="elements-title">
+        <span class="kicker">06 · Rendering and custom elements</span>
+        <h2 id="elements-title">The paginator deserves to be a custom element.</h2>
+        <p class="compact">It performs intrinsic measurement, chooses geometry, positions children and controls prepaint readiness. Trying to express that purely as nested <code>div</code>s would conceal the real algorithm rather than simplify it.</p>
+
+        <div class="grid">
+          <article class="card"><span class="tag">Strong</span><h3>Pure geometry module</h3><p>Column and row assignment can be reasoned about independently of GPUI state and painting.</p></article>
+          <article class="card"><span class="tag">Strong</span><h3>Deferred state mutation</h3><p>Measurements discovered during prepaint are committed through deferred updates instead of mutating paginator state in the middle of layout.</p></article>
+          <article class="card"><span class="tag">Strong</span><h3>Stable identity</h3><p>Element IDs include semantic identity and revision, protecting element-local state as data changes.</p></article>
+          <article class="card"><span class="tag rose">Main cost</span><h3>Rendering during candidate search</h3><p>Intrinsic comparison constructs and lays out child trees for candidate widths, then constructs selected children again.</p></article>
+        </div>
+
+        <p>The main conceptual correction is to make <strong>rendering observational</strong>. A render pass may occur for measurement, inspection, a parent update or a candidate that is never painted. Starting a cover load inside <code>Render</code> therefore gives layout an unintended behavioral side effect.</p>
+
+        <div class="code-card">
+          <div class="code-head"><span>Pure rendering boundary</span><span>conceptual</span></div>
+          <pre><span class="warn">Avoid:</span> Render → start task → return element
+
+<span class="good">Prefer:</span> explicit prepare/visibility event → start task
+        Render → describe current state only
+        task completion → mutate state + notify</pre>
+        </div>
+
+        <div class="callout amber">A low-priority inspector improvement: custom elements should preserve a caller source location rather than returning none. It makes the visual inspector and debug attribution more useful without changing runtime behavior.</div>
+      </section>
+
+      <section id="roadmap" aria-labelledby="roadmap-title">
+        <span class="kicker">07 · Recommended path</span>
+        <h2 id="roadmap-title">Improve by subtraction first.</h2>
+        <div class="roadmap">
+          <article class="step"><h3>Make every <code>Render</code> implementation observational</h3><p>Move lazy construction and loading to constructors, explicit preparation callbacks, visibility hooks or user actions.</p></article>
+          <article class="step"><h3>Remove redundant parent-notify observers</h3><p>Trust rendered entity boundaries in GPUI-Fork. Retain explicit observation only where an entity is read but not embedded, or where nonvisual logic depends on it.</p></article>
+          <article class="step"><h3>Unify keyboard behavior under actions</h3><p>Give browse pages their own key context, define semantic paginator/search actions and focus the active route deliberately.</p></article>
+          <article class="step"><h3>Reduce paginator measurement work</h3><p>Use declared sizing for candidate ranking where possible; otherwise persist an intrinsic measurement cache across compatible layouts.</p></article>
+          <article class="step"><h3>Own user-visible operations</h3><p>Store tasks and busy state for destructive or repeatable commands. Detach only effects whose lifecycle is genuinely irrelevant to the UI.</p></article>
+          <article class="step"><h3>Introduce <code>RenderOnce</code> selectively</h3><p>Promote repeated, named visual ideas—not arbitrary layout fragments—into stateless components with explicit props.</p></article>
+        </div>
+      </section>
+
+      <section id="checklist" aria-labelledby="checklist-title">
+        <span class="kicker">08 · Working checklist</span>
+        <h2 id="checklist-title">A compact standard for future browser-ui work.</h2>
+        <div class="checklist">
+          <div class="check"><span>✓</span><div><b>State lives at the narrowest durable owner.</b><small>Root for window state, page for interaction state, widget entity for independent behavior.</small></div></div>
+          <div class="check"><span>✓</span><div><b><code>Render</code> describes; it does not initiate.</b><small>No task creation, entity creation or state transitions caused merely by being measured.</small></div></div>
+          <div class="check"><span>✓</span><div><b>One mutation path owns <code>notify</code>.</b><small>Forwarders and subscriptions do not add speculative invalidation.</small></div></div>
+          <div class="check"><span>✓</span><div><b>Events express occurrences; observation expresses dependency.</b><small>Use typed events when the meaning matters beyond “this entity changed.”</small></div></div>
+          <div class="check"><span>✓</span><div><b>Async tasks have an intentional lifetime.</b><small>Store, replace, gate or detach based on what the user can still observe or repeat.</small></div></div>
+          <div class="check"><span>✓</span><div><b>Focus follows active interaction ownership.</b><small>Route activation, modal opening and dismissal all transfer or restore focus explicitly.</small></div></div>
+          <div class="check"><span>✓</span><div><b>Custom elements are algorithms, not styling shortcuts.</b><small>Keep geometry pure and GPUI layout/paint integration contained.</small></div></div>
+          <div class="check"><span>✓</span><div><b>Optimize entity boundaries with evidence.</b><small>Use cached views only with definite sizes and where unrelated parent renders are material.</small></div></div>
+        </div>
+      </section>
+
+      <footer>
+        Scope: <code>apps/ui/gpui/browser</code>, reviewed against the local <code>GPUI-Fork</code> entity/view model.<br>
+        This is a static architectural review of the current working tree. It intentionally does not catalogue components or mechanical child-building APIs.
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    const links = [...document.querySelectorAll('nav a')];
+    const sections = links.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+    const progress = document.querySelector('.progress span');
+
+    const update = () => {
+      const y = window.scrollY + Math.min(180, window.innerHeight * .3);
+      let active = sections[0];
+      for (const section of sections) if (section.offsetTop <= y) active = section;
+      links.forEach(link => link.classList.toggle('active', link.getAttribute('href') === `#${active.id}`));
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      progress.style.width = `${max > 0 ? Math.min(100, window.scrollY / max * 100) : 100}%`;
+    };
+    addEventListener('scroll', update, { passive: true });
+    addEventListener('resize', update);
+    update();
+  </script>
+</body>
+</html>

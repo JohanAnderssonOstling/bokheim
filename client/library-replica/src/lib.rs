@@ -87,6 +87,36 @@ pub fn coalesce_mutations_for_push(mutations: Vec<StateMutation>) -> Vec<StateMu
     reduce_same_replica_mutations(&mutations).into_iter().cloned().collect()
 }
 
+/// Holds reading-position registers until their quiet period expires while
+/// allowing unrelated state cells to synchronize immediately.
+pub fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce: Option<std::time::Duration>, now: std::time::SystemTime) -> Result<(Vec<StateMutation>, Option<std::time::Duration>), Box<dyn std::error::Error>> {
+    let Some(reading_debounce) = reading_debounce else {
+        return Ok((mutations, None));
+    };
+    let latest_reading_change = mutations.iter().filter(|mutation| matches!(mutation.body, MutationBody::ReadingPosition { .. })).map(|mutation| mutation.changed_at).max();
+    let Some(latest_reading_change) = latest_reading_change else {
+        return Ok((mutations, None));
+    };
+    let now_millis = u64::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
+    if latest_reading_change > now_millis.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "local reading-position timestamp is pathologically far in the future").into());
+    }
+    let debounce_millis = u64::try_from(reading_debounce.as_millis())?;
+    let ready_at = latest_reading_change.saturating_add(debounce_millis);
+    if ready_at <= now_millis {
+        return Ok((mutations, None));
+    }
+    mutations.retain(|mutation| !matches!(mutation.body, MutationBody::ReadingPosition { .. }));
+    Ok((mutations, Some(std::time::Duration::from_millis(ready_at - now_millis))))
+}
+
+/// Encodes replica-domain mutations and partitions them into bounded protocol
+/// pages while retaining oversized mutation identities for diagnostics.
+pub fn prepare_push(changes: Vec<StateMutation>) -> Result<sync_common::PushBatcher, Box<dyn std::error::Error>> {
+    let mutations = changes.into_iter().map(|mutation| mutation.to_wire()).collect::<Result<Vec<_>, _>>()?;
+    Ok(sync_common::PushBatcher::new(mutations)?)
+}
+
 fn same_replica_candidate_wins(current: &StateMutation, candidate: &StateMutation) -> bool {
     candidate.body.state_key() == current.body.state_key()
         && (candidate.changed_at, candidate.body.conflict_rank(), candidate.replica_seq, candidate.mutation_id) > (current.changed_at, current.body.conflict_rank(), current.replica_seq, current.mutation_id)
@@ -230,7 +260,7 @@ impl StateMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use library_model::{AnnotationAnchor, AnnotationStyle, BookFormat, ReadingPosition};
+    use library_model::{AnnotationAnchor, AnnotationStyle, BookFormat, Collection, CollectionKind, LocalizedText, PublicationSubject, ReadingPosition};
 
     fn content_hash(character: char) -> ContentHash {
         ContentHash::new(&character.to_string().repeat(64))
@@ -241,7 +271,24 @@ mod tests {
     }
 
     fn metadata() -> BookMetadataState {
-        BookMetadataState { title: "Book".to_owned(), contributors: Vec::new(), description: String::new(), publication: Default::default() }
+        let collection = Collection::with_details(
+            "The Earthsea Cycle",
+            vec![LocalizedText::new("sv", "Övärlden").unwrap()],
+            Some("Earthsea Cycle, The".to_owned()),
+            Vec::new(),
+            vec!["urn:series:earthsea".to_owned()],
+            Some(CollectionKind::Series),
+            Some("2".to_owned()),
+            "test:collection",
+        )
+        .unwrap();
+        let mut publication = library_model::PublicationMetadata::default();
+        publication.collections.push(collection);
+        publication.subjects.push(
+            PublicationSubject::with_details(None, "Historiska romaner", vec![LocalizedText::new("en", "Historical fiction").unwrap()], Some("Romaner, historiska".to_owned()), Vec::new(), "test:subject", Some("saogf".to_owned()), None)
+                .unwrap(),
+        );
+        BookMetadataState { title: "Book".to_owned(), contributors: Vec::new(), description: String::new(), publication }
     }
 
     #[test]

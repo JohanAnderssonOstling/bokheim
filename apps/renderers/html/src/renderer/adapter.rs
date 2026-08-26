@@ -8,8 +8,20 @@ use floem::action::exec_after;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, create_rw_signal};
 
 use super::boundary::{RendererCommand, RendererEvent, RendererHost};
+use html_view_core::{BlockingJob, BlockingJobSpawner};
 
 type EventCallback = Rc<dyn Fn(RendererEvent)>;
+
+struct FloemBlockingJobSpawner;
+
+impl BlockingJobSpawner for FloemBlockingJobSpawner {
+    fn spawn(&self, job: BlockingJob) {
+        #[cfg(not(target_family = "wasm"))]
+        rayon::spawn(job);
+        #[cfg(target_family = "wasm")]
+        job();
+    }
+}
 
 pub struct RendererHandle {
     id: ViewId,
@@ -80,6 +92,10 @@ impl RendererHost for FloemAdapter {
     fn schedule_repaint(&self, delay: Duration) {
         let id = self.id;
         exec_after(delay, move |_| id.request_paint());
+    }
+
+    fn blocking_job_spawner(&self) -> std::sync::Arc<dyn BlockingJobSpawner> {
+        std::sync::Arc::new(FloemBlockingJobSpawner)
     }
 
     fn resource_waker(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {

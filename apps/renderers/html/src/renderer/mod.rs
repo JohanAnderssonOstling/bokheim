@@ -61,7 +61,11 @@ impl HTMLRenderer {
     pub fn from_source_path_with_nav(path: PathBuf, nav_state: Option<&str>) -> Self {
         let adapter = adapter::FloemAdapter::new();
         let host: Rc<dyn RendererHost> = adapter.clone();
-        let source = html_publication::PublicationSource::from_path(path).expect("failed to open HTML publication");
+        let format = match path.extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("mobi" | "azw" | "azw3") => html_publication::PublicationFormat::Mobi,
+            _ => html_publication::PublicationFormat::Epub,
+        };
+        let source = html_publication::PublicationSource::from_path(format, path).expect("failed to open publication");
         let (provider, document_uris, start_index) = source.into_parts();
         let renderer = RendererSession::from_provider_with_nav(host, GlyphCache::new(), provider, document_uris, start_index, nav_state, Default::default());
         Self::from_renderer(adapter, renderer)

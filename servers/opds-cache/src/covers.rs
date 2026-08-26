@@ -1,5 +1,9 @@
-use super::{publication_cover_fallback, publication_metadata_acquisition, CatalogPage, CatalogService, CatalogServiceError, CatalogSourceId, BROWSER_UPSTREAM_TIMEOUT};
+use super::{
+    publication_cover_fallback, publication_metadata_acquisition, CatalogPage, CatalogProcess, CatalogService, CatalogServiceError, CatalogSourceId, BROWSER_UPSTREAM_TIMEOUT, COVER_RECONCILIATION_BATCH, EPUB_EXTRACTION_SWEEP_INTERVAL,
+};
 use crate::extraction::{generate_publication_thumbnail, is_synthetic_cover_key};
+use catalog_contract::{CatalogPublicationPayload, CatalogSubjectBrowseEntryPayload};
+use futures_util::future::join_all;
 impl CatalogService {
     pub(crate) async fn remember_browser_covers(&self, source_id: &CatalogSourceId, page: &CatalogPage) {
         let publications = page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).collect::<Vec<_>>();
@@ -9,8 +13,60 @@ impl CatalogService {
                 recent.remember(source_id, publication);
             }
         }
-        let urls = publications.into_iter().filter_map(|publication| publication.image_url.clone()).collect::<Vec<_>>();
-        self.state.cover_pipeline.enqueue(source_id.clone(), urls.into_iter().filter(|url| !is_synthetic_cover_key(url))).await;
+    }
+
+    pub(crate) async fn reconcile_active_cover_downloads(&self) -> Result<(), CatalogServiceError> {
+        loop {
+            let more = self.cache_write_call_named("cover_reconcile", move |cache| cache.reconcile_active_cover_downloads_batch(COVER_RECONCILIATION_BATCH)).await?;
+            if !more {
+                self.wake_process(CatalogProcess::CoverDownloads);
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub async fn run_cover_download_loop(self) {
+        loop {
+            if !self.process_enabled(CatalogProcess::CoverDownloads) {
+                self.set_process_running(CatalogProcess::CoverDownloads, false);
+                self.wait_for_process_wake(CatalogProcess::CoverDownloads).await;
+                continue;
+            }
+            self.set_process_running(CatalogProcess::CoverDownloads, true);
+            self.resume_pending_cover_downloads().await;
+            self.set_process_running(CatalogProcess::CoverDownloads, false);
+            tokio::select! {
+                _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
+                _ = self.wait_for_process_wake(CatalogProcess::CoverDownloads) => {}
+            }
+        }
+    }
+
+    pub(crate) async fn resume_pending_cover_downloads(&self) {
+        if let Err(error) = self.reconcile_active_cover_downloads().await {
+            tracing::warn!(%error, "could not reconcile the durable cover download queue");
+        }
+        while self.process_enabled(CatalogProcess::CoverDownloads) {
+            let job = match self.cache_write_call_named("cover_claim", |cache| cache.claim_next_cover_download()).await {
+                Ok(Some(job)) => job,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "could not claim a cover download");
+                    break;
+                }
+            };
+            self.download_queued_cover(job).await;
+        }
+    }
+
+    async fn download_queued_cover(&self, job: super::CatalogCoverDownloadJob) {
+        self.state.covers.remember_cover_url(&job.source_id, &job.image_url);
+        let outcome_error = self.state.covers.cover(&job.source_id, &job.image_url).await.err().map(|error| error.to_string());
+        let cache_job = job.clone();
+        if let Err(error) = self.cache_write_call_named("cover_finish", move |cache| cache.finish_cover_download(&cache_job, outcome_error.as_deref().map_or(Ok(()), Err))).await {
+            tracing::warn!(source = job.source_id.as_str(), edition = job.publication.edition_id, %error, "could not persist cover download outcome");
+        }
     }
 
     pub(crate) async fn prepare_publication_cover_fallbacks(&self, source_id: &CatalogSourceId, page: &mut CatalogPage) {
@@ -18,7 +74,55 @@ impl CatalogService {
             let _ = publication_cover_fallback(source_id, publication);
         }
     }
+
+    pub(crate) async fn publicize_page_covers(&self, page: &mut CatalogPage) {
+        let image_urls = page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).map(|publication| publication.image_url.clone()).collect::<Vec<_>>();
+        let references = self.public_cover_references(&image_urls).await;
+        for (publication, reference) in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())).zip(references) {
+            if let Some(reference) = reference {
+                publication.image_url = Some(reference);
+            }
+        }
+    }
+
+    pub(crate) async fn publicize_payload_covers(&self, payloads: &mut [CatalogPublicationPayload]) {
+        let image_urls = payloads.iter().map(|payload| payload.publication.image_url.clone()).collect::<Vec<_>>();
+        let references = self.public_cover_references(&image_urls).await;
+        for (payload, reference) in payloads.iter_mut().zip(references) {
+            if let Some(reference) = reference {
+                payload.publication.image_url = Some(reference);
+            }
+        }
+    }
+
+    pub(crate) async fn publicize_subject_covers(&self, payloads: &mut [CatalogSubjectBrowseEntryPayload]) {
+        let image_urls = payloads.iter().map(|payload| payload.publication.publication.image_url.clone()).collect::<Vec<_>>();
+        let references = self.public_cover_references(&image_urls).await;
+        for (payload, reference) in payloads.iter_mut().zip(references) {
+            if let Some(reference) = reference {
+                payload.publication.publication.image_url = Some(reference);
+            }
+        }
+    }
+
+    async fn public_cover_references(&self, image_urls: &[Option<String>]) -> Vec<Option<String>> {
+        join_all(image_urls.iter().map(|image_url| async {
+            match image_url {
+                Some(image_url) => self.state.covers.public_cover_reference(image_url).await,
+                None => None,
+            }
+        }))
+        .await
+    }
+
+    pub async fn catalog_cover_asset(&self, digest: &str) -> Result<Vec<u8>, CatalogServiceError> {
+        self.state.covers.cached_cover_asset(digest).await.map_err(|error| CatalogServiceError(error.to_string()))
+    }
+
     pub async fn catalog_cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogServiceError> {
+        if let Some(digest) = catalog_core::catalog_cover_asset_digest(image_url) {
+            return self.catalog_cover_asset(digest).await;
+        }
         self.public_endpoint(source_id).await?;
         let cache_source = source_id.clone();
         let cache_image = image_url.to_owned();
@@ -52,7 +156,7 @@ impl CatalogService {
             // EPUB fallback. Whichever task claims the extraction downloads
             // the EPUB once; the other waits for the generated JPEG instead of
             // issuing a competing acquisition request.
-            if let Some(identity) = publication_identity.as_ref() {
+            if let Some(identity) = publication_identity.as_ref().filter(|_| self.process_enabled(CatalogProcess::EpubEnrichment)) {
                 let cache_source = source_id.clone();
                 let cache_url = acquisition.url.clone();
                 self.cache_write_call(move |cache| cache.queue_epub_extractions(&cache_source, std::slice::from_ref(&cache_url), false)).await?;

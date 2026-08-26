@@ -16,7 +16,7 @@ use crate::preferences::{ApplicationPalette, ApplicationTheme, ResolvedAppearanc
 
 /// Matches `ui-components`' scale. Kept here so one file describes the whole
 /// token set to both frontends.
-const SPACING: [(&str, u16); 6] = [("xxs", 2), ("xs", 5), ("sm", 9), ("md", 14), ("lg", 18), ("xl", 28)];
+const SPACING: [(&str, u16); 4] = [("xxs", 2), ("xs", 4), ("sm", 8), ("md", 16)];
 const RADIUS: [(&str, u16); 3] = [("sm", 8), ("md", 11), ("lg", 16)];
 const TYPOGRAPHY: [(&str, u16); 6] = [("text_xs", 12), ("text_sm", 13), ("text_md", 15), ("text_lg", 17), ("title_md", 21), ("title_lg", 28)];
 
@@ -84,7 +84,8 @@ pub fn render() -> String {
     let _ = writeln!(out, "  \"typography\": {{ {} }},", group(&TYPOGRAPHY));
     let _ = writeln!(out, "  \"themes\": {{");
     let _ = writeln!(out, "    \"library_serif\": {},", theme_json(ApplicationTheme::LibrarySerif));
-    let _ = writeln!(out, "    \"greco_futuristic\": {}", theme_json(ApplicationTheme::GrecoFuturistic));
+    let _ = writeln!(out, "    \"greco_futuristic\": {},", theme_json(ApplicationTheme::GrecoFuturistic));
+    let _ = writeln!(out, "    \"classic_white\": {}", theme_json(ApplicationTheme::ClassicWhite));
     let _ = writeln!(out, "  }},");
     let _ = writeln!(out, "  \"font_families\": {{");
     let _ = writeln!(out, "    \"publisher\": \"\",");

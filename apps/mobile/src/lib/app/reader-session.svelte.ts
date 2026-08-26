@@ -261,13 +261,9 @@ class ReaderSession {
         fullPagePosition: number,
         _progress: number,
       ) => {
-        await measureInvoke("update_pdf_reading_position", () =>
-          commands.updatePdfReadingPosition(
-            libraryId,
-            bookId,
-            pageIndex,
-            fullPagePosition,
-          ),
+        const position = `pdfpage(${Math.max(0, Math.floor(pageIndex))},${Math.max(0, fullPagePosition)})`;
+        await measureInvoke("update_reading_position", () =>
+          commands.updateReadingPosition(libraryId, bookId, position, null),
         );
       },
     };

@@ -82,7 +82,12 @@
     if (index === storedPage) return;
     storedPage = index;
     try {
-      await commands.updatePdfReadingPosition(libraryId, bookId, index, null);
+      await commands.updateReadingPosition(
+        libraryId,
+        bookId,
+        `pdfpage(${Math.max(0, Math.floor(index))})`,
+        null,
+      );
     } catch {
       // A lost write costs the reader their place, not the reading session.
     }

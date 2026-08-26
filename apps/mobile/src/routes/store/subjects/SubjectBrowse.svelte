@@ -3,7 +3,6 @@
   import CatalogNavigationGrid from "../catalog/CatalogNavigationGrid.svelte";
   import SearchField from "../../../components/shared/SearchField.svelte";
   import MenuItemButton from "../../../components/shared/buttons/MenuItemButton.svelte";
-  import PrimaryButton from "../../../components/shared/buttons/PrimaryButton.svelte";
   import TextButton from "../../../components/shared/buttons/TextButton.svelte";
   import StoreBookGrid from "../shared/StoreBookGrid.svelte";
   import type { CatalogImportAction } from "../catalog/actions";
@@ -38,7 +37,6 @@
     onselect,
     onopensource,
     onaction,
-    onpage,
   }: {
     browse: CatalogSubjectBrowseView;
     levels: CatalogLevel[];
@@ -64,7 +62,6 @@
       publication: CatalogPublication,
       action: CatalogImportAction,
     ) => void | Promise<void>;
-    onpage: (locator: string) => void | Promise<void>;
   } = $props();
 
   function toggleSource(sourceId: string) {
@@ -163,23 +160,6 @@
     >
       No catalog books are assigned to this subject yet.
     </p>{/if}
-  <div
-    class="catalog-pagination"
-    aria-label="Subject results pages"
-  >
-    {#if browse.response.pagination.previous}<PrimaryButton
-        disabled={loading}
-        onclick={() => void onpage(browse.response.pagination.previous!)}
-        >Previous</PrimaryButton
-      >{/if}
-    {#if browse.response.pagination.current_page}<span
-        >Page {browse.response.pagination.current_page}</span
-      >{/if}
-    {#if browse.response.pagination.next}<PrimaryButton
-        disabled={loading}
-        onclick={() => void onpage(browse.response.pagination.next!)}>Next</PrimaryButton
-      >{/if}
-  </div>
 </div>
 
 <style>
@@ -282,15 +262,6 @@
     color: var(--color-danger-text);
     background: var(--color-danger-bg);
     font-size: 0.78rem;
-  }
-
-  .catalog-pagination {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    margin-top: 1.2rem;
-    color: var(--color-subtle-text);
   }
 
   @container (max-width: 719px) {

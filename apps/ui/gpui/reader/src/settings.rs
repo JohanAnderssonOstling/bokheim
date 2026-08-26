@@ -1,23 +1,16 @@
-//! Reader preferences and the process-wide globals every reader window reads.
+//! Reader preferences shared by all reader surfaces.
 //!
-//! Two globals, split by lifecycle. [`ReaderSettings`] is mutable user state
-//! that is persisted on every change; [`ReaderServices`] is the set of
-//! collaborators installed once by [`crate::configure`] and never absent
-//! afterwards, so nothing downstream has to unwrap them.
+//! [`ReaderSettings`] is mutable user state that is persisted on every change.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
-use epub_svelte_lib::app::preferences::{ReaderFontFamily, ReaderTextAlignment};
+use app_contract::preferences::{ReaderFontFamily, ReaderTextAlignment};
 
 /// The shared, synchronized description of how a PDF's layout is decided. The
 /// reader carries `pdf_page_count` and `pdf_zoom` alongside it, so each mode
 /// keeps the value it holds fixed.
-pub use epub_svelte_lib::app::preferences::PdfZoomMode as PdfZoomModePreference;
+pub use app_contract::preferences::PdfZoomMode as PdfZoomModePreference;
 use gpui::{App, Global};
-use ui_runtime::BlockingWorker;
-
-use crate::backends::{NativeAudioBackend, TtsProvider};
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderPreferences {
@@ -119,21 +112,12 @@ pub(crate) fn library_paint_palette(cx: &App) -> html_view_core::ReaderPaintPale
     html_view_core::ReaderPaintPalette { foreground: None, background: Some(u32::from(gpui::Rgba::from(theme.page_bg))) }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ReaderWindowGeometry {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
+pub type SaveReaderSettings = Rc<dyn Fn(ReaderPreferences, &mut App)>;
 
-pub type SaveReaderSettings = Rc<dyn Fn(ReaderPreferences, Option<ReaderWindowGeometry>, &mut App)>;
-
-/// User state shared by every reader window, persisted through [`Self::save`]
+/// User state shared by every reader surface, persisted through [`Self::save`]
 /// whenever it changes.
 pub(crate) struct ReaderSettings {
     pub(crate) preferences: ReaderPreferences,
-    pub(crate) geometry: Option<ReaderWindowGeometry>,
     pub(crate) save: SaveReaderSettings,
 }
 
@@ -146,52 +130,19 @@ impl ReaderSettings {
     /// persists nor reports a change, so callers can use the result to decide
     /// whether to repaint.
     pub(crate) fn update(cx: &mut App, update: impl FnOnce(&mut ReaderPreferences)) -> bool {
-        let Some((preferences, geometry, save)) = ({
+        let Some((preferences, save)) = ({
             let settings = cx.global_mut::<Self>();
             let previous = settings.preferences.clone();
             update(&mut settings.preferences);
-            (previous != settings.preferences).then(|| (settings.preferences.clone(), settings.geometry, settings.save.clone()))
+            (previous != settings.preferences).then(|| (settings.preferences.clone(), settings.save.clone()))
         }) else {
             return false;
         };
-        save(preferences, geometry, cx);
+        save(preferences, cx);
         true
-    }
-
-    /// Records a new window geometry and persists it, ignoring repeats.
-    pub(crate) fn set_geometry(cx: &mut App, geometry: ReaderWindowGeometry) {
-        let (preferences, save) = {
-            let settings = cx.global_mut::<Self>();
-            if settings.geometry == Some(geometry) {
-                return;
-            }
-            settings.geometry = Some(geometry);
-            (settings.preferences.clone(), settings.save.clone())
-        };
-        save(preferences, Some(geometry), cx);
     }
 
     pub(crate) fn preferences(cx: &App) -> &ReaderPreferences {
         &cx.global::<Self>().preferences
-    }
-}
-
-/// Collaborators installed once by [`crate::configure`]. Present for the whole
-/// life of the process, so readers use them without unwrapping.
-pub(crate) struct ReaderServices {
-    /// Off-thread work that may block: opening publications, decoding images,
-    /// whole-book search.
-    pub(crate) blocking: BlockingWorker,
-    /// Off-thread library writes: reading positions, annotations, bookmarks.
-    pub(crate) persistence: BlockingWorker,
-    pub(crate) speech: Arc<dyn TtsProvider>,
-    pub(crate) audio: Arc<dyn NativeAudioBackend>,
-}
-
-impl Global for ReaderServices {}
-
-impl ReaderServices {
-    pub(crate) fn get(cx: &App) -> &Self {
-        cx.global::<Self>()
     }
 }

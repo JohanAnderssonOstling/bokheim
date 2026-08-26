@@ -1,9 +1,10 @@
-//! Sync and account presentation.
+//! Sync and account presentation, rendered as the first section of Settings.
 //!
-//! The page states its conclusion first — one line answering "is everything
-//! synced?" — and everything below it is the evidence for that line: the quota
-//! as a shape, the libraries sorted by what they occupy, and the batch jobs
-//! reduced to a footer until they have something to report.
+//! The section leads with identity — who is signed in, with the sync verdict as
+//! one line inside that block — then the quota as a shape, then the libraries
+//! sorted by what they occupy, and last the activity: what the device has been
+//! uploading and downloading, which is the only part that reports events rather
+//! than state.
 
 use super::*;
 
@@ -22,6 +23,12 @@ fn format_last_sync(timestamp: u64) -> String {
         let days = elapsed_seconds / (24 * 60 * 60);
         if days == 1 { "1 day".to_owned() } else { format!("{days} days") }
     }
+}
+
+/// The single character the identity avatar carries. Uppercased from the
+/// address because that is the only name the account has.
+fn account_initial(email: &str) -> String {
+    email.chars().next().map(|first| first.to_uppercase().to_string()).unwrap_or_else(|| "?".to_owned())
 }
 
 fn format_storage_bytes(bytes: u64) -> String {
@@ -100,26 +107,45 @@ impl SyncPage {
         rows
     }
 
-    /// The line under the headline: how many libraries, how recently they
-    /// synced, and who the account belongs to.
-    fn verdict_detail(&self, summary: LibrarySyncSummary, contract: &app_contract::AccountContract) -> String {
+    /// The rest of the status line: how many libraries, and how recently they
+    /// synced. It does not name the account — the block it sits in already does.
+    fn identity_detail(&self, summary: LibrarySyncSummary) -> String {
         let libraries = if summary.library_count == 1 { "1 library".to_owned() } else { format!("{} libraries", summary.library_count) };
-        let mut parts = vec![if summary.attention_count == 0 { libraries } else { format!("{} of {} {}", summary.attention_count, libraries, contract.summary.needs_attention_suffix) }];
-        match summary.last_synced_at {
-            Some(timestamp) => parts.push(format!("last sync {}", format_last_sync(timestamp))),
-            None => parts.push("never synced".to_owned()),
-        }
-        if let Some(email) = self.account_status.email() {
-            parts.push(email.to_owned());
-        }
-        parts.join(" · ")
+        let last_sync = match summary.last_synced_at {
+            Some(timestamp) => format!("last sync {}", format_last_sync(timestamp)),
+            None => "never synced".to_owned(),
+        };
+        format!("{libraries} · {last_sync}")
+    }
+
+    /// A password field whose reveal stays on until it is pressed again.
+    ///
+    /// The input's own `mask_toggle` unmasks only while the mouse button is
+    /// held, which cannot be used to check a password as it is typed and does
+    /// not survive a touch at all.
+    fn password_input(&self, state: &Entity<InputState>, id: &'static str, entity: &Entity<Self>) -> Input {
+        let revealed = self.password_revealed;
+        let toggle = entity.clone();
+        let toggled_state = state.clone();
+        Input::new(state).suffix(Button::new(id).icon(if revealed { IconName::EyeOff } else { IconName::Eye }).xsmall().ghost().tooltip(if revealed { "Hide password" } else { "Show password" }).on_click(move |_, window, cx| {
+            toggled_state.update(cx, |state, cx| state.set_masked(revealed, window, cx));
+            toggle.update(cx, |page, cx| {
+                page.password_revealed = !revealed;
+                cx.notify();
+            });
+        }))
     }
 
     /// The sign-in, registration, verification and password-reset forms.
     ///
     /// Only reachable while signed out, so it is kept apart from the page the
     /// account renders once there is an account to report on.
-    fn account_access_form(&self, contract: &app_contract::AccountContract, entity: &Entity<Self>) -> Div {
+    ///
+    /// Every flow has the same shape: what this screen is, the inputs it needs,
+    /// one action that goes forward, and — quieter — the way to another flow.
+    /// The inputs carry their own placeholders and are never labelled as well.
+    fn account_access_form(&self, contract: &app_contract::AccountContract, entity: &Entity<Self>, feedback: Option<gpui::AnyElement>, theme: components::BrowserTheme) -> Div {
+        let form = components::access_form();
         match self.flow {
             AccountFlow::SignIn => {
                 let login = entity.clone();
@@ -129,124 +155,91 @@ impl SyncPage {
                     login.update(cx, |page, cx| page.start_login(cx));
                 }));
                 if contract.capabilities.public_registration {
-                    actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
-                        register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, cx));
+                    actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, window, cx| {
+                        register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
                     }));
                 }
+                let mut form = form
+                    .child(components::section_header("Sign in", "Your libraries, reading positions and purchases, on every device you use.", theme))
+                    .children(feedback)
+                    .child(Input::new(&self.authentication.login_email))
+                    .child(self.password_input(&self.authentication.password, "toggle-sign-in-password", entity))
+                    .child(actions);
+                // Recovery is offered once a sign-in has actually failed, so
+                // the screen a returning user sees carries one action, not
+                // three. It stays a link: it is the way out, not the way on.
                 if self.login_failed && contract.capabilities.password_recovery {
-                    actions = actions.child(components::secondary_action_button("account-request-reset", "Reset password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, cx));
+                    form = form.child(components::link_button("account-request-reset", "Forgot your password?", theme, self.busy).on_click(move |_, window, cx| {
+                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, window, cx));
                     }));
                 }
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(11.0))
-                    .child(Form::vertical().child(Field::new().label("Email").child(Input::new(&self.authentication.login_email))).child(Field::new().label("Password").child(Input::new(&self.authentication.password).mask_toggle())))
-                    .child(actions)
+                form
             }
             AccountFlow::Register => {
                 let register = entity.clone();
                 let sign_in = entity.clone();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(11.0))
-                    .child(
-                        Form::vertical().child(Field::new().label("Email").child(Input::new(&self.authentication.email))).child(
-                            Field::new()
-                                .label("Password")
-                                .description(format!("Passwords require at least {} characters.", contract.validation.password_min_characters))
-                                .child(Input::new(&self.authentication.registration_password).mask_toggle()),
-                        ),
-                    )
-                    .child(
-                        components::action_row()
-                            .child(components::primary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
-                                register.update(cx, |page, cx| page.start_registration(cx));
-                            }))
-                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
-                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
-                            })),
-                    )
+                form.child(components::section_header("Create account", "Only needed to keep more than one device in step. Reading works without one.", theme))
+                    .children(feedback)
+                    .child(Input::new(&self.authentication.email))
+                    .child(self.password_input(&self.authentication.registration_password, "toggle-registration-password", entity))
+                    .child(components::form_hint(format!("At least {} characters.", contract.validation.password_min_characters), theme))
+                    .child(components::action_row().child(components::primary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
+                        register.update(cx, |page, cx| page.start_registration(cx));
+                    })))
+                    .child(components::link_button("account-sign-in", "Already have an account? Sign in", theme, self.busy).on_click(move |_, window, cx| {
+                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
+                    }))
             }
             AccountFlow::VerifyEmail => {
                 let verify = entity.clone();
                 let resend = entity.clone();
-                let sign_in = entity.clone();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(11.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(components::SPACE_SM))
-                            .child(div().flex_1().min_w_0().child(OtpInput::new(&self.authentication.verification_pin)))
-                            .child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
-                                verify.update(cx, |page, cx| page.start_verify_email(cx));
-                            }))
-                            .child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).w(px(144.0)).flex_none().on_click(move |_, _, cx| {
-                                resend.update(cx, |page, cx| page.start_resend_verification(cx));
-                            })),
-                    )
-                    .child(components::action_row().child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
-                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
-                    })))
+                let start_over = entity.clone();
+                let mut actions = components::action_row().child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.busy).on_click(move |_, _, cx| {
+                    verify.update(cx, |page, cx| page.start_verify_email(cx));
+                }));
+                if contract.capabilities.resend_verification {
+                    actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                        resend.update(cx, |page, cx| page.start_resend_verification(cx));
+                    }));
+                }
+                form.child(components::section_header("Check your email", format!("Enter the {}-digit PIN we sent you.", contract.validation.verification_pin_digits), theme))
+                    .children(feedback)
+                    .child(OtpInput::new(&self.authentication.verification_pin))
+                    .child(actions)
+                    .child(components::link_button("account-restart-registration", "Wrong address? Start over", theme, self.busy).on_click(move |_, window, cx| {
+                        start_over.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
+                    }))
             }
             AccountFlow::RequestPasswordReset => {
                 let request = entity.clone();
-                let token = entity.clone();
                 let sign_in = entity.clone();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(11.0))
-                    .child(Form::vertical().child(Field::new().label("Email").description("Request a reset token by email. The response does not reveal whether an address exists.").child(Input::new(&self.authentication.email))))
-                    .child(
-                        components::action_row()
-                            .child(components::primary_action_button("account-request-reset", "Send reset token", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                                request.update(cx, |page, cx| page.start_password_reset_request(cx));
-                            }))
-                            .child(components::secondary_action_button("account-have-reset", "Enter reset token", IconName::ArrowRight, self.busy).on_click(move |_, _, cx| {
-                                token.update(cx, |page, cx| page.set_flow(AccountFlow::ResetPassword, cx));
-                            }))
-                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
-                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
-                            })),
-                    )
+                form.child(components::section_header("Reset your password", "We will email a token you can use to set a new one.", theme))
+                    .children(feedback)
+                    .child(Input::new(&self.authentication.email))
+                    .child(components::action_row().child(components::primary_action_button("account-request-reset", "Email me a reset token", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                        request.update(cx, |page, cx| page.start_password_reset_request(cx));
+                    })))
+                    .child(components::link_button("account-sign-in", "Back to sign in", theme, self.busy).on_click(move |_, window, cx| {
+                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
+                    }))
             }
             AccountFlow::ResetPassword => {
                 let reset = entity.clone();
                 let sign_in = entity.clone();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(11.0))
-                    .child(
-                        Form::vertical().child(Field::new().label("Reset token").child(Input::new(&self.authentication.reset_token))).child(
-                            Field::new()
-                                .label("New password")
-                                .description(format!("Choose a new password of at least {} characters.", contract.validation.password_min_characters))
-                                .child(Input::new(&self.authentication.new_password).mask_toggle()),
-                        ),
-                    )
-                    .child(
-                        components::action_row()
-                            .child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                                reset.update(cx, |page, cx| page.start_password_reset(cx));
-                            }))
-                            .child(components::secondary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
-                                sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, cx));
-                            })),
-                    )
+                // The token is a pasted string, not the six-digit PIN, so it is
+                // a plain input rather than the OTP boxes — drawing them alike
+                // invites people to type six of its characters and give up.
+                form.child(components::section_header("Set a new password", "Paste the token from the email. It is not the six-digit PIN.", theme))
+                    .children(feedback)
+                    .child(Input::new(&self.authentication.reset_token))
+                    .child(self.password_input(&self.authentication.new_password, "toggle-new-password", entity))
+                    .child(components::form_hint(format!("At least {} characters.", contract.validation.password_min_characters), theme))
+                    .child(components::action_row().child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                        reset.update(cx, |page, cx| page.start_password_reset(cx));
+                    })))
+                    .child(components::link_button("account-sign-in", "Back to sign in", theme, self.busy).on_click(move |_, window, cx| {
+                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
+                    }))
             }
         }
     }
@@ -286,25 +279,76 @@ impl SyncPage {
         }
         segments
     }
+
+    fn activity_section(&self, contract: &app_contract::AccountContract, theme: components::BrowserTheme) -> gpui::AnyElement {
+        let mut events = components::activity_list();
+        let mut event_count = 0_usize;
+        for group in self.transfers.groups.iter().filter(|group| group.scanner_running) {
+            events = events.child(components::activity_event(theme.accent, format!("Scanning library · {}", group.library_name), "Checking local files · running", None, theme));
+            event_count += 1;
+        }
+        for group in self.transfers.groups.iter() {
+            for transfer in &group.transfers {
+                let (color, progress) = match transfer.state {
+                    app_contract::transfer::TransferState::Running => (theme.accent, Some(transfer.completed_items as f32 / transfer.total_items.max(1) as f32)),
+                    app_contract::transfer::TransferState::Failed => (theme.danger, None),
+                    _ => (theme.warning, None),
+                };
+                let detail = match transfer.last_error.as_deref() {
+                    Some(error) => format!("{} of {} · {} · attempt {} · {error}", transfer.completed_items, transfer.total_items, group.library_name, transfer.attempts),
+                    None => format!("{} of {} · {} · {}", transfer.completed_items, transfer.total_items, group.library_name, transfer.state.label().to_lowercase()),
+                };
+                events = events.child(components::activity_event(color, format!("{} · {}", transfer.kind.batch_label(), group.library_name), detail, progress, theme));
+                event_count += 1;
+            }
+        }
+        for group in self.transfers.groups.iter() {
+            for transfer in &group.history {
+                let completed = matches!(transfer.state, app_contract::transfer::TransferState::Completed);
+                let color = if completed { theme.text_muted } else { theme.danger };
+                let title = match transfer.kind {
+                    app_contract::transfer::TransferJobKind::UploadBook => "Uploaded books",
+                    app_contract::transfer::TransferJobKind::UploadThumbnail => "Uploaded thumbnails",
+                    app_contract::transfer::TransferJobKind::DownloadBook => "Downloaded books",
+                    app_contract::transfer::TransferJobKind::DownloadThumbnail => "Downloaded thumbnails",
+                };
+                let detail = match transfer.last_error.as_deref() {
+                    Some(error) => format!("{} of {} · {} · {error}", transfer.completed_items, transfer.total_items, group.library_name),
+                    None => format!("{} of {} · {}", transfer.completed_items, transfer.total_items, group.library_name),
+                };
+                events = events.child(components::activity_event(color, format!("{title} · {}", group.library_name), detail, None, theme));
+                event_count += 1;
+            }
+        }
+
+        let activity = GroupBox::new().fill().child(components::section_header(contract.transfers_section_label.clone(), "", theme));
+        if event_count == 0 {
+            activity.child(Label::new(contract.summary.activity_idle_label.clone()).min_h(px(64.0)).flex().items_center().text_color(theme.text_muted)).into_any_element()
+        } else {
+            activity.child(events).into_any_element()
+        }
+    }
 }
 
-impl Render for SyncPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl SyncPage {
+    /// The account as it appears inside Settings: the same content the page
+    /// rendered when it was a destination of its own, without the scroll
+    /// container and page width that Settings now provides.
+    pub(crate) fn settings_section(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = components::browser_theme(cx);
         let contract = self.services.contracts.account.clone();
         let entity = cx.entity();
-        let mut content = components::centered_page_content();
+        let mut content = components::browser_settings_sections();
+        // Whichever of the two the last attempt produced. They are never both
+        // set, and one slot means a form cannot grow two lines of chrome.
+        let feedback = match (&self.error, &self.message) {
+            (Some(error), _) => Some(Alert::error("account-error", error.clone()).with_size(Size::Small).into_any_element()),
+            (None, Some(message)) => Some(Alert::info("account-message", message.clone()).with_size(Size::Small).into_any_element()),
+            (None, None) => None,
+        };
 
         if !self.account_status.signed_in() {
-            let mut account = GroupBox::new().fill();
-            account = account.child(self.account_access_form(&contract, &entity));
-            if let Some(message) = &self.message {
-                account = account.child(Alert::info("account-message", message.clone()).with_size(Size::Small));
-            }
-            if let Some(error) = &self.error {
-                account = account.child(Alert::error("account-error", error.clone()).with_size(Size::Small));
-            }
-            return components::scrollable_page().child(content.child(account)).into_any_element();
+            return content.child(GroupBox::new().fill().child(self.account_access_form(&contract, &entity, feedback, theme))).child(self.activity_section(&contract, theme));
         }
 
         let rows = self.library_rows(cx);
@@ -322,23 +366,17 @@ impl Render for SyncPage {
 
         let sync_now = entity.clone();
         let sign_out = entity.clone();
-        let banner_actions = components::action_row()
+        let actions = components::action_row()
             .child(components::primary_action_button("account-sync-now", contract.summary.sync_now_label.clone(), IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                sync_now.update(cx, |page, cx| page.refresh(cx));
+                sync_now.update(cx, |page, cx| page.start_sync(cx));
             }))
             .child(components::secondary_action_button("cloud-logout", contract.sign_out_label.clone(), IconName::Close, self.account_action_busy).on_click(move |_, _, cx| {
                 sign_out.update(cx, |page, cx| page.start_logout(cx));
             }));
-        // While a sync is running the stripe keeps the last known verdict rather
-        // than going amber: "Syncing…" is not itself a problem to report.
-        content = content.child(components::verdict_banner(headline, self.verdict_detail(summary, &contract), settled, banner_actions, theme));
-
-        if let Some(message) = &self.message {
-            content = content.child(Alert::info("account-message", message.clone()).with_size(Size::Small));
-        }
-        if let Some(error) = &self.error {
-            content = content.child(Alert::error("account-error", error.clone()).with_size(Size::Small));
-        }
+        let email = self.account_status.email().unwrap_or_default();
+        // While a sync is running the status line keeps the last known verdict
+        // rather than going amber: "Syncing…" is not itself a problem to report.
+        content = content.child(components::account_identity(account_initial(email), email.to_owned(), format!("{headline} · {}", self.identity_detail(summary)), settled || self.busy, actions, theme)).children(feedback);
 
         if let Some(usage) = self.storage_usage {
             let mut storage = components::storage_block().child(components::storage_figures(
@@ -375,7 +413,7 @@ impl Render for SyncPage {
                 let definition = contract.sync_states.iter().find(|definition| definition.state == row.status.state);
                 let detail = row.status.last_synced_at.map(|timestamp| format!("Last sync {}", format_last_sync(timestamp))).unwrap_or_default();
                 let (state_label, state_tag) = match row.status.state {
-                    LibrarySyncState::Synced if row.status.last_synced_at.is_none() => ("Not synced", Tag::secondary()),
+                    LibrarySyncState::Synced if row.status.last_synced_at.is_none() => ("Sync pending", Tag::secondary()),
                     LibrarySyncState::Synced if row.status.has_unsynced_changes => ("Changes pending", Tag::warning()),
                     LibrarySyncState::Synced => ("Synced", Tag::primary()),
                     LibrarySyncState::SignInRequired | LibrarySyncState::RemoteMissing => (definition.map(|definition| definition.label.as_str()).unwrap_or("Unknown"), Tag::warning()),
@@ -397,58 +435,8 @@ impl Render for SyncPage {
         }
         content = content.child(libraries);
 
-        let active = self.transfers.groups.iter().map(|group| group.transfers.len()).sum::<usize>();
-        if active > 0 {
-            let transfers = GroupBox::new().fill().child(components::section_header(contract.transfers_section_label.clone(), "Queued, running, or retrying transfers.", theme));
-            let mut list = components::item_list();
-            for group in self.transfers.groups.iter() {
-                for transfer in &group.transfers {
-                    let detail = match transfer.last_error.as_deref() {
-                        Some(error) => format!("{}/{} · {} · attempt {} · {}", transfer.completed_items, transfer.total_items, group.library_name, transfer.attempts, error),
-                        None => format!("{}/{} · {}", transfer.completed_items, transfer.total_items, group.library_name),
-                    };
-                    let status = if matches!(transfer.state, epub_svelte_lib::TransferState::Running) { Tag::primary() } else { Tag::secondary() };
-                    list = list
-                        .child(components::item_row(theme).child(components::item_identity(transfer.kind.batch_label(), detail, theme)).child(status.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(transfer.state.label())));
-                }
-            }
-            content = content.child(transfers.child(list));
-        }
+        content = content.child(self.activity_section(&contract, theme));
 
-        let history_count = self.transfers.groups.iter().map(|group| group.history.len()).sum::<usize>();
-        let footer_summary = if history_count == 0 { contract.summary.activity_idle_label.clone() } else { format!("{history_count} {}", contract.summary.finished_suffix) };
-        let toggle = entity.clone();
-        let toggle_label = if self.activity_expanded { contract.summary.hide_activity_label.clone() } else { contract.summary.show_activity_label.clone() };
-        let footer_action = components::secondary_action_button("account-activity-toggle", toggle_label, IconName::ArrowRight, history_count == 0).on_click(move |_, _, cx| {
-            toggle.update(cx, |page, cx| {
-                page.activity_expanded = !page.activity_expanded;
-                cx.notify();
-            });
-        });
-        content = content.child(components::activity_footer(footer_summary, footer_action, theme));
-
-        if self.activity_expanded && history_count > 0 {
-            let history = GroupBox::new().fill().child(components::section_header(contract.transfer_history_section_label.clone(), "The latest completed batch jobs on this device.", theme));
-            let mut list = components::item_list();
-            for group in self.transfers.groups.iter() {
-                for transfer in &group.history {
-                    let direction = match transfer.kind {
-                        epub_svelte_lib::TransferJobKind::UploadBook => "Uploaded books",
-                        epub_svelte_lib::TransferJobKind::UploadThumbnail => "Uploaded thumbnails",
-                        epub_svelte_lib::TransferJobKind::DownloadBook => "Downloaded books",
-                        epub_svelte_lib::TransferJobKind::DownloadThumbnail => "Downloaded thumbnails",
-                    };
-                    let detail = match transfer.last_error.as_deref() {
-                        Some(error) => format!("{}/{} · {} · {}", transfer.completed_items, transfer.total_items, group.library_name, error),
-                        None => format!("{}/{} · {}", transfer.completed_items, transfer.total_items, group.library_name),
-                    };
-                    let status = if matches!(transfer.state, epub_svelte_lib::TransferState::Completed) { Tag::primary() } else { Tag::secondary() };
-                    list = list.child(components::item_row(theme).child(components::item_identity(direction, detail, theme)).child(status.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(transfer.state.label())));
-                }
-            }
-            content = content.child(history.child(list));
-        }
-
-        components::scrollable_page().child(content).into_any_element()
+        content
     }
 }

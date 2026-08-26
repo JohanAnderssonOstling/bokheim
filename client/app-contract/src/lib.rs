@@ -3,6 +3,8 @@
 #[cfg(feature = "full")]
 pub mod account;
 #[cfg(feature = "full")]
+pub mod backend;
+#[cfg(feature = "full")]
 pub mod catalog;
 #[cfg(feature = "full")]
 pub mod design_tokens;

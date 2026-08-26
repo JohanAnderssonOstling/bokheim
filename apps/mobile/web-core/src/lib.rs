@@ -8,6 +8,9 @@ use std::io::{self, Cursor};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_arch = "wasm32")]
+pub mod web_database;
+
 const MAX_COVER_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +51,7 @@ pub fn content_hash(input: &[u8]) -> String {
     blake3::hash(input).to_hex().to_string()
 }
 
+#[cfg(test)]
 fn project_subject_codes(input: &[u8]) -> Result<Vec<u8>, String> {
     #[derive(Deserialize)]
     struct Subject {
@@ -73,7 +77,7 @@ fn project_subject_codes(input: &[u8]) -> Result<Vec<u8>, String> {
 
     let subjects = serde_json::from_slice::<Vec<Subject>>(input).map_err(|error| error.to_string())?;
     let subjects = subjects.into_iter().map(|subject| library_model::PublicationSubject::new(subject.id, subject.name, subject.source, subject.authority, subject.code)).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    let codes = library_model::project_subject_codes(&subjects);
+    let codes = subject_projection::project_subject_codes(&subjects);
     serde_json::to_vec(&codes.iter().map(|code| Code { system: code.system_id(), code: code.code() }).collect::<Vec<_>>()).map_err(|error| error.to_string())
 }
 
@@ -86,8 +90,9 @@ pub fn inspect_epub(input: &[u8]) -> io::Result<PublicationMetadata> {
     let description = non_empty(metadata.description);
     let subjects = metadata.subjects.iter().filter_map(|subject| non_empty(subject.value.clone())).collect::<Vec<_>>();
     let model_subjects = metadata.subjects.iter().filter_map(|subject| library_model::PublicationSubject::new(subject.id.clone(), &subject.value, &subject.source, subject.authority.clone(), subject.code.clone()).ok()).collect::<Vec<_>>();
-    let subject_paths = library_model::project_unified_subjects(&model_subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect();
-    let subject_codes = library_model::project_subject_codes(&model_subjects).into_iter().map(|classification| PublicationTaxonomyCode { system: classification.system_id().to_owned(), code: classification.code().to_owned() }).collect();
+    let subject_paths = subject_projection::project_unified_subjects(&model_subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect();
+    let subject_codes =
+        subject_projection::project_subject_codes(&model_subjects).into_iter().map(|classification| PublicationTaxonomyCode { system: classification.system_id().to_owned(), code: classification.code().to_owned() }).collect();
     let mut isbns = metadata.identifiers.iter().filter(|identifier| identifier.scheme == epub_provider::IdentifierScheme::ISBN).filter_map(|identifier| library_model::canonical_isbn(&identifier.value)).collect::<Vec<_>>();
     isbns.sort();
     isbns.dedup();
@@ -154,7 +159,7 @@ pub fn decode_account_response(kind: u32, bytes: &[u8]) -> Result<Vec<u8>, Strin
 }
 
 pub fn decode_blob_manifest_response(bytes: &[u8], request_json: &[u8]) -> Result<Vec<u8>, String> {
-    use sync_common::api::assets::{validate_blob_manifest_response, BlobManifestRequest, BlobManifestResponse};
+    use sync_common::api::assets::{BlobManifestRequest, BlobManifestResponse, validate_blob_manifest_response};
     let request: BlobManifestRequest = serde_json::from_slice(request_json).map_err(|error| error.to_string())?;
     let response: BlobManifestResponse = wire::decode(bytes, wire::MAX_DECODED_RESPONSE_BYTES).map_err(|error| error.to_string())?;
     validate_blob_manifest_response(&request, &response).map_err(|error| error.to_string())?;
@@ -278,6 +283,8 @@ pub fn project_browser_directories(json: &[u8]) -> Result<Vec<u8>, String> {
 #[derive(Deserialize, Serialize)]
 struct BrowserFolderDestination {
     id: String,
+    parent_id: Option<String>,
+    label: String,
     path: String,
 }
 
@@ -426,7 +433,7 @@ fn browser_mutation_value(body: library_replica::MutationBody) -> Result<serde_j
         MutationBody::BookLifecycle { value, .. } => {
             let subject_paths = match &value {
                 library_model::BookLifecycleState::Present { metadata, .. } => {
-                    Some(library_model::project_unified_subjects(&metadata.publication.subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<Vec<_>>())
+                    Some(subject_projection::project_unified_subjects(&metadata.publication.subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<Vec<_>>())
                 }
                 _ => None,
             };
@@ -439,7 +446,7 @@ fn browser_mutation_value(body: library_replica::MutationBody) -> Result<serde_j
         MutationBody::Placement { present, origin_folder_id, .. } => serde_json::to_value(serde_json::json!({ "present": present, "origin_folder_id": origin_folder_id })),
         MutationBody::ReadingPosition { value, .. } => serde_json::to_value(value),
         MutationBody::Metadata { value, .. } => {
-            let subject_paths = library_model::project_unified_subjects(&value.publication.subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<Vec<_>>();
+            let subject_paths = subject_projection::project_unified_subjects(&value.publication.subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<Vec<_>>();
             let mut encoded = serde_json::to_value(value).map_err(|error| error.to_string())?;
             insert_subject_paths(&mut encoded, "/publication", subject_paths).map_err(|error| error.to_string())?;
             Ok(encoded)
@@ -666,81 +673,6 @@ pub unsafe extern "C" fn bokheim_project_directories(input: *const u8, input_len
     // SAFETY: guaranteed by the caller as documented above.
     let input = unsafe { std::slice::from_raw_parts(input, input_length) };
     store_result(project_browser_directories(input))
-}
-
-
-
-/// Resolves a retained controlled-vocabulary code into unified browse paths.
-///
-/// # Safety
-/// Input must reference UTF-8 JSON containing `system_id` and `code` strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_unified_subject_paths(input: *const u8, input_length: usize) -> u32 {
-    #[derive(serde::Deserialize)]
-    struct Request {
-        system_id: String,
-        code: String,
-    }
-
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    let result = serde_json::from_slice::<Request>(input).map(|request| library_model::unified_subject_paths(&request.system_id, &request.code)).and_then(|paths| serde_json::to_vec(&paths)).map_err(|error| error.to_string());
-    store_result(result)
-}
-
-/// Projects raw publication subjects into every supported taxonomy code.
-/// Inferred BISAC headings and explicit BISAC, DDC, and LCC classifications
-/// are accumulated independently; finding one system never suppresses another.
-///
-/// # Safety
-/// Input must reference UTF-8 JSON containing an array of publication subjects.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_project_subject_codes(input: *const u8, input_length: usize) -> u32 {
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    store_result(project_subject_codes(input))
-}
-
-/// Reports whether the embedded-plus-overlay taxonomy names an exact code.
-///
-/// # Safety
-/// Input must reference UTF-8 JSON containing `system_id` and `code` strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_unified_has_exact_source_code(input: *const u8, input_length: usize) -> u32 {
-    #[derive(serde::Deserialize)]
-    struct Request {
-        system_id: String,
-        code: String,
-    }
-
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    let result = serde_json::from_slice::<Request>(input).map(|request| library_model::unified_has_exact_source_code(&request.system_id, &request.code)).and_then(|exact| serde_json::to_vec(&exact)).map_err(|error| error.to_string());
-    store_result(result)
-}
-
-/// Replaces the browser's on-demand taxonomy overlay.
-///
-/// # Safety
-/// Input must reference a JSON array of taxonomy concepts.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn bokheim_install_taxonomy_overlay(input: *const u8, input_length: usize) -> u32 {
-    // SAFETY: guaranteed by the caller as documented above.
-    let input = unsafe { std::slice::from_raw_parts(input, input_length) };
-    let result = serde_json::from_slice::<Vec<taxonomy_contract::TaxonomyConcept>>(input)
-        .map_err(|error| error.to_string())
-        .and_then(|concepts| {
-            let definitions = concepts
-                .into_iter()
-                .map(|concept| {
-                    let (parents, orders) = concept.parents.into_iter().map(|parent| (parent.concept_id, parent.display_order)).unzip();
-                    library_model::UnifiedConceptDefinition::new_with_parent_sort_orders(concept.concept_id, concept.preferred_label, parents, orders, concept.source_selectors, concept.source_labels)
-                })
-                .collect();
-            library_model::install_unified_taxonomy_overlay(definitions)
-        })
-        .map(|()| Vec::new());
-    store_result(result)
 }
 
 /// Selects valid folder destinations using the shared native policy.

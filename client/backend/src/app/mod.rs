@@ -13,8 +13,8 @@ mod server_url;
 
 pub(crate) use backend::AppState;
 pub use backend::{
-    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView, LibraryListState, LibrarySyncState,
-    LibrarySyncStatus, LibrarySyncSummary, LibraryUpdate, LocalLibraryStorageUsage, ServerLibraryStorageUsage,
+    AccountSessionSummary, AccountStatus, AccountStorageUsage, AppBackend, AppEvent, BackendError, CatalogPageView, LibraryListState, LibrarySyncState, LibrarySyncStatus, LibrarySyncSummary, LocalLibraryStorageUsage,
+    ServerLibraryStorageUsage,
 };
 pub(crate) use data::read_library_manifest;
 pub use data::{AppDataLocation, BackendContext, LibraryEntry, LIBRARY_MANIFEST_FILENAME};

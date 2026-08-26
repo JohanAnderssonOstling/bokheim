@@ -1,0 +1,31 @@
+[package]
+name = "subject-projection"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+authoritative-taxonomy = []
+
+[dependencies]
+publication-model = { path = "../publication-model" }
+csv = "1.3.1"
+uuid = { version = "1", features = ["v5"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.40.0", features = ["bundled", "serialize"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bincode = "2.0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+bincode = "2.0.1"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+uuid = { version = "1", features = ["v5"] }

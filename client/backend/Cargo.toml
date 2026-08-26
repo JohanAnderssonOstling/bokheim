@@ -26,7 +26,7 @@ path = "tests/blake3_hash_benchmark.rs"
 [features]
 default = ["desktop"]
 desktop = ["watcher", "pdf"]
-scanner = []
+scanner = ["library-sqlite/scanner"]
 watcher = ["scanner", "dep:notify"]
 pdf = ["dep:pdf-reader-core", "thumbnail/pdf"]
 mobile = []
@@ -40,8 +40,10 @@ catalog-client = { path = "../catalog-client" }
 metadata-client = { path = "../metadata-client" }
 taxonomy-client = { path = "../taxonomy-client" }
 library-model = { path = "../library-model" }
+library-sqlite = { path = "../library-sqlite" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 taxonomy-contract = { path = "../../shared/taxonomy-contract" }
+subject-projection = { path = "../../shared/subject-projection" }
 library-replica = { path = "../library-replica" }
 sync-client = { path = "../sync-client" }
 thumbnail = { path = "../thumbnail" }
@@ -49,25 +51,21 @@ log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = {version = "0.37.0", features = ["bundled", "functions"] }
-include-sqlite-sql = "0.2.1"
+rusqlite = { version = "0.40.0", features = ["bundled", "functions"] }
 walkdir = "2.5.0"
 uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
-roxmltree = "0.20"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.31"
+r2d2_sqlite = "0.35"
 notify = { version = "6.1", optional = true }
 futures-util = "0.3"
-html-publication = { path = "../../apps/renderers/html/crates/html-publication" }
+futures-executor = "0.3"
 epub_provider = { path = "../../apps/renderers/html/epub_provider" }
 crossbeam-channel = "0.5"
 async-channel = "2"
 sync-common = { path = "../../shared/sync-common" }
-urlencoding = "2"
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 blake3 = "1"
 pdf-reader-core = { path = "../../apps/renderers/pdf/core", optional = true }
 dirs = "6"
@@ -75,9 +73,9 @@ specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 specta-typescript = "0.0.12"
 [dev-dependencies]
 test-support = { path = "../test-support" }
+lopdf = { version = "0.44", default-features = false }
 axum = "0.7"
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
-lopdf = { version = "0.44", default-features = false }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
 tempfile = "3"
 zip.workspace = true

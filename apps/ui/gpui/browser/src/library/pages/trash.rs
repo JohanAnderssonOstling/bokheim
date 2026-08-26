@@ -1,41 +1,34 @@
 //! Library Trash. Deleted items remain recoverable here until explicitly purged.
 
-use epub_svelte_lib::library::{LibraryTrashView, TrashedBook, TrashedFolder};
+use app_contract::library::{LibraryTrashView, TrashedBook, TrashedFolder};
 use gpui::prelude::*;
-use gpui::{Context, IntoElement, Render, SharedString, Task, Window, div, px};
+use gpui::{Context, IntoElement, Render, SharedString, Subscription, Window, div, px};
 use gpui_component::IconName;
 use ui_components as components;
 
 use crate::library::pages::library_empty_state;
-use crate::library::services::{LatestRequest, LibraryContext};
+use crate::library::services::{LatestRequest, LibraryContentsChanged, LibraryContext};
 
 pub(crate) struct TrashPage {
     ui: LibraryContext,
     contents: Option<LibraryTrashView>,
     error: Option<SharedString>,
     request: LatestRequest,
-    _updates: Task<()>,
+    _updates: Subscription,
 }
 
 impl TrashPage {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
         let updates = ui.updates();
-        let update_task = cx.spawn(async move |page, cx| {
-            while let Ok(update) = updates.recv().await {
-                let _ = page.update(cx, |page, cx| match update {
-                    epub_svelte_lib::app::LibraryUpdate::Contents => page.refresh(cx),
-                    epub_svelte_lib::app::LibraryUpdate::Covers(_) => {}
-                });
-            }
-        });
-        let mut page = Self { ui, contents: None, error: None, request: LatestRequest::default(), _updates: update_task };
+        let update_subscription = cx.subscribe(&updates, |page, _, _: &LibraryContentsChanged, cx| page.refresh(cx));
+        let mut page = Self { ui, contents: None, error: None, request: LatestRequest::default(), _updates: update_subscription };
         page.refresh(cx);
         page
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let generation = self.request.begin();
-        let load = self.ui.load_trash();
+        let load = self.ui.backend().load_trash();
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             let _ = page.update(cx, |page, cx| {
@@ -66,7 +59,7 @@ impl TrashPage {
     }
 
     fn restore_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
-        let operation = self.ui.restore_book(book.content_hash);
+        let operation = self.ui.backend().restore_book(book.content_hash);
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "restore book", cx));
@@ -75,7 +68,7 @@ impl TrashPage {
     }
 
     fn restore_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
-        let operation = self.ui.restore_folder(folder.id, None);
+        let operation = self.ui.backend().restore_folder(folder.id, None);
         cx.spawn(async move |page, cx| {
             let result = operation.await.map(|_| ());
             let _ = page.update(cx, |page, cx| page.finish(result, "restore folder", cx));
@@ -84,7 +77,7 @@ impl TrashPage {
     }
 
     fn purge_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
-        let operation = self.ui.purge_book(book.content_hash);
+        let operation = self.ui.backend().purge_book(book.content_hash);
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "delete book permanently", cx));
@@ -93,7 +86,7 @@ impl TrashPage {
     }
 
     fn purge_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
-        let operation = self.ui.purge_folder(folder.id);
+        let operation = self.ui.backend().purge_folder(folder.id);
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "delete folder permanently", cx));
@@ -102,7 +95,7 @@ impl TrashPage {
     }
 
     fn empty(&mut self, cx: &mut Context<Self>) {
-        let operation = self.ui.empty_trash();
+        let operation = self.ui.backend().empty_trash();
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "empty Trash", cx));
@@ -179,12 +172,15 @@ impl Render for TrashPage {
                 body = body.child(sections);
             }
         }
-        components::library_section_content()
-            .child(header)
-            .child(components::browser_error_banner(self.error.clone(), "Retry".into(), theme, body.into_any_element(), {
+        let body = if let Some(error) = self.error.clone() {
+            let retry = components::topbar_action_button("retry-section", "Retry", IconName::Redo2, theme).on_click({
                 let page = cx.entity();
-                move |cx| page.update(cx, |page, cx| page.refresh(cx))
-            }))
-            .into_any_element()
+                move |_, _, cx| page.update(cx, |page, cx| page.refresh(cx))
+            });
+            components::browser_error_banner(error, retry, body.into_any_element()).into_any_element()
+        } else {
+            body.into_any_element()
+        };
+        components::library_section_content().child(header).child(body).into_any_element()
     }
 }

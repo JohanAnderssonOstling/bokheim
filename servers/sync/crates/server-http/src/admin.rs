@@ -415,6 +415,17 @@ pub(crate) async fn services(State(state): State<AppState>, admin: AdminUser) ->
     json_response(state.operational_services.snapshot().await)
 }
 
+pub(crate) async fn catalog_process_action(State(state): State<AppState>, admin: AdminUser, Path(process): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
+    if !matches!(process.as_str(), "catalogue_crawling" | "cover_downloads" | "epub_enrichment" | "catalogue_enrichment")
+        || !action.get("action").and_then(serde_json::Value::as_str).is_some_and(|action| matches!(action, "pause" | "resume" | "run_now"))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    audit(&state, &admin.user_id, "dashboard_catalog_process_changed").await?;
+    let response = state.operational_services.catalog_process_action(&process, &action).await.map_err(remote_admin_error)?;
+    json_response(response)
+}
+
 pub(crate) async fn catalog_identity_reviews(State(state): State<AppState>, admin: AdminUser, Query(query): Query<CatalogIdentityReviewQuery>) -> Result<Response, StatusCode> {
     audit(&state, &admin.user_id, "dashboard_catalog_identity_reviews_viewed").await?;
     let limit = query.limit.unwrap_or(100);

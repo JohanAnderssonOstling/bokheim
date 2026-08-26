@@ -7,7 +7,7 @@ use library_model::BookFormat;
 use walkdir::WalkDir;
 
 fn supported(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()).and_then(|extension| BookFormat::from_extension(&extension.to_ascii_lowercase())).is_some()
+    path.extension().and_then(|extension| extension.to_str()).and_then(BookFormat::from_import_extension).is_some()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

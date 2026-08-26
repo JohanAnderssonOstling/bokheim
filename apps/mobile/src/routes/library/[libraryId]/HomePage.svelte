@@ -5,6 +5,7 @@
   import type { BookCardData, DownloadState } from "../../../lib/shared/types";
   let {
     libraryId,
+    continueReading,
     inProgress,
     finished,
     recentlyAdded,
@@ -17,6 +18,7 @@
     ontrash,
   }: {
     libraryId: string;
+    continueReading: BookCardData[];
     inProgress: BookCardData[];
     finished: BookCardData[];
     recentlyAdded: BookCardData[];
@@ -30,19 +32,33 @@
   } = $props();
 </script>
 
-{#if !inProgress.length && !finished.length && !recentlyAdded.length}
+{#if !continueReading.length && !inProgress.length && !finished.length && !recentlyAdded.length}
   <EmptyPage
     primaryLabel="Add book"
     onprimary={onadd}
   />
 {:else}
+  {#if continueReading.length}<BookShelf
+      {libraryId}
+      id="continue-reading-carousel"
+      title="Furthest along"
+      books={continueReading}
+      emptyMessage="No books in progress yet."
+      first
+      {openingBookId}
+      {downloadStates}
+      {onopen}
+      {ondownload}
+      {onremove}
+      {ontrash}
+    />{/if}
   {#if inProgress.length}<BookShelf
       {libraryId}
       id="recently-read-carousel"
       title="Recently read"
       books={inProgress}
       emptyMessage="No books in progress yet."
-      first
+      first={!continueReading.length}
       {openingBookId}
       {downloadStates}
       {onopen}
@@ -56,7 +72,7 @@
       title="Finished"
       books={finished}
       emptyMessage="No finished books yet."
-      first={!inProgress.length}
+      first={!continueReading.length && !inProgress.length}
       {openingBookId}
       {downloadStates}
       {onopen}
@@ -70,7 +86,7 @@
       title="Recently added"
       books={recentlyAdded}
       emptyMessage="No books have been added yet."
-      first={!inProgress.length && !finished.length}
+      first={!continueReading.length && !inProgress.length && !finished.length}
       maxItems={BROWSING_CONTENT_CONTRACT.home_book_limit}
       {openingBookId}
       {downloadStates}

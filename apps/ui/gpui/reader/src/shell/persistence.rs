@@ -1,39 +1,65 @@
-//! Library writes made off the UI thread.
+//! Asynchronous library persistence coordinated by the reader.
 //!
-//! Every reader persists the same way: hand the work to the persistence
-//! worker, wait for it, then fold the result back into the view. The failure
-//! policy is uniform — log and carry on, never panic and never block the
-//! reader — so it lives here rather than at each call site.
+//! The backend owns any platform-specific blocking work. This module only
+//! folds loaded data back into its entity, serializes optimistic mutations,
+//! and debounces position updates.
 
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
-use epub_svelte_lib::LibraryBackend;
+use app_contract::backend::{BackendFuture, LibraryBackend};
 use gpui::{App, Context};
 
-use crate::settings::ReaderServices;
+type Mutation = Box<dyn FnOnce(&dyn LibraryBackend) -> BackendFuture<()> + 'static>;
 
-/// Runs `op` against the library on the persistence worker, then applies
-/// `apply` to the view with its result.
+/// Awaits `op` against the library, then applies `apply` to the view with its
+/// result.
 ///
 /// `what` names the write for log messages, phrased to follow "failed to" —
-/// for example `"save annotation"`. If the write fails, or the worker has
-/// stopped, the failure is logged and `apply` is not called.
-pub(crate) fn write<V, T>(view: &Context<V>, library: LibraryBackend, what: &'static str, op: impl FnOnce(&LibraryBackend) -> Result<T, String> + Send + 'static, apply: impl FnOnce(&mut V, &mut Context<V>, T) + 'static)
+/// for example `"save annotation"`. If the operation fails, the failure is
+/// logged and `apply` is not called.
+pub(crate) fn write<V, T>(view: &Context<V>, library: Rc<dyn LibraryBackend>, what: &'static str, op: impl FnOnce(&dyn LibraryBackend) -> BackendFuture<T> + 'static, apply: impl FnOnce(&mut V, &mut Context<V>, T) + 'static)
 where
     V: 'static,
-    T: Send + 'static,
+    T: 'static,
 {
-    let worker = ReaderServices::get(view).persistence.clone();
     view.spawn(async move |this, cx| {
-        let result = worker.dispatch(move || op(&library)).recv().await;
+        let result = op(library.as_ref()).await;
         let _ = this.update(cx, |this, cx| match result {
-            Ok(Ok(value)) => apply(this, cx, value),
-            Ok(Err(error)) => log::error!("failed to {what}: {error}"),
-            Err(_) => log::error!("{what} worker stopped"),
+            Ok(value) => apply(this, cx, value),
+            Err(error) => log::error!("failed to {what}: {error}"),
         });
     })
     .detach();
+}
+
+/// Serializes durable mutations independently of UI updates.
+///
+/// Reader state is changed optimistically on the GPUI thread. This queue then
+/// preserves the same order in storage.
+pub(crate) struct MutationWriter {
+    mutations: async_channel::Sender<(&'static str, Mutation)>,
+}
+
+impl MutationWriter {
+    pub(crate) fn new(cx: &App, library: Rc<dyn LibraryBackend>) -> Self {
+        let (mutations, incoming) = async_channel::unbounded::<(&'static str, Mutation)>();
+        cx.spawn(async move |_cx| {
+            while let Ok((what, mutation)) = incoming.recv().await {
+                if let Err(error) = mutation(library.as_ref()).await {
+                    log::error!("failed to {what}: {error}");
+                }
+            }
+        })
+        .detach();
+        Self { mutations }
+    }
+
+    pub(crate) fn record(&self, what: &'static str, mutation: impl FnOnce(&dyn LibraryBackend) -> BackendFuture<()> + 'static) {
+        if self.mutations.try_send((what, Box::new(mutation))).is_err() {
+            log::error!("failed to queue {what}");
+        }
+    }
 }
 
 /// How long a position update waits for a quieter one to supersede it.
@@ -49,40 +75,33 @@ pub(crate) struct PositionWriter<P> {
     updates: async_channel::Sender<P>,
 }
 
-impl<P: Send + 'static> PositionWriter<P> {
-    /// Starts the debouncing worker. `persist` performs the actual library
+impl<P: 'static> PositionWriter<P> {
+    /// Starts the debouncing task. `persist` performs the actual library
     /// write for the newest position; `what` names it for log messages.
-    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryBackend, &P) -> Result<(), String> + Send + Sync + 'static, library: LibraryBackend) -> Self {
+    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&dyn LibraryBackend, &P) -> BackendFuture<()> + 'static, library: Rc<dyn LibraryBackend>) -> Self {
         let (updates, incoming) = async_channel::unbounded::<P>();
-        let worker = ReaderServices::get(cx).persistence.clone();
         let executor = cx.background_executor().clone();
-        let persist = Arc::new(persist);
-        cx.background_executor()
-            .spawn(async move {
-                while let Ok(mut position) = incoming.recv().await {
-                    executor.timer(POSITION_DEBOUNCE).await;
-                    while let Ok(newer) = incoming.try_recv() {
-                        position = newer;
-                    }
-                    let library = library.clone();
-                    let persist = persist.clone();
-                    let Ok(result) = worker.dispatch(move || persist(&library, &position)).recv().await else {
-                        break;
-                    };
-                    if let Err(error) = result {
-                        log::error!("failed to {what}: {error}");
-                    }
+        let persist = Rc::new(persist);
+        cx.spawn(async move |_cx| {
+            while let Ok(mut position) = incoming.recv().await {
+                executor.timer(POSITION_DEBOUNCE).await;
+                while let Ok(newer) = incoming.try_recv() {
+                    position = newer;
                 }
-            })
-            .detach();
+                if let Err(error) = persist(library.as_ref(), &position).await {
+                    log::error!("failed to {what}: {error}");
+                }
+            }
+        })
+        .detach();
         Self { updates }
     }
 
-    /// Records a new position. Dropping it because the worker has stopped is
+    /// Records a new position. Dropping it because the task has stopped is
     /// logged once per update and is not otherwise fatal.
     pub(crate) fn record(&self, position: P, what: &'static str) {
         if self.updates.try_send(position).is_err() {
-            log::warn!("{what} worker stopped");
+            log::warn!("{what} persistence task stopped");
         }
     }
 }

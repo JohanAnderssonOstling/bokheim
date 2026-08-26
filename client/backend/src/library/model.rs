@@ -1,47 +1,12 @@
-use crate::ContentHash;
-use library_model::BookFormat;
-use std::io::{Read, Seek};
-use std::path::{Path, PathBuf};
+use app_contract::library::{BookFormat, BoxedBookReader};
+use std::path::PathBuf;
 
 #[cfg(test)]
 use super::covers::generate_thumbnail_for_sync;
 
-pub use app_contract::library::*;
-
-pub trait BookReader: Read + Seek + Send + Sync {}
-impl<T: Read + Seek + Send + Sync> BookReader for T {}
-pub type BoxedBookReader = Box<dyn BookReader>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReaderFormat {
-    Epub,
-    Pdf,
-    Cbz,
-    WebPub,
-    Audiobook,
-    Materialized,
-}
-
-impl ReaderFormat {
-    pub(crate) const fn from_book_format(format: BookFormat) -> Self {
-        match format {
-            BookFormat::Epub => Self::Epub,
-            BookFormat::Pdf => Self::Pdf,
-            BookFormat::Cbz => Self::Cbz,
-            BookFormat::WebPub => Self::WebPub,
-            BookFormat::M4b => Self::Audiobook,
-            BookFormat::Mobi | BookFormat::Fb2 | BookFormat::Html => Self::Materialized,
-        }
-    }
-}
-
 pub struct ResolvedBook {
     pub path: PathBuf,
-    /// A logical path carrying the authoritative synchronized format. The
-    /// underlying local or remote cache path may be content-addressed and have
-    /// no extension, so publication adapters must dispatch with this path.
-    pub publication_path: PathBuf,
-    pub format: ReaderFormat,
+    pub format: BookFormat,
     pub reader: BoxedBookReader,
 }
 
@@ -51,28 +16,25 @@ pub(crate) struct LibraryAccountState {
     pub signed_in: bool,
 }
 
-/// Canonical content identity: full-file BLAKE3 for every asset.
-pub(crate) fn generate_content_hash_blake3(path: &Path, _buf: &mut [u8]) -> std::io::Result<ContentHash> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    let hash = hasher.finalize().to_hex().to_string();
-    Ok(ContentHash::new(&hash))
-}
+pub(crate) use book_metadata::pdf_annotations::generate_content_hash_blake3;
+
+#[cfg(test)]
+use book_metadata::pdf_annotations::PDF_BASE_HASH_KEY;
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_content_hash_blake3, generate_thumbnail_for_sync, AuthorSort, AuthorSummary, Dir, FolderSort};
+    use super::{generate_content_hash_blake3, generate_thumbnail_for_sync};
     use crate::app::{AppBackend, AppDataLocation, BackendContext};
     use crate::library::database as db;
     use crate::library::LibraryBackend;
     use crate::{ContentHash, DownloadState};
+    use app_contract::library::{AuthorSort, AuthorSummary, BookFormat, Dir, FolderSort};
     use image::{DynamicImage, ImageOutputFormat};
-    use library_model::{agent_id_from_migration_seed, AuthorId};
+    use library_model::agent_id_from_migration_seed;
     use lopdf::{dictionary, Document, Object, Stream};
     use std::io::{Cursor, Write};
     use std::path::Path;
-    use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id};
+    use test_support::{fixture_dir_id, fixture_library_id};
     use zip::write::SimpleFileOptions;
 
     fn write_test_pdf(path: &Path) {
@@ -99,7 +61,7 @@ mod tests {
         LibraryBackend::open(&app, &context, library_dir.to_str().unwrap(), fixture_library_id(library_id)).unwrap().0
     }
 
-    fn imported_card(library: &LibraryBackend, content_hash: ContentHash) -> db::BookCardRow {
+    fn imported_card(library: &LibraryBackend, content_hash: ContentHash) -> app_contract::library::BookCardRow {
         let conn = library.db.get().unwrap();
         db::get_book_cards_in_dir_scoped(&conn, "00000000-0000-0000-0000-000000000000", false, "", app_contract::library::LibraryFileTypeFilter::All).unwrap().into_iter().find(|card| card.content_hash == content_hash).unwrap()
     }
@@ -123,6 +85,48 @@ mod tests {
     }
 
     #[test]
+    fn embedded_pdf_base_hash_survives_annotations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("annotated.pdf");
+        write_test_pdf(&path);
+        let mut buffer = [0_u8; 16];
+        let original = generate_content_hash_blake3(&path, &mut buffer).unwrap();
+
+        let mut document = Document::load(&path).unwrap();
+        let root_id = document.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        document.get_object_mut(root_id).unwrap().as_dict_mut().unwrap().set(super::PDF_BASE_HASH_KEY, Object::string_literal(original.as_str()));
+        let page_id = *document.get_pages().values().next().unwrap();
+        let annotation_id = document.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![0.into(), 0.into(), 20.into(), 20.into()],
+            "Contents" => Object::string_literal("reader note"),
+        });
+        let page = document.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        page.set("Annots", vec![annotation_id.into()]);
+        document.save(&path).unwrap();
+
+        assert_eq!(generate_content_hash_blake3(&path, &mut buffer).unwrap(), original);
+    }
+
+    #[test]
+    fn pdf_hash_changes_when_page_content_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("changed.pdf");
+        write_test_pdf(&path);
+        let mut buffer = [0_u8; 16];
+        let original = generate_content_hash_blake3(&path, &mut buffer).unwrap();
+
+        let mut document = Document::load(&path).unwrap();
+        let page_id = *document.get_pages().values().next().unwrap();
+        let contents_id = document.get_object(page_id).unwrap().as_dict().unwrap().get(b"Contents").unwrap().as_reference().unwrap();
+        document.get_object_mut(contents_id).unwrap().as_stream_mut().unwrap().set_content(b"BT /F1 12 Tf (changed) Tj ET".to_vec());
+        document.save(&path).unwrap();
+
+        assert_ne!(generate_content_hash_blake3(&path, &mut buffer).unwrap(), original);
+    }
+
+    #[test]
     fn pdf_import_indexes_thumbnail_and_resume_page() {
         let temp = tempfile::tempdir().unwrap();
         let app_data = temp.path().join("app");
@@ -133,13 +137,15 @@ mod tests {
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "pdf-test");
 
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "paper.pdf").unwrap();
+        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap();
         assert_eq!(imported_card(&library, content_hash).title, "paper");
         assert!(library.resolve_book_for_reader(content_hash).unwrap().path.ends_with("paper.pdf"));
         let conn = library.db.get().unwrap();
-        db::update_pdf_reading_page(&conn, content_hash, 0).unwrap();
+        db::update_reading_position(&conn, content_hash, &library_model::pdf_page_reading_position(0), None).unwrap();
         assert_eq!(db::get_pdf_reading_page(&conn, content_hash).unwrap(), Some(0));
         assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg")).exists());
+        let mut hash_buffer = [0_u8; 16];
+        assert_eq!(generate_content_hash_blake3(&library_dir.join("paper.pdf"), &mut hash_buffer).unwrap(), content_hash);
     }
 
     #[test]
@@ -152,7 +158,7 @@ mod tests {
         std::fs::create_dir_all(&library_dir).unwrap();
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "existing-instance-test");
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "paper.pdf").unwrap();
+        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap();
         let existing_path = library_dir.join("paper.pdf");
         let missing_dir_id = fixture_dir_id("missing-instance");
         let missing_path = library_dir.join("Missing").join("paper.pdf");
@@ -184,7 +190,7 @@ mod tests {
         std::fs::create_dir_all(&library_dir).unwrap();
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "extensionless-instance-test");
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "paper.pdf").unwrap();
+        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap();
         let extensionless_path = library_dir.join(content_hash.as_str());
         std::fs::rename(library_dir.join("paper.pdf"), &extensionless_path).unwrap();
         db::upsert_blob_local_ref(&library.db.get().unwrap(), crate::BlobKind::Book, &content_hash, extensionless_path.to_str().unwrap(), true).unwrap();
@@ -192,8 +198,7 @@ mod tests {
         let resolved = library.resolve_book_for_reader(content_hash).unwrap();
 
         assert_eq!(resolved.path, extensionless_path);
-        assert_eq!(resolved.format, super::ReaderFormat::Pdf);
-        assert_eq!(resolved.publication_path.extension().and_then(|extension| extension.to_str()), Some("pdf"));
+        assert_eq!(resolved.format, BookFormat::Pdf);
     }
 
     #[test]
@@ -207,7 +212,7 @@ mod tests {
         write_test_pdf(&source);
         let library = open_test_library(&app_data, &library_dir, "eviction-test");
 
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "paper.pdf").unwrap();
+        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap();
         let local_path = library.resolve_book_for_reader(content_hash).unwrap().path;
         assert!(local_path.exists());
         assert!(db::is_book_downloaded(&library.db.get().unwrap(), content_hash).unwrap());
@@ -232,7 +237,7 @@ mod tests {
         let library = open_test_library(&app_data, &library_dir, "folder-eviction-test");
         let first = library.create_directory(&sync_common::ROOT_DIR_ID, "First").unwrap();
         let second = library.create_directory(&sync_common::ROOT_DIR_ID, "Second").unwrap();
-        let content_hash = library.import_book(&first.id, &source, "paper.pdf").unwrap();
+        let content_hash = library.import_book(&first.id, &source).unwrap();
         library.copy_book_to_directory(&content_hash, &first.id, &second.id).unwrap();
 
         let status = library.remove_local_folder_copies(&first.id).unwrap();
@@ -245,60 +250,33 @@ mod tests {
     }
 
     #[test]
-    fn html_import_packages_reachable_assets_without_rewriting_sources() {
+    fn html_import_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let app_data = temp.path().join("app");
         let library_dir = temp.path().join("library");
         let source = temp.path().join("essay.html");
         std::fs::create_dir_all(&app_data).unwrap();
         std::fs::create_dir_all(&library_dir).unwrap();
-        let html = b"<!doctype html><html><head><title>A better title</title><meta name=\"author\" content=\"Ada Lovelace\"><link rel=\"stylesheet\" href=\"assets/book.css\"></head><body><img src=\"assets/cover.png\">Text</body></html>";
-        std::fs::create_dir_all(temp.path().join("assets")).unwrap();
-        std::fs::write(&source, html).unwrap();
-        std::fs::write(temp.path().join("assets/book.css"), b"body { color: navy }").unwrap();
-        std::fs::write(temp.path().join("assets/cover.png"), b"image bytes").unwrap();
-        std::fs::write(temp.path().join("unrelated.txt"), b"private sibling").unwrap();
+        std::fs::write(&source, b"<!doctype html><title>Unsupported</title>").unwrap();
         let library = open_test_library(&app_data, &library_dir, "html-test");
 
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "essay.html").unwrap();
-        let stored = library.resolve_book_for_reader(content_hash).unwrap().path;
-        assert!(stored.ends_with("essay.webpub"));
-        assert_eq!(stored.extension().and_then(|extension| extension.to_str()), Some("webpub"));
-        let publication = html_publication::PublicationSource::from_path(stored).unwrap();
-        assert_eq!(publication.provider.read_bytes("essay.html").unwrap(), html);
-        assert_eq!(publication.provider.read_bytes("assets/book.css").unwrap(), b"body { color: navy }");
-        assert!(publication.provider.read_bytes("unrelated.txt").is_err());
-        let card = imported_card(&library, content_hash);
-        assert_eq!(card.title, "A better title");
-        assert_eq!(card.author, "Ada Lovelace");
+        let error = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap_err();
+        assert!(error.to_string().contains("only EPUB, PDF"));
     }
 
     #[test]
-    fn cbz_import_reads_comic_info_and_generates_its_cover() {
+    fn cbz_import_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let app_data = temp.path().join("app");
         let library_dir = temp.path().join("library");
         let source = temp.path().join("comic.cbz");
         std::fs::create_dir_all(&app_data).unwrap();
         std::fs::create_dir_all(&library_dir).unwrap();
-        let mut image = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(2, 3).write_to(&mut image, ImageOutputFormat::Png).unwrap();
-        let file = std::fs::File::create(&source).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        let options = SimpleFileOptions::default();
-        archive.start_file("001.png", options).unwrap();
-        archive.write_all(image.get_ref()).unwrap();
-        archive.start_file("ComicInfo.xml", options).unwrap();
-        archive.write_all(br#"<ComicInfo><Title>Native Comic</Title><Writer>Grace Hopper</Writer><Pages><Page Image="0" Type="FrontCover"/></Pages></ComicInfo>"#).unwrap();
-        archive.finish().unwrap();
+        std::fs::write(&source, b"legacy comic").unwrap();
         let library = open_test_library(&app_data, &library_dir, "cbz-test");
 
-        let content_hash = library.import_book(&sync_common::ROOT_DIR_ID, &source, "comic.cbz").unwrap();
-
-        let card = imported_card(&library, content_hash);
-        assert_eq!(card.title, "Native Comic");
-        assert_eq!(card.author, "Grace Hopper");
-        assert!(app_data.join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg")).exists());
+        let error = library.import_book(&sync_common::ROOT_DIR_ID, &source).unwrap_err();
+        assert!(error.to_string().contains("only EPUB, PDF"));
     }
 
     #[test]
@@ -346,7 +324,7 @@ mod tests {
         let epub_path = library_dir.join("book.epub");
 
         let mut cover = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(2, 3).write_to(&mut cover, ImageOutputFormat::Png).unwrap();
+        DynamicImage::new_rgb8(300, 450).write_to(&mut cover, ImageOutputFormat::Png).unwrap();
         let file = std::fs::File::create(&epub_path).unwrap();
         let mut archive = zip::ZipWriter::new(file);
         let options = SimpleFileOptions::default();
@@ -377,7 +355,7 @@ mod tests {
         assert_eq!(&ui_bytes[..2], &[0xff, 0xd8]);
         assert_eq!(&sync_bytes[..3], &[0xff, 0xd8, 0xff]);
         let dimensions = image::load_from_memory_with_format(&sync_bytes, image::ImageFormat::Jpeg).unwrap().to_rgb8().dimensions();
-        assert_eq!(dimensions, (300, 450));
+        assert_eq!(dimensions, (600, 900));
 
         generate_thumbnail_for_sync(&context, &library_root, &epub_path, &content_hash).unwrap();
         assert_eq!(std::fs::read(sync_path).unwrap(), sync_bytes);

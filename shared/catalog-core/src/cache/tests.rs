@@ -1,5 +1,5 @@
 use super::*;
-use catalog_contract::{CatalogAuthorCredit, CatalogFreshness, CatalogPagination, CatalogPublicationIdentity, CatalogRecommendationExclusion, CatalogRecommendationRequest, CatalogSubjectPreference};
+use catalog_contract::{CatalogAuthorCredit, CatalogFreshness, CatalogPagination, CatalogPublicationIdentity, CatalogResultRange, CatalogResultRangeResponse, LanguageTag};
 use library_model::PublicationSubject;
 
 fn source_id() -> CatalogSourceId {
@@ -10,10 +10,11 @@ fn publication(id: &str, title: &str, author: &str, languages: &[&str]) -> Catal
     CatalogPublication {
         identity: CatalogPublicationIdentity { edition_id: id.to_owned(), work_id: None },
         title: title.to_owned(),
-        authors: vec![CatalogAuthorCredit { name: author.to_owned(), sort_name: None, identifiers: Vec::new(), provider_link: None }],
-        languages: languages.iter().map(|language| (*language).to_owned()).collect(),
+        authors: vec![CatalogAuthorCredit { name: author.to_owned(), name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None }],
+        languages: languages.iter().map(|language| LanguageTag::parse(language).unwrap()).collect(),
         description: None,
         image_url: None,
+        metadata: Default::default(),
         actions: Vec::new(),
     }
 }
@@ -514,8 +515,8 @@ fn page_batches_commit_incremental_and_replacement_pages_atomically() {
             &source,
             root,
             &[
-                CatalogPageWrite { page: page(root, vec![publication("one", "One", "Author", &["en"])]), etag: Some("root-v1".to_owned()), last_modified: None },
-                CatalogPageWrite { page: page(child, vec![publication("two", "Two", "Author", &["en"])]), etag: Some("child-v1".to_owned()), last_modified: None },
+                CatalogPageWrite { page: page(root, vec![publication("one", "One", "Author", &["en"])]), etag: Some("root-v1".to_owned()), last_modified: None, provider_paginated: false },
+                CatalogPageWrite { page: page(child, vec![publication("two", "Two", "Author", &["en"])]), etag: Some("child-v1".to_owned()), last_modified: None, provider_paginated: false },
             ],
         )
         .unwrap();
@@ -530,8 +531,8 @@ fn page_batches_commit_incremental_and_replacement_pages_atomically() {
         .stage_pages(
             &crawl,
             &[
-                CatalogPageWrite { page: page(root, vec![publication("three", "Three", "Author", &["en"])]), etag: Some("root-v2".to_owned()), last_modified: None },
-                CatalogPageWrite { page: page(child, Vec::new()), etag: Some("child-v2".to_owned()), last_modified: None },
+                CatalogPageWrite { page: page(root, vec![publication("three", "Three", "Author", &["en"])]), etag: Some("root-v2".to_owned()), last_modified: None, provider_paginated: false },
+                CatalogPageWrite { page: page(child, Vec::new()), etag: Some("child-v2".to_owned()), last_modified: None, provider_paginated: false },
             ],
         )
         .unwrap();
@@ -569,7 +570,7 @@ fn page_graph_frontier_and_enrichment_are_resolved_without_loading_all_pages() {
     let root_url = "https://example.com/opds";
     let child_url = "https://example.com/child";
     let mut root = page(root_url, vec![importable_epub("one", None)]);
-    root.navigation.push(CatalogLink { title: "Child".to_owned(), target: CatalogLinkTarget::Page { locator: child_url.to_owned() }, number_of_items: None, active: false });
+    root.navigation.push(CatalogLink { title: "Child".to_owned(), target: CatalogLinkTarget::Page { locator: child_url.to_owned() }, relations: Vec::new(), number_of_items: None, active: false });
     cache.put_page(&source, root_url, &root, None, None).unwrap();
     assert_eq!(cache.missing_page_frontier(&source, root_url).unwrap(), [child_url]);
 
@@ -625,7 +626,7 @@ fn subject_browse_reuses_projected_hierarchy_and_paginates_sourced_books() {
         )
         .unwrap();
 
-    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap();
     assert_eq!(root.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["Humanities", "Science & Nature"]);
     assert!(root.publications.is_empty());
     let humanities = root.navigation.iter().find(|link| link.title == "Humanities").unwrap();
@@ -633,27 +634,35 @@ fn subject_browse_reuses_projected_hierarchy_and_paginates_sourced_books() {
     let humanities_locator = locator.clone();
     let mut locator = locator.clone();
     for expected_child in ["History", "History by Region", "Americas", "North America", "United States", "Historical Eras", "20th Century"] {
-        let level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+        let level = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap();
         let child = level.navigation.iter().find(|link| link.title == expected_child).unwrap_or_else(|| panic!("missing unified subject child {expected_child}"));
         let CatalogLinkTarget::Page { locator: child_locator } = &child.target else { panic!("subject children must be internal links") };
         locator = child_locator.clone();
     }
 
-    let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+    let first = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator.clone()), supported_languages: vec!["en".to_owned()], range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap();
     assert!(first.navigation.is_empty());
     assert_eq!(first.publications.len(), 1);
     assert_eq!(first.publications[0].source_id, source_id());
     assert_eq!(first.publications[0].publication.identity.edition_id, "history-two", "popular books sort first within an equally relevant subject");
-    assert_eq!(first.pagination.number_of_items, Some(2));
-    let second = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: first.pagination.next.clone(), supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: String::new(), limit: 1 }).unwrap();
+    assert_eq!(first.range, CatalogResultRangeResponse { offset: 0, returned_items: 1, total_items: 2 });
+    let second = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(locator), supported_languages: vec!["en".to_owned()], range: CatalogResultRange::new(1, 1), ..Default::default() }).unwrap();
     assert_eq!(second.publications.len(), 1);
     assert_ne!(first.publications[0].publication.identity, second.publications[0].publication.identity);
 
     let excluded_source = CatalogSourceId::parse("another-source").unwrap();
-    let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![excluded_source], query: String::new(), limit: 10 });
+    let filtered_root = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![excluded_source], range: CatalogResultRange::new(0, 10), ..Default::default() });
     assert!(filtered_root.unwrap().navigation.is_empty());
 
-    let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: Some(humanities_locator), supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "FIRST HISTORY".to_owned(), limit: 10 });
+    cache.refresh_search_index().unwrap();
+    let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest {
+        locator: Some(humanities_locator),
+        supported_languages: vec!["en".to_owned()],
+        source_ids: vec![source_id()],
+        query: "FIRST HISTORY".to_owned(),
+        range: CatalogResultRange::new(0, 10),
+        ..Default::default()
+    });
     let searched = searched.unwrap();
     assert!(searched.navigation.is_empty());
     assert_eq!(searched.publications.len(), 1);
@@ -680,7 +689,8 @@ fn subject_browse_uses_gutenberg_downloads_when_open_library_popularity_is_missi
     }
     cache.activate_crawl(&crawl).unwrap();
 
-    let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: Vec::new(), query: "book".to_owned(), limit: 10 }).unwrap();
+    cache.refresh_search_index().unwrap();
+    let response = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], query: "book".to_owned(), range: CatalogResultRange::new(0, 10), ..Default::default() }).unwrap();
     assert_eq!(response.publications[0].publication.title, "The popular book");
 }
 
@@ -696,42 +706,42 @@ fn subject_browse_filters_and_paginates_inside_sqlite() {
     cache.stage_page(&crawl, &books, None, None).unwrap();
     cache.activate_crawl(&crawl).unwrap();
     let generation = cache.source_state(&source).unwrap().unwrap().active_generation;
-    let connection = cache.pool.get().unwrap();
+    let mut connection = cache.pool.get().unwrap();
+    let transaction = connection.transaction().unwrap();
+    let assignment = CatalogSubjectAssignment { system_id: "unified".to_owned(), subject_path: "Humanities / History".to_owned(), matcher_version: 1, evidence_positions: Vec::new() };
     for publication in &books.publications {
-        connection
-            .execute(
-                "INSERT INTO catalog_publication_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path,matcher_version)
-                     VALUES(?1,?2,?3,'','unified','Humanities / History',1)",
-                params![source.as_str(), storage_i64(generation, "generation").unwrap(), publication.identity.edition_id],
-            )
-            .unwrap();
+        insert_prepared_subject_assignments(&transaction, source.as_str(), storage_i64(generation, "generation").unwrap(), &publication.identity.edition_id, "", std::slice::from_ref(&assignment)).unwrap();
     }
+    transaction.commit().unwrap();
     drop(connection);
 
     assert!(!cache.search_index_ready().unwrap());
+    let warming = cache.browse_subjects(&CatalogSubjectBrowseRequest { query: "indexed history".to_owned(), range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap_err();
+    assert!(warming.to_string().contains("warming"));
     assert!(cache.refresh_search_index().unwrap());
     assert!(cache.search_index_ready().unwrap());
 
-    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source.clone()], query: String::new(), limit: 1 }).unwrap();
+    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source.clone()], range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap();
     assert_eq!(root.navigation.len(), 1);
     assert_eq!(root.navigation[0].title, "Humanities");
     assert_eq!(root.navigation[0].number_of_items, Some(2));
     assert!(root.publications.is_empty());
 
-    let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source], query: "FIRST".to_owned(), limit: 1 }).unwrap();
+    let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source], query: "FIRST".to_owned(), range: CatalogResultRange::new(0, 1), ..Default::default() }).unwrap();
     assert_eq!(searched.publications.len(), 1);
     assert_eq!(searched.publications[0].publication.identity.edition_id, "sqlite-one");
-    assert_eq!(searched.pagination.number_of_items, None);
-    assert_eq!(searched.pagination.last, None);
+    assert_eq!(searched.range, CatalogResultRangeResponse { offset: 0, returned_items: 1, total_items: 1 });
 
-    let first_search_page = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), limit: 1 }).unwrap();
+    let first_search_page = cache
+        .browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), range: CatalogResultRange::new(0, 1), ..Default::default() })
+        .unwrap();
     assert_eq!(first_search_page.publications.len(), 1);
-    assert!(first_search_page.pagination.next.is_some());
-    assert_eq!(first_search_page.pagination.number_of_items, None);
-    let second_search_page =
-        cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: first_search_page.pagination.next, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), limit: 1 }).unwrap();
+    assert_eq!(first_search_page.range, CatalogResultRangeResponse { offset: 0, returned_items: 1, total_items: 2 });
+    let second_search_page = cache
+        .browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), range: CatalogResultRange::new(1, 1), ..Default::default() })
+        .unwrap();
     assert_eq!(second_search_page.publications.len(), 1);
-    assert!(second_search_page.pagination.next.is_none());
+    assert_eq!(second_search_page.range, CatalogResultRangeResponse { offset: 1, returned_items: 1, total_items: 2 });
     assert_ne!(first_search_page.publications[0].publication.identity, second_search_page.publications[0].publication.identity);
 
     let connection = cache.pool.get().unwrap();
@@ -761,11 +771,33 @@ fn subject_browse_filters_and_paginates_inside_sqlite() {
     drop(connection);
 
     for query in ["authorneedle", "tocneedle"] {
-        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: query.to_owned(), limit: 10 });
+        let searched = cache.browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: query.to_owned(), range: CatalogResultRange::new(0, 10), ..Default::default() });
         let searched = searched.unwrap();
         assert_eq!(searched.publications.len(), 1, "FTS trigger did not index {query}");
         assert_eq!(searched.publications[0].publication.identity.edition_id, "sqlite-two");
     }
+
+    assert!(cache.refresh_browse_serving_index().unwrap());
+    assert!(cache.browse_serving_index_ready().unwrap());
+    assert!(!cache.refresh_browse_serving_index().unwrap());
+    // A completed serving snapshot remains readable while a newer catalogue
+    // revision waits to be projected; readers never fall back to the slow
+    // ingestion schema during a rebuild.
+    cache.pool.get().unwrap().execute("UPDATE catalog_transport_state SET revision=revision+1 WHERE singleton=1", []).unwrap();
+    assert!(cache.browse_serving_index_ready().unwrap());
+    for query in ["indexed history", "authorneedle", "tocneedle"] {
+        let request = CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: query.to_owned(), range: CatalogResultRange::new(0, 10), ..Default::default() };
+        let searched = cache.browse_subjects(&request).unwrap();
+        assert!(!searched.publications.is_empty(), "serving FTS did not index {query}");
+        let capabilities = cache.subject_browse_capabilities(&request).unwrap();
+        assert_eq!(capabilities.capabilities.book_formats.iter().find(|facet| facet.value == CatalogBookFormat::Epub).map(|facet| facet.number_of_items), Some(searched.range.total_items));
+        assert_eq!(capabilities.capabilities.languages.iter().find(|facet| facet.value == "en").map(|facet| facet.number_of_items), Some(searched.range.total_items));
+    }
+    let past_end = cache
+        .browse_subjects(&CatalogSubjectBrowseRequest { supported_languages: vec!["en".to_owned()], source_ids: vec![source_id()], query: "indexed history".to_owned(), range: CatalogResultRange::new(99, 1), ..Default::default() })
+        .unwrap();
+    assert!(past_end.publications.is_empty());
+    assert_eq!(past_end.range.total_items, 2);
 }
 
 #[test]
@@ -789,41 +821,9 @@ fn existing_cache_backfill_rebuilds_the_unified_subject_projection() {
 
     let cache = CatalogCache::open(&path).unwrap();
     cache.refresh_unified_subject_assignments().unwrap();
-    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { locator: None, supported_languages: Vec::new(), source_ids: Vec::new(), query: String::new(), limit: 10 }).unwrap();
+    let root = cache.browse_subjects(&CatalogSubjectBrowseRequest { range: CatalogResultRange::new(0, 10), ..Default::default() }).unwrap();
     assert!(root.navigation.iter().any(|link| link.title == "Humanities"));
     let connection = cache.pool.get().unwrap();
     let unified_count = connection.query_row("SELECT COUNT(*) FROM catalog_publication_subject_assignment WHERE system_id=?1", [library_model::UNIFIED_SYSTEM_ID], |row| row.get::<_, i64>(0)).unwrap();
     assert!(unified_count > 0);
-}
-
-#[test]
-fn canonical_subject_recommendations_rank_filter_exclude_and_survive_recrawl() {
-    let temporary = tempfile::tempdir().unwrap();
-    let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
-    cache.ensure_source(&source_id(), "https://example.com/opds").unwrap();
-    let first = cache.begin_crawl(&source_id(), "https://example.com/opds").unwrap();
-    let books = page("https://example.com/opds", vec![importable_epub("history-en", None), importable_epub("history-sv", None), importable_epub("fiction", None)]);
-    cache.stage_page(&first, &books, None, None).unwrap();
-    let history = PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap();
-    let fiction = PublicationSubject::new(None, "Fiction / General", "dc:subject", Some("bisac".to_owned()), Some("FIC000000".to_owned())).unwrap();
-    cache.stage_publication_subjects(&first, &books.publications[0].identity, std::slice::from_ref(&history)).unwrap();
-    cache.stage_publication_subjects(&first, &books.publications[1].identity, std::slice::from_ref(&history)).unwrap();
-    cache.stage_publication_subjects(&first, &books.publications[2].identity, std::slice::from_ref(&fiction)).unwrap();
-    cache.activate_crawl(&first).unwrap();
-
-    let request = CatalogRecommendationRequest {
-        subjects: vec![CatalogSubjectPreference { system_id: "bisac".to_owned(), subject_path: "History / United States".to_owned(), weight: 5 }],
-        supported_languages: vec!["en".to_owned()],
-        excluded_publications: vec![CatalogRecommendationExclusion { source_id: source_id(), publication: books.publications[1].identity.clone() }],
-        limit: 10,
-    };
-    let recommendations = cache.recommendations(&request).unwrap().recommendations;
-    assert_eq!(recommendations.len(), 1);
-    assert_eq!(recommendations[0].publication.identity.edition_id, "history-en");
-    assert_eq!(recommendations[0].matched_subjects[0].subject_path, "History / United States / 20th Century");
-
-    let second = cache.begin_crawl(&source_id(), "https://example.com/opds").unwrap();
-    cache.stage_page(&second, &books, None, None).unwrap();
-    cache.activate_crawl(&second).unwrap();
-    assert_eq!(cache.recommendations(&request).unwrap().recommendations.len(), 1, "subject sidecars are copied into an unchanged generation");
 }

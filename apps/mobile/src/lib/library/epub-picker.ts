@@ -8,6 +8,8 @@ import { BROWSING_CONTENT_CONTRACT } from "../shared/types";
 
 const EPUB_MIME = "application/epub+zip";
 const PDF_MIME = "application/pdf";
+const MOBI_MIME = "application/x-mobipocket-ebook";
+const M4B_MIME = "audio/x-m4b";
 const BOOK_EXTENSIONS: readonly string[] = BROWSING_CONTENT_CONTRACT.import_extensions;
 const ANDROID_PICKED_EVENT = `${APP_NAME_LOWER}-epub-picked`;
 const browserImports = new Map<string, File>();
@@ -53,21 +55,19 @@ function publicationMime(name: string) {
   const extension = name.split(".").at(-1)?.toLocaleLowerCase();
   if (extension === "epub") return EPUB_MIME;
   if (extension === "pdf") return PDF_MIME;
-  if (extension === "fb2") return "application/x-fictionbook+xml";
-  if (extension === "cbz") return "application/vnd.comicbook+zip";
-  if (extension === "webpub") return "application/webpub+zip";
-  if (extension === "html" || extension === "htm") return "text/html";
-  if (extension === "xhtml") return "application/xhtml+xml";
   if (extension === "mobi" || extension === "azw" || extension === "azw3")
-    return "application/x-mobipocket-ebook";
+    return MOBI_MIME;
+  if (extension === "m4b") return M4B_MIME;
   return "application/octet-stream";
 }
 
-function pickInBrowser(_importFormats: boolean): Promise<PickedEpub | null> {
+function pickInBrowser(importFormats: boolean): Promise<PickedEpub | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = `.epub,.pdf,${EPUB_MIME},${PDF_MIME}`;
+    input.accept = importFormats
+      ? [...BOOK_EXTENSIONS.map((extension) => `.${extension}`), EPUB_MIME, PDF_MIME, MOBI_MIME, M4B_MIME].join(",")
+      : `.epub,${EPUB_MIME}`;
     input.addEventListener(
       "change",
       () => {
@@ -136,7 +136,7 @@ function pickOnAndroid(): Promise<PickedEpub | null> {
   });
 }
 
-/** Opens the platform picker with the narrowest EPUB filter it supports. */
+/** Opens the platform picker with the narrowest requested publication filter. */
 export async function pickEpub(importFormats = false): Promise<PickedEpub | null> {
   if (!isTauri()) return pickInBrowser(importFormats);
 
@@ -145,7 +145,7 @@ export async function pickEpub(importFormats = false): Promise<PickedEpub | null
   }
 
   const selected = await open({
-    title: "Choose an EPUB",
+    title: importFormats ? "Choose a book" : "Choose an EPUB",
     multiple: false,
     directory: false,
     pickerMode: "document",

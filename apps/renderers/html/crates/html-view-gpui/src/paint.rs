@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 use gpui::{Bounds, ContentMask, Corners, Edges, Hsla, PaintGlyph, Pixels, RenderImage, SvgRenderer, Window, fill, point, px, rgba, size};
 use html_view_core::text_backend::{GlyphId, TextRunId};
@@ -453,7 +453,7 @@ fn paint_commands_inner(commands: &[PaintCommand], glyphs: &[GpuiGlyph], bounds:
             PaintCommand::Image { rect, image } => {
                 let operation_started = profile_enabled.then(Instant::now);
                 let image_bounds = Bounds { origin: point(bounds.origin.x + px(rect.x0 as f32), bounds.origin.y + px(rect.y0 as f32)), size: size(px(rect.width() as f32), px(rect.height() as f32)) };
-                let _ = window.paint_image(image_bounds, Corners::default(), image.clone(), 0, false);
+                let _ = window.paint_image(image_bounds, image_bounds, Corners::default(), image.clone(), 0, false);
                 if let Some(started) = operation_started {
                     profile.image_us += started.elapsed().as_micros();
                 }
@@ -538,5 +538,18 @@ mod tests {
     #[test]
     fn renders_full_color_svg_at_the_used_css_viewport() {
         assert!(render_svg(RELATIVE_SVG, (300, 150), 300, 96).is_some());
+    }
+
+    #[test]
+    fn renders_an_image_embedded_in_svg_as_a_data_url() {
+        use base64::Engine;
+        use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
+
+        let mut png = Vec::new();
+        PngEncoder::new(&mut png).write_image(&[255, 0, 0, 255], 1, 1, ExtendedColorType::Rgba8).expect("encode test PNG");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><image width="1" height="1" xlink:href="data:image/png;base64,{encoded}"/></svg>"#);
+        let rendered = render_svg(svg.as_bytes(), (1, 1), 16, 16).expect("SVG with an embedded image should render");
+        assert!(rendered.as_bytes(0).expect("first SVG frame").chunks_exact(4).any(|pixel| pixel[3] != 0), "embedded image must produce visible pixels");
     }
 }

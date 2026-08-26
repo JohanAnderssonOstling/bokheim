@@ -79,18 +79,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+    // Search is part of the interactive read path, so its one-time repair and
+    // read-optimized projection must not depend on administrators resuming
+    // the enrichment worker.
+    let search_index_service = service.clone();
+    tokio::spawn(async move {
+        search_index_service.refresh_search_index().await;
+        search_index_service.refresh_browse_serving_index().await;
+    });
     let refresh_service = service.clone();
     tokio::spawn(async move { refresh_service.run_refresh_loop().await });
     let registry_service = service.clone();
     tokio::spawn(async move { registry_service.run_registry_refresh_loop().await });
-    // Keep startup indexing and durable enrichment on one maintenance path so
-    // they cannot compete for the serialized SQLite writer.
-    let maintenance_service = service.clone();
-    tokio::spawn(async move {
-        maintenance_service.refresh_search_index().await;
-        maintenance_service.refresh_unified_subject_assignments().await;
-        maintenance_service.run_epub_extraction_loop().await;
-    });
+    let epub_enrichment_service = service.clone();
+    tokio::spawn(async move { epub_enrichment_service.run_epub_extraction_loop().await });
+    let cover_download_service = service.clone();
+    tokio::spawn(async move { cover_download_service.run_cover_download_loop().await });
+    let catalogue_enrichment_service = service.clone();
+    tokio::spawn(async move { catalogue_enrichment_service.run_catalogue_enrichment_loop().await });
     tracing::info!(address = %listener.local_addr()?, "public unauthenticated catalog server listening");
     tracing::info!(address = %operations_listener.local_addr()?, "loopback catalogue operations server listening");
     let public_server = axum::serve(listener, app(service.clone()));

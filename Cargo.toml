@@ -11,10 +11,13 @@ members = [
     "client/audiobook-library",
     "client/app-contract",
     "client/library-model",
+    "client/library-sqlite",
     "client/test-support",
     "shared/content-address",
     "shared/catalog-contract",
     "shared/catalog-model",
+    "shared/publication-model",
+    "shared/subject-projection",
     "shared/litteraturbanken",
     "shared/opds",
     "shared/account-contract",
@@ -37,6 +40,8 @@ members = [
     "apps/renderers/pdf/view-common",
     "apps/renderers/pdf/core",
     "apps/desktop-gpui",
+    "apps/web-gpui",
+    "apps/web-reader-smoke",
     "apps/ui/gpui/audiobook-player",
     "apps/kobo-device",
     "apps/ui/gpui/browser",
@@ -48,7 +53,7 @@ members = [
     "servers/metadata",
     "servers/taxonomy"
 ]
-exclude = ["servers/sync"]
+exclude = ["servers/sync", "apps/mobile/web-core"]
 
 [workspace.lints]
 

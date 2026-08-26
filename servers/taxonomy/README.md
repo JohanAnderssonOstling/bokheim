@@ -7,7 +7,7 @@ the reviewed `unified-taxonomy-v2.sqlite3` snapshot supplied at startup.
 ## Run
 
 ```sh
-BOKHEIM_TAXONOMY_DATABASE=client/library-model/data/unified-taxonomy-v2.sqlite3 \
+BOKHEIM_TAXONOMY_DATABASE=shared/subject-projection/data/unified-taxonomy-v2.sqlite3 \
   cargo run -p taxonomy-server
 ```
 

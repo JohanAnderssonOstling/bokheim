@@ -1,8 +1,9 @@
 use super::{
-    active_generation_in, bounded_crawl_error, copy_popularity_metadata, copy_subject_metadata, copy_toc_metadata, decode_cached, ensure_source_in, insert_staged_publication, next_sequence_in, params, put_page_row,
-    queue_publication_extraction, refresh_active_counts, replace_publication_subjects, source_state_in, storage_i64, unix_timestamp, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogPage, CatalogPageWrite,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, copy_popularity_metadata, copy_subject_metadata, copy_toc_metadata, decode_cached, ensure_source_in, insert_staged_publication, next_sequence_in, params,
+    put_page_row, queue_publication_extraction, refresh_active_counts, replace_publication_subjects, source_state_in, storage_i64, unix_timestamp, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogPage, CatalogPageWrite,
     CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, CatalogSourceState, OptionalExtension, PreparedCatalogPageWrite, TransactionBehavior,
 };
+use publication_model::PublicationSubject;
 
 impl CatalogCache {
     pub fn begin_crawl(&self, source_id: &CatalogSourceId, source_url: &str) -> Result<CatalogCrawlGeneration, CatalogCacheError> {
@@ -45,7 +46,7 @@ impl CatalogCache {
     }
 
     pub fn stage_page(&self, crawl: &CatalogCrawlGeneration, page: &CatalogPage, etag: Option<&str>, last_modified: Option<&str>) -> Result<(), CatalogCacheError> {
-        self.stage_prepared_pages(crawl, &Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned) }])?)
+        self.stage_prepared_pages(crawl, &Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned), provider_paginated: false }])?)
     }
 
     /// Stages several replacement-crawl pages in one bounded transaction.
@@ -62,7 +63,16 @@ impl CatalogCache {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let active_generation = active_generation_in(&transaction, &crawl.source_id)?;
         for prepared_page in pages {
-            put_page_row(&transaction, &crawl.source_id, crawl.generation, &prepared_page.write.page, &prepared_page.payload, prepared_page.write.etag.as_deref(), prepared_page.write.last_modified.as_deref())?;
+            put_page_row(
+                &transaction,
+                &crawl.source_id,
+                crawl.generation,
+                &prepared_page.write.page,
+                &prepared_page.payload,
+                prepared_page.write.etag.as_deref(),
+                prepared_page.write.last_modified.as_deref(),
+                prepared_page.write.provider_paginated,
+            )?;
             for publication in &prepared_page.publications {
                 insert_staged_publication(&transaction, &crawl.source_id, crawl.generation, publication)?;
                 copy_subject_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
@@ -78,7 +88,7 @@ impl CatalogCache {
     /// its deterministic canonical assignments. This deliberately remains a
     /// sidecar to the catalogue wire payload: browsing clients do not need the
     /// potentially large raw metadata in every publication card.
-    pub fn stage_publication_subjects(&self, crawl: &CatalogCrawlGeneration, identity: &CatalogPublicationIdentity, subjects: &[library_model::PublicationSubject]) -> Result<(), CatalogCacheError> {
+    pub fn stage_publication_subjects(&self, crawl: &CatalogCrawlGeneration, identity: &CatalogPublicationIdentity, subjects: &[PublicationSubject]) -> Result<(), CatalogCacheError> {
         let mut connection = self.pool.get()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = storage_i64(crawl.generation, "generation")?;
@@ -178,6 +188,7 @@ impl CatalogCache {
              WHERE source_id=?1",
             params![crawl.source_id.as_str(), generation, unix_timestamp()?, page_count, publication_count, epub_count],
         )?;
+        advance_catalog_transport_revision(&transaction)?;
         let state = source_state_in(&transaction, &crawl.source_id)?.expect("crawl source exists");
         transaction.commit()?;
         Ok(state)

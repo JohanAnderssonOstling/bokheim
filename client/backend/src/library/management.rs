@@ -4,8 +4,9 @@
 //! filesystem projection. Local failures are rolled back before returning;
 //! destructive files are staged until their SQLite transaction commits.
 
-use super::{database as db, filenames, LibraryBackend, LibraryFolderDestination, LibraryTrashView, TrashedBook, TrashedFolder};
+use super::{database as db, filenames, LibraryBackend};
 use crate::{BlobKind, ContentHash, DirId};
+use app_contract::library::{LibraryFolderDestination, LibraryTrashView};
 use rusqlite::{OptionalExtension, Transaction};
 use std::collections::HashSet;
 use std::fs;
@@ -319,82 +320,33 @@ impl LibraryBackend {
 
     pub(super) fn trash_book_on_disk(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let changed = conn.execute("UPDATE book SET deleted_at=?2,purged_at=NULL,trash_origin_dir_id=NULL WHERE content_hash=?1 AND deleted_at IS NULL", rusqlite::params![content_hash.as_str(), timestamp()?])?;
-        if changed == 0 {
-            return Err("book does not exist or is already in Trash".into());
-        }
+        db::trash_book_record(&conn, content_hash)?;
         Ok(())
     }
 
     pub(super) fn restore_book_from_trash(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let changed = conn.execute("UPDATE book SET deleted_at=NULL,purged_at=NULL,trash_origin_dir_id=NULL WHERE content_hash=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL", [content_hash.as_str()])?;
-        if changed == 0 {
-            return Err("book is not in Trash".into());
-        }
+        db::restore_book_record(&conn, content_hash)?;
         Ok(())
     }
 
     pub(super) fn load_trash(&self) -> Result<LibraryTrashView, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let mut book_statement = conn.prepare(
-            "SELECT content_hash,COALESCE(NULLIF(title,''),content_hash),format,deleted_at
-             FROM book WHERE deleted_at IS NOT NULL AND purged_at IS NULL
-             ORDER BY deleted_at DESC,portable_name_key(COALESCE(title,content_hash)),content_hash",
-        )?;
-        let books = book_statement.query_map([], |row| Ok(TrashedBook { content_hash: ContentHash::new(&row.get::<_, String>(0)?), title: row.get(1)?, format: row.get(2)?, deleted_at: row.get(3)? }))?.collect::<Result<Vec<_>, _>>()?;
-        let mut folder_statement = conn.prepare(
-            "SELECT id,name,deleted_at FROM dir
-             WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND intent_lifecycle=1
-             ORDER BY deleted_at DESC,name_key,id",
-        )?;
-        let folders = folder_statement
-            .query_map([], |row| {
-                let raw_id: String = row.get(0)?;
-                let id = DirId::parse_str(&raw_id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
-                Ok(TrashedFolder { id, name: row.get(1)?, deleted_at: row.get(2)? })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(LibraryTrashView { books, folders })
+        Ok(db::library_trash(&conn)?)
     }
 
     pub(super) fn load_folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, Box<dyn std::error::Error>> {
         let conn = self.db.get()?;
-        let mut statement = conn.prepare(
-            "WITH RECURSIVE tree(id,parent_id,label,path) AS (
-                 SELECT id,NULL,'Library','' FROM dir WHERE id='00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL
-                 UNION ALL
-                 SELECT child.id,child.parent_id,child.name,CASE WHEN tree.path='' THEN child.name ELSE tree.path||' / '||child.name END
-                 FROM dir child JOIN tree ON child.parent_id=tree.id
-                 WHERE child.id!=child.parent_id AND child.deleted_at IS NULL
-             ) SELECT id,parent_id,label,path FROM tree ORDER BY portable_name_key(path),id",
-        )?;
-        let destinations = statement
-            .query_map([], |row| {
-                let raw_id: String = row.get(0)?;
-                let id = DirId::parse_str(&raw_id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
-                let parent_id = row.get::<_, Option<String>>(1)?.map(|raw| DirId::parse_str(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))).transpose()?;
-                let label = row.get(2)?;
-                let path: String = row.get(3)?;
-                Ok(LibraryFolderDestination { id, parent_id, label, path: if path.is_empty() { "Library".to_owned() } else { path } })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(destinations)
+        Ok(db::folder_destinations(&conn)?)
     }
 
     pub(super) fn purge_book_from_trash(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.db.get()?;
         let tx = conn.transaction()?;
-        let (book_row_id, format): (i64, String) =
-            tx.query_row("SELECT row_id,format FROM book WHERE content_hash=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL", [content_hash.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or("book is not in Trash")?;
-        let mut paths = HashSet::<PathBuf>::new();
-        let mut path_statement = tx.prepare("SELECT path FROM blob_local_ref WHERE hash=?1 AND exists_flag=1")?;
-        for path in path_statement.query_map([content_hash.as_str()], |row| row.get::<_, String>(0))? {
-            paths.insert(PathBuf::from(path?));
-        }
-        drop(path_statement);
-        if !format.is_empty() {
-            paths.insert(self.library_root.join(crate::APP_HIDDEN_DIR).join("trash/books").join(format!("{content_hash}.{format}")));
+        let purge = db::book_purge_info(&tx, content_hash)?;
+        let mut paths = purge.local_paths.into_iter().collect::<HashSet<_>>();
+        if !purge.format.is_empty() {
+            paths.insert(self.library_root.join(crate::APP_HIDDEN_DIR).join("trash/books").join(format!("{content_hash}.{}", purge.format)));
         }
         paths.insert(self.context.thumbnails_dir()?.join(format!("{content_hash}.jpg")));
         paths.insert(crate::sync::transfer::thumbnail_path_from_content_hash(&self.library_root, content_hash));
@@ -405,43 +357,7 @@ impl LibraryBackend {
                 changes.push(change);
             }
         }
-        let now = timestamp()?;
-        let cleanup = (|| -> Result<(), Box<dyn std::error::Error>> {
-            // Publish placement tombstones before removing their disposable
-            // local rows. Other replicas use these to remove every projected
-            // file before the following Purged lifecycle arrives.
-            tx.execute("UPDATE book_dir SET deleted_at=?2,trash_origin_dir_id=NULL WHERE book_row_id=?1 AND deleted_at IS NULL", rusqlite::params![book_row_id, now])?;
-            for table in [
-                "book_publisher",
-                "book_identifier",
-                "book_language",
-                "book_contributor",
-                "book_subject_assignment_evidence",
-                "book_subject_assignment",
-                "book_subject",
-                "book_external_entity",
-                "external_metadata_attempt",
-                "book_collection",
-                "book_publication_date",
-                "book_publication_value",
-                "catalog_publication_book",
-                "annotation",
-                "bookmark",
-            ] {
-                tx.execute(&format!("DELETE FROM {table} WHERE book_row_id=?1"), [book_row_id])?;
-            }
-            tx.execute("DELETE FROM book_link WHERE source_book_row_id=?1 OR target_book_row_id=?1", [book_row_id])?;
-            tx.execute("DELETE FROM book_dir WHERE book_row_id=?1", [book_row_id])?;
-            tx.execute("DELETE FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()])?;
-            tx.execute("DELETE FROM blob_local_ref WHERE hash=?1", [content_hash.as_str()])?;
-            tx.execute("DELETE FROM download_requests WHERE target_key=?1", [content_hash.as_str()])?;
-            tx.execute("DELETE FROM remote_asset WHERE hash=?1", [content_hash.as_str()])?;
-            tx.execute(
-                "UPDATE book SET title=NULL,description='',description_scanned=0,publication_metadata=X'',format='',hidden_at=NULL,read_pos=NULL,read_progress=0,added_at=NULL,deleted_at=?2,purged_at=?2,trash_origin_dir_id=NULL WHERE row_id=?1",
-                rusqlite::params![book_row_id, now],
-            )?;
-            Ok(())
-        })();
+        let cleanup = db::purge_book_record(&tx, content_hash).map_err(Into::into);
         if let Err(error) = cleanup.and_then(|()| tx.commit().map_err(Into::into)) {
             for change in changes.iter().rev() {
                 change.rollback();
@@ -460,22 +376,10 @@ impl LibraryBackend {
         }
         let mut conn = self.db.get()?;
         let tx = conn.transaction()?;
-        let present: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE id=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL AND intent_lifecycle=1)", [directory_id.to_string()], |row| row.get(0))?;
-        if !present {
-            return Err("folder is not in Trash".into());
-        }
         let trash_path = self.library_root.join(crate::APP_HIDDEN_DIR).join("trash/folders").join(directory_id.to_string());
         let change = stage_path(&trash_path)?;
-        let now = timestamp()?;
-        let result = tx.execute(
-            "WITH RECURSIVE subtree(id) AS (
-                 SELECT id FROM dir WHERE id=?1
-                 UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id
-             )
-             UPDATE dir SET deleted_at=?2,purged_at=?2,intent_lifecycle=2 WHERE id IN (SELECT id FROM subtree)",
-            rusqlite::params![directory_id.to_string(), now],
-        );
-        if let Err(error) = result.and_then(|_| tx.commit()) {
+        let result = db::purge_directory_record(&tx, directory_id);
+        if let Err(error) = result.and_then(|()| tx.commit()) {
             if let Some(change) = &change {
                 change.rollback();
             }

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Static architecture and correctness audit of the GPUI EPUB reader crate.">
+  <title>EPUB reader — GPUI audit</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#101210; --surface:#181b18; --surface-2:#202420; --ink:#f3f1e9;
+      --muted:#aaa9a2; --dim:#747870; --line:#30352f; --green:#afe86f;
+      --blue:#82ccd5; --amber:#ebb96b; --rose:#e58c9d;
+      --green-bg:rgba(175,232,111,.075); --amber-bg:rgba(235,185,107,.08);
+      --rose-bg:rgba(229,140,157,.075);
+      --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+      --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      --radius:15px;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;color:var(--ink);background:radial-gradient(circle at 80% 2%,rgba(130,204,213,.08),transparent 32rem),linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),var(--bg);background-size:auto,38px 38px,38px 38px,auto;font-family:var(--sans);line-height:1.62}
+    a{color:inherit} code{font-family:var(--mono)} ::selection{background:var(--green);color:#101210}
+    .shell{display:grid;grid-template-columns:226px minmax(0,860px);gap:clamp(2rem,6vw,6rem);width:min(1270px,calc(100% - 44px));margin:0 auto;padding:30px 0 100px}
+    aside{position:sticky;top:24px;align-self:start;height:calc(100vh - 48px);display:flex;flex-direction:column;padding-right:25px;border-right:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:11px;margin:8px 0 38px;font:700 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}.brand-mark{width:25px;height:25px;border:1px solid var(--green);border-radius:8px;box-shadow:inset 0 0 0 6px rgba(175,232,111,.11);transform:rotate(7deg)}
+    nav{display:grid;gap:4px}nav a{position:relative;padding:8px 0 8px 17px;color:var(--dim);font:500 12px/1.3 var(--mono);text-decoration:none}nav a:before{content:"";position:absolute;left:0;top:50%;width:5px;height:5px;border-radius:50%;background:var(--line);transform:translateY(-50%)}nav a:hover,nav a.active{color:var(--ink)}nav a.active:before{background:var(--green);box-shadow:0 0 0 4px rgba(175,232,111,.11)}
+    .progress{height:2px;margin-top:auto;overflow:hidden;background:var(--line)}.progress span{display:block;width:0;height:100%;background:var(--green)}.aside-note{margin:12px 0 0;color:var(--dim);font:10.5px/1.5 var(--mono)}
+    main{min-width:0}header{padding:clamp(58px,10vw,112px) 0 78px}.eyebrow{display:flex;align-items:center;gap:12px;margin-bottom:26px;color:var(--green);font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase}.eyebrow:before{content:"";width:35px;height:1px;background:currentColor}
+    h1{max-width:820px;margin:0 0 28px;font-size:clamp(3.1rem,7vw,6rem);font-weight:730;letter-spacing:-.071em;line-height:.93}.lede{max-width:760px;margin:0;color:#c5c2bb;font-size:clamp(1.08rem,2vw,1.28rem)}
+    .headline{display:grid;grid-template-columns:repeat(3,1fr);margin-top:46px;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:rgba(24,27,24,.8)}.headline div{padding:20px;border-right:1px solid var(--line)}.headline div:last-child{border:0}.headline b{display:block;margin-bottom:7px;font:650 11px/1.2 var(--mono);text-transform:uppercase}.headline span{color:var(--muted);font-size:12px;line-height:1.45}.high{color:var(--rose)}.medium{color:var(--amber)}.sound{color:var(--green)}
+    section{scroll-margin-top:30px;padding:68px 0;border-top:1px solid var(--line)}.kicker{color:var(--green);font:600 10.5px/1 var(--mono);letter-spacing:.15em;text-transform:uppercase}h2{margin:13px 0 18px;font-size:clamp(2rem,4vw,3rem);letter-spacing:-.047em;line-height:1.05}h3{margin:0 0 8px;font-size:1rem}p{margin:0 0 18px;color:var(--muted)}p strong{color:var(--ink)}.compact{max-width:740px}
+    .finding{margin:27px 0;padding:22px;border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(145deg,var(--surface-2),var(--surface))}.finding-head{display:grid;grid-template-columns:auto 1fr auto;gap:13px;align-items:start}.number{width:31px;height:31px;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;color:var(--dim);font:650 10px/1 var(--mono)}.finding h3{font-size:1.08rem}.finding p{margin:11px 0 0;font-size:13px}.severity{padding:6px 8px;border-radius:999px;font:650 9px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}.severity.high{background:var(--rose-bg)}.severity.medium{background:var(--amber-bg)}.severity.low{color:var(--blue);background:rgba(130,204,213,.075)}.severity.resolved{color:var(--green);background:var(--green-bg)}
+    .source{display:inline-block;margin-top:12px;color:var(--dim);font:10.5px/1.4 var(--mono);text-decoration:none}.source:hover{color:var(--blue)}
+    .diagram{margin:28px 0;padding:18px;border:1px solid var(--line);border-radius:var(--radius);background:rgba(24,27,24,.72)}.diagram-title{margin-bottom:13px;color:var(--dim);font:600 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}.diagram svg{display:block;width:100%;height:auto}.diagram text{font-family:var(--mono)}
+    .diff{margin:18px 0 7px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0c0e0c}.diff-head{display:flex;justify-content:space-between;gap:15px;padding:11px 14px;border-bottom:1px solid var(--line);color:var(--dim);font:10px/1.3 var(--mono)}pre{margin:0;padding:17px 18px;overflow:auto;color:#d7d8d2;font:11.5px/1.62 var(--mono);tab-size:4}.del,.add,.ctx{display:block;margin:0 -18px;padding:0 18px}.del{color:#e9a0ad;background:var(--rose-bg)}.add{color:#c5ed9b;background:var(--green-bg)}.ctx{color:#b4b5af}.comment{color:#687069}
+    .matrix{width:100%;margin:28px 0;border-collapse:collapse;font-size:12.5px}.matrix th,.matrix td{padding:14px;border:1px solid var(--line);text-align:left;vertical-align:top}.matrix th{color:var(--dim);background:var(--surface);font:600 10px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase}.matrix td{color:var(--muted)}.matrix td:first-child{color:var(--ink);font-family:var(--mono)}
+    .flow{display:flex;align-items:stretch;gap:8px;margin:26px 0}.flow-box{flex:1;min-width:0;padding:15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.flow-box b{display:block;color:var(--blue);font:620 11px/1.3 var(--mono)}.flow-box span{display:block;margin-top:7px;color:var(--muted);font-size:11px}.arrow{display:grid;place-items:center;color:var(--dim);font:18px/1 var(--mono)}
+    .callout{margin:25px 0;padding:18px 20px;border-left:2px solid var(--green);background:var(--green-bg);color:#dae8cb;font-size:13px}.callout.amber{border-color:var(--amber);background:var(--amber-bg);color:#e5d4b9}
+    .roadmap{counter-reset:step;display:grid;gap:11px;margin:27px 0}.step{position:relative;padding:18px 18px 18px 62px;border:1px solid var(--line);border-radius:13px;background:var(--surface)}.step:before{counter-increment:step;content:counter(step);position:absolute;left:18px;top:18px;width:27px;height:27px;display:grid;place-items:center;border:1px solid var(--green);border-radius:50%;color:var(--green);font:650 10px/1 var(--mono)}.step b{display:block;font-size:13px}.step span{display:block;margin-top:4px;color:var(--muted);font-size:12px}
+    footer{padding-top:50px;color:var(--dim);font:11px/1.6 var(--mono);border-top:1px solid var(--line)}
+    @media(max-width:880px){.shell{display:block;width:min(100% - 34px,790px)}aside{display:none}header{padding-top:70px}}@media(max-width:650px){.headline{grid-template-columns:1fr}.headline div{border-right:0;border-bottom:1px solid var(--line)}.headline div:last-child{border-bottom:0}.finding-head{grid-template-columns:auto 1fr}.severity{grid-column:2;justify-self:start}.flow{flex-direction:column}.arrow{transform:rotate(90deg)}h1{font-size:3rem}.matrix{display:block;overflow-x:auto}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><span class="brand-mark"></span>Reader audit</div>
+      <nav aria-label="Report sections">
+        <a href="#summary">Summary</a>
+        <a href="#correctness">Correctness</a>
+        <a href="#toc">TOC & titles</a>
+        <a href="#rendering">Rendering</a>
+        <a href="#cleanup">Cleanup</a>
+        <a href="#strengths">What is good</a>
+        <a href="#roadmap">Recommended order</a>
+      </nav>
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <p class="aside-note">Static review · current working tree<br>reader-ui / GPUI-Fork · no tests</p>
+    </aside>
+
+    <main>
+      <header id="summary">
+        <div class="eyebrow">EPUB reader · static audit</div>
+        <h1>Good boundaries, a few consequential leaks.</h1>
+        <p class="lede">The reader is not fundamentally unidiomatic. Its focus handling, typed events, search cancellation, and renderer boundary are strong. The remaining important mistakes are narrower: delayed annotation mutations can lose edits, and several renderer projections are not kept synchronized. EPUB media-overlay audio was removed after this audit.</p>
+        <div class="headline">
+          <div><b class="high">1 high</b><span>Annotation write ordering can still produce incorrect durable state.</span></div>
+          <div><b class="medium">3 medium</b><span>Progress, TOC selection, and document titles can become stale or nondeterministic.</span></div>
+          <div><b class="sound">Sound core</b><span>No rewrite is warranted. Fix event projections and lifetimes in focused changes.</span></div>
+        </div>
+      </header>
+
+      <section id="correctness">
+        <span class="kicker">01 · Correctness</span>
+        <h2>The most important mistakes affect lifetime and ordering.</h2>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">1</span><div><h3>EPUB media-overlay audio had an incomplete lifetime</h3></div><span class="severity resolved">Removed</span></div>
+          <p>This finding is retained as the reason for the change. The EPUB audio state, toolbar affordance, backend API, polling tasks, <code>kira</code> dependency, and feature wiring have now been removed. The separate audiobook player is unchanged.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/windows.rs">windows.rs:65</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:616–692</a>
+          <div class="diagram">
+            <div class="diagram-title">Current lifetime leak and recommended state machine</div>
+            <svg viewBox="0 0 800 265" role="img" aria-label="Current audio lifecycle compared with an owned cancellable state machine">
+              <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#747870"/></marker></defs>
+              <text x="20" y="27" fill="#e58c9d" font-size="12">CURRENT</text>
+              <rect x="20" y="45" width="140" height="49" rx="10" fill="#202420" stroke="#30352f"/><text x="90" y="74" fill="#f3f1e9" font-size="11" text-anchor="middle">Idle</text>
+              <line x1="160" y1="69" x2="224" y2="69" stroke="#747870" marker-end="url(#arrow)"/><text x="192" y="58" fill="#aaa9a2" font-size="9" text-anchor="middle">async load</text>
+              <rect x="227" y="45" width="155" height="49" rx="10" fill="#2a2022" stroke="#e58c9d"/><text x="304" y="66" fill="#f3f1e9" font-size="11" text-anchor="middle">still says Idle</text><text x="304" y="81" fill="#e58c9d" font-size="9" text-anchor="middle">Stop cannot cancel</text>
+              <line x1="382" y1="69" x2="446" y2="69" stroke="#747870" marker-end="url(#arrow)"/>
+              <rect x="449" y="45" width="140" height="49" rx="10" fill="#202420" stroke="#30352f"/><text x="519" y="74" fill="#f3f1e9" font-size="11" text-anchor="middle">Playing</text>
+              <line x1="589" y1="69" x2="653" y2="69" stroke="#e58c9d" marker-end="url(#arrow)"/><text x="621" y="58" fill="#e58c9d" font-size="9" text-anchor="middle">deactivate</text>
+              <rect x="656" y="45" width="124" height="49" rx="10" fill="#2a2022" stroke="#e58c9d"/><text x="718" y="66" fill="#f3f1e9" font-size="11" text-anchor="middle">Library</text><text x="718" y="81" fill="#e58c9d" font-size="9" text-anchor="middle">audio remains</text>
+              <text x="20" y="153" fill="#afe86f" font-size="12">RECOMMENDED</text>
+              <rect x="20" y="172" width="120" height="49" rx="10" fill="#202420" stroke="#30352f"/><text x="80" y="201" fill="#f3f1e9" font-size="11" text-anchor="middle">Idle</text>
+              <line x1="140" y1="196" x2="190" y2="196" stroke="#747870" marker-end="url(#arrow)"/>
+              <rect x="193" y="172" width="135" height="49" rx="10" fill="#1d2a20" stroke="#afe86f"/><text x="260" y="193" fill="#f3f1e9" font-size="11" text-anchor="middle">Loading(gen)</text><text x="260" y="208" fill="#afe86f" font-size="9" text-anchor="middle">cancellable</text>
+              <line x1="328" y1="196" x2="378" y2="196" stroke="#747870" marker-end="url(#arrow)"/>
+              <rect x="381" y="172" width="120" height="49" rx="10" fill="#202420" stroke="#30352f"/><text x="441" y="201" fill="#f3f1e9" font-size="11" text-anchor="middle">Playing</text>
+              <line x1="501" y1="196" x2="551" y2="196" stroke="#747870" marker-end="url(#arrow)"/>
+              <rect x="554" y="172" width="120" height="49" rx="10" fill="#202420" stroke="#30352f"/><text x="614" y="201" fill="#f3f1e9" font-size="11" text-anchor="middle">Paused</text>
+              <path d="M674 196H732V230H80V224" fill="none" stroke="#afe86f" marker-end="url(#arrow)"/><text x="720" y="186" fill="#afe86f" font-size="9" text-anchor="middle">stop / deactivate</text>
+            </svg>
+          </div>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">2</span><div><h3>Persist-then-apply can lose rapid annotation edits</h3></div><span class="severity high">High</span></div>
+          <p>Each save clones the current stored annotation, writes it on the persistence worker, and updates local state only after success. Two quick edits therefore start from the same stale snapshot. A colour click followed by a style click can cause the later write to restore the old colour. Creation and deletion have the same delayed-interaction shape.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:210–345</a>
+          <div class="flow" aria-label="Lost annotation update sequence">
+            <div class="flow-box"><b>Click Blue</b><span>captures Yellow + Highlight</span></div><div class="arrow">→</div>
+            <div class="flow-box"><b>Click Underline</b><span>captures Yellow + Underline</span></div><div class="arrow">→</div>
+            <div class="flow-box"><b>Writes finish</b><span>Blue is overwritten by stale Yellow</span></div>
+          </div>
+          <div class="callout">Prefer <strong>optimistic local mutation</strong>: update the model and renderer synchronously, then enqueue the durable write. Roll back or surface an error if persistence fails. Filesystem speed is not the core issue; state ordering is.</div>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">3</span><div><h3>The toolbar's progress projection is not refreshed</h3></div><span class="severity medium">Medium</span></div>
+          <p><code>ReadingProgress</code> updates <code>self.progress</code> and records persistence, then returns <code>false</code>. The toolbar owns a copied <code>ToolbarModel</code>, so its percentage remains stale until an unrelated toolbar event pushes a new model.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:410–420</a>
+          <div class="diff"><div class="diff-head"><span>epub/state.rs</span><span>illustrative change</span></div><pre><span class="ctx">if let Some(cfi) = self.current_cfi.clone() {</span>
+<span class="ctx">    self.reading_positions.record((cfi, *fraction), "reading-position");</span>
+<span class="ctx">}</span>
+<span class="add">self.invalidate_toolbar("progress_changed", cx);</span>
+<span class="ctx">false</span></pre></div>
+        </article>
+      </section>
+
+      <section id="toc">
+        <span class="kicker">02 · Navigation projections</span>
+        <h2>TOC and title state are not total mappings.</h2>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">4</span><div><h3>TOC fallback selects an arbitrary entry</h3></div><span class="severity medium">Medium</span></div>
+          <p><code>TocState::link_at</code> performs its fallback by taking the first entry for a document from a <code>HashMap</code>. That order is deliberately unspecified. Because the reader does not install the publication's TOC anchors into the renderer's anchor filter, the reported anchor can also be an ordinary markup ID rather than a TOC anchor. When no entry matches, <code>active_link</code> becomes empty but the tree's selected item is not cleared.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/toc.rs">epub/toc.rs:46–51</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:368–381</a>
+          <div class="callout amber">Keep resolved TOC entries in publication order, install their anchor strings in <code>HtmlViewCore</code>, choose the nearest preceding entry, and explicitly set the tree selection to <code>None</code> when there is no active entry.</div>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">5</span><div><h3>A missing document title leaves the previous title stuck</h3></div><span class="severity medium">Medium</span></div>
+          <p>The event handler matches only <code>TitleChanged(Some(title))</code>. Moving from a titled spine item to an untitled one emits <code>TitleChanged(None)</code>, which falls through and preserves the previous chapter title.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:359–367</a>
+          <div class="diff"><div class="diff-head"><span>epub/state.rs</span><span>illustrative change</span></div><pre><span class="del">RendererEvent::TitleChanged(Some(title)) =&gt; {</span>
+<span class="add">RendererEvent::TitleChanged(title) =&gt; {</span>
+<span class="add">    let title = title.clone().unwrap_or_else(|| self.book_title.clone());</span>
+<span class="ctx">    if self.title == title { false } else {</span>
+<span class="ctx">        self.title = title;</span>
+<span class="ctx">        true</span>
+<span class="ctx">    }</span>
+<span class="ctx">}</span></pre></div>
+        </article>
+      </section>
+
+      <section id="rendering">
+        <span class="kicker">03 · GPUI rendering</span>
+        <h2>The render tree is mostly observational, but not fully isolated.</h2>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">6</span><div><h3><code>Render</code> changes the native window title</h3></div><span class="severity low">Low</span></div>
+          <p><code>window.set_window_title</code> runs on every reader render. It is idempotent, but still a platform mutation inside a method that should describe current UI. Set it during activation or when the title actually changes. The debug render counter is also a mutation, but is a reasonable instrumentation exception.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:217–222</a>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">7</span><div><h3>The toolbar entity is an ownership boundary, not complete render isolation</h3></div><span class="severity low">Low</span></div>
+          <p>In GPUI-Fork, notifying a rendered child marks its ancestor view path dirty. The reader shell therefore renders when the toolbar changes. Both the toolbar and renderer are embedded as ordinary, uncached entities. <code>HtmlView::render</code> is small and its painter has internal caches, so this is primarily an inaccurate architectural claim—not a catastrophic cost.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/toolbar.rs">epub/toolbar.rs:1–9</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:223–235</a>
+          <table class="matrix">
+            <thead><tr><th>Boundary</th><th>What it currently gives</th><th>What it does not guarantee</th></tr></thead>
+            <tbody><tr><td>ReaderToolbar entity</td><td>Independent state, typed events, model equality guard.</td><td>That the ancestor reader shell will not render.</td></tr><tr><td>HtmlView entity</td><td>Renderer ownership and its own invalidation source.</td><td>Subtree reuse when embedded uncached during shell invalidation.</td></tr><tr><td>cached(style)</td><td>Reuse until entity, bounds, mask, or text style changes.</td><td>Content-derived measurement; it requires a definite size.</td></tr></tbody>
+          </table>
+        </article>
+
+        <article class="finding">
+          <div class="finding-head"><span class="number">8</span><div><h3>Annotation placement duplicates renderer layout policy</h3></div><span class="severity low">Low</span></div>
+          <p>The shell recomputes fitted column count using its own gap, scaling, width, and rounding assumptions. A future renderer change can silently place the editor over the wrong column. The renderer should expose its actual laid-out column geometry as observable state.</p>
+          <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:25–39</a>
+        </article>
+      </section>
+
+      <section id="cleanup">
+        <span class="kicker">04 · Cleanup</span>
+        <h2>Remove machinery that no longer represents real behavior.</h2>
+        <table class="matrix">
+          <thead><tr><th>Issue</th><th>Why it is misleading or wasteful</th><th>Change</th></tr></thead>
+          <tbody>
+            <tr><td>Load generation</td><td>The generation is always <code>1</code>; the publication is already prepared and <code>finish_load</code> is always passed <code>Ok</code>.</td><td>Keep the one-frame loading presentation, but remove unreachable cancellation and failure machinery—or make loading genuinely asynchronous here.</td></tr>
+            <tr><td>Search results mirror</td><td><code>SearchState.results</code> is cloned and compared, but no EPUB UI reads it.</td><td>Remove the mirror and its shell invalidation, or add an actual results list.</td></tr>
+            <tr><td>Selection toolbar invalidation</td><td>Selection changes invalidate a toolbar model that contains no selection state.</td><td>Delete the invalidation unless a selection action is added to the toolbar.</td></tr>
+            <tr><td>Image format guessing</td><td>URI suffixes can be absent or incorrect; <code>svgz</code> may contain compressed bytes.</td><td>Carry media type from the provider or sniff the byte signature.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="strengths">
+        <span class="kicker">05 · Keep these</span>
+        <h2>The fundamentals are considerably better than the defect list suggests.</h2>
+        <div class="flow">
+          <div class="flow-box"><b>Renderer entity</b><span>Clear ownership boundary with typed commands and events.</span></div><div class="arrow">·</div>
+          <div class="flow-box"><b>Focus handoff</b><span>The document focus handle is restored deliberately and semantically.</span></div><div class="arrow">·</div>
+          <div class="flow-box"><b>Search lifetime</b><span>Generation and atomic cancellation protect against stale worker results.</span></div>
+        </div>
+        <div class="flow">
+          <div class="flow-box"><b>Position writer</b><span>Rapid navigation is coalesced before persistence.</span></div><div class="arrow">·</div>
+          <div class="flow-box"><b>Toolbar model</b><span>Equality avoids repainting when pushed state is unchanged.</span></div><div class="arrow">·</div>
+          <div class="flow-box"><b>Semantic actions</b><span>Reader navigation remains visible to GPUI's action and focus systems.</span></div>
+        </div>
+        <div class="callout">The right direction is targeted repair, not another broad refactor. Most responsibilities already have sensible names and boundaries; the failures occur where asynchronous work or copied renderer state needs a stricter ownership contract.</div>
+      </section>
+
+      <section id="roadmap">
+        <span class="kicker">06 · Recommended order</span>
+        <h2>Fix user-visible correctness before optimizing boundaries.</h2>
+        <div class="roadmap">
+          <div class="step"><b>Make annotation state optimistic and ordered</b><span>Mutate locally first, persist second, and define rollback/error behavior.</span></div>
+          <div class="step"><b>Repair progress and title projections</b><span>Small, high-confidence event-handler fixes.</span></div>
+          <div class="step"><b>Make TOC position mapping ordered</b><span>Install TOC anchor filters and clear stale tree selection.</span></div>
+          <div class="step"><b>Move the window-title side effect</b><span>Finish the observational-rendering work.</span></div>
+          <div class="step"><b>Measure before adding cached entity elements</b><span>The renderer already has paint caches; verify shell invalidation cost before complicating layout.</span></div>
+          <div class="step"><b>Delete dead projections and loading machinery</b><span>Reduce the number of states future work must keep synchronized.</span></div>
+        </div>
+      </section>
+
+      <footer>Static source inspection of the current working tree · 22 August 2026 · No tests or builds were run.</footer>
+    </main>
+  </div>
+  <script>
+    const links = [...document.querySelectorAll('nav a')];
+    const sections = links.map(link => document.querySelector(link.hash)).filter(Boolean);
+    const bar = document.querySelector('.progress span');
+    function update() {
+      const max = document.documentElement.scrollHeight - innerHeight;
+      bar.style.width = `${max > 0 ? (scrollY / max) * 100 : 0}%`;
+      let current = sections[0];
+      for (const section of sections) if (section.getBoundingClientRect().top <= 110) current = section;
+      links.forEach(link => link.classList.toggle('active', current && link.hash === `#${current.id}`));
+    }
+    addEventListener('scroll', update, {passive:true});
+    addEventListener('resize', update);
+    update();
+  </script>
+</body>
+</html>

@@ -94,8 +94,8 @@ if [[ ${catalog_health} != ok ]]; then
     echo "unexpected catalog HTTPS health response: ${catalog_health}" >&2
     exit 1
 fi
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --header 'Accept: application/vnd.bokheim+protobuf; version=14' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
-if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+protobuf;[[:space:]]*version=14([[:space:]]|\r)*$' "${headers}"; then
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --header 'Accept: application/vnd.bokheim+protobuf; version=16' --dump-header "${headers}" --output /dev/null "https://${catalog_domain}/api/opds/catalogs"
+if ! grep -Eqi '^content-type:[[:space:]]*application/vnd\.bokheim\+protobuf;[[:space:]]*version=16([[:space:]]|\r)*$' "${headers}"; then
     echo "catalog registry did not use the current Bokheim binary media type" >&2
     exit 1
 fi

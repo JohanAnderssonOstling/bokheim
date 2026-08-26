@@ -97,6 +97,8 @@
           <div class="panel-heading"><div><p class="eyebrow">Catalogue</p><h2>Catalogue inventory &amp; workers</h2></div><span>Local service status through the authenticated admin API</span></div>
           <p id="catalogue-unavailable" class="empty" hidden>The catalogue server is unavailable.</p>
           <div id="catalogue-content">
+            <div class="panel-heading subsection process-heading"><div><p class="eyebrow">Processes</p><h2>Worker controls</h2></div><span>All workers start paused after a server restart; pausing takes effect after the current source, cover, publication, or enrichment batch</span></div>
+            <div id="catalogue-processes" class="process-controls" aria-label="Catalogue process controls"></div>
             <div id="catalogue-cards" class="cards"></div>
             <div id="catalogue-metadata-backfill" hidden>
               <div class="panel-heading subsection"><div><p class="eyebrow">Enrichment</p><h2>Metadata backfill</h2></div><span>Local metadata enrichment from previously extracted publication data</span></div>
@@ -110,7 +112,7 @@
             <p id="catalogue-current-crawl-empty" class="empty">No source is crawling right now.</p>
             <div id="catalogue-current-crawl-wrap" class="table-wrap" hidden><table><thead><tr><th>Source</th><th>Started</th><th>Speed</th><th>Pages waiting</th><th>Cached pages</th><th>Publications found</th><th>Enrichment queue</th></tr></thead><tbody id="catalogue-current-crawl"></tbody></table></div>
             <div class="panel-heading subsection"><div><p class="eyebrow">Sources</p><h2>Crawl queue and inventory</h2></div><span>Pages waiting are discovered catalogue pages not fetched yet; the count can grow during a crawl</span></div>
-            <div class="table-wrap"><table><thead><tr><th>Source</th><th>Crawl status</th><th>Pages waiting</th><th>Last success</th><th>Publications</th><th>EPUBs</th><th>Queued / failed extractions</th></tr></thead><tbody id="catalogue-sources"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>Source</th><th>Crawl status</th><th>Origin throttle</th><th>Pages waiting</th><th>Last success</th><th>Publications</th><th>EPUBs</th><th>Queued / failed extractions</th></tr></thead><tbody id="catalogue-sources"></tbody></table></div>
             <div class="panel-heading subsection"><div><p class="eyebrow">Diagnostics</p><h2>Publication extraction failures</h2></div><span>Normalized categories and redacted examples · raw errors remain private</span></div>
             <p id="catalogue-failures-empty" class="empty">No classified extraction failures.</p>
             <div id="catalogue-failures-wrap" class="table-wrap" hidden><table><thead><tr><th>Category</th><th>Retry policy</th><th>Count</th><th>First / last seen</th><th>Next retry</th><th>Examples</th></tr></thead><tbody id="catalogue-failures"></tbody></table></div>

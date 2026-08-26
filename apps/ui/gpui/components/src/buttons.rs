@@ -35,3 +35,10 @@ pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedSt
 pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, disabled: bool) -> Button {
     Button::new(id).label(label).icon(icon).secondary().outline().h(px(TOPBAR_ACTION_HEIGHT)).px(px(SPACE_MD)).disabled(disabled)
 }
+
+/// A text action that carries no frame of its own, for the way out of a form
+/// rather than the way through it. It has no icon: an icon would give it the
+/// weight the shape exists to avoid.
+pub fn link_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme, disabled: bool) -> Button {
+    Button::new(id).label(label).ghost().with_size(gpui_component::Size::Small).px(px(0.0)).text_color(theme.accent).text_size(gpui::rems(TEXT_SM / 16.0)).disabled(disabled)
+}

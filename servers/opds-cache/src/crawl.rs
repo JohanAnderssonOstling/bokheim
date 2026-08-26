@@ -1,10 +1,132 @@
 use super::{
-    cache_error, canonicalize_opds_catalog_locator, catalog_crawls_disabled, duration_millis, opds_catalog_source_id, opds_page, prepare_catalog_subject_assignments, validate_opds_catalog_locator, AdaptiveCrawlWriteBatch, Arc,
-    CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogLinkTarget, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPage, CatalogPageWrite, CatalogService, CatalogServiceError, CatalogSourceId,
-    DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint, OpdsHttpValidators, Url, CRAWL_ACTIVATION_BATCH, CRAWL_CYCLE, CRAWL_PAUSE_SENTINEL, EPUB_EXTRACTION_SWEEP_INTERVAL,
-    EXTRACTION_RECONCILIATION_BATCH, INACTIVE_GENERATION_CLEANUP_BATCH, METADATA_BACKFILL_BATCH_SIZE, PRIORITY_CRAWL_SOURCE, REGISTRY_REFRESH_INTERVAL,
+    cache_error, canonicalize_opds_catalog_locator, catalog_crawls_disabled, duration_millis, opds_catalog_source_id, opds_page, prepare_catalog_subject_assignments, validate_opds_catalog_locator, AdaptiveCrawlWriteBatch,
+    AdaptiveOriginThrottle, AdaptiveOriginThrottleState, Arc, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogLinkTarget, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPage,
+    CatalogPageWrite, CatalogProcess, CatalogPublication, CatalogService, CatalogServiceError, CatalogSourceId, CrawlLocator, DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint, OpdsError,
+    OpdsHttpValidators, OriginThrottleFeedback, OriginThrottleSnapshot, PopularityRank, Url, CRAWL_ACTIVATION_BATCH, CRAWL_CYCLE, CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_INITIAL_SPACING, CRAWL_ORIGIN_MAX_ATTEMPTS,
+    CRAWL_ORIGIN_MAX_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_MAX_SPACING, CRAWL_ORIGIN_MIN_SPACING, CRAWL_ORIGIN_SUCCESS_WINDOW, CRAWL_ORIGIN_TRANSIENT_BACKOFF, CRAWL_PAGE_CONCURRENCY, CRAWL_PAGE_CONCURRENCY_MAX, CRAWL_PAUSE_SENTINEL,
+    EPUB_EXTRACTION_SWEEP_INTERVAL, EXTRACTION_RECONCILIATION_BATCH, INACTIVE_GENERATION_CLEANUP_BATCH, METADATA_BACKFILL_BATCH_SIZE, PRIORITY_CRAWL_SOURCE, REGISTRY_REFRESH_INTERVAL,
 };
-use crate::extraction::is_synthetic_cover_key;
+use futures_util::StreamExt;
+
+struct FetchedCrawlPage {
+    write: CatalogPageWrite,
+    links: Vec<CrawlLocator>,
+}
+
+enum IncrementalCrawlPage {
+    Cached { links: Vec<CrawlLocator> },
+    Fetched(FetchedCrawlPage),
+    LimitReached,
+}
+
+impl AdaptiveOriginThrottle {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(AdaptiveOriginThrottleState {
+                in_flight: 0,
+                concurrency_limit: CRAWL_PAGE_CONCURRENCY,
+                success_streak: 0,
+                minimum_spacing: CRAWL_ORIGIN_INITIAL_SPACING,
+                next_request_at: Instant::now(),
+                blocked_until: None,
+                latency_ewma_ms: None,
+            }),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn acquire(&self) {
+        loop {
+            let notified = self.notify.notified();
+            let wait = {
+                let mut state = self.state.lock().await;
+                let now = Instant::now();
+                if state.blocked_until.is_some_and(|until| until <= now) {
+                    state.blocked_until = None;
+                }
+                if let Some(until) = state.blocked_until {
+                    Some(until.saturating_duration_since(now))
+                } else if now < state.next_request_at {
+                    Some(state.next_request_at.saturating_duration_since(now))
+                } else if state.in_flight < state.concurrency_limit {
+                    state.in_flight += 1;
+                    state.next_request_at = now + state.minimum_spacing;
+                    return;
+                } else {
+                    None
+                }
+            };
+            if let Some(wait) = wait {
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = notified => {}
+                }
+            } else {
+                notified.await;
+            }
+        }
+    }
+
+    async fn complete(&self, feedback: OriginThrottleFeedback) -> (usize, usize, Duration, Option<Duration>) {
+        let now = Instant::now();
+        let mut state = self.state.lock().await;
+        let previous_limit = state.concurrency_limit;
+        state.in_flight = state.in_flight.saturating_sub(1);
+        state.record(feedback, now);
+        let blocked_for = state.blocked_until.map(|until| until.saturating_duration_since(now));
+        let snapshot = (previous_limit, state.concurrency_limit, state.minimum_spacing, blocked_for);
+        drop(state);
+        self.notify.notify_waiters();
+        snapshot
+    }
+}
+
+impl AdaptiveOriginThrottleState {
+    pub(crate) fn record(&mut self, feedback: OriginThrottleFeedback, now: Instant) {
+        match feedback {
+            OriginThrottleFeedback::Success(elapsed) => {
+                let elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
+                let slow = self.latency_ewma_ms.is_some_and(|average| elapsed_ms > average.saturating_mul(2).max(1_500));
+                self.latency_ewma_ms = Some(self.latency_ewma_ms.map_or(elapsed_ms, |average| average.saturating_mul(7).saturating_add(elapsed_ms) / 8));
+                if slow {
+                    self.success_streak = 0;
+                    self.concurrency_limit = self.concurrency_limit.saturating_sub(1).max(1);
+                    self.minimum_spacing = self.minimum_spacing.saturating_mul(2).min(CRAWL_ORIGIN_MAX_SPACING);
+                } else {
+                    self.success_streak = self.success_streak.saturating_add(1);
+                    if self.success_streak >= CRAWL_ORIGIN_SUCCESS_WINDOW {
+                        self.success_streak = 0;
+                        self.concurrency_limit = self.concurrency_limit.saturating_add(1).min(CRAWL_PAGE_CONCURRENCY_MAX);
+                        self.minimum_spacing = self.minimum_spacing.mul_f64(0.75).max(CRAWL_ORIGIN_MIN_SPACING);
+                    }
+                }
+            }
+            OriginThrottleFeedback::RateLimited(retry_after) => {
+                self.success_streak = 0;
+                self.concurrency_limit = 1;
+                self.minimum_spacing = self.minimum_spacing.saturating_mul(2).max(Duration::from_secs(1)).min(CRAWL_ORIGIN_MAX_SPACING);
+                let backoff = retry_after.unwrap_or(CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF).min(CRAWL_ORIGIN_MAX_RATE_LIMIT_BACKOFF);
+                let until = now + backoff;
+                self.blocked_until = Some(self.blocked_until.map_or(until, |current| current.max(until)));
+            }
+            OriginThrottleFeedback::TransientFailure => {
+                self.success_streak = 0;
+                self.concurrency_limit = (self.concurrency_limit / 2).max(1);
+                self.minimum_spacing = self.minimum_spacing.saturating_mul(2).min(CRAWL_ORIGIN_MAX_SPACING);
+                let until = now + CRAWL_ORIGIN_TRANSIENT_BACKOFF;
+                self.blocked_until = Some(self.blocked_until.map_or(until, |current| current.max(until)));
+            }
+            OriginThrottleFeedback::OtherFailure => self.success_streak = 0,
+        }
+    }
+}
+
+impl OriginThrottleFeedback {
+    fn retryable(self) -> bool {
+        matches!(self, Self::RateLimited(_) | Self::TransientFailure)
+    }
+}
+
 impl CatalogService {
     pub async fn crawl_source(&self, source_id: &CatalogSourceId) -> Result<(), CatalogServiceError> {
         let endpoint = self.public_endpoint(source_id).await?;
@@ -14,6 +136,74 @@ impl CatalogService {
         };
         let _crawl = lock.lock().await;
         self.crawl_endpoint(endpoint).await
+    }
+
+    async fn origin_throttle(&self, url: &Url) -> Arc<AdaptiveOriginThrottle> {
+        let origin = url.origin().ascii_serialization();
+        let mut throttles = self.state.origin_throttles.lock().await;
+        throttles.entry(origin).or_insert_with(|| Arc::new(AdaptiveOriginThrottle::new())).clone()
+    }
+
+    pub(crate) async fn origin_throttle_snapshot(&self, url: &Url) -> OriginThrottleSnapshot {
+        let throttle = self.origin_throttle(url).await;
+        let state = throttle.state.lock().await;
+        OriginThrottleSnapshot {
+            in_flight: state.in_flight,
+            concurrency_limit: state.concurrency_limit,
+            minimum_spacing_ms: state.minimum_spacing.as_millis().min(u64::MAX as u128) as u64,
+            blocked_for_ms: state.blocked_until.map(|until| until.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64),
+        }
+    }
+
+    async fn fetch_catalog_fresh_throttled(&self, origin_url: &Url, locator: &str) -> Result<opds::OpdsCatalog, CatalogServiceError> {
+        let throttle = self.origin_throttle(origin_url).await;
+        for attempt in 1..=CRAWL_ORIGIN_MAX_ATTEMPTS {
+            throttle.acquire().await;
+            let started = Instant::now();
+            let result = self.state.opds.fetch_catalog_fresh(locator).await;
+            let feedback = origin_throttle_feedback(&result, started.elapsed());
+            self.record_origin_fetch(origin_url, &throttle, feedback).await;
+            match result {
+                Ok(catalog) => return Ok(catalog),
+                Err(error) if feedback.retryable() && attempt < CRAWL_ORIGIN_MAX_ATTEMPTS => {
+                    tracing::warn!(origin = %origin_url.origin().ascii_serialization(), attempt, %error, "retrying throttled catalogue request");
+                }
+                Err(error) => return Err(CatalogServiceError(error.to_string())),
+            }
+        }
+        unreachable!("bounded catalogue attempts always return")
+    }
+
+    async fn fetch_catalog_conditional_throttled(&self, origin_url: &Url, locator: &str, validators: &OpdsHttpValidators) -> Result<OpdsConditionalCatalog, CatalogServiceError> {
+        let throttle = self.origin_throttle(origin_url).await;
+        for attempt in 1..=CRAWL_ORIGIN_MAX_ATTEMPTS {
+            throttle.acquire().await;
+            let started = Instant::now();
+            let result = self.state.opds.fetch_catalog_conditional(locator, validators).await;
+            let feedback = origin_throttle_feedback(&result, started.elapsed());
+            self.record_origin_fetch(origin_url, &throttle, feedback).await;
+            match result {
+                Ok(catalog) => return Ok(catalog),
+                Err(error) if feedback.retryable() && attempt < CRAWL_ORIGIN_MAX_ATTEMPTS => {
+                    tracing::warn!(origin = %origin_url.origin().ascii_serialization(), attempt, %error, "retrying throttled conditional catalogue request");
+                }
+                Err(error) => return Err(CatalogServiceError(error.to_string())),
+            }
+        }
+        unreachable!("bounded catalogue attempts always return")
+    }
+
+    async fn record_origin_fetch(&self, origin_url: &Url, throttle: &AdaptiveOriginThrottle, feedback: OriginThrottleFeedback) {
+        let (previous_limit, concurrency_limit, minimum_spacing, blocked_for) = throttle.complete(feedback).await;
+        if previous_limit != concurrency_limit || blocked_for.is_some() {
+            tracing::info!(
+                origin = %origin_url.origin().ascii_serialization(),
+                concurrency = concurrency_limit,
+                spacing_ms = minimum_spacing.as_millis(),
+                blocked_ms = blocked_for.map(|delay| delay.as_millis()),
+                "adapted catalogue origin throttle"
+            );
+        }
     }
 
     pub(crate) async fn source_update_lock(&self, source_id: &CatalogSourceId) -> Arc<Mutex<()>> {
@@ -90,7 +280,6 @@ impl CatalogService {
         }
         let pages = batch.take_pages();
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
-        let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
         let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
         let cache_crawl = crawl.clone();
         let started = Instant::now();
@@ -99,7 +288,6 @@ impl CatalogService {
         for publications in publication_counts {
             self.record_crawl_page(source_id, publications).await;
         }
-        self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -129,7 +317,6 @@ impl CatalogService {
         }
         let pages = enriched_pages;
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
-        let cover_urls = pages.iter().flat_map(|write| page_cover_urls(&write.page)).collect::<Vec<_>>();
         let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
         let cache_source = source_id.clone();
         let cache_root = source_url.to_owned();
@@ -140,7 +327,7 @@ impl CatalogService {
         for publications in publication_counts {
             self.record_crawl_page(source_id, publications).await;
         }
-        self.state.cover_pipeline.enqueue(source_id.clone(), cover_urls).await;
+        self.wake_process(CatalogProcess::CoverDownloads);
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -211,58 +398,13 @@ impl CatalogService {
                 if batch.is_empty() {
                     break;
                 }
-                for locator in batch {
-                    validate_opds_catalog_locator(&endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
-                    let cache_source = source_id.clone();
-                    let cache_locator = locator.clone();
-                    let cached = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await?;
-                    // A cached leaf cannot lead us to any newly discovered
-                    // catalogue pages. Re-stage it without contacting the
-                    // upstream server so it remains part of the replacement
-                    // generation, while avoiding recurring requests for the
-                    // (typically large) book-only collections.
-                    if let Some(cached_page) = cached.as_ref() {
-                        if internal_page_links(&root_url, &cached_page.page)?.is_empty() {
-                            let cache_source = source_id.clone();
-                            let mut page = cached_page.page.clone();
-                            page = self
-                                .cache_call(move |cache| {
-                                    cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
-                                    Ok(page)
-                                })
-                                .await?;
-                            let publications = page_publication_count(&page) as usize;
-                            let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
-                            write_batch.push(CatalogPageWrite { page, etag: cached_page.etag.clone(), last_modified: cached_page.last_modified.clone() }, publications, bytes);
-                            if write_batch.reached_capacity() {
-                                self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
-                            }
-                            continue;
-                        }
-                    }
-                    let validators = cached.as_ref().map(|page| OpdsHttpValidators { etag: page.etag.clone(), last_modified: page.last_modified.clone() }).unwrap_or_default();
-                    let (mut page, validators) = match self.state.opds.fetch_catalog_conditional(&locator, &validators).await.map_err(|error| CatalogServiceError(error.to_string()))? {
-                        OpdsConditionalCatalog::NotModified => {
-                            let cached = cached.ok_or_else(|| CatalogServiceError("upstream returned 304 for an uncached catalog page".to_owned()))?;
-                            (cached.page, validators)
-                        }
-                        OpdsConditionalCatalog::Modified { catalog, validators } => {
-                            validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
-                            (opds_page(source_id.clone(), catalog), validators)
-                        }
-                    };
-                    let cache_source = source_id.clone();
-                    page = self
-                        .cache_call(move |cache| {
-                            cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
-                            Ok(page)
-                        })
-                        .await?;
-                    self.prepare_publication_cover_fallbacks(&source_id, &mut page).await;
-                    frontier.enqueue(internal_page_links(&root_url, &page)?)?;
-                    let publications = page_publication_count(&page) as usize;
-                    let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
-                    write_batch.push(CatalogPageWrite { page, etag: validators.etag, last_modified: validators.last_modified }, publications, bytes);
+                let mut pages = futures_util::stream::iter(batch.into_iter().map(|locator| self.fetch_replacement_crawl_page(&endpoint, &root_url, &source_id, locator))).buffered(CRAWL_PAGE_CONCURRENCY_MAX);
+                while let Some(page) = pages.next().await {
+                    let page = page?;
+                    frontier.enqueue(page.links)?;
+                    let publications = page_publication_count(&page.write.page) as usize;
+                    let bytes = wire::encode(&page.write.page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
+                    write_batch.push(page.write, publications, bytes);
                     if write_batch.reached_capacity() {
                         self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
                     }
@@ -279,6 +421,7 @@ impl CatalogService {
             }
             let cache_crawl = crawl.clone();
             self.cache_write_call_named("crawl_finalize", move |cache| cache.finalize_crawl_activation(&cache_crawl)).await?;
+            self.reconcile_active_cover_downloads().await?;
             self.reconcile_active_epub_extractions(source_id.clone()).await?;
             self.cleanup_inactive_generations(source_id.clone()).await;
             Ok::<(), CatalogServiceError>(())
@@ -301,7 +444,7 @@ impl CatalogService {
         self.cache_write_call_named("crawl_begin_incremental", move |cache| cache.begin_incremental_crawl(&cache_source, &cache_root)).await?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
-        let mut fetched = 0usize;
+        let fetch_slots = Arc::new(tokio::sync::Semaphore::new(self.state.max_crawl_pages));
         let mut write_batch = AdaptiveCrawlWriteBatch::default();
         let result = async {
             loop {
@@ -309,29 +452,26 @@ impl CatalogService {
                 if batch.is_empty() {
                     break;
                 }
-                for locator in batch {
-                    validate_opds_catalog_locator(&endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
-                    let cache_source = source_id.clone();
-                    let cache_locator = locator.clone();
-                    if let Some(cached) = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await? {
-                        frontier.enqueue(internal_page_links(&root_url, &cached.page)?)?;
-                        continue;
+                let mut limit_reached = false;
+                let mut pages = futures_util::stream::iter(batch.into_iter().map(|locator| self.fetch_incremental_crawl_page(&endpoint, &root_url, &source_id, locator, fetch_slots.clone()))).buffered(CRAWL_PAGE_CONCURRENCY_MAX);
+                while let Some(page) = pages.next().await {
+                    match page? {
+                        IncrementalCrawlPage::Cached { links } => frontier.enqueue(links)?,
+                        IncrementalCrawlPage::Fetched(page) => {
+                            frontier.enqueue(page.links)?;
+                            let publications = page_publication_count(&page.write.page) as usize;
+                            let bytes = wire::encode(&page.write.page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
+                            write_batch.push(page.write, publications, bytes);
+                            if write_batch.should_flush_incremental() {
+                                self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
+                            }
+                        }
+                        IncrementalCrawlPage::LimitReached => limit_reached = true,
                     }
-                    if fetched >= self.state.max_crawl_pages {
-                        self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
-                        return Ok(false);
-                    }
-                    fetched += 1;
-                    let catalog = self.state.opds.fetch_catalog_fresh(&locator).await.map_err(|error| CatalogServiceError(error.to_string()))?;
-                    validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
-                    let page = opds_page(source_id.clone(), catalog);
-                    frontier.enqueue(internal_page_links(&root_url, &page)?)?;
-                    let publications = page_publication_count(&page) as usize;
-                    let bytes = wire::encode(&page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
-                    write_batch.push(CatalogPageWrite { page, etag: None, last_modified: None }, publications, bytes);
-                    if write_batch.should_flush_incremental() {
-                        self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
-                    }
+                }
+                if limit_reached {
+                    self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
+                    return Ok(false);
                 }
             }
             self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
@@ -341,18 +481,144 @@ impl CatalogService {
         let complete = result.as_ref().copied().unwrap_or(false);
         let cache_source = source_id.clone();
         self.cache_write_call_named("crawl_finish_incremental", move |cache| cache.finish_incremental_crawl(&cache_source, complete)).await?;
+        self.reconcile_active_cover_downloads().await?;
         self.state.extraction_notify.notify_one();
         result.map(|_| ())
     }
 
+    async fn fetch_replacement_crawl_page(&self, endpoint: &OpdsEndpoint, root_url: &Url, source_id: &CatalogSourceId, crawl_locator: CrawlLocator) -> Result<FetchedCrawlPage, CatalogServiceError> {
+        let popular_listing = crawl_locator.popular_listing;
+        let locator = crawl_locator.locator;
+        validate_opds_catalog_locator(endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let cache_source = source_id.clone();
+        let cache_locator = locator.clone();
+        let cached = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await?;
+        // Cached leaves are immutable catalogue records and never contact the
+        // upstream server during replacement crawls.
+        if let Some(cached_page) = cached.as_ref().filter(|page| !page.provider_paginated) {
+            if internal_page_links(root_url, &cached_page.page, popular_listing)?.is_empty() {
+                let cache_source = source_id.clone();
+                let mut page = cached_page.page.clone();
+                page = self
+                    .cache_call(move |cache| {
+                        cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
+                        Ok(page)
+                    })
+                    .await?;
+                annotate_popular_listing(&mut page, popular_listing);
+                return Ok(FetchedCrawlPage { write: CatalogPageWrite { page, etag: cached_page.etag.clone(), last_modified: cached_page.last_modified.clone(), provider_paginated: false }, links: Vec::new() });
+            }
+        }
+        // A validator belongs only to the first upstream page, not to the
+        // compacted logical collection. Re-fetch the whole provider chain when
+        // the cached page was built from pagination.
+        let request_validators = cached.as_ref().filter(|page| !page.provider_paginated).map(|page| OpdsHttpValidators { etag: page.etag.clone(), last_modified: page.last_modified.clone() }).unwrap_or_default();
+        let (mut page, validators, provider_paginated) = match self.fetch_catalog_conditional_throttled(root_url, &locator, &request_validators).await? {
+            OpdsConditionalCatalog::NotModified => {
+                let cached = cached.ok_or_else(|| CatalogServiceError("upstream returned 304 for an uncached catalog page".to_owned()))?;
+                if cached.provider_paginated {
+                    return Err(CatalogServiceError("upstream returned 304 without a validator for a paginated catalogue".to_owned()));
+                }
+                (cached.page, request_validators, false)
+            }
+            OpdsConditionalCatalog::Modified { catalog, validators } => {
+                validate_opds_catalog_locator(endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
+                let page = opds_page(source_id.clone(), catalog);
+                let (page, provider_paginated) = self.compact_provider_pagination(endpoint, root_url, source_id, page).await?;
+                (page, validators, provider_paginated)
+            }
+        };
+        let cache_source = source_id.clone();
+        page = self
+            .cache_call(move |cache| {
+                cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
+                Ok(page)
+            })
+            .await?;
+        self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
+        annotate_popular_listing(&mut page, popular_listing);
+        let links = internal_page_links(root_url, &page, popular_listing)?;
+        Ok(FetchedCrawlPage { write: CatalogPageWrite { page, etag: validators.etag, last_modified: validators.last_modified, provider_paginated }, links })
+    }
+
+    async fn fetch_incremental_crawl_page(
+        &self, endpoint: &OpdsEndpoint, root_url: &Url, source_id: &CatalogSourceId, crawl_locator: CrawlLocator, fetch_slots: Arc<tokio::sync::Semaphore>,
+    ) -> Result<IncrementalCrawlPage, CatalogServiceError> {
+        let popular_listing = crawl_locator.popular_listing;
+        let locator = crawl_locator.locator;
+        validate_opds_catalog_locator(endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let cache_source = source_id.clone();
+        let cache_locator = locator.clone();
+        if let Some(mut cached) = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await? {
+            let links = internal_page_links(root_url, &cached.page, popular_listing)?;
+            if popular_listing && !page_has_popular_rank(&cached.page) {
+                annotate_popular_listing(&mut cached.page, true);
+                return Ok(IncrementalCrawlPage::Fetched(FetchedCrawlPage { write: CatalogPageWrite { page: cached.page, etag: cached.etag, last_modified: cached.last_modified, provider_paginated: cached.provider_paginated }, links }));
+            }
+            return Ok(IncrementalCrawlPage::Cached { links });
+        }
+        let Ok(fetch_slot) = fetch_slots.try_acquire_owned() else {
+            return Ok(IncrementalCrawlPage::LimitReached);
+        };
+        fetch_slot.forget();
+        let catalog = self.fetch_catalog_fresh_throttled(root_url, &locator).await?;
+        validate_opds_catalog_locator(endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let page = opds_page(source_id.clone(), catalog);
+        let (mut page, provider_paginated) = self.compact_provider_pagination(endpoint, root_url, source_id, page).await?;
+        annotate_popular_listing(&mut page, popular_listing);
+        let links = internal_page_links(root_url, &page, popular_listing)?;
+        Ok(IncrementalCrawlPage::Fetched(FetchedCrawlPage { write: CatalogPageWrite { page, etag: None, last_modified: None, provider_paginated }, links }))
+    }
+
+    /// Consumes provider pagination while data is entering the cache. The
+    /// returned page is the only representation staged or exposed; upstream
+    /// continuation locators never become catalogue navigation pages.
+    pub(crate) async fn compact_provider_pagination(&self, endpoint: &OpdsEndpoint, root_url: &Url, source_id: &CatalogSourceId, first_page: CatalogPage) -> Result<(CatalogPage, bool), CatalogServiceError> {
+        let mut pages = vec![first_page];
+        let mut visited = HashSet::new();
+        visited.insert(pages[0].locator.clone());
+        let mut next = pages[0].pagination.next.clone();
+        let provider_paginated = next.is_some() || pages[0].pagination.first.is_some() || pages[0].pagination.previous.is_some() || pages[0].pagination.last.is_some();
+
+        while let Some(locator) = next {
+            if !same_origin(root_url, &locator)? {
+                break;
+            }
+            validate_opds_catalog_locator(endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
+            if !visited.insert(locator.clone()) {
+                return Err(CatalogServiceError("catalogue provider pagination contains a cycle".to_owned()));
+            }
+            if pages.len() >= self.state.max_crawl_pages {
+                return Err(CatalogServiceError(format!("catalogue pagination exceeded {} pages", self.state.max_crawl_pages)));
+            }
+            let catalog = self.fetch_catalog_fresh_throttled(root_url, &locator).await?;
+            validate_opds_catalog_locator(endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
+            let page = opds_page(source_id.clone(), catalog);
+            next = page.pagination.next.clone();
+            pages.push(page);
+        }
+
+        Ok((compact_catalog_pages(pages), provider_paginated))
+    }
+
     pub async fn run_refresh_loop(self) {
         loop {
-            if !catalog_crawls_disabled() {
+            if self.process_enabled(CatalogProcess::CatalogueCrawling) && !catalog_crawls_disabled() {
+                self.set_process_running(CatalogProcess::CatalogueCrawling, true);
                 self.refresh_all_sources().await;
+                self.set_process_running(CatalogProcess::CatalogueCrawling, false);
             } else {
                 tracing::info!(sentinel = CRAWL_PAUSE_SENTINEL, "catalog crawls are paused");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                    _ = self.wait_for_process_wake(CatalogProcess::CatalogueCrawling) => {}
+                }
+                continue;
             }
-            tokio::time::sleep(CRAWL_CYCLE).await;
+            tokio::select! {
+                _ = tokio::time::sleep(CRAWL_CYCLE) => {}
+                _ = self.wait_for_process_wake(CatalogProcess::CatalogueCrawling) => {}
+            }
         }
     }
 
@@ -368,19 +634,55 @@ impl CatalogService {
     /// `running` rows are changed back to `pending` when the cache opens.
     pub async fn run_epub_extraction_loop(self) {
         loop {
+            if !self.process_enabled(CatalogProcess::EpubEnrichment) {
+                self.set_process_running(CatalogProcess::EpubEnrichment, false);
+                self.wait_for_process_wake(CatalogProcess::EpubEnrichment).await;
+                continue;
+            }
+            self.set_process_running(CatalogProcess::EpubEnrichment, true);
             self.resume_pending_epub_extractions().await;
-            self.resume_metadata_index().await;
-            self.resume_metadata_backfill().await;
-            self.resume_description_backfill().await;
+            self.set_process_running(CatalogProcess::EpubEnrichment, false);
             tokio::select! {
                 _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
                 _ = self.state.extraction_notify.notified() => {}
+                _ = self.wait_for_process_wake(CatalogProcess::EpubEnrichment) => {}
+            }
+        }
+    }
+
+    pub async fn run_catalogue_enrichment_loop(self) {
+        let mut startup_repairs_pending = true;
+        loop {
+            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+                self.set_process_running(CatalogProcess::CatalogueEnrichment, false);
+                self.wait_for_process_wake(CatalogProcess::CatalogueEnrichment).await;
+                continue;
+            }
+            self.set_process_running(CatalogProcess::CatalogueEnrichment, true);
+            if startup_repairs_pending {
+                self.refresh_search_index().await;
+                self.refresh_unified_subject_assignments().await;
+                self.refresh_subject_browse_index().await;
+                self.refresh_browse_serving_index().await;
+                startup_repairs_pending = false;
+            }
+            self.resume_metadata_index().await;
+            self.resume_metadata_backfill().await;
+            self.resume_description_backfill().await;
+            self.refresh_browse_serving_index().await;
+            self.set_process_running(CatalogProcess::CatalogueEnrichment, false);
+            tokio::select! {
+                _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
+                _ = self.wait_for_process_wake(CatalogProcess::CatalogueEnrichment) => {}
             }
         }
     }
 
     pub(crate) async fn resume_metadata_index(&self) {
         loop {
+            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+                return;
+            }
             match self.cache_call(|cache| cache.migrate_metadata_index_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(count) if count == METADATA_BACKFILL_BATCH_SIZE => tokio::task::yield_now().await,
                 Ok(_) => return,
@@ -405,6 +707,22 @@ impl CatalogService {
             tracing::error!(%error, "failed to refresh unified catalogue subject assignments");
         }
     }
+
+    pub async fn refresh_subject_browse_index(&self) {
+        match self.cache_write_call_named("subject_browse_index_refresh", |cache| cache.refresh_subject_browse_index()).await {
+            Ok(true) => tracing::info!("catalogue subject browse index is ready"),
+            Ok(false) => {}
+            Err(error) => tracing::error!(%error, "failed to refresh catalogue subject browse index"),
+        }
+    }
+
+    pub async fn refresh_browse_serving_index(&self) {
+        match self.cache_write_call_named("browse_serving_index_refresh", |cache| cache.refresh_browse_serving_index()).await {
+            Ok(true) => tracing::info!("catalogue browse serving index is ready"),
+            Ok(false) => {}
+            Err(error) => tracing::error!(%error, "failed to refresh catalogue browse serving index"),
+        }
+    }
     pub(crate) async fn refresh_all_sources(&self) {
         let mut endpoints = self.state.endpoints.read().await.clone();
         prioritize_startup_crawls(&mut endpoints);
@@ -412,12 +730,59 @@ impl CatalogService {
         if let Err(error) = self.cache_write_call(move |cache| cache.queue_crawls(&source_ids)).await {
             tracing::warn!(%error, "could not persist the startup crawl queue");
         }
-        for endpoint in endpoints {
-            let source_id = opds_catalog_source_id(&endpoint.id);
-            if let Err(error) = self.crawl_source(&source_id).await {
-                tracing::warn!(source = source_id.as_str(), %error, "catalog crawl failed; retaining the previous generation");
+        let mut origin_crawls = tokio::task::JoinSet::new();
+        for origin_endpoints in crawl_endpoint_groups(endpoints) {
+            let service = self.clone();
+            origin_crawls.spawn(async move {
+                for endpoint in origin_endpoints {
+                    if !service.process_enabled(CatalogProcess::CatalogueCrawling) {
+                        tracing::info!("catalogue crawl process paused before the next source");
+                        break;
+                    }
+                    let source_id = opds_catalog_source_id(&endpoint.id);
+                    if let Err(error) = service.crawl_source(&source_id).await {
+                        tracing::warn!(source = source_id.as_str(), %error, "catalog crawl failed; retaining the previous generation");
+                    }
+                }
+            });
+        }
+        while let Some(result) = origin_crawls.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "catalogue origin crawl task stopped unexpectedly");
             }
         }
+        self.refresh_browse_serving_index().await;
+    }
+}
+
+/// Runs distinct origins concurrently while preserving the crawler's existing
+/// one-request-at-a-time behavior for every upstream origin. Registry order is
+/// retained inside each group, including the priority-source ordering.
+pub(crate) fn crawl_endpoint_groups(endpoints: Vec<OpdsEndpoint>) -> Vec<Vec<OpdsEndpoint>> {
+    let mut groups: Vec<(String, Vec<OpdsEndpoint>)> = Vec::new();
+    for endpoint in endpoints {
+        let origin = Url::parse(&endpoint.url).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| endpoint.url.clone());
+        if let Some((_, group)) = groups.iter_mut().find(|(candidate, _)| candidate == &origin) {
+            group.push(endpoint);
+        } else {
+            groups.push((origin, vec![endpoint]));
+        }
+    }
+    groups.into_iter().map(|(_, endpoints)| endpoints).collect()
+}
+
+fn origin_throttle_feedback<T>(result: &Result<T, OpdsError>, elapsed: Duration) -> OriginThrottleFeedback {
+    let Err(error) = result else { return OriginThrottleFeedback::Success(elapsed) };
+    if error.retry_after().is_some() || error.http_status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+        return OriginThrottleFeedback::RateLimited(error.retry_after());
+    }
+    if error.http_status().is_some_and(|status| status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT)
+        || matches!(error, OpdsError::Network(_) | OpdsError::TimedOut)
+        || matches!(classify_catalog_failure(&error.to_string()), ("network_timeout" | "network_dns" | "network_tls" | "network_or_http", true))
+    {
+        OriginThrottleFeedback::TransientFailure
+    } else {
+        OriginThrottleFeedback::OtherFailure
     }
 }
 
@@ -475,25 +840,106 @@ pub(crate) fn page_publication_count(page: &CatalogPage) -> u64 {
     page.publications.len().saturating_add(page.groups.iter().map(|group| group.publications.len()).sum::<usize>()) as u64
 }
 
-pub(crate) fn page_cover_urls(page: &CatalogPage) -> Vec<String> {
-    page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).filter_map(|publication| publication.image_url.clone()).filter(|url| !is_synthetic_cover_key(url)).collect()
+fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
+    let mut pages = pages.into_iter();
+    let mut compacted = pages.next().expect("provider page compaction requires a first page");
+    let mut top_level = HashSet::new();
+    retain_unique_publications(&mut compacted.publications, &mut top_level);
+    for group in &mut compacted.groups {
+        let mut seen = HashSet::new();
+        retain_unique_publications(&mut group.publications, &mut seen);
+    }
+
+    for mut page in pages {
+        for link in page.navigation.drain(..) {
+            if !compacted.navigation.contains(&link) {
+                compacted.navigation.push(link);
+            }
+        }
+        retain_unique_publications(&mut page.publications, &mut top_level);
+        compacted.publications.extend(page.publications);
+
+        for mut group in page.groups {
+            if let Some(existing) = compacted.groups.iter_mut().find(|existing| existing.title == group.title && existing.page_locator == group.page_locator) {
+                existing.number_of_items = existing.number_of_items.into_iter().chain(group.number_of_items).max();
+                for link in group.navigation.drain(..) {
+                    if !existing.navigation.contains(&link) {
+                        existing.navigation.push(link);
+                    }
+                }
+                let mut seen = existing.publications.iter().map(|publication| (publication.identity.edition_id.clone(), publication.identity.work_id.clone().unwrap_or_default())).collect::<HashSet<_>>();
+                retain_unique_publications(&mut group.publications, &mut seen);
+                existing.publications.extend(group.publications);
+            } else {
+                let mut seen = HashSet::new();
+                retain_unique_publications(&mut group.publications, &mut seen);
+                compacted.groups.push(group);
+            }
+        }
+
+        for mut facet in page.facets {
+            if let Some(existing) = compacted.facets.iter_mut().find(|existing| existing.title == facet.title) {
+                for link in facet.links.drain(..) {
+                    if !existing.links.contains(&link) {
+                        existing.links.push(link);
+                    }
+                }
+            } else {
+                compacted.facets.push(facet);
+            }
+        }
+        if compacted.search.is_none() {
+            compacted.search = page.search;
+        }
+    }
+
+    compacted.pagination = Default::default();
+    compacted
 }
 
-pub(crate) fn internal_page_links(root: &Url, page: &CatalogPage) -> Result<Vec<String>, CatalogServiceError> {
+fn retain_unique_publications(publications: &mut Vec<CatalogPublication>, seen: &mut HashSet<(String, String)>) {
+    publications.retain(|publication| seen.insert((publication.identity.edition_id.clone(), publication.identity.work_id.clone().unwrap_or_default())));
+}
+
+pub(crate) fn internal_page_links(root: &Url, page: &CatalogPage, current_popular_listing: bool) -> Result<Vec<CrawlLocator>, CatalogServiceError> {
     let links = page.navigation.iter().chain(page.groups.iter().flat_map(|group| group.navigation.iter())).filter_map(|link| match &link.target {
-        CatalogLinkTarget::Page { locator } => Some(locator.as_str()),
+        CatalogLinkTarget::Page { locator } => Some((locator.as_str(), link.relations.iter().any(|relation| relation == "http://opds-spec.org/sort/popular" || relation == "popular"))),
         CatalogLinkTarget::External { .. } => None,
     });
     let mut internal = Vec::new();
-    for locator in links
-        .chain(page.groups.iter().filter_map(|group| group.page_locator.as_deref()))
+    for (locator, popular_listing) in links {
+        if same_origin(root, locator)? {
+            internal.push(CrawlLocator { locator: locator.to_owned(), popular_listing });
+        }
+    }
+    for locator in page
+        .groups
+        .iter()
+        .filter_map(|group| group.page_locator.as_deref())
         .chain([page.pagination.first.as_deref(), page.pagination.previous.as_deref(), page.pagination.next.as_deref(), page.pagination.last.as_deref()].into_iter().flatten())
     {
         if same_origin(root, locator)? {
-            internal.push(locator.to_owned());
+            internal.push(CrawlLocator { locator: locator.to_owned(), popular_listing: current_popular_listing });
         }
     }
     Ok(internal)
+}
+
+pub(crate) fn annotate_popular_listing(page: &mut CatalogPage, popular_listing: bool) {
+    if !popular_listing {
+        return;
+    }
+    let source = format!("opds:sort/popular:{}", page.locator);
+    for (index, publication) in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())).enumerate() {
+        let rank = PopularityRank { position: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1), source: source.clone() };
+        if !publication.metadata.popularity_ranks.contains(&rank) {
+            publication.metadata.popularity_ranks.push(rank);
+        }
+    }
+}
+
+fn page_has_popular_rank(page: &CatalogPage) -> bool {
+    page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).any(|publication| publication.metadata.popularity_ranks.iter().any(|rank| rank.source.starts_with("opds:sort/popular:")))
 }
 
 pub(crate) fn canonicalize_page_layout_locators(endpoint: &OpdsEndpoint, page: &mut catalog_contract::CatalogPageLayout) -> Result<(), CatalogServiceError> {

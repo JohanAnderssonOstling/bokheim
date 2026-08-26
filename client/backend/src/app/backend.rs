@@ -1,16 +1,13 @@
 use super::data::{AppDataLocation, BackendContext, LibraryEntry};
 use super::executor::{BackendExecutor, BackendTask};
-use super::librarything::LibraryThingClient;
 use super::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences};
-use crate::catalog::{
-    CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationKey, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSource,
-    CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogWideSearchResult,
-};
+use crate::catalog::{CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationKey, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse};
 use crate::library::database as db;
-use crate::library::BookImportDestination;
 use crate::platform::scanner::LibraryEvent;
-use crate::sync::{AssetSync, ReadingPositionSync, SyncPolicy};
-use crate::{AuthorId, ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
+use crate::sync::{AssetSync, ReadingPositionSync, SyncError, SyncPolicy};
+use crate::{ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
+use app_contract::library::BookImportDestination;
+use book_metadata::librarything::LibraryThingClient;
 use catalog_client::CatalogClient;
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use metadata_client::MetadataClient;
@@ -19,7 +16,7 @@ use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -29,13 +26,8 @@ use sync_common::api::notifications::NotificationMessage;
 use taxonomy_client::TaxonomyClient;
 
 use crate::library::LibraryBackend;
-
-/// A change relevant to a currently displayed library page.
-#[derive(Clone, Debug)]
-pub enum LibraryUpdate {
-    Contents,
-    Covers(Vec<ContentHash>),
-}
+use app_contract::catalog::CatalogSubjectBrowseView;
+use app_contract::library::LibraryUpdate;
 
 #[derive(Default)]
 struct AppEventSubscribers {
@@ -43,6 +35,7 @@ struct AppEventSubscribers {
     libraries: Vec<(LibraryId, async_channel::Sender<LibraryUpdate>)>,
     library_contents: Vec<(LibraryId, async_channel::Sender<()>)>,
     library_lists: Vec<async_channel::Sender<()>>,
+    sync: Vec<async_channel::Sender<()>>,
     transfers: Vec<async_channel::Sender<()>>,
     book_removals: Vec<async_channel::Sender<(LibraryId, ContentHash)>>,
 }
@@ -57,6 +50,10 @@ impl AppEventBus {
             subscribers.all = None;
         }
 
+        if matches!(&app_event.event, LibraryEvent::TransferStatusChanged | LibraryEvent::ScanStarted | LibraryEvent::ScanComplete) {
+            subscribers.transfers.retain(|sender| sender.try_send(()).is_ok());
+        }
+
         match &app_event.event {
             LibraryEvent::ThumbnailGenerated { content_hash } => {
                 send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Covers(vec![content_hash.clone()]));
@@ -65,9 +62,7 @@ impl AppEventBus {
                 send_library_update(&mut subscribers.libraries, &app_event.library_id, LibraryUpdate::Covers(content_hashes.clone()));
             }
             LibraryEvent::DownloadStatusChanged { .. } => {}
-            LibraryEvent::TransferStatusChanged => {
-                subscribers.transfers.retain(|sender| sender.try_send(()).is_ok());
-            }
+            LibraryEvent::TransferStatusChanged | LibraryEvent::ScanStarted => {}
             LibraryEvent::LibraryListChanged => {
                 subscribers.library_lists.retain(|sender| sender.try_send(()).is_ok());
             }
@@ -112,10 +107,6 @@ const BACKGROUND_SYNC_DEBOUNCE: Duration = Duration::from_millis(750);
 const READING_POSITION_SYNC_DEBOUNCE: Duration = Duration::from_secs(30);
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 const AUTH_REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
-
-fn catalog_publication_key(source_id: &CatalogSourceId, publication: CatalogPublicationIdentity) -> CatalogPublicationKey {
-    CatalogPublicationKey { source_id: source_id.clone(), publication }
-}
 
 fn account_status_from_session(session: Option<&crate::auth::Session>) -> AccountStatus {
     session.map(|session| AccountStatus::authenticated(session.server_url().as_str(), session.email())).unwrap_or_else(AccountStatus::signed_out)
@@ -180,24 +171,6 @@ pub struct LibraryListState {
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct CatalogPageView {
     pub page: CatalogPage,
-    pub owned_publications: HashSet<CatalogPublicationKey>,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-pub struct CatalogSubjectBrowseView {
-    pub response: CatalogSubjectBrowseResponse,
-    pub owned_publications: HashSet<CatalogPublicationKey>,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-pub struct CatalogWideSearchView {
-    pub result: CatalogWideSearchResult,
-    pub owned_publications: HashSet<CatalogPublicationKey>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CatalogAuthorDiscoveryView {
-    pub result: CatalogAuthorDiscoveryResult,
     pub owned_publications: HashSet<CatalogPublicationKey>,
 }
 
@@ -551,7 +524,7 @@ impl AppBackend {
         let catalogs = CatalogClient::with_persistent_cache(crate::catalog_server_url().as_str(), backend.app_data_dir()).map_err(BackendError::operation)?;
         let metadata = MetadataClient::new(crate::metadata_server_url().as_str()).map_err(BackendError::operation)?;
         let taxonomy = TaxonomyClient::new(crate::taxonomy_server_url().as_str()).map_err(BackendError::operation)?;
-        let librarything = LibraryThingClient::from_environment().map_err(BackendError::operation)?;
+        let librarything = super::librarything::client_from_environment().map_err(BackendError::operation)?;
         catalogs.set_supported_languages(browsing_preferences.included_catalog_languages()).map_err(BackendError::operation)?;
         let core = Self {
             state: Arc::new(AppState {
@@ -633,6 +606,16 @@ impl AppBackend {
         receiver
     }
 
+    pub fn sync_changes(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).sync.push(sender);
+        receiver
+    }
+
+    fn send_sync_changed(&self) {
+        self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).sync.retain(|sender| sender.try_send(()).is_ok());
+    }
+
     pub fn book_removals(&self) -> async_channel::Receiver<(LibraryId, ContentHash)> {
         let (sender, receiver) = async_channel::unbounded();
         self.state.events.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).book_removals.push(sender);
@@ -649,6 +632,45 @@ impl AppBackend {
             self.state.backend.create_library(name, root).map_err(BackendError::operation)?
         };
         self.finish_created_library(entry)
+    }
+
+    /// Registers folders selected by a native frontend.
+    ///
+    /// Paths remain inside the backend after this call. Frontends identify the
+    /// resulting libraries only by `LibraryId`.
+    pub fn create_libraries_from_paths(&self, paths: Vec<PathBuf>) -> Result<(Vec<LibraryId>, Vec<String>), BackendError> {
+        let mut known_paths = self.libraries()?.into_iter().map(|entry| entry.library_path().to_path_buf()).collect::<Vec<_>>();
+        let mut created_ids = Vec::new();
+        let mut errors = Vec::new();
+        for path in paths {
+            let display_path = path.display().to_string();
+            if !path.is_dir() {
+                errors.push(format!("{display_path}: not a folder"));
+                continue;
+            }
+            let canonical_path = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(format!("{display_path}: {error}"));
+                    continue;
+                }
+            };
+            if known_paths.contains(&canonical_path) {
+                continue;
+            }
+            match self.create_library(library_name_for_folder(&path), Some(path)) {
+                Ok(entry) => {
+                    known_paths.push(entry.library_path().to_path_buf());
+                    created_ids.push(*entry.library_id());
+                }
+                Err(error) => errors.push(format!("{display_path}: {error}")),
+            }
+        }
+        Ok((created_ids, errors))
+    }
+
+    pub fn import_library_directory(&self, library_id: &LibraryId, directory: app_contract::library::DirectoryImport) -> Result<Vec<String>, BackendError> {
+        self.library_handle(library_id, false)?.import_directory_contents(directory)
     }
 
     /// Ensures the application always has a local library to select.
@@ -723,6 +745,11 @@ impl AppBackend {
         Ok(library)
     }
 
+    pub fn request_library_scan(&self, library_id: &LibraryId) -> Result<(), BackendError> {
+        self.library_handle(library_id, false)?.request_scan();
+        Ok(())
+    }
+
     fn library_handle(&self, library_id: &LibraryId, start_scan: bool) -> Result<LibraryBackend, BackendError> {
         let start_scan = start_scan && self.state.library_scanning_enabled.load(Ordering::Acquire);
         if let Some(library) = self.lock(&self.state.open_libraries)?.get(library_id).cloned() {
@@ -733,13 +760,25 @@ impl AppBackend {
         }
         let account = self.current_account()?;
         let entry = self.library_entry(library_id)?;
+        let mut open_libraries = self.lock(&self.state.open_libraries)?;
+        // Opening constructs a pool, scanner threads, and a sync manager. Recheck
+        // after taking the insertion lock so concurrent first users cannot each
+        // create a live handle for the same library.
+        if let Some(library) = open_libraries.get(library_id).cloned() {
+            drop(open_libraries);
+            if start_scan {
+                library.start_scanner();
+            }
+            return Ok(library);
+        }
         let path = entry.library_path().to_string_lossy();
         let (library, events) =
             if start_scan { LibraryBackend::open(self, &self.state.backend, &path, *library_id) } else { LibraryBackend::open_deferred_scan(self, &self.state.backend, &path, *library_id) }.map_err(BackendError::operation)?;
         if let Some(session) = account {
             library.adopt_session(session).map_err(BackendError::message)?;
         }
-        self.lock(&self.state.open_libraries)?.insert(*library_id, library.clone());
+        open_libraries.insert(*library_id, library.clone());
+        drop(open_libraries);
         self.forward_library_events(library.clone(), events);
         self.request_library_sync(*library_id, true);
         Ok(library)
@@ -760,34 +799,6 @@ impl AppBackend {
 
     pub fn catalog_sources(&self) -> Vec<CatalogSource> {
         self.state.catalogs.sources()
-    }
-
-    pub fn supported_catalog_sources(&self) -> Vec<CatalogSource> {
-        self.state.catalogs.supported_sources()
-    }
-
-    pub fn custom_catalog_sources(&self) -> Result<Vec<CatalogSource>, BackendError> {
-        self.state.catalogs.custom_sources().map_err(BackendError::operation)
-    }
-
-    pub(crate) async fn cached_search_catalogs_in(&self, library_id: &LibraryId, query: &str) -> Result<CatalogWideSearchView, BackendError> {
-        let result = self.state.catalogs.cached_search_catalogs(query).await.map_err(BackendError::operation)?;
-        self.catalog_wide_search_view(library_id, result)
-    }
-
-    pub(crate) async fn search_catalogs_in(&self, library_id: &LibraryId, query: &str) -> Result<CatalogWideSearchView, BackendError> {
-        let result = self.state.catalogs.search_catalogs(query).await.map_err(BackendError::operation)?;
-        self.catalog_wide_search_view(library_id, result)
-    }
-
-    fn catalog_wide_search_view(&self, library_id: &LibraryId, result: CatalogWideSearchResult) -> Result<CatalogWideSearchView, BackendError> {
-        let mut owned_publications = HashSet::new();
-        for group in &result.groups {
-            if let crate::catalog::CatalogWideSearchOutcome::Results { page } = &group.outcome {
-                owned_publications.extend(self.owned_catalog_publications_for_page(library_id, &group.source.id, page)?);
-            }
-        }
-        Ok(CatalogWideSearchView { result, owned_publications })
     }
 
     pub(crate) async fn catalog_page_in(&self, library_id: &LibraryId, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPageView, BackendError> {
@@ -828,58 +839,41 @@ impl AppBackend {
 
     pub(crate) async fn librarything_sibling_isbns(&self, isbn: &str) -> Result<Vec<String>, BackendError> {
         let client = self.state.librarything.as_ref().ok_or_else(|| BackendError::message("LibraryThing is not configured"))?;
-        client.sibling_isbns(isbn).await.map_err(BackendError::message)
+        client.sibling_isbns(isbn).await.map_err(BackendError::operation)
     }
 
     pub(crate) async fn resolve_edition_identities(&self, request: &metadata_contract::EditionIdentityRequest) -> Result<metadata_contract::EditionIdentityResponse, BackendError> {
         self.state.metadata.resolve_edition_identities(request).await.map_err(BackendError::operation)
     }
 
-    pub(crate) async fn catalog_recommendations_in(&self, library_id: &LibraryId, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
-        let request = {
-            let library = self.library(library_id)?;
-            library.catalog_recommendation_request(limit)?
-        };
-        self.catalog_recommendations_for_request(library_id, request, limit).await
+    pub(crate) async fn refresh_catalog_subjects_in(&self, library_id: &LibraryId, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
+        let response = self.state.catalogs.refresh_subjects(request).await.map_err(BackendError::operation)?;
+        self.catalog_subject_browse_view(library_id, response)
     }
 
-    pub(crate) async fn catalog_subject_recommendations_in(&self, library_id: &LibraryId, subject_path: &str, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
-        let request = {
-            let library = self.library(library_id)?;
-            library.catalog_subject_recommendation_request(subject_path, limit)?
-        };
-        self.catalog_recommendations_for_request(library_id, request, limit).await
+    pub(crate) async fn catalog_subject_capabilities(&self, request: CatalogSubjectBrowseRequest) -> Result<app_contract::catalog::CatalogSubjectBrowseCapabilities, BackendError> {
+        self.state.catalogs.subject_browse_capabilities(request).await.map_err(BackendError::operation)
     }
 
-    pub(crate) async fn browse_catalog_subjects_in(&self, library_id: &LibraryId, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
-        let response = self.state.catalogs.browse_subjects(request).await.map_err(BackendError::operation)?;
-        let mut by_source = HashMap::<CatalogSourceId, Vec<CatalogPublicationIdentity>>::new();
-        for item in &response.publications {
-            by_source.entry(item.source_id.clone()).or_default().push(item.publication.identity.clone());
-        }
-        let mut owned_publications = HashSet::new();
-        for (source_id, identities) in by_source {
-            owned_publications.extend(self.owned_catalog_publications_in(library_id, &source_id, &identities)?.into_iter().map(|identity| catalog_publication_key(&source_id, identity)));
-        }
+    pub(crate) fn cached_catalog_subjects_in(&self, library_id: &LibraryId, request: CatalogSubjectBrowseRequest) -> Result<Option<CatalogSubjectBrowseView>, BackendError> {
+        self.state.catalogs.cached_subjects(request).map_err(BackendError::operation)?.map(|response| self.catalog_subject_browse_view(library_id, response)).transpose()
+    }
+
+    fn catalog_subject_browse_view(&self, library_id: &LibraryId, response: CatalogSubjectBrowseResponse) -> Result<CatalogSubjectBrowseView, BackendError> {
+        let owned_publications = self.catalog_ownership(library_id, response.publications.iter().map(|item| (item.source_id.clone(), item.publication.identity.clone())))?;
         Ok(CatalogSubjectBrowseView { response, owned_publications })
     }
 
-    async fn catalog_recommendations_for_request(&self, library_id: &LibraryId, mut request: CatalogRecommendationRequest, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
-        // Over-fetch before applying the private ownership overlay locally;
-        // owned titles are never disclosed to the public catalogue service.
-        request.limit = limit.saturating_mul(3).min(100).max(1);
-        let mut response = self.state.catalogs.recommendations(request).await.map_err(BackendError::operation)?;
+    fn catalog_ownership(&self, library_id: &LibraryId, publications: impl IntoIterator<Item = (CatalogSourceId, CatalogPublicationIdentity)>) -> Result<HashSet<CatalogPublicationKey>, BackendError> {
         let mut by_source = HashMap::<CatalogSourceId, Vec<CatalogPublicationIdentity>>::new();
-        for recommendation in &response.recommendations {
-            by_source.entry(recommendation.source_id.clone()).or_default().push(recommendation.publication.identity.clone());
+        for (source_id, identity) in publications {
+            by_source.entry(source_id).or_default().push(identity);
         }
-        let mut owned = HashSet::new();
+        let mut owned_publications = HashSet::new();
         for (source_id, identities) in by_source {
-            owned.extend(self.owned_catalog_publications_in(library_id, &source_id, &identities)?.into_iter().map(|identity| catalog_publication_key(&source_id, identity)));
+            owned_publications.extend(self.owned_catalog_publications_in(library_id, &source_id, &identities)?.into_iter().map(|identity| CatalogPublicationKey::new(source_id.clone(), identity)));
         }
-        response.recommendations.retain(|recommendation| !owned.contains(&catalog_publication_key(&recommendation.source_id, recommendation.publication.identity.clone())));
-        response.recommendations.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-        Ok(response)
+        Ok(owned_publications)
     }
 
     fn owned_catalog_publications_in(&self, library_id: &LibraryId, source_id: &CatalogSourceId, identities: &[CatalogPublicationIdentity]) -> Result<Vec<CatalogPublicationIdentity>, BackendError> {
@@ -887,8 +881,7 @@ impl AppBackend {
     }
 
     fn owned_catalog_publications_for_page(&self, library_id: &LibraryId, source_id: &CatalogSourceId, page: &CatalogPage) -> Result<HashSet<CatalogPublicationKey>, BackendError> {
-        let identities = page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).map(|publication| publication.identity.clone()).collect::<Vec<_>>();
-        Ok(self.owned_catalog_publications_in(library_id, source_id, &identities)?.into_iter().map(|publication| catalog_publication_key(source_id, publication)).collect())
+        self.catalog_ownership(library_id, page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).map(|publication| (source_id.clone(), publication.identity.clone())))
     }
 
     pub(crate) async fn import_catalog_book_in(&self, destination: &BookImportDestination, request: &CatalogImportRequest) -> Result<ContentHash, BackendError> {
@@ -986,14 +979,6 @@ impl AppBackend {
         self.reload_taxonomy_assignments(library)
     }
 
-    pub fn add_custom_catalog(&self, title: &str, url: &str) -> Result<CatalogSource, BackendError> {
-        self.state.catalogs.add_custom_source(title, url).map_err(BackendError::operation)
-    }
-
-    pub fn remove_custom_catalog(&self, source_id: &CatalogSourceId) -> Result<(), BackendError> {
-        self.state.catalogs.remove_custom_source(source_id).map_err(BackendError::operation)
-    }
-
     pub async fn refresh_catalog_sources(&self) -> Result<Vec<CatalogSource>, BackendError> {
         self.state.catalogs.refresh_sources().await.map_err(BackendError::operation)
     }
@@ -1008,24 +993,6 @@ impl AppBackend {
         }
         let network = self.network_status();
         Ok(!network.connected || network.validated == Some(false))
-    }
-
-    pub(crate) async fn discover_catalog_author_books_in(&self, library_id: &LibraryId, author_id: AuthorId) -> Result<CatalogAuthorDiscoveryResult, BackendError> {
-        let request = self.library(library_id)?.catalog_author_discovery_request(author_id)?;
-        self.state.catalogs.discover_author_books(&request).await.map_err(BackendError::operation)
-    }
-
-    pub(crate) async fn discover_catalog_author_view_in(&self, library_id: &LibraryId, author_id: AuthorId) -> Result<CatalogAuthorDiscoveryView, BackendError> {
-        let result = self.discover_catalog_author_books_in(library_id, author_id).await?;
-        let mut by_source = HashMap::<CatalogSourceId, Vec<CatalogPublicationIdentity>>::new();
-        for matched in &result.matches {
-            by_source.entry(matched.source.id.clone()).or_default().push(matched.publication.identity.clone());
-        }
-        let mut owned_publications = HashSet::new();
-        for (source_id, identities) in by_source {
-            owned_publications.extend(self.owned_catalog_publications_in(library_id, &source_id, &identities)?.into_iter().map(|publication| catalog_publication_key(&source_id, publication)));
-        }
-        Ok(CatalogAuthorDiscoveryView { result, owned_publications })
     }
 
     pub(crate) async fn download_book_in(&self, library_id: &LibraryId, content_hash: ContentHash) -> Result<crate::DownloadState, BackendError> {
@@ -1355,7 +1322,7 @@ impl AppBackend {
             .into_iter()
             .map(|library| {
                 let entry = self.library_entry(library.id())?;
-                Ok(LibraryTransfers { library_id: *library.id(), library_name: entry.library_name().to_owned(), transfers: library.transfer_statuses(), history: library.transfer_history() })
+                Ok(LibraryTransfers { library_id: *library.id(), library_name: entry.library_name().to_owned(), scanner_running: library.scanner_running(), transfers: library.transfer_statuses(), history: library.transfer_history() })
             })
             .collect::<Result<Vec<_>, BackendError>>()?;
         groups.sort_by(|left, right| left.library_name.cmp(&right.library_name));
@@ -1582,33 +1549,40 @@ impl AppBackend {
             Err(_) => log::warn!("Open Library author enrichment timed out before synchronizing library {}; continuing with provisional identities", library.id()),
         }
         let policy = SyncPolicy { assets, reading_positions: ReadingPositionSync::AfterQuietPeriod(READING_POSITION_SYNC_DEBOUNCE) };
-        let first = library.synchronize(policy).await.map_err(|error| (Self::sync_error_is_unauthorized(error.as_ref()), error.to_string()));
-        let outcome = match first {
+        let outcome = match library.synchronize(policy).await {
             Ok(outcome) => outcome,
-            Err((true, _)) => {
+            Err(SyncError::AuthenticationRequired) => {
                 self.refresh_account_after_unauthorized(session.token()).await?.ok_or_else(|| BackendError::message("authentication expired; sign in again"))?;
                 library.synchronize(policy).await.map_err(BackendError::operation)?
             }
-            Err((false, message)) => return Err(BackendError::message(message)),
+            Err(error) => return Err(BackendError::operation(error)),
         };
+        // Metadata-only and empty libraries do not necessarily create transfer
+        // events. Notify account surfaces explicitly so their last-sync state
+        // advances as soon as this successful checkpoint is persisted.
+        self.send_sync_changed();
         if let Err(error) = self.hydrate_taxonomy_for_library(library).await {
             log::warn!("library synchronization completed, but missing taxonomy codes could not be hydrated: {error}");
         }
         if let Some(delay) = outcome.next_reading_upload_in {
             self.request_reading_position_sync_after(library.id().clone(), delay);
         }
-        if outcome.deferred_mutations.iter().any(|rejection| rejection.reason == sync_common::MutationRejectionReason::MissingDependency) {
+        if outcome.mutation_issues.iter().any(|issue| matches!(issue, sync_common::MutationIssue::Retryable(rejection) if rejection.reason == sync_common::MutationRejectionReason::MissingDependency)) {
             self.request_reading_position_sync_after(library.id().clone(), BACKGROUND_SYNC_RETRY_INTERVAL);
         }
-        let clock_skewed = outcome.deferred_mutations.iter().filter(|rejection| rejection.reason == sync_common::MutationRejectionReason::TimestampTooFarFuture).count();
+        let clock_skewed = outcome.mutation_issues.iter().filter(|issue| matches!(issue, sync_common::MutationIssue::Retryable(rejection) if rejection.reason == sync_common::MutationRejectionReason::TimestampTooFarFuture)).count();
         if clock_skewed > 0 {
             log::warn!("{clock_skewed} mutation(s) for library {} were deferred because this device's clock is ahead of the server", library.id());
         }
+        let rejected = outcome.mutation_issues.iter().filter(|issue| matches!(issue, sync_common::MutationIssue::Rejected(_))).count();
+        if rejected > 0 {
+            log::error!("{rejected} mutation(s) for library {} were permanently rejected by the synchronization service and removed from the local outbox", library.id());
+        }
+        let untransmittable = outcome.mutation_issues.iter().filter(|issue| matches!(issue, sync_common::MutationIssue::Untransmittable(_))).count();
+        if untransmittable > 0 {
+            log::error!("{untransmittable} mutation(s) for library {} exceed the synchronization batch limit and remain in the local outbox", library.id());
+        }
         Ok(())
-    }
-
-    fn sync_error_is_unauthorized(error: &(dyn std::error::Error + 'static)) -> bool {
-        error.downcast_ref::<crate::auth::AuthError>().is_some_and(crate::auth::AuthError::is_unauthorized) || error.downcast_ref::<crate::sync::transfer::AuthenticationRequired>().is_some()
     }
 
     fn clear_account_locally(&self) -> Result<(), BackendError> {
@@ -1654,7 +1628,7 @@ impl AppBackend {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().folder_path = path)
     }
 
-    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<crate::library::SubjectPath>>) -> Result<(), BackendError> {
+    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<app_contract::library::SubjectPath>>) -> Result<(), BackendError> {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().subject_path = path)
     }
 
@@ -1705,11 +1679,6 @@ impl AppBackend {
         // The work batch is sized for network pacing: each book is a provider
         // lookup, so a small batch keeps failures cheap and progress steady.
         const SUBJECT_ENRICHMENT_BATCH_SIZE: usize = 25;
-        // How many books must actually gain subjects before the UI is told.
-        // Every notification re-queries the visible page, and most books get no
-        // match at all, so reporting per work batch spent a full page query on
-        // batches that changed nothing.
-        const SUBJECT_ENRICHMENT_NOTIFY_THRESHOLD: usize = 100;
         let library_id = *library.id();
         let event_tx = self.state.events.clone();
         let sync_wake_tx = self.state.sync_wake_tx.clone();
@@ -1723,7 +1692,6 @@ impl AppBackend {
                     let library = library.clone();
                     let executor = executor.clone();
                     let enrichment_running = enrichment_running.clone();
-                    let enrichment_event_tx = event_tx.clone();
                     let enrichment_pending_sync = pending_sync.clone();
                     let enrichment_sync_wake_tx = sync_wake_tx.clone();
                     std::thread::spawn(move || {
@@ -1744,8 +1712,6 @@ impl AppBackend {
                             };
                             let provider = book_metadata::library_of_congress::LibraryOfCongressProvider::new().map_err(BackendError::operation)?;
                             let providers = book_metadata::external::ExternalMetadataProviders::new().with(provider);
-                            let mut unreported_updated = 0_usize;
-                            let mut unreported_processed = 0_usize;
                             loop {
                                 let outcomes = library.enrich_missing_subjects(&providers, SUBJECT_ENRICHMENT_BATCH_SIZE, false).await?;
                                 if outcomes.is_empty() {
@@ -1756,13 +1722,6 @@ impl AppBackend {
                                 if batch_updated > 0 {
                                     enrichment_pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id, false);
                                     let _ = enrichment_sync_wake_tx.try_send(());
-                                }
-                                unreported_updated += batch_updated;
-                                unreported_processed += outcomes.len();
-                                if unreported_updated >= SUBJECT_ENRICHMENT_NOTIFY_THRESHOLD {
-                                    enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: unreported_processed, updated: unreported_updated, finished: false } });
-                                    unreported_updated = 0;
-                                    unreported_processed = 0;
                                 }
                                 if outcomes.iter().any(|outcome| outcome.status == crate::library::SubjectEnrichmentStatus::Failed) {
                                     return Err(BackendError::operation("Library of Congress subject enrichment stopped after a provider failure"));
@@ -1775,7 +1734,6 @@ impl AppBackend {
                             Ok(_) => {}
                             Err(error) => log::warn!("Library of Congress subject enrichment paused: {error}"),
                         }
-                        enrichment_event_tx.send(AppEvent { library_id, event: LibraryEvent::SubjectEnrichmentBatchProcessed { processed: 0, updated: 0, finished: true } });
                         enrichment_running.store(false, Ordering::Release);
                     });
                 }
@@ -1789,7 +1747,8 @@ impl AppBackend {
                     | LibraryEvent::SubjectEnrichmentBatchProcessed { .. }
                     | LibraryEvent::TransferStatusChanged
                     | LibraryEvent::LibraryListChanged
-                    | LibraryEvent::LibraryChanged => None,
+                    | LibraryEvent::LibraryChanged
+                    | LibraryEvent::ScanStarted => None,
                 };
                 if let Some(assets) = sync_assets {
                     pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id.clone(), assets);
@@ -1803,6 +1762,10 @@ impl AppBackend {
     fn lock<'a, T>(&self, mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, BackendError> {
         mutex.lock().map_err(|_| BackendError::message("application state lock is poisoned"))
     }
+}
+
+fn library_name_for_folder(path: &Path) -> String {
+    path.file_name().and_then(|name| name.to_str()).filter(|name| !name.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(test)]
@@ -1840,6 +1803,20 @@ mod tests {
         #[cfg(unix)]
         selected.push(root.path().join("duplicate-link"));
         assert_eq!(regular_files_apparent_size(selected).unwrap(), 40);
+    }
+
+    #[test]
+    fn scanner_activity_notifies_batch_job_subscribers() {
+        let events = AppEventBus::default();
+        let (sender, receiver) = async_channel::unbounded();
+        events.0.lock().unwrap().transfers.push(sender);
+        let library_id = fixture_library_id("scanner-activity");
+
+        events.send(AppEvent { library_id, event: LibraryEvent::ScanStarted });
+        assert!(receiver.try_recv().is_ok());
+
+        events.send(AppEvent { library_id, event: LibraryEvent::ScanComplete });
+        assert!(receiver.try_recv().is_ok());
     }
 
     #[test]
@@ -2012,8 +1989,8 @@ mod tests {
         let folder = destination_library.create_directory(&root_id, "Shelf").unwrap();
         let source = root.path().join("book.pdf");
         write_test_pdf(&source);
-        assert!(active.import_book(folder.id(), &source, "book.pdf").is_err());
-        destination_library.import_book(folder.id(), &source, "book.pdf").unwrap();
+        assert!(active.import_book(folder.id(), &source).is_err());
+        destination_library.import_book(folder.id(), &source).unwrap();
 
         assert!(destination_library.folder(folder.id()).unwrap().books.iter().any(|book| book.title == "book"));
         assert!(active.folder(&root_id).unwrap().books.is_empty());
@@ -2050,6 +2027,7 @@ mod tests {
             .collect::<Vec<_>>();
         let libraries = threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>();
         assert!(libraries.iter().all(|library| library.id() == &library_id));
+        assert!(libraries.iter().all(|library| library.shares_scanner_with(&libraries[0])));
     }
 
     #[test]
@@ -2253,46 +2231,5 @@ mod tests {
 
         assert_eq!(core.lock(&core.state.open_libraries).unwrap().len(), 2);
         assert_eq!(core.transfer_statuses().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn custom_catalog_identity_is_generated_device_local_and_persistent() {
-        let root = tempfile::tempdir().unwrap();
-        let app_data = root.path().join("app-data");
-        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
-        let source = core.add_custom_catalog("Local books", "http://127.0.0.1:8080/opds").unwrap();
-        assert!(source.id.as_str().starts_with("opds-custom-"));
-        assert_eq!(source.id.as_str().len(), "opds-custom-".len() + 32);
-        assert!(core.custom_catalog_sources().unwrap().iter().any(|candidate| candidate.id == source.id));
-        assert!(core.add_custom_catalog("Duplicate", "http://127.0.0.1:8080/opds").unwrap_err().to_string().contains("already configured"));
-        drop(core);
-        let restored = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
-        assert_eq!(restored.custom_catalog_sources().unwrap().iter().map(|source| source.id.clone()).collect::<Vec<_>>(), vec![source.id.clone()]);
-        restored.remove_custom_catalog(&source.id).unwrap();
-        drop(restored);
-        let removed = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data)).unwrap();
-        assert!(removed.custom_catalog_sources().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn custom_catalog_rejects_a_redirect_to_another_origin() {
-        let destination = axum::Router::new().route(
-            "/catalog",
-            axum::routing::get(|| async { ([(axum::http::header::CONTENT_TYPE, "application/opds+json")], r#"{"metadata":{"title":"Other origin"},"navigation":[{"title":"Books","href":"/books","type":"application/opds+json"}]}"#) }),
-        );
-        let destination_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination_address = destination_listener.local_addr().unwrap();
-        let destination_task = tokio::spawn(async move { axum::serve(destination_listener, destination).await.unwrap() });
-        let source = axum::Router::new().route("/root", axum::routing::get(move || async move { axum::response::Redirect::temporary(&format!("http://{destination_address}/catalog")) }));
-        let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let source_address = source_listener.local_addr().unwrap();
-        let source_task = tokio::spawn(async move { axum::serve(source_listener, source).await.unwrap() });
-        let root = tempfile::tempdir().unwrap();
-        let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        let source = core.add_custom_catalog("Redirecting", &format!("http://{source_address}/root")).unwrap();
-        let error = core.state.catalogs.page(&source.id, None).await.unwrap_err();
-        assert!(error.to_string().contains("registered OPDS origin"), "{error}");
-        source_task.abort();
-        destination_task.abort();
     }
 }

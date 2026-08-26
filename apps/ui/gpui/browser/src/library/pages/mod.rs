@@ -5,10 +5,6 @@ use ui_components::BrowserTheme;
 
 pub(crate) mod authors;
 pub(crate) mod browse;
-pub(crate) mod browse_grid;
-pub(crate) mod browse_next;
-pub(crate) mod browse_page;
-pub(crate) mod chip_grid;
 pub(crate) mod home;
 pub(crate) mod subjects;
 pub(crate) mod trash;

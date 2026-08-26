@@ -377,10 +377,10 @@ def render_sql(manifest: dict[str, object], taxonomy_path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--taxonomy", type=Path, default=Path("client/library-model/data/unified-taxonomy-v2.sqlite3"))
-    parser.add_argument("--snapshot", type=Path, default=Path("client/library-model/data/lcc-mdsconnect-2016.sqlite3"))
-    parser.add_argument("--manifest", type=Path, default=Path("client/library-model/data/history-lcc-next-level-manifest.json"))
-    parser.add_argument("--output", type=Path, default=Path("client/library-model/data/migrations/20260817_history_lcc_next_level.sql"))
+    parser.add_argument("--taxonomy", type=Path, default=Path("shared/subject-projection/data/unified-taxonomy-v2.sqlite3"))
+    parser.add_argument("--snapshot", type=Path, default=Path("shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"))
+    parser.add_argument("--manifest", type=Path, default=Path("shared/subject-projection/data/history-lcc-next-level-manifest.json"))
+    parser.add_argument("--output", type=Path, default=Path("shared/subject-projection/data/migrations/20260817_history_lcc_next_level.sql"))
     args = parser.parse_args()
     manifest = build_manifest(args.taxonomy, args.snapshot)
     args.manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

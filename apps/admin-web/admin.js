@@ -1,4 +1,4 @@
-const wireMediaType = "application/vnd.bokheim+protobuf; version=14";
+const wireMediaType = "application/vnd.bokheim+protobuf; version=16";
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 let hours = 24;
 let refreshing = false;
@@ -128,6 +128,37 @@ function card(label, value, detail) {
   }
   return item;
 }
+function processControl(process) {
+  const labels = {
+    catalogue_crawling:["Catalogue crawling", "Fetches and activates OPDS catalogue generations"],
+    cover_downloads:["Cover downloads", "Downloads saved cover URLs and records the result against each book"],
+    epub_enrichment:["EPUB enrichment", "Downloads publications and extracts embedded metadata and covers"],
+    catalogue_enrichment:["Catalogue enrichment", "Indexes extracted metadata and applies external catalogue supplements"],
+  };
+  const [label, description] = labels[process.process] ?? [process.process.replaceAll("_", " "), "Catalogue background process"];
+  const state = process.blocked_by_configuration
+    ? "Disabled by server configuration"
+    : process.pause_pending
+      ? "Pausing after current work"
+      : process.running
+        ? "Running"
+        : process.enabled
+          ? "Enabled · idle"
+          : "Paused";
+  const item = document.createElement("article"); item.className = "process-control";
+  const header = document.createElement("header");
+  const title = document.createElement("h3"); title.textContent = label;
+  const status = document.createElement("span"); status.className = "process-state"; status.textContent = `${state} · ${description}`;
+  header.append(title, status);
+  const actions = document.createElement("div"); actions.className = "process-actions";
+  const toggle = document.createElement("button"); toggle.type = "button"; toggle.dataset.process = process.process; toggle.dataset.processAction = process.enabled ? "pause" : "resume"; toggle.textContent = process.enabled ? "Pause" : "Resume";
+  actions.append(toggle);
+  if (process.enabled && !process.blocked_by_configuration) {
+    const run = document.createElement("button"); run.type = "button"; run.dataset.process = process.process; run.dataset.processAction = "run_now"; run.textContent = "Run now"; actions.append(run);
+  }
+  item.append(header, actions);
+  return item;
+}
 function serviceState(service) {
   return service.available ? ["Available", `${number(service.latency_ms)} ms response`] : ["Unavailable", "Check the service or dashboard target configuration"];
 }
@@ -184,6 +215,7 @@ function render(overview, history, requestHistory, engagement, services, identit
   elements["catalogue-content"].hidden = !catalogue;
   if (catalogue) {
     const extractions = catalogue.epub_extractions;
+    const coverDownloads = catalogue.cover_downloads;
     const metadataBackfill = catalogue.metadata_backfill;
     const descriptionBackfill = catalogue.description_backfill;
     const descriptionMetrics = catalogue.description_backfill_metrics;
@@ -194,6 +226,7 @@ function render(overview, history, requestHistory, engagement, services, identit
     const descriptionProgress = descriptionTotal ? descriptionFinished / descriptionTotal * 100 : 100;
     const descriptionsPerMinute = descriptionMetrics ? descriptionMetrics.jobs_per_second * 60 : null;
     const currentCrawls = catalogue.sources.filter((source) => source.crawl_status === "running");
+    elements["catalogue-processes"].replaceChildren(...(catalogue.processes ?? []).map(processControl));
     const crawlRates = currentCrawls.map((source) => ({
       pages:perMinute(source.crawl_pages_fetched, source.crawl_elapsed_seconds),
       publications:perMinute(source.crawl_publications_seen, source.crawl_elapsed_seconds),
@@ -206,6 +239,7 @@ function render(overview, history, requestHistory, engagement, services, identit
       card("Importable EPUBs", number(catalogue.active_epub_count), `${number(catalogue.sources.length)} configured sources`),
       card("Catalogue latency", `${number(services.catalogue.latency_ms)} ms`, "Operations snapshot response"),
       card("EPUB extraction queue", number(extractions.pending + extractions.running), `${number(extractions.succeeded)} succeeded · ${number(extractions.failed)} failed`),
+      ...(coverDownloads ? [card("Cover download queue", number(coverDownloads.pending + coverDownloads.running), `${number(coverDownloads.succeeded)} cached · ${number(coverDownloads.failed)} failed`)] : []),
       ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded · ${number(catalogue.identity_reviews?.failed ?? 0)} recorded failures`)] : []),
       ...(descriptionBackfill ? [card("Description backfill", descriptionBackfillAvailable ? `${descriptionProgress.toFixed(1)}%` : "Waiting", descriptionBackfillAvailable ? `${number(descriptionBackfill.pending + descriptionBackfill.running)} queued · ${rate(descriptionsPerMinute)} books/min · ${number(descriptionWithoutOpenLibraryText)} without an OL description` : "Metadata snapshot does not contain Open Library descriptions yet")] : []),
       card("Registry revision", number(catalogue.registry_revision), catalogue.metadata_enrichment_configured ? "Metadata enrichment configured" : "Metadata enrichment disabled"),
@@ -271,7 +305,11 @@ function render(overview, history, requestHistory, engagement, services, identit
       const lastSuccess = source.last_crawl_succeeded_at ? timestamp(source.last_crawl_succeeded_at) : "Never";
       const extraction = source.epub_extractions;
       const crawlStatus = source.last_crawl_error_category ? `${source.crawl_status} · ${source.last_crawl_error_category.replaceAll("_", " ")}` : source.crawl_status;
-      for (const [index, value] of [source.source_id, crawlStatus, source.crawl_frontier_count == null ? "—" : number(source.crawl_frontier_count), lastSuccess, number(source.active_publication_count), number(source.active_epub_count), `${number(extraction.pending + extraction.running)} / ${number(extraction.failed)}`].entries()) {
+      const blockedSeconds = Math.ceil(source.crawl_origin_blocked_ms / 1000);
+      const throttle = blockedSeconds > 0
+        ? `Waiting ${blockedSeconds < 60 ? `${blockedSeconds}s` : duration(blockedSeconds)}`
+        : `${number(source.crawl_origin_in_flight)} / ${number(source.crawl_origin_concurrency)} active · ${number(source.crawl_origin_spacing_ms)} ms spacing`;
+      for (const [index, value] of [source.source_id, crawlStatus, throttle, source.crawl_frontier_count == null ? "—" : number(source.crawl_frontier_count), lastSuccess, number(source.active_publication_count), number(source.active_epub_count), `${number(extraction.pending + extraction.running)} / ${number(extraction.failed)}`].entries()) {
         const cell = document.createElement("td");
         if (index === 0) { const code = document.createElement("code"); code.textContent = value; cell.append(code); } else cell.textContent = value;
         row.append(cell);
@@ -486,6 +524,19 @@ elements.ranges.addEventListener("click", (event) => {
 });
 elements["review-source"].addEventListener("change", load);
 elements["review-status"].addEventListener("change", load);
+elements["catalogue-processes"].addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-process-action]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const response = await post(`/api/admin/catalog-processes/${button.dataset.process}`, { action:button.dataset.processAction });
+    if (!response.ok) throw new Error();
+    await load();
+  } catch {
+    button.disabled = false;
+    window.alert("The catalogue process control could not be changed.");
+  }
+});
 elements.reviews.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-review-action]");
   if (!button) return;

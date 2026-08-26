@@ -1,10 +1,16 @@
-use super::super::{BackfillBatchMetrics, CatalogCache, CatalogService, Instant, METADATA_BACKFILL_BATCH_SIZE, METADATA_BACKFILL_RETRY_DELAY};
+use super::super::{BackfillBatchMetrics, CatalogCache, CatalogProcess, CatalogService, Instant, METADATA_BACKFILL_BATCH_SIZE, METADATA_BACKFILL_RETRY_DELAY};
 impl CatalogService {
     pub(crate) async fn resume_metadata_backfill(&self) {
+        if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+            return;
+        }
         if !self.schedule_backfill("backfill_schedule", "could not schedule saved catalogue metadata for local backfill", CatalogCache::schedule_metadata_backfill).await {
             return;
         }
         loop {
+            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+                return;
+            }
             let claim_started = Instant::now();
             let jobs = match self.cache_write_call_named("backfill_claim", |cache| cache.claim_metadata_backfill_indexed_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(jobs) if jobs.is_empty() => return,
@@ -39,7 +45,10 @@ impl CatalogService {
                         tracing::warn!(%release_error, "could not record saved catalogue metadata backfill failure");
                         return;
                     }
-                    tokio::time::sleep(METADATA_BACKFILL_RETRY_DELAY).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(METADATA_BACKFILL_RETRY_DELAY) => {}
+                        _ = self.wait_for_process_wake(CatalogProcess::CatalogueEnrichment) => {}
+                    }
                 }
             }
         }

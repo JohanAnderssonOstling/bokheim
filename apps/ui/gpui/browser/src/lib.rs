@@ -4,8 +4,7 @@
 //! current flat library or universal page. Folder/subject navigation and book
 //! detail belong to their individual library pages.
 
-mod catalog;
-mod description;
+mod application;
 mod library;
 mod model;
 mod navigation;
@@ -13,41 +12,35 @@ mod root;
 mod services;
 mod stores;
 mod universal;
-mod virtual_grid;
 
 use gpui::{App, KeyBinding, actions};
 
-pub use model::BrowserSession;
+fn directory_import(selected: gpui::SelectedDirectory) -> app_contract::library::DirectoryImport {
+    app_contract::library::DirectoryImport {
+        name: selected.name,
+        directories: selected.directories,
+        files: selected.files.into_iter().map(|file| app_contract::library::DirectoryImportFile { path: file.path.clone(), open: Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) })) }).collect(),
+    }
+}
+
+pub use application::{ApplicationRoot, OpenRequest, OpenedBook, ReturnToLibrary};
+pub use navigation::Route;
 pub use root::BrowserRoot;
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
 pub use services::{AppServices, DesktopUpdate, DesktopUpdater, OpenReader};
 
-/// The currently displayed browser page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Route {
-    Home,
-    Authors,
-    Folders,
-    Subjects,
-    Trash,
-    Store,
-    Account,
-    Settings,
-}
-
-impl Default for Route {
-    fn default() -> Self {
-        Self::Folders
-    }
-}
-
-actions!(bokheim_browser, [DismissSettings, ShowSettings, FocusPreviousListItem, FocusNextListItem, ActivateAuthor]);
+actions!(bokheim_browser, [DismissSettings, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, FocusPreviousListItem, FocusNextListItem, ActivateAuthor]);
 
 pub fn bind_keys(cx: &mut App) {
     // Number shortcuts follow the order drawn by the navigation rail.
     cx.bind_keys([
         KeyBinding::new("escape", DismissSettings, Some("Browser")),
+        #[cfg(feature = "mobile")]
+        KeyBinding::new("back", DismissSettings, Some("Browser")),
+        KeyBinding::new("ctrl--", DecreaseUiFontSize, Some("Browser")),
+        KeyBinding::new("ctrl-=", IncreaseUiFontSize, Some("Browser")),
+        KeyBinding::new("ctrl-+", IncreaseUiFontSize, Some("Browser")),
         KeyBinding::new("up", FocusPreviousListItem, Some("BrowserArrowList")),
         KeyBinding::new("down", FocusNextListItem, Some("BrowserArrowList")),
         KeyBinding::new("enter", ActivateAuthor, Some("BrowserAuthorList")),

@@ -4,18 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["desktop-backend"]
-desktop-backend = ["epub_svelte_lib/desktop"]
+default = []
 audiobooks = ["dep:audiobook-player"]
+filesystem-libraries = []
 kobo = ["dep:gpui_kobo", "ui-components/kobo"]
+mobile = ["ui-components/mobile"]
 
 [dependencies]
 async-channel = "2"
 app-contract = { path = "../../../../client/app-contract" }
 audiobook-player = { path = "../audiobook-player", optional = true }
-ui-runtime = { path = "../runtime" }
 ui-components = { path = "../components" }
-epub_svelte_lib = { package = "epub-svelte", path = "../../../../client/backend", default-features = false }
 gpui.workspace = true
 gpui-component.workspace = true
 gpui_kobo = { path = "../../../../../GPUI-Fork/crates/gpui_kobo", optional = true }
@@ -27,7 +26,9 @@ log = "0.4"
 chrono = "0.4"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
+sync-common = { path = "../../../../shared/sync-common" }
 uuid = { version = "1", features = ["v4"] }
+web-time = "1"
 
 [dev-dependencies]
 gpui_platform.workspace = true

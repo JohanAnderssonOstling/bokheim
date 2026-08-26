@@ -1,9 +1,10 @@
-//! Account page visuals: the verdict banner, the storage meter, and the
-//! library usage rows that read against it.
+//! Account section visuals: the identity block, the storage meter, the library
+//! usage rows that read against it, and the activity list under them.
 //!
-//! The page opens with its conclusion, so the banner is the only element on the
-//! page allowed to carry a semantic colour at full strength; everything below it
-//! is evidence for that conclusion and stays quiet.
+//! The section opens with who is signed in, and the sync state is one line
+//! inside that block rather than a banner above it. Only that line and the
+//! activity dots carry a semantic colour, and only while something is actually
+//! waiting; everything else is quiet.
 
 use gpui::prelude::*;
 use gpui::{Div, FontWeight, Hsla, SharedString, div, px, relative};
@@ -16,41 +17,58 @@ const METER_HEIGHT: f32 = 10.0;
 const USAGE_BAR_WIDTH: f32 = 96.0;
 const USAGE_BAR_HEIGHT: f32 = 4.0;
 const USAGE_AMOUNT_WIDTH: f32 = 76.0;
-const VERDICT_STRIPE_WIDTH: f32 = 3.0;
+const AVATAR_SIZE: f32 = 40.0;
+const EVENT_DOT_SIZE: f32 = 8.0;
+/// Half the gap between the dot and the cap height of the line beside it.
+const EVENT_DOT_OFFSET: f32 = 6.0;
+const PROGRESS_HEIGHT: f32 = 3.0;
 
-/// The banner the page opens with: one line that answers "is everything
-/// synced?", the evidence for it underneath, and the actions that change it.
-pub fn verdict_banner(headline: impl Into<SharedString>, detail: impl Into<SharedString>, settled: bool, actions: impl IntoElement, theme: BrowserTheme) -> Div {
-    // A settled page carries no state colour: the stripe stays on the theme's
-    // own accent, and amber appears only when something is actually waiting.
-    let state_color = if settled { theme.accent } else { theme.warning };
-    // The stripe is a child rather than a left border because a border colour in
-    // GPUI applies to every side; a coloured frame would make the whole banner
-    // read as an alert.
-    div().w_full().flex().flex_row().items_stretch().border_1().border_color(theme.border).bg(theme.raised_bg).child(div().w(px(VERDICT_STRIPE_WIDTH)).flex_none().bg(state_color)).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .flex_wrap()
-            .gap(px(SPACE_MD))
-            .px(px(SPACE_MD))
-            .py(px(SPACE_MD))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_XXS))
-                    .child(div().text_size(gpui::rems(TITLE_MD / 16.0)).font_weight(FontWeight::SEMIBOLD).child(headline.into()))
-                    .child(div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(detail.into())),
-            )
-            .child(actions),
-    )
+/// The account itself: who is signed in, one line on how the sync is doing, and
+/// the two actions that change either.
+///
+/// The page opens with identity rather than with a verdict, so the sync state
+/// is a line inside this block instead of a banner above it. It keeps a colour
+/// only while something is actually waiting; a settled account is not news.
+pub fn account_identity(initial: impl Into<SharedString>, email: impl Into<SharedString>, status: impl Into<SharedString>, settled: bool, actions: impl IntoElement, theme: BrowserTheme) -> Div {
+    let status_color = if settled { theme.text_muted } else { theme.warning };
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_wrap()
+        .gap(px(SPACE_MD))
+        .px(px(SPACE_MD))
+        .py(px(SPACE_MD))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.raised_bg)
+        .child(
+            div()
+                .w(px(AVATAR_SIZE))
+                .h(px(AVATAR_SIZE))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(AVATAR_SIZE / 2.0))
+                .bg(theme.accent)
+                .text_color(theme.page_bg)
+                .text_size(gpui::rems(TITLE_MD / 16.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(initial.into()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_XXS))
+                .child(div().line_clamp(1).text_size(gpui::rems(TITLE_MD / 16.0)).font_weight(FontWeight::SEMIBOLD).child(email.into()))
+                .child(div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(status_color).child(status.into())),
+        )
+        .child(actions)
 }
 
 /// The quota as a figure rather than a sentence: the used amount is the largest
@@ -142,25 +160,55 @@ pub fn usage_bar(fraction: f32, theme: BrowserTheme) -> Div {
     div().w(px(USAGE_BAR_WIDTH)).h(px(USAGE_BAR_HEIGHT)).flex_none().flex().flex_row().overflow_hidden().bg(theme.page_bg).child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(theme.accent))
 }
 
-/// The single line that stands in for the batch job sections while they are
-/// empty. It states what is happening and offers the way in; it never grows
-/// into a section of its own.
-pub fn activity_footer(summary: impl Into<SharedString>, action: impl IntoElement, theme: BrowserTheme) -> Div {
+/// The activity section: what the device has been doing, newest first.
+///
+/// Batch jobs are the only part of the page that reports events rather than
+/// state, so they are a list of their own rather than rows in a table.
+pub fn activity_list() -> Div {
+    div().w_full().flex().flex_col()
+}
+
+/// One batch job. The dot carries the state, so the text never has to repeat
+/// it; `progress` is the share done and is drawn only while a job is running,
+/// where it is the only thing that changes between refreshes.
+pub fn activity_event(state_color: Hsla, title: impl Into<SharedString>, detail: impl Into<SharedString>, progress: Option<f32>, theme: BrowserTheme) -> Div {
+    let detail = detail.into();
+    let mut text = div().flex_1().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).child(div().text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::SEMIBOLD).child(title.into()));
+    if !detail.is_empty() {
+        text = text.child(div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(detail));
+    }
+    if let Some(progress) = progress {
+        text = text.child(div().w_full().h(px(PROGRESS_HEIGHT)).bg(theme.page_bg).child(div().h_full().w(relative(progress.clamp(0.0, 1.0))).bg(theme.accent)));
+    }
     div()
         .w_full()
         .flex()
         .flex_row()
-        .items_center()
-        .justify_between()
-        .flex_wrap()
+        .items_start()
         .gap(px(SPACE_SM))
-        .px(px(SPACE_MD))
         .py(px(SPACE_SM))
-        .border_1()
+        .border_b_1()
         .border_color(theme.border)
-        .bg(theme.raised_bg)
-        .child(div().flex_1().min_w_0().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(summary.into()))
-        .child(action)
+        // The dot sits on the first line's optical centre rather than the top of
+        // the row, so a two-line event does not appear to hang off it.
+        .child(div().w(px(EVENT_DOT_SIZE)).h(px(EVENT_DOT_SIZE)).flex_none().mt(px(EVENT_DOT_OFFSET)).rounded(px(EVENT_DOT_SIZE / 2.0)).bg(state_color))
+        .child(text)
+}
+
+/// Vertical rhythm for the storage block/// The signed-out form: a title, the inputs, the actions, and whatever the last
+/// attempt had to say, in one measure.
+///
+/// The inputs inside it carry their own placeholders and are never given a
+/// label as well — a field named twice reads as two fields.
+pub fn access_form() -> Div {
+    div().w_full().flex().flex_col().gap(px(SPACE_SM))
+}
+
+/// The quiet line under an input that names a constraint the user cannot guess,
+/// such as a minimum password length. Not a label: it says something the
+/// placeholder does not.
+pub fn form_hint(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(text.into())
 }
 
 /// Vertical rhythm for the storage block: figures, meter, legend.

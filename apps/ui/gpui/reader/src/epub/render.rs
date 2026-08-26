@@ -10,8 +10,8 @@ use crate::{
 };
 use std::rc::Rc;
 
+use app_contract::reader_state::{AnnotationStyle, ReaderAnnotation, ReaderBookmark};
 use app_contract::{READER_NAVIGATION_SHORTCUTS, ReaderNavigationAction, ReaderNavigationKey, ReaderNavigationShortcut};
-use epub_svelte_lib::library::marks::{AnnotationStyle, ReaderAnnotation, ReaderBookmark};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, Point, Render, Window, px};
 use gpui_component::input::Input;
@@ -22,21 +22,8 @@ const READER_TOOLBAR_HEIGHT: f32 = 58.0;
 /// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
 /// This is a renderer guard band, not an authored EPUB margin.
 const KOBO_READER_EDGE_INSET: f32 = 2.0;
-/// Places the annotation editor, deriving the column count the way the
-/// renderer does.
-///
-/// The EPUB view is not told how many columns it ended up with — it asks for a
-/// column width and the renderer fits as many as will go, capped by the
-/// reader's preference. The panel has to land on the same column the click did,
-/// so that arithmetic is repeated here before the shared placement runs.
-fn annotation_popup_geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, requested_column_width: f32, scale: f32, maximum_columns: u8) -> annotation_editor::Geometry {
-    let document_width = annotation_editor::document_width(viewport_width, sidebar_width);
-    let scale = scale.max(0.01);
-    let minimum_gap = 20.0 * scale;
-    let requested_column_width = requested_column_width.max(1.0) * scale;
-    let derived_columns = ((document_width + minimum_gap) / (requested_column_width + minimum_gap)).floor().max(1.0) as u8;
-    let column_count = derived_columns.min(maximum_columns.max(1));
-    annotation_editor::geometry(anchor, viewport_width, viewport_height, sidebar_width, READER_TOOLBAR_HEIGHT, usize::from(column_count))
+fn annotation_popup_geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewport_height: f32, sidebar_width: f32, column_count: usize) -> annotation_editor::Geometry {
+    annotation_editor::geometry(anchor, viewport_width, viewport_height, sidebar_width, READER_TOOLBAR_HEIGHT, column_count.max(1))
 }
 
 impl ReaderView {
@@ -72,7 +59,7 @@ impl ReaderView {
             cx,
             |showing_bookmarks, this, cx| {
                 this.reader_state_bookmarks = showing_bookmarks;
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+                crate::invalidation::notify(cx, Component::ReaderShell, "reader_state_tab_changed");
             },
         ));
 
@@ -115,6 +102,7 @@ impl ReaderView {
             return;
         }
         self.chrome_hidden = true;
+        cx.set_system_bars_visible(false);
         crate::invalidation::notify(cx, Component::ReaderShell, "chrome_hidden");
     }
 
@@ -123,6 +111,7 @@ impl ReaderView {
             return;
         }
         self.chrome_hidden = false;
+        cx.set_system_bars_visible(true);
         crate::invalidation::notify(cx, Component::ReaderShell, "chrome_shown");
     }
 
@@ -133,7 +122,7 @@ impl ReaderView {
     fn on_toggle_toc(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
         self.show_chrome(cx);
         self.set_toc_visible(!self.toc_visible, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "toc_visibility_changed");
     }
 
     pub(crate) fn set_toc_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -218,8 +207,14 @@ impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::invalidation::record_render(Component::ReaderShell);
         let theme = components::browser_theme(cx);
-        window.set_window_title(&self.book_title);
         let entity = cx.entity();
+        let touch_input = cx.supports_touch_input();
+        let sidebar_visible = self.reader_state_visible || self.toc_visible;
+        let split_sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
+        let available_width = (f32::from(window.viewport_size().width) - split_sidebar_width).max(1.0);
+        if let LoadState::Ready(renderer) = &self.load_state {
+            renderer.update(cx, |renderer, cx| renderer.set_available_width(f64::from(available_width), cx));
+        }
         let document = match &self.load_state {
             LoadState::Loading => components::reader_content().child(components::empty_document()).into_any_element(),
             LoadState::Ready(renderer) => {
@@ -278,17 +273,18 @@ impl Render for ReaderView {
                     })
                     .into_any_element()
             }
-            LoadState::Failed => components::reader_content().child(components::empty_document()).into_any_element(),
         };
 
         let mut document_body = components::reader_document_body().child(document);
         if let Some(annotation) = self.marks.selected_id.as_ref().and_then(|id| self.marks.annotation(id)).cloned() {
             let delete_id = annotation.id.clone();
-            let sidebar_visible = self.reader_state_visible || self.toc_visible;
-            let sidebar_width = chrome::sidebar_width(sidebar_visible, cx);
+            let sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
             let viewport = window.viewport_size();
-            let preferences = ReaderSettings::preferences(cx);
-            let popup = annotation_popup_geometry(self.annotation_popup_anchor, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, preferences.column_width as f32, preferences.scale as f32, self.desired_column_count);
+            let column_count = match &self.load_state {
+                LoadState::Ready(renderer) => renderer.read(cx).layout_geometry().map_or(1, |geometry| usize::from(geometry.column_count)),
+                LoadState::Loading => 1,
+            };
+            let popup = annotation_popup_geometry(self.annotation_popup_anchor, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, column_count);
             // Saving a style or a colour leaves the editor open so several can
             // be tried; only closing and deleting dismiss it. Those two have to
             // hand the keyboard back, because the note input inside the editor
@@ -376,13 +372,11 @@ impl Render for ReaderView {
             panel = panel.child(components::reader_state_actions().child(components::reader_control_button("reader-footnote-open", "Go to note", theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx)))).child(
                 components::reader_control_button("reader-footnote-close", "Close", theme).on_click(cx.listener(|this, _, _, cx| {
                     this.footnote = None;
-                    crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+                    crate::invalidation::notify(cx, Component::ReaderShell, "footnote_closed");
                 })),
             ));
             document_body = document_body.child(panel);
         }
-        let sidebar_visible = self.reader_state_visible || self.toc_visible;
-        let split_sidebar_width = chrome::sidebar_width(sidebar_visible, cx);
         if let Some((uri, image)) = self.image_preview.clone() {
             let copy_image = entity.clone();
             let close_image = entity.clone();
@@ -393,7 +387,7 @@ impl Render for ReaderView {
                 move |_, cx| {
                     close_image.update(cx, |this, cx| {
                         this.image_preview = None;
-                        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+                        crate::invalidation::notify(cx, Component::ReaderShell, "image_preview_closed");
                     })
                 },
             ));
@@ -401,7 +395,7 @@ impl Render for ReaderView {
 
         let content = if sidebar_visible {
             let sidebar = if self.reader_state_visible { self.render_reader_state(cx) } else { self.render_toc(entity.clone(), theme, cx) };
-            chrome::with_sidebar(sidebar, document_body.into_any_element(), cx)
+            chrome::with_sidebar(sidebar, document_body.into_any_element(), window, cx)
         } else {
             document_body.into_any_element()
         };
@@ -483,8 +477,19 @@ impl Render for ReaderView {
                     }))
                     .into_any_element()
             }));
-        page.children(
-            (self.chrome_hidden && !cfg!(feature = "kobo"))
+        page.children((self.chrome_hidden && touch_input && !cfg!(feature = "kobo")).then(|| {
+            gpui::div()
+                .id("touch-epub-show-toolbar-tap-zone")
+                .absolute()
+                .left(gpui::relative(0.25))
+                .right(gpui::relative(0.25))
+                .top_0()
+                .bottom_0()
+                .on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx)))
+                .into_any_element()
+        }))
+        .children(
+            (self.chrome_hidden && !cfg!(feature = "kobo") && !touch_input)
                 .then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()),
         )
     }
@@ -596,8 +601,8 @@ mod key_binding_tests {
 
     #[test]
     fn annotation_popup_centers_in_the_clicked_column() {
-        let left = annotation_popup_geometry(Some(Point::new(px(100.0), px(200.0))), 1200.0, 800.0, 0.0, 500.0, 1.0, 2);
-        let right = annotation_popup_geometry(Some(Point::new(px(900.0), px(200.0))), 1200.0, 800.0, 0.0, 500.0, 1.0, 2);
+        let left = annotation_popup_geometry(Some(Point::new(px(100.0), px(200.0))), 1200.0, 800.0, 0.0, 2);
+        let right = annotation_popup_geometry(Some(Point::new(px(900.0), px(200.0))), 1200.0, 800.0, 0.0, 2);
 
         assert_eq!(left.left, 120.0);
         assert_eq!(right.left, 720.0);
@@ -605,8 +610,8 @@ mod key_binding_tests {
 
     #[test]
     fn annotation_popup_uses_the_roomier_vertical_side() {
-        let near_top = annotation_popup_geometry(Some(Point::new(px(100.0), px(140.0))), 1200.0, 800.0, 0.0, 600.0, 1.0, 2);
-        let near_bottom = annotation_popup_geometry(Some(Point::new(px(100.0), px(700.0))), 1200.0, 800.0, 0.0, 600.0, 1.0, 2);
+        let near_top = annotation_popup_geometry(Some(Point::new(px(100.0), px(140.0))), 1200.0, 800.0, 0.0, 2);
+        let near_bottom = annotation_popup_geometry(Some(Point::new(px(100.0), px(700.0))), 1200.0, 800.0, 0.0, 2);
 
         assert!(!near_top.above);
         assert!(near_bottom.above);

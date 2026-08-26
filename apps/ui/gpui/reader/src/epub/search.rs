@@ -11,15 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::Task;
-use html_view_core::{BookSearchMatch, BookSearchTarget, SearchOptions, SearchScope};
-
-fn same_target(left: &BookSearchTarget, right: &BookSearchTarget) -> bool {
-    match (left, right) {
-        (BookSearchTarget::SourceCfi(left), BookSearchTarget::SourceCfi(right)) => left == right,
-        (BookSearchTarget::LocalOccurrence(left), BookSearchTarget::LocalOccurrence(right)) => left == right,
-        _ => false,
-    }
-}
+use html_view_core::{SearchOptions, SearchScope};
 
 /// Which text a search treats as a match.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,7 +50,6 @@ pub(crate) struct SearchState {
     /// Position within the matches, as `(current, total)`.
     pub(crate) match_position: Option<(usize, usize)>,
     pub(crate) active: bool,
-    pub(crate) results: Vec<BookSearchMatch>,
 }
 
 impl Default for SearchState {
@@ -73,13 +64,13 @@ impl Default for SearchState {
             filters: SearchFilters { whole_book: true, ..SearchFilters::default() },
             match_position: None,
             active: false,
-            results: Vec::new(),
         }
     }
 }
 
 impl SearchState {
-    pub(crate) fn query(&self) -> &str {
+    #[cfg(test)]
+    fn query(&self) -> &str {
         &self.query
     }
 
@@ -142,18 +133,6 @@ impl SearchState {
         self.applied_query.clear();
         self.match_position = None;
         self.active = false;
-        self.results.clear();
-    }
-
-    /// Replaces the streamed results, reporting whether anything changed so a
-    /// repaint can be skipped when a batch repeats.
-    pub(crate) fn set_results(&mut self, results: &[BookSearchMatch]) -> bool {
-        let unchanged = self.results.len() == results.len() && self.results.iter().zip(results).all(|(left, right)| left.doc == right.doc && same_target(&left.target, &right.target) && left.excerpt == right.excerpt);
-        if unchanged {
-            return false;
-        }
-        self.results = results.to_vec();
-        true
     }
 }
 
@@ -221,17 +200,7 @@ mod tests {
         assert!(search.query().is_empty());
         assert!(!search.active);
         assert_eq!(search.match_position, None);
-        assert!(search.results.is_empty());
         assert!(!search.is_current(before), "an in-flight scan must not survive a clear");
-    }
-
-    #[test]
-    fn repeated_result_batches_do_not_report_a_change() {
-        let mut search = state();
-        let batch = vec![BookSearchMatch { doc: 1, target: BookSearchTarget::LocalOccurrence(3), excerpt: "a furrow".to_owned() }];
-
-        assert!(search.set_results(&batch), "the first batch is a change");
-        assert!(!search.set_results(&batch), "an identical batch must not force a repaint");
     }
 
     #[test]

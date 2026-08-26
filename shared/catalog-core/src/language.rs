@@ -1,4 +1,4 @@
-use catalog_contract::{CatalogPage, CatalogPublication, CatalogSource, CatalogWideSearchOutcome, CatalogWideSearchResult};
+use catalog_contract::{CatalogPage, CatalogPublication, CatalogSource};
 
 /// Explicit client language preferences used to constrain catalogue-wide
 /// search and multilingual feeds. An empty list means all languages.
@@ -40,7 +40,7 @@ impl CatalogLanguageFilter {
         if self.supported.is_empty() {
             return true;
         }
-        publication.languages.iter().filter_map(|language| canonical_language(language)).any(|language| self.supports(&language))
+        publication.languages.iter().filter_map(|language| canonical_language(language.as_str())).any(|language| self.supports(&language))
     }
 
     pub fn filter_sources(&self, sources: impl IntoIterator<Item = CatalogSource>) -> Vec<CatalogSource> {
@@ -55,18 +55,6 @@ impl CatalogLanguageFilter {
         for group in &mut page.groups {
             group.publications.retain(|publication| self.publication_supported(publication));
         }
-    }
-
-    pub fn filter_wide_search(&self, result: &mut CatalogWideSearchResult) {
-        result.groups.retain_mut(|group| {
-            if !self.source_supported(&group.source) {
-                return false;
-            }
-            if let CatalogWideSearchOutcome::Results { page } = &mut group.outcome {
-                self.filter_page(&group.source, page);
-            }
-            true
-        });
     }
 
     fn supports(&self, candidate: &str) -> bool {
@@ -126,9 +114,10 @@ mod tests {
             identity: CatalogPublicationIdentity { edition_id: "book".to_owned(), work_id: None },
             title: "Book".to_owned(),
             authors: Vec::new(),
-            languages: languages.iter().map(|language| (*language).to_owned()).collect(),
+            languages: languages.iter().map(|language| catalog_contract::LanguageTag::parse(language).unwrap()).collect(),
             description: None,
             image_url: None,
+            metadata: Default::default(),
             actions: Vec::new(),
         }
     }

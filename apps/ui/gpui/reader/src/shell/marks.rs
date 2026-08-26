@@ -5,7 +5,7 @@
 //! lives here rather than beside one of them. How a mark is anchored, and how
 //! it becomes something painted over the page, is the reader's own business.
 
-use epub_svelte_lib::library::marks::{ReaderAnnotation, ReaderBookmark};
+use app_contract::reader_state::{ReaderAnnotation, ReaderBookmark};
 
 #[derive(Default)]
 pub(crate) struct MarksState {
@@ -43,12 +43,14 @@ impl MarksState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle};
+    use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle};
+
+    const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
     fn annotation(id: &str) -> ReaderAnnotation {
         ReaderAnnotation {
             id: id.to_owned(),
-            content_hash: epub_svelte_lib::ContentHash::new("1"),
+            content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()),
             exact_text: "a furrow".to_owned(),
             style: AnnotationStyle::Highlight,

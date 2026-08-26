@@ -1,32 +1,9 @@
 //! Loads and applies the combined account, library, transfer, and session snapshot.
 
-use std::future::Future;
-
-use epub_svelte_lib::LibraryTransfers;
-use epub_svelte_lib::app::{AccountStatus, AccountStorageUsage, AppBackend, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 use gpui::Context;
 
 use super::SyncPage;
-
-pub(super) struct CloudSnapshot {
-    pub(super) account: AccountStatus,
-    pub(super) storage_usage: Option<AccountStorageUsage>,
-    pub(super) sync_statuses: Vec<LibrarySyncStatus>,
-    pub(super) local_storage_usage: Vec<LocalLibraryStorageUsage>,
-    /// `None` from a server without the per-library storage endpoint.
-    pub(super) server_storage_usage: Option<Vec<ServerLibraryStorageUsage>>,
-    pub(super) transfers: Vec<LibraryTransfers>,
-}
-
-pub(super) async fn load_cloud_snapshot(core: &AppBackend) -> Result<CloudSnapshot, String> {
-    let library_list = core.reconcile_libraries().await.map_err(|error| error.to_string())?;
-    let account = core.account_status().map_err(|error| error.to_string())?;
-    let storage_usage = if account.signed_in() { core.account_storage_usage_if_supported().await.map_err(|error| error.to_string())? } else { None };
-    let local_storage_usage = core.scan_local_library_storage_usage().await.map_err(|error| error.to_string())?;
-    let server_storage_usage = if account.signed_in() { core.account_library_storage_usage_if_supported().await.map_err(|error| error.to_string())? } else { None };
-    let transfers = core.transfer_statuses().map_err(|error| error.to_string())?;
-    Ok(CloudSnapshot { account, storage_usage, sync_statuses: library_list.sync_statuses, local_storage_usage, server_storage_usage, transfers })
-}
+use app_contract::backend::{BackendFuture, CloudSnapshot};
 
 impl SyncPage {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -46,9 +23,9 @@ impl SyncPage {
             self.message = Some("Refreshing…".into());
         }
         cx.notify();
-        let operation = self.services.backend.spawn(|core| async move { load_cloud_snapshot(&core).await });
+        let operation = self.services.backend.cloud_snapshot();
         self.task = Some(cx.spawn(async move |page, cx| {
-            let result = operation.await.unwrap_or_else(|error| Err(error.to_string()));
+            let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(snapshot) => page.apply_snapshot(snapshot, None, cx),
                 Err(error) => page.apply_error(error, cx),
@@ -83,11 +60,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    pub(super) fn start_snapshot_operation<F, Fut>(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: F, cx: &mut Context<Self>)
-    where
-        F: FnOnce(AppBackend) -> Fut,
-        Fut: Future<Output = Result<CloudSnapshot, String>> + Send + 'static,
-    {
+    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: BackendFuture<CloudSnapshot>, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -99,9 +72,8 @@ impl SyncPage {
         self.error = None;
         self.message = Some(progress.into());
         cx.notify();
-        let task = self.services.backend.spawn(operation);
         self.task = Some(cx.spawn(async move |page, cx| {
-            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+            let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(snapshot) => {
                     page.login_failed = false;
@@ -116,15 +88,12 @@ impl SyncPage {
     }
 
     pub(super) fn start_logout(&mut self, cx: &mut Context<Self>) {
-        self.start_snapshot_operation(
-            "Signing out…",
-            "Signed out",
-            false,
-            |core| async move {
-                core.logout().await.map_err(|error| error.to_string())?;
-                load_cloud_snapshot(&core).await
-            },
-            cx,
-        );
+        let operation = self.services.backend.logout();
+        self.start_snapshot_operation("Signing out…", "Signed out", false, operation, cx);
+    }
+
+    pub(super) fn start_sync(&mut self, cx: &mut Context<Self>) {
+        let operation = self.services.backend.sync_all_libraries();
+        self.start_snapshot_operation("Syncing…", "All libraries synced", false, operation, cx);
     }
 }

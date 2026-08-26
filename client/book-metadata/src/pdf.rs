@@ -1,7 +1,7 @@
 use crate::{author_credit, fallback_metadata, MetadataResult};
 use library_model::{
-    canonical_doi, canonical_isbn, canonical_uuid, BookMetadataState, Contributor, LanguageTag, PublicationCollection, PublicationDate, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata,
-    PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit, CONTRIBUTOR_MARC_RELATOR_CODE,
+    canonical_doi, canonical_isbn, canonical_uuid, BookMetadataState, Collection, CollectionKind, Contributor, Identifier, LanguageTag, PublicationDate, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle,
+    PublisherCredit, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE,
 };
 use lopdf::{Dictionary, Document};
 use roxmltree::{Document as XmlDocument, Node};
@@ -30,6 +30,12 @@ pub struct InspectedPdf {
 /// checksum validation; arbitrary XMP extensions are never promoted.
 pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
     let document = Document::load(path)?;
+    if document.is_encrypted() {
+        return Err("password-protected PDF publications are not supported".into());
+    }
+    if document.get_pages().is_empty() {
+        return Err("PDF publication contains no pages".into());
+    }
     let info = pdf_info_dictionary(&document);
     let xmp = pdf_xmp(&document);
     let parsed = xmp.as_deref().and_then(|xml| XmlDocument::parse(xml).ok());
@@ -54,7 +60,7 @@ pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
         publication.identifiers = xmp_identifiers(xml);
         publication.publishers = xmp_values(xml, DC, "publisher", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublisherCredit::new(value.text).ok()).collect();
         publication.languages = xmp_values(xml, DC, "language", MAX_TEXT_BYTES).into_iter().filter_map(|value| LanguageTag::parse(value.text).ok()).collect();
-        publication.dates = xmp_values(xml, DC, "date", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublicationDate::new(None, value.text, Some("dc:date".to_owned())).ok()).collect();
+        publication.dates = xmp_values(xml, DC, "date", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublicationDate::new(None, value.text, Some("dc:date".to_owned()), "pdf:xmp:dc:date").ok()).collect();
         publication.subjects = xmp_values(xml, DC, "subject", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublicationSubject::new(None, value.text, "pdf:xmp:dc:subject", None, None).ok()).collect();
         publication.rights = texts(xmp_values(xml, DC, "rights", MAX_DESCRIPTION_BYTES));
         publication.sources = texts(xmp_values(xml, DC, "source", MAX_TEXT_BYTES));
@@ -62,16 +68,15 @@ pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
         publication.formats = texts(xmp_values(xml, DC, "format", MAX_TEXT_BYTES));
         publication.relations = texts(xmp_values(xml, DC, "relation", MAX_TEXT_BYTES));
         publication.coverage = texts(xmp_values(xml, DC, "coverage", MAX_TEXT_BYTES));
-        publication.alternate_titles = title_values.iter().filter(|value| value.text != title).filter_map(|value| PublicationTitle::new(None, &value.text, Some("alternative".to_owned()), None).ok()).collect();
+        publication.alternate_titles = title_values.iter().filter(|value| value.text != title).filter_map(|value| PublicationTitle::new(None, &value.text, Some("alternative".to_owned()), None, "pdf:xmp:dc:title").ok()).collect();
         publication.collections = xmp_collections(xml);
         publication.properties = xmp_properties(xml);
     }
 
-    let mut seen_isbns = publication.identifiers.iter().filter(|identifier| identifier.scheme() == &PublicationIdentifierScheme::Isbn).filter_map(PublicationIdentifier::canonical_value).collect::<HashSet<_>>();
+    let mut seen_isbns = publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(Identifier::canonical_value).collect::<HashSet<_>>();
     for isbn in early_page_isbns(&document) {
         if seen_isbns.insert(isbn.clone()) {
-            let provenance = PublicationIdentifierType::new("early-page-text", Some("bokheim:provenance".to_owned())).ok().into_iter().collect();
-            if let Ok(identifier) = PublicationIdentifier::new(isbn, PublicationIdentifierScheme::Isbn, provenance) {
+            if let Ok(identifier) = Identifier::new(isbn, Scheme::Isbn, Scope::Publication, "pdf:early-page-text") {
                 publication.identifiers.push(identifier);
             }
         }
@@ -157,7 +162,7 @@ fn texts(values: Vec<XmpValue>) -> Vec<String> {
     values.into_iter().map(|value| value.text).collect()
 }
 
-fn xmp_identifiers(document: &XmlDocument<'_>) -> Vec<PublicationIdentifier> {
+fn xmp_identifiers(document: &XmlDocument<'_>) -> Vec<Identifier> {
     let mut values = xmp_values(document, DC, "identifier", MAX_TEXT_BYTES);
     values.extend(xmp_values(document, XMP, "Identifier", MAX_TEXT_BYTES));
     for node in document
@@ -174,22 +179,21 @@ fn xmp_identifiers(document: &XmlDocument<'_>) -> Vec<PublicationIdentifier> {
     values.into_iter().filter_map(publication_identifier).take(MAX_VALUES).collect()
 }
 
-fn publication_identifier(value: XmpValue) -> Option<PublicationIdentifier> {
+fn publication_identifier(value: XmpValue) -> Option<Identifier> {
     let declared = value.scheme.as_deref().unwrap_or_default().to_ascii_lowercase();
     let trimmed = strip_identifier_label(&value.text);
     let (value, scheme) = if declared.contains("isbn") || canonical_isbn(trimmed).is_some() {
-        (canonical_isbn(trimmed)?, PublicationIdentifierScheme::Isbn)
+        (canonical_isbn(trimmed)?, Scheme::Isbn)
     } else if declared.contains("doi") || canonical_doi(trimmed).is_some() {
-        (canonical_doi(trimmed)?, PublicationIdentifierScheme::Doi)
+        (canonical_doi(trimmed)?, Scheme::Doi)
     } else if declared.contains("uuid") || canonical_uuid(trimmed).is_some() {
-        (canonical_uuid(trimmed)?, PublicationIdentifierScheme::Uuid)
+        (canonical_uuid(trimmed)?, Scheme::Uuid)
     } else if declared.contains("issn") {
-        (trimmed.to_owned(), PublicationIdentifierScheme::Issn)
+        (trimmed.to_owned(), Scheme::Issn)
     } else {
-        (trimmed.to_owned(), PublicationIdentifierScheme::Unspecified)
+        (trimmed.to_owned(), Scheme::Unspecified)
     };
-    let provenance = PublicationIdentifierType::new("xmp", Some("bokheim:provenance".to_owned())).ok().into_iter().collect();
-    PublicationIdentifier::new(value, scheme, provenance).ok()
+    Identifier::new(value, scheme, Scope::Publication, "pdf:xmp").ok()
 }
 
 fn strip_identifier_label(value: &str) -> &str {
@@ -202,13 +206,13 @@ fn strip_identifier_label(value: &str) -> &str {
     value
 }
 
-fn xmp_collections(document: &XmlDocument<'_>) -> Vec<PublicationCollection> {
+fn xmp_collections(document: &XmlDocument<'_>) -> Vec<Collection> {
     let mut collections = Vec::new();
     let series = xmp_values(document, CALIBRE, "series", MAX_TEXT_BYTES);
     let positions = xmp_values(document, CALIBRE, "series_index", MAX_TEXT_BYTES);
     for (index, series) in series.into_iter().enumerate() {
         let position = positions.get(index).or_else(|| positions.first()).map(|value| value.text.clone());
-        if let Ok(collection) = PublicationCollection::new(series.text, Some("series".to_owned()), position) {
+        if let Ok(collection) = Collection::new(series.text, Some(CollectionKind::Series), position, "pdf:xmp") {
             collections.push(collection);
         }
     }
@@ -221,7 +225,7 @@ fn xmp_properties(document: &XmlDocument<'_>) -> Vec<PublicationProperty> {
     let mut properties = Vec::new();
     for (namespace, name) in fields {
         for value in xmp_values(document, namespace, name, MAX_DESCRIPTION_BYTES) {
-            if let Ok(property) = PublicationProperty::new(None, format!("pdf:xmp:{name}"), value.text, None, value.scheme, value.language) {
+            if let Ok(property) = PublicationProperty::new(None, format!("pdf:xmp:{name}"), value.text, None, value.scheme, value.language, "pdf:xmp:property") {
                 properties.push(property);
             }
         }
@@ -246,7 +250,8 @@ fn isbns_in_early_text(text: &str) -> Vec<String> {
     // permissive scan to text following an explicit ISBN label.
     let lower = text.to_ascii_lowercase();
     for (offset, _) in lower.match_indices("isbn") {
-        let tail = &text[offset + 4..text.len().min(offset + 64)];
+        let tail_end = text.floor_char_boundary(text.len().min(offset + 64));
+        let tail = &text[offset + 4..tail_end];
         let candidate = tail.trim_start_matches(|character: char| !character.is_ascii_digit() && character != 'X' && character != 'x');
         let candidate = candidate.chars().take_while(|character| character.is_ascii_digit() || matches!(character, 'X' | 'x' | '-' | ' ')).collect::<String>();
         if let Some(isbn) = canonical_isbn(candidate.trim()) {
@@ -299,7 +304,14 @@ mod tests {
         let mut document = Document::with_version("1.7");
         let metadata = br#"<?xpacket begin=''?><x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description xmlns:dc='http://purl.org/dc/elements/1.1/' xmlns:xmp='http://ns.adobe.com/xap/1.0/' xmlns:calibre='http://calibre-ebook.com/xmp-namespace' calibre:series='Examples' calibre:series_index='2'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>Rich title</rdf:li><rdf:li xml:lang='sv'>Rik titel</rdf:li></rdf:Alt></dc:title><dc:creator><rdf:Seq><rdf:li>Ada Author</rdf:li></rdf:Seq></dc:creator><dc:publisher><rdf:Bag><rdf:li>Example Press</rdf:li></rdf:Bag></dc:publisher><dc:date><rdf:Seq><rdf:li>2024-05-06</rdf:li></rdf:Seq></dc:date><dc:language><rdf:Bag><rdf:li>sv</rdf:li></rdf:Bag></dc:language><dc:identifier>urn:isbn:978-0-8213-3827-8</dc:identifier><dc:subject><rdf:Bag><rdf:li>History</rdf:li></rdf:Bag></dc:subject><dc:rights><rdf:Alt><rdf:li xml:lang='x-default'>Copyright example</rdf:li></rdf:Alt></dc:rights></rdf:Description></rdf:RDF></x:xmpmeta>"#;
         let metadata_id = document.add_object(Stream::new(dictionary! { "Type" => "Metadata", "Subtype" => "XML" }, metadata.to_vec()));
-        let pages_id = document.add_object(dictionary! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 });
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 600.into(), 800.into()],
+            "Resources" => dictionary! {},
+        });
+        document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }));
         let root_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id, "Metadata" => metadata_id });
         document.trailer.set("Root", root_id);
         document.save(&path).unwrap();
@@ -317,5 +329,14 @@ mod tests {
     #[test]
     fn early_page_text_accepts_only_checksum_valid_isbns() {
         assert_eq!(isbns_in_early_text("ISBN 978 0 8213 3827 8\nInvalid ISBN 978-0-8213-3827-9"), ["9780821338278"]);
+    }
+
+    #[test]
+    fn early_page_isbn_window_ends_at_utf8_boundary() {
+        let mut text = format!("{}isbn 978-0-8213-3827-8", "a".repeat(1_984));
+        text.extend(std::iter::repeat_n(' ', 2_047 - text.len()));
+        text.push('\u{f736}');
+
+        assert_eq!(isbns_in_early_text(&text), ["9780821338278"]);
     }
 }

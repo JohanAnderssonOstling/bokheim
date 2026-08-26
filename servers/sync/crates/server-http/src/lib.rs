@@ -151,6 +151,7 @@ pub fn router_with_operational_limits(
         .route("/api/admin/engagement", get(admin::engagement))
         .route("/api/admin/accounts", get(admin::accounts))
         .route("/api/admin/services", get(admin::services))
+        .route("/api/admin/catalog-processes/:process", post(admin::catalog_process_action).layer(DefaultBodyLimit::max(4 * 1024)))
         .route("/api/admin/catalog-identity-reviews", get(admin::catalog_identity_reviews))
         .route("/api/admin/catalog-identity-reviews/:review_id", post(admin::catalog_identity_review_action).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/admin/login", post(admin::login).layer(DefaultBodyLimit::max(16 * 1024)))

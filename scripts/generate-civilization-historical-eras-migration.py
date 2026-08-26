@@ -255,9 +255,9 @@ def render(manifest: dict[str, object], taxonomy: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--taxonomy", type=Path, default=Path("client/library-model/data/unified-taxonomy-v2.sqlite3"))
-    parser.add_argument("--manifest", type=Path, default=Path("client/library-model/data/civilization-historical-eras-manifest.json"))
-    parser.add_argument("--output", type=Path, default=Path("client/library-model/data/migrations/20260817_civilization_historical_eras.sql"))
+    parser.add_argument("--taxonomy", type=Path, default=Path("shared/subject-projection/data/unified-taxonomy-v2.sqlite3"))
+    parser.add_argument("--manifest", type=Path, default=Path("shared/subject-projection/data/civilization-historical-eras-manifest.json"))
+    parser.add_argument("--output", type=Path, default=Path("shared/subject-projection/data/migrations/20260817_civilization_historical_eras.sql"))
     args = parser.parse_args()
     manifest = build()
     args.manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

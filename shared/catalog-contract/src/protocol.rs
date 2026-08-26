@@ -1,5 +1,21 @@
-use crate::{CatalogFacet, CatalogGroup, CatalogLink, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationIdentity, CatalogSearch, CatalogSourceId};
+use crate::{
+    CatalogFacet, CatalogGroup, CatalogLink, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationIdentity, CatalogSearch, CatalogSource, CatalogSourceId, CatalogSourcedPublication, CatalogSubjectBrowseDeltaResponse,
+    CatalogSubjectBrowseResponse,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSourceRegistration {
+    pub source: CatalogSource,
+    pub root_locator: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSourceRegistry {
+    pub revision: u64,
+    pub sources: Vec<CatalogSourceRegistration>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogPublicationReference {
@@ -120,4 +136,42 @@ pub fn materialize_page(layout: CatalogPageLayout, mut publication: impl FnMut(&
         pagination: layout.pagination,
         search: layout.search,
     })
+}
+
+/// Resolves a delta response into the ordered subject-browse response consumed
+/// by frontends. All transports share the same consistency checks.
+pub fn materialize_subject_browse_delta(delta: CatalogSubjectBrowseDeltaResponse) -> Result<CatalogSubjectBrowseResponse, String> {
+    if delta.range.returned_items as usize != delta.entry_ids.len() {
+        return Err("catalogue returned an inconsistent subject result range".to_owned());
+    }
+    let mut payloads = HashMap::<u64, CatalogSourcedPublication>::new();
+    for payload in delta.payloads {
+        if payloads.insert(payload.entry_id, payload.publication).is_some() {
+            return Err(format!("catalogue returned duplicate subject publication {}", payload.entry_id));
+        }
+    }
+    let publications = delta.entry_ids.iter().map(|entry_id| payloads.remove(entry_id).ok_or_else(|| format!("catalogue omitted subject publication {entry_id}"))).collect::<Result<Vec<_>, _>>()?;
+    Ok(CatalogSubjectBrowseResponse { epoch: delta.epoch, navigation: delta.navigation, publications, range: delta.range, capabilities: delta.capabilities })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CatalogResultRangeResponse, CatalogSubjectBrowseCapabilities};
+
+    #[test]
+    fn subject_delta_range_must_match_its_ordered_ids() {
+        let delta = CatalogSubjectBrowseDeltaResponse {
+            epoch: "epoch".to_owned(),
+            revision: 1,
+            navigation: Vec::new(),
+            entry_ids: vec![1],
+            exact_entry_ids: Vec::new(),
+            payloads: Vec::new(),
+            range: CatalogResultRangeResponse { offset: 0, returned_items: 0, total_items: 1 },
+            capabilities: CatalogSubjectBrowseCapabilities::default(),
+        };
+
+        assert!(materialize_subject_browse_delta(delta).unwrap_err().contains("inconsistent"));
+    }
 }

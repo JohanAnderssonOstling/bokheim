@@ -1,3 +1,3 @@
-//! The PDF reader window.
+//! The PDF reader surface.
 
 pub(crate) mod toc;

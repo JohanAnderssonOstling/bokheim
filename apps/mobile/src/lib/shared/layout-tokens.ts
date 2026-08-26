@@ -48,8 +48,6 @@ const LENGTH_TOKENS: [
   ["--book-card-author-size", "book_card_author_size_px", "scaled"],
   ["--book-card-cover-content-gap", "book_card_cover_content_gap_px", "fixed"],
   ["--book-card-text-gap", "book_card_text_gap_px", "fixed"],
-  ["--book-card-progress-height", "book_card_progress_height_px", "fixed"],
-  ["--book-grid-row-trailing-space", "book_grid_row_trailing_space_px", "fixed"],
   ["--carousel-title-size", "carousel_title_size_px", "scaled"],
   ["--carousel-section-gap", "carousel_section_gap_px", "fixed"],
   ["--carousel-content-gap", "carousel_content_gap_px", "fixed"],
@@ -132,8 +130,8 @@ export function browsingLayoutStyle() {
     // Containers summed from their parts, so the fixed art and the scaling text
     // each contribute on their own terms. At 16px these equal the contract's
     // stated book_card_height_px, book_grid_row_height_px and author_row_height_px.
-    "--book-card-height: calc(var(--book-cover-height) + var(--book-card-cover-content-gap) + var(--book-card-title-block-height) + var(--book-card-text-gap) + var(--book-card-author-block-height) + var(--book-card-text-gap) + var(--book-card-progress-height))",
-    "--book-grid-row-height: calc(var(--book-card-height) + var(--book-grid-row-trailing-space))",
+    "--book-card-height: calc(var(--book-cover-height) + var(--book-card-cover-content-gap) + var(--book-card-title-block-height) + var(--book-card-text-gap) + var(--book-card-author-block-height))",
+    "--book-grid-row-height: var(--book-card-height)",
     "--author-row-height: calc(var(--author-row-cover-height) + var(--book-card-title-block-height) + var(--author-row-content-gap) + var(--author-row-horizontal-padding) * 2)",
   ];
 

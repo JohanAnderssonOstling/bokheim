@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use epub_svelte_lib::LibraryTransfers;
+use app_contract::transfer::LibraryTransfers;
 use gpui::Context;
 
 use super::SyncPage;

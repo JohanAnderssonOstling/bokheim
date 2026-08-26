@@ -1,17 +1,16 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Div, FontWeight, SharedString, Window, div, px};
-use gpui_component::IconName;
+use gpui::{AnyElement, App, Div, FontWeight, IntoElement, SharedString, Window, div, px};
 use gpui_component::Sizable;
 use gpui_component::Size;
 use gpui_component::Theme;
 use gpui_component::alert::Alert;
 
-use crate::{BrowserTheme, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, TITLE_MD};
+use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, TITLE_MD};
 
 /// Fills the parent's layout box and permits both axes to shrink inside flex
 /// parents. GPUI's `size_full` alone retains the default minimum size, which can
 /// make nested panes or virtual-list viewports overflow instead of shrinking.
-pub fn full_size() -> Div {
+fn full_size() -> Div {
     div().size_full().min_h_0().min_w_0()
 }
 
@@ -45,22 +44,19 @@ pub fn reader_app_page(window: &mut Window, cx: &App, theme: BrowserTheme) -> Di
     full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(font_size)
 }
 
-pub fn browser_error_banner(error: Option<SharedString>, retry_label: SharedString, theme: BrowserTheme, body: AnyElement, on_retry: impl Fn(&mut App) + 'static) -> AnyElement {
-    let Some(error) = error else {
-        return body;
-    };
-    let retry = crate::topbar_action_button("retry-section", retry_label, IconName::Redo2, theme).on_click(move |_, _, cx| on_retry(cx));
+/// Error presentation for a browser section.
+///
+/// The caller owns error-state branching and the retry element's behavior;
+/// this helper only supplies their shared layout and styling.
+pub fn browser_error_banner(error: impl Into<SharedString>, retry: impl IntoElement, body: AnyElement) -> Div {
     full_size_column()
         .gap(px(SPACE_SM))
-        .child(div().w_full().flex().items_center().justify_between().gap(px(SPACE_SM)).child(Alert::error("browser-error", error).with_size(Size::Small)).child(retry))
+        .child(div().w_full().flex().items_center().justify_between().gap(px(SPACE_SM)).child(Alert::error("browser-error", error.into()).with_size(Size::Small)).child(retry))
         .child(div().flex_1().min_h_0().child(body))
-        .into_any_element()
 }
 
-pub fn sidebar(width: f32, theme: BrowserTheme) -> Scrollable<Div> {
-    let mut separator = theme.border;
-    separator.a *= 0.55;
-    div().w(px(width)).h_full().min_h_0().flex_none().flex().flex_col().gap_0().border_r_1().border_color(separator).bg(theme.page_bg).overflow_y_scroll_hidden()
+pub fn sidebar(theme: BrowserTheme) -> Scrollable<Div> {
+    div().w(gpui::rems(crate::NAV_RAIL_SIZE_REM)).h_full().min_h_0().flex_none().flex().flex_col().gap_0().bg(theme.page_bg).overflow_y_scroll_hidden()
 }
 
 pub fn section_title(text: impl Into<SharedString>) -> Div {
@@ -68,11 +64,11 @@ pub fn section_title(text: impl Into<SharedString>) -> Div {
 }
 
 pub fn scrollable_page() -> Scrollable<Div> {
-    full_size().p(px(SPACE_LG)).overflow_y_scrollbar()
+    full_size().overflow_y_scrollbar()
 }
 
 pub fn centered_page_content() -> Div {
-    div().w_full().max_w(px(920.0)).mx_auto().flex().flex_col().gap(px(SPACE_LG))
+    div().w_full().max_w(px(920.0)).mx_auto().flex().flex_col().gap(px(SPACE_MD))
 }
 
 pub fn section_header(title: impl Into<SharedString>, detail: impl Into<SharedString>, theme: BrowserTheme) -> Div {

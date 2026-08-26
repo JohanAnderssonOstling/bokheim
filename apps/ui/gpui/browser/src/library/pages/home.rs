@@ -1,20 +1,22 @@
-//! Landing page: recently read, finished, and recently added carousels.
+//! Landing page: progress, recent activity, finished, and recently added carousels.
 
 use std::collections::HashSet;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Task, Window};
+use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px, rems};
+use gpui_component::{Disableable, IconName};
 use ui_components as components;
 
 use crate::library::pages::library_empty_state;
-use crate::library::services::{HomeBrowseRows, LatestRequest, LibraryContext};
-use crate::library::widgets::BookCarousel;
-use crate::library::{DetailOwner, context_with_page_detail, detail::BookDetailPage, page_detail};
+use crate::library::services::{HomeBrowseRows, LatestRequest, LibraryContentsChanged, LibraryContext};
+use crate::library::widgets::{BookCardView, Paginator, PaginatorAxis, PaginatorChild, PaginatorGapPolicy, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
+const HOME_BOOK_PREFERRED_WIDTH_REM: f32 = components::BOOK_COVER_WIDTH / 16.0;
+const HOME_BOOK_ASPECT_RATIO: f32 = components::BOOK_COVER_ASPECT_RATIO;
+const HOME_BOOK_EXTRA_HEIGHT_REM: f32 = components::BOOK_CARD_TITLE_HEIGHT_REM + components::BOOK_CARD_AUTHOR_HEIGHT_REM;
 
 pub(crate) struct HomePage {
     ui: LibraryContext,
-    detail: Option<Entity<BookDetailPage>>,
-    sections: Vec<BookCarousel>,
+    sections: Vec<HomeSection>,
     error: Option<SharedString>,
     refresh: LatestRequest,
     /// Whether a load has resolved at least once.
@@ -23,29 +25,64 @@ pub(crate) struct HomePage {
     /// library has no books" after it. Without this the page cannot tell those
     /// apart, and a library that is still being scanned is described as empty.
     loaded: bool,
-    _updates: Task<()>,
+    _updates: Subscription,
+}
+
+struct HomeSection {
+    id: &'static str,
+    title: SharedString,
+    paginator: Entity<Paginator>,
+}
+
+impl HomeSection {
+    fn new(id: &'static str, title: &'static str, cx: &mut Context<HomePage>) -> Self {
+        let paginator = cx.new(|_| Paginator::new(id, []).max_rows(1).flow_axis(PaginatorAxis::Horizontal).horizontal_only());
+        Self { id, title: title.into(), paginator }
+    }
+
+    fn render(&self, index: usize, show_controls: bool, cx: &mut Context<HomePage>) -> AnyElement {
+        let theme = components::browser_theme(cx);
+        let mut heading = components::carousel_heading().child(components::carousel_title(self.title.clone()));
+        if show_controls {
+            let paginator = self.paginator.read(cx);
+            let has_previous = paginator.has_previous();
+            let has_next = paginator.has_next();
+            let can_previous = paginator.can_previous();
+            let can_next = paginator.can_next();
+            let previous = has_previous.then(|| {
+                components::carousel_arrow_button(format!("{}-previous", self.id), "Previous", IconName::ChevronLeft, theme)
+                    .disabled(!can_previous)
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.sections[index].paginator.update(cx, |paginator, cx| paginator.previous(cx));
+                    }))
+                    .into_any_element()
+            });
+            let next = has_next.then(|| {
+                components::carousel_arrow_button(format!("{}-next", self.id), "Next", IconName::ChevronRight, theme)
+                    .disabled(!can_next)
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.sections[index].paginator.update(cx, |paginator, cx| paginator.next(cx));
+                    }))
+                    .into_any_element()
+            });
+            if has_previous || has_next {
+                heading = heading.child(components::paginator_controls(previous, next));
+            }
+        }
+        components::carousel_section().child(heading).child(self.paginator.clone()).into_any_element()
+    }
 }
 
 impl HomePage {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
-        let ui = context_with_page_detail(ui, cx);
-        let recently_read = BookCarousel::new("Recently read", ui.clone(), true);
-        // A finished book's bar is full on every card in the section, so it
-        // draws the same mark for every book and separates none of them; the
-        // heading has already said what the bar would.
-        let finished = BookCarousel::new("Finished", ui.clone(), false);
-        let recently_added = BookCarousel::new("Recently added", ui.clone(), false);
-        let sections = vec![recently_read, finished, recently_added];
+        let continue_reading = HomeSection::new("home-continue-reading", "Furthest along", cx);
+        let recently_read = HomeSection::new("home-recently-read", "Recently read", cx);
+        let finished = HomeSection::new("home-finished", "Finished", cx);
+        let recently_added = HomeSection::new("home-recently-added", "Recently added", cx);
+        let sections = vec![continue_reading, recently_read, finished, recently_added];
         let updates = ui.updates();
-        let update_task = cx.spawn(async move |page, cx| {
-            while let Ok(update) = updates.recv().await {
-                let _ = page.update(cx, |page, cx| match update {
-                    epub_svelte_lib::app::LibraryUpdate::Contents => page.refresh(cx),
-                    epub_svelte_lib::app::LibraryUpdate::Covers(content_hashes) => crate::library::invalidate_covers(page.ui.library.id().clone(), &content_hashes, cx),
-                });
-            }
-        });
-        let mut page = Self { ui, detail: None, sections, error: None, refresh: LatestRequest::default(), loaded: false, _updates: update_task };
+        let update_subscription = cx.subscribe(&updates, |page, _, _: &LibraryContentsChanged, cx| page.refresh(cx));
+        let mut page = Self { ui, sections, error: None, refresh: LatestRequest::default(), loaded: false, _updates: update_subscription };
         page.refresh(cx);
         page
     }
@@ -53,7 +90,7 @@ impl HomePage {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let limit = i32::from(self.ui.contracts().browsing_content.home_book_limit);
         let generation = self.refresh.begin();
-        let load = self.ui.load_home(limit);
+        let load = self.ui.backend().load_home(limit);
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             let _ = page.update(cx, |page, cx| {
@@ -92,31 +129,55 @@ impl HomePage {
                 in_progress.push(book);
             }
         }
-        let recent_ids = in_progress.iter().chain(&finished).map(|book| book.content_hash.clone()).collect::<HashSet<_>>();
+        let recent_ids = data.most_progress.iter().chain(&in_progress).chain(&finished).map(|book| book.content_hash).collect::<HashSet<_>>();
         data.recently_added.retain(|book| !recent_ids.contains(&book.content_hash));
 
-        let groups = [in_progress, finished, data.recently_added];
-        for (section, books) in self.sections.iter_mut().zip(groups) {
-            section.set_books(books, cx);
+        let groups = [data.most_progress, in_progress, finished, data.recently_added];
+        for (section, books) in self.sections.iter().zip(groups) {
+            let children = books
+                .into_iter()
+                .map(|book| {
+                    let card = BookCardView::create(book, self.ui.clone(), cx);
+                    let prepared_card = card.clone();
+                    let ready_card = card.clone();
+                    let open_card = card.clone();
+                    PaginatorChild::new(move |_, _| div().w_full().min_w_0().child(card.clone()).into_any_element())
+                        .with_activate(move |window, cx| {
+                            let _ = open_card.update(cx, |card, card_cx| card.open(window, card_cx));
+                        })
+                        .with_prepare(move |cx| prepared_card.update(cx, |card, cx| card.prepare(cx)))
+                        .with_ready(move |cx| ready_card.read(cx).is_prepared())
+                })
+                .collect::<Vec<_>>();
+            let policy = PaginatorGroupPolicy::new(
+                // Home is a set of horizontal shelves, not a fill-the-window
+                // grid. Keeping every card at the established cover width
+                // also keeps the paginator's intrinsic row height identical
+                // to the geometry it paints when a shelf contains only a few
+                // books.
+                PaginatorWidthPolicy::fixed(rems(HOME_BOOK_PREFERRED_WIDTH_REM)),
+                PaginatorSizing::aspect_ratio(HOME_BOOK_ASPECT_RATIO).with_rems(rems(HOME_BOOK_EXTRA_HEIGHT_REM)).with_pixels(px(components::BOOK_CARD_FIXED_HEIGHT)),
+                PaginatorGapPolicy::new(px(components::BOOK_GRID_GAP), px(components::BOOK_GRID_BOOK_GAP)).with_maximum(px(components::BOOK_GRID_MAX_GAP)),
+                PaginatorGapPolicy::new(px(components::BOOK_GRID_GAP), px(components::BOOK_GRID_BOOK_GAP)),
+            );
+            section.paginator.update(cx, |paginator, cx| paginator.set_groups([PaginatorGroup::new(policy, children)], cx));
         }
     }
 }
 
 impl Render for HomePage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(detail) = page_detail(self) {
-            return detail;
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
+        let show_paginator_controls = !cx.supports_touch_input();
 
         let mut page = components::home_page();
         let mut rendered_any = false;
         for (index, section) in self.sections.iter().enumerate() {
-            if section.is_empty() {
+            if section.paginator.read(cx).is_empty() {
                 continue;
             }
             rendered_any = true;
-            page = page.child(section.render(index, window, cx));
+            page = page.child(section.render(index, show_paginator_controls, cx));
         }
 
         // Every carousel is empty either because nothing has loaded yet or
@@ -124,28 +185,21 @@ impl Render for HomePage {
         // blank page in both cases.
         if !rendered_any && self.error.is_none() {
             let states = &self.ui.contracts().browsing_states;
-            page = page.child(if self.loaded && !self.ui.scanner_running() {
+            page = page.child(if self.loaded && !self.ui.backend().scanner_running() {
                 library_empty_state(theme)
             } else {
-                let label = if self.ui.scanner_running() { "Scanning library…".into() } else { states.loading_library_label.clone() };
+                let label = if self.ui.backend().scanner_running() { "Scanning library…".into() } else { states.loading_library_label.clone() };
                 components::browser_loading_message(label, theme).into_any_element()
             });
         }
 
         let entity = cx.entity();
         let retry_label = self.ui.contracts().browsing_states.retry_label.clone();
-        components::browser_error_banner(self.error.clone(), retry_label.into(), theme, page.into_any_element(), move |cx| {
-            entity.update(cx, |page, cx| page.refresh(cx));
-        })
-    }
-}
-
-impl DetailOwner for HomePage {
-    fn detail(&self) -> Option<&Entity<BookDetailPage>> {
-        self.detail.as_ref()
-    }
-
-    fn detail_mut(&mut self) -> &mut Option<Entity<BookDetailPage>> {
-        &mut self.detail
+        if let Some(error) = self.error.clone() {
+            let retry = components::topbar_action_button("retry-section", retry_label, IconName::Redo2, theme).on_click(move |_, _, cx| entity.update(cx, |page, cx| page.refresh(cx)));
+            components::browser_error_banner(error, retry, page.into_any_element()).into_any_element()
+        } else {
+            page.into_any_element()
+        }
     }
 }

@@ -12,6 +12,7 @@ export interface HomePageState {
   libraryId: string;
   loading: boolean;
   error: string;
+  continueReading: BookCardData[];
   inProgress: BookCardData[];
   finished: BookCardData[];
   recentlyAdded: BookCardData[];
@@ -22,6 +23,7 @@ const initialState = (): HomePageState => ({
   libraryId: "",
   loading: false,
   error: "",
+  continueReading: [],
   inProgress: [],
   finished: [],
   recentlyAdded: [],
@@ -63,10 +65,11 @@ export function createHomePageController(navigate: (path: string) => Promise<voi
       );
       if (current !== request) return;
       const recentlyRead = home.recently_read;
-      const allBooks = [...home.recently_added, ...recentlyRead];
+      const allBooks = [...home.recently_added, ...recentlyRead, ...home.most_progress];
       update((state) => ({
         ...state,
         loading: false,
+        continueReading: home.most_progress,
         inProgress: recentlyRead.filter(
           (book) =>
             (book.progress ?? 0) < BROWSING_CONTENT_CONTRACT.finished_progress_threshold,

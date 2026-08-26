@@ -1,12 +1,17 @@
-//! Appearance, library presentation and desktop update settings.
+//! Account, appearance, library presentation and desktop update settings.
 //!
 //! Universal: everything it edits is account-scoped rather than library-scoped,
 //! so it edits the shared [`Preferences`] store and every library page observes
 //! the result.
+//!
+//! The account and its sync state are the first section rather than a
+//! destination of their own: signing in is something you do once, and the
+//! things it governs — quota, which libraries sync — are settings like any
+//! other. [`SyncPage`] keeps owning that state and is embedded here.
 
-use epub_svelte_lib::app::preferences::BrowsingPreferencePatch;
+use app_contract::preferences::BrowsingPreferencePatch;
 use gpui::prelude::*;
-use gpui::{Context, Entity, IntoElement, Render, SharedString, Window};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::group_box::{GroupBox, GroupBoxVariants};
@@ -14,8 +19,10 @@ use gpui_component::group_box::{GroupBox, GroupBoxVariants};
 use gpui_component::switch::Switch;
 use ui_components as components;
 
+use crate::navigation::NavigationState;
 use crate::services::{AppServices, DesktopUpdate};
 use crate::stores::Preferences;
+use crate::universal::sync::SyncPage;
 
 enum DesktopUpdateState {
     Idle,
@@ -30,22 +37,30 @@ enum DesktopUpdateState {
 pub(crate) struct SettingsPage {
     services: AppServices,
     preferences: Entity<Preferences>,
+    account: Entity<SyncPage>,
     error: Option<SharedString>,
     desktop_update: DesktopUpdateState,
     #[cfg(feature = "kobo")]
     kobo_auto_rotate: bool,
+    _account_subscription: Subscription,
 }
 
 impl SettingsPage {
-    pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, _cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, active_library: Entity<NavigationState>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let desktop_update = services.desktop_updater.as_ref().and_then(|updater| updater.available_update()).map(DesktopUpdateState::Available).unwrap_or(DesktopUpdateState::Idle);
+        let account = cx.new(|cx| SyncPage::new(services.clone(), active_library, window, cx));
+        // The account section refreshes on its own — transfers finishing, a
+        // sign-in completing — and this page has to repaint when it does.
+        let account_subscription = cx.observe(&account, |_, _, cx| cx.notify());
         Self {
             services,
             preferences,
+            account,
             error: None,
             desktop_update,
             #[cfg(feature = "kobo")]
             kobo_auto_rotate,
+            _account_subscription: account_subscription,
         }
     }
 
@@ -174,21 +189,8 @@ impl Render for SettingsPage {
         });
         let font_size = components::browser_settings_font_size_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
-        // "Book display" reads the same shared preference the grids do, so the
-        // desktop and mobile settings screens cannot drift apart on it.
-        let mut book_display = components::browser_settings_button_group(theme);
-        for (index, option) in contract.options.library_views.iter().enumerate() {
-            let value = option.value;
-            let entity = entity.clone();
-            book_display = book_display.child(components::browser_settings_choice_button(format!("library-view-{index}"), option.label.clone(), value == preferences.library_view(), theme).on_click(move |_, _, cx| {
-                entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::LibraryView(value), cx));
-            }));
-        }
-        let book_display = components::browser_settings_compact_row(settings.library_view_label.clone(), book_display, theme);
-
         let mut sections = components::browser_settings_sections()
             .child(appearance_settings)
-            .child(book_display)
             .child(components::browser_settings_font_row(settings.interface_font_label.clone(), interface_fonts, theme))
             .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme));
 
@@ -253,6 +255,10 @@ impl Render for SettingsPage {
             sections = sections.child(Alert::error("settings-error", error));
         }
 
-        components::browser_settings_page().child(components::browser_settings_content().child(GroupBox::new().fill().child(sections)))
+        // The account leads the page: it is the one section that can be in a
+        // state the user has to act on, and the rest are preferences that are
+        // always simply on or off.
+        let account = self.account.update(cx, |page, cx| page.settings_section(cx));
+        components::browser_settings_page().child(components::browser_settings_content().child(account).child(GroupBox::new().fill().child(sections)))
     }
 }

@@ -3,11 +3,25 @@
 pub use catalog_contract::*;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 pub struct CatalogPublicationKey {
     pub source_id: CatalogSourceId,
     pub publication: CatalogPublicationIdentity,
+}
+
+impl CatalogPublicationKey {
+    pub fn new(source_id: CatalogSourceId, publication: CatalogPublicationIdentity) -> Self {
+        Self { source_id, publication }
+    }
+}
+
+/// Catalog browse results enriched with ownership in the selected library.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct CatalogSubjectBrowseView {
+    pub response: CatalogSubjectBrowseResponse,
+    pub owned_publications: HashSet<CatalogPublicationKey>,
 }
 
 #[cfg(test)]

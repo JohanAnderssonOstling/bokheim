@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 axum = "0.7"
-library-model = { path = "../../client/library-model" }
+subject-projection = { path = "../../shared/subject-projection", features = ["authoritative-taxonomy"] }
 serde = { version = "1", features = ["derive"] }
 taxonomy-contract = { path = "../../shared/taxonomy-contract" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }

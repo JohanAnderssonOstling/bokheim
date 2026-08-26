@@ -60,8 +60,11 @@ move into the backend ownership directory.
 
 - `backend` (`epub-svelte`) owns SQLite, native paths, scanning, local file
   materialization, session persistence, and composition for application UIs.
-- `catalog-client` composes the internal curated cache provider with direct OPDS
-  fallback and the client's partial SQLite catalog cache.
+- `catalog-client` consumes the catalogue server for curated registry, page,
+  search, cover, and acquisition traffic, and owns the client's partial SQLite
+  catalogue cache. Its active registry contains provider-neutral catalogue
+  sources and opaque server locators; it does not contact or route external
+  OPDS providers directly.
 - `library-replica` owns the client-replica schema for synchronized library
   payloads, local mutation coalescing, conflict keys, and conversion to and from
   `sync-common::WireMutation`. The sync server never links it.

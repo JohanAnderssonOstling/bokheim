@@ -1,10 +1,13 @@
 use super::{
     canonicalize_opds_catalog_locator, canonicalize_page_layout_locators, fmt, materialize_page, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogImportRequest, CatalogInventory,
-    CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest,
-    CatalogSearchResponse, CatalogService, CatalogServiceError, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CrawlProgress, DownloadedOpdsBook, HashMap, HashSet, Instant, OpdsEndpoint,
-    OpdsSearch, PathBuf, BROWSER_UPSTREAM_TIMEOUT,
+    CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPageWrite, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogService, CatalogServiceError,
+    CatalogSource, CatalogSourceId, CatalogSubjectBrowseCapabilitiesResponse, CatalogSubjectBrowseDeltaResponse, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest,
+    CatalogSubjectCollectionManifestResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, CrawlProgress, DownloadedOpdsBook, HashMap, HashSet, Instant, OpdsEndpoint, OpdsSearch, PathBuf, Url,
+    BROWSER_UPSTREAM_TIMEOUT,
 };
 use crate::http::public::filter_browser_page;
+
+const PUBLIC_COVER_EPOCH_SUFFIX: &str = "+bokheim-covers-v1";
 
 impl CatalogService {
     pub(crate) async fn begin_crawl_progress(&self, source_id: &CatalogSourceId) {
@@ -17,7 +20,10 @@ impl CatalogService {
             progress.publications_seen = progress.publications_seen.saturating_add(publications);
         }
     }
-    pub async fn page_response(&self, source_id: &CatalogSourceId, request: CatalogPageRequest) -> Result<CatalogPageResponse, CatalogServiceError> {
+    pub async fn page_response(&self, source_id: &CatalogSourceId, mut request: CatalogPageRequest) -> Result<CatalogPageResponse, CatalogServiceError> {
+        if !internalize_transport_epoch(&mut request.epoch) {
+            request.known_publications.clear();
+        }
         let endpoint = self.public_endpoint(source_id).await?;
         let locator = canonicalize_opds_catalog_locator(&endpoint, request.locator.as_deref().unwrap_or(&endpoint.url)).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
@@ -35,6 +41,8 @@ impl CatalogService {
             let mut response =
                 self.cache_call(move |cache| cache.page_response(&cache_source, &cache_locator, epoch.as_deref(), &known)).await?.ok_or_else(|| CatalogServiceError("catalog has no active cached generation for this page".to_owned()))?;
             canonicalize_page_layout_locators(&endpoint, &mut response.page)?;
+            self.publicize_payload_covers(&mut response.payloads).await;
+            publicize_transport_epoch(&mut response.epoch);
             return Ok(response);
         }
 
@@ -48,6 +56,8 @@ impl CatalogService {
         }
         retain_delta_payloads(&mut response.payloads, response.page.publications.iter().chain(response.page.groups.iter().flat_map(|group| group.publications.iter())), request.epoch.as_deref(), &response.epoch, request.known_publications);
         canonicalize_page_layout_locators(&endpoint, &mut response.page)?;
+        self.publicize_payload_covers(&mut response.payloads).await;
+        publicize_transport_epoch(&mut response.epoch);
         Ok(response)
     }
 
@@ -57,7 +67,9 @@ impl CatalogService {
             .map_err(|_| CatalogServiceError("catalogue page did not respond before the upstream timeout".to_owned()))?
             .map_err(|error| CatalogServiceError(error.to_string()))?;
         validate_opds_catalog_locator(endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let mut page = opds_page(source_id.clone(), catalog);
+        let page = opds_page(source_id.clone(), catalog);
+        let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let (mut page, provider_paginated) = self.compact_provider_pagination(endpoint, &root_url, source_id, page).await?;
         let cache_source = source_id.clone();
         page = self
             .cache_call(move |cache| {
@@ -68,14 +80,17 @@ impl CatalogService {
         self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
         let cache_source = source_id.clone();
         let root = endpoint.url.clone();
-        let cached_page = page.clone();
-        self.cache_write_call_named("crawl_page_write", move |cache| cache.put_page(&cache_source, &root, &cached_page, None, None)).await?;
+        let write = CatalogPageWrite { page: page.clone(), etag: None, last_modified: None, provider_paginated };
+        self.cache_write_call_named("crawl_page_write", move |cache| cache.put_pages(&cache_source, &root, &[write])).await?;
         self.remember_browser_covers(source_id, &page).await;
         self.state.extraction_notify.notify_one();
         Ok(())
     }
 
-    pub async fn search_response(&self, source_id: &CatalogSourceId, request: CatalogSearchRequest) -> Result<CatalogSearchResponse, CatalogServiceError> {
+    pub async fn search_response(&self, source_id: &CatalogSourceId, mut request: CatalogSearchRequest) -> Result<CatalogSearchResponse, CatalogServiceError> {
+        if !internalize_transport_epoch(&mut request.epoch) {
+            request.known_publications.clear();
+        }
         validate_query(&request.query)?;
         let endpoint = self.public_endpoint(source_id).await?;
         let source = opds_source(&endpoint);
@@ -89,7 +104,10 @@ impl CatalogService {
             let query = request.query.clone();
             let epoch = request.epoch.clone();
             let known = request.known_publications.clone();
-            return self.cache_call(move |cache| cache.search_response(&cache_source, &query, epoch.as_deref(), &known)).await?.ok_or_else(|| CatalogServiceError("catalog has not been crawled".to_owned()));
+            let mut response = self.cache_call(move |cache| cache.search_response(&cache_source, &query, epoch.as_deref(), &known)).await?.ok_or_else(|| CatalogServiceError("catalog has not been crawled".to_owned()))?;
+            self.publicize_payload_covers(&mut response.payloads).await;
+            publicize_transport_epoch(&mut response.epoch);
+            return Ok(response);
         }
         let cache_source = source_id.clone();
         let query = request.query.clone();
@@ -99,6 +117,8 @@ impl CatalogService {
         response.author_matches.retain(|item| supported.contains(&item.identity));
         response.toc_matches.retain(|item| supported.contains(&item.identity));
         retain_delta_payloads(&mut response.payloads, response.title_matches.iter().chain(&response.author_matches).chain(&response.toc_matches), request.epoch.as_deref(), &response.epoch, request.known_publications);
+        self.publicize_payload_covers(&mut response.payloads).await;
+        publicize_transport_epoch(&mut response.epoch);
         Ok(response)
     }
 
@@ -114,6 +134,7 @@ impl CatalogService {
             if let Some(mut page) = materialize_page(response.page, |reference| payloads.get(&reference.identity).filter(|(sequence, _)| *sequence == reference.sequence).map(|(_, publication)| publication.clone())) {
                 self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
                 self.remember_browser_covers(source_id, &page).await;
+                self.publicize_page_covers(&mut page).await;
                 return Ok(page);
             }
         }
@@ -122,9 +143,12 @@ impl CatalogService {
             .map_err(|_| CatalogServiceError("catalogue page did not respond before the browser timeout".to_owned()))?
             .map_err(|error| CatalogServiceError(error.to_string()))?;
         validate_opds_catalog_locator(&endpoint, &catalog.source_url).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let mut page = filter_browser_page(opds_page(source_id.clone(), catalog), &opds_source(&endpoint), &request.supported_languages);
+        let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let (page, _) = self.compact_provider_pagination(&endpoint, &root_url, source_id, opds_page(source_id.clone(), catalog)).await?;
+        let mut page = filter_browser_page(page, &opds_source(&endpoint), &request.supported_languages);
         self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
         self.remember_browser_covers(source_id, &page).await;
+        self.publicize_page_covers(&mut page).await;
         Ok(page)
     }
 
@@ -148,16 +172,54 @@ impl CatalogService {
         let mut page = filter_browser_page(opds_page(source_id.clone(), catalog), &opds_source(&endpoint), &request.supported_languages);
         self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
         self.remember_browser_covers(source_id, &page).await;
+        self.publicize_page_covers(&mut page).await;
         Ok(page)
     }
-    pub async fn recommendations(&self, request: &CatalogRecommendationRequest) -> Result<CatalogRecommendationResponse, CatalogServiceError> {
-        let request = request.clone();
-        self.cache_call(move |cache| cache.recommendations(&request)).await
+    pub async fn browse_subjects_delta(&self, request: &CatalogSubjectBrowseRefreshRequest) -> Result<CatalogSubjectBrowseDeltaResponse, CatalogServiceError> {
+        let started = Instant::now();
+        let mut request = request.clone();
+        if !internalize_transport_epoch(&mut request.epoch) {
+            request.known_entry_ids.clear();
+        }
+        let identifiers_only = request.identifiers_only;
+        let collection_sync = request.collection_sync;
+        let mut response = self.cache_call(move |cache| cache.browse_subjects_delta(&request)).await?;
+        self.publicize_subject_covers(&mut response.payloads).await;
+        publicize_transport_epoch(&mut response.epoch);
+        tracing::info!(identifiers_only, collection_sync, returned = response.entry_ids.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject browse completed");
+        Ok(response)
     }
 
-    pub async fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogServiceError> {
+    pub async fn subject_browse_capabilities(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseCapabilitiesResponse, CatalogServiceError> {
+        let started = Instant::now();
         let request = request.clone();
-        self.cache_call(move |cache| cache.browse_subjects(&request)).await
+        let mut response = self.cache_call(move |cache| cache.subject_browse_capabilities(&request)).await?;
+        publicize_transport_epoch(&mut response.epoch);
+        tracing::info!(elapsed_ms = started.elapsed().as_millis(), "catalogue subject capabilities completed");
+        Ok(response)
+    }
+
+    pub async fn subject_publication_payloads(&self, request: &CatalogSubjectPublicationPayloadRequest) -> Result<CatalogSubjectPublicationPayloadResponse, CatalogServiceError> {
+        let started = Instant::now();
+        let mut request = request.clone();
+        let mut epoch = Some(request.epoch);
+        if !internalize_transport_epoch(&mut epoch) {
+            return Err(CatalogServiceError("catalogue publication epoch is stale".to_owned()));
+        }
+        request.epoch = epoch.expect("successful epoch internalization preserves an epoch");
+        let requested = request.entry_ids.len();
+        let mut response = self.cache_call(move |cache| cache.subject_publication_payloads(&request)).await?;
+        self.publicize_subject_covers(&mut response.payloads).await;
+        publicize_transport_epoch(&mut response.epoch);
+        tracing::info!(requested, returned = response.payloads.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject publication payloads completed");
+        Ok(response)
+    }
+
+    pub async fn subject_collection_manifest(&self, request: &CatalogSubjectCollectionManifestRequest) -> Result<CatalogSubjectCollectionManifestResponse, CatalogServiceError> {
+        let request = request.clone();
+        let mut response = self.cache_call(move |cache| cache.subject_collection_manifest(&request)).await?;
+        publicize_transport_epoch(&mut response.epoch);
+        Ok(response)
     }
 
     pub async fn browser_sources(&self) -> Vec<CatalogSource> {
@@ -171,7 +233,7 @@ impl CatalogService {
     /// Downloads only an acquisition that is present on a freshly fetched
     /// page from the registered catalogue origin. This deliberately accepts
     /// structured identity data rather than an arbitrary proxy URL.
-    pub async fn browser_acquisition(&self, source_id: &CatalogSourceId, request: &CatalogImportRequest) -> Result<DownloadedOpdsBook, CatalogServiceError> {
+    pub async fn acquisition(&self, source_id: &CatalogSourceId, request: &CatalogImportRequest) -> Result<DownloadedOpdsBook, CatalogServiceError> {
         let _permit = tokio::time::timeout(BROWSER_UPSTREAM_TIMEOUT, self.state.interactive_download_slots.acquire())
             .await
             .map_err(|_| CatalogServiceError("interactive catalog acquisition capacity timed out".to_owned()))?
@@ -190,6 +252,21 @@ impl CatalogService {
             .map_err(|_| CatalogServiceError("interactive catalog acquisition timed out".to_owned()))?
             .map_err(|error| CatalogServiceError(error.to_string()))
     }
+}
+
+fn internalize_transport_epoch(epoch: &mut Option<String>) -> bool {
+    let Some(public_epoch) = epoch.take() else {
+        return false;
+    };
+    let Some(internal_epoch) = public_epoch.strip_suffix(PUBLIC_COVER_EPOCH_SUFFIX) else {
+        return false;
+    };
+    *epoch = Some(internal_epoch.to_owned());
+    true
+}
+
+fn publicize_transport_epoch(epoch: &mut String) {
+    epoch.push_str(PUBLIC_COVER_EPOCH_SUFFIX);
 }
 
 pub(crate) fn validate_query(query: &str) -> Result<(), CatalogServiceError> {

@@ -5,7 +5,7 @@ use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::json;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub const CATALOG_URL: &str = "https://litteraturbanken.se/epub?visa=epub&sort=popularitet";
 pub const SEARCH_TEMPLATE: &str = "?visa=epub&sort=popularitet&bokheim_query={searchTerms}";
@@ -21,7 +21,7 @@ const MODERNIZED_PARAMETER: &str = "bokheim_modernized";
 const PAGE_PARAMETER: &str = "bokheim_page";
 pub const PAGE_SIZE: u32 = 48;
 const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const INCLUDED_FIELDS: &str = "lbworkid,titlepath,title,titleid,work_titleid,shorttitle,mediatype,authors.authorid,authors.full_name,authors.name_for_index,authors.type,language";
+const INCLUDED_FIELDS: &str = "lbworkid,titlepath,title,titleid,work_titleid,shorttitle,mediatype,authors.authorid,authors.full_name,authors.name_for_index,authors.type,language,series,isbn_download,urn,librisid,publisher,imprintyear,edition,imported,work_updated,export.type,export.updated,keyword,geokeyword,texttype,workintro_download,workintro_download_author,license,epub_license,epub_popularity,popularity,modernized,fraktur,cover_download_info,provenance.library,provenance.signum";
 const EXCLUDED_FIELDS: &str = "text,parts,sourcedesc,pages,errata,content_vector";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,9 +66,41 @@ struct QueryOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publication {
     pub id: String,
+    pub title_id: String,
+    pub work_title_id: Option<String>,
     pub title: String,
+    pub alternate_titles: Vec<String>,
     pub authors: Vec<Author>,
+    pub contributors: Vec<Author>,
     pub language: Option<String>,
+    /// Provider-native series text. Litteraturbanken currently encodes the
+    /// position as the final integer, for example `Barnbiblioteket Saga 3`.
+    pub series: Option<String>,
+    pub isbn: Option<String>,
+    pub urn: Option<String>,
+    pub libris_id: Option<String>,
+    pub publisher: Vec<String>,
+    pub imprint_year: Option<String>,
+    pub edition: Option<String>,
+    pub imported: Option<String>,
+    pub work_updated: Option<String>,
+    pub epub_updated: Option<String>,
+    pub keywords: Vec<String>,
+    pub geographic_keywords: Vec<String>,
+    pub text_type: Option<String>,
+    pub media_type: Option<String>,
+    pub description_html: Option<String>,
+    /// Provider-supplied attribution for the work introduction. This field is
+    /// heterogeneous and may contain a local key, prose, or HTML.
+    pub description_attribution: Option<String>,
+    pub rights: Vec<String>,
+    pub popularity: Option<u64>,
+    pub epub_popularity: Option<u64>,
+    pub modernized: Option<bool>,
+    pub fraktur: Option<bool>,
+    pub cover_attribution: Option<String>,
+    pub sources: Vec<String>,
+    pub provider_url: Option<Url>,
     pub download_url: Url,
     pub file_name: String,
 }
@@ -78,6 +110,7 @@ pub struct Author {
     pub id: String,
     pub name: String,
     pub sort_name: Option<String>,
+    pub role: Option<String>,
     pub provider_url: Option<Url>,
 }
 
@@ -86,7 +119,7 @@ pub enum Error {
     InvalidUrl(String),
     Network(reqwest::Error),
     TimedOut,
-    HttpStatus(StatusCode),
+    HttpStatus { status: StatusCode, retry_after: Option<Duration> },
     ResponseTooLarge { limit: u64 },
     InvalidResponse(String),
 }
@@ -97,7 +130,13 @@ impl fmt::Display for Error {
             Self::InvalidUrl(error) => write!(formatter, "invalid Litteraturbanken URL: {error}"),
             Self::Network(error) => write!(formatter, "Litteraturbanken request failed: {error}"),
             Self::TimedOut => formatter.write_str("Litteraturbanken did not respond before the timeout"),
-            Self::HttpStatus(status) => write!(formatter, "Litteraturbanken returned HTTP {status}"),
+            Self::HttpStatus { status, retry_after } => {
+                write!(formatter, "Litteraturbanken returned HTTP {status}")?;
+                if let Some(retry_after) = retry_after {
+                    write!(formatter, " (retry after {} seconds)", retry_after.as_secs())?;
+                }
+                Ok(())
+            }
             Self::ResponseTooLarge { limit } => write!(formatter, "Litteraturbanken response exceeds the {limit}-byte limit"),
             Self::InvalidResponse(error) => write!(formatter, "invalid Litteraturbanken response: {error}"),
         }
@@ -125,16 +164,58 @@ struct ApiResponse {
     data: Vec<ApiWork>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct ApiWork {
     lbworkid: String,
     title: String,
     titleid: String,
     work_titleid: Option<String>,
+    titlepath: Option<String>,
     shorttitle: Option<String>,
+    mediatype: Option<String>,
     language: Option<String>,
+    series: Option<String>,
+    isbn_download: Option<String>,
+    urn: Option<String>,
+    librisid: Option<String>,
+    #[serde(default)]
+    publisher: Vec<String>,
+    imprintyear: Option<String>,
+    edition: Option<String>,
+    imported: Option<String>,
+    work_updated: Option<String>,
+    #[serde(default)]
+    export: Vec<ApiExport>,
+    #[serde(default)]
+    keyword: Vec<String>,
+    geokeyword: Option<String>,
+    texttype: Option<String>,
+    workintro_download: Option<String>,
+    workintro_download_author: Option<String>,
+    license: Option<String>,
+    epub_license: Option<String>,
+    epub_popularity: Option<u64>,
+    popularity: Option<u64>,
+    modernized: Option<bool>,
+    fraktur: Option<bool>,
+    cover_download_info: Option<String>,
+    #[serde(default)]
+    provenance: Vec<ApiProvenance>,
     #[serde(default)]
     authors: Vec<ApiAuthor>,
+}
+
+#[derive(Deserialize)]
+struct ApiExport {
+    #[serde(rename = "type")]
+    export_type: Option<String>,
+    updated: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiProvenance {
+    library: Option<String>,
+    signum: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -191,11 +272,19 @@ pub async fn fetch_catalog(client: &Client, source_url: Url, byte_limit: u64) ->
     ]);
     let response = tokio::time::timeout(NETWORK_IDLE_TIMEOUT, request.send()).await.map_err(|_| Error::TimedOut)??;
     if !response.status().is_success() {
-        return Err(Error::HttpStatus(response.status()));
+        return Err(Error::HttpStatus { status: response.status(), retry_after: retry_after(response.headers(), SystemTime::now()) });
     }
     let bytes = read_bounded(response, byte_limit).await?;
     let response: ApiResponse = serde_json::from_slice(&bytes).map_err(|error| Error::InvalidResponse(error.to_string()))?;
     catalog_from_response(source_url, options, response)
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    Some(httpdate::parse_http_date(value).ok()?.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 fn catalog_from_response(source_url: Url, options: QueryOptions, response: ApiResponse) -> Result<Catalog, Error> {
@@ -215,13 +304,77 @@ fn catalog_from_response(source_url: Url, options: QueryOptions, response: ApiRe
 
 fn publication(base: &Url, work: ApiWork) -> Result<Option<Publication>, Error> {
     let Some(main_author) = work.authors.iter().find(|author| author.role.is_none()).or_else(|| work.authors.first()) else { return Ok(None) };
+    let main_author_id = main_author.authorid.clone();
+    let has_untyped_author = work.authors.iter().any(|author| author.role.is_none());
     let title_id = work.work_titleid.as_deref().unwrap_or(&work.titleid);
     let file_name = format!("{}_{}.epub", main_author.authorid, title_id);
+    let provider_url = work.titlepath.as_deref().and_then(|title_path| publication_url(base, &main_author_id, title_path).ok());
+    let full_title = work.title;
+    let title = work.shorttitle.filter(|title| !title.trim().is_empty()).unwrap_or_else(|| full_title.clone());
+    let alternate_titles = (title != full_title).then_some(full_title).into_iter().collect();
     let mut download_url = base.join("/txt/epub/").map_err(|error| Error::InvalidUrl(error.to_string()))?;
     download_url.path_segments_mut().map_err(|_| Error::InvalidUrl("download URL cannot be a base".to_owned()))?.pop_if_empty().push(&file_name);
-    let authors =
-        work.authors.into_iter().filter(|author| author.role.is_none()).map(|author| Author { provider_url: author_url(base, &author.authorid).ok(), id: author.authorid, name: author.full_name, sort_name: author.name_for_index }).collect();
-    Ok(Some(Publication { id: work.lbworkid, title: work.shorttitle.filter(|title| !title.trim().is_empty()).unwrap_or(work.title), authors, language: work.language.map(canonical_language), download_url, file_name }))
+    let mut authors = Vec::new();
+    let mut contributors = Vec::new();
+    for author in work.authors {
+        let primary = author.role.is_none() || (!has_untyped_author && author.authorid == main_author_id);
+        let credit = Author { provider_url: author_url(base, &author.authorid).ok(), id: author.authorid, name: author.full_name, sort_name: author.name_for_index, role: author.role };
+        if primary {
+            authors.push(credit);
+        } else {
+            contributors.push(credit);
+        }
+    }
+    let epub_updated = work.export.iter().find(|value| value.export_type.as_deref() == Some("epub")).and_then(|value| value.updated.clone());
+    let mut rights = [work.license, work.epub_license].into_iter().flatten().filter(|value| !value.trim().is_empty()).collect::<Vec<_>>();
+    rights.sort();
+    rights.dedup();
+    let sources = work
+        .provenance
+        .into_iter()
+        .filter_map(|value| match (value.library.filter(|value| !value.trim().is_empty()), value.signum.filter(|value| !value.trim().is_empty())) {
+            (Some(library), Some(signum)) => Some(format!("{library}: {signum}")),
+            (Some(library), None) => Some(library),
+            (None, Some(signum)) => Some(signum),
+            (None, None) => None,
+        })
+        .collect();
+    Ok(Some(Publication {
+        id: work.lbworkid,
+        title_id: work.titleid,
+        work_title_id: work.work_titleid,
+        title,
+        alternate_titles,
+        authors,
+        contributors,
+        language: work.language.map(canonical_language),
+        series: work.series.filter(|series| !series.trim().is_empty()),
+        isbn: work.isbn_download.filter(|value| !value.trim().is_empty()),
+        urn: work.urn.filter(|value| !value.trim().is_empty()),
+        libris_id: work.librisid.filter(|value| !value.trim().is_empty()),
+        publisher: work.publisher.into_iter().filter(|value| !value.trim().is_empty()).collect(),
+        imprint_year: work.imprintyear.filter(|value| !value.trim().is_empty()),
+        edition: work.edition.filter(|value| !value.trim().is_empty()),
+        imported: work.imported.filter(|value| !value.trim().is_empty()),
+        work_updated: work.work_updated.filter(|value| !value.trim().is_empty()),
+        epub_updated,
+        keywords: work.keyword.into_iter().filter(|value| !value.trim().is_empty()).collect(),
+        geographic_keywords: work.geokeyword.filter(|value| !value.trim().is_empty()).into_iter().collect(),
+        text_type: work.texttype.filter(|value| !value.trim().is_empty()),
+        media_type: work.mediatype.filter(|value| !value.trim().is_empty()),
+        description_html: work.workintro_download.filter(|value| !value.trim().is_empty()),
+        description_attribution: work.workintro_download_author.filter(|value| !value.trim().is_empty()),
+        rights,
+        popularity: work.popularity,
+        epub_popularity: work.epub_popularity,
+        modernized: work.modernized,
+        fraktur: work.fraktur,
+        cover_attribution: work.cover_download_info.filter(|value| !value.trim().is_empty()),
+        sources,
+        provider_url,
+        download_url,
+        file_name,
+    }))
 }
 
 fn api_search(options: &QueryOptions) -> String {
@@ -341,6 +494,12 @@ fn author_url(base: &Url, author_id: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
+fn publication_url(base: &Url, author_id: &str, title_path: &str) -> Result<Url, Error> {
+    let mut url = author_url(base, author_id)?;
+    url.path_segments_mut().map_err(|_| Error::InvalidUrl("publication URL cannot be a base".to_owned()))?.push("titlar").push(title_path).push("info");
+    Ok(url)
+}
+
 fn canonical_language(language: String) -> String {
     match language.as_str() {
         "swe" => "sv".to_owned(),
@@ -383,22 +542,94 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_retry_after() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "45".parse().unwrap());
+        assert_eq!(retry_after(&headers, SystemTime::UNIX_EPOCH), Some(Duration::from_secs(45)));
+    }
+
+    #[test]
     fn converts_a_work_to_a_downloadable_publication() {
         let work = ApiWork {
             lbworkid: "lb1728740".to_owned(),
             title: "Doktor Glas. Roman".to_owned(),
             titleid: "DoktorGlas".to_owned(),
             work_titleid: None,
+            titlepath: Some("DoktorGlas".to_owned()),
             shorttitle: Some("Doktor Glas".to_owned()),
             language: Some("swe".to_owned()),
+            series: Some("Barnbiblioteket Saga 3".to_owned()),
             authors: vec![ApiAuthor { authorid: "SöderbergH".to_owned(), full_name: "Hjalmar Söderberg".to_owned(), name_for_index: Some("Söderberg, Hjalmar".to_owned()), role: None }],
+            ..ApiWork::default()
         };
         let publication = publication(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
         assert_eq!(publication.id, "lb1728740");
         assert_eq!(publication.title, "Doktor Glas");
+        assert_eq!(publication.alternate_titles, ["Doktor Glas. Roman"]);
         assert_eq!(publication.language.as_deref(), Some("sv"));
+        assert_eq!(publication.series.as_deref(), Some("Barnbiblioteket Saga 3"));
         assert_eq!(publication.authors[0].name, "Hjalmar Söderberg");
+        assert_eq!(publication.provider_url.as_ref().map(Url::as_str), Some("https://litteraturbanken.se/f%C3%B6rfattare/S%C3%B6derbergH/titlar/DoktorGlas/info"));
         assert_eq!(publication.download_url.as_str(), "https://litteraturbanken.se/txt/epub/S%C3%B6derbergH_DoktorGlas.epub");
+    }
+
+    #[test]
+    fn deserializes_and_retains_rich_catalogue_metadata() {
+        let work: ApiWork = serde_json::from_value(json!({
+            "lbworkid": "lb1728740",
+            "title": "Doktor Glas. Roman",
+            "titleid": "DoktorGlas",
+            "work_titleid": "DoktorGlasSamlade",
+            "titlepath": "DoktorGlas",
+            "shorttitle": "Doktor Glas",
+            "mediatype": "etext",
+            "language": "swe",
+            "series": "Barnbiblioteket Saga 3",
+            "isbn_download": "978-91-8123-064-2",
+            "urn": "urn:nbn:se:lb-lb1728740-etext",
+            "librisid": "1728740",
+            "publisher": ["Almqvist &amp; Wiksell förlag", "Stockholm", "SE"],
+            "imprintyear": "1905",
+            "edition": "1",
+            "imported": "2012-01-17",
+            "work_updated": "2026-04-27",
+            "export": [{"type": "epub", "updated": "2026-05-21"}, {"type": "txt", "updated": "2026-04-28"}],
+            "keyword": ["Brott", "Dagboksromaner"],
+            "geokeyword": "Stockholm",
+            "texttype": "roman",
+            "workintro_download": "<p>En kort introduktion.</p>",
+            "workintro_download_author": "HelgesonP",
+            "license": "cc-0",
+            "epub_license": "cc-0",
+            "popularity": 2059021,
+            "epub_popularity": 9705,
+            "modernized": false,
+            "fraktur": false,
+            "cover_download_info": "Omslag från GUB.",
+            "provenance": [{"library": "GUB", "signum": "Litt. Sv."}],
+            "authors": [
+                {"authorid": "SöderbergH", "full_name": "Hjalmar Söderberg", "name_for_index": "Söderberg, Hjalmar"},
+                {"authorid": "EditorE", "full_name": "Eva Redaktör", "name_for_index": "Redaktör, Eva", "type": "editor"}
+            ]
+        }))
+        .unwrap();
+
+        let publication = publication(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
+        assert_eq!(publication.title_id, "DoktorGlas");
+        assert_eq!(publication.work_title_id.as_deref(), Some("DoktorGlasSamlade"));
+        assert_eq!(publication.alternate_titles, ["Doktor Glas. Roman"]);
+        assert_eq!(publication.media_type.as_deref(), Some("etext"));
+        assert_eq!(publication.isbn.as_deref(), Some("978-91-8123-064-2"));
+        assert_eq!(publication.publisher, ["Almqvist &amp; Wiksell förlag", "Stockholm", "SE"]);
+        assert_eq!(publication.epub_updated.as_deref(), Some("2026-05-21"));
+        assert_eq!(publication.keywords, ["Brott", "Dagboksromaner"]);
+        assert_eq!(publication.geographic_keywords, ["Stockholm"]);
+        assert_eq!(publication.description_attribution.as_deref(), Some("HelgesonP"));
+        assert_eq!(publication.contributors[0].role.as_deref(), Some("editor"));
+        assert_eq!(publication.rights, ["cc-0"]);
+        assert_eq!(publication.sources, ["GUB: Litt. Sv."]);
+        assert_eq!(publication.popularity, Some(2_059_021));
+        assert_eq!(publication.epub_popularity, Some(9_705));
     }
 
     #[test]

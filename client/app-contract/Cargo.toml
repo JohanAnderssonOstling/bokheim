@@ -6,10 +6,11 @@ publish = false
 
 [features]
 default = ["full"]
-full = ["dep:account-contract", "dep:catalog-contract", "dep:library-model", "dep:sync-common"]
+full = ["dep:account-contract", "dep:async-channel", "dep:catalog-contract", "dep:library-model", "dep:sync-common"]
 
 [dependencies]
 account-contract = { path = "../../shared/account-contract", optional = true }
+async-channel = { version = "2", optional = true }
 catalog-contract = { path = "../../shared/catalog-contract", optional = true }
 library-model = { path = "../library-model", optional = true }
 serde = { version = "1", features = ["derive"] }

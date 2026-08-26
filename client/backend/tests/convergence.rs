@@ -1022,7 +1022,8 @@ fn book_metadata_updates_produce_a_synchronizable_mutation() {
     device.seed_book(content_hash);
 
     let tx = device.conn.transaction().unwrap();
-    db::update_book_metadata(&tx, content_hash, "Changed title", "Changed author").unwrap();
+    let contributors = [Contributor::new("Changed author", None, MarcRelatorCode(*b"aut")).unwrap()];
+    db::update_book_metadata_contributors(&tx, content_hash, "Changed title", &contributors).unwrap();
     tx.commit().unwrap();
 
     let outbox = db::get_pending_mutations(&device.conn).unwrap();

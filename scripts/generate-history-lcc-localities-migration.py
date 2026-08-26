@@ -24,22 +24,22 @@ def main() -> None:
     parser.add_argument(
         "--taxonomy",
         type=Path,
-        default=Path("client/library-model/data/unified-taxonomy-v2.sqlite3"),
+        default=Path("shared/subject-projection/data/unified-taxonomy-v2.sqlite3"),
     )
     parser.add_argument(
         "--snapshot",
         type=Path,
-        default=Path("client/library-model/data/lcc-mdsconnect-2016.sqlite3"),
+        default=Path("shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"),
     )
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path("client/library-model/data/history-lcc-localities-manifest.json"),
+        default=Path("shared/subject-projection/data/history-lcc-localities-manifest.json"),
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("client/library-model/data/migrations/20260817_history_lcc_localities.sql"),
+        default=Path("shared/subject-projection/data/migrations/20260817_history_lcc_localities.sql"),
     )
     args = parser.parse_args()
 

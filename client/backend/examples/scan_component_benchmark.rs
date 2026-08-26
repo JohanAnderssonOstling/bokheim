@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn format_for_path(path: &Path) -> Option<BookFormat> {
-    path.extension().and_then(|extension| extension.to_str()).and_then(BookFormat::from_extension)
+    path.extension().and_then(|extension| extension.to_str()).and_then(BookFormat::from_import_extension)
 }
 
 fn benchmark_hashing(books: &[BookFile], worker_count: usize) -> Summary {
@@ -243,7 +243,7 @@ fn run_thumbnail_benchmark_worker(task_rx: crossbeam_channel::Receiver<BookFile>
 
 fn generate_thumbnail_sample(book: BookFile) -> Sample {
     let started = Instant::now();
-    let (outcome, bytes) = if !matches!(book.format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::Cbz | BookFormat::M4b) {
+    let (outcome, bytes) = if !matches!(book.format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::M4b) {
         (Outcome::NoOutput, 0)
     } else {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| thumbnail::generate_thumbnail(&book.path))) {
@@ -263,7 +263,7 @@ fn benchmark_thumbnails_isolated(books: &[BookFile]) -> Summary {
     let executable = std::env::current_exe().expect("benchmark executable path");
     for (index, book) in books.iter().enumerate() {
         let started = Instant::now();
-        let outcome = if !matches!(book.format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::Cbz | BookFormat::M4b) {
+        let outcome = if !matches!(book.format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::M4b) {
             (Outcome::NoOutput, 0)
         } else {
             let outcome = match Command::new(&executable).arg("--thumbnail-child").arg(&book.path).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {

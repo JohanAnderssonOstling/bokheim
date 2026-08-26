@@ -206,8 +206,8 @@ def render(records: dict[str, tuple[str, str]]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot", type=Path, default=Path("client/library-model/data/lcc-mdsconnect-2016.sqlite3"))
-    parser.add_argument("--output", type=Path, default=Path("client/library-model/data/migrations/20260817_subject_bibliography_lcc_expansion.sql"))
+    parser.add_argument("--snapshot", type=Path, default=Path("shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"))
+    parser.add_argument("--output", type=Path, default=Path("shared/subject-projection/data/migrations/20260817_subject_bibliography_lcc_expansion.sql"))
     args = parser.parse_args()
     args.output.write_text(render(load_records(args.snapshot)), encoding="utf-8")
 

@@ -13,18 +13,37 @@ crate-type = ["cdylib", "rlib"]
 account-contract = { path = "../../../shared/account-contract" }
 app-contract = { path = "../../../client/app-contract", default-features = false }
 blake3 = "1"
+book-metadata = { path = "../../../client/book-metadata", default-features = false }
 catalog-model = { path = "../../../shared/catalog-model" }
 catalog-contract = { path = "../../../shared/catalog-contract" }
+catalog-core = { path = "../../../shared/catalog-core", default-features = false }
 epub_provider = { path = "../../renderers/html/epub_provider", default-features = false }
 library-replica = { path = "../../../client/library-replica", default-features = false }
 library-model = { path = "../../../client/library-model", default-features = false }
+library-sqlite = { path = "../../../client/library-sqlite", default-features = false }
+publication-model = { path = "../../../shared/publication-model" }
+subject-projection = { path = "../../../shared/subject-projection" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sync-common = { path = "../../../shared/sync-common", default-features = false }
 taxonomy-contract = { path = "../../../shared/taxonomy-contract" }
+taxonomy-client = { path = "../../../client/taxonomy-client" }
 thumbnail = { path = "../../../client/thumbnail", default-features = false }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 wire = { package = "protobuf-wire", path = "../../../shared/protobuf-wire" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+rusqlite = { version = "0.40.0", features = ["functions"] }
+reqwest = { version = "0.11", default-features = false }
+serde-wasm-bindgen = "0.6"
+serde_bytes = "0.11"
+js-sys = "0.3"
+sqlite-wasm-vfs = "0.2.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Location", "Window"] }
 
 [profile.release]
 lto = true

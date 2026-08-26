@@ -1,10 +1,11 @@
 use super::{
     CatalogBookFormat, CatalogDescription, CatalogEpubMetadata, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataMatch, CatalogPublication, CatalogPublicationAction, CatalogPublicationPopularity,
-    CatalogService, CatalogServiceError, CatalogSourceId, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, HashMap, HashSet, LookupStatus,
-    MetadataEnrichmentRequest, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject, RichWorkMetadataMatch, EPUB_COVER_KEY_PREFIX,
-    MAX_EPUB_METADATA_PUBLICATION_BYTES, MAX_MOBI_METADATA_PUBLICATION_BYTES, MAX_PDF_METADATA_PUBLICATION_BYTES,
+    CatalogService, CatalogServiceError, CatalogSourceId, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, HashMap, HashSet, Identifier, LookupStatus,
+    MetadataEnrichmentRequest, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, PublicationSubject, RichWorkMetadataMatch, Scheme, Scope, EPUB_COVER_KEY_PREFIX, MAX_EPUB_METADATA_PUBLICATION_BYTES,
+    MAX_MOBI_METADATA_PUBLICATION_BYTES, MAX_PDF_METADATA_PUBLICATION_BYTES,
 };
 use crate::extraction::ExtractedCatalogMetadata;
+use catalog_contract::{AgeRange, Audience, CatalogContributorCredit, CatalogPublisherCredit};
 impl CatalogService {
     pub(crate) async fn enrich_saved_metadata_batch(&self, jobs: &[CatalogMetadataBackfillIndexedJob]) -> Result<Vec<CatalogMetadataBackfillIndexedUpdate>, CatalogServiceError> {
         let isbn_groups = jobs.iter().map(|job| job.index.isbns.clone()).collect::<Vec<_>>();
@@ -276,6 +277,94 @@ pub(crate) fn apply_catalog_metadata(publication: &mut CatalogPublication, metad
     }
 }
 
+pub(crate) fn merge_catalog_epub_metadata(publication: &mut CatalogPublication, metadata: &CatalogEpubMetadata) {
+    let book = &metadata.book;
+    let rich = &book.publication;
+
+    for date in &rich.dates {
+        push_unique(&mut publication.metadata.dates, date.clone());
+    }
+    if publication.metadata.published.is_none() {
+        publication.metadata.published =
+            rich.dates.iter().find(|date| date.event().is_some_and(|event| matches!(metadata_token(event).as_str(), "publication" | "published"))).or_else(|| rich.dates.first()).map(|date| date.value().to_owned());
+    }
+    if publication.metadata.modified.is_none() {
+        publication.metadata.modified = rich.dates.iter().find(|date| date.event().is_some_and(|event| matches!(metadata_token(event).as_str(), "modification" | "modified"))).map(|date| date.value().to_owned());
+    }
+    for publisher in &rich.publishers {
+        push_unique(
+            &mut publication.metadata.publishers,
+            CatalogPublisherCredit { name: publisher.name().as_str().to_owned(), name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None },
+        );
+    }
+    for identifier in &rich.identifiers {
+        push_unique(&mut publication.metadata.identifiers, identifier.clone());
+    }
+    for title in &rich.alternate_titles {
+        let candidate = title.clone();
+        if publication.metadata.subtitle.is_none() && candidate.title_type.as_deref().is_some_and(|kind| metadata_token(kind) == "subtitle") {
+            publication.metadata.subtitle = Some(candidate.value.clone());
+        }
+        push_unique(&mut publication.metadata.alternate_titles, candidate);
+    }
+    for collection in &rich.collections {
+        push_unique(&mut publication.metadata.collections, collection.clone());
+    }
+    for contributor in &book.contributors {
+        if contributor.role_code() == library_model::AUTHOR_MARC_RELATOR_CODE {
+            continue;
+        }
+        let role = String::from_utf8_lossy(&contributor.role_code().0).into_owned();
+        push_unique(
+            &mut publication.metadata.contributors,
+            CatalogContributorCredit {
+                name: contributor.name().to_owned(),
+                name_localizations: Vec::new(),
+                sort_name: contributor.sort_name().map(str::to_owned),
+                sort_name_localizations: Vec::new(),
+                identifiers: Vec::new(),
+                provider_link: None,
+                roles: vec![role],
+            },
+        );
+    }
+    append_unique_strings(&mut publication.metadata.rights, &rich.rights);
+    append_unique_strings(&mut publication.metadata.sources, &rich.sources);
+    append_unique_strings(&mut publication.metadata.types, &rich.types);
+    append_unique_strings(&mut publication.metadata.formats, &rich.formats);
+    append_unique_strings(&mut publication.metadata.relations, &rich.relations);
+    append_unique_strings(&mut publication.metadata.coverage, &rich.coverage);
+    for property in &rich.properties {
+        let candidate = property.clone();
+        let token = metadata_token(property.property());
+        if matches!(token.as_str(), "audience" | "audiencetype") {
+            push_unique(&mut publication.metadata.audiences, Audience { value: property.value().to_owned(), source: property.source().to_owned() });
+        }
+        if matches!(token.as_str(), "typicalagerange" | "agerange") {
+            push_unique(&mut publication.metadata.age_ranges, AgeRange { value: property.value().to_owned(), source: property.source().to_owned() });
+        }
+        push_unique(&mut publication.metadata.properties, candidate);
+    }
+}
+
+fn metadata_token(value: &str) -> String {
+    value.rsplit([':', '#', '/']).next().unwrap_or(value).chars().filter(|character| character.is_ascii_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn push_unique<T: PartialEq>(target: &mut Vec<T>, candidate: T) {
+    if !target.contains(&candidate) {
+        target.push(candidate);
+    }
+}
+
+fn append_unique_strings(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target.contains(value) {
+            target.push(value.clone());
+        }
+    }
+}
+
 pub(crate) fn apply_catalog_description_if_missing(publication: &mut CatalogPublication, description: Option<String>) {
     if publication.description.is_none() {
         if let Some(text) = description {
@@ -326,9 +415,8 @@ pub(crate) fn catalog_metadata_match(records: Vec<&RichWorkMetadataMatch>, snaps
 }
 
 pub(crate) fn add_catalog_identity_isbn(metadata: &mut CatalogEpubMetadata, canonical_isbn13: &str) -> Result<(), CatalogServiceError> {
-    let provenance = PublicationIdentifierType::new("openlibrary-edition-match", Some("bokheim:provenance".to_owned())).map_err(|error| CatalogServiceError(error.to_string()))?;
-    let identifier = PublicationIdentifier::new(canonical_isbn13, PublicationIdentifierScheme::Isbn, vec![provenance]).map_err(|error| CatalogServiceError(error.to_string()))?;
-    metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &PublicationIdentifierScheme::Isbn);
+    let identifier = Identifier::new(canonical_isbn13, Scheme::Isbn, Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogServiceError(error.to_string()))?;
+    metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &Scheme::Isbn);
     metadata.book.publication.identifiers.push(identifier);
     Ok(())
 }

@@ -93,10 +93,11 @@ mod tests {
     #[test]
     fn browsing_options_cover_every_closed_value_once() {
         let options = BrowsingPreferenceOptions::default();
-        assert_eq!(options.themes.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif]);
+        assert_eq!(options.themes.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite]);
         assert!(options.themes.iter().all(|option| !option.label.is_empty() && !option.description.is_empty()));
         assert_eq!(ApplicationTheme::GrecoFuturistic.next(), ApplicationTheme::LibrarySerif);
-        assert_eq!(ApplicationTheme::LibrarySerif.next(), ApplicationTheme::GrecoFuturistic);
+        assert_eq!(ApplicationTheme::LibrarySerif.next(), ApplicationTheme::ClassicWhite);
+        assert_eq!(ApplicationTheme::ClassicWhite.next(), ApplicationTheme::GrecoFuturistic);
         assert_eq!(options.fonts.iter().map(|option| option.value).collect::<Vec<_>>(), vec![UiFontFamily::SansSerif, UiFontFamily::Serif]);
         assert_eq!(options.fonts.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), vec!["Sans Serif", "Serif"]);
         assert!(options.fonts.iter().all(|option| !option.font_name.is_empty()));
@@ -165,7 +166,6 @@ mod tests {
         assert!(fs::read_dir(directory.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
     }
 
-    #[test]
     #[test]
     fn client_preference_contexts_do_not_leak_state_between_instances() {
         let first_dir = tempfile::tempdir().unwrap();

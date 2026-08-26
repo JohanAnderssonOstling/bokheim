@@ -5,7 +5,7 @@
 //! account. So this store lives at the root and is injected downward. Settings
 //! edits it, and appearance refreshes all windows.
 
-use epub_svelte_lib::app::preferences::{BrowsingPreferencePatch, BrowsingPreferences};
+use app_contract::preferences::{BrowsingPreferencePatch, BrowsingPreferences};
 use gpui::{App, Context, SharedString, px};
 use gpui_component::{Theme, ThemeTokens};
 

@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A short, concept-first guide to GPUI fundamentals, based on the local GPUI-Fork source and examples.">
+  <title>GPUI — a working mental model</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f4f0e8;
+      --muted: #aaa9a5;
+      --dim: #737571;
+      --paper: #121514;
+      --panel: #191d1b;
+      --panel-2: #202522;
+      --line: #303732;
+      --lime: #b7f36b;
+      --lime-soft: rgba(183, 243, 107, .12);
+      --amber: #f2bd64;
+      --cyan: #7ed6d0;
+      --rose: #e88d9b;
+      --code: #0d100f;
+      --radius: 16px;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 78% 8%, rgba(126, 214, 208, .07), transparent 28rem),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+        var(--paper);
+      background-size: auto, 36px 36px, 36px 36px, auto;
+      color: var(--ink);
+      font-family: var(--sans);
+      line-height: 1.62;
+    }
+
+    a { color: inherit; }
+    code { font-family: var(--mono); }
+    ::selection { background: var(--lime); color: #111; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 760px);
+      gap: clamp(2rem, 6vw, 6rem);
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 32px 0 96px;
+    }
+
+    aside {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line);
+      padding-right: 28px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 0 42px;
+      font: 700 13px/1 var(--mono);
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--lime);
+      border-radius: 7px;
+      box-shadow: inset 0 0 0 5px var(--lime-soft);
+      transform: rotate(8deg);
+    }
+
+    nav { display: grid; gap: 6px; }
+    nav a {
+      position: relative;
+      padding: 8px 0 8px 18px;
+      color: var(--dim);
+      font: 500 13px/1.3 var(--mono);
+      text-decoration: none;
+      transition: color .18s ease;
+    }
+    nav a::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--line);
+      transform: translateY(-50%);
+      transition: background .18s ease, box-shadow .18s ease;
+    }
+    nav a:hover, nav a.active { color: var(--ink); }
+    nav a.active::before { background: var(--lime); box-shadow: 0 0 0 4px var(--lime-soft); }
+
+    .reading-progress {
+      height: 2px;
+      margin-top: auto;
+      background: var(--line);
+      overflow: hidden;
+    }
+    .reading-progress span { display: block; width: 0; height: 100%; background: var(--lime); }
+    .source-note { margin: 12px 0 2px; color: var(--dim); font: 11px/1.5 var(--mono); }
+
+    main { min-width: 0; }
+    header { padding: clamp(56px, 11vw, 120px) 0 88px; }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+      color: var(--lime);
+      font: 600 12px/1 var(--mono);
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 34px; height: 1px; background: currentColor; }
+    h1 {
+      max-width: 690px;
+      margin: 0 0 28px;
+      font-size: clamp(3.3rem, 8vw, 6.3rem);
+      font-weight: 720;
+      letter-spacing: -.075em;
+      line-height: .91;
+    }
+    .lede {
+      max-width: 650px;
+      margin: 0;
+      color: #c4c2bc;
+      font-size: clamp(1.08rem, 2vw, 1.3rem);
+      line-height: 1.6;
+    }
+    .thesis {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: 52px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: rgba(25, 29, 27, .74);
+    }
+    .thesis div { padding: 20px; border-right: 1px solid var(--line); }
+    .thesis div:last-child { border: 0; }
+    .thesis b { display: block; margin-bottom: 6px; color: var(--lime); font: 600 12px/1 var(--mono); }
+    .thesis span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    section { scroll-margin-top: 34px; padding: 70px 0; border-top: 1px solid var(--line); }
+    .section-kicker { color: var(--lime); font: 600 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    h2 { margin: 13px 0 18px; font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -.045em; line-height: 1.06; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    p { margin: 0 0 18px; color: var(--muted); }
+    p strong { color: var(--ink); }
+    .compact { max-width: 680px; }
+
+    .model {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin: 30px 0 14px;
+    }
+    .model-card {
+      position: relative;
+      min-height: 170px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(145deg, var(--panel-2), var(--panel));
+    }
+    .model-card::after {
+      content: attr(data-index);
+      position: absolute;
+      right: 15px;
+      top: 12px;
+      color: #39413c;
+      font: 700 32px/1 var(--mono);
+    }
+    .model-card .term { color: var(--ink); font: 650 18px/1.2 var(--mono); }
+    .model-card p { margin: 18px 0 0; font-size: 13px; line-height: 1.55; }
+    .model-card:nth-child(2) .term { color: var(--cyan); }
+    .model-card:nth-child(3) .term { color: var(--amber); }
+
+    .callout {
+      margin: 28px 0;
+      padding: 18px 20px;
+      border-left: 2px solid var(--lime);
+      background: var(--lime-soft);
+      color: #d9e8c8;
+      font-size: 14px;
+    }
+    .callout code { color: var(--lime); }
+
+    .code-card { margin: 28px 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--code); }
+    .code-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--dim);
+      font: 11px/1 var(--mono);
+    }
+    .code-head span:last-child { color: #555d58; }
+    pre { margin: 0; padding: 20px; overflow: auto; color: #d8d9d4; font: 12.5px/1.65 var(--mono); tab-size: 4; }
+    .kw { color: #e88d9b; } .ty { color: #7ed6d0; } .fn { color: #b7f36b; } .st { color: #f2bd64; } .cm { color: #69726c; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 28px 1fr 28px 1fr;
+      align-items: stretch;
+      margin: 34px 0;
+    }
+    .flow-node { padding: 18px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); }
+    .flow-node code { color: var(--lime); font-size: 13px; }
+    .flow-node small { display: block; margin-top: 8px; color: var(--dim); line-height: 1.45; }
+    .arrow { display: grid; place-items: center; color: var(--dim); font-family: var(--mono); }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 28px 0; }
+    .choice { padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+    .choice .label { display: inline-flex; margin-bottom: 16px; padding: 5px 8px; border-radius: 6px; color: var(--cyan); background: rgba(126,214,208,.1); font: 600 11px/1 var(--mono); }
+    .choice:nth-child(2) .label { color: var(--amber); background: rgba(242,189,100,.1); }
+    .choice p { margin: 0; font-size: 13px; }
+
+    .rules { display: grid; gap: 1px; margin: 28px 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--line); }
+    .rule { display: grid; grid-template-columns: 34px 1fr; gap: 14px; padding: 18px; background: var(--panel); }
+    .rule b { color: var(--lime); font: 600 12px/1.6 var(--mono); }
+    .rule p { margin: 0; font-size: 14px; }
+
+    .source-grid { display: grid; gap: 9px; margin-top: 26px; }
+    .source-row { display: grid; grid-template-columns: 155px 1fr; gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .source-row code { color: var(--cyan); font-size: 12px; }
+    .source-row span { color: var(--muted); font-size: 13px; }
+    footer { padding-top: 30px; color: var(--dim); font: 11px/1.6 var(--mono); }
+
+    @media (max-width: 820px) {
+      .shell { display: block; width: min(100% - 32px, 720px); }
+      aside { position: static; height: auto; padding: 0 0 20px; border: 0; }
+      .brand { margin-bottom: 18px; }
+      nav { grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 12px; padding: 6px; }
+      nav a { padding: 8px; text-align: center; }
+      nav a::before, .reading-progress, .source-note { display: none; }
+      header { padding-top: 58px; }
+    }
+    @media (max-width: 610px) {
+      .thesis, .model, .split { grid-template-columns: 1fr; }
+      .thesis div { border-right: 0; border-bottom: 1px solid var(--line); }
+      .flow { grid-template-columns: 1fr; gap: 7px; }
+      .arrow { transform: rotate(90deg); }
+      .source-row { grid-template-columns: 1fr; gap: 5px; }
+      nav { grid-template-columns: repeat(2, 1fr); }
+      h1 { font-size: 3.45rem; }
+    }
+    @media print {
+      body { background: white; color: #111; }
+      aside { display: none; }
+      .shell { display: block; width: 100%; padding: 0; }
+      main { width: 100%; }
+      p, .model-card p, .choice p, .rule p, .source-row span { color: #444; }
+      section { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside aria-label="Tutorial navigation">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span> GPUI / 01</div>
+      <nav>
+        <a href="#model" class="active">Mental model</a>
+        <a href="#entities">Entities</a>
+        <a href="#widgets">Widgets & views</a>
+        <a href="#invalidation">Invalidation</a>
+        <a href="#signals">Signals</a>
+        <a href="#practice">Practice</a>
+      </nav>
+      <div class="reading-progress" aria-hidden="true"><span></span></div>
+      <p class="source-note">Based on local GPUI-Fork<br>branch central/gpui</p>
+    </aside>
+
+    <main>
+      <header>
+        <div class="eyebrow">A ten-minute mental model</div>
+        <h1>GPUI,<br>from state<br>to pixels.</h1>
+        <p class="lede">GPUI is easiest to understand as three cooperating systems: app-owned state, disposable UI descriptions, and explicit invalidation. Learn those boundaries and the API becomes much less mysterious.</p>
+        <div class="thesis" aria-label="The GPUI loop in three parts">
+          <div><b>01 / OWN</b><span><code>App</code> owns long-lived state in entities.</span></div>
+          <div><b>02 / DESCRIBE</b><span><code>Render</code> turns current state into elements.</span></div>
+          <div><b>03 / INVALIDATE</b><span><code>notify()</code> declares which state became stale.</span></div>
+        </div>
+      </header>
+
+      <section id="model">
+        <span class="section-kicker">01 — Mental model</span>
+        <h2>Retained state. Immediate description.</h2>
+        <p class="compact">GPUI calls itself a <strong>hybrid immediate/retained UI framework</strong>. Your application state persists inside entities. The element tree produced by rendering is temporary: GPUI lays it out, prepaints it, paints it, then recreates or reuses it as needed.</p>
+
+        <div class="model">
+          <article class="model-card" data-index="1">
+            <div class="term">Entity&lt;T&gt;</div>
+            <p>Stable identity and long-lived state, owned by the app.</p>
+          </article>
+          <article class="model-card" data-index="2">
+            <div class="term">View</div>
+            <p>An entity with <code>Render</code>, or a renderable value with an identity.</p>
+          </article>
+          <article class="model-card" data-index="3">
+            <div class="term">Element</div>
+            <p>A short-lived node responsible for layout, interaction, and paint.</p>
+          </article>
+        </div>
+
+        <div class="callout"><strong>The practical rule:</strong> put durable application state in entities; return a fresh description of the UI from <code>render</code>; implement a custom <code>Element</code> only when you need direct control of layout or painting.</div>
+      </section>
+
+      <section id="entities">
+        <span class="section-kicker">02 — Entities & contexts</span>
+        <h2>A handle is not the data.</h2>
+        <p class="compact"><code>Entity&lt;T&gt;</code> is a cloneable, typed handle. The <code>App</code> owns the actual <code>T</code>, so the handle can only read or mutate it when you also have a GPUI context. This central ownership lets GPUI control borrowing, lifetime, observation, and UI invalidation.</p>
+
+        <div class="code-card">
+          <div class="code-head"><span>entity.rs</span><span>create · read · update</span></div>
+          <pre><span class="kw">let</span> counter: <span class="ty">Entity</span>&lt;<span class="ty">Counter</span>&gt; = cx.<span class="fn">new</span>(|_| <span class="ty">Counter</span> { count: <span class="st">0</span> });
+
+<span class="kw">let</span> n = counter.<span class="fn">read</span>(cx).count;         <span class="cm">// shared access</span>
+
+counter.<span class="fn">update</span>(cx, |counter, cx| {       <span class="cm">// exclusive access</span>
+    counter.count += <span class="st">1</span>;
+    cx.<span class="fn">notify</span>();
+});</pre>
+        </div>
+
+        <p><strong>Contexts are capabilities.</strong> <code>App</code> exposes global services and all entities. <code>Context&lt;T&gt;</code> wraps <code>App</code> and adds services tied to one entity: <code>notify</code>, <code>emit</code>, listeners, weak handles, and tasks. <code>Window</code> carries per-window state such as focus and input.</p>
+      </section>
+
+      <section id="widgets">
+        <span class="section-kicker">03 — Widgets, views & elements</span>
+        <h2>“Widget” is a role, not one type.</h2>
+        <p class="compact">In everyday GPUI code, a widget usually means either a stateful view or a stateless component. Choose based on where identity and mutable state should live.</p>
+
+        <div class="split">
+          <article class="choice">
+            <span class="label">Render</span>
+            <h3>Stateful view</h3>
+            <p>A <code>T: Render</code> stored as <code>Entity&lt;T&gt;</code>. It has stable identity, a <code>Context&lt;T&gt;</code>, and its own invalidation boundary.</p>
+          </article>
+          <article class="choice">
+            <span class="label">RenderOnce</span>
+            <h3>Stateless component</h3>
+            <p>A consumed value that turns props into elements. Derive <code>IntoElement</code>; keep durable state elsewhere.</p>
+          </article>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>badge.rs</span><span>a small reusable component</span></div>
+          <pre><span class="kw">#[derive</span>(<span class="ty">IntoElement</span>)<span class="kw">]</span>
+<span class="kw">struct</span> <span class="ty">CountBadge</span> { count: usize }
+
+<span class="kw">impl</span> <span class="ty">RenderOnce</span> <span class="kw">for</span> <span class="ty">CountBadge</span> {
+    <span class="kw">fn</span> <span class="fn">render</span>(self, _: &amp;<span class="kw">mut</span> <span class="ty">Window</span>, _: &amp;<span class="kw">mut</span> <span class="ty">App</span>) -&gt; <span class="kw">impl</span> <span class="ty">IntoElement</span> {
+        <span class="fn">div</span>().rounded_full().px_2().child(self.count.to_string())
+    }
+}</pre>
+        </div>
+
+        <p>The lower layer is <code>Element</code>: <code>request_layout → prepaint → paint</code>. GPUI’s <code>div</code>, text, images, lists, and canvas already live there. Most application code should compose those primitives, not implement the pipeline itself.</p>
+      </section>
+
+      <section id="invalidation">
+        <span class="section-kicker">04 — Rendering & invalidation</span>
+        <h2>Mutation is silent until you notify.</h2>
+        <p class="compact"><code>update</code> gives you mutable access; it does <em>not</em> imply a visual change. Call <code>cx.notify()</code> after a mutation that affects rendering. In this fork, GPUI tracks which windows display the entity and invalidates that view’s subtree.</p>
+
+        <div class="flow" aria-label="Invalidation sequence">
+          <div class="flow-node"><code>update</code><small>Mutate entity state inside its context.</small></div>
+          <div class="arrow">→</div>
+          <div class="flow-node"><code>notify</code><small>Wake observers and mark displayed view state dirty.</small></div>
+          <div class="arrow">→</div>
+          <div class="flow-node"><code>render</code><small>Describe the affected UI again from current state.</small></div>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>counter.rs</span><span>the essential loop</span></div>
+          <pre><span class="kw">impl</span> <span class="ty">Render</span> <span class="kw">for</span> <span class="ty">Counter</span> {
+    <span class="kw">fn</span> <span class="fn">render</span>(&amp;<span class="kw">mut</span> self, _: &amp;<span class="kw">mut</span> <span class="ty">Window</span>, cx: &amp;<span class="kw">mut</span> <span class="ty">Context</span>&lt;Self&gt;)
+        -&gt; <span class="kw">impl</span> <span class="ty">IntoElement</span>
+    {
+        <span class="fn">div</span>()
+            .child(<span class="fn">format!</span>(<span class="st">"Count: {}"</span>, self.count))
+            .on_click(cx.<span class="fn">listener</span>(|this, _, _, cx| {
+                this.count += <span class="st">1</span>;
+                cx.<span class="fn">notify</span>();
+            }))
+    }
+}</pre>
+        </div>
+
+        <p><strong>Optimization is explicit.</strong> An entity embedded as a child is a reactive boundary. Calling <code>entity.cached(style)</code> goes further: GPUI can reuse that subtree’s layout and paint work until the entity notifies or its external bounds/text style change. Because cached content is not measured, give it a definite size.</p>
+      </section>
+
+      <section id="signals">
+        <span class="section-kicker">05 — Data flow</span>
+        <h2>Observe state; subscribe to meaning.</h2>
+        <p class="compact">GPUI has two deliberately different communication channels. Their distinction keeps state propagation predictable.</p>
+
+        <div class="split">
+          <article class="choice">
+            <span class="label">observe + notify</span>
+            <h3>Something changed</h3>
+            <p>The callback receives the entity handle and reads its latest state. Use this for derived state and view refresh.</p>
+          </article>
+          <article class="choice">
+            <span class="label">subscribe + emit</span>
+            <h3>Something happened</h3>
+            <p>The callback receives a typed event. Use this for semantic occurrences such as “saved” or “selection confirmed.”</p>
+          </article>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>ownership_post.rs</span><span>state signal</span></div>
+          <pre>cx.<span class="fn">observe</span>(&amp;counter, |summary, counter, cx| {
+    summary.total = counter.<span class="fn">read</span>(cx).count * <span class="st">2</span>;
+    cx.<span class="fn">notify</span>();
+}).detach();</pre>
+        </div>
+
+        <p>A <code>Subscription</code> disconnects when dropped. Store it when lifetime matters; use <code>.detach()</code> only when the entities’ lifetimes are the intended lifetime. For async work, <code>cx.spawn</code> supplies a <code>WeakEntity</code> and an async context; re-enter through <code>update</code> after an <code>await</code>, because the entity may already be gone.</p>
+      </section>
+
+      <section id="practice">
+        <span class="section-kicker">06 — Working rules</span>
+        <h2>The habits that make GPUI click.</h2>
+        <div class="rules">
+          <div class="rule"><b>01</b><p>Model shared or long-lived state as an <code>Entity</code>; pass cloned handles, not copied state.</p></div>
+          <div class="rule"><b>02</b><p>Use <code>RenderOnce</code> for small prop-driven components and <code>Render</code> for stateful views.</p></div>
+          <div class="rule"><b>03</b><p>Keep <code>render</code> declarative. Put mutations in named methods or event listeners, then <code>notify</code>.</p></div>
+          <div class="rule"><b>04</b><p>Use <code>observe</code> for state invalidation and typed events for intent. Keep those concepts separate.</p></div>
+          <div class="rule"><b>05</b><p>Treat element IDs and entity IDs as identity: they anchor focus, local element state, and subtree reuse.</p></div>
+        </div>
+
+        <h3>Where these ideas come from</h3>
+        <div class="source-grid">
+          <div class="source-row"><code>README.md</code><span>The three levels: entities, declarative views, imperative elements.</span></div>
+          <div class="source-row"><code>_ownership_and_data_flow.rs</code><span>Entity ownership, reads, updates, notify/observe, and emit/subscribe.</span></div>
+          <div class="source-row"><code>view.rs</code><span>View identity, reactive boundaries, and explicit subtree caching in this fork.</span></div>
+          <div class="source-row"><code>examples/view_example/</code><span>Stateful editors composed with stateless inputs and identity-backed local state.</span></div>
+          <div class="source-row"><code>examples/hello_world.rs</code><span>The minimal application → window → root view path.</span></div>
+        </div>
+
+        <footer>Written against the local GPUI-Fork at commit ecbdbae682b · 2026-08-21</footer>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const links = [...document.querySelectorAll('nav a')];
+    const sections = links.map(link => document.querySelector(link.hash));
+    const progress = document.querySelector('.reading-progress span');
+
+    const updatePosition = () => {
+      const y = window.scrollY + window.innerHeight * 0.32;
+      let active = 0;
+      sections.forEach((section, index) => {
+        if (section && section.offsetTop <= y) active = index;
+      });
+      links.forEach((link, index) => link.classList.toggle('active', index === active));
+
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      progress.style.width = `${max > 0 ? Math.min(100, window.scrollY / max * 100) : 0}%`;
+    };
+
+    addEventListener('scroll', updatePosition, { passive: true });
+    addEventListener('resize', updatePosition);
+    updatePosition();
+  </script>
+</body>
+</html>

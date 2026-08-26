@@ -1,10 +1,18 @@
-use library_model::{project_subject_codes, unified_has_exact_source_code, PublicationSubject, UnifiedConceptDefinition};
+use publication_model::PublicationSubject;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+use subject_projection::{project_subject_codes, unified_has_exact_source_code, UnifiedConceptDefinition};
 use taxonomy_contract::{TaxonomyBatchRequest, TaxonomyBatchResponse, TaxonomyCode, TaxonomyConcept, TaxonomySystem, MAX_CODES_PER_REQUEST, MAX_CODE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use url::Url;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod cache;
+#[cfg(not(target_arch = "wasm32"))]
+pub use cache::TaxonomyCache;
 
 #[derive(Clone)]
 pub struct TaxonomyClient {
@@ -17,10 +25,37 @@ pub struct TaxonomyClient {
 struct CachedRelease {
     release_id: String,
     etag: String,
-    checked_at: Instant,
+    checked_at: ReleaseCheckedAt,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type ReleaseCheckedAt = Instant;
+#[cfg(target_arch = "wasm32")]
+type ReleaseCheckedAt = f64;
+
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn release_checked_at() -> ReleaseCheckedAt {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Instant::now()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now()
+    }
+}
+
+fn release_is_fresh(checked_at: ReleaseCheckedAt) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        checked_at.elapsed() < RELEASE_CHECK_INTERVAL
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() - checked_at < RELEASE_CHECK_INTERVAL.as_millis() as f64
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaxonomyClientError(String);
@@ -45,12 +80,10 @@ impl TaxonomyClient {
         if !matches!(base_url.scheme(), "http" | "https") || !base_url.username().is_empty() || base_url.password().is_some() || base_url.query().is_some() || base_url.fragment().is_some() {
             return Err(TaxonomyClientError::new("taxonomy server URL must be an HTTP origin or base path without credentials, query, or fragment"));
         }
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .user_agent(format!("Bokheim/{} taxonomy-client", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        let builder = reqwest::Client::builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(30));
+        let http = builder.user_agent(format!("Bokheim/{} taxonomy-client", env!("CARGO_PKG_VERSION"))).build().map_err(|error| TaxonomyClientError::new(error.to_string()))?;
         Ok(Self { http, base_url, release_cache: Arc::new(Mutex::new(None)) })
     }
 
@@ -59,7 +92,7 @@ impl TaxonomyClient {
     /// HEAD normally returns 304 without a response body.
     pub async fn current_release_id(&self) -> Result<String, TaxonomyClientError> {
         let cached = self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))?.clone();
-        if cached.as_ref().is_some_and(|cached| cached.checked_at.elapsed() < RELEASE_CHECK_INTERVAL) {
+        if cached.as_ref().is_some_and(|cached| release_is_fresh(cached.checked_at)) {
             return Ok(cached.expect("checked above").release_id);
         }
         let mut request = self.http.head(self.endpoint("v1/taxonomy")?);
@@ -71,7 +104,7 @@ impl TaxonomyClient {
             let Some(mut cached) = cached else {
                 return Err(TaxonomyClientError::new("taxonomy server returned 304 without a cached release"));
             };
-            cached.checked_at = Instant::now();
+            cached.checked_at = release_checked_at();
             let release_id = cached.release_id.clone();
             *self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))? = Some(cached);
             return Ok(release_id);
@@ -81,7 +114,7 @@ impl TaxonomyClient {
         }
         let etag = response.headers().get(reqwest::header::ETAG).and_then(|value| value.to_str().ok()).ok_or_else(|| TaxonomyClientError::new("taxonomy release check omitted its ETag"))?.to_owned();
         let release_id = etag.strip_prefix('"').and_then(|value| value.strip_suffix('"')).filter(|value| !value.is_empty()).ok_or_else(|| TaxonomyClientError::new("taxonomy release check returned an invalid ETag"))?.to_owned();
-        *self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))? = Some(CachedRelease { release_id: release_id.clone(), etag, checked_at: Instant::now() });
+        *self.release_cache.lock().map_err(|_| TaxonomyClientError::new("taxonomy release cache lock is poisoned"))? = Some(CachedRelease { release_id: release_id.clone(), etag, checked_at: release_checked_at() });
         Ok(release_id)
     }
 
@@ -95,9 +128,9 @@ impl TaxonomyClient {
             .filter(|classification| !unified_has_exact_source_code(classification.system_id(), classification.code()))
             .filter_map(|classification| {
                 let system = match classification.system_id() {
-                    library_model::BISAC_SYSTEM_ID => TaxonomySystem::Bisac,
-                    library_model::DDC_SYSTEM_ID => TaxonomySystem::Ddc,
-                    library_model::LCC_SYSTEM_ID => TaxonomySystem::Lcc,
+                    subject_projection::BISAC_SYSTEM_ID => TaxonomySystem::Bisac,
+                    subject_projection::DDC_SYSTEM_ID => TaxonomySystem::Ddc,
+                    subject_projection::LCC_SYSTEM_ID => TaxonomySystem::Lcc,
                     _ => return None,
                 };
                 Some(TaxonomyCode { system, code: classification.code().to_owned() })
@@ -130,7 +163,7 @@ impl TaxonomyClient {
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(TaxonomyClientError::new("taxonomy batch request is too large"));
         }
-        let mut response = self
+        let response = self
             .http
             .post(self.endpoint("v1/resolve")?)
             .header(reqwest::header::ACCEPT, "application/json")
@@ -148,12 +181,9 @@ impl TaxonomyClient {
         if response.content_length().is_some_and(|length| length > MAX_RESPONSE_BYTES as u64) {
             return Err(TaxonomyClientError::new("taxonomy response is too large"));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| TaxonomyClientError::new(error.to_string()))? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(TaxonomyClientError::new("taxonomy response is too large"));
-            }
-            bytes.extend_from_slice(&chunk);
+        let bytes = response.bytes().await.map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(TaxonomyClientError::new("taxonomy response is too large"));
         }
         let response: TaxonomyBatchResponse = serde_json::from_slice(&bytes).map_err(|error| TaxonomyClientError::new(error.to_string()))?;
         let actual = response.results.iter().map(|result| TaxonomyCode { system: result.system, code: result.code.clone() }).collect::<BTreeSet<_>>();
@@ -183,7 +213,7 @@ fn prepare_batches(codes: impl IntoIterator<Item = TaxonomyCode>) -> Result<Vec<
     let codes = codes
         .into_iter()
         .map(|mut code| {
-            code.code = code.code.trim().to_owned();
+            code.code = code.code.trim().to_ascii_uppercase();
             code
         })
         .collect::<BTreeSet<_>>()
@@ -250,14 +280,15 @@ pub fn concept_definitions(concepts: &[TaxonomyConcept]) -> Vec<UnifiedConceptDe
         .collect()
 }
 
-pub fn code_resolutions(response: &TaxonomyBatchResponse) -> Vec<library_model::UnifiedCodeResolution> {
-    response.results.iter().map(|result| library_model::UnifiedCodeResolution::new(result.system.as_str().to_owned(), result.code.clone(), result.matched_concept_ids.clone())).collect()
+#[cfg(not(target_arch = "wasm32"))]
+pub fn code_resolutions(response: &TaxonomyBatchResponse) -> Vec<subject_projection::UnifiedCodeResolution> {
+    response.results.iter().map(|result| subject_projection::UnifiedCodeResolution::new(result.system.as_str().to_owned(), result.code.clone(), result.matched_concept_ids.clone())).collect()
 }
 
 /// Produces a complete replacement runtime by overlaying a fetched slice on
 /// the currently installed local definitions.
 pub fn merged_runtime_definitions(concepts: &[TaxonomyConcept]) -> Vec<UnifiedConceptDefinition> {
-    let mut merged = library_model::unified_concept_definitions().into_iter().map(|concept| (concept.concept_id().to_owned(), concept)).collect::<BTreeMap<_, _>>();
+    let mut merged = subject_projection::unified_concept_definitions().into_iter().map(|concept| (concept.concept_id().to_owned(), concept)).collect::<BTreeMap<_, _>>();
     for concept in concept_definitions(concepts) {
         merged.insert(concept.concept_id().to_owned(), concept);
     }

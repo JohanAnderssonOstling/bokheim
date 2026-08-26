@@ -1,4 +1,4 @@
-//! GPUI reader windows.
+//! GPUI reader surfaces embedded by the application shell.
 
 /// Records a book-open startup phase against the `book_startup` log target.
 ///
@@ -11,8 +11,6 @@ macro_rules! startup_phase {
     };
 }
 
-mod backends;
-mod cbz_reader;
 mod epub;
 mod invalidation;
 #[cfg(feature = "pdf")]
@@ -26,12 +24,10 @@ mod windows;
 
 use gpui::actions;
 
-pub use backends::{NativeAudioBackend, NativeAudioState, NativeAudioStatus, SystemAudioBackend, SystemTtsProvider, TtsProvider, TtsState};
-pub use epub::ReaderWindowId;
-pub use epub_svelte_lib::app::preferences::PdfZoomMode;
-pub use epub_svelte_lib::app::preferences::{ReaderFontFamily, ReaderTextAlignment};
-pub use settings::{ReaderPreferences, ReaderWindowGeometry, SaveReaderSettings};
-pub use windows::{close_readers_for_library, configure, configure_audio_backend, configure_tts_provider, handle_book_removed, open_reader_window};
+pub use app_contract::preferences::PdfZoomMode;
+pub use app_contract::preferences::{ReaderFontFamily, ReaderTextAlignment};
+pub use settings::{ReaderPreferences, SaveReaderSettings};
+pub use windows::{ReaderView, ReturnToLibrary, configure};
 
 actions!(
     bokheim_reader,
@@ -60,7 +56,6 @@ actions!(
 
 pub fn bind_keys(cx: &mut gpui::App) {
     epub::render::bind_keys(cx);
-    cbz_reader::bind_cbz_keys(cx);
     #[cfg(feature = "pdf")]
     pdf_reader::bind_pdf_keys(cx);
 }
@@ -72,10 +67,10 @@ pub fn notification_counts() -> Vec<((invalidation::Component, &'static str), u6
 }
 
 #[cfg(debug_assertions)]
-pub use invalidation::{Component, ReaderPerformanceSnapshot, ReaderRepaintBudgetEvaluation, ReaderRepaintScenario};
+pub use invalidation::{Component, ReaderPerformanceSnapshot};
 
-/// Returns reader repaint and render timing measurements accumulated since the
-/// previous snapshot or reset.
+/// Returns reader invalidation and render counts accumulated since the previous
+/// reset.
 #[cfg(debug_assertions)]
 pub fn performance_snapshot() -> ReaderPerformanceSnapshot {
     invalidation::performance_snapshot()

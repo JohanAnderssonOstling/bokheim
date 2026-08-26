@@ -1,0 +1,503 @@
+package se.bokheim.reader.gpui;
+
+import android.app.Activity;
+import android.content.ClipData;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
+import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
+import android.util.Log;
+import android.view.KeyEvent;
+import android.view.WindowManager;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsAnimationCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
+import com.google.androidgamesdk.GameActivity;
+
+import org.json.JSONArray;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public final class MainActivity extends GameActivity {
+    private static final String LOG_TAG = "Bokheim";
+    private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
+    private static final String[] PUBLICATION_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
+
+    private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
+    private ActivityResultLauncher<Intent> pathPromptLauncher;
+    private PathPrompt pendingPathPrompt;
+    private volatile boolean captureVolumeButtons;
+    private boolean systemBarsVisible = true;
+    private boolean keepScreenAwake;
+    private Insets lastSafeAreaInsets;
+    private Insets lastImeInsets;
+
+    private static final class PathPrompt {
+        final long id;
+        final boolean returnFileDescriptors;
+        final boolean returnDirectoryTree;
+        final String[] extensions;
+
+        PathPrompt(long id, boolean returnFileDescriptors, boolean returnDirectoryTree, String[] extensions) {
+            this.id = id;
+            this.returnFileDescriptors = returnFileDescriptors;
+            this.returnDirectoryTree = returnDirectoryTree;
+            this.extensions = extensions;
+        }
+    }
+
+    private static final class DocumentInfo {
+        final String id;
+        final String name;
+        final String mimeType;
+
+        DocumentInfo(String id, String name, String mimeType) {
+            this.id = id;
+            this.name = name;
+            this.mimeType = mimeType;
+        }
+    }
+
+    private native void nativeSelectedFileDescriptor(long requestId, String name, int fileDescriptor);
+    private native void nativeFilePromptResult(long requestId, String error, boolean cancelled);
+    private native void nativeSelectedDirectoryRoot(long requestId, String name);
+    private native void nativeSelectedDirectoryPath(long requestId, String pathJson);
+    private native void nativeSelectedDirectoryFile(long requestId, String pathJson, String uri);
+    private native void nativeDirectoryPromptResult(long requestId, String error, boolean cancelled);
+    private native void nativeOpenPublication(String name, int fileDescriptor);
+    private native void nativeVolumeButton(boolean next);
+    private native void nativeWindowInsets(
+        int safeLeft,
+        int safeTop,
+        int safeRight,
+        int safeBottom,
+        int imeLeft,
+        int imeTop,
+        int imeRight,
+        int imeBottom
+    );
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        pathPromptLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            result -> handlePathPromptResult(result.getResultCode(), result.getData())
+        );
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        installWindowInsetsReporting();
+        applySystemBarsVisibility();
+        handleIncomingPublicationIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIncomingPublicationIntent(intent);
+    }
+
+    private void handleIncomingPublicationIntent(Intent intent) {
+        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData() == null) {
+            return;
+        }
+        Uri uri = intent.getData();
+        intent.setAction(null);
+        intent.setData(null);
+        fileExecutor.execute(() -> {
+            try {
+                String name = queryDisplayName(uri);
+                if (!matchesExtension(name, PUBLICATION_EXTENSIONS)) {
+                    Log.w(LOG_TAG, "Ignoring unsupported incoming publication " + name);
+                    return;
+                }
+                try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+                    if (descriptor == null) {
+                        throw new IOException("The document provider could not open " + name);
+                    }
+                    nativeOpenPublication(name, descriptor.detachFd());
+                }
+            } catch (Exception error) {
+                Log.e(LOG_TAG, "Could not open incoming publication", error);
+            }
+        });
+    }
+
+    public void openFilePrompt(long requestId, boolean multiple, String extensionList) {
+        if (pendingPathPrompt != null) {
+            nativeFilePromptResult(requestId, "Another path prompt is already open", false);
+            return;
+        }
+
+        String[] extensions = extensionList.isEmpty() ? new String[0] : extensionList.split("\\n");
+        pendingPathPrompt = new PathPrompt(requestId, true, false, extensions);
+        try {
+            pathPromptLauncher.launch(filePromptIntent(multiple, extensions));
+        } catch (RuntimeException error) {
+            pendingPathPrompt = null;
+            nativeFilePromptResult(requestId, error.toString(), false);
+        }
+    }
+
+    public void openDirectoryPrompt(long requestId, String extensionList) {
+        if (pendingPathPrompt != null) {
+            nativeDirectoryPromptResult(requestId, "Another path prompt is already open", false);
+            return;
+        }
+        String[] extensions = extensionList.isEmpty() ? new String[0] : extensionList.split("\\n");
+        pendingPathPrompt = new PathPrompt(requestId, false, true, extensions);
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        try {
+            pathPromptLauncher.launch(intent);
+        } catch (RuntimeException error) {
+            pendingPathPrompt = null;
+            nativeDirectoryPromptResult(requestId, error.toString(), false);
+        }
+    }
+
+    public int openDocumentDescriptor(String uriText) {
+        try {
+            ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(Uri.parse(uriText), "r");
+            return descriptor == null ? -1 : descriptor.detachFd();
+        } catch (Exception error) {
+            return -1;
+        }
+    }
+
+    public void setVolumeButtonCapture(boolean enabled) {
+        captureVolumeButtons = enabled;
+    }
+
+    public void setSystemBarsVisible(boolean visible) {
+        systemBarsVisible = visible;
+        applySystemBarsVisibility();
+    }
+
+    public void setKeepScreenAwake(boolean awake) {
+        keepScreenAwake = awake;
+        applyKeepScreenAwake();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyKeepScreenAwake();
+    }
+
+    @Override
+    protected void onPause() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        super.onPause();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        boolean isVolumeButton = keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
+        if (!captureVolumeButtons || !isVolumeButton) {
+            return super.dispatchKeyEvent(event);
+        }
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+            nativeVolumeButton(keyCode == KeyEvent.KEYCODE_VOLUME_DOWN);
+        }
+        return true;
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applySystemBarsVisibility();
+        }
+    }
+
+    private void handlePathPromptResult(int resultCode, Intent data) {
+        if (pendingPathPrompt == null) {
+            return;
+        }
+
+        PathPrompt prompt = pendingPathPrompt;
+        pendingPathPrompt = null;
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            if (prompt.returnDirectoryTree) {
+                nativeDirectoryPromptResult(prompt.id, null, true);
+            } else if (prompt.returnFileDescriptors) {
+                nativeFilePromptResult(prompt.id, null, true);
+            }
+            return;
+        }
+
+        fileExecutor.execute(() -> {
+            try {
+                if (prompt.returnDirectoryTree) {
+                    transferSelectedDirectory(prompt, data);
+                    return;
+                } else if (prompt.returnFileDescriptors) {
+                    transferSelectedFileDescriptors(prompt, data);
+                    return;
+                }
+            } catch (Exception error) {
+                if (prompt.returnDirectoryTree) {
+                    nativeDirectoryPromptResult(prompt.id, error.toString(), false);
+                } else if (prompt.returnFileDescriptors) {
+                    nativeFilePromptResult(prompt.id, error.toString(), false);
+                }
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        fileExecutor.shutdownNow();
+        super.onDestroy();
+    }
+
+    private void applySystemBarsVisibility() {
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        if (systemBarsVisible) {
+            controller.show(WindowInsetsCompat.Type.systemBars());
+        } else {
+            controller.hide(WindowInsetsCompat.Type.systemBars());
+        }
+    }
+
+    private void installWindowInsetsReporting() {
+        android.view.View decorView = getWindow().getDecorView();
+        ViewCompat.setOnApplyWindowInsetsListener(decorView, (view, insets) -> {
+            publishWindowInsets(insets);
+            return insets;
+        });
+        ViewCompat.setWindowInsetsAnimationCallback(
+            decorView,
+            new WindowInsetsAnimationCompat.Callback(
+                WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE
+            ) {
+                @Override
+                public WindowInsetsCompat onProgress(
+                    WindowInsetsCompat insets,
+                    List<WindowInsetsAnimationCompat> runningAnimations
+                ) {
+                    publishWindowInsets(insets);
+                    return insets;
+                }
+            }
+        );
+        ViewCompat.requestApplyInsets(decorView);
+    }
+
+    private void publishWindowInsets(WindowInsetsCompat insets) {
+        Insets safeArea = insets.getInsets(
+            WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+        );
+        Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+        if (safeArea.equals(lastSafeAreaInsets) && ime.equals(lastImeInsets)) {
+            return;
+        }
+        lastSafeAreaInsets = safeArea;
+        lastImeInsets = ime;
+        nativeWindowInsets(
+            safeArea.left,
+            safeArea.top,
+            safeArea.right,
+            safeArea.bottom,
+            ime.left,
+            ime.top,
+            ime.right,
+            ime.bottom
+        );
+    }
+
+    private void applyKeepScreenAwake() {
+        if (keepScreenAwake) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    private void transferSelectedFileDescriptors(PathPrompt prompt, Intent data) throws IOException {
+        for (Uri uri : selectedFileUris(data)) {
+            String name = queryDisplayName(uri);
+            try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+                if (descriptor == null) {
+                    throw new IOException("The document provider could not open " + name);
+                }
+                nativeSelectedFileDescriptor(prompt.id, name, descriptor.detachFd());
+            }
+        }
+        nativeFilePromptResult(prompt.id, null, false);
+    }
+
+    private void transferSelectedDirectory(PathPrompt prompt, Intent data) throws IOException {
+        Uri treeUri = data.getData();
+        if (treeUri == null) {
+            throw new IOException("The document provider returned no directory");
+        }
+        String rootId = DocumentsContract.getTreeDocumentId(treeUri);
+        Uri rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId);
+        DocumentInfo root = queryDocument(rootUri);
+        nativeSelectedDirectoryRoot(prompt.id, root.name);
+        collectDirectoryTree(prompt, treeUri, root.id, new ArrayList<>(), new LinkedHashSet<>());
+        nativeDirectoryPromptResult(prompt.id, null, false);
+    }
+
+    private void collectDirectoryTree(PathPrompt prompt, Uri treeUri, String parentDocumentId, List<String> parentPath, Set<String> visitedDirectories) throws IOException {
+        if (!visitedDirectories.add(parentDocumentId)) {
+            return;
+        }
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId);
+        String[] projection = {
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        };
+        try (Cursor cursor = getContentResolver().query(childrenUri, projection, null, null, null)) {
+            if (cursor == null) {
+                throw new IOException("The document provider could not list " + parentDocumentId);
+            }
+            while (cursor.moveToNext()) {
+                DocumentInfo child = documentInfo(cursor);
+                List<String> path = new ArrayList<>(parentPath);
+                path.add(child.name);
+                JSONArray pathJson = new JSONArray(path);
+                if (DIRECTORY_MIME.equals(child.mimeType)) {
+                    nativeSelectedDirectoryPath(prompt.id, pathJson.toString());
+                    collectDirectoryTree(prompt, treeUri, child.id, path, visitedDirectories);
+                } else if (matchesExtension(child.name, prompt.extensions)) {
+                    Uri childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.id);
+                    nativeSelectedDirectoryFile(prompt.id, pathJson.toString(), childUri.toString());
+                }
+            }
+        }
+    }
+
+    private static boolean matchesExtension(String name, String[] extensions) {
+        if (extensions.length == 0) {
+            return true;
+        }
+        int separator = name.lastIndexOf('.');
+        if (separator < 0 || separator == name.length() - 1) {
+            return false;
+        }
+        String extension = name.substring(separator + 1).toLowerCase(Locale.ROOT);
+        for (String accepted : extensions) {
+            if (extension.equals(accepted.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Set<Uri> selectedFileUris(Intent data) throws IOException {
+        Set<Uri> uris = new LinkedHashSet<>();
+        if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int index = 0; index < clipData.getItemCount(); index++) {
+                uris.add(clipData.getItemAt(index).getUri());
+            }
+        }
+        if (uris.isEmpty()) {
+            throw new IOException("The document provider returned no files");
+        }
+        return uris;
+    }
+
+    private DocumentInfo queryDocument(Uri uri) throws IOException {
+        String[] projection = {
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        };
+        try (Cursor cursor = getContentResolver().query(uri, projection, null, null, null)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                throw new IOException("The document provider returned no metadata for " + uri);
+            }
+            return documentInfo(cursor);
+        }
+    }
+
+    private static DocumentInfo documentInfo(Cursor cursor) throws IOException {
+        String id = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID));
+        String name = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME));
+        String mime = cursor.getString(cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE));
+        if (name == null || name.isEmpty()) {
+            throw new IOException("The document provider returned an empty filename");
+        }
+        return new DocumentInfo(id, name, mime);
+    }
+
+    private String queryDisplayName(Uri uri) throws IOException {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                throw new IOException("The document provider returned no filename for " + uri);
+            }
+            String name = cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME));
+            if (name == null || name.isEmpty()) {
+                throw new IOException("The document provider returned an empty filename");
+            }
+            return name;
+        }
+    }
+
+    private static String[] mimeTypesFor(String[] extensions) {
+        Set<String> mimeTypes = new LinkedHashSet<>();
+        for (String extension : extensions) {
+            switch (extension.toLowerCase(Locale.ROOT)) {
+                case "epub":
+                    mimeTypes.add("application/epub+zip");
+                    break;
+                case "pdf":
+                    mimeTypes.add("application/pdf");
+                    break;
+                case "mobi":
+                    mimeTypes.add("application/x-mobipocket-ebook");
+                    break;
+                case "azw":
+                case "azw3":
+                    mimeTypes.add("application/vnd.amazon.ebook");
+                    mimeTypes.add("application/x-mobi8-ebook");
+                    break;
+                case "m4b":
+                    mimeTypes.add("audio/mp4");
+                    mimeTypes.add("audio/x-m4b");
+                    break;
+                default:
+                    break;
+            }
+        }
+        return mimeTypes.toArray(new String[0]);
+    }
+
+    private static Intent filePromptIntent(boolean multiple, String[] extensions) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        String[] mimeTypes = mimeTypesFor(extensions);
+        intent.setType(mimeTypes.length == 1 ? mimeTypes[0] : "*/*");
+        if (mimeTypes.length > 1) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+        }
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+        return intent;
+    }
+}

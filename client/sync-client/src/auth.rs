@@ -55,6 +55,51 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
+/// Control-flow relevant failures from synchronization endpoints. Account
+/// APIs retain `AuthError`; sync callers should never need to inspect an HTTP
+/// status or downcast an erased error to decide whether to refresh or recover.
+#[derive(Debug)]
+pub enum SyncRequestError {
+    AuthenticationRequired,
+    CursorRejected,
+    EndpointNotFound,
+    Retryable(AuthError),
+    InvalidResponse(AuthError),
+}
+
+impl std::fmt::Display for SyncRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
+            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected"),
+            Self::EndpointNotFound => formatter.write_str("the synchronization endpoint was not found"),
+            Self::Retryable(error) | Self::InvalidResponse(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SyncRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Retryable(error) | Self::InvalidResponse(error) => Some(error),
+            Self::AuthenticationRequired | Self::CursorRejected | Self::EndpointNotFound => None,
+        }
+    }
+}
+
+impl From<AuthError> for SyncRequestError {
+    fn from(error: AuthError) -> Self {
+        match error {
+            AuthError::BadStatus(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN, _) => Self::AuthenticationRequired,
+            AuthError::BadStatus(reqwest::StatusCode::GONE, _) => Self::CursorRejected,
+            AuthError::BadStatus(reqwest::StatusCode::NOT_FOUND, _) => Self::EndpointNotFound,
+            AuthError::Network(error) => Self::Retryable(AuthError::Network(error)),
+            AuthError::BadStatus(status, message) if status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT || status == reqwest::StatusCode::TOO_MANY_REQUESTS => Self::Retryable(AuthError::BadStatus(status, message)),
+            error => Self::InvalidResponse(error),
+        }
+    }
+}
+
 impl AuthError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::NOT_FOUND)
@@ -62,14 +107,6 @@ impl AuthError {
 
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::UNAUTHORIZED)
-    }
-
-    pub fn is_cursor_rejected(&self) -> bool {
-        matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::GONE)
-    }
-
-    pub fn is_authentication_failure(&self) -> bool {
-        matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::UNAUTHORIZED || *status == reqwest::StatusCode::FORBIDDEN)
     }
 }
 
@@ -345,21 +382,21 @@ pub async fn delete_library(session: &Session, library_id: &sync_common::Library
     receive_api(reqwest::Client::builder().build()?.delete(session.server_url.endpoint(&format!("api/libraries/{library_id}"))).bearer_auth(&session.token)).await
 }
 
-pub async fn negotiate_blobs(client: &reqwest::Client, session: &Session, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, AuthError> {
+pub async fn negotiate_blobs(client: &reqwest::Client, session: &Session, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, SyncRequestError> {
     let request = BlobManifestRequest { blobs };
     let response: BlobManifestResponse = send_api(client.post(session.server_url.endpoint(&format!("api/libraries/{library_id}/blobs/negotiate"))).bearer_auth(&session.token), &request).await?;
     validate_blob_manifest_response(&request, &response).map_err(|error| AuthError::InvalidData(error.to_string()))?;
     Ok(response)
 }
 
-pub async fn exchange_changes(client: &reqwest::Client, session: &Session, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::WireMutation>, cursor: SyncCursor) -> Result<SyncExchangeResponse, AuthError> {
+pub async fn exchange_changes(client: &reqwest::Client, session: &Session, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::WireMutation>, cursor: SyncCursor) -> Result<SyncExchangeResponse, SyncRequestError> {
     let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor };
-    post_api(client, session, "api/sync/exchange", &request).await
+    Ok(post_api(client, session, "api/sync/exchange", &request).await?)
 }
 
-pub async fn compare_state_inventory(client: &reqwest::Client, session: &Session, library_id: LibraryId, cells: Vec<sync_common::StateCell>) -> Result<StateInventoryResponse, AuthError> {
+pub async fn compare_state_inventory(client: &reqwest::Client, session: &Session, library_id: LibraryId, cells: Vec<sync_common::StateCell>) -> Result<StateInventoryResponse, SyncRequestError> {
     let request = StateInventoryRequest { library_id, cells };
-    post_api(client, session, "api/sync/inventory", &request).await
+    Ok(post_api(client, session, "api/sync/inventory", &request).await?)
 }
 
 async fn post_api<T: Serialize, R: DeserializeOwned>(client: &reqwest::Client, session: &Session, path: &str, value: &T) -> Result<R, AuthError> {
@@ -403,11 +440,12 @@ mod tests {
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
-    fn gone_is_recognized_only_as_a_rejected_sync_cursor() {
-        let gone = AuthError::BadStatus(reqwest::StatusCode::GONE, String::new());
-        let conflict = AuthError::BadStatus(reqwest::StatusCode::CONFLICT, String::new());
-        assert!(gone.is_cursor_rejected());
-        assert!(!conflict.is_cursor_rejected());
+    fn sync_request_failures_are_closed_control_flow_categories() {
+        assert!(matches!(SyncRequestError::from(AuthError::BadStatus(reqwest::StatusCode::UNAUTHORIZED, String::new())), SyncRequestError::AuthenticationRequired));
+        assert!(matches!(SyncRequestError::from(AuthError::BadStatus(reqwest::StatusCode::GONE, String::new())), SyncRequestError::CursorRejected));
+        assert!(matches!(SyncRequestError::from(AuthError::BadStatus(reqwest::StatusCode::NOT_FOUND, String::new())), SyncRequestError::EndpointNotFound));
+        assert!(matches!(SyncRequestError::from(AuthError::BadStatus(reqwest::StatusCode::TOO_MANY_REQUESTS, String::new())), SyncRequestError::Retryable(_)));
+        assert!(matches!(SyncRequestError::from(AuthError::BadStatus(reqwest::StatusCode::UNPROCESSABLE_ENTITY, String::new())), SyncRequestError::InvalidResponse(_)));
     }
 
     #[tokio::test]
@@ -587,7 +625,7 @@ mod tests {
 
         let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), sync_mutations(1), SyncCursor::default()).await;
 
-        assert!(matches!(response, Err(AuthError::BadStatus(reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE, _))));
+        assert!(matches!(response, Err(SyncRequestError::InvalidResponse(AuthError::BadStatus(reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE, _)))));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         server.abort();
     }
@@ -606,7 +644,7 @@ mod tests {
 
         let response = exchange_changes(&reqwest::Client::new(), &sync_session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), Vec::new(), SyncCursor::default()).await;
 
-        assert!(matches!(response, Err(AuthError::InvalidData(message)) if message.contains("unsupported API response content type: application/json")));
+        assert!(matches!(response, Err(SyncRequestError::InvalidResponse(AuthError::InvalidData(message))) if message.contains("unsupported API response content type: application/json")));
         server.abort();
     }
 }

@@ -1,20 +1,21 @@
 use super::{
-    active_generation_in, active_generation_optional, ensure_source_in, materialize_page, next_sequence_in, normalize_search_text, page_layout, params, publication_extraction, queue_publication_extraction, refresh_active_counts,
-    source_state_connection, upsert_active_prepared_publication, upsert_publication_with_sequence, CachedCatalogPage, CatalogCache, CatalogCacheError, CatalogDescription, CatalogLinkTarget, CatalogPage, CatalogPageResponse,
-    CatalogPageWrite, CatalogPublication, CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchMatches, CatalogSearchResponse, CatalogSourceId, Connection, HashMap, HashSet, OptionalExtension,
-    PreparedCatalogPageWrite, SequencedCatalogPublication, Transaction, TransactionBehavior,
+    active_generation_in, active_generation_optional, advance_catalog_transport_revision, ensure_source_in, materialize_page, merge_catalog_publication_metadata, next_sequence_in, normalize_search_text, page_layout, params,
+    publication_extraction, queue_publication_extraction, refresh_active_counts, source_state_connection, upsert_active_prepared_publication, upsert_publication_with_sequence, CachedCatalogPage, CatalogCache, CatalogCacheError,
+    CatalogDescription, CatalogLinkTarget, CatalogPage, CatalogPageResponse, CatalogPageWrite, CatalogPublication, CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchMatches,
+    CatalogSearchResponse, CatalogSourceId, Connection, HashMap, HashSet, OptionalExtension, PreparedCatalogPageWrite, SequencedCatalogPublication, Transaction, TransactionBehavior,
 };
 
 impl CatalogCache {
     /// Stores a directly fetched page into the active local generation.
     pub fn put_page(&self, source_id: &CatalogSourceId, source_url: &str, page: &CatalogPage, etag: Option<&str>, last_modified: Option<&str>) -> Result<(), CatalogCacheError> {
-        let prepared = Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned) }])?;
+        let prepared = Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned), provider_paginated: false }])?;
         let mut connection = self.pool.get()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_source_in(&transaction, source_id, source_url)?;
         let generation = active_generation_in(&transaction, source_id)?;
         put_prepared_page_rows(&transaction, source_id, generation, &prepared)?;
         refresh_active_counts(&transaction, source_id, generation)?;
+        advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -40,6 +41,7 @@ impl CatalogCache {
         ensure_source_in(&transaction, source_id, source_url)?;
         let generation = active_generation_in(&transaction, source_id)?;
         put_prepared_page_rows(&transaction, source_id, generation, pages)?;
+        advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -50,10 +52,10 @@ impl CatalogCache {
             return Ok(None);
         };
         connection
-            .query_row("SELECT payload, etag, last_modified FROM catalog_page WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), storage_i64(generation, "generation")?, locator], |row| {
+            .query_row("SELECT payload, etag, last_modified, provider_paginated FROM catalog_page WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), storage_i64(generation, "generation")?, locator], |row| {
                 let payload: Vec<u8> = row.get(0)?;
                 let page = decode_page(&payload).map_err(sql_decode_error)?;
-                Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)? })
+                Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)?, provider_paginated: row.get(3)? })
             })
             .optional()
             .map_err(Into::into)
@@ -130,6 +132,7 @@ impl CatalogCache {
             publication.languages = enriched.languages;
             publication.description = enriched.description;
             publication.image_url = enriched.image_url;
+            merge_catalog_publication_metadata(&mut publication.metadata, &enriched.metadata);
         }
         Ok(())
     }
@@ -139,9 +142,18 @@ impl CatalogCache {
         let Some(generation) = active_generation_optional(&connection, source_id)? else { return Ok(None) };
         let payload = connection
             .query_row(
-                "SELECT payload FROM catalog_publication
-                 WHERE source_id=?1 AND generation=?2 AND cover_url=?3
-                 ORDER BY edition_id,work_id LIMIT 1",
+                "SELECT payload FROM (
+                     SELECT publication.payload,publication.edition_id,publication.work_id,0 AS priority
+                     FROM catalog_publication publication
+                     WHERE publication.source_id=?1 AND publication.generation=?2 AND publication.cover_url=?3
+                     UNION ALL
+                     SELECT publication.payload,publication.edition_id,publication.work_id,1 AS priority
+                     FROM catalog_cover_download cover
+                     JOIN catalog_publication publication
+                       ON publication.source_id=cover.source_id AND publication.generation=cover.catalog_generation
+                      AND publication.edition_id=cover.edition_id AND publication.work_id=cover.work_id
+                     WHERE cover.source_id=?1 AND cover.catalog_generation=?2 AND cover.image_url=?3
+                 ) ORDER BY priority,edition_id,work_id LIMIT 1",
                 params![source_id.as_str(), storage_i64(generation, "generation")?, cover_url],
                 |row| row.get::<_, Vec<u8>>(0),
             )
@@ -155,13 +167,13 @@ impl CatalogCache {
             return Ok(Vec::new());
         };
         let mut statement = connection.prepare(
-            "SELECT payload, etag, last_modified FROM catalog_page
+            "SELECT payload, etag, last_modified, provider_paginated FROM catalog_page
              WHERE source_id=?1 AND generation=?2 ORDER BY locator",
         )?;
         let rows = statement.query_map(params![source_id.as_str(), storage_i64(generation, "generation")?], |row| {
             let payload: Vec<u8> = row.get(0)?;
             let page = decode_page(&payload).map_err(sql_decode_error)?;
-            Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)? })
+            Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)?, provider_paginated: row.get(3)? })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -381,7 +393,7 @@ impl CatalogCache {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_source_in(&transaction, source_id, source_url)?;
         let generation = active_generation_in(&transaction, source_id)?;
-        put_page_row(&transaction, source_id, generation, page, &page_payload, None, None)?;
+        put_page_row(&transaction, source_id, generation, page, &page_payload, None, None, false)?;
         for publication in unique_page_publications(page) {
             let sequence =
                 supplied.get(&publication.identity).copied().or_else(|| sequence_in(&transaction, source_id, generation, &publication.identity).ok().flatten()).ok_or_else(|| CatalogCacheError::new("publication sequence is unavailable"))?;
@@ -393,11 +405,13 @@ impl CatalogCache {
     }
 }
 
-pub(crate) fn put_page_row(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, page: &CatalogPage, payload: &[u8], etag: Option<&str>, last_modified: Option<&str>) -> Result<(), CatalogCacheError> {
+pub(crate) fn put_page_row(
+    transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, page: &CatalogPage, payload: &[u8], etag: Option<&str>, last_modified: Option<&str>, provider_paginated: bool,
+) -> Result<(), CatalogCacheError> {
     transaction.execute(
-        "INSERT INTO catalog_page(source_id, generation, locator, payload, etag, last_modified) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(source_id, generation, locator) DO UPDATE SET payload=excluded.payload, etag=excluded.etag, last_modified=excluded.last_modified",
-        params![source_id.as_str(), storage_i64(generation, "generation")?, page.locator, payload, etag, last_modified],
+        "INSERT INTO catalog_page(source_id, generation, locator, payload, etag, last_modified, provider_paginated) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(source_id, generation, locator) DO UPDATE SET payload=excluded.payload, etag=excluded.etag, last_modified=excluded.last_modified,provider_paginated=excluded.provider_paginated",
+        params![source_id.as_str(), storage_i64(generation, "generation")?, page.locator, payload, etag, last_modified, provider_paginated],
     )?;
     replace_page_links(transaction, source_id.as_str(), storage_i64(generation, "generation")?, &page.locator, page)?;
     Ok(())
@@ -405,7 +419,7 @@ pub(crate) fn put_page_row(transaction: &Transaction<'_>, source_id: &CatalogSou
 
 pub(crate) fn put_prepared_page_rows(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogCacheError> {
     for prepared_page in pages {
-        put_page_row(transaction, source_id, generation, &prepared_page.write.page, &prepared_page.payload, prepared_page.write.etag.as_deref(), prepared_page.write.last_modified.as_deref())?;
+        put_page_row(transaction, source_id, generation, &prepared_page.write.page, &prepared_page.payload, prepared_page.write.etag.as_deref(), prepared_page.write.last_modified.as_deref(), prepared_page.write.provider_paginated)?;
         for publication in &prepared_page.publications {
             upsert_active_prepared_publication(transaction, source_id, generation, publication)?;
             queue_publication_extraction(transaction, source_id, generation, &publication.publication, false)?;
@@ -434,10 +448,10 @@ pub(crate) fn replace_page_links(transaction: &Transaction<'_>, source_id: &str,
 
 pub(crate) fn page_in(connection: &Connection, source_id: &CatalogSourceId, generation: u64, locator: &str) -> Result<Option<CachedCatalogPage>, CatalogCacheError> {
     connection
-        .query_row("SELECT payload, etag, last_modified FROM catalog_page WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), storage_i64(generation, "generation")?, locator], |row| {
+        .query_row("SELECT payload, etag, last_modified, provider_paginated FROM catalog_page WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), storage_i64(generation, "generation")?, locator], |row| {
             let payload: Vec<u8> = row.get(0)?;
             let page = decode_page(&payload).map_err(sql_decode_error)?;
-            Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)? })
+            Ok(CachedCatalogPage { page, etag: row.get(1)?, last_modified: row.get(2)?, provider_paginated: row.get(3)? })
         })
         .optional()
         .map_err(Into::into)
@@ -513,7 +527,15 @@ pub(crate) fn sort_page_publications_by_popularity(page: &mut CatalogPage, popul
     }
 }
 
-pub(crate) fn project_gutenberg_download_count(publication: &CatalogPublication) -> Option<u64> {
+pub(crate) fn project_provider_popularity(publication: &CatalogPublication) -> Option<u64> {
+    if let Some(count) = publication.metadata.interactions.iter().find(|statistic| statistic.source == "litteraturbanken:epub_popularity" || statistic.interaction_type == "litteraturbanken:epub-popularity").map(|statistic| statistic.count)
+    {
+        return Some(count);
+    }
+    project_gutenberg_download_count(publication)
+}
+
+fn project_gutenberg_download_count(publication: &CatalogPublication) -> Option<u64> {
     if !publication.identity.edition_id.starts_with("urn:gutenberg:") {
         return None;
     }

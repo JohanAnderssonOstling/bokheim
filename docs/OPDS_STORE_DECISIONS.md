@@ -17,8 +17,19 @@ Catalog support is split by responsibility:
 - `shared/catalog-core` owns behavior shared by both providers: normalization,
   SQLite storage, language filtering, OPDS-to-contract conversion, and cover
   thumbnails.
-- `client/catalog-client` composes the internal cache provider with direct OPDS
-  fallback and persists only catalog data the client has encountered.
+- `client/catalog-client` talks only to the catalogue server for curated source
+  discovery, pages, searches, covers, and acquisitions. Its SQLite cache holds
+  only catalogue data the client has encountered and remains available for
+  offline page and search display. The server registry is authoritative: before
+  the first registry sync the client exposes no sources, and it never merges in
+  bundled source definitions as a fallback. GPUI refreshes the registry in the
+  background at startup; a first-run subject refresh waits for that registry if
+  none is cached. Cover and acquisition authorization remains server-side, so
+  stale subject cards are not rejected against a temporarily empty local registry.
+  The active client registry persists the provider-neutral `CatalogSource`
+  records returned by `/api/catalog/sources`, together with opaque root
+  locators used only in server requests. OPDS endpoint identities, origin
+  canonicalization, and provider URL policy remain server responsibilities.
 - `servers/opds-cache` crawls curated external catalogs and serves its complete
   local SQLite snapshot. It never contacts an upstream catalog on a user search
   or page request.
@@ -49,6 +60,24 @@ publication sequences they already know. The server returns page/search layout
 plus only the changed or missing publication payloads. The server never keeps
 per-client state and the client is not required to store the complete catalog.
 
+Provider page compaction applies only to catalogue-page navigation. During
+ingestion the server follows an upstream continuation chain and stores it as
+one complete logical page; clients download and cache that page without a
+catalogue range or provider-pagination contract.
+Subject navigation instead synchronizes the complete descendant collection for
+one opaque subject locator in bounded transport chunks. Native and browser
+clients atomically replace that locator's membership in local SQLite, reuse
+unchanged publication payloads only when both epoch and revision match, and
+remove memberships no longer returned by the server. Search, source/language/
+format filters, facets, sorting, and UI ranges are then evaluated locally; they
+are not part of the network cache identity.
+
+A synchronized subject collection is reused without a request for five minutes.
+After that freshness window, the client fetches only the collection manifest's
+epoch and revision. It downloads and atomically replaces the collection only
+when that version changed. The server does not expose a subject endpoint that
+accepts client query, filter, sort, or range state.
+
 ## Search
 
 Catalog and local-library searches share one text normalizer. Matching is
@@ -62,12 +91,12 @@ author matches that did not already match the title. There is no result-count
 limit. Catalog search is served from SQLite and never calls an external OPDS
 source on the request path.
 
-Clients display local cached matches immediately while refreshing from the
-selected provider. A successful refresh replaces the displayed results; a
-refresh failure leaves the cached results in place without displaying a
-"could not refresh" message. If the internal cache server is unavailable or
-access policy later prevents its use, curated sources fall back to their direct
-OPDS search endpoint. Custom sources are always direct.
+Clients can display local cached matches immediately while refreshing from the
+catalogue server. A successful refresh replaces the displayed results; a
+refresh failure leaves any cached results in place. The native Store does not
+contact external OPDS endpoints directly. Catalog sources are exclusively
+managed by the catalogue server registry; device-local sources are not
+supported.
 
 ## Languages
 
@@ -93,13 +122,12 @@ does not wait for cover processing, and failed covers are retried on a later
 crawl.
 
 The catalog cache server persistently stores metadata and covers only. Native
-imports perform fresh verification and download directly from the external
-OPDS catalogue. Browser imports use a public, bounded acquisition endpoint:
-the server re-fetches the registered page, validates the source, publication,
-exact download URL, free acquisition kind, and format, then streams a temporary
-download to the browser without retaining it. The endpoint cannot proxy an
+and browser imports use public, bounded acquisition endpoints: the server
+re-fetches the registered page, validates the source, publication, exact
+download URL, free acquisition kind, and format, then streams a temporary
+download to the client without retaining it. The endpoint cannot proxy an
 arbitrary URL and limits concurrent upstream acquisitions. EPUB,
-PDF, MOBI/AZW/AZW3, FB2, CBZ, WebPub, and M4B acquisitions are represented by
+PDF, MOBI/AZW/AZW3, and M4B acquisitions are represented by
 the neutral contract; actual import remains subject to the local library's
 supported formats and acquisition policy.
 
@@ -109,5 +137,6 @@ The internal service is public and unauthenticated today. Native structured
 requests use the versioned Bokheim protobuf media type with identity encoding
 only. Browsers use a JSON façade and explicit CORS preflight support. Content
 compression and the former HTTP response-cache layer are not supported.
-Registry responses retain normal HTTP ETag handling. External OPDS traffic
-remains standards-compliant XML or JSON.
+Registry responses retain normal HTTP ETag handling. Only the catalogue server
+contacts external catalogue providers; that upstream OPDS traffic remains
+standards-compliant XML or JSON.

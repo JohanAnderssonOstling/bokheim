@@ -79,7 +79,7 @@
         locator,
         sourceIds,
         query.trim(),
-        48,
+        { offset: 0, limit: 48 },
       );
       browse = view;
       ownership = ownedEditions(view.owned_publications);
@@ -177,7 +177,6 @@
       onselect={openLink}
       onopensource={() => goto("/store")}
       onaction={addBook}
-      onpage={(locator) => loadSubjects(locator)}
     />
   {:else if loading}
     <p>Loading subjects…</p>

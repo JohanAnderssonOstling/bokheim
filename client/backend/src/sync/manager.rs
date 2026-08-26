@@ -1,25 +1,44 @@
-#![allow(clippy::too_many_arguments)]
-
-use super::transfer::{TransferJob, TransferOrigin, TransferQueue, TransferRuntime, TransferWorker};
+#[cfg(test)]
+use super::asset_sync::should_download_thumbnail;
+use super::asset_sync::{AssetSyncConfig, AssetSyncEngine};
+#[cfg(test)]
+use super::error::SyncError;
+use super::error::SyncResult;
+use super::filesystem::FilesystemProjector;
+#[cfg(test)]
+use super::state_sync::{StateExchangeResult, StateSyncResult, CURSOR_RECOVERY_PENDING_KEY};
+use super::state_sync::{StateSyncConfig, StateSyncEngine};
+#[cfg(test)]
+use super::transfer::TransferJob;
+use super::transfer::{TransferOrigin, TransferQueue, TransferRuntime, TransferWorker, TransferWorkerConfig};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
+#[cfg(test)]
+use crate::BlobKind;
+#[cfg(test)]
 use crate::RelativeDirPath;
-use crate::{BlobKind, BookPlacement, ContentHash, RelativeBookPath, ServerUrl};
+use crate::{ContentHash, ServerUrl};
 use crossbeam_channel::Sender;
-use library_replica::{coalesce_mutations_for_push, MutationBody, StateMutation};
+#[cfg(test)]
+use library_replica::coalesce_mutations_for_push;
+#[cfg(test)]
+use library_replica::{mutations_ready_for_push, prepare_push};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use sync_common::api::assets::{BlobManifestEntry, BlobManifestResponse, MAX_BLOB_MANIFEST_ENTRIES};
+#[cfg(test)]
+use sync_client::{validate_pull_batch, validate_push_response, PushResponseError};
+#[cfg(test)]
+use sync_common::api::assets::BlobManifestEntry;
 #[cfg(test)]
 use sync_common::SyncExchangeResponse;
-use sync_common::{DirId, LibraryId, PullStateResponse, PushMutationsResponse, ReplicaId};
-
-use sync_client::{validate_pull_batch, validate_push_response, PushResponseError};
+#[cfg(test)]
+use sync_common::{DirId, PullStateResponse, PushMutationsResponse};
+use sync_common::{LibraryId, ReplicaId};
 
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 
@@ -45,93 +64,22 @@ pub(crate) struct SyncPolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SyncOutcome {
     pub next_reading_upload_in: Option<Duration>,
-    pub deferred_mutations: Vec<sync_common::MutationRejection>,
-}
-
-const CURSOR_RECOVERY_PENDING_KEY: &str = "cursor_recovery_pending";
-
-fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce: Option<Duration>, now: std::time::SystemTime) -> Result<(Vec<StateMutation>, Option<Duration>), Box<dyn std::error::Error>> {
-    let Some(reading_debounce) = reading_debounce else {
-        return Ok((mutations, None));
-    };
-    let latest_reading_change = mutations.iter().filter(|mutation| matches!(mutation.body, MutationBody::ReadingPosition { .. })).map(|mutation| mutation.changed_at).max();
-    let Some(latest_reading_change) = latest_reading_change else {
-        return Ok((mutations, None));
-    };
-    let now_millis = u64::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
-    if latest_reading_change > now_millis.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "local reading-position timestamp is pathologically far in the future").into());
-    }
-    let debounce_millis = u64::try_from(reading_debounce.as_millis())?;
-    let ready_at = latest_reading_change.saturating_add(debounce_millis);
-    if ready_at <= now_millis {
-        return Ok((mutations, None));
-    }
-    mutations.retain(|mutation| !matches!(mutation.body, MutationBody::ReadingPosition { .. }));
-    Ok((mutations, Some(Duration::from_millis(ready_at - now_millis))))
-}
-
-/// A mutation paired with the wire form that will actually be transmitted.
-/// Both the page budget and the service's own request limit are expressed in
-/// transmitted bytes, so the size is measured there rather than on the local
-/// representation, and the encoding is kept for the request itself.
-struct PendingPush {
-    mutation: StateMutation,
-    wire: sync_common::WireMutation,
-    encoded_bytes: usize,
-}
-
-impl PendingPush {
-    fn encode(mutation: StateMutation) -> Result<Self, Box<dyn std::error::Error>> {
-        let wire = mutation.to_wire()?;
-        let encoded_bytes = sync_common::transport::encode(&wire)?.len();
-        Ok(Self { mutation, wire, encoded_bytes })
-    }
-
-    fn exceeds_a_whole_page(&self) -> bool {
-        self.encoded_bytes > sync_common::MAX_PUSH_MUTATION_BYTES
-    }
-}
-
-/// Separates mutations that can be transmitted from those no page can carry.
-///
-/// A mutation larger than a whole page is refused by the service's request
-/// limit however it is batched, and the client cannot page around it. Left at
-/// the head of the queue it would fail every exchange and block every later
-/// mutation behind it indefinitely. It is set aside so the rest continues to
-/// synchronize, but deliberately left in the outbox: acknowledging it would
-/// diverge this replica from the server with nothing left to notice.
-fn partition_transmittable(changes: Vec<StateMutation>) -> Result<(VecDeque<PendingPush>, Vec<sync_common::MutationId>), Box<dyn std::error::Error>> {
-    let mut transmittable = VecDeque::with_capacity(changes.len());
-    let mut set_aside = Vec::new();
-    for change in changes {
-        let pending = PendingPush::encode(change)?;
-        if pending.exceeds_a_whole_page() {
-            set_aside.push(pending.mutation.mutation_id);
-        } else {
-            transmittable.push_back(pending);
-        }
-    }
-    Ok((transmittable, set_aside))
-}
-
-fn take_push_page(mutations: &mut VecDeque<PendingPush>) -> Vec<PendingPush> {
-    let mut page = Vec::with_capacity(sync_common::MAX_PUSH_MUTATIONS.min(mutations.len()));
-    let mut encoded_bytes = 0_usize;
-    while page.len() < sync_common::MAX_PUSH_MUTATIONS {
-        let Some(next) = mutations.front() else { break };
-        // Nothing in the queue exceeds a whole page, so the first mutation
-        // always fits and the page can never come back empty.
-        if !page.is_empty() && encoded_bytes.saturating_add(next.encoded_bytes) > sync_common::MAX_PUSH_MUTATION_BYTES {
-            break;
-        }
-        encoded_bytes = encoded_bytes.saturating_add(next.encoded_bytes);
-        page.push(mutations.pop_front().expect("the inspected mutation is still queued"));
-    }
-    page
+    pub mutation_issues: Vec<sync_common::MutationIssue>,
 }
 
 pub type DbPool = Pool<SqliteConnectionManager>;
+
+pub(crate) struct SyncManagerConfig {
+    pub(crate) db_pool: DbPool,
+    pub(crate) replica_id: ReplicaId,
+    pub(crate) server_url: ServerUrl,
+    pub(crate) library_id: LibraryId,
+    pub(crate) library_root: PathBuf,
+    pub(crate) session_path: PathBuf,
+    pub(crate) event_tx: Option<Sender<LibraryEvent>>,
+    pub(crate) transfer_runtime: TransferRuntime,
+    pub(crate) pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
+}
 
 #[derive(Debug)]
 pub struct SyncManager {
@@ -152,25 +100,22 @@ pub struct SyncManager {
 }
 
 impl SyncManager {
-    pub(crate) fn new(
-        db_pool: DbPool, replica_id: ReplicaId, server_url: ServerUrl, library_id: LibraryId, library_root: PathBuf, session_path: PathBuf, event_tx: Option<Sender<LibraryEvent>>, transfer_runtime: TransferRuntime,
-        pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn new(config: SyncManagerConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let http_client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        let transfer_queue = Arc::new(TransferQueue::with_history_db(db_pool.clone()));
+        let transfer_queue = Arc::new(TransferQueue::with_history_db(config.db_pool.clone()));
         Ok(Self {
-            db_pool,
-            replica_id,
-            server_url,
+            db_pool: config.db_pool,
+            replica_id: config.replica_id,
+            server_url: config.server_url,
             http_client,
-            library_id,
-            library_root,
-            event_tx,
+            library_id: config.library_id,
+            library_root: config.library_root,
+            event_tx: config.event_tx,
             session: Arc::new(std::sync::RwLock::new(None)),
-            session_path,
-            transfer_runtime,
+            session_path: config.session_path,
+            transfer_runtime: config.transfer_runtime,
             transfer_queue,
-            pending_thumbnail_jobs,
+            pending_thumbnail_jobs: config.pending_thumbnail_jobs,
             sync_gate: tokio::sync::Mutex::new(()),
             inventory_checked: AtomicBool::new(false),
         })
@@ -234,312 +179,100 @@ impl SyncManager {
         crate::auth::clear_session_from(&self.session_path).map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> Result<SyncOutcome, Box<dyn std::error::Error>> {
+    pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> SyncResult<SyncOutcome> {
         let _sync_guard = self.sync_gate.lock().await;
         // Anything a previous run recorded but did not finish is owed to the
         // disk before this one advances the cursor any further; the pull that
         // queued it has already moved past it.
         self.run_owed_fs_actions();
+        if !self.is_signed_in() {
+            return Ok(SyncOutcome::default());
+        }
+        if self.current_session().is_some_and(|session| if session.refresh_token().is_some() { session.refresh_expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) } else { session.expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) }) {
+            self.clear_session().map_err(std::io::Error::other)?;
+            log::warn!("Authentication credentials expired or are too close to expiry; sign in again before synchronizing");
+            return Ok(SyncOutcome::default());
+        }
         let reading_debounce = match policy.reading_positions {
             #[cfg(test)]
             ReadingPositionSync::Immediate => None,
             ReadingPositionSync::AfterQuietPeriod(duration) => Some(duration),
         };
-        let (signed_in, reading_delay, assets_needed, deferred_mutations) = self.sync_state_under_gate(reading_debounce).await?;
-        if !signed_in {
-            return Ok(SyncOutcome::default());
-        }
+        let state = self.state_engine().synchronize(reading_debounce).await?;
         if let AssetSync::Transfer(origin) = policy.assets {
             self.sync_assets(origin).await?;
-        } else if assets_needed {
+        } else if state.assets_needed {
             self.sync_assets(TransferOrigin::Background).await?;
         }
         let completed_at = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
         let conn = self.db_pool.get()?;
         db::set_sync_metadata(&conn, "last_successful_sync_at", &completed_at.to_string())?;
-        Ok(SyncOutcome { next_reading_upload_in: reading_delay, deferred_mutations })
+        Ok(SyncOutcome { next_reading_upload_in: state.next_reading_upload_in, mutation_issues: state.mutation_issues })
     }
 
     #[cfg(test)]
-    async fn sync_once(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn sync_once(&self) -> SyncResult<()> {
         self.synchronize(SyncPolicy { assets: AssetSync::Transfer(TransferOrigin::Background), reading_positions: ReadingPositionSync::Immediate }).await.map(|_| ())
     }
 
-    async fn sync_state_under_gate(&self, reading_debounce: Option<Duration>) -> Result<(bool, Option<Duration>, bool, Vec<sync_common::MutationRejection>), Box<dyn std::error::Error>> {
-        if !self.is_signed_in() {
-            // Local-only mode: nothing to push, nothing to pull.
-            return Ok((false, None, false, Vec::new()));
-        }
-        if self.current_session().is_some_and(|session| if session.refresh_token().is_some() { session.refresh_expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) } else { session.expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) }) {
-            self.clear_session().map_err(std::io::Error::other)?;
-            log::warn!("Authentication credentials expired or are too close to expiry; sign in again before synchronizing");
-            return Ok((false, None, false, Vec::new()));
-        }
-
-        let mut recovery_assets_needed = false;
-        if self.cursor_recovery_pending()? {
-            recovery_assets_needed |= self.resume_cursor_recovery().await?;
-        }
-
-        self.reconcile_state_inventory_once().await?;
-
-        for attempt in 0..2 {
-            let pull_cursor = {
-                let conn = self.db_pool.get()?;
-                db::get_pull_cursor(&conn)?
-            };
-
-            // One authenticated exchange publishes the local outbox and returns
-            // the first incremental page from the resulting committed snapshot.
-            let recover_cursor = {
-                match self.exchange_events_with_server(pull_cursor, reading_debounce).await {
-                    Ok((reading_delay, assets_needed, deferred)) => return Ok((true, reading_delay, recovery_assets_needed | assets_needed, deferred)),
-                    Err(error) if attempt == 0 && Self::sync_error_is_cursor_rejected(error.as_ref()) => true,
-                    Err(error) => return Err(error),
-                }
-            };
-            // Keep the non-Send boxed exchange error in the scope above, so it
-            // is destroyed before cursor recovery crosses another await point.
-            if recover_cursor {
-                self.begin_cursor_recovery()?;
-                recovery_assets_needed |= self.resume_cursor_recovery().await?;
-            }
-        }
-        unreachable!("cursor recovery retry must return")
+    fn state_engine(&self) -> StateSyncEngine<'_> {
+        StateSyncEngine::new(StateSyncConfig {
+            db_pool: &self.db_pool,
+            http_client: &self.http_client,
+            library_id: self.library_id,
+            replica_id: self.replica_id,
+            session: self.session.as_ref(),
+            inventory_checked: &self.inventory_checked,
+            filesystem: self.filesystem_projector(),
+        })
     }
 
-    fn sync_error_is_cursor_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
-        error.downcast_ref::<sync_client::AuthError>().is_some_and(sync_client::AuthError::is_cursor_rejected)
+    #[cfg(test)]
+    async fn sync_state_under_gate(&self, reading_debounce: Option<Duration>) -> SyncResult<StateSyncResult> {
+        self.state_engine().synchronize(reading_debounce).await
     }
 
-    fn cursor_recovery_pending(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let conn = self.db_pool.get()?;
-        Ok(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY)?.as_deref() == Some("1"))
-    }
-
+    #[cfg(test)]
     fn begin_cursor_recovery(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.db_pool.get()?;
-        let tx = conn.unchecked_transaction()?;
-        db::set_pull_cursor(&tx, sync_common::SyncCursor::default())?;
-        db::set_sync_metadata(&tx, CURSOR_RECOVERY_PENDING_KEY, "1")?;
-        tx.commit()?;
-        self.inventory_checked.store(false, Ordering::Release);
-        Ok(())
+        self.state_engine().begin_cursor_recovery()
     }
 
-    async fn resume_cursor_recovery(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        // Pull first so local LWW reduction sees everything retained by the
-        // restored server before canonical local state is republished.
-        let (_, assets_needed) = self.pull_events_from_server_with_first(sync_common::SyncCursor::default(), None).await?;
-        let cells = {
-            let conn = self.db_pool.get()?;
-            db::state_inventory(&conn)?
-        };
-        let inserted = {
-            let mut conn = self.db_pool.get()?;
-            db::enqueue_missing_state_cells(&mut conn, &cells)?
-        };
-        let conn = self.db_pool.get()?;
-        conn.execute("DELETE FROM sync_metadata WHERE key=?1", [CURSOR_RECOVERY_PENDING_KEY])?;
-        self.inventory_checked.store(true, Ordering::Release);
-        log::warn!("Recovered a rejected synchronization cursor and queued {inserted} canonical cells for republishing");
-        Ok(assets_needed)
-    }
-
-    async fn reconcile_state_inventory_once(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.inventory_checked.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let result = self.reconcile_state_inventory().await;
-        if result.is_err() {
-            self.inventory_checked.store(false, Ordering::Release);
-        }
-        result
-    }
-
-    async fn reconcile_state_inventory(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let cells = {
-            let conn = self.db_pool.get()?;
-            db::state_inventory(&conn)?
-        };
-        if cells.is_empty() {
-            return Ok(());
-        }
-        let session = self.current_session().ok_or("not signed in")?;
-        let mut missing = Vec::new();
-        for chunk in cells.chunks(sync_common::MAX_STATE_INVENTORY_CELLS) {
-            let requested = chunk.iter().cloned().collect::<HashSet<_>>();
-            let response = match sync_client::compare_state_inventory(&self.http_client, &session, self.library_id.clone(), chunk.to_vec()).await {
-                Ok(response) => response,
-                Err(error) if error.is_not_found() => {
-                    log::debug!("Server does not support state inventory reconciliation yet");
-                    return Ok(());
-                }
-                Err(error) => return Err(Box::new(error)),
-            };
-            if response.missing.len() > chunk.len() || response.missing.iter().any(|cell| !requested.contains(cell)) {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "server returned an invalid state inventory response").into());
-            }
-            missing.extend(response.missing);
-        }
-        if missing.is_empty() {
-            return Ok(());
-        }
-        let inserted = {
-            let mut conn = self.db_pool.get()?;
-            db::enqueue_missing_state_cells(&mut conn, &missing)?
-        };
-        log::info!("State inventory reconciliation queued {inserted} missing cells for library {}", self.library_id);
-        Ok(())
-    }
-
-    pub async fn resume_transfers(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn resume_transfers(&self) -> SyncResult<()> {
         if !self.is_signed_in() {
             return Ok(());
         }
-        TransferWorker::new(
-            self.http_client.clone(),
-            self.server_url.clone(),
-            self.library_id.clone(),
-            self.library_root.clone(),
-            self.db_pool.clone(),
-            self.event_tx.clone(),
-            Arc::clone(&self.session),
-            self.session_path.parent().unwrap_or(Path::new(".")).join("remote-book-cache"),
-            self.transfer_runtime.clone(),
-            Arc::clone(&self.transfer_queue),
-        )
-        .run_pending(4)
-        .await
-        .map_err(|error| error as Box<dyn std::error::Error>)
+        self.transfer_worker().run_pending(4).await.map_err(Into::into)
     }
 
-    fn handle_client_result<T>(&self, result: Result<T, sync_client::AuthError>) -> Result<T, Box<dyn std::error::Error>> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => Err(Box::new(error)),
-        }
+    fn transfer_worker(&self) -> TransferWorker {
+        TransferWorker::new(TransferWorkerConfig {
+            http_client: self.http_client.clone(),
+            server_url: self.server_url.clone(),
+            library_id: self.library_id,
+            library_root: self.library_root.clone(),
+            db_pool: self.db_pool.clone(),
+            event_tx: self.event_tx.clone(),
+            session: Arc::clone(&self.session),
+            cache_root: self.session_path.parent().unwrap_or(Path::new(".")).join("remote-book-cache"),
+            runtime: self.transfer_runtime.clone(),
+            queue: Arc::clone(&self.transfer_queue),
+        })
     }
 
-    async fn sync_assets(&self, upload_origin: TransferOrigin) -> Result<(), Box<dyn std::error::Error>> {
-        cleanup_stale_transfer_temps(self.library_root.as_path(), std::time::SystemTime::now() - Duration::from_secs(24 * 60 * 60));
-        let conn = self.db_pool.get()?;
-        let assets = db::get_book_assets(&conn)?;
-        let mut jobs = Vec::new();
-        let mut known_hashes = HashSet::new();
+    fn asset_engine(&self) -> AssetSyncEngine<'_> {
+        AssetSyncEngine::new(AssetSyncConfig {
+            db_pool: &self.db_pool,
+            http_client: &self.http_client,
+            library_id: self.library_id,
+            library_root: &self.library_root,
+            session: self.session.as_ref(),
+            pending_thumbnail_jobs: self.pending_thumbnail_jobs.as_ref(),
+            transfer_worker: self.transfer_worker(),
+        })
+    }
 
-        // Record every existing local instance. Synced folder relationships do
-        // not materialize additional copies of content already present locally.
-        for asset in &assets {
-            let local_path = self.resolve_book_path(&asset.rel_path);
-            let thumb_path = self.thumbnail_path_for_content_hash(&asset.content_hash);
-            db::upsert_blob_local_ref(&conn, BlobKind::Book, &asset.content_hash, &local_path, Path::new(&local_path).exists())?;
-            db::upsert_blob_local_ref(&conn, BlobKind::Thumbnail, &asset.content_hash, &thumb_path, Path::new(&thumb_path).exists())?;
-            known_hashes.insert(asset.content_hash.clone());
-        }
-
-        let upload_blob_hashes = db::get_locally_present_blob_hashes(&conn, BlobKind::Book)?;
-        let remote_book_hashes = db::get_remote_asset_hashes(&conn, BlobKind::Book)?;
-        let mut upload_blobs = Vec::with_capacity(upload_blob_hashes.len());
-        for content_hash in upload_blob_hashes {
-            if remote_book_hashes.contains(&content_hash) {
-                continue;
-            }
-            let Some(local_path) = db::get_blob_local_path(&conn, BlobKind::Book, &content_hash)? else { continue };
-            match std::fs::metadata(&local_path) {
-                Ok(metadata) if metadata.is_file() => {
-                    upload_blobs.push((content_hash, local_path, metadata.len()));
-                }
-                _ => db::upsert_blob_local_ref(&conn, BlobKind::Book, &content_hash, &local_path, false)?,
-            }
-        }
-        let upload_thumb_hashes = db::get_locally_present_blob_hashes(&conn, BlobKind::Thumbnail)?;
-        let remote_thumbnail_hashes = db::get_remote_asset_hashes(&conn, BlobKind::Thumbnail)?;
-        let pending_thumbnail_jobs = self.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        let pending_requests = db::get_asset_requests(&conn, BlobKind::Book)?;
-        drop(conn);
-
-        let manifest = upload_blobs.iter().map(|(content_hash, _, size_bytes)| BlobManifestEntry { content_hash: content_hash.clone(), size_bytes: *size_bytes }).collect();
-        let negotiated = self.negotiate_upload_blobs(manifest).await?;
-        let remotely_present: HashSet<_> = negotiated.owned.into_iter().chain(negotiated.claimed).collect();
-        let should_upload: HashSet<_> = negotiated.upload.into_iter().collect();
-        for rejected in negotiated.rejected {
-            log::warn!("Server rejected blob {} during batch admission: {:?}", rejected.content_hash, rejected.reason);
-        }
-        for (content_hash, local_path, _) in upload_blobs {
-            if remotely_present.contains(&content_hash) {
-                let conn = self.db_pool.get()?;
-                db::record_remote_asset(&conn, BlobKind::Book, &content_hash)?;
-                continue;
-            }
-            if !should_upload.contains(&content_hash) {
-                continue;
-            }
-            jobs.push(TransferJob::UploadBlob { content_hash, local_path, placement: None, origin: upload_origin });
-        }
-        for content_hash in upload_thumb_hashes {
-            if remote_thumbnail_hashes.contains(&content_hash) {
-                continue;
-            }
-            let conn = self.db_pool.get()?;
-            let Some(thumbnail_path) = db::get_blob_local_path(&conn, BlobKind::Thumbnail, &content_hash)? else {
-                continue;
-            };
-            jobs.push(TransferJob::UploadThumbnail { thumbnail_hash: content_hash, thumbnail_path, book_content_hash: None, origin: upload_origin });
-        }
-
-        // A requested download is itself the authoritative presence check: a
-        // successful GET records present and a 404 records missing.
-        for (content_hash, origin) in pending_requests {
-            if origin != TransferOrigin::UserInitiated {
-                continue;
-            }
-            let conn = self.db_pool.get()?;
-            if db::is_blob_local(&conn, BlobKind::Book, &content_hash)? {
-                db::complete_asset_request(&conn, BlobKind::Book, &content_hash)?;
-                continue;
-            }
-            match self.download_job(&conn, &content_hash, origin) {
-                Ok(Some(job)) => jobs.push(job),
-                Ok(None) => {}
-                Err(error) => log::warn!("Skipping invalid requested book download {content_hash}: {error}"),
-            }
-        }
-
-        // Thumbnail GETs likewise record either present or missing themselves.
-        for content_hash in known_hashes {
-            let conn = self.db_pool.get()?;
-            let thumbnail_is_local = db::is_blob_local(&conn, BlobKind::Thumbnail, &content_hash)?;
-            let book_is_local = db::is_blob_local(&conn, BlobKind::Book, &content_hash)?;
-            let thumbnail_is_known_remote = remote_thumbnail_hashes.contains(&content_hash);
-            let thumbnail_generation_pending = pending_thumbnail_jobs.contains(&content_hash);
-            if !should_download_thumbnail(book_is_local, thumbnail_is_local, thumbnail_is_known_remote, thumbnail_generation_pending) {
-                continue;
-            }
-            let Some(book_path) = db::get_book_paths_by_content_hash(&conn, &content_hash)?.into_iter().next() else {
-                continue;
-            };
-            jobs.push(TransferJob::DownloadThumbnail { thumbnail_hash: content_hash, book_content_hash: book_path.content_hash, origin: upload_origin });
-        }
-
-        TransferWorker::new(
-            self.http_client.clone(),
-            self.server_url.clone(),
-            self.library_id.clone(),
-            self.library_root.clone(),
-            self.db_pool.clone(),
-            self.event_tx.clone(),
-            Arc::clone(&self.session),
-            self.session_path.parent().unwrap_or(Path::new(".")).join("remote-book-cache"),
-            self.transfer_runtime.clone(),
-            Arc::clone(&self.transfer_queue),
-        )
-        // A single queue consumer makes the priority ordering a strict phase:
-        // synchronized database state is already committed above, thumbnails
-        // finish before any full publication transfer begins.
-        .run(jobs, 1)
-        .await?;
-        Ok(())
+    async fn sync_assets(&self, upload_origin: TransferOrigin) -> SyncResult<()> {
+        self.asset_engine().synchronize(upload_origin).await
     }
 
     pub fn transfer_statuses(&self) -> Vec<crate::TransferStatus> {
@@ -556,201 +289,34 @@ impl SyncManager {
 
     pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.db_pool.get()?;
-        let transaction = conn.transaction()?;
-        for content_hash in content_hashes {
-            let hashes = db::get_book_hashes(&transaction, content_hash.clone())?;
-            if hashes.is_empty() {
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("book {content_hash} has no live placement")).into());
-            }
-            for hash in hashes {
-                db::add_asset_request(&transaction, BlobKind::Book, &hash, TransferOrigin::UserInitiated)?;
-            }
-        }
-        transaction.commit()?;
+        db::request_book_downloads(&mut conn, content_hashes, TransferOrigin::UserInitiated)?;
         drop(conn);
         if let Some(tx) = &self.event_tx {
             for content_hash in content_hashes {
-                let _ = tx.send(LibraryEvent::DownloadStatusChanged { content_hash: content_hash.clone(), state: crate::DownloadState::Queued });
+                let _ = tx.send(LibraryEvent::DownloadStatusChanged { content_hash: *content_hash, state: crate::DownloadState::Queued });
             }
         }
         Ok(())
     }
 
-    fn resolve_book_path(&self, rel_path: &RelativeBookPath) -> String {
-        rel_path.resolve_under(&self.library_root).to_string_lossy().into_owned()
-    }
-
-    fn thumbnail_path_for_content_hash(&self, content_hash: &ContentHash) -> String {
-        crate::sync::transfer::thumbnail_path_from_content_hash(&self.library_root, content_hash).to_string_lossy().into_owned()
-    }
-
+    #[cfg(test)]
     fn download_job(&self, conn: &rusqlite::Connection, content_hash: &ContentHash, origin: TransferOrigin) -> Result<Option<TransferJob>, rusqlite::Error> {
-        let book_paths = db::get_book_paths_by_content_hash(conn, content_hash)?;
-        let Some(chosen) = book_paths.iter().find(|path| !Path::new(&self.resolve_book_path(&path.rel_path)).exists()).or_else(|| book_paths.first()) else {
-            return Ok(None);
-        };
-        let materialized_path = db::materialize_download_path(conn, &self.library_root, &BookPlacement::new(chosen.content_hash.clone(), chosen.rel_path.clone()))?;
-        let local_path = self.resolve_book_path(&materialized_path);
-        db::upsert_blob_local_ref(conn, BlobKind::Book, content_hash, &local_path, Path::new(&local_path).exists())?;
-        Ok(Some(TransferJob::DownloadBlob { content_hash: content_hash.clone(), placement: BookPlacement::new(chosen.content_hash.clone(), materialized_path), origin }))
+        self.asset_engine().download_job(conn, content_hash, origin)
     }
 
-    async fn negotiate_upload_blobs(&self, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, Box<dyn std::error::Error>> {
-        if blobs.is_empty() {
-            return Ok(BlobManifestResponse::default());
-        }
-        let session = self.current_session().ok_or("not signed in")?;
-        let mut combined = BlobManifestResponse::default();
-        for chunk in blobs.chunks(MAX_BLOB_MANIFEST_ENTRIES) {
-            let mut response = self.handle_client_result(sync_client::negotiate_blobs(&self.http_client, &session, &self.library_id, chunk.to_vec()).await)?;
-            combined.owned.append(&mut response.owned);
-            combined.claimed.append(&mut response.claimed);
-            combined.upload.append(&mut response.upload);
-            combined.rejected.append(&mut response.rejected);
-        }
-        Ok(combined)
-    }
-
+    #[cfg(test)]
     fn apply_push_response(&self, requested_ids: &[sync_common::MutationId], push_response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, Box<dyn std::error::Error>> {
-        let validated = validate_push_response(requested_ids, push_response)?;
-
-        for rejection in &push_response.rejected {
-            if rejection.reason.is_transient() {
-                log::warn!("Server deferred local sync mutation {}: {:?}", rejection.mutation_id, rejection.reason);
-            } else {
-                log::error!("Server rejected local sync mutation {}: {:?}", rejection.mutation_id, rejection.reason);
-            }
-        }
-
-        let completed = validated.accepted.iter().copied().chain(validated.permanent_rejections.iter().map(|(mutation_id, _)| *mutation_id)).collect::<Vec<_>>();
-        if !completed.is_empty() {
-            let conn = self.db_pool.get()?;
-            db::acknowledge_mutations(&conn, &completed)?;
-        }
-        if let Some(&(mutation_id, reason)) = validated.permanent_rejections.first() {
-            return Err(PushResponseError::PermanentRejection { mutation_id, reason }.into());
-        }
-        Ok(validated.transient_rejections.into_iter().map(|(mutation_id, reason)| sync_common::MutationRejection { mutation_id, reason }).collect())
+        self.state_engine().apply_push_response(requested_ids, push_response)
     }
 
-    async fn exchange_events_with_server(&self, starting_cursor: sync_common::SyncCursor, reading_debounce: Option<Duration>) -> Result<(Option<Duration>, bool, Vec<sync_common::MutationRejection>), Box<dyn std::error::Error>> {
-        let (changes, reading_delay) = {
-            let conn = self.db_pool.get()?;
-            mutations_ready_for_push(coalesce_mutations_for_push(db::get_pending_mutations(&conn)?), reading_debounce, std::time::SystemTime::now())?
-        };
-        let session = self.current_session().ok_or("not signed in")?;
-        let (mut remaining, set_aside) = partition_transmittable(changes)?;
-        let mut cursor = starting_cursor;
-        let mut sent_page = false;
-        let mut transient_rejections = Vec::new();
-        let mut assets_needed = false;
-        for mutation_id in &set_aside {
-            log::error!("Local sync mutation {mutation_id} encodes to more than the {} byte push limit and cannot be transmitted; it stays queued while every other change continues to synchronize", sync_common::MAX_PUSH_MUTATION_BYTES);
-        }
-        transient_rejections.extend(set_aside.into_iter().map(|mutation_id| sync_common::MutationRejection { mutation_id, reason: sync_common::MutationRejectionReason::InvalidPayload }));
-        while !remaining.is_empty() || !sent_page {
-            let requested = take_push_page(&mut remaining);
-            let requested_ids = requested.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>();
-            // Captured before the request consumes the page; a lifecycle or
-            // placement mutation the server accepts may need its bytes moved.
-            let asset_bearing = requested.iter().filter(|pending| matches!(pending.mutation.body, MutationBody::BookLifecycle { .. } | MutationBody::Placement { .. })).map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>();
-            let wire_requested = requested.into_iter().map(|pending| pending.wire).collect::<Vec<_>>();
-            let response = self.handle_client_result(sync_client::exchange_changes(&self.http_client, &session, self.library_id.clone(), self.replica_id.clone(), wire_requested, cursor).await)?;
-            assets_needed |= asset_bearing.iter().any(|mutation_id| response.push.accepted.contains(mutation_id));
-            transient_rejections.extend(self.apply_push_response(&requested_ids, &response.push)?);
-            let (next_cursor, page_assets_needed) = self.pull_events_from_server_with_first(cursor, Some(response.pull)).await?;
-            cursor = next_cursor;
-            assets_needed |= page_assets_needed;
-            sent_page = true;
-        }
-        Ok((reading_delay, assets_needed, transient_rejections))
+    #[cfg(test)]
+    async fn exchange_events_with_server(&self, starting_cursor: sync_common::SyncCursor, reading_debounce: Option<Duration>) -> SyncResult<StateExchangeResult> {
+        self.state_engine().exchange_events_with_server(starting_cursor, reading_debounce).await
     }
 
-    async fn pull_events_from_server(&self, cursor: sync_common::SyncCursor) -> Result<(), Box<dyn std::error::Error>> {
-        self.pull_events_from_server_with_first(cursor, None).await.map(|_| ())
-    }
-
-    async fn pull_events_from_server_with_first(&self, starting_cursor: sync_common::SyncCursor, mut first_response: Option<PullStateResponse>) -> Result<(sync_common::SyncCursor, bool), Box<dyn std::error::Error>> {
-        let session = self.current_session().ok_or("not signed in")?;
-        let mut cursor = starting_cursor;
-        let mut assets_needed = false;
-        loop {
-            let pull_response = match first_response.take() {
-                Some(response) => response,
-                None => self.handle_client_result(sync_client::exchange_changes(&self.http_client, &session, self.library_id.clone(), self.replica_id.clone(), Vec::new(), cursor).await)?.pull,
-            };
-            let has_more = pull_response.has_more;
-            validate_pull_batch(&pull_response, cursor)?;
-            let next_cursor = pull_response.next_cursor;
-            let changes = pull_response.mutations;
-            assets_needed |= changes.iter().any(|change| matches!(change.mutation.kind.as_str(), "book_lifecycle" | "placement"));
-
-            if changes.is_empty() {
-                if has_more {
-                    return Err("server returned an empty synchronization page with has_more=true".into());
-                }
-                if next_cursor != cursor {
-                    let conn = self.db_pool.get()?;
-                    let tx = conn.unchecked_transaction()?;
-                    db::set_pull_cursor(&tx, next_cursor)?;
-                    tx.commit()?;
-                }
-                cursor = next_cursor;
-                break;
-            }
-
-            let mut conn = self.db_pool.get()?;
-            let tx = conn.transaction()?;
-            // Pull pages are applied in server revision order and the exact
-            // advertised cursor advances only in the same commit. A placement
-            // or child directory can precede its dependency across page boundaries;
-            // the reducer materializes hidden placeholders until those dependencies
-            // arrive.
-            tx.pragma_update(None, "defer_foreign_keys", "ON")?;
-            let mut removed_placements = Vec::new();
-            let dirs_before = db::get_live_dir_paths_tx(&tx)?;
-            for change in &changes {
-                if let Some(removed) = db::apply_remote_change_in_tx(&tx, change)? {
-                    removed_placements.push(removed);
-                }
-            }
-            let dirs_after = db::get_live_dir_paths_tx(&tx)?;
-
-            // A removal that won the LWW gate also acts on the local file, so a delete
-            // on one device propagates to the others (otherwise the next scan would
-            // see the still-present file and resurrect the placement). A move arrives
-            // as add(new) then remove(old) — the grace period guarantees the add lands
-            // first — so we relocate rather than delete + re-download.
-            //
-            // These effects are recorded in the same commit that advances the
-            // cursor, because the cursor moving past work the disk never
-            // received is exactly what resurrects a deleted book.
-            let mut owed = Vec::new();
-            owed.extend(dirs_after.iter().filter_map(|(id, new_path)| match dirs_before.get(id) {
-                None => Some(db::FsAction::MaterializeDir { dir_id: id.to_string() }),
-                Some(old_path) if old_path != new_path => Some(db::FsAction::MoveDir { dir_id: id.to_string(), old_path: old_path.as_str().to_owned(), new_path: new_path.as_str().to_owned() }),
-                Some(_) => None,
-            }));
-            owed.extend(removed_placements.iter().map(|placement| db::FsAction::RetirePlacementFile { dir_id: placement.dir_id.to_string(), content_hash: placement.content_hash.to_string() }));
-            // Deepest first, so a parent is never asked to vanish while a child
-            // it still contains is queued behind it.
-            let mut dir_deletes: Vec<_> = dirs_before.iter().filter(|(id, _)| !dirs_after.contains_key(*id)).map(|(_, old_path)| old_path.clone()).collect();
-            dir_deletes.sort_by_key(|path| std::cmp::Reverse(path.as_path().components().count()));
-            owed.extend(dir_deletes.iter().map(|path| db::FsAction::RemoveDir { path: path.as_str().to_owned() }));
-
-            db::enqueue_fs_actions(&tx, &owed)?;
-            db::set_pull_cursor(&tx, next_cursor)?;
-
-            tx.commit()?;
-            drop(conn);
-
-            self.run_owed_fs_actions();
-            cursor = next_cursor;
-            if !has_more {
-                break;
-            }
-        }
-        Ok((cursor, assets_needed))
+    #[cfg(test)]
+    async fn pull_events_from_server(&self, cursor: sync_common::SyncCursor) -> SyncResult<()> {
+        self.state_engine().pull_events_from_server(cursor).await
     }
 
     /// Performs the filesystem work recorded by applied pull pages, retiring
@@ -762,167 +328,21 @@ impl SyncManager {
     /// files into, say) is logged and retired rather than retried forever: the
     /// log exists to survive a crash, not to make the filesystem obey.
     pub(crate) fn run_owed_fs_actions(&self) {
-        let Ok(conn) = self.db_pool.get() else {
-            return;
-        };
-        let owed = match db::pending_fs_actions(&conn) {
-            Ok(owed) => owed,
-            Err(error) => {
-                log::warn!("Could not read the pending filesystem actions: {error}");
-                return;
-            }
-        };
-        for (id, action) in owed {
-            match action {
-                Some(action) => {
-                    if let Err(error) = self.run_fs_action(&conn, &action) {
-                        log::warn!("Synchronized filesystem action {action:?} did not complete: {error}");
-                    }
-                }
-                None => log::error!("Discarding an unreadable pending filesystem action so the work queued behind it can proceed"),
-            }
-            if let Err(error) = db::complete_fs_action(&conn, id) {
-                log::warn!("Could not retire a completed filesystem action: {error}");
-                return;
-            }
-        }
+        self.filesystem_projector().run_owed_actions();
     }
 
+    fn filesystem_projector(&self) -> FilesystemProjector<'_> {
+        FilesystemProjector::new(&self.db_pool, &self.library_root)
+    }
+
+    #[cfg(test)]
     fn run_fs_action(&self, conn: &rusqlite::Connection, action: &db::FsAction) -> Result<(), Box<dyn std::error::Error>> {
-        match action {
-            db::FsAction::MaterializeDir { dir_id } => {
-                DirId::parse_str(dir_id)?;
-                db::materialize_dir_with_markers(conn, self.library_root.as_path(), dir_id)?;
-                Ok(())
-            }
-            db::FsAction::MoveDir { dir_id, old_path, new_path } => self.move_remote_dir(conn, dir_id, old_path, new_path),
-            db::FsAction::RetirePlacementFile { dir_id, content_hash } => self.retire_placement_file(conn, &DirId::parse_str(dir_id)?, &content_hash.parse::<ContentHash>()?),
-            db::FsAction::RemoveDir { path } => {
-                self.remove_remote_dir(&RelativeDirPath::parse(path)?);
-                Ok(())
-            }
-        }
+        self.filesystem_projector().run_action(conn, action)
     }
 
-    fn move_remote_dir(&self, conn: &rusqlite::Connection, dir_id: &str, old_path: &str, new_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        DirId::parse_str(dir_id)?;
-        let library_root = &self.library_root;
-        let old_abs = RelativeDirPath::parse(old_path)?.resolve_under(library_root);
-        let new_abs = RelativeDirPath::parse(new_path)?.resolve_under(library_root);
-        // Already moved (or never materialized): create it where it belongs now.
-        if !old_abs.exists() {
-            db::materialize_dir_with_markers(conn, library_root.as_path(), dir_id)?;
-            return Ok(());
-        }
-        db::materialize_dir_parent_with_markers(conn, library_root.as_path(), dir_id)?;
-        std::fs::rename(&old_abs, &new_abs)?;
-        db::materialize_dir_with_markers(conn, library_root.as_path(), dir_id)?;
-        Ok(())
-    }
-
-    fn remove_remote_dir(&self, old_path: &RelativeDirPath) {
-        let abs = old_path.resolve_under(&self.library_root);
-        let marker = abs.join(".biblos_uuid");
-        // Read the marker before touching anything so we can restore it if
-        // remove_dir fails due to stray user files (leaving marker intact
-        // preserves the dir identity for the next scanner pass).
-        let marker_content = std::fs::read(&marker).ok();
-        if marker_content.is_some() {
-            match std::fs::remove_file(&marker) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => log::warn!("Failed to remove marker {:?}: {}", marker, err),
-            }
-        }
-        match std::fs::remove_dir(&abs) {
-            Ok(()) => log::info!("Removed remote-deleted dir {:?}", abs),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                log::warn!("Failed to remove remote-deleted dir {:?}: {}", abs, err);
-                if let Some(content) = marker_content {
-                    let _ = std::fs::write(&marker, content);
-                }
-            }
-        }
-    }
-
-    fn retire_placement_file(&self, conn: &rusqlite::Connection, dir_id: &DirId, placement_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
-        {
-            // Only act if still tombstoned in the committed state; a later add in
-            // the same batch may have resurrected this exact placement.
-            let Some((rel_path, content_hash)) = db::resolve_removed_book_dir(conn, &dir_id.to_string(), placement_hash.clone())? else {
-                return Ok(());
-            };
-            let abs_old = self.resolve_book_path(&rel_path);
-            if !Path::new(&abs_old).exists() {
-                return Ok(());
-            }
-
-            // Move, not delete: if a live placement holds the same content but is
-            // missing its file (the book was moved to a new path), relocate the
-            // file there instead of deleting and later re-downloading it.
-            if let Some(content_hash) = content_hash {
-                if let Some(target) = self.live_placement_missing_file(conn, &content_hash)? {
-                    let target_rel = target.rel_path;
-                    let abs_new = self.resolve_book_path(&target_rel);
-                    let mut target_ready = true;
-                    if let Some((_, dir_id, _)) = db::get_book_dir_entry_by_path(conn, &target_rel)? {
-                        if let Err(err) = db::materialize_dir_with_markers(conn, self.library_root.as_path(), &dir_id.to_string()) {
-                            log::warn!("Failed to materialize relocation target {}: {}", target_rel, err);
-                            target_ready = false;
-                        }
-                    } else if let Some(parent) = Path::new(&abs_new).parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if target_ready && std::fs::rename(&abs_old, &abs_new).is_ok() {
-                        if let Err(err) = db::stamp_book_dir_local_hash_by_rel_path(conn, &target_rel, target.content_hash.clone(), Path::new(&abs_new)) {
-                            log::warn!("Failed to stamp relocated fingerprint for {}: {}", abs_new, err);
-                        }
-                        db::upsert_blob_local_ref(conn, BlobKind::Book, &content_hash, &abs_new, true)?;
-                        db::complete_asset_request(conn, BlobKind::Book, &content_hash)?;
-                        db::set_book_downloaded(conn, &target_rel, target.content_hash, true)?;
-                        log::info!("Relocated {abs_old} -> {abs_new} (book moved)");
-                        return Ok(());
-                    }
-                }
-            }
-
-            match std::fs::remove_file(&abs_old) {
-                Ok(()) => log::info!("Removed {abs_old} after synchronized deletion"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => log::warn!("Failed to remove {abs_old} after synchronized deletion: {error}"),
-            }
-        }
-        Ok(())
-    }
-
-    /// Library-relative path of a live placement of `content_hash` whose file is
-    /// not on disk — a relocation target for a moved book's file.
-    fn live_placement_missing_file(&self, conn: &rusqlite::Connection, content_hash: &ContentHash) -> Result<Option<db::BookPath>, rusqlite::Error> {
-        Ok(db::get_book_paths_by_content_hash(conn, content_hash)?.into_iter().find(|path| !Path::new(&self.resolve_book_path(&path.rel_path)).exists()))
-    }
-}
-
-fn should_download_thumbnail(book_is_local: bool, thumbnail_is_local: bool, thumbnail_is_known_remote: bool, thumbnail_generation_pending: bool) -> bool {
-    !thumbnail_is_local && !thumbnail_generation_pending && (!book_is_local || thumbnail_is_known_remote)
-}
-
-fn cleanup_stale_transfer_temps(root: &Path, cutoff: std::time::SystemTime) {
-    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str() else { continue };
-        let Some(raw_uuid) = name.rsplit_once(".tmp-").map(|(_, suffix)| suffix) else { continue };
-        if uuid::Uuid::parse_str(raw_uuid).is_err() {
-            continue;
-        }
-        let old_enough = entry.metadata().ok().and_then(|metadata| metadata.modified().ok()).is_some_and(|modified| modified <= cutoff);
-        if old_enough {
-            if let Err(error) = std::fs::remove_file(entry.path()) {
-                log::warn!("Failed to remove stale transfer temp {}: {error}", entry.path().display());
-            }
-        }
+    #[cfg(test)]
+    fn remove_remote_dir(&self, path: &RelativeDirPath) {
+        self.filesystem_projector().remove_remote_dir(path);
     }
 }
 
@@ -934,7 +354,6 @@ mod tests {
     use r2d2_sqlite::SqliteConnectionManager;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::process::{Child, Command};
     use sync_common::{LibraryRevision, MutationRejection, MutationRejectionReason, ReplicaSeq, ServerMutation, SyncCursor};
     use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id, fixture_replica_id};
 
@@ -1306,11 +725,11 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        let (_, _, deferred) = manager.exchange_events_with_server(SyncCursor::default(), None).await.expect("a deferred page still completes the exchange");
+        let exchange = manager.exchange_events_with_server(SyncCursor::default(), None).await.expect("a deferred page still completes the exchange");
 
         assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         let rejected = state.rejected.lock().unwrap().unwrap();
-        assert_eq!(deferred, vec![MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::MissingDependency }]);
+        assert_eq!(exchange.mutation_issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::MissingDependency })]);
         let conn = manager.db_pool.get().unwrap();
         let pending = db::get_pending_mutations(&conn).unwrap();
         assert_eq!(pending.len(), 1);
@@ -1375,7 +794,7 @@ mod tests {
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()), "the pulled page is still applied");
 
         let outcome = outcome.expect("one deferred mutation must not fail the synchronization");
-        assert_eq!(outcome.deferred_mutations, vec![MutationRejection { mutation_id: state.deferred.lock().unwrap().unwrap(), reason: MutationRejectionReason::TimestampTooFarFuture }]);
+        assert_eq!(outcome.mutation_issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { mutation_id: state.deferred.lock().unwrap().unwrap(), reason: MutationRejectionReason::TimestampTooFarFuture })]);
         assert!(db::get_sync_metadata(&conn, "last_successful_sync_at").unwrap().is_some(), "the exchange completed, so the sync is checkpointed");
         server.abort();
     }
@@ -1525,9 +944,9 @@ mod tests {
         }
     }
 
-    fn transmittable(changes: Vec<StateMutation>) -> VecDeque<PendingPush> {
-        let (queued, set_aside) = partition_transmittable(changes).unwrap();
-        assert!(set_aside.is_empty(), "this fixture holds nothing larger than a page");
+    fn transmittable(changes: Vec<StateMutation>) -> sync_common::PushBatcher {
+        let queued = prepare_push(changes).unwrap();
+        assert!(queued.untransmittable().is_empty(), "this fixture holds nothing larger than a batch");
         queued
     }
 
@@ -1535,13 +954,13 @@ mod tests {
     fn push_pages_are_bounded_by_count_and_preserve_sequence_order() {
         let mut changes = transmittable((1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 7).map(|sequence| reading_change(sequence, sequence, "epubcfi(/6/2)", sequence)).collect::<Vec<_>>());
 
-        let first = take_push_page(&mut changes);
-        let second = take_push_page(&mut changes);
+        let first = changes.next_batch();
+        let second = changes.next_batch();
 
         assert_eq!(first.len(), sync_common::MAX_PUSH_MUTATIONS);
         assert_eq!(second.len(), 7);
-        assert_eq!(first.first().unwrap().mutation.replica_seq.get(), 1);
-        assert_eq!(second.first().unwrap().mutation.replica_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
+        assert_eq!(first.first().unwrap().replica_seq.get(), 1);
+        assert_eq!(second.first().unwrap().replica_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
     }
 
     /// The service refuses a request larger than its decoded request limit, and
@@ -1552,14 +971,14 @@ mod tests {
     #[test]
     fn a_mutation_too_large_to_transmit_does_not_block_the_rest_of_the_outbox() {
         let ahead = reading_change(1, 1, "epubcfi(/6/2)", 1);
-        let oversized = annotation_change(2, "x".repeat(sync_common::MAX_PUSH_MUTATION_BYTES + 1));
+        let oversized = annotation_change(2, "x".repeat(sync_common::MAX_PUSH_BATCH_BYTES + 1));
         let behind = reading_change(3, 3, "epubcfi(/6/4)", 3);
 
-        let (mut queued, set_aside) = partition_transmittable(vec![ahead.clone(), oversized.clone(), behind.clone()]).unwrap();
+        let mut queued = prepare_push(vec![ahead.clone(), oversized.clone(), behind.clone()]).unwrap();
 
-        assert_eq!(set_aside, vec![oversized.mutation_id], "only the untransmittable mutation is set aside");
-        let page = take_push_page(&mut queued);
-        assert_eq!(page.iter().map(|pending| pending.mutation.mutation_id).collect::<Vec<_>>(), vec![ahead.mutation_id, behind.mutation_id], "the mutations queued behind it still go out, in sequence order");
+        assert_eq!(queued.untransmittable(), &[oversized.mutation_id], "only the untransmittable mutation is set aside");
+        let page = queued.next_batch();
+        assert_eq!(page.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>(), vec![ahead.mutation_id, behind.mutation_id], "the mutations queued behind it still go out, in sequence order");
         assert!(queued.is_empty(), "the exchange loop has nothing left to spin on");
     }
 
@@ -1568,15 +987,14 @@ mod tests {
         let large_text = "x".repeat(64 * 1024);
         let mut queued = transmittable((1..=100_u64).map(|sequence| annotation_change(sequence, large_text.clone())).collect::<Vec<_>>());
 
-        let page = take_push_page(&mut queued);
+        let page = queued.next_batch();
         // The budget is spent in transmitted bytes, so the page is measured in
         // the same wire encoding the request carries.
-        let encoded_bytes = page.iter().map(|pending| pending.encoded_bytes).sum::<usize>();
+        let encoded_bytes = page.iter().map(|mutation| sync_common::transport::encode(mutation).unwrap().len()).sum::<usize>();
 
         assert!(!page.is_empty());
         assert!(page.len() < 100);
-        assert!(encoded_bytes <= sync_common::MAX_PUSH_MUTATION_BYTES);
-        assert_eq!(encoded_bytes, page.iter().map(|pending| sync_common::transport::encode(&pending.wire).unwrap().len()).sum::<usize>());
+        assert!(encoded_bytes <= sync_common::MAX_PUSH_BATCH_BYTES);
         assert!(!queued.is_empty());
     }
 
@@ -1695,7 +1113,7 @@ mod tests {
         let requested_ids = changes.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
         let validated = validate_push_response(&requested_ids, &response).unwrap();
         assert_eq!(validated.accepted, vec![changes[1].mutation_id]);
-        assert_eq!(validated.transient_rejections, vec![(changes[0].mutation_id, MutationRejectionReason::TimestampTooFarFuture)]);
+        assert_eq!(validated.issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { mutation_id: changes[0].mutation_id, reason: MutationRejectionReason::TimestampTooFarFuture })]);
     }
 
     #[test]
@@ -1711,7 +1129,7 @@ mod tests {
         let requested = vec![reading_change(1, 1, "epubcfi(/6/24)", 1)];
         let response = PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload }] };
         let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
-        assert_eq!(validate_push_response(&requested_ids, &response).unwrap().permanent_rejections, vec![(requested[0].mutation_id, MutationRejectionReason::InvalidPayload)]);
+        assert_eq!(validate_push_response(&requested_ids, &response).unwrap().issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload })]);
     }
 
     #[test]
@@ -1734,6 +1152,41 @@ mod tests {
 
         let conn = manager.db_pool.get().unwrap();
         assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn permanent_rejection_is_an_outcome_after_applying_the_exchange_pull_half() {
+        async fn exchange(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            let request = decode_sync_exchange(&headers, &body);
+            let rejected = request.mutations.first().expect("the fixture publishes one mutation").mutation_id;
+            binary_sync_response(&SyncExchangeResponse {
+                push: PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::InvalidPayload }] },
+                pull: pull_response(vec![pulled_change(1, added(9, "Pulled despite rejection", 10))], LibraryRevision::new(1).ok(), false),
+            })
+        }
+
+        let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(exchange));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        let requested = reading_change(1, 1, "epubcfi(/6/24)", 1);
+        queue_outbox_reading_change(&manager, &requested, 1);
+
+        let outcome = manager.exchange_events_with_server(SyncCursor::default(), None).await.unwrap();
+        assert_eq!(outcome.mutation_issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { mutation_id: requested.mutation_id, reason: MutationRejectionReason::InvalidPayload })]);
+        assert!(outcome.assets_needed, "the pull half's asset signal must survive the rejection");
+
+        let conn = manager.db_pool.get().unwrap();
+        assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()));
+        let pulled_title: String = conn.query_row("SELECT title FROM book WHERE content_hash=?1", [fixture_content_hash(9).as_str()], |row| row.get(0)).unwrap();
+        assert_eq!(pulled_title, "Pulled despite rejection");
+        server.abort();
     }
 
     #[test]
@@ -2200,7 +1653,7 @@ mod tests {
 
         let error = manager.sync_once().await.unwrap_err();
 
-        assert!(error.downcast_ref::<sync_client::AuthError>().is_some_and(sync_client::AuthError::is_unauthorized));
+        assert!(matches!(error, SyncError::AuthenticationRequired));
         assert!(manager.is_signed_in());
         assert!(manager.session_path.exists());
         server.abort();

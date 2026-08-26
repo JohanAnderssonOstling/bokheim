@@ -6,7 +6,7 @@
 //! [`crate::shell::marks`]. What is here depends on EPUB CFIs, which no other
 //! reader has.
 
-use epub_svelte_lib::library::marks::ReaderAnnotation;
+use app_contract::reader_state::{AnnotationStyle, ReaderAnnotation};
 use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
 
 use crate::shell::marks::MarksState;
@@ -47,10 +47,10 @@ pub(crate) fn overlays(marks: &MarksState) -> Vec<RendererAnnotation> {
 pub(crate) fn renderer_annotation(annotation: &ReaderAnnotation) -> Option<RendererAnnotation> {
     let cfi_range = annotation.anchor.epub_cfi_value()?.to_owned();
     let style = match annotation.style {
-        epub_svelte_lib::library::marks::AnnotationStyle::Highlight => RendererAnnotationStyle::Highlight,
-        epub_svelte_lib::library::marks::AnnotationStyle::Underline => RendererAnnotationStyle::Underline,
-        epub_svelte_lib::library::marks::AnnotationStyle::Squiggly => RendererAnnotationStyle::Squiggly,
-        epub_svelte_lib::library::marks::AnnotationStyle::Strikethrough => RendererAnnotationStyle::Strikethrough,
+        AnnotationStyle::Highlight => RendererAnnotationStyle::Highlight,
+        AnnotationStyle::Underline => RendererAnnotationStyle::Underline,
+        AnnotationStyle::Squiggly => RendererAnnotationStyle::Squiggly,
+        AnnotationStyle::Strikethrough => RendererAnnotationStyle::Strikethrough,
     };
     Some(RendererAnnotation { id: annotation.id.clone(), cfi_range, exact_text: annotation.exact_text.clone(), prefix: None, suffix: None, style, color: highlight_color(&annotation.color) })
 }
@@ -72,12 +72,14 @@ fn highlight_color(color: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle};
+    use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle};
+
+    const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
     fn annotation(id: &str, color: &str) -> ReaderAnnotation {
         ReaderAnnotation {
             id: id.to_owned(),
-            content_hash: epub_svelte_lib::ContentHash::new("1"),
+            content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH),
             anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()),
             exact_text: "a furrow".to_owned(),
             style: AnnotationStyle::Highlight,
@@ -121,8 +123,8 @@ mod tests {
     #[test]
     fn overlays_skip_annotations_the_renderer_cannot_place() {
         let mut pdf_annotation = annotation("pdf", "#f6c945");
-        let rects = vec![epub_svelte_lib::library::marks::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
-        let anchor = epub_svelte_lib::library::marks::PdfAnnotationAnchor::new(0, rects, None);
+        let rects = vec![app_contract::reader_state::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
+        let anchor = app_contract::reader_state::PdfAnnotationAnchor::new(0, rects, None);
         pdf_annotation.anchor = AnnotationAnchor::pdf(anchor);
         let marks = MarksState { annotations: vec![annotation("epub", "#f6c945"), pdf_annotation], ..MarksState::default() };
 

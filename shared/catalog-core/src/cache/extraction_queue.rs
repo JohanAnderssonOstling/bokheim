@@ -1,9 +1,11 @@
 use super::{
-    active_generation_in, active_generation_optional, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, insert_prepared_subject_assignments, normalize_search_text, params,
-    prepare_catalog_subject_assignments, publication_extraction, publication_inventory, publication_key, replace_publication_metadata, replace_publication_subjects_prepared, replace_publication_toc, sequenced_publication_in,
-    sql_decode_error, storage_i64, unix_timestamp, BTreeSet, CatalogCache, CatalogCacheError, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogMetadataIndex, CatalogPublication, CatalogPublicationIdentity,
-    CatalogPublicationPopularity, CatalogSourceId, CatalogSubjectAssignment, HashSet, OptionalExtension, PreparedCatalogPublication, Transaction, TransactionBehavior, CATALOG_EPUB_ENRICHMENT_VERSION,
+    active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, gutenberg_edition_has_images, normalize_search_text,
+    params, prepare_catalog_subject_assignments, project_provider_popularity, publication_entry_id, publication_extraction, publication_inventory, publication_key, queue_publication_cover, replace_feed_publication_subjects_prepared,
+    replace_publication_metadata, replace_publication_subjects_prepared, replace_publication_toc, sequenced_publication_in, sql_decode_error, storage_i64, unix_timestamp, BTreeSet, CatalogCache, CatalogCacheError, CatalogEpubExtractionJob,
+    CatalogEpubMetadata, CatalogMetadataIndex, CatalogPublication, CatalogPublicationIdentity, CatalogPublicationPopularity, CatalogSourceId, CatalogSubjectAssignment, HashSet, OptionalExtension, PreparedCatalogPublication, Transaction,
+    TransactionBehavior, CATALOG_EPUB_ENRICHMENT_VERSION,
 };
+use publication_model::PublicationSubject;
 
 impl CatalogCache {
     pub fn queue_crawls(&self, source_ids: &[CatalogSourceId]) -> Result<(), CatalogCacheError> {
@@ -140,14 +142,17 @@ impl CatalogCache {
     }
 
     pub fn enrich_active_publication(
-        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[library_model::PublicationSubject], toc: &[library_model::PublicationTocEntry], popularity: Option<&CatalogPublicationPopularity>,
+        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[PublicationSubject], toc: &[library_model::PublicationTocEntry], popularity: Option<&CatalogPublicationPopularity>,
     ) -> Result<bool, CatalogCacheError> {
-        let assignments = prepare_catalog_subject_assignments(subjects);
-        self.enrich_active_publication_prepared(source_id, publication, subjects, &assignments, toc, popularity)
+        let mut publication = publication.clone();
+        merge_catalog_subject_evidence(&mut publication, subjects);
+        let combined_subjects = catalog_subject_evidence(&publication)?;
+        let assignments = prepare_catalog_subject_assignments(&combined_subjects);
+        self.enrich_active_publication_prepared(source_id, &publication, &combined_subjects, &assignments, toc, popularity)
     }
 
     pub fn enrich_active_publication_prepared(
-        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[library_model::PublicationSubject], assignments: &[CatalogSubjectAssignment], toc: &[library_model::PublicationTocEntry],
+        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[PublicationSubject], assignments: &[CatalogSubjectAssignment], toc: &[library_model::PublicationTocEntry],
         popularity: Option<&CatalogPublicationPopularity>,
     ) -> Result<bool, CatalogCacheError> {
         let mut connection = self.pool.get()?;
@@ -192,6 +197,7 @@ impl CatalogCache {
                 ],
             )?;
         }
+        advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -217,6 +223,7 @@ impl CatalogCache {
             params![source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id, completion_sequence],
         )?;
         transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&publication)?])?;
+        advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -264,6 +271,59 @@ impl CatalogCache {
         transaction.commit()?;
         Ok(())
     }
+}
+
+pub(crate) fn merge_catalog_subject_evidence(publication: &mut CatalogPublication, subjects: &[PublicationSubject]) {
+    for subject in subjects {
+        let candidate = subject.clone();
+        if !publication.metadata.subjects.contains(&candidate) {
+            publication.metadata.subjects.push(candidate);
+        }
+    }
+}
+
+pub(crate) fn merge_catalog_publication_metadata(target: &mut catalog_contract::CatalogPublicationMetadata, candidate: &catalog_contract::CatalogPublicationMetadata) {
+    if target.published.is_none() {
+        target.published.clone_from(&candidate.published);
+    }
+    if target.modified.is_none() {
+        target.modified.clone_from(&candidate.modified);
+    }
+    if target.subtitle.is_none() {
+        target.subtitle.clone_from(&candidate.subtitle);
+    }
+    append_unique(&mut target.dates, &candidate.dates);
+    append_unique(&mut target.publishers, &candidate.publishers);
+    append_unique(&mut target.identifiers, &candidate.identifiers);
+    append_unique(&mut target.subjects, &candidate.subjects);
+    append_unique(&mut target.alternate_titles, &candidate.alternate_titles);
+    append_unique(&mut target.collections, &candidate.collections);
+    append_unique(&mut target.contributors, &candidate.contributors);
+    append_unique(&mut target.rights, &candidate.rights);
+    append_unique(&mut target.sources, &candidate.sources);
+    append_unique(&mut target.types, &candidate.types);
+    append_unique(&mut target.formats, &candidate.formats);
+    append_unique(&mut target.relations, &candidate.relations);
+    append_unique(&mut target.coverage, &candidate.coverage);
+    append_unique(&mut target.properties, &candidate.properties);
+    append_unique(&mut target.audiences, &candidate.audiences);
+    append_unique(&mut target.age_ranges, &candidate.age_ranges);
+    append_unique(&mut target.images, &candidate.images);
+    append_unique(&mut target.ratings, &candidate.ratings);
+    append_unique(&mut target.interactions, &candidate.interactions);
+    append_unique(&mut target.popularity_ranks, &candidate.popularity_ranks);
+}
+
+fn append_unique<T: Clone + PartialEq>(target: &mut Vec<T>, candidates: &[T]) {
+    for candidate in candidates {
+        if !target.contains(candidate) {
+            target.push(candidate.clone());
+        }
+    }
+}
+
+fn catalog_subject_evidence(publication: &CatalogPublication) -> Result<Vec<PublicationSubject>, CatalogCacheError> {
+    Ok(publication.metadata.subjects.clone())
 }
 
 pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication, force: bool) -> Result<(), CatalogCacheError> {
@@ -336,17 +396,19 @@ pub(crate) fn upsert_active_prepared_publication(transaction: &Transaction<'_>, 
         )
         .optional()?;
     if previous.as_ref().is_some_and(|(previous_hash, _, inventory_indexed)| *inventory_indexed && previous_hash == &prepared.payload_hash) {
+        queue_publication_cover(transaction, source_id, generation, publication)?;
         return Ok(());
     }
     let sequence = match previous {
         Some((previous_hash, sequence, _)) if previous_hash == prepared.payload_hash => sequence,
         _ => allocate_sequence(transaction, source_id)?,
     };
+    let entry_id = publication_entry_id(transaction, source_id, publication, &prepared.payload_hash)?;
     transaction.execute(
-        "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14)
-         ON CONFLICT(source_id, generation, edition_id, work_id) DO UPDATE SET sequence=excluded.sequence, payload_hash=excluded.payload_hash, normalized_title=excluded.normalized_title,
-             book_format=excluded.book_format, importable=excluded.importable, has_upstream_cover=excluded.has_upstream_cover, inventory_indexed=1,
+        "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, provider_popularity, gutenberg_has_images, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload, entry_id)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?15, ?16, ?17)
+         ON CONFLICT(source_id, generation, edition_id, work_id) DO UPDATE SET entry_id=excluded.entry_id, sequence=excluded.sequence, payload_hash=excluded.payload_hash, normalized_title=excluded.normalized_title,
+             provider_popularity=excluded.provider_popularity, gutenberg_has_images=excluded.gutenberg_has_images, book_format=excluded.book_format, importable=excluded.importable, has_upstream_cover=excluded.has_upstream_cover, inventory_indexed=1,
              acquisition_url=excluded.acquisition_url, extraction_format=excluded.extraction_format, cover_url=excluded.cover_url, payload=excluded.payload",
         params![
             source_id.as_str(),
@@ -356,16 +418,20 @@ pub(crate) fn upsert_active_prepared_publication(transaction: &Transaction<'_>, 
             sequence,
             prepared.payload_hash,
             prepared.normalized_title,
+            storage_i64(prepared.provider_popularity, "provider popularity")?,
+            prepared.gutenberg_has_images,
             prepared.inventory.book_format,
             prepared.inventory.importable,
             prepared.inventory.has_upstream_cover,
             extraction.as_ref().map(|item| item.acquisition_url),
             extraction.as_ref().map(|item| book_format_storage(item.book_format)),
             publication.image_url,
-            prepared.payload
+            prepared.payload,
+            entry_id
         ],
     )?;
     replace_prepared_publication_metadata(transaction, source_id, generation, prepared)?;
+    queue_publication_cover(transaction, source_id, generation, publication)?;
     Ok(())
 }
 
@@ -376,11 +442,12 @@ pub(crate) fn upsert_publication_with_sequence(transaction: &Transaction<'_>, so
     let extraction = publication_extraction(publication);
     let (edition_id, work_id) = publication_key(publication);
     let sequence = storage_i64(sequence, "publication sequence")?;
+    let entry_id = publication_entry_id(transaction, source_id, publication, &payload_hash)?;
     transaction.execute(
-        "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14)
-         ON CONFLICT(source_id, generation, edition_id, work_id) DO UPDATE SET sequence=excluded.sequence, payload_hash=excluded.payload_hash, normalized_title=excluded.normalized_title,
-             book_format=excluded.book_format, importable=excluded.importable, has_upstream_cover=excluded.has_upstream_cover, inventory_indexed=1,
+        "INSERT INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, provider_popularity, gutenberg_has_images, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload, entry_id)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?15, ?16, ?17)
+         ON CONFLICT(source_id, generation, edition_id, work_id) DO UPDATE SET entry_id=excluded.entry_id, sequence=excluded.sequence, payload_hash=excluded.payload_hash, normalized_title=excluded.normalized_title,
+             provider_popularity=excluded.provider_popularity, gutenberg_has_images=excluded.gutenberg_has_images, book_format=excluded.book_format, importable=excluded.importable, has_upstream_cover=excluded.has_upstream_cover, inventory_indexed=1,
              acquisition_url=excluded.acquisition_url, extraction_format=excluded.extraction_format, cover_url=excluded.cover_url, payload=excluded.payload",
         params![
             source_id.as_str(),
@@ -390,30 +457,35 @@ pub(crate) fn upsert_publication_with_sequence(transaction: &Transaction<'_>, so
             sequence,
             payload_hash,
             normalize_search_text(&publication.title),
+            storage_i64(project_provider_popularity(publication).unwrap_or_default(), "provider popularity")?,
+            gutenberg_edition_has_images(publication),
             inventory.book_format,
             inventory.importable,
             inventory.has_upstream_cover,
             extraction.as_ref().map(|item| item.acquisition_url),
             extraction.as_ref().map(|item| book_format_storage(item.book_format)),
             publication.image_url,
-            payload
+            payload,
+            entry_id
         ],
     )?;
     transaction.execute("UPDATE catalog_source SET next_sequence=MAX(next_sequence, ?2) WHERE source_id=?1", params![source_id.as_str(), sequence])?;
-    replace_publication_metadata(transaction, source_id, generation, publication)
+    replace_publication_metadata(transaction, source_id, generation, publication)?;
+    queue_publication_cover(transaction, source_id, generation, publication)
 }
 
 pub(crate) fn insert_staged_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogCacheError> {
     let publication = &prepared.publication;
     let extraction = publication_extraction(publication);
     let (edition_id, work_id) = publication_key(publication);
+    let entry_id = publication_entry_id(transaction, source_id, publication, &prepared.payload_hash)?;
     let inserted = transaction.execute(
-        "INSERT OR IGNORE INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload)
-         VALUES(?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13)",
+        "INSERT OR IGNORE INTO catalog_publication(source_id, generation, edition_id, work_id, sequence, payload_hash, normalized_title, provider_popularity, gutenberg_has_images, book_format, importable, has_upstream_cover, inventory_indexed, acquisition_url, extraction_format, cover_url, payload, entry_id)
+         VALUES(?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?15, ?16)",
         params![
-            source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id, prepared.payload_hash, prepared.normalized_title, prepared.inventory.book_format,
+            source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id, prepared.payload_hash, prepared.normalized_title, storage_i64(prepared.provider_popularity, "provider popularity")?, prepared.gutenberg_has_images, prepared.inventory.book_format,
             prepared.inventory.importable, prepared.inventory.has_upstream_cover, extraction.as_ref().map(|item| item.acquisition_url), extraction.as_ref().map(|item| book_format_storage(item.book_format)),
-            publication.image_url, prepared.payload
+            publication.image_url, prepared.payload, entry_id
         ],
     )?;
     if inserted > 0 {
@@ -436,44 +508,16 @@ pub(crate) fn replace_prepared_publication_metadata(transaction: &Transaction<'_
     for language in &prepared.languages {
         transaction.execute("INSERT OR IGNORE INTO catalog_publication_language(source_id, generation, edition_id, work_id, language) VALUES(?1, ?2, ?3, ?4, ?5)", params![source_id.as_str(), generation, edition_id, work_id, language])?;
     }
-    Ok(())
+    transaction.execute("DELETE FROM catalog_publication_format WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4", params![source_id.as_str(), generation, edition_id, work_id])?;
+    for format in &prepared.formats {
+        transaction.execute("INSERT INTO catalog_publication_format(source_id, generation, edition_id, work_id, book_format) VALUES(?1, ?2, ?3, ?4, ?5)", params![source_id.as_str(), generation, edition_id, work_id, format])?;
+    }
+    replace_feed_publication_subjects_prepared(transaction, source_id, generation as u64, &prepared.publication.identity, &prepared.subjects, &prepared.subject_assignments)
 }
 
 pub(crate) fn merge_extracted_publication_authors(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, metadata: &CatalogEpubMetadata) -> Result<(), CatalogCacheError> {
     let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect::<Vec<_>>();
     merge_extracted_author_names(transaction, source_id, generation, publication, &authors)
-}
-
-pub(crate) fn merge_publication_subjects(
-    transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, subjects: &[library_model::PublicationSubject],
-) -> Result<(), CatalogCacheError> {
-    let assignments = prepare_catalog_subject_assignments(subjects);
-    merge_publication_subjects_prepared(transaction, source_id, generation, publication, subjects, &assignments)
-}
-
-pub(crate) fn merge_publication_subjects_prepared(
-    transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, subjects: &[library_model::PublicationSubject], assignments: &[CatalogSubjectAssignment],
-) -> Result<(), CatalogCacheError> {
-    let generation = storage_i64(generation, "generation")?;
-    let work_id = publication.work_id.as_deref().unwrap_or("");
-    for (position, subject) in subjects.iter().enumerate() {
-        transaction.execute(
-            "INSERT OR IGNORE INTO catalog_publication_subject(source_id,generation,edition_id,work_id,position,name,source,authority,code) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
-                source_id.as_str(),
-                generation,
-                publication.edition_id,
-                work_id,
-                1_000_000_i64 + i64::try_from(position).map_err(|_| CatalogCacheError::new("enriched subject position overflow"))?,
-                subject.name(),
-                subject.source(),
-                subject.authority(),
-                subject.code()
-            ],
-        )?;
-    }
-    insert_prepared_subject_assignments(transaction, source_id.as_str(), generation, &publication.edition_id, work_id, assignments)?;
-    Ok(())
 }
 
 pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, authors: &[String]) -> Result<(), CatalogCacheError> {
@@ -497,16 +541,7 @@ pub(crate) fn metadata_index_from_metadata(metadata: &CatalogEpubMetadata) -> Ca
         title: metadata.book.title.clone(),
         authors: metadata.book.authors().map(|author| author.name().to_owned()).collect(),
         publishers: metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect(),
-        isbns: metadata
-            .book
-            .publication
-            .identifiers
-            .iter()
-            .filter(|identifier| identifier.scheme() == &library_model::PublicationIdentifierScheme::Isbn)
-            .filter_map(library_model::PublicationIdentifier::canonical_value)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        isbns: metadata.book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &library_model::Scheme::Isbn).filter_map(library_model::Identifier::canonical_value).collect::<BTreeSet<_>>().into_iter().collect(),
         publication_year: library_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value())),
     }
 }

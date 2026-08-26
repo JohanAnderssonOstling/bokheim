@@ -1,13 +1,13 @@
-//! The EPUB toolbar: navigation, sidebar, audio, and the appearance panel.
+//! The EPUB toolbar: navigation, sidebar, progress, and appearance controls.
 //!
-//! The toolbar repaints far more often than the document — a page turn changes
-//! the chapter title and the history buttons while the document layout is
-//! untouched — so it is its own entity with its own invalidation.
+//! The toolbar owns a small projection of reader state and reports typed events
+//! back to the reader. Keeping that projection in an entity gives it a clear
+//! state and event boundary; GPUI may still dirty the ancestor render path when
+//! the child changes.
 //!
 //! It owns everything it draws. The reader pushes a [`ToolbarModel`] into it
 //! when something it displays changes, and the toolbar reports interaction
-//! back as a [`ToolbarEvent`]. It holds no handle to the reader, so a repaint
-//! here can never pull the reader's whole render along with it.
+//! back as a [`ToolbarEvent`]. It deliberately holds no handle to the reader.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, EventEmitter, IntoElement, Render, Window};
@@ -17,45 +17,6 @@ use crate::invalidation::{self, Component};
 use crate::settings::ReaderPreferences;
 use crate::{ReaderFontFamily, ReaderTextAlignment};
 
-/// What the audio button offers for the open book.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum AudioAffordance {
-    /// The book has no narration and speech synthesis is unavailable.
-    #[default]
-    Unavailable,
-    /// Speech synthesis is idle and can start.
-    ReadAloud,
-    /// Speech synthesis is running.
-    Speaking,
-    /// The book has narration, stopped.
-    NarrationIdle,
-    NarrationPlaying,
-    NarrationPaused,
-}
-
-impl AudioAffordance {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Unavailable | Self::ReadAloud => "Read",
-            Self::Speaking => "Stop",
-            Self::NarrationIdle => "Audio",
-            Self::NarrationPlaying => "Pause audio",
-            Self::NarrationPaused => "Resume audio",
-        }
-    }
-
-    fn is_available(self) -> bool {
-        self != Self::Unavailable
-    }
-
-    fn icon(self) -> gpui_component::IconName {
-        match self {
-            Self::Speaking | Self::NarrationPlaying => gpui_component::IconName::CircleX,
-            Self::Unavailable | Self::ReadAloud | Self::NarrationIdle | Self::NarrationPaused => gpui_component::IconName::BookOpen,
-        }
-    }
-}
-
 /// Everything the toolbar draws, pushed in by the reader.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ToolbarModel {
@@ -63,7 +24,6 @@ pub(crate) struct ToolbarModel {
     pub(crate) title: String,
     pub(crate) can_history_back: bool,
     pub(crate) can_history_forward: bool,
-    pub(crate) audio: AudioAffordance,
     /// How far through the book, for the toolbar's compact readout.
     pub(crate) progress: crate::epub::progress::ProgressSummary,
     /// How many columns the reader is currently fitting.
@@ -85,7 +45,6 @@ pub(crate) enum ToolbarEvent {
     /// `-1` for back, `1` for forward.
     NavigateHistory(i8),
     ToggleSidebar,
-    ToggleAudio,
     AdjustColumnWidth(f64),
     /// Fit one more or one fewer column in the current width.
     AdjustColumnCount(i8),
@@ -116,10 +75,10 @@ impl ReaderToolbar {
         invalidation::notify(cx, Component::ReaderToolbar, reason);
     }
 
-    fn render_settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let current = &self.model.preferences;
-        components::reader_settings_dropdown(theme)
+        components::reader_settings_dropdown(window.viewport_size().height, theme)
             .child(
                 components::reader_settings_section("Typography", theme)
                     .child(
@@ -190,11 +149,10 @@ impl ReaderToolbar {
 }
 
 impl Render for ReaderToolbar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         invalidation::record_render(Component::ReaderToolbar);
         let theme = components::browser_theme(cx);
-        let audio = self.model.audio;
-        let settings_panel = self.render_settings_panel(cx);
+        let settings_panel = self.render_settings_panel(window, cx);
 
         let left = gpui::div()
             .min_w_0()
@@ -202,10 +160,8 @@ impl Render for ReaderToolbar {
             .flex()
             .items_center()
             .gap(gpui::px(components::SPACE_SM))
+            .child(components::reader_control_button_icon("reader-library", "Return to library", gpui_component::IconName::BookOpen, theme).on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::ReturnToLibrary))))
             .child(components::reader_control_button_icon("reader-sidebar", "Toggle contents and annotations", gpui_component::IconName::PanelLeftOpen, theme).on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::ToggleSidebar))))
-            .when(cfg!(feature = "kobo"), |group| {
-                group.child(components::reader_control_button_icon("reader-library", "Return to library", gpui_component::IconName::BookOpen, theme).on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::ReturnToLibrary))))
-            })
             // `Undo2`/`Redo2`, not arrows: these retrace footnote and link
             // jumps, and bare arrows among the paging keys imply page turns.
             .child(
@@ -225,33 +181,8 @@ impl Render for ReaderToolbar {
             .justify_end()
             .gap(gpui::px(components::SPACE_SM))
             .child(components::reader_progress(self.model.progress.label(), self.model.progress.tooltip(), theme))
-            // Omitted rather than made transparent: an invisible button still
-            // occupies the toolbar and still answers clicks.
-            .children(audio.is_available().then(|| components::reader_control_button_icon("reader-audio", audio.label(), audio.icon(), theme).on_click(cx.listener(|_, _, _, cx| cx.emit(ToolbarEvent::ToggleAudio)))))
             .child(components::reader_settings_popover(self.model.document_focus.as_ref(), theme).child(settings_panel));
 
         components::reader_toolbar(theme).child(left).child(components::reader_toolbar_title(self.model.title.clone())).child(right)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_audio_button_names_what_pressing_it_will_do() {
-        assert_eq!(AudioAffordance::ReadAloud.label(), "Read");
-        assert_eq!(AudioAffordance::Speaking.label(), "Stop");
-        assert_eq!(AudioAffordance::NarrationIdle.label(), "Audio");
-        assert_eq!(AudioAffordance::NarrationPlaying.label(), "Pause audio");
-        assert_eq!(AudioAffordance::NarrationPaused.label(), "Resume audio");
-    }
-
-    #[test]
-    fn only_the_unavailable_affordance_hides_the_button() {
-        assert!(!AudioAffordance::Unavailable.is_available());
-        for affordance in [AudioAffordance::ReadAloud, AudioAffordance::Speaking, AudioAffordance::NarrationIdle, AudioAffordance::NarrationPlaying, AudioAffordance::NarrationPaused] {
-            assert!(affordance.is_available(), "{affordance:?} must leave the button usable");
-        }
     }
 }

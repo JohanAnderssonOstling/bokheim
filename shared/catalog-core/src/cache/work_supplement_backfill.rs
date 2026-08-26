@@ -1,7 +1,7 @@
 use super::{
-    active_generation_in, bounded_crawl_error, decode_cached, merge_publication_subjects, params, sequence_in, sequenced_publication_in, storage_i64, unix_timestamp, upsert_active_publication, CatalogCache, CatalogCacheError,
-    CatalogDescription, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, OptionalExtension, Transaction, TransactionBehavior,
-    CATALOG_DESCRIPTION_BACKFILL_VERSION, CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, merge_catalog_subject_evidence, params, sequence_in, sequenced_publication_in, storage_i64, unix_timestamp, upsert_active_publication, CatalogCache,
+    CatalogCacheError, CatalogDescription, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogPublicationIdentity, CatalogSourceId, TransactionBehavior, CATALOG_DESCRIPTION_BACKFILL_VERSION,
+    CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
 };
 
 impl CatalogCache {
@@ -85,19 +85,24 @@ impl CatalogCache {
             let outcome = update.open_library_description_missing.then_some("no_description");
             let generation = active_generation_in(&transaction, &update.source_id)?;
             if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
-                merge_publication_subjects(&transaction, &update.source_id, generation, &update.publication, &update.subjects)?;
-            }
-            if let (Some(description), Some(mut active)) = (update.description.as_deref(), sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)?) {
-                if active.publication.description.is_none() {
-                    active.publication.description = Some(CatalogDescription::PlainText { text: description.to_owned() });
+                if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
+                    merge_catalog_subject_evidence(&mut active.publication, &update.subjects);
+                    if active.publication.description.is_none() {
+                        if let Some(description) = update.description.as_deref() {
+                            active.publication.description = Some(CatalogDescription::PlainText { text: description.to_owned() });
+                        }
+                    }
                     upsert_active_publication(&transaction, &update.source_id, generation, &active.publication)?;
-                    fill_extraction_result_description(&transaction, &update.source_id, &update.acquisition_url, description)?;
+                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
                 }
             }
             transaction.execute(
                 "UPDATE catalog_description_backfill SET status='succeeded',last_error=NULL,outcome=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running'",
                 params![update.source_id.as_str(), update.acquisition_url, outcome],
             )?;
+        }
+        if !updates.is_empty() {
+            advance_catalog_transport_revision(&transaction)?;
         }
         transaction.commit()?;
         Ok(())
@@ -113,18 +118,4 @@ impl CatalogCache {
         transaction.commit()?;
         Ok(())
     }
-}
-
-pub(crate) fn fill_extraction_result_description(transaction: &Transaction<'_>, source_id: &CatalogSourceId, acquisition_url: &str, description: &str) -> Result<(), CatalogCacheError> {
-    let payload = transaction
-        .query_row("SELECT result_payload FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2 AND result_payload IS NOT NULL", params![source_id.as_str(), acquisition_url], |row| row.get::<_, Vec<u8>>(0))
-        .optional()?;
-    let Some(payload) = payload else { return Ok(()) };
-    let mut publication: CatalogPublication = decode_cached(&payload)?;
-    if publication.description.is_some() {
-        return Ok(());
-    }
-    publication.description = Some(CatalogDescription::PlainText { text: description.to_owned() });
-    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&publication)?])?;
-    Ok(())
 }

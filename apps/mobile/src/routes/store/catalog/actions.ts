@@ -3,8 +3,7 @@ import type { CatalogBookFormat, CatalogPublicationAction } from "../../../lib/b
 type CatalogOwnershipStatus = "not_owned" | "exact_edition_owned" | "other_edition_owned";
 export type CatalogImportAction = Extract<CatalogPublicationAction, { kind: "import" }>;
 
-const formatLabel = (format: CatalogBookFormat) =>
-  format === "web_pub" ? "WebPub" : format.toUpperCase();
+const formatLabel = (format: CatalogBookFormat) => format.toUpperCase();
 
 export function catalogActionKey(action: CatalogPublicationAction) {
   return action.kind === "import"

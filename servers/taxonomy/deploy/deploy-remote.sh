@@ -28,7 +28,7 @@ trap cleanup EXIT
 echo "Building taxonomy-server..."
 cargo build --release --manifest-path "${repository_root}/Cargo.toml" -p taxonomy-server
 binary=${repository_root}/target/release/taxonomy-server
-database=${repository_root}/client/library-model/data/unified-taxonomy-v2.sqlite3
+database=${repository_root}/shared/subject-projection/data/unified-taxonomy-v2.sqlite3
 [[ -x ${binary} && -f ${database} ]] || { echo "missing taxonomy deployment artifact" >&2; exit 1; }
 
 install -m 0755 "${binary}" "${stage}/taxonomy-server"

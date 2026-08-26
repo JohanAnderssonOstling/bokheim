@@ -4,13 +4,13 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use library_model::{read_unified_taxonomy_sqlite, UnifiedConceptDefinition, UnifiedTaxonomy, BISAC_SYSTEM_ID, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
+use subject_projection::{read_unified_taxonomy_sqlite, UnifiedConceptDefinition, UnifiedTaxonomy, BISAC_SYSTEM_ID, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
 use taxonomy_contract::{
     TaxonomyBatchRequest, TaxonomyBatchResponse, TaxonomyCodeResolution, TaxonomyConcept, TaxonomyDescription, TaxonomyParent, TaxonomyResolution, TaxonomySlice, TaxonomySystem, API_VERSION, MAX_CODES_PER_REQUEST, MAX_CODE_BYTES,
     MAX_REQUEST_BYTES, SNAPSHOT_MEDIA_TYPE,
@@ -257,7 +257,7 @@ fn internal_error(error: TaxonomyError) -> Response {
 }
 
 pub fn default_database_path() -> &'static FilePath {
-    FilePath::new("client/library-model/data/unified-taxonomy-v2.sqlite3")
+    FilePath::new("shared/subject-projection/data/unified-taxonomy-v2.sqlite3")
 }
 
 #[cfg(test)]
@@ -272,7 +272,7 @@ mod tests {
         static SERVICE: OnceLock<TaxonomyService> = OnceLock::new();
         SERVICE
             .get_or_init(|| {
-                let database = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("../../client/library-model/data/unified-taxonomy-v2.sqlite3");
+                let database = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/subject-projection/data/unified-taxonomy-v2.sqlite3");
                 TaxonomyService::open(database).expect("curated taxonomy opens")
             })
             .clone()

@@ -1,7 +1,7 @@
 use super::{
-    decode_cached, decode_page, identity_review_inventory_in, optional_stored_u64, params, sql_decode_error, storage_i64, stored_u64, BTreeMap, CatalogCache, CatalogCacheError, CatalogDescriptionBackfillInventory,
-    CatalogEpubExtractionInventory, CatalogEpubFailureDiagnostic, CatalogEpubFailureExample, CatalogEpubMetadata, CatalogInventory, CatalogMetadataBackfillInventory, CatalogPublication, CatalogSourceId, CatalogSourceInventory,
-    CatalogSourceState, Connection, OptionalExtension, Transaction, TransactionBehavior, Uuid, CATALOG_DESCRIPTION_BACKFILL_VERSION, CATALOG_SEARCH_INDEX_VERSION,
+    advance_catalog_transport_revision, decode_cached, decode_page, identity_review_inventory_in, optional_stored_u64, params, publication_entry_id, sql_decode_error, storage_i64, stored_u64, BTreeMap, CatalogCache, CatalogCacheError,
+    CatalogCoverDownloadInventory, CatalogDescriptionBackfillInventory, CatalogEpubExtractionInventory, CatalogEpubFailureDiagnostic, CatalogEpubFailureExample, CatalogEpubMetadata, CatalogInventory, CatalogMetadataBackfillInventory,
+    CatalogPublication, CatalogSourceId, CatalogSourceInventory, CatalogSourceState, Connection, OptionalExtension, Transaction, TransactionBehavior, Uuid, CATALOG_DESCRIPTION_BACKFILL_VERSION, CATALOG_SEARCH_INDEX_VERSION,
 };
 #[cfg(test)]
 use super::{HashSet, CATALOG_EPUB_ENRICHMENT_VERSION};
@@ -24,9 +24,10 @@ impl CatalogCache {
             if rewrite(&mut publication) {
                 let payload = wire::encode(&publication)?;
                 let payload_hash = blake3::hash(&payload).to_hex().to_string();
+                let entry_id = publication_entry_id(&transaction, source_id, &publication, &payload_hash)?;
                 transaction.execute(
-                    "UPDATE catalog_publication SET payload=?5, payload_hash=?6 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
-                    params![source_id.as_str(), generation, edition_id, work_id, payload, payload_hash],
+                    "UPDATE catalog_publication SET payload=?5, payload_hash=?6, entry_id=?7 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+                    params![source_id.as_str(), generation, edition_id, work_id, payload, payload_hash, entry_id],
                 )?;
                 changed += 1;
             }
@@ -43,6 +44,9 @@ impl CatalogCache {
             if page_changed {
                 transaction.execute("UPDATE catalog_page SET payload=?4 WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), generation, locator, wire::encode(&page)?])?;
             }
+        }
+        if changed > 0 {
+            advance_catalog_transport_revision(&transaction)?;
         }
         transaction.commit()?;
         Ok(changed)
@@ -121,6 +125,14 @@ impl CatalogCache {
                 .optional()?,
         };
         let identity_reviews = identity_review_inventory_in(&connection, None)?;
+        let cover_downloads = CatalogCoverDownloadInventory {
+            pending: connection.query_row("SELECT COUNT(*) FROM catalog_cover_download WHERE status='pending'", [], |row| stored_u64(row.get(0)?, "pending cover download count"))?,
+            running: connection.query_row("SELECT COUNT(*) FROM catalog_cover_download WHERE status='running'", [], |row| stored_u64(row.get(0)?, "running cover download count"))?,
+            succeeded: connection.query_row("SELECT COUNT(*) FROM catalog_cover_download WHERE status='succeeded'", [], |row| stored_u64(row.get(0)?, "succeeded cover download count"))?,
+            failed: connection.query_row("SELECT COUNT(*) FROM catalog_cover_download WHERE status='failed'", [], |row| stored_u64(row.get(0)?, "failed cover download count"))?,
+            attempts: connection.query_row("SELECT COALESCE(SUM(attempts),0) FROM catalog_cover_download", [], |row| stored_u64(row.get(0)?, "cover download attempt count"))?,
+            last_error: connection.query_row("SELECT last_error FROM catalog_cover_download WHERE last_error IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1", [], |row| row.get(0)).optional()?,
+        };
         Ok(CatalogInventory {
             search_index_ready: connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get(0))?,
             active_page_count: sources.iter().map(|source| source.active_page_count).sum(),
@@ -138,6 +150,7 @@ impl CatalogCache {
                 total.downloaded_bytes += source.epub_extractions.downloaded_bytes;
                 total
             }),
+            cover_downloads,
             metadata_backfill,
             description_backfill,
             identity_reviews,
@@ -256,8 +269,11 @@ impl CatalogCache {
     }
 
     pub fn remove_source(&self, source_id: &CatalogSourceId) -> Result<(), CatalogCacheError> {
-        let connection = self.pool.get()?;
-        connection.execute("DELETE FROM catalog_source WHERE source_id=?1", [source_id.as_str()])?;
+        let mut connection = self.pool.get()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("DELETE FROM catalog_source WHERE source_id=?1", [source_id.as_str()])?;
+        advance_catalog_transport_revision(&transaction)?;
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -269,6 +285,7 @@ pub(crate) fn ensure_source_in(transaction: &Transaction<'_>, source_id: &Catalo
         Some(_) => {
             transaction.execute("DELETE FROM catalog_source WHERE source_id=?1", [source_id.as_str()])?;
             insert_source(transaction, source_id, source_url)?;
+            advance_catalog_transport_revision(transaction)?;
         }
         None => insert_source(transaction, source_id, source_url)?,
     }
@@ -290,6 +307,7 @@ pub(crate) fn clear_source_rows(transaction: &Transaction<'_>, source_id: &Catal
          WHERE source_id=?1",
         params![source_id.as_str(), Uuid::new_v4().to_string()],
     )?;
+    advance_catalog_transport_revision(transaction)?;
     Ok(())
 }
 

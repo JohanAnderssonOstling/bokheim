@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use uri_template::{HashValues, UriTemplate};
 
@@ -19,6 +19,11 @@ mod outbound;
 mod registry;
 
 pub use outbound::{send_get as send_outbound_get, OutboundHttpError, OutboundNetworkPolicy};
+pub use publication_model::{
+    AgeRange as OpdsAgeRange, AggregateRating as OpdsAggregateRating, Audience as OpdsAudience, Collection as OpdsPublicationCollection, CollectionKind, InteractionStatistic as OpdsInteractionStatistic, LanguageTag as OpdsLanguageTag,
+    LocalizedText as OpdsLocalizedText, PopularityRank as OpdsPopularityRank, PublicationDate as OpdsPublicationDate, PublicationImage as OpdsPublicationImage, PublicationProperty as OpdsPublicationProperty,
+    PublicationSubject as OpdsPublicationSubject, PublicationTitle as OpdsPublicationTitle,
+};
 pub use registry::{CatalogRegistry, CatalogSource, CATALOG_REGISTRY_SCHEMA_VERSION};
 
 const MAX_CATALOG_BYTES: u64 = 24 * 1024 * 1024;
@@ -35,13 +40,11 @@ const MAX_EPUB_CONTAINER_BYTES: u64 = 256 * 1024;
 const MAX_EPUB_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_EPUB_NAVIGATION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_EPUB_COVER_BYTES: u64 = 24 * 1024 * 1024;
-const MAX_CUSTOM_ENDPOINTS: usize = 64;
+const MAX_RETAINED_METADATA_PROPERTIES: usize = 64;
+const MAX_RETAINED_METADATA_PROPERTY_BYTES: usize = 16 * 1024;
 const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
 const PDF_MEDIA_TYPE: &str = "application/pdf";
 const MOBI_MEDIA_TYPE: &str = "application/x-mobipocket-ebook";
-const FB2_MEDIA_TYPE: &str = "application/x-fictionbook+xml";
-const CBZ_MEDIA_TYPE: &str = "application/vnd.comicbook+zip";
-const WEBPUB_MEDIA_TYPE: &str = "application/webpub+zip";
 const M4B_MEDIA_TYPE: &str = "audio/mp4";
 const OPDS_2_MEDIA_TYPE: &str = "application/opds+json";
 const OPENSEARCH_MEDIA_TYPE: &str = "application/opensearchdescription+xml";
@@ -106,7 +109,14 @@ fn open_endpoint(id: &str, title: &str, description: &str, languages: &[&str], u
 }
 
 pub fn endpoints_from_registry(registry: CatalogRegistry) -> Result<Vec<OpdsEndpoint>, OpdsError> {
-    endpoints_from_registry_with_policy(registry, RegistryUrlPolicy::HttpsOnly)
+    if registry.schema_version != CATALOG_REGISTRY_SCHEMA_VERSION {
+        return Err(OpdsError::InvalidEndpoint(format!("unsupported registry schema {}", registry.schema_version)));
+    }
+    if registry.revision == 0 {
+        return Err(OpdsError::InvalidEndpoint("registry revision must be greater than zero".to_owned()));
+    }
+    let mut ids = std::collections::HashSet::new();
+    registry.catalogs.into_iter().map(|source| endpoint_from_source(source, &mut ids)).collect()
 }
 
 pub fn validate_curated_registry(registry: &CatalogRegistry) -> Result<(), OpdsError> {
@@ -115,21 +125,6 @@ pub fn validate_curated_registry(registry: &CatalogRegistry) -> Result<(), OpdsE
         return Err(OpdsError::InvalidEndpoint("the curated OPDS registry must contain at least one catalog".to_owned()));
     }
     Ok(())
-}
-
-pub fn custom_endpoints_from_registry(registry: CatalogRegistry) -> Result<Vec<OpdsEndpoint>, OpdsError> {
-    endpoints_from_registry_with_policy(registry, RegistryUrlPolicy::HttpOrHttps)
-}
-
-fn endpoints_from_registry_with_policy(registry: CatalogRegistry, url_policy: RegistryUrlPolicy) -> Result<Vec<OpdsEndpoint>, OpdsError> {
-    if registry.schema_version != CATALOG_REGISTRY_SCHEMA_VERSION {
-        return Err(OpdsError::InvalidEndpoint(format!("unsupported registry schema {}", registry.schema_version)));
-    }
-    if registry.revision == 0 {
-        return Err(OpdsError::InvalidEndpoint("registry revision must be greater than zero".to_owned()));
-    }
-    let mut ids = std::collections::HashSet::new();
-    registry.catalogs.into_iter().map(|source| endpoint_from_source(source, &mut ids, url_policy)).collect()
 }
 
 pub fn registry_from_endpoints(revision: u64, endpoints: &[OpdsEndpoint]) -> CatalogRegistry {
@@ -144,31 +139,9 @@ pub fn registry_from_endpoints(revision: u64, endpoints: &[OpdsEndpoint]) -> Cat
 }
 
 pub fn load_registry_cache(path: &Path) -> Result<Option<(CatalogRegistry, Vec<OpdsEndpoint>)>, OpdsError> {
-    load_registry_cache_with_policy(path, RegistryUrlPolicy::HttpsOnly)
-}
-
-pub fn load_custom_registry_cache(path: &Path) -> Result<Option<(CatalogRegistry, Vec<OpdsEndpoint>)>, OpdsError> {
-    let Some(mut value) = load_registry_cache_value(path)? else { return Ok(None) };
-    if value.get("schema_version").and_then(Value::as_u64) == Some(1) {
-        value["schema_version"] = Value::from(CATALOG_REGISTRY_SCHEMA_VERSION);
-        if let Some(catalogs) = value.get_mut("catalogs").and_then(Value::as_array_mut) {
-            for catalog in catalogs {
-                if let Some(catalog) = catalog.as_object_mut() {
-                    catalog.remove("access");
-                    catalog.remove("authentication");
-                }
-            }
-        }
-    }
-    let registry: CatalogRegistry = serde_json::from_value(value).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))?;
-    let endpoints = endpoints_from_registry_with_policy(registry.clone(), RegistryUrlPolicy::HttpOrHttps)?;
-    Ok(Some((registry, endpoints)))
-}
-
-fn load_registry_cache_with_policy(path: &Path, url_policy: RegistryUrlPolicy) -> Result<Option<(CatalogRegistry, Vec<OpdsEndpoint>)>, OpdsError> {
     let Some(value) = load_registry_cache_value(path)? else { return Ok(None) };
     let registry: CatalogRegistry = serde_json::from_value(value).map_err(|error| OpdsError::InvalidEndpoint(error.to_string()))?;
-    let endpoints = endpoints_from_registry_with_policy(registry.clone(), url_policy)?;
+    let endpoints = endpoints_from_registry(registry.clone())?;
     Ok(Some((registry, endpoints)))
 }
 
@@ -206,117 +179,7 @@ pub fn save_registry_cache(path: &Path, registry: &CatalogRegistry) -> Result<()
     result.map_err(OpdsError::Io)
 }
 
-/// Owns the persisted curated and device-local endpoint registries.
-///
-/// Invalid or missing caches are ignored during startup so bundled endpoints
-/// remain available. Mutations are persisted before the in-memory state is
-/// changed.
-#[derive(Debug)]
-pub struct OpdsEndpointStore {
-    curated_cache_path: PathBuf,
-    custom_cache_path: PathBuf,
-    curated_revision: u64,
-    curated: Vec<OpdsEndpoint>,
-    custom: Vec<OpdsEndpoint>,
-}
-
-impl OpdsEndpointStore {
-    pub fn load(curated_cache_path: PathBuf, custom_cache_path: PathBuf) -> Self {
-        let cached_curated = load_registry_cache(&curated_cache_path).ok().flatten().filter(|(_, endpoints)| !endpoints.is_empty());
-        let curated_revision = cached_curated.as_ref().map(|(registry, _)| registry.revision).unwrap_or(0);
-        let curated = cached_curated.map(|(_, endpoints)| endpoints).unwrap_or_else(built_in_opds_endpoints);
-        let custom = load_custom_registry_cache(&custom_cache_path).ok().flatten().map(|(_, endpoints)| endpoints).unwrap_or_default();
-        Self { curated_cache_path, custom_cache_path, curated_revision, curated, custom }
-    }
-
-    pub fn endpoints(&self) -> Vec<OpdsEndpoint> {
-        let mut endpoints = built_in_opds_endpoints();
-        merge_endpoints(&mut endpoints, self.curated.iter().cloned());
-        merge_endpoints(&mut endpoints, self.custom.iter().cloned());
-        endpoints
-    }
-
-    pub fn custom_endpoints(&self) -> &[OpdsEndpoint] {
-        &self.custom
-    }
-
-    pub fn is_curated_endpoint(&self, endpoint: &OpdsEndpoint) -> bool {
-        self.curated.iter().any(|candidate| candidate.id == endpoint.id)
-    }
-
-    pub fn add_custom_endpoint(&mut self, title: &str, url: &str) -> Result<OpdsEndpoint, OpdsError> {
-        let registry = CatalogRegistry {
-            schema_version: CATALOG_REGISTRY_SCHEMA_VERSION,
-            revision: 1,
-            catalogs: vec![CatalogSource {
-                id: format!("custom-{}", uuid::Uuid::new_v4().simple()),
-                title: title.to_owned(),
-                description: "User-supplied OPDS catalog".to_owned(),
-                languages: vec!["Unspecified".to_owned()],
-                url: url.to_owned(),
-            }],
-        };
-        let endpoint = custom_endpoints_from_registry(registry)?.into_iter().next().ok_or_else(|| OpdsError::InvalidEndpoint("custom OPDS endpoint was not created".to_owned()))?;
-        if self.custom.len() >= MAX_CUSTOM_ENDPOINTS {
-            return Err(OpdsError::InvalidEndpoint(format!("at most {MAX_CUSTOM_ENDPOINTS} custom OPDS catalogs can be configured")));
-        }
-        if self.custom.iter().any(|candidate| candidate.url == endpoint.url) {
-            return Err(OpdsError::InvalidEndpoint("this custom OPDS catalog is already configured".to_owned()));
-        }
-        let mut custom = self.custom.clone();
-        custom.push(endpoint.clone());
-        save_registry_cache(&self.custom_cache_path, &registry_from_endpoints(1, &custom))?;
-        self.custom = custom;
-        Ok(endpoint)
-    }
-
-    pub fn remove_custom_endpoint(&mut self, endpoint_id: &OpdsEndpointId) -> Result<(), OpdsError> {
-        let mut custom = self.custom.clone();
-        let previous_len = custom.len();
-        custom.retain(|endpoint| &endpoint.id != endpoint_id);
-        if custom.len() == previous_len {
-            return Err(OpdsError::InvalidEndpoint("custom OPDS endpoint was not found".to_owned()));
-        }
-        save_registry_cache(&self.custom_cache_path, &registry_from_endpoints(1, &custom))?;
-        self.custom = custom;
-        Ok(())
-    }
-
-    pub fn replace_curated_registry(&mut self, registry: CatalogRegistry) -> Result<(), OpdsError> {
-        let endpoints = endpoints_from_registry(registry.clone())?;
-        if endpoints.is_empty() {
-            return Err(OpdsError::InvalidEndpoint("the curated OPDS registry is empty".to_owned()));
-        }
-        if registry.revision < self.curated_revision {
-            return Err(OpdsError::InvalidEndpoint(format!("refusing stale OPDS registry revision {} because revision {} is cached", registry.revision, self.curated_revision)));
-        }
-        if registry.revision == self.curated_revision && self.curated_revision != 0 && endpoints != self.curated {
-            return Err(OpdsError::InvalidEndpoint(format!("OPDS registry revision {} changed without a revision increment", registry.revision)));
-        }
-        save_registry_cache(&self.curated_cache_path, &registry)?;
-        self.curated = endpoints;
-        self.curated_revision = registry.revision;
-        Ok(())
-    }
-}
-
-fn merge_endpoints(endpoints: &mut Vec<OpdsEndpoint>, replacements: impl IntoIterator<Item = OpdsEndpoint>) {
-    for endpoint in replacements {
-        if let Some(existing) = endpoints.iter_mut().find(|existing| existing.id == endpoint.id) {
-            *existing = endpoint;
-        } else {
-            endpoints.push(endpoint);
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum RegistryUrlPolicy {
-    HttpsOnly,
-    HttpOrHttps,
-}
-
-fn endpoint_from_source(source: CatalogSource, ids: &mut std::collections::HashSet<String>, url_policy: RegistryUrlPolicy) -> Result<OpdsEndpoint, OpdsError> {
+fn endpoint_from_source(source: CatalogSource, ids: &mut std::collections::HashSet<String>) -> Result<OpdsEndpoint, OpdsError> {
     let id = OpdsEndpointId::parse(&source.id)?;
     if !ids.insert(source.id) {
         return Err(OpdsError::InvalidEndpoint(format!("duplicate catalog id {}", id.as_str())));
@@ -328,7 +191,7 @@ fn endpoint_from_source(source: CatalogSource, ids: &mut std::collections::HashS
     }
     let languages = source.languages.into_iter().map(|language| bounded_endpoint_text(language, "language", 80)).collect::<Result<Vec<_>, _>>()?;
     let url = parse_http_url(&source.url)?.to_string();
-    if matches!(url_policy, RegistryUrlPolicy::HttpsOnly) && !url.starts_with("https://") {
+    if !url.starts_with("https://") {
         return Err(OpdsError::InvalidEndpoint(format!("curated catalog {} must use HTTPS", id.as_str())));
     }
     Ok(OpdsEndpoint { id, title, description, languages, url })
@@ -343,7 +206,7 @@ fn bounded_endpoint_text(value: String, field: &str, maximum: usize) -> Result<S
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum OpdsVersion {
     V1_2,
@@ -381,6 +244,9 @@ pub struct OpdsCatalogLink {
     pub title: String,
     pub url: String,
     pub target: OpdsLinkTarget,
+    /// Exact link-relation values advertised by the provider.
+    #[serde(default)]
+    pub relations: Vec<String>,
     pub number_of_items: Option<u32>,
     pub active: bool,
 }
@@ -416,9 +282,6 @@ pub enum OpdsBookFormat {
     Epub,
     Pdf,
     Mobi,
-    Fb2,
-    Cbz,
-    WebPub,
     M4b,
 }
 
@@ -428,9 +291,6 @@ impl OpdsBookFormat {
             Self::Epub => EPUB_MEDIA_TYPE,
             Self::Pdf => PDF_MEDIA_TYPE,
             Self::Mobi => MOBI_MEDIA_TYPE,
-            Self::Fb2 => FB2_MEDIA_TYPE,
-            Self::Cbz => CBZ_MEDIA_TYPE,
-            Self::WebPub => WEBPUB_MEDIA_TYPE,
             Self::M4b => M4B_MEDIA_TYPE,
         }
     }
@@ -440,9 +300,6 @@ impl OpdsBookFormat {
             Self::Epub => "epub",
             Self::Pdf => "pdf",
             Self::Mobi => "mobi",
-            Self::Fb2 => "fb2",
-            Self::Cbz => "cbz",
-            Self::WebPub => "webpub",
             Self::M4b => "m4b",
         }
     }
@@ -495,7 +352,11 @@ pub enum OpdsAcquisition {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct OpdsAuthorCredit {
     pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<OpdsLocalizedText>,
     pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<OpdsLocalizedText>,
     pub identifiers: Vec<String>,
     pub provider_link: Option<OpdsAuthorLink>,
 }
@@ -515,8 +376,85 @@ pub struct OpdsPublication {
     pub languages: Vec<String>,
     pub description: Option<OpdsDescription>,
     pub image_url: Option<String>,
+    #[serde(default)]
+    pub metadata: OpdsPublicationMetadata,
     pub preferred_download: Option<OpdsDirectAcquisition>,
     pub acquisitions: Vec<OpdsAcquisition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum OpdsIdentifierScope {
+    Publication,
+    CatalogEntry,
+    Edition,
+    Work,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct OpdsPublicationIdentifier {
+    pub value: String,
+    pub scheme: Option<String>,
+    pub source: String,
+    pub scope: OpdsIdentifierScope,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(default)]
+pub struct OpdsPublicationMetadata {
+    pub title_localizations: Vec<OpdsLocalizedText>,
+    pub sort_name: Option<String>,
+    pub sort_name_localizations: Vec<OpdsLocalizedText>,
+    pub published: Option<String>,
+    pub modified: Option<String>,
+    pub dates: Vec<OpdsPublicationDate>,
+    pub publishers: Vec<OpdsAgentCredit>,
+    pub identifiers: Vec<OpdsPublicationIdentifier>,
+    pub subjects: Vec<OpdsPublicationSubject>,
+    pub subtitle: Option<String>,
+    pub subtitle_localizations: Vec<OpdsLocalizedText>,
+    pub alternate_titles: Vec<OpdsPublicationTitle>,
+    pub collections: Vec<OpdsPublicationCollection>,
+    pub contributors: Vec<OpdsContributorCredit>,
+    pub rights: Vec<String>,
+    pub sources: Vec<String>,
+    pub types: Vec<String>,
+    pub formats: Vec<String>,
+    pub relations: Vec<String>,
+    pub coverage: Vec<String>,
+    pub audiences: Vec<OpdsAudience>,
+    pub age_ranges: Vec<OpdsAgeRange>,
+    pub images: Vec<OpdsPublicationImage>,
+    pub ratings: Vec<OpdsAggregateRating>,
+    pub interactions: Vec<OpdsInteractionStatistic>,
+    pub popularity_ranks: Vec<OpdsPopularityRank>,
+    /// Raw provider metadata retained losslessly when reasonably sized.
+    pub properties: Vec<OpdsPublicationProperty>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct OpdsAgentCredit {
+    pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<OpdsLocalizedText>,
+    pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<OpdsLocalizedText>,
+    pub identifiers: Vec<String>,
+    pub provider_link: Option<OpdsAuthorLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct OpdsContributorCredit {
+    pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<OpdsLocalizedText>,
+    pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<OpdsLocalizedText>,
+    pub identifiers: Vec<String>,
+    pub provider_link: Option<OpdsAuthorLink>,
+    pub roles: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -641,7 +579,7 @@ pub enum OpdsError {
     InvalidUrl(String),
     Network(reqwest::Error),
     TimedOut,
-    HttpStatus(reqwest::StatusCode),
+    HttpStatus { status: reqwest::StatusCode, retry_after: Option<Duration> },
     ResponseTooLarge { limit: u64 },
     RangeUnsupported,
     UnsupportedCatalogFormat,
@@ -660,7 +598,13 @@ impl fmt::Display for OpdsError {
             Self::InvalidUrl(error) => write!(formatter, "invalid OPDS URL: {error}"),
             Self::Network(error) => write!(formatter, "OPDS network request failed: {error}"),
             Self::TimedOut => formatter.write_str("OPDS server did not respond before the timeout"),
-            Self::HttpStatus(status) => write!(formatter, "OPDS server returned HTTP {status}"),
+            Self::HttpStatus { status, retry_after } => {
+                write!(formatter, "OPDS server returned HTTP {status}")?;
+                if let Some(retry_after) = retry_after {
+                    write!(formatter, " (retry after {} seconds)", retry_after.as_secs())?;
+                }
+                Ok(())
+            }
             Self::ResponseTooLarge { limit } => write!(formatter, "OPDS response exceeds the {limit}-byte limit"),
             Self::RangeUnsupported => formatter.write_str("OPDS acquisition origin does not support reliable byte ranges"),
             Self::UnsupportedCatalogFormat => formatter.write_str("response is neither an OPDS 1.2 Atom feed nor an OPDS 2.0 JSON feed"),
@@ -679,6 +623,22 @@ impl std::error::Error for OpdsError {
         match self {
             Self::Network(error) => Some(error),
             Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl OpdsError {
+    pub fn http_status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::HttpStatus { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -1062,7 +1022,7 @@ impl OpdsClient {
                 return Ok(OpdsConditionalCatalog::NotModified);
             }
             if !response.status().is_success() {
-                return Err(OpdsError::HttpStatus(response.status()));
+                return Err(http_status_error(&response));
             }
             let final_url = validated_response_url(&response)?;
             let response_validators = response_validators(&response);
@@ -1134,7 +1094,7 @@ impl OpdsClient {
     async fn send(&self, url: Url, headers: reqwest::header::HeaderMap) -> Result<Response, OpdsError> {
         let response = self.get(url, headers).await?;
         if !response.status().is_success() {
-            return Err(OpdsError::HttpStatus(response.status()));
+            return Err(http_status_error(&response));
         }
         Ok(response)
     }
@@ -1145,6 +1105,18 @@ fn response_validators(response: &Response) -> OpdsHttpValidators {
         etag: response.headers().get(reqwest::header::ETAG).and_then(|value| value.to_str().ok()).map(str::to_owned),
         last_modified: response.headers().get(reqwest::header::LAST_MODIFIED).and_then(|value| value.to_str().ok()).map(str::to_owned),
     }
+}
+
+fn http_status_error(response: &Response) -> OpdsError {
+    OpdsError::HttpStatus { status: response.status(), retry_after: retry_after(response.headers(), SystemTime::now()) }
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    Some(httpdate::parse_http_date(value).ok()?.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 #[cfg(debug_assertions)]
@@ -1160,7 +1132,7 @@ fn opds_error_kind(error: &OpdsError) -> &'static str {
         OpdsError::InvalidUrl(_) => "invalid_url",
         OpdsError::Network(_) => "network_error",
         OpdsError::TimedOut => "timeout",
-        OpdsError::HttpStatus(_) => "http_error",
+        OpdsError::HttpStatus { .. } => "http_error",
         OpdsError::ResponseTooLarge { .. } => "response_too_large",
         OpdsError::RangeUnsupported => "range_unsupported",
         OpdsError::UnsupportedCatalogFormat => "unsupported_catalog_format",
@@ -1513,7 +1485,7 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
             if let Some(link) = entry.links.iter().find(|link| link.mime_type.as_deref().is_some_and(is_catalog_media_type) || is_navigation_relation(&link.rel)) {
                 if let Ok(url) = resolve_url(&base_url, &link.href) {
                     let target = entry.links.iter().find(|candidate| candidate.href == link.href).and_then(|candidate| candidate.mime_type.as_deref()).map(link_target_from_media_type).unwrap_or(OpdsLinkTarget::Catalog);
-                    navigation.push(OpdsCatalogLink { title: nonempty(entry.title.as_str()).unwrap_or("Untitled").to_owned(), url: url.to_string(), target, number_of_items: None, active: false });
+                    navigation.push(OpdsCatalogLink { title: nonempty(entry.title.as_str()).unwrap_or("Untitled").to_owned(), url: url.to_string(), target, relations: vec![link.rel.clone()], number_of_items: None, active: false });
                 }
             }
             continue;
@@ -1521,7 +1493,6 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
         let title = nonempty(entry.title.as_str()).unwrap_or("Untitled").to_owned();
         let acquisitions =
             acquisition_links.into_iter().enumerate().filter_map(|(link_index, link)| acquisition_from_atom(&base_url, link, &title, acquisition_details.get(entry_index).and_then(|links| links.get(link_index)))).collect::<Vec<_>>();
-        let image_url = entry.links.iter().filter(|link| is_image_relation(&link.rel)).find_map(|link| resolve_url(&base_url, &link.href).ok()).map(|url| url.to_string());
         let preferred_download = preferred_download(&acquisitions);
         let authors = entry
             .authors
@@ -1531,14 +1502,25 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
                 let raw_uri = author.uri.as_deref().and_then(nonempty);
                 let resolved_uri = raw_uri.and_then(|uri| resolve_url(&base_url, uri).ok()).map(|url| url.to_string());
                 let identifier = resolved_uri.clone().or_else(|| raw_uri.map(str::to_owned));
-                Some(OpdsAuthorCredit { name, sort_name: None, identifiers: identifier.into_iter().collect(), provider_link: resolved_uri.map(|url| OpdsAuthorLink { url, target: OpdsLinkTarget::Web }) })
+                Some(OpdsAuthorCredit {
+                    name,
+                    name_localizations: Vec::new(),
+                    sort_name: None,
+                    sort_name_localizations: Vec::new(),
+                    identifiers: identifier.into_iter().collect(),
+                    provider_link: resolved_uri.map(|url| OpdsAuthorLink { url, target: OpdsLinkTarget::Web }),
+                })
             })
             .collect::<Vec<_>>();
         let self_url = relation_url_atom(&base_url, &entry.links, "self");
         let id = stable_publication_id(Some(&entry.id), self_url.as_deref(), &acquisitions, &base_url, &title, &authors);
         let description = atom_description(entry).and_then(|description| normalize_project_gutenberg_description(&id, description));
         let languages = atom_publication_languages(entry);
-        publications.push(OpdsPublication { work_id: work_id_from_publication_id(&id), id, title, authors, languages, description, image_url, preferred_download, acquisitions });
+        let work_id = work_id_from_publication_id(&id);
+        let mut metadata = atom_publication_metadata(&base_url, entry);
+        append_identity_evidence(&mut metadata, &id, work_id.as_deref(), "opds1:resolved-identity");
+        let image_url = preferred_image_url(&metadata.images);
+        publications.push(OpdsPublication { work_id, id, title, authors, languages, description, image_url, metadata, preferred_download, acquisitions });
     }
     let facets = parse_opds_1_facets(&base_url, bytes)?;
     let search = feed.links.iter().find(|link| link.rel == "search").and_then(|link| search_from_atom(&base_url, link));
@@ -1582,7 +1564,7 @@ fn parse_opds_1_facets(base: &Url, bytes: &[u8]) -> Result<Vec<OpdsFacet>, OpdsE
                 let group = xml_attribute(&reader, &element, b"facetGroup")?.and_then(|value| nonempty(&value).map(str::to_owned)).unwrap_or_else(|| "Facets".to_owned());
                 let active = xml_attribute(&reader, &element, b"activeFacet")?.is_some_and(|value| value.eq_ignore_ascii_case("true"));
                 let number_of_items = xml_attribute(&reader, &element, b"count")?.and_then(|value| value.parse::<u32>().ok());
-                let link = OpdsCatalogLink { title, url: url.to_string(), target: OpdsLinkTarget::Catalog, number_of_items, active };
+                let link = OpdsCatalogLink { title, url: url.to_string(), target: OpdsLinkTarget::Catalog, relations: vec!["http://opds-spec.org/facet".to_owned()], number_of_items, active };
                 if let Some(facet) = facets.iter_mut().find(|facet| facet.title == group) {
                     facet.links.push(link);
                 } else {
@@ -1756,7 +1738,6 @@ fn parse_json_publication(base: &Url, value: &Value) -> Option<OpdsPublication> 
     let authors = metadata.get("author").map(|authors| contributor_credits(base, authors)).unwrap_or_default();
     let languages = metadata.get("language").map(publication_languages).unwrap_or_default();
     let description = metadata.get("description").and_then(localized_text).as_deref().and_then(inferred_description);
-    let image_url = object.get("images").and_then(Value::as_array).and_then(|images| images.iter().find_map(|image| json_link_url(base, image))).map(|url| url.to_string());
     let mut acquisitions = links.iter().filter_map(|link| acquisition_from_json(base, link, &title)).collect::<Vec<_>>();
     if acquisitions.is_empty() {
         if let Some(url) = links.iter().find(|link| json_link_has_relation(link, "alternate") && link.get("type").and_then(Value::as_str).is_some_and(|media_type| media_type == "text/html")).and_then(|link| json_link_url(base, link)) {
@@ -1764,9 +1745,583 @@ fn parse_json_publication(base: &Url, value: &Value) -> Option<OpdsPublication> 
         }
     }
     let self_url = relation_url_json(base, &links, "self");
-    let id = stable_publication_id(metadata.get("identifier").and_then(Value::as_str), self_url.as_deref(), &acquisitions, base, &title, &authors);
+    let explicit_identifier = metadata.get("identifier").map(identifier_values).and_then(|identifiers| identifiers.into_iter().next());
+    let id = stable_publication_id(explicit_identifier.as_deref(), self_url.as_deref(), &acquisitions, base, &title, &authors);
     let preferred_download = preferred_download(&acquisitions);
-    Some(OpdsPublication { work_id: work_id_from_publication_id(&id), id, title, authors, languages, description, image_url, preferred_download, acquisitions })
+    let work_id = work_id_from_publication_id(&id);
+    let mut metadata = json_publication_metadata(base, metadata);
+    append_identity_evidence(&mut metadata, &id, work_id.as_deref(), "opds2:resolved-identity");
+    metadata.images = json_publication_images(base, object);
+    let image_url = preferred_image_url(&metadata.images);
+    Some(OpdsPublication { work_id, id, title, authors, languages, description, image_url, metadata, preferred_download, acquisitions })
+}
+
+fn atom_publication_metadata(base: &Url, entry: &AtomEntry) -> OpdsPublicationMetadata {
+    let publishers = atom_extensions(entry, "publisher")
+        .filter_map(|extension| {
+            nonempty(extension.value.as_deref()?).map(|name| OpdsAgentCredit { name: name.to_owned(), name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None })
+        })
+        .collect::<Vec<_>>();
+    let mut identifiers = vec![opds_identifier(&entry.id, None, "atom:id", OpdsIdentifierScope::CatalogEntry)];
+    identifiers.extend(atom_extensions(entry, "identifier").filter_map(|extension| {
+        let value = nonempty(extension.value.as_deref()?)?;
+        let scheme = atom_extension_attribute(extension, &["scheme", "type"]).map(str::to_owned);
+        Some(opds_identifier(value, scheme, &extension.name, OpdsIdentifierScope::Publication))
+    }));
+    deduplicate_identifiers(&mut identifiers);
+
+    let mut subjects = entry
+        .categories
+        .iter()
+        .filter_map(|category| {
+            let term = nonempty(&category.term)?;
+            let name = category.label.as_deref().and_then(nonempty).unwrap_or(term).to_owned();
+            Some(OpdsPublicationSubject {
+                id: None,
+                name,
+                name_localizations: Vec::new(),
+                sort_name: None,
+                sort_name_localizations: Vec::new(),
+                source: "opds:category".to_owned(),
+                authority: category.scheme.as_deref().and_then(nonempty).map(str::to_owned),
+                code: category.scheme.as_deref().and_then(nonempty).map(|_| term.to_owned()),
+            })
+        })
+        .collect::<Vec<_>>();
+    subjects.extend(atom_extensions(entry, "subject").filter_map(|extension| {
+        let value = nonempty(extension.value.as_deref()?)?.to_owned();
+        let authority = atom_extension_attribute(extension, &["authority", "scheme"]).map(str::to_owned);
+        let code = atom_extension_attribute(extension, &["code", "term"]).map(str::to_owned);
+        Some(OpdsPublicationSubject { id: None, name: value, name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), source: extension.name.clone(), authority, code })
+    }));
+    deduplicate_subjects(&mut subjects);
+
+    let mut contributors = entry
+        .contributors
+        .iter()
+        .filter_map(|person| {
+            let name = nonempty(&person.name)?.to_owned();
+            let provider_link = person.uri.as_deref().and_then(|uri| resolve_url(base, uri).ok()).map(|url| OpdsAuthorLink { url: url.to_string(), target: OpdsLinkTarget::Web });
+            Some(OpdsContributorCredit { name, name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link, roles: vec!["contributor".to_owned()] })
+        })
+        .collect::<Vec<_>>();
+    contributors.extend(atom_extensions(entry, "contributor").filter_map(|extension| {
+        let name = nonempty(extension.value.as_deref()?)?.to_owned();
+        let role = atom_extension_attribute(extension, &["role"]).unwrap_or("contributor").to_owned();
+        Some(OpdsContributorCredit { name, name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None, roles: vec![role] })
+    }));
+    deduplicate_contributors(&mut contributors);
+
+    let mut collections = Vec::new();
+    for (local_name, collection_type) in [("series", "series"), ("collection", "collection")] {
+        collections.extend(atom_extensions(entry, local_name).filter_map(|extension| {
+            let name = nonempty(extension.value.as_deref()?)?.to_owned();
+            let sort_name = atom_extension_scalar(extension, &["sortAs", "sort-as", "file-as"]).map(str::to_owned);
+            let mut identifiers = atom_extension_values(extension, &["identifier", "altIdentifier", "alternateIdentifier", "id"]);
+            deduplicate_strings(&mut identifiers);
+            let position = atom_extension_attribute(extension, &["position", "group-position", "series_index", "series-index"]).map(str::to_owned);
+            Some(OpdsPublicationCollection {
+                name,
+                name_localizations: Vec::new(),
+                sort_name,
+                sort_name_localizations: Vec::new(),
+                identifiers,
+                kind: CollectionKind::from_label(collection_type).ok(),
+                position,
+                source: format!("atom:{local_name}"),
+            })
+        }));
+    }
+
+    let published = entry.published.as_ref().map(chrono_date_text);
+    let modified = Some(chrono_date_text(&entry.updated));
+    let mut dates = Vec::new();
+    if let Some(value) = &published {
+        dates.push(OpdsPublicationDate { id: None, value: value.clone(), event: Some("published".to_owned()), source: "atom:published".to_owned() });
+    }
+    if let Some(value) = &modified {
+        dates.push(OpdsPublicationDate { id: None, value: value.clone(), event: Some("modified".to_owned()), source: "atom:updated".to_owned() });
+    }
+    dates.extend(atom_extensions(entry, "date").filter_map(|extension| {
+        let value = nonempty(extension.value.as_deref()?)?.to_owned();
+        let event = atom_extension_attribute(extension, &["event", "type"]).map(str::to_owned);
+        Some(OpdsPublicationDate { id: None, value, event, source: extension.name.clone() })
+    }));
+    let audiences = atom_extensions(entry, "audience").filter_map(|extension| nonempty(extension.value.as_deref()?).map(|value| OpdsAudience { value: value.to_owned(), source: extension.name.clone() })).collect();
+    let age_ranges = atom_extensions(entry, "typicalAgeRange")
+        .chain(atom_extensions(entry, "ageRange"))
+        .filter_map(|extension| nonempty(extension.value.as_deref()?).map(|value| OpdsAgeRange { value: value.to_owned(), source: extension.name.clone() }))
+        .collect();
+    let images = atom_publication_images(base, entry);
+    let ratings = atom_extensions(entry, "aggregateRating").chain(atom_extensions(entry, "rating")).filter_map(|extension| atom_aggregate_rating(base, extension)).collect();
+    let interactions = atom_extensions(entry, "interactionStatistic").filter_map(|extension| atom_interaction_statistic(base, extension)).collect();
+    let properties = atom_raw_metadata_properties(base, entry);
+
+    OpdsPublicationMetadata {
+        title_localizations: Vec::new(),
+        sort_name: None,
+        sort_name_localizations: Vec::new(),
+        published,
+        modified,
+        dates,
+        publishers,
+        identifiers,
+        subjects,
+        subtitle: atom_extensions(entry, "subtitle").find_map(|extension| extension.value.as_deref().and_then(nonempty).map(str::to_owned)),
+        subtitle_localizations: Vec::new(),
+        alternate_titles: Vec::new(),
+        collections,
+        contributors,
+        rights: Vec::new(),
+        sources: Vec::new(),
+        types: Vec::new(),
+        formats: Vec::new(),
+        relations: Vec::new(),
+        coverage: Vec::new(),
+        audiences,
+        age_ranges,
+        images,
+        ratings,
+        interactions,
+        popularity_ranks: Vec::new(),
+        properties,
+    }
+}
+
+fn chrono_date_text(value: &atom_syndication::FixedDateTime) -> String {
+    value.to_rfc3339()
+}
+
+fn atom_extensions<'a>(entry: &'a AtomEntry, local_name: &'a str) -> impl Iterator<Item = &'a atom_syndication::extension::Extension> {
+    entry.extensions.values().flat_map(|namespace| namespace.iter()).filter(move |(name, _)| name.eq_ignore_ascii_case(local_name)).flat_map(|(_, extensions)| extensions.iter())
+}
+
+fn atom_extension_attribute<'a>(extension: &'a atom_syndication::extension::Extension, local_names: &[&str]) -> Option<&'a str> {
+    extension.attrs.iter().find_map(|(name, value)| {
+        let local_name = name.rsplit(':').next().unwrap_or(name);
+        local_names.iter().any(|candidate| local_name.eq_ignore_ascii_case(candidate)).then_some(value.as_str()).and_then(nonempty)
+    })
+}
+
+fn atom_extension_scalar<'a>(extension: &'a atom_syndication::extension::Extension, local_names: &[&str]) -> Option<&'a str> {
+    atom_extension_attribute(extension, local_names)
+        .or_else(|| extension.children.iter().find(|(name, _)| local_names.iter().any(|candidate| name.eq_ignore_ascii_case(candidate))).and_then(|(_, children)| children.iter().find_map(|child| child.value.as_deref().and_then(nonempty))))
+}
+
+fn atom_extension_values(extension: &atom_syndication::extension::Extension, local_names: &[&str]) -> Vec<String> {
+    let attributes = extension.attrs.iter().filter_map(|(name, value)| {
+        let local_name = name.rsplit(':').next().unwrap_or(name);
+        local_names.iter().any(|candidate| local_name.eq_ignore_ascii_case(candidate)).then(|| value.as_str()).and_then(nonempty).map(str::to_owned)
+    });
+    let children = extension.children.iter().filter(|(name, _)| {
+        let local_name = name.rsplit(':').next().unwrap_or(name);
+        local_names.iter().any(|candidate| local_name.eq_ignore_ascii_case(candidate))
+    });
+    attributes.chain(children.flat_map(|(_, children)| children.iter().filter_map(|child| child.value.as_deref().and_then(nonempty).or_else(|| atom_extension_scalar(child, &["value", "identifier"])).map(str::to_owned)))).collect()
+}
+
+fn scalar_u64(value: &str) -> Option<u64> {
+    value.trim().parse().ok()
+}
+
+fn atom_aggregate_rating(base: &Url, extension: &atom_syndication::extension::Extension) -> Option<OpdsAggregateRating> {
+    let value = atom_extension_scalar(extension, &["ratingValue", "value"]).or_else(|| extension.value.as_deref().and_then(nonempty))?.to_owned();
+    Some(OpdsAggregateRating {
+        value,
+        rating_count: atom_extension_scalar(extension, &["ratingCount", "count"]).and_then(scalar_u64),
+        review_count: atom_extension_scalar(extension, &["reviewCount"]).and_then(scalar_u64),
+        best_rating: atom_extension_scalar(extension, &["bestRating"]).map(str::to_owned),
+        worst_rating: atom_extension_scalar(extension, &["worstRating"]).map(str::to_owned),
+        source: format!("opds1:{base}#{}", extension.name),
+    })
+}
+
+fn atom_interaction_statistic(base: &Url, extension: &atom_syndication::extension::Extension) -> Option<OpdsInteractionStatistic> {
+    Some(OpdsInteractionStatistic {
+        interaction_type: atom_extension_scalar(extension, &["interactionType", "type"])?.to_owned(),
+        count: atom_extension_scalar(extension, &["userInteractionCount", "count"]).and_then(scalar_u64)?,
+        service: atom_extension_scalar(extension, &["interactionService", "service"]).map(str::to_owned),
+        source: format!("opds1:{base}#{}", extension.name),
+    })
+}
+
+fn atom_raw_metadata_properties(base: &Url, entry: &AtomEntry) -> Vec<OpdsPublicationProperty> {
+    let mut properties = Vec::new();
+    for (namespace, elements) in &entry.extensions {
+        for extensions in elements.values() {
+            for extension in extensions {
+                if properties.len() == MAX_RETAINED_METADATA_PROPERTIES {
+                    return properties;
+                }
+                let Ok(value) = serde_json::to_string(&atom_extension_json(extension)) else { continue };
+                if value.len() <= MAX_RETAINED_METADATA_PROPERTY_BYTES {
+                    properties.push(OpdsPublicationProperty { id: None, property: extension.name.clone(), value, refines: None, scheme: None, language: None, source: format!("opds1:{base}#{namespace}") });
+                }
+            }
+        }
+    }
+    properties
+}
+
+fn atom_extension_json(extension: &atom_syndication::extension::Extension) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("name".to_owned(), Value::String(extension.name.clone()));
+    if let Some(value) = &extension.value {
+        object.insert("value".to_owned(), Value::String(value.clone()));
+    }
+    if !extension.attrs.is_empty() {
+        object.insert("attributes".to_owned(), Value::Object(extension.attrs.iter().map(|(name, value)| (name.clone(), Value::String(value.clone()))).collect()));
+    }
+    if !extension.children.is_empty() {
+        object.insert("children".to_owned(), Value::Object(extension.children.iter().map(|(name, children)| (name.clone(), Value::Array(children.iter().map(atom_extension_json).collect()))).collect()));
+    }
+    Value::Object(object)
+}
+
+fn json_publication_metadata(base: &Url, metadata: &serde_json::Map<String, Value>) -> OpdsPublicationMetadata {
+    let publishers = metadata.get("publisher").map(|value| contributor_credits(base, value).into_iter().map(opds_agent_credit).collect()).unwrap_or_default();
+    let identifiers = metadata.get("identifier").map(|value| json_publication_identifiers(value, "opds2:metadata.identifier", OpdsIdentifierScope::Publication)).unwrap_or_default();
+    let subjects = metadata.get("subject").map(json_subjects).unwrap_or_default();
+    let collections = metadata.get("belongsTo").and_then(Value::as_object).map(|belongs_to| belongs_to.iter().flat_map(|(collection_type, value)| json_collections(value, collection_type)).collect()).unwrap_or_default();
+    let contributor_fields = ["contributor", "translator", "editor", "artist", "illustrator", "letterer", "penciler", "colorist", "inker", "narrator"];
+    let contributors = contributor_fields.into_iter().flat_map(|role| metadata.get(role).into_iter().flat_map(move |value| json_contributor_credits(base, value, role))).collect::<Vec<_>>();
+    let published = metadata.get("published").and_then(Value::as_str).and_then(nonempty).map(str::to_owned);
+    let modified = metadata.get("modified").and_then(Value::as_str).and_then(nonempty).map(str::to_owned);
+    let mut dates = Vec::new();
+    if let Some(value) = &published {
+        dates.push(OpdsPublicationDate { id: None, value: value.clone(), event: Some("published".to_owned()), source: "opds2:metadata.published".to_owned() });
+    }
+    if let Some(value) = &modified {
+        dates.push(OpdsPublicationDate { id: None, value: value.clone(), event: Some("modified".to_owned()), source: "opds2:metadata.modified".to_owned() });
+    }
+    let audiences = metadata.get("audience").map(|value| sourced_json_texts(value, "opds2:metadata.audience").into_iter().map(|(value, source)| OpdsAudience { value, source }).collect()).unwrap_or_default();
+    let age_ranges = metadata
+        .get("typicalAgeRange")
+        .or_else(|| metadata.get("ageRange"))
+        .map(|value| sourced_json_texts(value, "opds2:metadata.typicalAgeRange").into_iter().map(|(value, source)| OpdsAgeRange { value, source }).collect())
+        .unwrap_or_default();
+    let ratings = metadata.get("aggregateRating").map(|value| json_aggregate_ratings(base, value)).unwrap_or_default();
+    let interactions = metadata.get("interactionStatistic").map(|value| json_interaction_statistics(base, value)).unwrap_or_default();
+    let properties = json_raw_metadata_properties(base, metadata);
+    OpdsPublicationMetadata {
+        title_localizations: metadata.get("title").map(localized_texts).unwrap_or_default(),
+        sort_name: metadata.get("sortAs").and_then(localized_text).and_then(|value| nonempty(&value).map(str::to_owned)),
+        sort_name_localizations: metadata.get("sortAs").map(localized_texts).unwrap_or_default(),
+        published,
+        modified,
+        dates,
+        publishers,
+        identifiers,
+        subjects,
+        subtitle: metadata.get("subtitle").and_then(localized_text).and_then(|value| nonempty(&value).map(str::to_owned)),
+        subtitle_localizations: metadata.get("subtitle").map(localized_texts).unwrap_or_default(),
+        alternate_titles: Vec::new(),
+        collections,
+        contributors,
+        rights: Vec::new(),
+        sources: Vec::new(),
+        types: Vec::new(),
+        formats: Vec::new(),
+        relations: Vec::new(),
+        coverage: Vec::new(),
+        audiences,
+        age_ranges,
+        images: Vec::new(),
+        ratings,
+        interactions,
+        popularity_ranks: Vec::new(),
+        properties,
+    }
+}
+
+fn json_numeric_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => nonempty(value).map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str().and_then(scalar_u64))
+}
+
+fn json_aggregate_ratings(base: &Url, value: &Value) -> Vec<OpdsAggregateRating> {
+    match value {
+        Value::Array(values) => values.iter().flat_map(|value| json_aggregate_ratings(base, value)).collect(),
+        Value::Object(rating) => {
+            let Some(value) = rating.get("ratingValue").or_else(|| rating.get("value")).and_then(json_numeric_text) else { return Vec::new() };
+            vec![OpdsAggregateRating {
+                value,
+                rating_count: rating.get("ratingCount").and_then(json_u64),
+                review_count: rating.get("reviewCount").and_then(json_u64),
+                best_rating: rating.get("bestRating").and_then(json_numeric_text),
+                worst_rating: rating.get("worstRating").and_then(json_numeric_text),
+                source: format!("opds2:{base}#metadata.aggregateRating"),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn json_object_label(value: &Value) -> Option<String> {
+    value.as_str().and_then(nonempty).map(str::to_owned).or_else(|| {
+        let object = value.as_object()?;
+        object.get("@id").or_else(|| object.get("id")).or_else(|| object.get("url")).or_else(|| object.get("name")).and_then(localized_text).and_then(|value| nonempty(&value).map(str::to_owned))
+    })
+}
+
+fn json_interaction_statistics(base: &Url, value: &Value) -> Vec<OpdsInteractionStatistic> {
+    match value {
+        Value::Array(values) => values.iter().flat_map(|value| json_interaction_statistics(base, value)).collect(),
+        Value::Object(interaction) => {
+            let Some(interaction_type) = interaction.get("interactionType").and_then(json_object_label) else { return Vec::new() };
+            let Some(count) = interaction.get("userInteractionCount").or_else(|| interaction.get("count")).and_then(json_u64) else { return Vec::new() };
+            vec![OpdsInteractionStatistic { interaction_type, count, service: interaction.get("interactionService").and_then(json_object_label), source: format!("opds2:{base}#metadata.interactionStatistic") }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn json_raw_metadata_properties(base: &Url, metadata: &serde_json::Map<String, Value>) -> Vec<OpdsPublicationProperty> {
+    metadata
+        .iter()
+        .take(MAX_RETAINED_METADATA_PROPERTIES)
+        .filter_map(|(property, raw)| {
+            let value = serde_json::to_string(raw).ok()?;
+            (value.len() <= MAX_RETAINED_METADATA_PROPERTY_BYTES).then(|| OpdsPublicationProperty { id: None, property: property.clone(), value, refines: None, scheme: None, language: None, source: format!("opds2:{base}#metadata") })
+        })
+        .collect()
+}
+
+fn json_publication_identifiers(value: &Value, source: &str, scope: OpdsIdentifierScope) -> Vec<OpdsPublicationIdentifier> {
+    match value {
+        Value::String(value) => nonempty(value).map(|value| vec![opds_identifier(value, None, source, scope)]).unwrap_or_default(),
+        Value::Array(values) => values.iter().flat_map(|value| json_publication_identifiers(value, source, scope)).collect(),
+        Value::Object(identifier) => {
+            let Some(value) = identifier.get("value").or_else(|| identifier.get("identifier")).and_then(Value::as_str).and_then(nonempty) else { return Vec::new() };
+            let scheme = identifier.get("scheme").or_else(|| identifier.get("type")).and_then(Value::as_str).and_then(nonempty).map(str::to_owned);
+            vec![opds_identifier(value, scheme, source, scope)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn opds_identifier(value: &str, scheme: Option<String>, source: &str, scope: OpdsIdentifierScope) -> OpdsPublicationIdentifier {
+    let scheme = scheme.or_else(|| identifier_scheme_from_value(value));
+    OpdsPublicationIdentifier { value: value.to_owned(), scheme, source: source.to_owned(), scope }
+}
+
+fn append_identity_evidence(metadata: &mut OpdsPublicationMetadata, id: &str, work_id: Option<&str>, source: &str) {
+    metadata.identifiers.push(opds_identifier(id, None, source, OpdsIdentifierScope::CatalogEntry));
+    if let Some(work_id) = work_id {
+        metadata.identifiers.push(opds_identifier(work_id, None, source, OpdsIdentifierScope::Work));
+    }
+    deduplicate_identifiers(&mut metadata.identifiers);
+}
+
+fn identifier_scheme_from_value(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("urn:") {
+        return rest.split(':').next().and_then(nonempty).map(str::to_owned);
+    }
+    for scheme in ["isbn", "doi", "oclc", "lccn", "issn", "asin", "uuid"] {
+        if lower.strip_prefix(scheme).is_some_and(|rest| rest.starts_with(':')) {
+            return Some(scheme.to_owned());
+        }
+    }
+    None
+}
+
+fn sourced_json_texts(value: &Value, source: &str) -> Vec<(String, String)> {
+    match value {
+        Value::String(value) => nonempty(value).map(|value| vec![(value.to_owned(), source.to_owned())]).unwrap_or_default(),
+        Value::Number(value) => vec![(value.to_string(), source.to_owned())],
+        Value::Array(values) => values.iter().flat_map(|value| sourced_json_texts(value, source)).collect(),
+        Value::Object(value) => value
+            .get("name")
+            .or_else(|| value.get("value"))
+            .or_else(|| value.get("identifier"))
+            .and_then(localized_text)
+            .and_then(|value| nonempty(&value).map(str::to_owned))
+            .map(|value| vec![(value, source.to_owned())])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn opds_agent_credit(credit: OpdsAuthorCredit) -> OpdsAgentCredit {
+    OpdsAgentCredit {
+        name: credit.name,
+        name_localizations: credit.name_localizations,
+        sort_name: credit.sort_name,
+        sort_name_localizations: credit.sort_name_localizations,
+        identifiers: credit.identifiers,
+        provider_link: credit.provider_link,
+    }
+}
+
+fn json_contributor_credits(base: &Url, value: &Value, default_role: &str) -> Vec<OpdsContributorCredit> {
+    match value {
+        Value::Array(values) => values.iter().flat_map(|value| json_contributor_credits(base, value, default_role)).collect(),
+        _ => contributor_credits(base, value)
+            .into_iter()
+            .map(|credit| {
+                let mut roles = value.get("role").map(identifier_values).unwrap_or_default();
+                if roles.is_empty() {
+                    roles.push(default_role.to_owned());
+                }
+                OpdsContributorCredit {
+                    name: credit.name,
+                    name_localizations: credit.name_localizations,
+                    sort_name: credit.sort_name,
+                    sort_name_localizations: credit.sort_name_localizations,
+                    identifiers: credit.identifiers,
+                    provider_link: credit.provider_link,
+                    roles,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn json_subjects(value: &Value) -> Vec<OpdsPublicationSubject> {
+    match value {
+        Value::String(name) => nonempty(name)
+            .map(|name| vec![OpdsPublicationSubject { id: None, name: name.to_owned(), name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), source: "opds2:subject".to_owned(), authority: None, code: None }])
+            .unwrap_or_default(),
+        Value::Object(subject) => {
+            let code = subject.get("code").and_then(Value::as_str).and_then(nonempty).map(str::to_owned);
+            let name = subject.get("name").and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned)).or_else(|| code.clone());
+            let name_localizations = subject.get("name").map(localized_texts).unwrap_or_default();
+            let sort_name = subject.get("sortAs").and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned));
+            let sort_name_localizations = subject.get("sortAs").map(localized_texts).unwrap_or_default();
+            let authority = subject.get("scheme").or_else(|| subject.get("authority")).and_then(Value::as_str).and_then(nonempty).map(str::to_owned);
+            name.map(|name| vec![OpdsPublicationSubject { id: None, name, name_localizations, sort_name, sort_name_localizations, source: "opds2:subject".to_owned(), authority, code }]).unwrap_or_default()
+        }
+        Value::Array(subjects) => subjects.iter().flat_map(json_subjects).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_collections(value: &Value, collection_type: &str) -> Vec<OpdsPublicationCollection> {
+    match value {
+        Value::String(name) => nonempty(name)
+            .map(|name| {
+                vec![OpdsPublicationCollection {
+                    name: name.to_owned(),
+                    name_localizations: Vec::new(),
+                    sort_name: None,
+                    sort_name_localizations: Vec::new(),
+                    identifiers: Vec::new(),
+                    kind: CollectionKind::from_label(collection_type).ok(),
+                    position: None,
+                    source: format!("opds2:metadata.belongsTo.{collection_type}"),
+                }]
+            })
+            .unwrap_or_default(),
+        Value::Object(collection) => {
+            let name = collection.get("name").or_else(|| collection.get("title")).and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned));
+            let name_localizations = collection.get("name").or_else(|| collection.get("title")).map(localized_texts).unwrap_or_default();
+            let sort_name = collection.get("sortAs").and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned));
+            let sort_name_localizations = collection.get("sortAs").map(localized_texts).unwrap_or_default();
+            let mut identifiers = collection.get("identifier").map(identifier_values).unwrap_or_default();
+            identifiers.extend(collection.get("altIdentifier").map(identifier_values).unwrap_or_default());
+            identifiers.extend(collection.get("alternateIdentifier").map(identifier_values).unwrap_or_default());
+            deduplicate_strings(&mut identifiers);
+            let position = collection.get("position").and_then(json_scalar_text);
+            name.map(|name| {
+                vec![OpdsPublicationCollection {
+                    name,
+                    name_localizations,
+                    sort_name,
+                    sort_name_localizations,
+                    identifiers,
+                    kind: CollectionKind::from_label(collection_type).ok(),
+                    position,
+                    source: format!("opds2:metadata.belongsTo.{collection_type}"),
+                }]
+            })
+            .unwrap_or_default()
+        }
+        Value::Array(collections) => collections.iter().flat_map(|collection| json_collections(collection, collection_type)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn json_scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => nonempty(value).map(str::to_owned),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn atom_publication_images(base: &Url, entry: &AtomEntry) -> Vec<OpdsPublicationImage> {
+    let mut images = entry
+        .links
+        .iter()
+        .filter(|link| is_image_relation(&link.rel))
+        .filter_map(|link| {
+            let url = resolve_url(base, &link.href).ok()?.to_string();
+            Some(OpdsPublicationImage { url, media_type: link.mime_type.clone(), relations: vec![link.rel.clone()], width: None, height: None, source: "opds1:link".to_owned() })
+        })
+        .collect::<Vec<_>>();
+    deduplicate_images(&mut images);
+    images
+}
+
+fn json_publication_images(base: &Url, publication: &serde_json::Map<String, Value>) -> Vec<OpdsPublicationImage> {
+    let mut images = Vec::new();
+    if let Some(values) = publication.get("images").and_then(Value::as_array) {
+        images.extend(values.iter().filter_map(|value| json_publication_image(base, value, "opds2:images")));
+    }
+    if let Some(values) = publication.get("links").and_then(Value::as_array) {
+        images.extend(values.iter().filter(|value| json_relations(value).any(is_image_relation)).filter_map(|value| json_publication_image(base, value, "opds2:links")));
+    }
+    deduplicate_images(&mut images);
+    images
+}
+
+fn json_publication_image(base: &Url, value: &Value, source: &str) -> Option<OpdsPublicationImage> {
+    let object = value.as_object()?;
+    Some(OpdsPublicationImage {
+        url: json_link_url(base, value)?.to_string(),
+        media_type: object.get("type").and_then(Value::as_str).and_then(nonempty).map(str::to_owned),
+        relations: json_relations(value).map(str::to_owned).collect(),
+        width: object.get("width").and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()),
+        height: object.get("height").and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()),
+        source: source.to_owned(),
+    })
+}
+
+fn preferred_image_url(images: &[OpdsPublicationImage]) -> Option<String> {
+    images.iter().find(|image| !image.relations.iter().any(|relation| relation == "thumbnail" || relation.ends_with("/thumbnail"))).or_else(|| images.first()).map(|image| image.url.clone())
+}
+
+fn deduplicate_identifiers(identifiers: &mut Vec<OpdsPublicationIdentifier>) {
+    let mut seen = HashSet::new();
+    identifiers.retain(|identifier| seen.insert((identifier.value.clone(), identifier.scheme.clone(), identifier.source.clone(), identifier.scope)));
+}
+
+fn deduplicate_images(images: &mut Vec<OpdsPublicationImage>) {
+    let mut seen = HashSet::new();
+    images.retain(|image| seen.insert((image.url.clone(), image.media_type.clone(), image.relations.clone(), image.width, image.height, image.source.clone())));
+}
+
+fn deduplicate_subjects(subjects: &mut Vec<OpdsPublicationSubject>) {
+    let mut seen = HashSet::new();
+    subjects.retain(|subject| seen.insert((subject.name.clone(), subject.source.clone(), subject.authority.clone(), subject.code.clone())));
+}
+
+fn deduplicate_contributors(contributors: &mut Vec<OpdsContributorCredit>) {
+    let mut seen = HashSet::new();
+    contributors.retain(|contributor| seen.insert((contributor.name.clone(), contributor.roles.clone())));
+}
+
+fn deduplicate_strings(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn atom_publication_languages(entry: &atom_syndication::Entry) -> Vec<String> {
@@ -1790,12 +2345,7 @@ fn canonical_language_tags<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec
 }
 
 fn canonical_language_tag(value: &str) -> Option<String> {
-    let value = value.trim().replace('_', "-").to_ascii_lowercase();
-    let valid = !value.is_empty()
-        && value.len() <= 63
-        && value.split('-').all(|part| !part.is_empty() && part.len() <= 8 && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-        && value.split('-').next().is_some_and(|part| ((2..=8).contains(&part.len()) || part == "x") && part.bytes().all(|byte| byte.is_ascii_alphabetic()));
-    valid.then_some(value)
+    OpdsLanguageTag::parse(value).ok().map(OpdsLanguageTag::into_string)
 }
 
 fn stable_publication_id(explicit: Option<&str>, self_url: Option<&str>, acquisitions: &[OpdsAcquisition], base: &Url, title: &str, authors: &[OpdsAuthorCredit]) -> String {
@@ -2029,15 +2579,19 @@ fn is_importable_acquisition(acquisition: &OpdsDirectAcquisition) -> bool {
 
 fn contributor_credits(base: &Url, value: &Value) -> Vec<OpdsAuthorCredit> {
     match value {
-        Value::String(name) => nonempty(name).map(|name| vec![OpdsAuthorCredit { name: name.to_owned(), sort_name: None, identifiers: Vec::new(), provider_link: None }]).unwrap_or_default(),
+        Value::String(name) => {
+            nonempty(name).map(|name| vec![OpdsAuthorCredit { name: name.to_owned(), name_localizations: Vec::new(), sort_name: None, sort_name_localizations: Vec::new(), identifiers: Vec::new(), provider_link: None }]).unwrap_or_default()
+        }
         Value::Object(author) => {
             let Some(name) = author.get("name").and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned)) else {
                 return Vec::new();
             };
+            let name_localizations = author.get("name").map(localized_texts).unwrap_or_default();
             let sort_name = author.get("sortAs").and_then(localized_text).and_then(|name| nonempty(&name).map(str::to_owned));
+            let sort_name_localizations = author.get("sortAs").map(localized_texts).unwrap_or_default();
             let identifiers = author.get("identifier").map(identifier_values).unwrap_or_default();
             let provider_link = author.get("links").and_then(Value::as_array).and_then(|links| links.iter().find_map(|link| contributor_link(base, link)));
-            vec![OpdsAuthorCredit { name, sort_name, identifiers, provider_link }]
+            vec![OpdsAuthorCredit { name, name_localizations, sort_name, sort_name_localizations, identifiers, provider_link }]
         }
         Value::Array(authors) => authors.iter().flat_map(|author| contributor_credits(base, author)).collect(),
         _ => Vec::new(),
@@ -2048,6 +2602,7 @@ fn identifier_values(value: &Value) -> Vec<String> {
     match value {
         Value::String(identifier) => nonempty(identifier).map(|identifier| vec![identifier.to_owned()]).unwrap_or_default(),
         Value::Array(identifiers) => identifiers.iter().flat_map(identifier_values).collect(),
+        Value::Object(identifier) => identifier.get("value").or_else(|| identifier.get("identifier")).or_else(|| identifier.get("@id")).or_else(|| identifier.get("id")).map(identifier_values).unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -2061,9 +2616,24 @@ fn contributor_link(base: &Url, value: &Value) -> Option<OpdsAuthorLink> {
 fn localized_text(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
-        Value::Object(variants) => variants.get("en").and_then(Value::as_str).or_else(|| variants.values().find_map(Value::as_str)).map(str::to_owned),
+        Value::Object(variants) => variants.get("en").and_then(Value::as_str).or_else(|| variants.get("und").and_then(Value::as_str)).or_else(|| variants.values().find_map(Value::as_str)).map(str::to_owned),
         _ => None,
     }
+}
+
+fn localized_texts(value: &Value) -> Vec<OpdsLocalizedText> {
+    let Value::Object(variants) = value else { return Vec::new() };
+    let mut localized = variants
+        .iter()
+        .filter_map(|(language, value)| {
+            let language = canonical_language_tag(language)?;
+            let value = value.as_str().and_then(nonempty)?.to_owned();
+            Some(OpdsLocalizedText { language, value })
+        })
+        .collect::<Vec<_>>();
+    localized.sort_by(|left, right| left.language.cmp(&right.language).then_with(|| left.value.cmp(&right.value)));
+    localized.dedup();
+    localized
 }
 
 #[derive(Default)]
@@ -2218,7 +2788,7 @@ fn catalog_link_from_json(base: &Url, value: &Value) -> Option<OpdsCatalogLink> 
     let target = object.get("type").and_then(Value::as_str).map(link_target_from_media_type).unwrap_or(OpdsLinkTarget::Catalog);
     let number_of_items = object.get("properties").and_then(Value::as_object).and_then(|properties| properties.get("numberOfItems")).and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok());
     let active = json_link_has_relation(value, "self");
-    Some(OpdsCatalogLink { title, url: url.to_string(), target, number_of_items, active })
+    Some(OpdsCatalogLink { title, url: url.to_string(), target, relations: json_relations(value).map(str::to_owned).collect(), number_of_items, active })
 }
 
 fn relation_url_atom(base: &Url, links: &[AtomLink], relation: &str) -> Option<String> {
@@ -2426,9 +2996,6 @@ fn book_format_from_media_type(value: &str) -> Option<OpdsBookFormat> {
         EPUB_MEDIA_TYPE => Some(OpdsBookFormat::Epub),
         PDF_MEDIA_TYPE => Some(OpdsBookFormat::Pdf),
         MOBI_MEDIA_TYPE | "application/vnd.amazon.ebook" | "application/x-mobi8-ebook" => Some(OpdsBookFormat::Mobi),
-        FB2_MEDIA_TYPE | "application/fb2+xml" => Some(OpdsBookFormat::Fb2),
-        CBZ_MEDIA_TYPE | "application/x-cbz" => Some(OpdsBookFormat::Cbz),
-        WEBPUB_MEDIA_TYPE => Some(OpdsBookFormat::WebPub),
         M4B_MEDIA_TYPE | "audio/x-m4b" | "audio/m4b" => Some(OpdsBookFormat::M4b),
         _ => None,
     }
@@ -2442,12 +3009,6 @@ fn book_format_from_url(url: &Url) -> Option<OpdsBookFormat> {
         Some(OpdsBookFormat::Pdf)
     } else if path.ends_with(".mobi") || path.ends_with(".azw") || path.ends_with(".azw3") {
         Some(OpdsBookFormat::Mobi)
-    } else if path.ends_with(".fb2") {
-        Some(OpdsBookFormat::Fb2)
-    } else if path.ends_with(".cbz") {
-        Some(OpdsBookFormat::Cbz)
-    } else if path.ends_with(".webpub") {
-        Some(OpdsBookFormat::WebPub)
     } else if path.ends_with(".m4b") {
         Some(OpdsBookFormat::M4b)
     } else {
@@ -2576,7 +3137,7 @@ mod tests {
     const OPDS_2: &str = r#"{
       "metadata":{"title":"Test catalog","numberOfItems":1},
       "links":[{"rel":"self","href":"/v2","type":"application/opds+json"},{"rel":["next"],"href":"?page=2","type":"application/opds+json"},{"rel":"search","href":"search{?query,title}","type":"application/opds+json","templated":true}],
-      "navigation":[{"title":"Recent","href":"recent","type":"application/opds+json"}],
+      "navigation":[{"title":"Recent","href":"recent","type":"application/opds+json","rel":"http://opds-spec.org/sort/popular"}],
       "publications":[{"metadata":{"identifier":"urn:isbn:1","title":{"en":"A Book"},"author":["One",{"name":"Two","sortAs":"Two, Author","identifier":"https://isni.org/isni/0000000121400562","links":[{"href":"authors/two","type":"application/opds+json"}]}]},"links":[{"rel":"download","href":"../book.epub","type":"application/epub+zip"}],"images":[{"href":"cover.jpg","type":"image/jpeg"}]}]
     }"#;
 
@@ -2595,6 +3156,29 @@ mod tests {
     #[test]
     fn performance_log_urls_exclude_queries_and_fragments() {
         assert_eq!(profile_log_url("https://catalog.example/search?q=private#result"), "https://catalog.example/search");
+    }
+
+    #[test]
+    fn validates_and_canonicalizes_catalogue_language_tags() {
+        assert_eq!(canonical_language_tag("EN_us").as_deref(), Some("en-US"));
+        assert_eq!(canonical_language_tag("zh-hant-tw").as_deref(), Some("zh-Hant-TW"));
+        assert_eq!(canonical_language_tag("iw-IL").as_deref(), Some("he-IL"));
+        assert_eq!(canonical_language_tag("i-klingon").as_deref(), Some("tlh"));
+        assert_eq!(canonical_language_tag("x-catalogue").as_deref(), Some("x-catalogue"));
+        assert_eq!(canonical_language_tag("en--US"), None);
+        assert_eq!(canonical_language_tag("zz-invalid"), None);
+        assert_eq!(canonical_language_tags(["SV_se", "sv-SE", "zh-hant-tw"]), ["sv-SE", "zh-Hant-TW"]);
+    }
+
+    #[test]
+    fn preserves_delta_and_http_date_retry_after_values() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(retry_after(&headers, now), Some(Duration::from_secs(120)));
+
+        headers.insert(reqwest::header::RETRY_AFTER, httpdate::fmt_http_date(now + Duration::from_secs(90)).parse().unwrap());
+        assert_eq!(retry_after(&headers, now), Some(Duration::from_secs(90)));
     }
 
     #[tokio::test]
@@ -2653,6 +3237,61 @@ mod tests {
         assert_eq!(acquisition.url, "https://example.com/catalog/books/1.epub");
         assert_eq!(acquisition.book_format, OpdsBookFormat::Epub);
         assert_eq!(catalog.publications[0].preferred_download.as_ref(), Some(acquisition));
+    }
+
+    #[test]
+    fn retains_rich_opds_1_publication_metadata() {
+        let feed = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opf="http://www.idpf.org/2007/opf" xmlns:calibre="http://calibre.kovidgoyal.net/2009/metadata" xmlns:schema="https://schema.org/">
+  <id>catalog</id><title>Rich catalog</title><updated>2026-08-21T00:00:00Z</updated>
+  <entry><id>urn:isbn:9780306406157</id><title>Rich Book</title><published>2020-02-03T00:00:00Z</published><updated>2026-08-20T12:00:00Z</updated>
+    <dc:publisher>Example Press</dc:publisher><dc:identifier>urn:isbn:9780306406157</dc:identifier>
+    <dc:subject opf:authority="DDC" opf:term="510">Mathematics</dc:subject>
+    <category scheme="BISAC" term="HIS036060" label="History / United States / 20th Century"/>
+    <calibre:subtitle>A Documentary History</calibre:subtitle><calibre:series series_index="2" sortAs="Archive Studies, The" identifier="urn:series:archive">Archive Studies</calibre:series>
+    <dc:audience>Young adult</dc:audience><schema:typicalAgeRange>12-17</schema:typicalAgeRange>
+    <schema:aggregateRating ratingValue="4.25" ratingCount="12" bestRating="5" worstRating="1"/>
+    <schema:interactionStatistic interactionType="https://schema.org/ReadAction" userInteractionCount="37" interactionService="Example"/>
+    <schema:isFamilyFriendly>true</schema:isFamilyFriendly>
+    <contributor><name>General Editor</name></contributor><dc:contributor opf:role="trl">A Translator</dc:contributor>
+    <link rel="http://opds-spec.org/image" href="cover.jpg" type="image/jpeg"/>
+    <link rel="http://opds-spec.org/image/thumbnail" href="thumb.jpg" type="image/jpeg"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" href="book.epub" type="application/epub+zip"/>
+  </entry>
+</feed>"#;
+        let catalog = parse_catalog(Url::parse("https://example.com/opds").unwrap(), Some("application/atom+xml"), feed.as_bytes()).unwrap();
+        let metadata = &catalog.publications[0].metadata;
+        assert_eq!(metadata.published.as_deref(), Some("2020-02-03T00:00:00+00:00"));
+        assert_eq!(metadata.modified.as_deref(), Some("2026-08-20T12:00:00+00:00"));
+        assert_eq!(metadata.publishers.iter().map(|publisher| publisher.name.as_str()).collect::<Vec<_>>(), ["Example Press"]);
+        assert!(metadata.identifiers.iter().any(|identifier| identifier.value == "urn:isbn:9780306406157" && identifier.scheme.as_deref() == Some("isbn") && identifier.scope == OpdsIdentifierScope::Publication));
+        assert!(metadata.identifiers.iter().any(|identifier| identifier.value == "urn:isbn:9780306406157" && identifier.scope == OpdsIdentifierScope::CatalogEntry));
+        assert!(metadata.subjects.iter().any(|subject| subject.authority.as_deref() == Some("DDC") && subject.code.as_deref() == Some("510") && subject.name == "Mathematics"));
+        assert!(metadata.subjects.iter().any(|subject| subject.authority.as_deref() == Some("BISAC") && subject.code.as_deref() == Some("HIS036060")));
+        assert_eq!(metadata.subtitle.as_deref(), Some("A Documentary History"));
+        assert_eq!(
+            metadata.collections[0],
+            OpdsPublicationCollection {
+                name: "Archive Studies".to_owned(),
+                name_localizations: Vec::new(),
+                sort_name: Some("Archive Studies, The".to_owned()),
+                sort_name_localizations: Vec::new(),
+                identifiers: vec!["urn:series:archive".to_owned()],
+                kind: Some(CollectionKind::Series),
+                position: Some("2".to_owned()),
+                source: "atom:series".to_owned(),
+            }
+        );
+        assert!(metadata.contributors.iter().any(|contributor| contributor.name == "General Editor" && contributor.roles == ["contributor"]));
+        assert!(metadata.contributors.iter().any(|contributor| contributor.name == "A Translator" && contributor.roles == ["trl"]));
+        assert_eq!(metadata.audiences[0].value, "Young adult");
+        assert_eq!(metadata.age_ranges[0].value, "12-17");
+        assert_eq!(metadata.ratings[0].value, "4.25");
+        assert_eq!(metadata.ratings[0].rating_count, Some(12));
+        assert_eq!(metadata.interactions[0].count, 37);
+        assert!(metadata.properties.iter().any(|property| property.property.ends_with("isFamilyFriendly") && property.value.contains("true")));
+        assert_eq!(metadata.images.iter().map(|image| image.url.as_str()).collect::<Vec<_>>(), ["https://example.com/cover.jpg", "https://example.com/thumb.jpg"]);
+        assert_eq!(catalog.publications[0].image_url.as_deref(), Some("https://example.com/cover.jpg"));
     }
 
     #[test]
@@ -2740,6 +3379,7 @@ mod tests {
         assert_eq!(catalog.version, OpdsVersion::V2_0);
         assert_eq!(catalog.pagination.number_of_items, Some(1));
         assert_eq!(catalog.navigation[0].url, "https://example.com/catalog/v2/recent");
+        assert_eq!(catalog.navigation[0].relations, ["http://opds-spec.org/sort/popular"]);
         assert_eq!(catalog.publications[0].authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>(), vec!["One", "Two"]);
         assert_eq!(catalog.publications[0].authors[1].sort_name.as_deref(), Some("Two, Author"));
         assert_eq!(catalog.publications[0].authors[1].identifiers, vec!["https://isni.org/isni/0000000121400562"]);
@@ -2749,6 +3389,82 @@ mod tests {
         assert_eq!(catalog.publications[0].preferred_download.as_ref(), Some(acquisition));
         let OpdsSearch::UriTemplate { template, .. } = catalog.search.unwrap() else { panic!("expected URI template") };
         assert_eq!(expand_search_template(&template, &OpdsSearchQuery { query: "a & b".to_owned(), title: None, author: None }).unwrap(), "search?query=a%20%26%20b");
+    }
+
+    #[test]
+    fn retains_rich_opds_2_publication_metadata() {
+        let feed = r#"{
+          "metadata":{"title":"Rich catalog"},
+          "publications":[{
+            "metadata":{
+              "identifier":["urn:isbn:9780306406157","urn:uuid:book"],
+              "title":{"en":"Rich Book","sv":"Rik bok"},"sortAs":{"en":"Rich Book","sv":"Bok, Rik"},"subtitle":{"en":"A Documentary History","sv":"En dokumentär historia"},
+              "author":{"name":{"en":"An Author","sv":"En författare"},"sortAs":{"en":"Author, An","sv":"Författare, En"}},
+              "published":"2020-02-03","modified":"2026-08-20T12:00:00Z","audience":["Young adult","Teen"],"typicalAgeRange":"12-17",
+              "publisher":{"name":{"en":"Example Press","sv":"Exempelförlaget"},"sortAs":{"en":"Example Press","sv":"Exempelförlaget"},"identifier":"https://example.com/publishers/1"},
+              "aggregateRating":{"@type":"AggregateRating","ratingValue":4.5,"ratingCount":22,"reviewCount":"7","bestRating":5,"worstRating":1},
+              "interactionStatistic":[{"@type":"InteractionCounter","interactionType":"https://schema.org/ReadAction","userInteractionCount":91,"interactionService":{"name":"Example Reader"}}],
+              "accessibility":{"feature":["alternativeText","tableOfContents"]},
+              "subject":[{"name":{"en":"Mathematics","sv":"Matematik"},"sortAs":{"en":"Mathematics","sv":"Matematik"},"scheme":"DDC","code":"510"},"History / United States / 20th Century"],
+              "belongsTo":{"series":{"name":{"en":"Archive Studies","sv":"Arkivstudier"},"sortAs":{"en":"Archive Studies, The","sv":"Arkivstudier"},"identifier":"urn:series:archive","altIdentifier":[{"@id":"legacy-series-1","scheme":"example"},"urn:series:archive"],"position":2},"collection":"Documents"},
+              "translator":{"name":"A Translator","identifier":"urn:isni:translator"},
+              "contributor":{"name":"An Editor","role":["edt","researcher"]}
+            },
+            "images":[{"href":"cover.jpg","type":"image/jpeg","rel":"cover","width":1200,"height":1800},{"href":"thumb.jpg","type":"image/jpeg","rel":"thumbnail","width":200,"height":300}],
+            "links":[{"rel":"download","href":"book.epub","type":"application/epub+zip"}]
+          }]
+        }"#;
+        let catalog = parse_catalog(Url::parse("https://example.com/opds/").unwrap(), Some(OPDS_2_MEDIA_TYPE), feed.as_bytes()).unwrap();
+        let metadata = &catalog.publications[0].metadata;
+        assert_eq!(metadata.published.as_deref(), Some("2020-02-03"));
+        assert_eq!(metadata.modified.as_deref(), Some("2026-08-20T12:00:00Z"));
+        assert!(metadata.identifiers.iter().any(|identifier| identifier.value == "urn:isbn:9780306406157" && identifier.scheme.as_deref() == Some("isbn")));
+        assert!(metadata.identifiers.iter().any(|identifier| identifier.value == "urn:uuid:book" && identifier.scheme.as_deref() == Some("uuid")));
+        assert!(metadata.identifiers.iter().any(|identifier| identifier.scope == OpdsIdentifierScope::CatalogEntry));
+        assert_eq!(metadata.publishers[0].name, "Example Press");
+        assert_eq!(metadata.publishers[0].name_localizations, [OpdsLocalizedText { language: "en".to_owned(), value: "Example Press".to_owned() }, OpdsLocalizedText { language: "sv".to_owned(), value: "Exempelförlaget".to_owned() }]);
+        assert_eq!(metadata.publishers[0].identifiers, ["https://example.com/publishers/1"]);
+        assert_eq!(metadata.title_localizations, [OpdsLocalizedText { language: "en".to_owned(), value: "Rich Book".to_owned() }, OpdsLocalizedText { language: "sv".to_owned(), value: "Rik bok".to_owned() }]);
+        assert_eq!(metadata.sort_name.as_deref(), Some("Rich Book"));
+        assert_eq!(metadata.sort_name_localizations.len(), 2);
+        assert_eq!(metadata.subtitle.as_deref(), Some("A Documentary History"));
+        assert_eq!(metadata.subtitle_localizations.len(), 2);
+        assert_eq!(catalog.publications[0].authors[0].name, "An Author");
+        assert_eq!(catalog.publications[0].authors[0].name_localizations.len(), 2);
+        assert_eq!(catalog.publications[0].authors[0].sort_name_localizations.len(), 2);
+        assert!(metadata.subjects.iter().any(|subject| subject.authority.as_deref() == Some("DDC") && subject.code.as_deref() == Some("510")));
+        assert!(metadata.subjects.iter().any(|subject| subject.name == "Mathematics" && subject.name_localizations.len() == 2 && subject.sort_name_localizations.len() == 2));
+        assert!(metadata.collections.iter().any(|collection| {
+            collection.name == "Archive Studies"
+                && collection.sort_name.as_deref() == Some("Archive Studies, The")
+                && collection.name_localizations.len() == 2
+                && collection.sort_name_localizations.len() == 2
+                && collection.identifiers == ["urn:series:archive", "legacy-series-1"]
+                && collection.position.as_deref() == Some("2")
+        }));
+        assert!(metadata.collections.iter().any(|collection| collection.name == "Documents" && collection.collection_type() == Some("collection")));
+        assert!(metadata.contributors.iter().any(|contributor| contributor.name == "A Translator" && contributor.roles == ["translator"]));
+        assert!(metadata.contributors.iter().any(|contributor| contributor.name == "An Editor" && contributor.roles == ["edt", "researcher"]));
+        assert_eq!(metadata.audiences.iter().map(|audience| audience.value.as_str()).collect::<Vec<_>>(), ["Young adult", "Teen"]);
+        assert_eq!(metadata.age_ranges[0].value, "12-17");
+        assert_eq!(
+            metadata.ratings[0],
+            OpdsAggregateRating {
+                value: "4.5".to_owned(),
+                rating_count: Some(22),
+                review_count: Some(7),
+                best_rating: Some("5".to_owned()),
+                worst_rating: Some("1".to_owned()),
+                source: "opds2:https://example.com/opds/#metadata.aggregateRating".to_owned()
+            }
+        );
+        assert_eq!(metadata.interactions[0].interaction_type, "https://schema.org/ReadAction");
+        assert_eq!(metadata.interactions[0].count, 91);
+        assert_eq!(metadata.interactions[0].service.as_deref(), Some("Example Reader"));
+        assert!(metadata.properties.iter().any(|property| property.property == "accessibility" && property.value.contains("alternativeText")));
+        assert_eq!(metadata.images.len(), 2);
+        assert_eq!((metadata.images[0].width, metadata.images[0].height), (Some(1200), Some(1800)));
+        assert_eq!(catalog.publications[0].image_url.as_deref(), Some("https://example.com/opds/cover.jpg"));
     }
 
     #[test]
@@ -2855,65 +3571,7 @@ mod tests {
             revision: 5,
             catalogs: vec![CatalogSource { id: "local".to_owned(), title: "Local".to_owned(), description: "Local catalog".to_owned(), languages: vec!["English".to_owned()], url: "http://127.0.0.1:8080/opds".to_owned() }],
         };
-        assert!(endpoints_from_registry(local.clone()).is_err());
-        assert_eq!(custom_endpoints_from_registry(local).unwrap()[0].url, "http://127.0.0.1:8080/opds");
-
-        let legacy_path = temporary.path().join("legacy-custom-catalogs.json");
-        std::fs::write(
-            &legacy_path,
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "revision": 1,
-                "catalogs": [{
-                    "id": "legacy-local",
-                    "title": "Legacy local",
-                    "description": "Legacy custom catalog",
-                    "languages": ["English"],
-                    "url": "http://127.0.0.1:8081/opds",
-                    "access": "open",
-                    "authentication": { "kind": "none" }
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let (migrated, endpoints) = load_custom_registry_cache(&legacy_path).unwrap().unwrap();
-        assert_eq!(migrated.schema_version, CATALOG_REGISTRY_SCHEMA_VERSION);
-        assert_eq!(endpoints[0].id.as_str(), "legacy-local");
-    }
-
-    #[test]
-    fn endpoint_store_persists_custom_endpoints_and_keeps_bundled_fallbacks() {
-        let temporary = tempfile::tempdir().unwrap();
-        let curated_path = temporary.path().join("curated.json");
-        let custom_path = temporary.path().join("custom.json");
-        let project_gutenberg = built_in_opds_endpoints().into_iter().find(|endpoint| endpoint.id.as_str() == "project-gutenberg").unwrap();
-        save_registry_cache(&curated_path, &registry_from_endpoints(2, &[project_gutenberg])).unwrap();
-
-        let mut store = OpdsEndpointStore::load(curated_path.clone(), custom_path.clone());
-        assert!(store.endpoints().iter().any(|endpoint| endpoint.id.as_str() == "litteraturbanken"));
-        let custom = store.add_custom_endpoint("Local books", "http://127.0.0.1:8080/opds").unwrap();
-        assert!(custom.id.as_str().starts_with("custom-"));
-        assert!(store.add_custom_endpoint("Duplicate", "http://127.0.0.1:8080/opds").unwrap_err().to_string().contains("already configured"));
-
-        drop(store);
-        let mut restored = OpdsEndpointStore::load(curated_path, custom_path);
-        assert_eq!(restored.custom_endpoints(), &[custom.clone()]);
-        restored.remove_custom_endpoint(&custom.id).unwrap();
-        assert!(restored.custom_endpoints().is_empty());
-    }
-
-    #[test]
-    fn endpoint_store_enforces_curated_registry_revisions() {
-        let temporary = tempfile::tempdir().unwrap();
-        let curated_path = temporary.path().join("curated.json");
-        let custom_path = temporary.path().join("custom.json");
-        let mut store = OpdsEndpointStore::load(curated_path, custom_path);
-        let endpoint = OpdsEndpoint { id: OpdsEndpointId::parse("example").unwrap(), title: "Example".to_owned(), description: "Books".to_owned(), languages: vec!["English".to_owned()], url: "https://example.com/opds".to_owned() };
-        store.replace_curated_registry(registry_from_endpoints(2, std::slice::from_ref(&endpoint))).unwrap();
-        let changed = OpdsEndpoint { title: "Changed".to_owned(), ..endpoint.clone() };
-        assert!(store.replace_curated_registry(registry_from_endpoints(2, &[changed])).unwrap_err().to_string().contains("without a revision increment"));
-        assert!(store.replace_curated_registry(registry_from_endpoints(1, &[endpoint])).unwrap_err().to_string().contains("refusing stale"));
+        assert!(endpoints_from_registry(local).is_err());
     }
 
     #[tokio::test]

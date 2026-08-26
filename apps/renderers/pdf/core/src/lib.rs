@@ -184,25 +184,26 @@ impl PdfDocumentSession {
     pub fn open(path: impl Into<PathBuf>) -> PdfResult<Self> {
         let path = path.into();
         let bytes = fs::read(&path).map_err(|error| PdfError::new(format!("reading {}: {error}", path.display())))?;
-        Self::from_bytes(path, bytes)
+        Self::from_bytes(path.display().to_string(), bytes)
     }
 
-    pub fn from_bytes(display_path: impl Into<PathBuf>, bytes: Vec<u8>) -> PdfResult<Self> {
-        let path = display_path.into();
-        let document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).map_err(|error| PdfError::new(format!("opening {}: {error}", path.display())))?;
-        Self::from_document(path, document)
+    pub fn from_bytes(source_name: impl Into<String>, bytes: Vec<u8>) -> PdfResult<Self> {
+        let source_name = source_name.into();
+        let document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).map_err(|error| PdfError::new(format!("opening {source_name}: {error}")))?;
+        Self::from_document(source_name, document)
     }
 
-    pub fn from_reader<R>(display_path: impl Into<PathBuf>, reader: R) -> PdfResult<Self>
+    pub fn from_reader<R>(source_name: impl Into<String>, reader: R) -> PdfResult<Self>
     where
         R: Read + Seek + 'static,
     {
-        let path = display_path.into();
-        let document = shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(format!("opening {}: {error}", path.display())))?;
-        Self::from_document(path, document)
+        let source_name = source_name.into();
+        let document = shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(format!("opening {source_name}: {error}")))?;
+        Self::from_document(source_name, document)
     }
 
-    fn from_document(path: PathBuf, document: PdfDocument<'static>) -> PdfResult<Self> {
+    fn from_document(source_name: String, document: PdfDocument<'static>) -> PdfResult<Self> {
+        suppress_bokheim_annotation_rendering(&document);
         let pages = document.pages().iter().map(|page| PdfPageInfo { width_points: page.width().value, height_points: page.height().value }).collect::<Vec<_>>();
         if pages.is_empty() {
             return Err(PdfError::new("the PDF has no pages"));
@@ -225,7 +226,7 @@ impl PdfDocumentSession {
                 Some(PdfOutlineEntry { title, page_index, depth })
             })
             .collect();
-        Ok(Self { document, info: PdfDocumentInfo { path, pages, outline } })
+        Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline } })
     }
 
     pub fn info(&self) -> &PdfDocumentInfo {
@@ -292,9 +293,26 @@ impl PdfDocumentSession {
     }
 }
 
+/// Bokheim annotations remain ordinary, printable PDF annotations on disk.
+/// In the live reader PDFium must not paint them a second time underneath the
+/// editable GPUI overlay. This changes only the in-memory PDFium document; the
+/// source bytes and their standard annotation flags are not saved.
+fn suppress_bokheim_annotation_rendering(document: &PdfDocument<'_>) {
+    for page_index in document.pages().as_range() {
+        let Ok(mut page) = document.pages().get(page_index) else { continue };
+        let annotation_range = page.annotations().as_range();
+        for annotation_index in annotation_range {
+            let Ok(mut annotation) = page.annotations_mut().get(annotation_index) else { continue };
+            if annotation.name().as_deref().is_some_and(|name| name.starts_with("bokheim:")) {
+                let _ = annotation.set_is_printable_but_not_viewable(true);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PdfDocumentInfo {
-    path: PathBuf,
+    source_name: String,
     pages: Vec<PdfPageInfo>,
     outline: Vec<PdfOutlineEntry>,
 }
@@ -304,8 +322,8 @@ impl PdfDocumentInfo {
         Ok(PdfDocumentSession::open(path)?.info)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn source_name(&self) -> &str {
+        &self.source_name
     }
 
     pub fn page_count(&self) -> usize {
@@ -1004,7 +1022,7 @@ mod tests {
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
         let reader = ChunkedReader { inner: Cursor::new(bytes), chunk_size: 7 };
-        let session = PdfDocumentSession::from_reader(&path, reader)?;
+        let session = PdfDocumentSession::from_reader(path.display().to_string(), reader)?;
         assert_eq!(session.info().page_count(), 2);
 
         drop(session);

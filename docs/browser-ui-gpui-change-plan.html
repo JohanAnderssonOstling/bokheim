@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A prioritized GPUI change plan for browser-ui with illustrated flows and proposed code diffs.">
+  <title>browser-ui — recommended GPUI changes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:#101210; --surface:#181b18; --surface2:#202420; --ink:#f2f0e8;
+      --muted:#aaa9a2; --dim:#747870; --line:#30352f; --green:#afe86f;
+      --green2:#72c991; --blue:#82ccd5; --amber:#ebb96b; --rose:#e58c9d;
+      --red-bg:rgba(229,140,157,.075); --green-bg:rgba(175,232,111,.075);
+      --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+      --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      --radius:15px;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;color:var(--ink);background:radial-gradient(circle at 80% 2%,rgba(130,204,213,.08),transparent 32rem),linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),var(--bg);background-size:auto,38px 38px,38px 38px,auto;font-family:var(--sans);line-height:1.62}
+    a{color:inherit} code{font-family:var(--mono)} ::selection{background:var(--green);color:#101210}
+    .shell{display:grid;grid-template-columns:226px minmax(0,850px);gap:clamp(2rem,6vw,6rem);width:min(1260px,calc(100% - 44px));margin:0 auto;padding:30px 0 100px}
+    aside{position:sticky;top:24px;align-self:start;height:calc(100vh - 48px);display:flex;flex-direction:column;padding-right:25px;border-right:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:11px;margin:8px 0 38px;font:700 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+    .mark{width:25px;height:25px;border:1px solid var(--green);border-radius:8px;box-shadow:inset 0 0 0 6px rgba(175,232,111,.11);transform:rotate(7deg)}
+    nav{display:grid;gap:4px} nav a{position:relative;padding:8px 0 8px 17px;color:var(--dim);font:500 12px/1.3 var(--mono);text-decoration:none} nav a:before{content:"";position:absolute;left:0;top:50%;width:5px;height:5px;border-radius:50%;background:var(--line);transform:translateY(-50%)} nav a:hover,nav a.active{color:var(--ink)} nav a.active:before{background:var(--green);box-shadow:0 0 0 4px rgba(175,232,111,.11)}
+    .progress{height:2px;margin-top:auto;overflow:hidden;background:var(--line)}.progress span{display:block;width:0;height:100%;background:var(--green)}.aside-note{margin:12px 0 0;color:var(--dim);font:10.5px/1.5 var(--mono)}
+    main{min-width:0} header{padding:clamp(58px,10vw,112px) 0 78px}.eyebrow{display:flex;align-items:center;gap:12px;margin-bottom:26px;color:var(--green);font:600 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase}.eyebrow:before{content:"";width:35px;height:1px;background:currentColor}
+    h1{max-width:800px;margin:0 0 28px;font-size:clamp(3.1rem,7vw,6rem);font-weight:730;letter-spacing:-.071em;line-height:.93}.lede{max-width:740px;margin:0;color:#c5c2bb;font-size:clamp(1.08rem,2vw,1.28rem)}
+    .headline-card{display:grid;grid-template-columns:repeat(3,1fr);margin-top:46px;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:rgba(24,27,24,.8)}.headline-card div{padding:20px;border-right:1px solid var(--line)}.headline-card div:last-child{border:0}.headline-card b{display:block;margin-bottom:7px;color:var(--green);font:650 11px/1.2 var(--mono);text-transform:uppercase}.headline-card span{color:var(--muted);font-size:12px;line-height:1.45}
+    section{scroll-margin-top:30px;padding:68px 0;border-top:1px solid var(--line)}.kicker{color:var(--green);font:600 10.5px/1 var(--mono);letter-spacing:.15em;text-transform:uppercase}h2{margin:13px 0 18px;font-size:clamp(2rem,4vw,3rem);letter-spacing:-.047em;line-height:1.05}h3{margin:0 0 8px;font-size:1rem}p{margin:0 0 18px;color:var(--muted)}p strong{color:var(--ink)}.compact{max-width:730px}
+    .legend{display:flex;flex-wrap:wrap;gap:9px;margin:26px 0}.pill{padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font:600 10px/1 var(--mono)}.pill.safe{color:var(--green);background:rgba(175,232,111,.07)}.pill.behavior{color:var(--blue);background:rgba(130,204,213,.07)}.pill.measure{color:var(--amber);background:rgba(235,185,107,.07)}
+    .matrix{display:grid;grid-template-columns:120px repeat(3,1fr);margin:29px 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.matrix>*{min-height:76px;padding:13px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.matrix>*:nth-child(4n){border-right:0}.matrix>*:nth-last-child(-n+4){border-bottom:0}.axis{display:grid;place-items:center;color:var(--dim);background:var(--surface);font:600 10px/1.3 var(--mono);text-align:center;text-transform:uppercase}.matrix-item{background:linear-gradient(145deg,var(--surface2),var(--surface));font-size:11px;color:var(--muted)}.matrix-item b{display:block;margin-bottom:4px;color:var(--ink);font-size:12px}.matrix-item.best{box-shadow:inset 0 0 0 1px var(--green);background:rgba(175,232,111,.055)}
+    .change{margin:34px 0 60px}.change-head{display:grid;grid-template-columns:52px 1fr auto;gap:15px;align-items:start;margin-bottom:21px}.num{width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--green);border-radius:50%;color:var(--green);font:650 11px/1 var(--mono)}.change-head h3{font-size:1.3rem;letter-spacing:-.02em}.change-head p{margin:4px 0 0;font-size:13px}.impact{padding:7px 9px;border-radius:999px;background:rgba(175,232,111,.09);color:var(--green);font:600 10px/1 var(--mono);white-space:nowrap}
+    .diagram{margin:27px 0;padding:18px;border:1px solid var(--line);border-radius:var(--radius);background:rgba(24,27,24,.72)}.diagram-title{margin-bottom:13px;color:var(--dim);font:600 10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}.diagram svg{display:block;width:100%;height:auto}.diagram text{font-family:var(--mono)}
+    .diff{margin:25px 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:#0c0e0c}.diff-head{display:flex;justify-content:space-between;gap:15px;padding:12px 15px;border-bottom:1px solid var(--line);color:var(--dim);font:10.5px/1.3 var(--mono)}pre{margin:0;padding:17px 18px;overflow:auto;color:#d7d8d2;font:11.5px/1.62 var(--mono);tab-size:4}.del,.add,.ctx{display:block;margin:0 -18px;padding:0 18px}.del{color:#e9a0ad;background:var(--red-bg)}.add{color:#c5ed9b;background:var(--green-bg)}.ctx{color:#b4b5af}.meta{color:#6f766f}.comment{color:#687069}.type{color:var(--blue)}
+    .notes{display:grid;grid-template-columns:repeat(2,1fr);gap:11px;margin:23px 0}.note{padding:18px;border:1px solid var(--line);border-radius:13px;background:var(--surface)}.note b{display:block;margin-bottom:6px;font-size:12px}.note p{margin:0;font-size:12px}.note.good b{color:var(--green)}.note.warn b{color:var(--amber)}
+    .callout{margin:25px 0;padding:18px 20px;border-left:2px solid var(--green);background:rgba(175,232,111,.08);color:#dae8cb;font-size:13px}.callout.amber{border-color:var(--amber);background:rgba(235,185,107,.07);color:#e5d4b9}
+    .flow{display:flex;align-items:stretch;gap:8px;margin:26px 0}.flow-box{flex:1;min-width:0;padding:15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.flow-box b{display:block;color:var(--blue);font:620 11px/1.3 var(--mono)}.flow-box span{display:block;margin-top:7px;color:var(--muted);font-size:11px}.arrow{display:grid;place-items:center;color:var(--dim);font:18px/1 var(--mono)}
+    .checklist{display:grid;gap:1px;margin:27px 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--line)}.check{display:grid;grid-template-columns:105px 1fr 90px;gap:15px;padding:15px 17px;background:var(--surface);font-size:12px}.check b{font-family:var(--mono)}.check span{color:var(--muted)}.check em{color:var(--green);font:600 10px/1.5 var(--mono);font-style:normal;text-align:right}
+    footer{padding-top:50px;color:var(--dim);font:11px/1.6 var(--mono);border-top:1px solid var(--line)}
+    @media(max-width:880px){.shell{display:block;width:min(100% - 34px,780px)}aside{display:none}header{padding-top:70px}}
+    @media(max-width:650px){.headline-card,.notes{grid-template-columns:1fr}.headline-card div{border-right:0;border-bottom:1px solid var(--line)}.headline-card div:last-child{border-bottom:0}.matrix{grid-template-columns:82px 1fr}.matrix>*{border-right:0}.axis.corner,.axis.col{display:none}.change-head{grid-template-columns:45px 1fr}.impact{grid-column:2}.flow{flex-direction:column}.arrow{transform:rotate(90deg)}.check{grid-template-columns:1fr}.check em{text-align:left}h1{font-size:3rem}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><span class="mark"></span>Change plan</div>
+      <nav aria-label="Report sections">
+        <a href="#summary">Summary</a><a href="#priority">Priorities</a><a href="#render">Pure rendering</a><a href="#invalidation">Invalidation</a><a href="#focus">Actions & focus</a><a href="#tasks">Task ownership</a><a href="#paginator">Paginator cost</a><a href="#components">Components</a><a href="#sequence">Sequence</a>
+      </nav>
+      <div class="progress"><span></span></div>
+      <p class="aside-note">Change plan + progress<br>Steps 1–2 + focus applied · no project tests</p>
+    </aside>
+    <main>
+      <header id="summary">
+        <div class="eyebrow">browser-ui · implementation plan</div>
+        <h1>Change less code, make the boundaries sharper.</h1>
+        <p class="lede">The codebase does not need a rewrite. I recommend six focused changes: remove behavior from rendering, simplify invalidation, make focus semantic, own user-visible tasks, reduce paginator measurement cost, and introduce stateless components selectively.</p>
+        <div class="headline-card">
+          <div><b>First move</b><span>Render purity and redundant observer cleanup.</span></div>
+          <div><b>Largest UX gain</b><span>Explicit focus plus semantic actions.</span></div>
+          <div><b>Measure first</b><span>Persistent paginator measurement optimization.</span></div>
+        </div>
+      </header>
+
+      <section id="priority">
+        <span class="kicker">Priority map</span><h2>Start with high-certainty simplifications.</h2>
+        <div class="legend"><span class="pill safe">Safe cleanup</span><span class="pill behavior">Behavioral improvement</span><span class="pill measure">Measure first</span></div>
+        <div class="matrix" aria-label="Impact and effort matrix">
+          <div class="axis corner">Impact →<br>Effort ↓</div><div class="axis col">Low</div><div class="axis col">Medium</div><div class="axis col">High</div>
+          <div class="axis">Small</div><div class="matrix-item"><b>RenderOnce polish</b>Better component identity.</div><div class="matrix-item"><b>Trash busy state</b>Clearer operation lifetime.</div><div class="matrix-item"></div>
+          <div class="axis">Medium</div><div class="matrix-item best"><b>Remove observers</b>Less duplicate invalidation.</div><div class="matrix-item best"><b>Pure card render</b>No accidental I/O during layout.</div><div class="matrix-item"><b>Measurement cache</b>Potential resize/layout gain.</div>
+          <div class="axis">Large</div><div class="matrix-item"></div><div class="matrix-item best"><b>Actions + focus</b>Reliable keyboard ownership.</div><div class="matrix-item"><b>Policy-based profiling</b>Fastest paginator, most behavior risk.</div>
+        </div>
+      </section>
+
+      <section id="render">
+        <span class="kicker">01 · Applied</span><h2>Make rendering purely observational.</h2>
+        <p class="compact">GPUI may render a child because it will paint, because a parent changed, because the inspector is active, or merely to measure a candidate layout. A render method should describe current state—not create more state or initiate work.</p>
+        <div class="diagram">
+          <div class="diagram-title">Illustration · why a render side effect escapes visibility control</div>
+          <svg viewBox="0 0 800 265" role="img" aria-label="Layout candidate rendering compared with explicit preparation">
+            <defs><marker id="arr1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#747870"/></marker></defs>
+            <text x="20" y="28" fill="#e58c9d" font-size="12">CURRENT</text>
+            <rect x="20" y="44" width="150" height="52" rx="10" fill="#202420" stroke="#30352f"/><text x="95" y="66" fill="#f2f0e8" font-size="11" text-anchor="middle">candidate layout</text><text x="95" y="82" fill="#aaa9a2" font-size="10" text-anchor="middle">may never paint</text>
+            <line x1="170" y1="70" x2="225" y2="70" stroke="#747870" marker-end="url(#arr1)"/>
+            <rect x="228" y="44" width="150" height="52" rx="10" fill="#2a2022" stroke="#e58c9d"/><text x="303" y="67" fill="#f2f0e8" font-size="11" text-anchor="middle">Render</text><text x="303" y="83" fill="#e58c9d" font-size="10" text-anchor="middle">starts cover load</text>
+            <line x1="378" y1="70" x2="433" y2="70" stroke="#747870" marker-end="url(#arr1)"/>
+            <rect x="436" y="44" width="150" height="52" rx="10" fill="#202420" stroke="#30352f"/><text x="511" y="67" fill="#f2f0e8" font-size="11" text-anchor="middle">background task</text><text x="511" y="83" fill="#aaa9a2" font-size="10" text-anchor="middle">work already escaped</text>
+            <text x="20" y="146" fill="#afe86f" font-size="12">RECOMMENDED</text>
+            <rect x="20" y="162" width="150" height="52" rx="10" fill="#202420" stroke="#30352f"/><text x="95" y="185" fill="#f2f0e8" font-size="11" text-anchor="middle">selected page</text><text x="95" y="201" fill="#aaa9a2" font-size="10" text-anchor="middle">visibility known</text>
+            <line x1="170" y1="188" x2="225" y2="188" stroke="#747870" marker-end="url(#arr1)"/>
+            <rect x="228" y="162" width="150" height="52" rx="10" fill="#1d2a20" stroke="#afe86f"/><text x="303" y="185" fill="#f2f0e8" font-size="11" text-anchor="middle">prepare</text><text x="303" y="201" fill="#afe86f" font-size="10" text-anchor="middle">starts cover load</text>
+            <line x1="378" y1="188" x2="433" y2="188" stroke="#747870" marker-end="url(#arr1)"/>
+            <rect x="436" y="162" width="150" height="52" rx="10" fill="#202420" stroke="#30352f"/><text x="511" y="185" fill="#f2f0e8" font-size="11" text-anchor="middle">state settles</text><text x="511" y="201" fill="#aaa9a2" font-size="10" text-anchor="middle">notify entity</text>
+            <line x1="586" y1="188" x2="641" y2="188" stroke="#747870" marker-end="url(#arr1)"/>
+            <rect x="644" y="162" width="135" height="52" rx="10" fill="#202420" stroke="#30352f"/><text x="711" y="185" fill="#f2f0e8" font-size="11" text-anchor="middle">Render</text><text x="711" y="201" fill="#aaa9a2" font-size="10" text-anchor="middle">describes state</text>
+          </svg>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>library/widgets/book_card.rs + browse/store_card.rs</span><span>applied</span></div>
+          <pre><span class="meta">@@ impl Render for BookCardView</span>
+<span class="ctx"> fn render(&amp;mut self, _window: &amp;mut Window, cx: &amp;mut Context&lt;Self&gt;) -&gt; impl IntoElement {</span>
+<span class="del">-    self.prepare(cx);</span>
+<span class="ctx">     let theme = components::browser_theme(cx);</span>
+<span class="meta">@@ impl Render for StoreCoverView</span>
+<span class="ctx"> fn render(&amp;mut self, _window: &amp;mut Window, cx: &amp;mut Context&lt;Self&gt;) -&gt; impl IntoElement {</span>
+<span class="del">-    self.prepare(cx);</span>
+<span class="ctx">     let theme = components::browser_theme(cx);</span></pre>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>browse/page.rs</span><span>applied · lazy creation belongs to the action</span></div>
+          <pre><span class="meta">@@ fn open_search</span>
+<span class="ctx"> fn open_search(&amp;mut self, window: &amp;mut Window, cx: &amp;mut Context&lt;Self&gt;) {</span>
+<span class="add">+    self.ensure_search_field(window, cx);</span>
+<span class="ctx">     self.search_open = true;</span>
+<span class="meta">@@ impl Render for BrowsePage</span>
+<span class="del">-    self.ensure_search_field(window, cx);</span>
+<span class="ctx">     let theme = components::browser_theme(cx);</span></pre>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>subjects/review_cover.rs</span><span>applied · virtual-list visibility boundary</span></div>
+          <pre><span class="del">-if matches!(self.state, Pending) &amp;&amp; self.task.is_none() {</span>
+<span class="del">-    self.load(cx);</span>
+<span class="del">-}</span>
+<span class="add">+Pending if self.task.is_none() =&gt; frame.on_prepaint(move |_, window, cx| {</span>
+<span class="add">+    window.defer(cx, move |_, cx| {</span>
+<span class="add">+        let _ = cover.update(cx, |cover, cx| cover.prepare(cx));</span>
+<span class="add">+    });</span>
+<span class="add">+}),</span></pre>
+        </div>
+        <div class="notes"><div class="note good"><b>Why this is safe</b><p>Book and store cards are already given explicit <code>with_prepare</code> callbacks by the paginator adapters.</p></div><div class="note warn"><b>What to inspect manually</b><p>Confirm no future caller embeds these card entities outside a preparation-owning container.</p></div></div>
+      </section>
+
+      <section id="invalidation">
+        <span class="kicker">02 · Applied</span><h2>Let rendered entity boundaries propagate invalidation.</h2>
+        <p class="compact">The fork records the rendered view path and marks ancestors dirty when a child entity notifies. A parent observer whose only job is to call <code>cx.notify()</code> repeats that relationship in application code.</p>
+        <div class="diagram">
+          <div class="diagram-title">Illustration · one state change, two invalidation paths</div>
+          <svg viewBox="0 0 800 285" role="img" aria-label="Current duplicate invalidation and simplified invalidation">
+            <defs><marker id="arr2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#747870"/></marker></defs>
+            <text x="20" y="27" fill="#e58c9d" font-size="12">CURRENT</text>
+            <rect x="20" y="48" width="145" height="48" rx="10" fill="#202420" stroke="#30352f"/><text x="92" y="77" fill="#f2f0e8" font-size="11" text-anchor="middle">Paginator notify</text>
+            <path d="M165 65 C225 28,255 28,315 65" fill="none" stroke="#747870" marker-end="url(#arr2)"/><text x="240" y="35" fill="#aaa9a2" font-size="9" text-anchor="middle">rendered view path</text>
+            <path d="M165 82 C225 119,255 119,315 82" fill="none" stroke="#e58c9d" marker-end="url(#arr2)"/><text x="240" y="124" fill="#e58c9d" font-size="9" text-anchor="middle">explicit observe → notify</text>
+            <rect x="318" y="48" width="155" height="48" rx="10" fill="#2a2022" stroke="#e58c9d"/><text x="395" y="70" fill="#f2f0e8" font-size="11" text-anchor="middle">BrowsePage dirty</text><text x="395" y="84" fill="#e58c9d" font-size="9" text-anchor="middle">same dependency twice</text>
+            <text x="20" y="175" fill="#afe86f" font-size="12">RECOMMENDED</text>
+            <rect x="20" y="196" width="145" height="48" rx="10" fill="#202420" stroke="#30352f"/><text x="92" y="225" fill="#f2f0e8" font-size="11" text-anchor="middle">Paginator notify</text>
+            <line x1="165" y1="220" x2="315" y2="220" stroke="#747870" marker-end="url(#arr2)"/><text x="240" y="210" fill="#aaa9a2" font-size="9" text-anchor="middle">GPUI view path</text>
+            <rect x="318" y="196" width="155" height="48" rx="10" fill="#1d2a20" stroke="#afe86f"/><text x="395" y="218" fill="#f2f0e8" font-size="11" text-anchor="middle">BrowsePage dirty</text><text x="395" y="232" fill="#afe86f" font-size="9" text-anchor="middle">one ownership path</text>
+          </svg>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>browse/page.rs</span><span>applied · removed visual parent observer</span></div>
+          <pre><span class="meta">@@ struct BrowsePage</span>
+<span class="del">-    _paginator_updates: Subscription,</span>
+<span class="meta">@@ fn new</span>
+<span class="ctx">     let paginator = cx.new(|_| Paginator::new(...));</span>
+<span class="del">-    let paginator_updates = cx.observe(&amp;paginator, |_, _, cx| cx.notify());</span>
+<span class="meta">@@ Self { ... }</span>
+<span class="del">-    _paginator_updates: paginator_updates,</span></pre>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>library/pages/home.rs + browse/controls.rs</span><span>applied · same ownership rule</span></div>
+          <pre><span class="del">-    _paginator_updates: Subscription,</span>
+<span class="del">-    let paginator_updates = cx.observe(&amp;paginator, |_, _, cx| cx.notify());</span>
+<span class="del">-    Self { id, title: title.into(), paginator, _paginator_updates: paginator_updates }</span>
+<span class="add">+    Self { id, title: title.into(), paginator }</span>
+
+<span class="ctx"> if matches!(event, InputEvent::Change) &amp;&amp; !suppressed.get() {</span>
+<span class="ctx">     on_changed(page, cx);</span>
+<span class="del">-    cx.notify();</span>
+<span class="ctx"> }</span></pre>
+        </div>
+        <div class="callout amber">Retain explicit <code>observe</code> when the observed entity is not embedded in the observing view’s rendered subtree, or when nonvisual state must react. <code>NavigationView</code> observing <code>NavigationState</code> is a good example that should stay.</div>
+      </section>
+
+      <section id="focus">
+        <span class="kicker">03 · Focus applied; actions deferred</span><h2>Keep local keyboard handling and make focus deliberate.</h2>
+        <p class="compact">The existing raw arrow-key handling is compact and appropriately local to the browse page. Converting it into actions would add machinery without a current remapping, menu or command-palette requirement. The useful part of this step is explicit focus ownership.</p>
+        <div class="diagram">
+          <div class="diagram-title">Illustration · focus path and command scope</div>
+          <svg viewBox="0 0 800 250" role="img" aria-label="Focus path from root to browse page to search input">
+            <defs><marker id="arr3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#747870"/></marker></defs>
+            <rect x="32" y="42" width="190" height="158" rx="15" fill="#181b18" stroke="#30352f"/><text x="52" y="67" fill="#82ccd5" font-size="11">Browser</text><text x="52" y="87" fill="#aaa9a2" font-size="9">global actions</text>
+            <rect x="255" y="63" width="235" height="116" rx="14" fill="#202420" stroke="#afe86f"/><circle cx="276" cy="84" r="5" fill="#afe86f"/><text x="292" y="88" fill="#f2f0e8" font-size="11">BrowserBrowse</text><text x="276" y="112" fill="#aaa9a2" font-size="9">previous / next / toggle search</text><text x="276" y="134" fill="#aaa9a2" font-size="9">focused when route activates</text>
+            <rect x="532" y="84" width="220" height="74" rx="13" fill="#202420" stroke="#30352f"/><text x="552" y="108" fill="#f2f0e8" font-size="11">Search Input</text><text x="552" y="130" fill="#aaa9a2" font-size="9">temporarily owns arrows + text</text>
+            <line x1="222" y1="121" x2="252" y2="121" stroke="#747870" marker-end="url(#arr3)"/><line x1="490" y1="121" x2="529" y2="121" stroke="#747870" marker-end="url(#arr3)"/>
+            <path d="M642 160 C642 222,372 230,372 182" fill="none" stroke="#afe86f" stroke-dasharray="4 4" marker-end="url(#arr3)"/><text x="515" y="224" fill="#afe86f" font-size="9" text-anchor="middle">close search → restore page focus</text>
+          </svg>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>browser/src/lib.rs</span><span>deferred · optional only if commands become reusable</span></div>
+          <pre><span class="del">-actions!(bokheim_browser, [...]);</span>
+<span class="add">+actions!(bokheim_browser, [</span>
+<span class="add">+    ..., PreviousBrowsePage, NextBrowsePage, ToggleBrowseSearch</span>
+<span class="add">+]);</span>
+<span class="meta">@@ bind_keys</span>
+<span class="add">+KeyBinding::new("left", PreviousBrowsePage, Some("BrowserBrowse")),</span>
+<span class="add">+KeyBinding::new("right", NextBrowsePage, Some("BrowserBrowse")),</span>
+<span class="add">+KeyBinding::new("ctrl-f", ToggleBrowseSearch, Some("BrowserBrowse")),</span></pre>
+        </div>
+        <div class="diff">
+          <div class="diff-head"><span>browse/page.rs</span><span>deferred · current local listener retained</span></div>
+          <pre><span class="del">-fn navigate_paginator(&amp;mut self, event: &amp;KeyDownEvent, ...)</span>
+<span class="add">+fn previous_page(&amp;mut self, _: &amp;PreviousBrowsePage, _: &amp;mut Window, cx: &amp;mut Context&lt;Self&gt;) {</span>
+<span class="add">+    self.paginator.update(cx, |p, cx| { p.previous(cx); });</span>
+<span class="add">+}</span>
+<span class="add">+fn next_page(&amp;mut self, _: &amp;NextBrowsePage, _: &amp;mut Window, cx: &amp;mut Context&lt;Self&gt;) {</span>
+<span class="add">+    self.paginator.update(cx, |p, cx| { p.next(cx); });</span>
+<span class="add">+}</span>
+<span class="meta">@@ render</span>
+<span class="del">-.track_focus(&amp;self.focus).on_key_down(cx.listener(Self::navigate_paginator))</span>
+<span class="add">+.track_focus(&amp;self.focus).key_context("BrowserBrowse")</span>
+<span class="add">+.on_action(cx.listener(Self::previous_page))</span>
+<span class="add">+.on_action(cx.listener(Self::next_page))</span>
+<span class="add">+.on_action(cx.listener(|page, _: &amp;ToggleBrowseSearch, window, cx|</span>
+<span class="add">+    page.toggle_search(window, cx)))</span></pre>
+        </div>
+        <div class="callout"><strong>Applied:</strong> the root now calls <code>cx.focus_view</code> for newly created folder, subject and store pages before converting them to <code>AnyView</code>. Non-browse routes restore root focus, while closing search restores the browse-page focus. The local arrow listener remains unchanged.</div>
+      </section>
+
+      <section id="tasks">
+        <span class="kicker">04 · Behavioral improvement</span><h2>Store tasks the user can still observe or repeat.</h2>
+        <p class="compact">Detached tasks are safe because GPUI passes a weak entity, but safety is not the only lifecycle question. Trash operations should disable their originating controls and prevent duplicate commands.</p>
+        <div class="flow" aria-label="Task ownership state machine"><div class="flow-box"><b>Idle</b><span>Controls enabled; no mutation task.</span></div><div class="arrow">→</div><div class="flow-box"><b>Busy(target)</b><span>Store task, disable matching controls, notify.</span></div><div class="arrow">→</div><div class="flow-box"><b>Complete</b><span>Clear task and busy state; refresh or show error.</span></div></div>
+        <div class="diff">
+          <div class="diff-head"><span>library/pages/trash.rs</span><span>represent operation lifetime</span></div>
+          <pre><span class="meta">@@ struct TrashPage</span>
+<span class="add">+    operation: Option&lt;Task&lt;()&gt;&gt;,</span>
+<span class="add">+    busy: Option&lt;TrashTarget&gt;,</span>
+<span class="meta">@@ fn restore_book</span>
+<span class="add">+    if self.operation.is_some() { return; }</span>
+<span class="add">+    self.busy = Some(TrashTarget::Book(book.content_hash.clone()));</span>
+<span class="ctx">     let operation = self.ui.restore_book(book.content_hash);</span>
+<span class="del">-    cx.spawn(async move |page, cx| {</span>
+<span class="add">+    self.operation = Some(cx.spawn(async move |page, cx| {</span>
+<span class="ctx">         let result = operation.await;</span>
+<span class="add">+        let _ = page.update(cx, |page, cx| {</span>
+<span class="add">+            page.operation.take();</span>
+<span class="add">+            page.busy = None;</span>
+<span class="add">+            page.finish(result, "restore book", cx);</span>
+<span class="add">+        });</span>
+<span class="del">-    }).detach();</span>
+<span class="add">+    }));</span>
+<span class="add">+    cx.notify();</span></pre>
+        </div>
+        <p>Apply the same pattern to purge, restore-folder and empty-trash. If concurrency between independent rows is desirable, replace the single busy target with a small map of operation tasks keyed by semantic target.</p>
+      </section>
+
+      <section id="paginator">
+        <span class="kicker">05 · Measure first</span><h2>Reduce paginator work without weakening its model.</h2>
+        <p class="compact">The custom element is appropriate. The expensive part is candidate evaluation: intrinsic child trees are constructed for candidate widths and the accepted page is constructed again. First remove render side effects; then profile resize, initial layout and data replacement before changing geometry policy.</p>
+        <div class="diagram">
+          <div class="diagram-title">Illustration · where repeated work occurs</div>
+          <svg viewBox="0 0 800 230" role="img" aria-label="Paginator candidate measurement funnel">
+            <defs><marker id="arr4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#747870"/></marker></defs>
+            <text x="28" y="32" fill="#82ccd5" font-size="11">geometry candidates</text>
+            <rect x="28" y="50" width="135" height="42" rx="9" fill="#202420" stroke="#30352f"/><text x="95" y="76" fill="#f2f0e8" font-size="10" text-anchor="middle">4 columns</text>
+            <rect x="28" y="103" width="135" height="42" rx="9" fill="#202420" stroke="#30352f"/><text x="95" y="129" fill="#f2f0e8" font-size="10" text-anchor="middle">5 columns</text>
+            <rect x="28" y="156" width="135" height="42" rx="9" fill="#202420" stroke="#30352f"/><text x="95" y="182" fill="#f2f0e8" font-size="10" text-anchor="middle">6 columns</text>
+            <path d="M163 71L280 112" stroke="#747870" marker-end="url(#arr4)"/><path d="M163 124L280 118" stroke="#747870" marker-end="url(#arr4)"/><path d="M163 177L280 124" stroke="#747870" marker-end="url(#arr4)"/>
+            <rect x="284" y="88" width="175" height="58" rx="11" fill="#2a2620" stroke="#ebb96b"/><text x="371" y="112" fill="#f2f0e8" font-size="11" text-anchor="middle">intrinsic layout</text><text x="371" y="130" fill="#ebb96b" font-size="9" text-anchor="middle">render + layout per key</text>
+            <line x1="459" y1="117" x2="528" y2="117" stroke="#747870" marker-end="url(#arr4)"/><rect x="532" y="88" width="105" height="58" rx="11" fill="#1d2a20" stroke="#afe86f"/><text x="584" y="112" fill="#f2f0e8" font-size="11" text-anchor="middle">selected</text><text x="584" y="130" fill="#afe86f" font-size="9" text-anchor="middle">geometry</text>
+            <line x1="637" y1="117" x2="681" y2="117" stroke="#747870" marker-end="url(#arr4)"/><rect x="685" y="88" width="90" height="58" rx="11" fill="#202420" stroke="#30352f"/><text x="730" y="112" fill="#f2f0e8" font-size="10" text-anchor="middle">layout</text><text x="730" y="130" fill="#aaa9a2" font-size="9" text-anchor="middle">again</text>
+          </svg>
+        </div>
+        <div class="notes"><div class="note good"><b>Low-risk optimization</b><p>Persist intrinsic heights with the paginator data, keyed by child, width and rem size. Replacing groups naturally discards the cache.</p></div><div class="note warn"><b>Higher-risk optimization</b><p>Rank candidates solely from declared sizing and render only the winner. Faster, but may change packing when children are shorter than their maximum.</p></div></div>
+        <div class="diff">
+          <div class="diff-head"><span>widgets/paginator</span><span>illustrative persistent cache</span></div>
+          <pre><span class="meta">@@ struct PaginatorData</span>
+<span class="add">+    intrinsic_heights: RefCell&lt;HashMap&lt;IntrinsicMeasurementKey, Pixels&gt;&gt;,</span>
+<span class="meta">@@ measure_intrinsic_row_height</span>
+<span class="del">-    *intrinsic_heights.entry(key).or_insert_with(|| measure_child(...))</span>
+<span class="add">+    if let Some(height) = self.data.intrinsic_heights.borrow().get(&amp;key) {</span>
+<span class="add">+        return *height;</span>
+<span class="add">+    }</span>
+<span class="add">+    let height = measure_child(...);</span>
+<span class="add">+    self.data.intrinsic_heights.borrow_mut().insert(key, height);</span>
+<span class="add">+    height</span></pre>
+        </div>
+        <div class="callout amber">This diff is intentionally illustrative, not a first commit. Cache placement and borrowing should be chosen after profiling. The geometry selection cache already avoids most repeated candidate work when bounds and revision remain stable.</div>
+      </section>
+
+      <section id="components">
+        <span class="kicker">06 · Low-priority polish</span><h2>Use <code>RenderOnce</code> for concepts, not fragments.</h2>
+        <p class="compact">The code has many builder helpers. Most are fine. Promote only units that have a name, props, repeated structure and value in the inspector—such as a review metadata field, a settings row variant, or browse options as a whole.</p>
+        <div class="diff">
+          <div class="diff-head"><span>conceptual component extraction</span><span>not a blanket rewrite</span></div>
+          <pre><span class="del">-fn metadata_field(theme: BrowserTheme) -&gt; Div { ... }</span>
+<span class="add">+#[derive(IntoElement)]</span>
+<span class="add">+struct MetadataField {</span>
+<span class="add">+    value: SharedString,</span>
+<span class="add">+    emphasis: MetadataEmphasis,</span>
+<span class="add">+    theme: BrowserTheme,</span>
+<span class="add">+}</span>
+<span class="add">+impl RenderOnce for MetadataField { ... }</span></pre>
+        </div>
+        <p>Leave one-line spacing/layout helpers as functions. An entity would be wrong here because the component has no durable state; <code>RenderOnce</code> simply gives the stateless widget identity and an explicit prop surface.</p>
+      </section>
+
+      <section id="sequence">
+        <span class="kicker">Suggested sequence</span><h2>Six small reviewable changes.</h2>
+        <div class="checklist">
+          <div class="check"><b>1 · render-purity</b><span>Removed card preparation and search construction from <code>Render</code>; review covers now prepare after visible prepaint.</span><em>applied</em></div>
+          <div class="check"><b>2 · invalidation</b><span>Removed paginator parent observers and helper-level duplicate notify.</span><em>applied</em></div>
+          <div class="check"><b>3 · browse-focus</b><span>Explicit route focus applied; local arrow handling retained to avoid unnecessary action machinery.</span><em>applied</em></div>
+          <div class="check"><b>4 · trash-lifetime</b><span>Store operation tasks and expose busy state to controls.</span><em>behavior</em></div>
+          <div class="check"><b>5 · measurement</b><span>Profile first; add a persistent intrinsic cache only if supported.</span><em>measure</em></div>
+          <div class="check"><b>6 · components</b><span>Extract two or three coherent stateless widgets as examples.</span><em>polish</em></div>
+        </div>
+        <div class="callout"><strong>Recommended stopping point:</strong> after steps 1–4, reassess the application before touching the paginator algorithm. Those changes clarify semantics and UX regardless of benchmark results; step 5 is justified only by evidence.</div>
+      </section>
+
+      <footer>Scope: changes for <code>apps/ui/gpui/browser</code> against the current local <code>GPUI-Fork</code> model. Render purity, invalidation cleanup and explicit browse focus are applied; action conversion is intentionally deferred and later sections remain proposals.</footer>
+    </main>
+  </div>
+  <script>
+    const links=[...document.querySelectorAll('nav a')];const sections=links.map(a=>document.querySelector(a.getAttribute('href'))).filter(Boolean);const bar=document.querySelector('.progress span');
+    function update(){const y=scrollY+Math.min(180,innerHeight*.3);let active=sections[0];for(const s of sections)if(s.offsetTop<=y)active=s;for(const a of links)a.classList.toggle('active',a.getAttribute('href')===`#${active.id}`);const max=document.documentElement.scrollHeight-innerHeight;bar.style.width=`${max>0?Math.min(100,scrollY/max*100):100}%`}
+    addEventListener('scroll',update,{passive:true});addEventListener('resize',update);update();
+  </script>
+</body>
+</html>

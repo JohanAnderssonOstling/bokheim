@@ -1,15 +1,12 @@
 //! Owns authentication inputs and sign-in, registration, verification, and reset flows.
 
-use std::future::Future;
-
-use epub_svelte_lib::app::AppBackend;
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputState, OtpState};
 
 use crate::model::AccountFlow;
+use app_contract::backend::BackendFuture;
 
 use super::SyncPage;
-use super::account::load_cloud_snapshot;
 
 pub(super) struct AuthenticationInputs {
     pub(super) login_email: Entity<InputState>,
@@ -38,9 +35,15 @@ impl AuthenticationInputs {
 }
 
 impl SyncPage {
-    pub(super) fn set_flow(&mut self, flow: AccountFlow, cx: &mut Context<Self>) {
+    /// Leaving a flow re-masks every password, so a field revealed on one
+    /// screen is never left in clear text behind another.
+    pub(super) fn set_flow(&mut self, flow: AccountFlow, window: &mut Window, cx: &mut Context<Self>) {
         if self.flow == flow && self.error.is_none() && self.message.is_none() {
             return;
+        }
+        self.password_revealed = false;
+        for state in [&self.authentication.password, &self.authentication.registration_password, &self.authentication.new_password] {
+            state.update(cx, |state, cx| state.set_masked(true, window, cx));
         }
         self.flow = flow;
         self.login_failed = false;
@@ -49,11 +52,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    fn start_account_request<F, Fut>(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: F, cx: &mut Context<Self>)
-    where
-        F: FnOnce(AppBackend) -> Fut,
-        Fut: Future<Output = Result<(), String>> + Send + 'static,
-    {
+    fn start_account_request(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: BackendFuture<()>, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -62,14 +61,14 @@ impl SyncPage {
         self.error = None;
         self.message = Some(progress.into());
         cx.notify();
-        let task = self.services.backend.spawn(operation);
         self.task = Some(cx.spawn(async move |page, cx| {
-            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
+            let result = operation.await;
             let _ = page.update(cx, |page, cx| {
                 page.busy = false;
                 page.account_action_busy = false;
                 match result {
                     Ok(()) => {
+                        page.password_revealed = false;
                         page.flow = next_flow;
                         page.message = Some(success.into());
                     }
@@ -91,16 +90,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_snapshot_operation(
-            "Signing in…",
-            "Signed in",
-            true,
-            move |core| async move {
-                core.login(&email, &password).await.map_err(|error| error.to_string())?;
-                load_cloud_snapshot(&core).await
-            },
-            cx,
-        );
+        let operation = self.services.backend.login(email, password);
+        self.start_snapshot_operation("Signing in…", "Signed in", true, operation, cx);
     }
 
     pub(super) fn start_registration(&mut self, cx: &mut Context<Self>) {
@@ -112,13 +103,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_account_request(
-            "Creating account…",
-            "Check your email for a six-digit verification PIN",
-            AccountFlow::VerifyEmail,
-            move |core| async move { core.request_public_registration(&email, &password).await.map_err(|error| error.to_string()) },
-            cx,
-        );
+        let operation = self.services.backend.request_registration(email, password);
+        self.start_account_request("Creating account…", "Check your email for a six-digit verification PIN", AccountFlow::VerifyEmail, operation, cx);
     }
 
     pub(super) fn start_resend_verification(&mut self, cx: &mut Context<Self>) {
@@ -128,7 +114,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_account_request("Resending PIN…", "Verification PIN sent if the address exists", AccountFlow::VerifyEmail, move |core| async move { core.resend_verification(&email).await.map_err(|error| error.to_string()) }, cx);
+        let operation = self.services.backend.resend_verification(email);
+        self.start_account_request("Resending PIN…", "Verification PIN sent if the address exists", AccountFlow::VerifyEmail, operation, cx);
     }
 
     pub(super) fn start_verify_email(&mut self, cx: &mut Context<Self>) {
@@ -140,16 +127,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_snapshot_operation(
-            "Verifying email…",
-            "Email verified",
-            false,
-            move |core| async move {
-                core.verify_email(&email, &pin).await.map_err(|error| error.to_string())?;
-                load_cloud_snapshot(&core).await
-            },
-            cx,
-        );
+        let operation = self.services.backend.verify_email(email, pin);
+        self.start_snapshot_operation("Verifying email…", "Email verified", false, operation, cx);
     }
 
     pub(super) fn start_password_reset_request(&mut self, cx: &mut Context<Self>) {
@@ -159,7 +138,8 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_account_request("Requesting reset…", "Reset token sent if the address exists", AccountFlow::ResetPassword, move |core| async move { core.request_password_reset(&email).await.map_err(|error| error.to_string()) }, cx);
+        let operation = self.services.backend.request_password_reset(email);
+        self.start_account_request("Requesting reset…", "Reset token sent if the address exists", AccountFlow::ResetPassword, operation, cx);
     }
 
     pub(super) fn start_password_reset(&mut self, cx: &mut Context<Self>) {
@@ -170,12 +150,7 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        self.start_account_request(
-            "Updating password…",
-            "Password updated. Sign in with your new password.",
-            AccountFlow::SignIn,
-            move |core| async move { core.reset_password(&token, &password).await.map_err(|error| error.to_string()) },
-            cx,
-        );
+        let operation = self.services.backend.reset_password(token, password);
+        self.start_account_request("Updating password…", "Password updated. Sign in with your new password.", AccountFlow::SignIn, operation, cx);
     }
 }

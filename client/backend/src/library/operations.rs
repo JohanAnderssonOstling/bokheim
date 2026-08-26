@@ -1,17 +1,21 @@
 //! Multi-resource library workflows implemented on the public library handle.
 
 use super::covers::generate_thumbnail_for_sync;
+use super::filenames;
 use super::handle::LibraryBackend;
-use super::model::{generate_content_hash_blake3, Dir, LibraryAccountState, ReaderFormat, ResolvedBook};
+use super::model::{generate_content_hash_blake3, LibraryAccountState, ResolvedBook};
 use crate::app::BackendError;
 use crate::catalog::{CatalogPublicationIdentity, CatalogSourceId};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryEvent;
-use crate::sync::{SyncOutcome, SyncPolicy};
+use crate::sync::{SyncError, SyncOutcome, SyncPolicy};
 use crate::{BlobKind, ContentHash, DownloadState};
+use app_contract::library::{Dir, DirectoryImport};
 use library_model::BookFormat;
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use sync_common::DirId;
 
@@ -94,11 +98,13 @@ impl LibraryBackend {
             let conn = self.db.get()?;
             db::get_book_format(&conn, &content_hash)?.ok_or_else(|| format!("book format not found: {content_hash}"))?
         };
-        let format = ReaderFormat::from_book_format(source_format);
-        let publication_path = path.with_extension(source_format.canonical_extension());
+        if !matches!(source_format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::M4b) {
+            return Err(format!("the {} format is no longer supported", source_format.canonical_extension()).into());
+        }
+        let format = source_format;
         if exists_locally {
             match File::open(&path) {
-                Ok(reader) => return Ok(ResolvedBook { path, publication_path, format, reader: Box::new(reader) }),
+                Ok(reader) => return Ok(ResolvedBook { path, format, reader: Box::new(reader) }),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
@@ -110,7 +116,7 @@ impl LibraryBackend {
             };
             let session = self.sync_manager.current_session().ok_or("authentication is required to open an uncached server book")?;
             let reader = remote_reader::RemoteAssetReader::open(&self.context.app_data_dir().join("remote-book-cache"), session.user_id(), &self.id, content_hash.clone(), self.sync_manager.server_url(), session.token().to_owned())?;
-            return Ok(ResolvedBook { path, publication_path, format, reader: Box::new(reader) });
+            return Ok(ResolvedBook { path, format, reader: Box::new(reader) });
         }
     }
 
@@ -174,11 +180,11 @@ impl LibraryBackend {
         Ok(content_hashes.len())
     }
 
-    pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> Result<SyncOutcome, Box<dyn std::error::Error>> {
+    pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> Result<SyncOutcome, SyncError> {
         self.sync_manager.synchronize(policy).await
     }
 
-    pub(crate) async fn resume_transfers(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) async fn resume_transfers(&self) -> Result<(), SyncError> {
         self.sync_manager.resume_transfers().await
     }
 
@@ -218,102 +224,175 @@ impl LibraryBackend {
 
     /// Copies and indexes a supported book in one operation. Mobile builds do not run a
     /// filesystem watcher, so importing must not depend on a later scan.
-    pub(super) fn import_local_book(&self, parent_id: &DirId, source_path: &Path, file_name: &str) -> Result<ContentHash, Box<dyn std::error::Error>> {
-        self.import_book_file(parent_id, source_path, file_name, None)
+    pub(super) fn import_local_book(&self, parent_id: &DirId, source_path: &Path) -> Result<ContentHash, Box<dyn std::error::Error>> {
+        self.import_book_file(parent_id, source_path, None)
+    }
+
+    pub(super) fn import_local_folder(&self, parent_id: &DirId, source_path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let source_path = source_path.canonicalize()?;
+        if !source_path.is_dir() {
+            return Err(format!("selected folder is not a directory: {}", source_path.display()).into());
+        }
+        let folder_name = source_path.file_name().and_then(|name| name.to_str()).ok_or("selected folder has no valid name")?;
+        let destination = self.create_directory_on_disk(parent_id, folder_name)?;
+        let mut failures = Vec::new();
+        self.import_local_folder_contents(&destination.id, &source_path, &mut failures)?;
+        Ok(failures)
+    }
+
+    pub(super) fn import_selected_directory(&self, parent_id: &DirId, source: DirectoryImport, create_root: bool) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let DirectoryImport { name, mut directories, mut files } = source;
+        let root_id = if create_root { self.create_directory_on_disk(parent_id, &name)?.id } else { *parent_id };
+        let mut imported_directories = HashMap::from([(Vec::<String>::new(), root_id)]);
+        let mut failures = Vec::new();
+
+        directories.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+        directories.dedup();
+        for path in directories {
+            let Some((name, parent_path)) = path.split_last() else { continue };
+            let Some(parent_id) = imported_directories.get(parent_path) else {
+                failures.push(format!("{}: parent folder could not be imported", path.join("/")));
+                continue;
+            };
+            match self.create_directory_on_disk(parent_id, name) {
+                Ok(directory) => {
+                    imported_directories.insert(path, directory.id);
+                }
+                Err(error) => failures.push(format!("{}: {error}", path.join("/"))),
+            }
+        }
+
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        for file in files {
+            let Some((file_name, parent_path)) = file.path.split_last() else { continue };
+            let extension = Path::new(file_name).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+            if BookFormat::from_import_extension(extension).is_none() {
+                continue;
+            }
+            let display_path = file.path.join("/");
+            let Some(parent_id) = imported_directories.get(parent_path) else {
+                failures.push(format!("{display_path}: parent folder could not be imported"));
+                continue;
+            };
+            let mut reader = match futures_executor::block_on((file.open)()) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    failures.push(format!("{display_path}: {error}"));
+                    continue;
+                }
+            };
+            if let Err(error) = self.import_book_reader(parent_id, reader.as_mut(), file_name.clone(), None) {
+                failures.push(format!("{display_path}: {error}"));
+            }
+        }
+        Ok(failures)
+    }
+
+    fn import_local_folder_contents(&self, parent_id: &DirId, source_path: &Path, failures: &mut Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut entries = fs::read_dir(source_path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_dir() {
+                match self.create_directory_on_disk(parent_id, &name) {
+                    Ok(directory) => {
+                        if let Err(error) = self.import_local_folder_contents(&directory.id, &path, failures) {
+                            failures.push(format!("{}: {error}", path.display()));
+                        }
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", path.display())),
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+            if BookFormat::from_import_extension(extension).is_none() {
+                continue;
+            }
+            if let Err(error) = self.import_book_file(parent_id, &path, None) {
+                failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn import_catalog_book_file(&self, parent_id: &DirId, source_path: &Path, file_name: &str, source_id: &CatalogSourceId, publication: &CatalogPublicationIdentity) -> Result<ContentHash, Box<dyn std::error::Error>> {
-        self.import_book_file(parent_id, source_path, file_name, Some((source_id, publication)))
+        let file_name = filenames::validate_component(file_name)?;
+        let source_path = source_path.canonicalize()?;
+        if !source_path.is_file() {
+            return Err(format!("downloaded book is not a file: {}", source_path.display()).into());
+        }
+        self.import_book_file_as(parent_id, &source_path, file_name, Some((source_id, publication)))
     }
 
-    fn import_book_file(&self, parent_id: &DirId, source_path: &Path, file_name: &str, catalog_publication: Option<(&CatalogSourceId, &CatalogPublicationIdentity)>) -> Result<ContentHash, Box<dyn std::error::Error>> {
-        let mut file_name = file_name.trim().to_owned();
-        let extension = Path::new(file_name.as_str()).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+    fn import_book_file(&self, parent_id: &DirId, source_path: &Path, catalog_publication: Option<(&CatalogSourceId, &CatalogPublicationIdentity)>) -> Result<ContentHash, Box<dyn std::error::Error>> {
         let source_path = source_path.canonicalize()?;
         if !source_path.is_file() {
             return Err(format!("selected book is not a file: {}", source_path.display()).into());
         }
-        let expected_format = BookFormat::from_extension(extension).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, FB2, CBZ, HTML, Readium Web Publication, and M4B files can be added to a library")?;
-        let inspection = book_metadata::inspect_book(&source_path, expected_format)?;
-        let metadata = inspection.metadata;
+        let file_name = source_path.file_name().and_then(|name| name.to_str()).ok_or("selected book has no valid UTF-8 filename")?.to_owned();
+        self.import_book_file_as(parent_id, &source_path, file_name, catalog_publication)
+    }
 
-        // Bundling rewrites the file to a Web Publication, so the format stored on
-        // the book is the bundled one rather than the format that was inspected.
-        let stored_format = if expected_format == BookFormat::Html { BookFormat::WebPub } else { expected_format };
-        let bundled_html = if expected_format == BookFormat::Html {
-            let bytes = html_publication::bundle_webpub(&source_path).map_err(|error| format!("could not package Web Publication: {error}"))?;
-            let stem = Path::new(file_name.as_str()).file_stem().and_then(|value| value.to_str()).unwrap_or("publication");
-            file_name = format!("{stem}.webpub");
-            Some(bytes)
-        } else {
-            None
-        };
+    fn import_book_file_as(&self, parent_id: &DirId, source_path: &Path, file_name: String, catalog_publication: Option<(&CatalogSourceId, &CatalogPublicationIdentity)>) -> Result<ContentHash, Box<dyn std::error::Error>> {
+        let mut source = File::open(source_path)?;
+        self.import_book_reader(parent_id, &mut source, file_name, catalog_publication)
+    }
+
+    pub(super) fn import_book_reader(&self, parent_id: &DirId, source: &mut dyn Read, file_name: String, catalog_publication: Option<(&CatalogSourceId, &CatalogPublicationIdentity)>) -> Result<ContentHash, Box<dyn std::error::Error>> {
+        let extension = Path::new(file_name.as_str()).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+        let expected_format = BookFormat::from_import_extension(extension).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, and M4B files can be added to a library")?;
 
         if !db::directory_exists(&*self.db.get()?, &parent_id.to_string())? {
             return Err(format!("library folder does not exist: {parent_id}").into());
         }
-        let mut conn = self.db.get()?;
-        let destination_parent = if *parent_id == sync_common::ROOT_DIR_ID {
-            self.library_root.as_path().to_path_buf()
-        } else {
-            db::materialize_dir_with_markers(&conn, self.library_root.as_path(), &parent_id.to_string())?.ok_or_else(|| format!("could not resolve library folder: {parent_id}"))?
+        let destination_parent = {
+            let conn = self.db.get()?;
+            if *parent_id == sync_common::ROOT_DIR_ID {
+                self.library_root.as_path().to_path_buf()
+            } else {
+                db::materialize_dir_with_markers(&conn, self.library_root.as_path(), &parent_id.to_string())?.ok_or_else(|| format!("could not resolve library folder: {parent_id}"))?
+            }
         };
         let destination = destination_parent.join(file_name.as_str());
         if destination.exists() {
             return Err(format!("a book named '{}' already exists in this folder", file_name.as_str()).into());
         }
 
-        let temporary = destination_parent.join(format!("{}-import-{}.tmp", crate::APP_HIDDEN_DIR, uuid::Uuid::new_v4()));
-        let mut destination_created = false;
-        let copy_result = (|| -> std::io::Result<()> {
-            let mut target = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
-            if let Some(bytes) = bundled_html.as_deref() {
-                use std::io::Write as _;
-                target.write_all(bytes)?;
-            } else {
-                let mut source = File::open(&source_path)?;
-                std::io::copy(&mut source, &mut target)?;
-            }
+        let staged = StagedBook::create(&self.library_root, &file_name)?;
+        {
+            let mut target = fs::OpenOptions::new().write(true).create_new(true).open(staged.path())?;
+            std::io::copy(source, &mut target)?;
             target.sync_all()?;
-            match fs::hard_link(&temporary, &destination) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                    // Android's app-data filesystem permits creating and
-                    // renaming files but rejects hard links with EACCES.
-                    // Recheck the destination before using rename, since it
-                    // replaces an existing file on Unix.
-                    if destination.exists() {
-                        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("a book named '{}' already exists in this folder", file_name.as_str())));
-                    }
-                    fs::rename(&temporary, &destination)?;
-                }
-                Err(error) => return Err(error),
-            }
-            destination_created = true;
-            match fs::remove_file(&temporary) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
-            }
-        })();
-        if let Err(error) = copy_result {
-            let _ = fs::remove_file(&temporary);
-            if destination_created {
-                let _ = fs::remove_file(&destination);
-            }
-            return Err(error.into());
         }
+        let inspection = book_metadata::inspect_book(staged.path(), expected_format).map_err(|error| format!("invalid {} publication: {error}", expected_format.canonical_extension().to_ascii_uppercase()))?;
+        let metadata = inspection.metadata;
+        let stored_format = expected_format;
+
+        let mut hash_buffer = vec![0_u8; 1024 * 1024];
+        let content_hash = generate_content_hash_blake3(staged.path(), &mut hash_buffer)?;
+        let local_hash = db::local_file_fingerprint(staged.path())?;
+
+        staged.publish(&destination, &file_name)?;
 
         let indexed = (|| -> Result<ContentHash, Box<dyn std::error::Error>> {
-            let mut hash_buffer = vec![0_u8; 1024 * 1024];
-            let content_hash = generate_content_hash_blake3(&destination, &mut hash_buffer)?;
-            let local_hash = db::local_file_fingerprint(&destination)?;
+            let mut conn = self.db.get()?;
             let scan_id = db::next_scan_id(&conn)?;
             let transaction = conn.transaction()?;
             db::insert_scanned_book_metadata(&transaction, content_hash.clone(), &metadata, stored_format)?;
             db::insert_local_book_dir(&transaction, &parent_id, content_hash.clone(), &file_name, local_hash, scan_id)?;
             if let Some((source_id, publication)) = catalog_publication {
                 db::record_catalog_publication(&transaction, source_id, publication, &content_hash)?;
+            }
+            if let Some(audiobook) = inspection.audiobook.as_ref() {
+                db::upsert_audiobook_metadata(&transaction, &content_hash, audiobook)?;
             }
             transaction.commit()?;
             Ok(content_hash)
@@ -325,12 +404,6 @@ impl LibraryBackend {
                 return Err(error);
             }
         };
-        drop(conn);
-
-        if let Some(audiobook) = inspection.audiobook {
-            let conn = self.db.get()?;
-            db::upsert_audiobook_metadata(&conn, &content_hash, &audiobook)?;
-        }
 
         if let Err(error) = generate_thumbnail_for_sync(&self.context, &self.library_root, &destination, &content_hash) {
             log::warn!("could not generate thumbnail for imported book {}: {error}", destination.display());
@@ -338,5 +411,49 @@ impl LibraryBackend {
         let relative_path = destination.strip_prefix(self.library_root.as_path()).unwrap_or(&destination).to_string_lossy().into_owned();
         let _ = self.event_tx.send(LibraryEvent::BookAdded { content_hash: content_hash.clone(), path: relative_path });
         Ok(content_hash)
+    }
+}
+
+struct StagedBook {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedBook {
+    fn create(library_root: &Path, file_name: &str) -> std::io::Result<Self> {
+        let staging_root = library_root.join(crate::APP_HIDDEN_DIR).join("staging");
+        fs::create_dir_all(&staging_root)?;
+        let directory = staging_root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&directory)?;
+        let path = directory.join(file_name);
+        Ok(Self { directory, path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn publish(&self, destination: &Path, file_name: &str) -> std::io::Result<()> {
+        match fs::hard_link(&self.path, destination) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                if destination.exists() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("a book named '{file_name}' already exists in this folder")));
+                }
+                fs::rename(&self.path, destination)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for StagedBook {
+    fn drop(&mut self) {
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
+        let _ = fs::remove_dir(&self.directory);
     }
 }

@@ -3,13 +3,14 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, ImageFormat, InspectorElementId, IntoElement, KeyContext,
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Style, Window, relative,
 };
-use html_view_core::{DisplayCacheKey, InteractionPalette, PointerDownOptions, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
+use html_view_core::{BlockingJob, BlockingJobSpawner, DisplayCacheKey, InteractionPalette, PointerDownOptions, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
 use image::RgbaImage;
 use kurbo::{Point, Size};
 
@@ -179,6 +180,23 @@ struct GpuiHost {
     note_width: Cell<Option<f64>>,
 }
 
+/// Bridges the renderer's runtime-neutral finite-job contract to GPUI's
+/// platform executor. On the web that executor owns the Web Worker pool; on
+/// native platforms it uses GPUI's shared background workers.
+struct GpuiBlockingJobSpawner {
+    executor: gpui::BackgroundExecutor,
+}
+
+impl BlockingJobSpawner for GpuiBlockingJobSpawner {
+    fn spawn(&self, job: BlockingJob) {
+        self.executor
+            .spawn(async move {
+                job();
+            })
+            .detach();
+    }
+}
+
 impl GpuiHost {
     fn new(messages: async_channel::Sender<HostMessage>, executor: gpui::BackgroundExecutor) -> Self {
         Self { repaint_pending: Cell::new(false), messages, executor, scheduled_repaint: Arc::new(AtomicBool::new(false)), resource_repaint_pending: Arc::new(AtomicBool::new(false)), note_width: Cell::new(None) }
@@ -232,6 +250,10 @@ impl RendererHost for GpuiHost {
             .detach();
     }
 
+    fn blocking_job_spawner(&self) -> Arc<dyn BlockingJobSpawner> {
+        Arc::new(GpuiBlockingJobSpawner { executor: self.executor.clone() })
+    }
+
     fn resource_waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         let messages = self.messages.clone();
         let pending = self.resource_repaint_pending.clone();
@@ -271,6 +293,7 @@ pub struct HtmlView {
     prepared_paints: VecDeque<CachedPaint>,
     command_buffers: Vec<Vec<PaintCommand>>,
     paint_cache_stats: PaintCacheStats,
+    layout_geometry: Option<HtmlLayoutGeometry>,
     prepared_viewport: Option<Size>,
     prepared_paint: Option<PreparedPaint>,
     display_dirty: bool,
@@ -315,6 +338,31 @@ pub struct PaintCacheStats {
     pub retained_entries: usize,
 }
 
+/// Effective post-layout column geometry for the most recently prepared
+/// viewport.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HtmlLayoutGeometry {
+    pub viewport_width: f64,
+    pub viewport_height: f64,
+    pub column_width: f64,
+    pub column_gap: f64,
+    pub column_count: u8,
+    pub scale: f64,
+}
+
+impl HtmlLayoutGeometry {
+    fn from_display_key(key: DisplayCacheKey) -> Self {
+        Self {
+            viewport_width: f64::from_bits(key.viewport_width_bits),
+            viewport_height: f64::from_bits(key.viewport_height_bits),
+            column_width: f64::from_bits(key.column_width_bits),
+            column_gap: f64::from_bits(key.column_gap_bits),
+            column_count: key.column_count,
+            scale: f64::from_bits(key.scale_bits),
+        }
+    }
+}
+
 impl IntoElement for HtmlDocumentElement {
     type Element = Self;
 
@@ -345,7 +393,7 @@ impl Element for HtmlDocumentElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
         window.set_focus_handle(&self.focus, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let paint = self.view.update(cx, |view, _| view.prepared_paint_for_bounds(bounds));
+        let paint = self.view.update(cx, |view, cx| view.prepared_paint_for_bounds(bounds, cx));
         HtmlDocumentPrepaint { hitbox, paint }
     }
 
@@ -434,10 +482,14 @@ impl HtmlView {
     pub fn from_provider(
         provider: std::sync::Arc<dyn html_view_core::ResourceProvider>, document_uris: Vec<String>, start_index: usize, nav_state: Option<&str>, config: html_view_core::RendererInitialConfig, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_renderer(window, cx, move |host, shaper| RendererSession::from_provider_with_nav(host, shaper, provider, document_uris, start_index, nav_state, config))
+        Self::new_with_renderer(window, cx, move |host, shaper| Ok(RendererSession::from_provider_with_nav(host, shaper, provider, document_uris, start_index, nav_state, config))).expect("initial renderer construction should succeed")
     }
 
-    fn new_with_renderer(window: &mut Window, cx: &mut Context<Self>, make_renderer: impl FnOnce(Rc<GpuiHost>, GpuiTextCache) -> RendererSession<GpuiTextCache>) -> Self {
+    pub fn from_preparation(prepared: html_view_core::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) -> Result<Self, String> {
+        Self::new_with_renderer(window, cx, move |host, shaper| RendererSession::from_preparation(host, shaper, prepared))
+    }
+
+    fn new_with_renderer(window: &mut Window, cx: &mut Context<Self>, make_renderer: impl FnOnce(Rc<GpuiHost>, GpuiTextCache) -> Result<RendererSession<GpuiTextCache>, String>) -> Result<Self, String> {
         let startup_started = Instant::now();
         let (messages, receiver) = async_channel::unbounded();
         let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
@@ -446,7 +498,7 @@ impl HtmlView {
         let shaper = GpuiTextCache::new(window.text_system().clone());
         println!("HTML_VIEW_STARTUP phase=shaper_ready elapsed_ms={} phase_ms={}", startup_started.elapsed().as_millis(), shaper_started.elapsed().as_millis());
         let renderer_started = Instant::now();
-        let mut renderer = make_renderer(host.clone(), shaper);
+        let mut renderer = make_renderer(host.clone(), shaper)?;
         println!("HTML_VIEW_STARTUP phase=renderer_ready elapsed_ms={} phase_ms={}", startup_started.elapsed().as_millis(), renderer_started.elapsed().as_millis());
         let snapshot_started = Instant::now();
         renderer.emit_state_snapshot();
@@ -470,6 +522,7 @@ impl HtmlView {
             prepared_paints: VecDeque::with_capacity(PAINT_CACHE_CAPACITY),
             command_buffers: Vec::with_capacity(COMMAND_BUFFER_POOL_CAPACITY),
             paint_cache_stats: PaintCacheStats::default(),
+            layout_geometry: None,
             prepared_viewport: None,
             prepared_paint: None,
             display_dirty: true,
@@ -477,11 +530,19 @@ impl HtmlView {
             wheel_scroll_enabled: true,
         };
         println!("HTML_VIEW_STARTUP phase=view_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-        view
+        Ok(view)
     }
 
     pub fn apply(&mut self, command: RendererCommand, _cx: &mut Context<Self>) {
         self.renderer.apply(command);
+    }
+
+    /// Reflows to the width supplied by the containing GPUI layout without
+    /// replacing the reader's preferred column width.
+    pub fn set_available_width(&mut self, width: f64, _cx: &mut Context<Self>) {
+        if self.renderer.set_available_width(width) {
+            self.display_dirty = true;
+        }
     }
 
     /// Returns whether the renderer is still loading or decoding resources.
@@ -563,6 +624,13 @@ impl HtmlView {
         self.renderer.resolve_href(href)
     }
 
+    /// Restricts position events to publisher TOC anchors and immediately
+    /// republishes the current position using the new filter.
+    pub fn set_toc_anchor_strings_by_doc(&mut self, anchors_by_doc: Vec<Vec<String>>, _cx: &mut Context<Self>) {
+        self.renderer.set_toc_anchor_strings_by_doc(anchors_by_doc);
+        self.renderer.emit_state_snapshot();
+    }
+
     pub fn navigate_to_href(&mut self, href: &str, _cx: &mut Context<Self>) -> bool {
         self.renderer.navigate_to_href(href)
     }
@@ -613,6 +681,11 @@ impl HtmlView {
 
     pub fn paint_cache_stats(&self) -> PaintCacheStats {
         PaintCacheStats { retained_entries: self.prepared_paints.len(), ..self.paint_cache_stats }
+    }
+
+    /// Geometry produced by the renderer for the last laid-out viewport.
+    pub fn layout_geometry(&self) -> Option<HtmlLayoutGeometry> {
+        self.layout_geometry
     }
 
     pub fn text_shape_cache_stats(&self) -> TextShapeCacheStats {
@@ -689,16 +762,20 @@ impl HtmlView {
     /// Returns a display list composed for the final post-layout bounds.
     /// `compose_viewport_display_list` is deliberately pipeline-free, so a
     /// resized frame never paints a snapshot for the previous viewport.
-    fn prepared_paint_for_bounds(&mut self, bounds: Bounds<Pixels>) -> PreparedPaint {
+    fn prepared_paint_for_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) -> PreparedPaint {
         self.document_origin.set(bounds.origin);
         self.host.note_width.set(Some((f32::from(bounds.size.width) as f64 - FOOTNOTE_PANEL_PADDING * 2.0).max(1.0)));
         let viewport = Size::new(f32::from(bounds.size.width) as f64, f32::from(bounds.size.height) as f64);
         let viewport_ready = self.prepared_viewport == Some(viewport);
         if !viewport_ready || self.display_dirty {
+            let previous_geometry = self.layout_geometry;
             let paint = self.compose_viewport_display_list(viewport);
             self.prepared_viewport = Some(viewport);
             self.prepared_paint = Some(paint);
             self.display_dirty = false;
+            if self.layout_geometry != previous_geometry {
+                cx.notify();
+            }
         }
         self.prepared_paint.clone().expect("post-layout viewport composition must install a display list")
     }
@@ -712,6 +789,7 @@ impl HtmlView {
         let renderer_us = renderer_started.elapsed().as_micros();
         let cache_started = Instant::now();
         let keys = frame.cache_keys();
+        self.layout_geometry = Some(HtmlLayoutGeometry::from_display_key(keys.base));
         let glyph_store = frame.glyph_shaper().store();
         let run_store = frame.glyph_shaper().run_store();
         let base = self.prepared_paints.iter().find(|cached| cached.base_key == keys.base).map(|cached| (cached.paint.base_before_overlay.clone(), cached.paint.base_after_overlay.clone()));

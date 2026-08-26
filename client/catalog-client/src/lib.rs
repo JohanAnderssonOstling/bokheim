@@ -1,109 +1,32 @@
 pub use catalog_contract::{
-    CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest,
-    CatalogSearchResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
+    CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogResultRange, CatalogResultRangeResponse, CatalogSearchRequest, CatalogSearchResponse,
+    CatalogSourceRegistration, CatalogSourceRegistry, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseCapabilitiesResponse, CatalogSubjectBrowseDeltaResponse, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest,
+    CatalogSubjectBrowseResponse, CatalogSubjectCollectionManifestRequest, CatalogSubjectCollectionManifestResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse,
 };
+use catalog_core::validate_server_cover;
 pub use catalog_core::{
-    canonicalize_opds_catalog_locator, discover_author_books_locally, opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, opds_source, resolve_author_discovery, search_all_catalogs, validate_opds_catalog_locator,
-    CatalogCache, CatalogCoverCache, CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches,
+    canonicalize_opds_catalog_locator, normalize_project_gutenberg_page, normalize_project_gutenberg_publication, normalize_project_gutenberg_publications, normalize_project_gutenberg_sourced_publication_descriptions,
+    opds_catalog_source_id, opds_page, opds_search_definition, opds_search_query, opds_source, validate_opds_catalog_locator, CatalogCache, CatalogCoverCache, CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches,
 };
-use catalog_core::{opds_endpoint_id, search_opds_catalogs, validate_server_cover, validated_opds_import};
 #[cfg(test)]
-use catalog_core::{opds_publication, opds_search, wide_search_concurrency};
+use catalog_core::{opds_endpoint_id, opds_publication, opds_search, validated_opds_import};
 
 #[cfg(test)]
-use catalog_contract::CatalogBookFormat;
-use catalog_contract::{
-    CatalogAuthorDiscoveryRequest, CatalogAuthorDiscoveryResult, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction, CatalogSearch,
-    CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogWideSearchGroup, CatalogWideSearchOutcome, CatalogWideSearchResult,
-};
-use futures_util::stream::{self, StreamExt};
-use opds::{CatalogRegistry, DownloadedOpdsBook, OpdsEndpoint, OpdsEndpointStore, OpdsSearch};
+use catalog_contract::{CatalogBookFormat, CatalogDescription, CatalogPublication, CatalogPublicationAction};
+use catalog_contract::{CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId};
 #[cfg(test)]
-use opds::{OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsDirectAcquisition, OpdsEndpointId, OpdsPublicationIdentity};
+use opds::{OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsSearch};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 use url::Url;
 
-const MAX_WIDE_SEARCH_CONCURRENCY: usize = 16;
 const MAX_CATALOG_SERVER_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_COVER_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
-
-fn normalize_project_gutenberg_publication(publication: &mut CatalogPublication) -> bool {
-    let previous = publication.description.clone();
-    let Some(description) = publication.description.take() else { return false };
-    publication.description = match description {
-        CatalogDescription::PlainText { text } => {
-            let text = opds::strip_project_gutenberg_plain_text(&text);
-            (!text.trim().is_empty()).then_some(CatalogDescription::PlainText { text })
-        }
-        CatalogDescription::RichHtml { safe_html, .. } => opds::project_gutenberg_description_parts(&safe_html).map(|(safe_html, plain_text)| CatalogDescription::RichHtml { safe_html, plain_text }),
-    };
-    publication.description != previous
-}
-
-fn project_gutenberg_edition_has_images(publication: &CatalogPublication) -> bool {
-    publication.actions.iter().any(|action| {
-        let CatalogPublicationAction::Import { request } = action else { return false };
-        let download_url = request.download_url.to_ascii_lowercase();
-        download_url.contains(".images") && !download_url.contains(".noimages")
-    })
-}
-
-fn normalize_project_gutenberg_publications(publications: &mut Vec<CatalogPublication>) {
-    let mut work_positions = HashMap::<String, usize>::new();
-    let mut normalized = Vec::with_capacity(publications.len());
-    for mut publication in publications.drain(..) {
-        normalize_project_gutenberg_publication(&mut publication);
-        let Some(work_id) = publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
-            normalized.push(publication);
-            continue;
-        };
-        if let Some(&position) = work_positions.get(work_id) {
-            if project_gutenberg_edition_has_images(&publication) && !project_gutenberg_edition_has_images(&normalized[position]) {
-                normalized[position] = publication;
-            }
-        } else {
-            work_positions.insert(work_id.to_owned(), normalized.len());
-            normalized.push(publication);
-        }
-    }
-    *publications = normalized;
-}
-
-fn normalize_project_gutenberg_page(page: &mut CatalogPage) {
-    normalize_project_gutenberg_publications(&mut page.publications);
-    for group in &mut page.groups {
-        normalize_project_gutenberg_publications(&mut group.publications);
-    }
-}
-
-fn normalize_project_gutenberg_sourced_publications(publications: &mut Vec<catalog_contract::CatalogSourcedPublication>) {
-    let mut work_positions = HashMap::<String, usize>::new();
-    let mut normalized = Vec::with_capacity(publications.len());
-    for mut item in publications.drain(..) {
-        if item.source_id.as_str() != "opds-project-gutenberg" {
-            normalized.push(item);
-            continue;
-        }
-        normalize_project_gutenberg_publication(&mut item.publication);
-        let Some(work_id) = item.publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
-            normalized.push(item);
-            continue;
-        };
-        if let Some(&position) = work_positions.get(work_id) {
-            if project_gutenberg_edition_has_images(&item.publication) && !project_gutenberg_edition_has_images(&normalized[position].publication) {
-                normalized[position] = item;
-            }
-        } else {
-            work_positions.insert(work_id.to_owned(), normalized.len());
-            normalized.push(item);
-        }
-    }
-    *publications = normalized;
-}
+const MAX_CATALOG_ACQUISITION_BYTES: u64 = 1_000_000_000;
+const CATALOG_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 pub struct CatalogServerClient {
@@ -112,25 +35,25 @@ pub struct CatalogServerClient {
 }
 
 pub struct CatalogClient {
-    opds: opds::OpdsClient,
     server: CatalogServerClient,
     cache: CatalogCache,
     covers: CatalogCoverCache,
-    endpoints: Mutex<OpdsEndpointStore>,
+    registry: Mutex<registry::ServerRegistryStore>,
     languages: RwLock<CatalogLanguageFilter>,
 }
 
 pub struct CatalogDownload {
-    download: DownloadedOpdsBook,
+    path: tempfile::TempPath,
+    file_name: String,
 }
 
 impl CatalogDownload {
     pub fn path(&self) -> &Path {
-        self.download.path()
+        &self.path
     }
 
     pub fn file_name(&self) -> &str {
-        self.download.file_name()
+        &self.file_name
     }
 }
 
@@ -140,14 +63,13 @@ impl CatalogClient {
     }
 
     pub fn with_supported_languages(server_base_url: &str, data_directory: &Path, languages: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, CatalogProviderError> {
-        let opds = opds::OpdsClient::new().map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let server = CatalogServerClient::new(server_base_url)?;
         let cache = CatalogCache::open(data_directory.join("catalog-cache.db")).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let gutenberg = CatalogSourceId::parse("opds-project-gutenberg").map_err(|error| CatalogProviderError::new(error.to_string()))?;
         cache.rewrite_source_publications(&gutenberg, normalize_project_gutenberg_publication).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let covers = CatalogCoverCache::new(data_directory.join("catalog-covers"))?;
-        let endpoints = OpdsEndpointStore::load(data_directory.join("opds-catalogs.json"), data_directory.join("custom-opds-catalogs.json"));
-        Ok(Self { opds, server, cache, covers, endpoints: Mutex::new(endpoints), languages: RwLock::new(CatalogLanguageFilter::new(languages)) })
+        let registry = registry::ServerRegistryStore::load(data_directory.join("catalog-sources.json"));
+        Ok(Self { server, cache, covers, registry: Mutex::new(registry), languages: RwLock::new(CatalogLanguageFilter::new(languages)) })
     }
 
     pub fn set_supported_languages(&self, languages: impl IntoIterator<Item = impl AsRef<str>>) -> Result<(), CatalogProviderError> {
@@ -166,336 +88,12 @@ impl CatalogClient {
         }
     }
 
-    fn opds_endpoints(&self) -> Vec<OpdsEndpoint> {
-        self.endpoints.lock().map(|store| store.endpoints()).unwrap_or_else(|_| opds::built_in_opds_endpoints())
-    }
-
-    fn supported_endpoint_sources(&self, endpoints: impl IntoIterator<Item = OpdsEndpoint>) -> Vec<(CatalogSource, OpdsEndpoint)> {
-        endpoints
-            .into_iter()
-            .filter_map(|endpoint| {
-                let source = opds_source(&endpoint);
-                self.language_filter().source_supported(&source).then_some((source, endpoint))
-            })
-            .collect()
-    }
-
-    pub fn sources(&self) -> Vec<CatalogSource> {
-        self.opds_endpoints().into_iter().map(|endpoint| opds_source(&endpoint)).collect()
-    }
-
-    /// Sources visible under the current language preference. Multilingual and
-    /// language-unspecified catalogues remain available because their
-    /// publications are filtered individually.
-    pub fn supported_sources(&self) -> Vec<CatalogSource> {
-        self.language_filter().filter_sources(self.sources())
-    }
-
-    pub fn custom_sources(&self) -> Result<Vec<CatalogSource>, CatalogProviderError> {
-        let endpoints = self.endpoint_store()?.custom_endpoints().to_vec();
-        Ok(endpoints.into_iter().map(|endpoint| opds_source(&endpoint)).collect())
-    }
-
-    /// Returns the current local SQLite matches without performing network I/O.
-    pub async fn cached_search_catalogs(&self, query: &str) -> Result<CatalogWideSearchResult, CatalogProviderError> {
-        let mut groups = Vec::new();
-        for (source, _) in self.supported_endpoint_sources(self.opds_endpoints()) {
-            let page = self.cached_search_page(&source, query)?;
-            groups.push(CatalogWideSearchGroup { source, outcome: CatalogWideSearchOutcome::Results { page } });
-        }
-        let result = CatalogWideSearchResult { query: query.trim().to_owned(), groups };
-        self.covers.remember_wide_search(&result);
-        Ok(result)
-    }
-
-    /// Returns local SQLite matches for one source without network I/O.
-    pub async fn cached_search(&self, source_id: &CatalogSourceId, query: &str) -> Result<CatalogPage, CatalogProviderError> {
-        let endpoint = self.endpoint_for_source(source_id)?;
-        let page = self.cached_search_page(&opds_source(&endpoint), query)?;
-        self.covers.remember_page(&page);
-        Ok(page)
-    }
-
-    fn cached_search_page(&self, source: &CatalogSource, query: &str) -> Result<CatalogPage, CatalogProviderError> {
-        let matches = self.cache.search(&source.id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let mut page = search_page(source.id.clone(), query.trim().to_owned(), matches);
-        page.freshness = CatalogFreshness::Stale;
-        self.prepare_page(source, &mut page);
-        Ok(page)
-    }
-
-    fn endpoint_for_source(&self, source_id: &CatalogSourceId) -> Result<OpdsEndpoint, CatalogProviderError> {
-        let endpoint_id = opds_endpoint_id(source_id)?;
-        self.opds_endpoints().into_iter().find(|endpoint| endpoint.id == endpoint_id).ok_or_else(|| CatalogProviderError::new("catalog source is no longer available"))
-    }
-
-    fn is_curated_endpoint(&self, endpoint: &OpdsEndpoint) -> Result<bool, CatalogProviderError> {
-        Ok(self.endpoint_store()?.is_curated_endpoint(endpoint))
-    }
-
-    pub async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchResult, CatalogProviderError> {
-        let (endpoints, custom_ids) = {
-            let store = self.endpoint_store()?;
-            (store.endpoints(), store.custom_endpoints().iter().map(|endpoint| endpoint.id.clone()).collect::<HashSet<_>>())
-        };
-        let plans = self.supported_endpoint_sources(endpoints).into_iter().map(|(source, endpoint)| self.cached_search_page(&source, query).map(|cached| (source, endpoint, cached))).collect::<Result<Vec<_>, _>>()?;
-        let mut indexed = stream::iter(plans.into_iter().enumerate())
-            .map(|(index, (source, endpoint, cached))| {
-                let custom_ids = &custom_ids;
-                async move {
-                    let refreshed = if custom_ids.contains(&endpoint.id) {
-                        search_opds_catalogs(&self.opds, vec![endpoint], query).await.map(|mut groups| groups.pop().map(|group| group.outcome).unwrap_or(CatalogWideSearchOutcome::Unsupported))
-                    } else {
-                        self.search_cached_endpoint(&endpoint, query).await
-                    };
-                    let outcome = refresh_outcome_or_cached(refreshed, cached);
-                    (index, CatalogWideSearchGroup { source, outcome })
-                }
-            })
-            .buffer_unordered(MAX_WIDE_SEARCH_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
-        indexed.sort_by_key(|(index, _)| *index);
-        let mut result = CatalogWideSearchResult { query: query.trim().to_owned(), groups: indexed.into_iter().map(|(_, group)| group).collect() };
-        self.language_filter().filter_wide_search(&mut result);
-        for group in &mut result.groups {
-            if group.source.id.as_str() == "opds-project-gutenberg" {
-                if let CatalogWideSearchOutcome::Results { page } = &mut group.outcome {
-                    normalize_project_gutenberg_page(page);
-                }
-            }
-        }
-        self.covers.remember_wide_search(&result);
-        Ok(result)
-    }
-
-    pub async fn page(&self, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPage, CatalogProviderError> {
-        let endpoint = self.endpoint_for_source(source_id)?;
-        let locator = canonicalize_opds_catalog_locator(&endpoint, locator.unwrap_or(&endpoint.url))?;
-        if self.is_curated_endpoint(&endpoint)? {
-            let request = self.page_request(source_id, &locator)?;
-            match self.server.catalog_page(source_id, &request).await {
-                Ok(response) => {
-                    let mut page = self.cache.apply_page_response(&endpoint.url, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-                    self.prepare_page(&opds_source(&endpoint), &mut page);
-                    self.covers.remember_page(&page);
-                    return Ok(page);
-                }
-                Err(error) => {
-                    log::warn!(target: "catalog", "catalog server page unavailable; using local page or direct OPDS: {error}");
-                    if let Some(cached) = self.cache.page(source_id, &locator).map_err(|error| CatalogProviderError::new(error.to_string()))? {
-                        let mut page = cached.page;
-                        page.freshness = CatalogFreshness::Stale;
-                        self.prepare_page(&opds_source(&endpoint), &mut page);
-                        self.covers.remember_page(&page);
-                        return Ok(page);
-                    }
-                }
-            }
-        }
-        let catalog = self.opds.fetch_catalog(&locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
-        let mut page = opds_page(source_id.clone(), catalog);
-        self.prepare_page(&opds_source(&endpoint), &mut page);
-        self.cache.put_page(source_id, &endpoint.url, &page, None, None).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        self.covers.remember_page(&page);
-        Ok(page)
-    }
-
-    pub async fn search(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPage, CatalogProviderError> {
-        let endpoint = self.endpoint_for_source(source_id)?;
-        if self.is_curated_endpoint(&endpoint)? {
-            match self.search_cached_source(source_id, &endpoint, &query.query).await {
-                Ok(mut page) => {
-                    self.prepare_page(&opds_source(&endpoint), &mut page);
-                    self.covers.remember_page(&page);
-                    return Ok(page);
-                }
-                Err(error) => log::warn!(target: "catalog", "catalog server search unavailable; using direct OPDS: {error}"),
-            }
-        }
-        let search = opds_search_definition(search)?;
-        let search_origin = match &search {
-            OpdsSearch::UriTemplate { base_url, .. } => base_url,
-            OpdsSearch::OpenSearchDescription { url } => url,
-        };
-        validate_opds_catalog_locator(&endpoint, search_origin)?;
-        let query_text = query.query.clone();
-        let catalog = self.opds.search_definition(&search, &opds_search_query(query)).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
-        let mut page = opds_page(source_id.clone(), catalog);
-        self.prepare_page(&opds_source(&endpoint), &mut page);
-        self.cache.put_page(source_id, &endpoint.url, &page, None, None).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        page = search_page(source_id.clone(), query_text.clone(), self.cache.search(source_id, &query_text).map_err(|error| CatalogProviderError::new(error.to_string()))?);
-        self.prepare_page(&opds_source(&endpoint), &mut page);
-        self.covers.remember_page(&page);
-        Ok(page)
-    }
-
-    pub async fn cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
-        let endpoint = self.endpoint_for_source(source_id)?;
-        if self.is_curated_endpoint(&endpoint)? {
-            match self.covers.cover_with(source_id, image_url, self.server.catalog_cover(source_id, image_url)).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) if is_direct_cover_url(image_url) => log::warn!(target: "catalog", "catalog server cover unavailable; fetching the remembered OPDS cover directly: {error}"),
-                Err(error) => return Err(error),
-            }
-        }
-        self.covers.cover(source_id, image_url).await
-    }
-
-    pub async fn recommendations(&self, mut request: CatalogRecommendationRequest) -> Result<CatalogRecommendationResponse, CatalogProviderError> {
-        if request.supported_languages.is_empty() {
-            request.supported_languages = self.language_filter().supported().to_vec();
-        }
-        let mut response = self.server.recommendations(&request).await?;
-        for recommendation in &mut response.recommendations {
-            if recommendation.source_id.as_str() == "opds-project-gutenberg" {
-                normalize_project_gutenberg_publication(&mut recommendation.publication);
-            }
-        }
-        self.covers.remember_recommendations(&response);
-        Ok(response)
-    }
-
-    pub async fn browse_subjects(&self, mut request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogProviderError> {
-        if request.supported_languages.is_empty() {
-            request.supported_languages = self.language_filter().supported().to_vec();
-        }
-        let mut response = self.server.browse_subjects(&request).await?;
-        normalize_project_gutenberg_sourced_publications(&mut response.publications);
-        self.covers.remember_subject_browse(&response);
-        Ok(response)
-    }
-
-    pub async fn download_import(&self, request: &CatalogImportRequest, temporary_directory: &Path) -> Result<CatalogDownload, CatalogProviderError> {
-        let endpoint = self.endpoint_for_source(&request.source_id)?;
-        validate_opds_catalog_locator(&endpoint, &request.catalog_locator)?;
-        let catalog = self.opds.fetch_catalog_fresh(&request.catalog_locator).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        validate_opds_catalog_locator(&endpoint, &catalog.source_url)?;
-        let (identity, acquisition) = validated_opds_import(request, &catalog)?;
-        identity.validate().map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        self.opds.download_book(&acquisition, temporary_directory).await.map(|download| CatalogDownload { download }).map_err(|error| CatalogProviderError::new(error.to_string()))
-    }
-
-    pub fn add_custom_source(&self, title: &str, url: &str) -> Result<CatalogSource, CatalogProviderError> {
-        let endpoint = self.endpoint_store()?.add_custom_endpoint(title, url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let source_id = opds_catalog_source_id(&endpoint.id);
-        self.cache.ensure_source(&source_id, &endpoint.url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        Ok(opds_source(&endpoint))
-    }
-
-    pub fn remove_custom_source(&self, source_id: &CatalogSourceId) -> Result<(), CatalogProviderError> {
-        let endpoint_id = opds_endpoint_id(source_id)?;
-        self.endpoint_store()?.remove_custom_endpoint(&endpoint_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        self.cache.remove_source(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))
-    }
-
-    pub async fn refresh_sources(&self) -> Result<Vec<CatalogSource>, CatalogProviderError> {
-        let registry = self.server.registry().await?;
-        let mut store = self.endpoint_store()?;
-        let previous = store.endpoints();
-        store.replace_curated_registry(registry).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let current = store.endpoints();
-        drop(store);
-        let retained = current.iter().map(|endpoint| opds_catalog_source_id(&endpoint.id)).collect::<HashSet<_>>();
-        for endpoint in &current {
-            self.cache.ensure_source(&opds_catalog_source_id(&endpoint.id), &endpoint.url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        }
-        for endpoint in previous {
-            let source_id = opds_catalog_source_id(&endpoint.id);
-            if !retained.contains(&source_id) {
-                self.cache.remove_source(&source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-            }
-        }
-        Ok(current.into_iter().map(|endpoint| opds_source(&endpoint)).collect())
-    }
-
-    pub async fn discover_author_books(&self, request: &CatalogAuthorDiscoveryRequest) -> Result<CatalogAuthorDiscoveryResult, CatalogProviderError> {
-        let mut identifier_searches = Vec::new();
-        for identifier in &request.book_identifiers {
-            identifier_searches.push((identifier, self.search_catalogs(&identifier.value).await?));
-        }
-        let name_search = self.search_catalogs(&request.author_name).await?;
-        let identifier_searches = identifier_searches.iter().map(|(identifier, result)| (*identifier, result)).collect::<Vec<_>>();
-        let result = resolve_author_discovery(request, &identifier_searches, &name_search)?;
-        self.covers.remember_author_discovery(&result);
-        Ok(result)
-    }
-
-    fn endpoint_store(&self) -> Result<std::sync::MutexGuard<'_, OpdsEndpointStore>, CatalogProviderError> {
-        self.endpoints.lock().map_err(|_| CatalogProviderError::new("OPDS endpoint registry lock was poisoned"))
-    }
-
-    fn page_request(&self, source_id: &CatalogSourceId, locator: &str) -> Result<CatalogPageRequest, CatalogProviderError> {
-        let state = self.cache.source_state(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let known_publications = if state.is_some() { self.cache.known_page_publications(source_id, locator).map_err(|error| CatalogProviderError::new(error.to_string()))? } else { Vec::new() };
-        Ok(CatalogPageRequest { locator: Some(locator.to_owned()), supported_languages: self.language_filter().supported().to_vec(), epoch: state.and_then(|state| state.provider_epoch), known_publications })
-    }
-
-    async fn search_cached_endpoint(&self, endpoint: &OpdsEndpoint, query: &str) -> Result<CatalogWideSearchOutcome, CatalogProviderError> {
-        let source_id = opds_catalog_source_id(&endpoint.id);
-        match self.search_cached_source(&source_id, endpoint, query).await {
-            Ok(page) => Ok(CatalogWideSearchOutcome::Results { page }),
-            Err(server_error) => {
-                log::warn!(target: "catalog", "catalog server search unavailable; using direct OPDS: {server_error}");
-                search_opds_catalogs(&self.opds, vec![endpoint.clone()], query).await.map(|mut groups| groups.pop().map(|group| group.outcome).unwrap_or(CatalogWideSearchOutcome::Unsupported))
-            }
-        }
-    }
-
-    async fn search_cached_source(&self, source_id: &CatalogSourceId, endpoint: &OpdsEndpoint, query: &str) -> Result<CatalogPage, CatalogProviderError> {
-        let cached = self.cache.search(source_id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let state = self.cache.source_state(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let known_publications = cached
-            .title_matches
-            .iter()
-            .chain(&cached.author_matches)
-            .chain(&cached.toc_matches)
-            .map(|publication| CatalogPublicationReference { identity: publication.publication.identity.clone(), sequence: publication.sequence })
-            .collect();
-        let request = CatalogSearchRequest { query: query.to_owned(), supported_languages: self.language_filter().supported().to_vec(), epoch: state.and_then(|state| state.provider_epoch), known_publications };
-        let response = self.server.search_catalog(source_id, &request).await?;
-        let matches = self.cache.apply_search_response(&endpoint.url, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        Ok(search_page(source_id.clone(), query.to_owned(), matches))
+    fn catalog_sources(&self) -> Vec<CatalogSource> {
+        self.registry.lock().map(|registry| registry.sources()).unwrap_or_default()
     }
 }
 
-fn is_direct_cover_url(value: &str) -> bool {
-    Url::parse(value).ok().is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some() && url.username().is_empty() && url.password().is_none())
-}
-
-fn refresh_outcome_or_cached(refreshed: Result<CatalogWideSearchOutcome, CatalogProviderError>, cached: CatalogPage) -> CatalogWideSearchOutcome {
-    match refreshed {
-        Ok(outcome @ CatalogWideSearchOutcome::Results { .. }) => outcome,
-        Ok(CatalogWideSearchOutcome::Unsupported) => CatalogWideSearchOutcome::Unsupported,
-        Ok(CatalogWideSearchOutcome::TimedOut | CatalogWideSearchOutcome::Failed { .. }) | Err(_) => CatalogWideSearchOutcome::Results { page: cached },
-    }
-}
-
-fn search_page(source_id: CatalogSourceId, query: String, matches: CatalogSearchMatches) -> CatalogPage {
-    CatalogPage {
-        source_id,
-        freshness: CatalogFreshness::Current,
-        title: format!("Search results for {query}"),
-        locator: format!("catalog-search:{query}"),
-        navigation: Vec::new(),
-        publications: matches.title_matches.into_iter().map(|publication| publication.publication).collect(),
-        groups: vec![
-            CatalogGroup { title: "Author matches".to_owned(), page_locator: None, number_of_items: None, navigation: Vec::new(), publications: matches.author_matches.into_iter().map(|publication| publication.publication).collect() },
-            CatalogGroup {
-                title: "Table of contents matches".to_owned(),
-                page_locator: None,
-                number_of_items: None,
-                navigation: Vec::new(),
-                publications: matches.toc_matches.into_iter().map(|publication| publication.publication).collect(),
-            },
-        ],
-        facets: Vec::new(),
-        pagination: CatalogPagination::default(),
-        search: None,
-    }
-}
+mod registry;
 
 impl CatalogServerClient {
     pub fn new(base_url: &str) -> Result<Self, CatalogProviderError> {
@@ -510,47 +108,6 @@ impl CatalogServerClient {
             .build()
             .map_err(|error| CatalogProviderError::new(error.to_string()))?;
         Ok(Self { http, base_url })
-    }
-
-    pub async fn registry(&self) -> Result<CatalogRegistry, CatalogProviderError> {
-        self.get_wire(self.endpoint("api/opds/catalogs")?).await
-    }
-
-    pub async fn catalog_page(&self, source_id: &CatalogSourceId, request: &CatalogPageRequest) -> Result<CatalogPageResponse, CatalogProviderError> {
-        self.post_wire(self.endpoint(&format!("api/opds/sources/{}/page", source_id.as_str()))?, request).await
-    }
-
-    pub async fn search_catalog(&self, source_id: &CatalogSourceId, request: &CatalogSearchRequest) -> Result<CatalogSearchResponse, CatalogProviderError> {
-        self.post_wire(self.endpoint(&format!("api/opds/sources/{}/search", source_id.as_str()))?, request).await
-    }
-
-    pub async fn recommendations(&self, request: &CatalogRecommendationRequest) -> Result<CatalogRecommendationResponse, CatalogProviderError> {
-        self.post_wire(self.endpoint("api/opds/recommendations")?, request).await
-    }
-
-    pub async fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogProviderError> {
-        self.post_wire(self.endpoint("api/opds/subjects")?, request).await
-    }
-
-    pub async fn catalog_cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
-        let mut url = self.endpoint(&format!("api/opds/sources/{}/cover", source_id.as_str()))?;
-        url.query_pairs_mut().append_pair("image_url", image_url);
-        let response = self.http.get(url).send().await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(CatalogProviderError::new(format!("catalog server returned HTTP {}", response.status())));
-        }
-        if response.content_length().is_some_and(|length| length > MAX_CATALOG_COVER_SOURCE_BYTES) {
-            return Err(CatalogProviderError::new("catalog server cover is too large"));
-        }
-        let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).and_then(|value| value.split(';').next());
-        if media_type != Some("image/jpeg") {
-            return Err(CatalogProviderError::new("catalog server cover is not a JPEG"));
-        }
-        let bytes = response.bytes().await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if bytes.is_empty() || bytes.len() as u64 > MAX_CATALOG_COVER_SOURCE_BYTES {
-            return Err(CatalogProviderError::new("catalog server cover is empty or too large"));
-        }
-        tokio::task::spawn_blocking(move || validate_server_cover(bytes.to_vec())).await.map_err(|error| CatalogProviderError::new(error.to_string()))?
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, CatalogProviderError> {
@@ -593,49 +150,22 @@ impl CatalogServerClient {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::extract::Query;
     use axum::http::{header, Response, StatusCode};
     use axum::routing::get;
     use axum::Router;
-    use catalog_contract::{
-        CatalogAuthorDiscoveryEvidence, CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationIdentifier, CatalogPublicationIdentifierScheme, CatalogPublicationIdentity, CatalogSearchDefinition,
-        CatalogSearchField,
-    };
+    use catalog_contract::{CatalogExternalActionKind, CatalogLinkTarget, CatalogPublication, CatalogPublicationIdentity, CatalogSearchDefinition, CatalogSearchField, LanguageTag};
     use image::{DynamicImage, ImageOutputFormat};
     use opds::{OpdsAcquisition, OpdsAuthorCredit, OpdsAuthorLink, OpdsCatalogLink, OpdsFacet, OpdsIndirectAcquisition, OpdsLinkTarget, OpdsPagination, OpdsPublication, OpdsUnsupportedAcquisition, OpdsVersion};
-    use std::collections::HashMap;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[test]
-    fn unsupported_catalog_languages_are_removed_before_search_planning() {
-        let temporary = tempfile::tempdir().unwrap();
-        let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en-US"]).unwrap();
-        let endpoint = |id: &str, language: &str| OpdsEndpoint { id: OpdsEndpointId::parse(id).unwrap(), title: id.to_owned(), description: String::new(), languages: vec![language.to_owned()], url: format!("https://{id}.example/opds") };
-
-        let plans = client.supported_endpoint_sources([endpoint("english", "English"), endpoint("french", "French"), endpoint("multilingual", "Multilingual")]);
-
-        assert_eq!(plans.into_iter().map(|(_, endpoint)| endpoint.id.as_str().to_owned()).collect::<Vec<_>>(), ["english", "multilingual"]);
-    }
-
-    #[test]
-    fn unsupported_catalog_languages_remain_visible_for_explicit_browsing() {
+    fn sources_are_empty_until_the_server_registry_is_cached() {
         let temporary = tempfile::tempdir().unwrap();
         let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en-US"]).unwrap();
 
-        assert!(client.sources().iter().any(|source| source.id.as_str() == "opds-litteraturbanken"));
-    }
-
-    #[test]
-    fn supported_sources_apply_the_current_language_filter() {
-        let temporary = tempfile::tempdir().unwrap();
-        let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en"]).unwrap();
-        let sources = client.supported_sources();
-
-        assert!(sources.iter().any(|source| source.id.as_str() == "opds-office-of-the-historian"));
-        assert!(sources.iter().any(|source| source.id.as_str() == "opds-project-gutenberg"));
-        assert!(!sources.iter().any(|source| source.id.as_str() == "opds-ebooks-gratuits"));
+        assert!(client.sources().is_empty());
     }
 
     #[test]
@@ -644,12 +174,13 @@ mod tests {
             identity: CatalogPublicationIdentity { edition_id: "urn:gutenberg:2465:3".to_owned(), work_id: Some("urn:gutenberg:2465".to_owned()) },
             title: "Carmen".to_owned(),
             authors: Vec::new(),
-            languages: vec!["en".to_owned()],
+            languages: vec![LanguageTag::parse("en").unwrap()],
             description: Some(CatalogDescription::RichHtml {
                 safe_html: r#"<p>This edition has images.</p><p>Title: Carmen</p><p>Note: Wikipedia page about this book: <a href="https://en.wikipedia.org/wiki/Carmen_(novella)">Carmen</a></p><p>Summary: Useful text</p>"#.to_owned(),
                 plain_text: "stale cached text".to_owned(),
             }),
             image_url: None,
+            metadata: Default::default(),
             actions: Vec::new(),
         };
 
@@ -667,9 +198,10 @@ mod tests {
                 identity: identity.clone(),
                 title: "Carmen".to_owned(),
                 authors: Vec::new(),
-                languages: vec!["en".to_owned()],
+                languages: vec![LanguageTag::parse("en").unwrap()],
                 description: None,
                 image_url: None,
+                metadata: Default::default(),
                 actions: vec![CatalogPublicationAction::Import {
                     request: CatalogImportRequest {
                         source_id: source_id.clone(),
@@ -690,16 +222,6 @@ mod tests {
     }
 
     #[test]
-    fn wide_search_refresh_failures_retain_the_cached_source_page() {
-        let mut cached = search_page(CatalogSourceId::parse("opds-test").unwrap(), "book".to_owned(), CatalogSearchMatches::default());
-        cached.freshness = CatalogFreshness::Stale;
-
-        for refreshed in [Ok(CatalogWideSearchOutcome::TimedOut), Ok(CatalogWideSearchOutcome::Failed { message: "offline".to_owned() }), Err(CatalogProviderError::new("offline"))] {
-            assert!(matches!(refresh_outcome_or_cached(refreshed, cached.clone()), CatalogWideSearchOutcome::Results { page } if page == cached));
-        }
-    }
-
-    #[test]
     fn opds_actions_preserve_all_import_formats_and_external_fulfillment() {
         let source_id = CatalogSourceId::parse("opds-test").unwrap();
         let raw_publication = OpdsPublication {
@@ -708,13 +230,16 @@ mod tests {
             title: "Book".to_owned(),
             authors: vec![OpdsAuthorCredit {
                 name: "Author".to_owned(),
+                name_localizations: Vec::new(),
                 sort_name: Some("Author, An".to_owned()),
+                sort_name_localizations: Vec::new(),
                 identifiers: vec!["https://isni.org/isni/0000000121400562".to_owned()],
                 provider_link: Some(OpdsAuthorLink { url: "https://catalog.example/authors/1".to_owned(), target: OpdsLinkTarget::Catalog }),
             }],
             languages: vec!["en".to_owned()],
             description: None,
             image_url: None,
+            metadata: Default::default(),
             preferred_download: None,
             acquisitions: vec![
                 OpdsAcquisition::Direct(OpdsDirectAcquisition {
@@ -790,7 +315,7 @@ mod tests {
 
     #[test]
     fn catalog_facets_hide_provider_metadata_and_compact_supported_formats() {
-        let link = |title: &str| OpdsCatalogLink { title: title.to_owned(), url: format!("https://example.com/{}", title.replace(' ', "-")), target: OpdsLinkTarget::Catalog, number_of_items: None, active: false };
+        let link = |title: &str| OpdsCatalogLink { title: title.to_owned(), url: format!("https://example.com/{}", title.replace(' ', "-")), target: OpdsLinkTarget::Catalog, relations: Vec::new(), number_of_items: None, active: false };
         let catalog = OpdsCatalog {
             version: OpdsVersion::V1_2,
             freshness: opds::OpdsCatalogFreshness::Current,
@@ -839,58 +364,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_author_discovery_needs_no_catalog_provider_server() {
-        let application = Router::new()
-            .route(
-                "/root",
-                get(|| async {
-                    (
-                        [(header::CONTENT_TYPE, "application/opds+json")],
-                        r#"{"metadata":{"title":"Authors"},"links":[{"rel":"search","href":"/search{?query}","type":"application/opds+json","templated":true}],"navigation":[{"title":"Books","href":"/books","type":"application/opds+json"}]}"#,
-                    )
-                }),
-            )
-            .route(
-                "/search",
-                get(|Query(parameters): Query<HashMap<String, String>>| async move {
-                    let body = if parameters.get("query").map(String::as_str) == Some("9780306406157") {
-                        r#"{"metadata":{"title":"Identifier result"},"publications":[{"metadata":{"identifier":"urn:isbn:9780306406157","title":"Known local book","author":[{"name":"Smith, Alex","identifier":"urn:isni:correct"}]},"links":[{"rel":"http://opds-spec.org/acquisition/open-access","href":"/known.epub","type":"application/epub+zip"}]}]}"#
-                    } else {
-                        r#"{"metadata":{"title":"Name results"},"publications":[{"metadata":{"identifier":"catalogue:correct:second","title":"Another book by the identified author","author":[{"name":"Alex Smith","identifier":"urn:isni:correct"}]},"links":[{"rel":"http://opds-spec.org/acquisition/open-access","href":"/correct.epub","type":"application/epub+zip"}]},{"metadata":{"identifier":"catalogue:collision","title":"Book by a different Alex Smith","author":[{"name":"Alex Smith","identifier":"urn:isni:different"}]},"links":[{"rel":"http://opds-spec.org/acquisition/open-access","href":"/collision.epub","type":"application/epub+zip"}]}]}"#
-                    };
-                    ([(header::CONTENT_TYPE, "application/opds+json")], body)
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
-        let endpoint = OpdsEndpoint {
-            id: OpdsEndpointId::parse("local-fallback").unwrap(),
-            title: "Local fallback".to_owned(),
-            description: "Local fallback test".to_owned(),
-            languages: vec!["English".to_owned()],
-            url: format!("http://{address}/root"),
-        };
-        let request = CatalogAuthorDiscoveryRequest { author_name: "Alex Smith".to_owned(), book_identifiers: vec![CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "9780306406157".to_owned() }] };
-
-        let result = discover_author_books_locally(&opds::OpdsClient::new().unwrap(), vec![endpoint], &request).await.unwrap();
-
-        assert_eq!(result.matches.len(), 2);
-        assert_eq!(result.matches[0].publication.title, "Another book by the identified author");
-        assert!(matches!(result.matches[0].evidence, CatalogAuthorDiscoveryEvidence::BookIdentifier { .. }));
-        assert_eq!(result.matches[1].publication.title, "Book by a different Alex Smith");
-        assert_eq!(result.matches[1].evidence, CatalogAuthorDiscoveryEvidence::AuthorName);
-        server.abort();
-    }
-
-    #[tokio::test]
     async fn catalog_covers_are_authorized_normalized_and_reused_from_disk() {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_counter = requests.clone();
         let failures = Arc::new(AtomicUsize::new(0));
         let failure_counter = failures.clone();
         let mut png = Cursor::new(Vec::new());
-        DynamicImage::new_rgb8(16, 24).write_to(&mut png, ImageOutputFormat::Png).unwrap();
+        DynamicImage::new_rgb8(400, 600).write_to(&mut png, ImageOutputFormat::Png).unwrap();
         let source_bytes = png.into_inner();
         let application = Router::new()
             .route(
@@ -929,6 +409,7 @@ mod tests {
                     languages: Vec::new(),
                     description: None,
                     image_url: Some(image_url.clone()),
+                    metadata: Default::default(),
                     actions: Vec::new(),
                 },
                 CatalogPublication {
@@ -938,6 +419,7 @@ mod tests {
                     languages: Vec::new(),
                     description: None,
                     image_url: Some(broken_url.clone()),
+                    metadata: Default::default(),
                     actions: Vec::new(),
                 },
             ],
@@ -970,6 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_cover_cache_fetches_server_covers_only_once() {
+        const IMAGE_URL: &str = "/api/opds/covers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg";
         let requests = Arc::new(AtomicUsize::new(0));
         let request_counter = requests.clone();
         let mut jpeg = Cursor::new(Vec::new());
@@ -979,7 +462,7 @@ mod tests {
         DynamicImage::new_rgb8(600, 960).write_to(&mut jpeg, ImageOutputFormat::Jpeg(85)).unwrap();
         let server_bytes = jpeg.into_inner();
         let application = Router::new().route(
-            "/api/opds/sources/opds-test/cover",
+            IMAGE_URL,
             get(move || {
                 request_counter.fetch_add(1, Ordering::SeqCst);
                 let bytes = server_bytes.clone();
@@ -991,7 +474,7 @@ mod tests {
         let server_task = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
         let temporary = tempfile::tempdir().unwrap();
         let source_id = CatalogSourceId::parse("opds-test").unwrap();
-        let image_url = "https://covers.example/book.jpg";
+        let image_url = IMAGE_URL;
         let page = CatalogPage {
             source_id: source_id.clone(),
             freshness: CatalogFreshness::Current,
@@ -1005,6 +488,7 @@ mod tests {
                 languages: Vec::new(),
                 description: None,
                 image_url: Some(image_url.to_owned()),
+                metadata: Default::default(),
                 actions: Vec::new(),
             }],
             groups: Vec::new(),
@@ -1025,26 +509,7 @@ mod tests {
         assert_eq!(restored.cover_with(&source_id, image_url, server.catalog_cover(&source_id, image_url)).await.unwrap(), first);
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
-
-    #[test]
-    fn wide_search_starts_the_normal_catalogue_set_in_one_wave() {
-        assert_eq!(wide_search_concurrency(9), 9);
-        assert_eq!(wide_search_concurrency(16), 16);
-        assert_eq!(wide_search_concurrency(100), 16);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live third-party catalog servers"]
-    async fn live_wide_search_never_exposes_invalid_publication_identities() {
-        let result = search_all_catalogs(&opds::OpdsClient::new().unwrap(), opds::built_in_opds_endpoints(), "Carmen").await.unwrap();
-        for group in result.groups {
-            if let CatalogWideSearchOutcome::Results { page } = group.outcome {
-                for publication in page.publications.into_iter().chain(page.groups.into_iter().flat_map(|group| group.publications)) {
-                    OpdsPublicationIdentity { publication_id: publication.identity.edition_id, work_id: publication.identity.work_id }
-                        .validate()
-                        .unwrap_or_else(|error| panic!("{} returned an invalid identity: {error}", group.source.title));
-                }
-            }
-        }
-    }
 }
+mod assets;
+mod sources;
+mod subjects;

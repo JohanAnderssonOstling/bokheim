@@ -43,15 +43,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--taxonomy", type=Path,
-        default=Path("client/library-model/data/unified-taxonomy-v2.sqlite3"),
+        default=Path("shared/subject-projection/data/unified-taxonomy-v2.sqlite3"),
     )
     parser.add_argument(
         "--manifest", type=Path,
-        default=Path("client/library-model/data/unified-taxonomy-deduplication-manifest.json"),
+        default=Path("shared/subject-projection/data/unified-taxonomy-deduplication-manifest.json"),
     )
     parser.add_argument(
         "--output", type=Path,
-        default=Path("client/library-model/data/migrations/20260817_unified_taxonomy_deduplication.sql"),
+        default=Path("shared/subject-projection/data/migrations/20260817_unified_taxonomy_deduplication.sql"),
     )
     parser.add_argument(
         "--merge-parent-child-labels",

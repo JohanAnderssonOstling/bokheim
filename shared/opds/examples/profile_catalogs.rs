@@ -19,7 +19,7 @@ async fn main() {
     let registry: CatalogRegistry = serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("invalid registry {}: {error}", options.registry.display()));
     let endpoints = match options.url.as_ref() {
         Some(url) => vec![OpdsEndpoint {
-            id: OpdsEndpointId::parse(options.only_id.as_deref().unwrap_or("custom")).expect("--id must be a valid catalog id"),
+            id: OpdsEndpointId::parse(options.only_id.as_deref().unwrap_or("probe")).expect("--id must be a valid catalog id"),
             title: "Custom URL".to_owned(),
             description: "Ad hoc profiling target".to_owned(),
             languages: vec!["Unspecified".to_owned()],

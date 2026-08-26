@@ -86,9 +86,8 @@ impl CatalogCache {
             .optional()?;
         let Some((source_id, acquisition_url, payload)) = row else { return Ok(false) };
         let mut metadata: CatalogEpubMetadata = decode_cached(&payload)?;
-        let provenance = library_model::PublicationIdentifierType::new("openlibrary-edition-match", Some("bokheim:provenance".to_owned())).map_err(|error| CatalogCacheError::new(error.to_string()))?;
-        let identifier = library_model::PublicationIdentifier::new(canonical_isbn13, library_model::PublicationIdentifierScheme::Isbn, vec![provenance]).map_err(|error| CatalogCacheError::new(error.to_string()))?;
-        metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &library_model::PublicationIdentifierScheme::Isbn);
+        let identifier = library_model::Identifier::new(canonical_isbn13, library_model::Scheme::Isbn, library_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &library_model::Scheme::Isbn);
         metadata.book.publication.identifiers.push(identifier);
         transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id, acquisition_url, wire::encode(&metadata)?])?;
         transaction.execute(

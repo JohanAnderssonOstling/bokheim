@@ -178,7 +178,7 @@ export default defineConfig(async () => ({
   // SQLite ships its own WASM loader and must remain outside Vite's dependency
   // pre-bundle so the same module can initialize inside the backend worker.
   optimizeDeps: {
-    exclude: ["@sqlite.org/sqlite-wasm"],
+    exclude: [],
   },
 
   // The browser backend is launched as a module worker and PDF.js remains a

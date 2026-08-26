@@ -212,7 +212,7 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=14` representation. The wire body
+`application/vnd.bokheim+protobuf; version=16` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;

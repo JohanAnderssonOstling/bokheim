@@ -745,6 +745,24 @@ impl EpubProvider {
 
         if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
     }
+
+    /// Returns the documents the reader can present, preferring the package
+    /// spine and falling back to HTML archive entries for older publications.
+    pub fn document_uris(&self) -> io::Result<Vec<String>> {
+        if let Some(spine) = self.resolve_spine_entries()? {
+            return Ok(spine);
+        }
+
+        let mut archive = self.archive.lock().unwrap();
+        let mut candidates = Vec::new();
+        for i in 0..archive.len() {
+            let name = archive.by_index(i).map_err(io::Error::other)?.name().to_string();
+            if Self::is_html_entry(&name) {
+                candidates.push(name);
+            }
+        }
+        Ok(candidates)
+    }
 }
 
 fn read_bounded_entry(reader: &mut impl Read, declared_limit: u64, label: &str) -> io::Result<Vec<u8>> {
@@ -772,19 +790,7 @@ impl ResourceProvider for EpubProvider {
     }
 
     fn list_html_candidates(&self, _root: &str) -> io::Result<Vec<String>> {
-        if let Some(spine) = self.resolve_spine_entries()? {
-            return Ok(spine);
-        }
-
-        let mut archive = self.archive.lock().unwrap();
-        let mut candidates = Vec::new();
-        for i in 0..archive.len() {
-            let name = archive.by_index(i).map_err(io::Error::other)?.name().to_string();
-            if Self::is_html_entry(&name) {
-                candidates.push(name);
-            }
-        }
-        Ok(candidates)
+        self.document_uris()
     }
 
     fn toc(&self) -> io::Result<Option<Vec<html::resources::TocEntry>>> {
@@ -833,6 +839,7 @@ fn publication_root_href(href: String) -> String {
     if href.is_empty() || href.starts_with('/') || href.split('#').next().is_some_and(|path| path.contains(':')) { href } else { format!("/{href}") }
 }
 
+#[cfg(any(feature = "html-resource-provider", test))]
 fn resolve_resource_href(base: &str, href: &str) -> String {
     let href = href.split('#').next().unwrap_or(href);
     let href = href.split('?').next().unwrap_or(href);
@@ -870,8 +877,10 @@ fn resolve_toc_href(base_path: &str, href: &str) -> String {
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
+    use std::collections::HashSet;
     use std::io::{Cursor, SeekFrom, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     struct CountingReader {
         cursor: Cursor<Vec<u8>>,
@@ -914,6 +923,45 @@ mod streaming_tests {
         assert_eq!(provider.list_html_candidates("").unwrap(), vec!["OEBPS/chapter.xhtml"]);
         assert_eq!(provider.read_string("OEBPS/chapter.xhtml").unwrap(), "<html><body>Only this chapter</body></html>");
         assert!(bytes_read.load(Ordering::Relaxed) < bytes.len() / 2, "EPUB provider read the unused archive payload");
+    }
+
+    #[test]
+    fn html_image_pipeline_resolves_inline_svg_images_from_the_epub() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", stored).unwrap();
+        archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
+        archive.start_file("OEBPS/content.opf", stored).unwrap();
+        archive.write_all(br#"<package><manifest><item id="cover" href="Text/titlepage.xhtml" media-type="application/xhtml+xml"/><item id="image" href="Images/cover.jpeg" media-type="image/jpeg"/></manifest><spine><itemref idref="cover"/></spine></package>"#).unwrap();
+        archive.start_file("OEBPS/Text/titlepage.xhtml", stored).unwrap();
+        archive.write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><image width="1" height="1" xlink:href="../Images/cover.jpeg"/></svg></body></html>"#).unwrap();
+        archive.start_file("OEBPS/Images/cover.jpeg", stored).unwrap();
+        archive.write_all(&[0xff, 0xd8, 0xff, 0xd9]).unwrap();
+        let provider = Arc::new(EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap());
+        let document_uri = "OEBPS/Text/titlepage.xhtml";
+
+        let source = <EpubProvider as ResourceProvider>::read_bytes(provider.as_ref(), document_uri).unwrap();
+        let source = String::from_utf8(source).unwrap();
+        assert!(source.contains(r#"xlink:href="../Images/cover.jpeg""#), "providers must return unmodified publication bytes");
+
+        let mut factory = html::pipeline::DocumentFactory::new();
+        factory.set_resource_context(provider.clone(), document_uri);
+        let document = factory.parse_to_dom(&source);
+        let (image_idx, image) = document.images().iter().enumerate().find(|(_, image)| matches!(&image.source, html::document::ImageSource::InlineSvg { .. })).expect("inline SVG image resource");
+        assert!(matches!(&image.source, html::document::ImageSource::InlineSvg { base_uri, .. } if base_uri == document_uri));
+
+        let mut pipeline = html::resources::ImagePipeline::new(Arc::new(document.images().to_vec()), provider);
+        pipeline.ensure_window(&HashSet::from([image_idx as u32]));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pipeline.get_decoded(image_idx as u32).is_none() && Instant::now() < deadline {
+            pipeline.poll();
+            std::thread::yield_now();
+        }
+        let html::resources::DecodedImage::Svg { bytes, .. } = pipeline.get_decoded(image_idx as u32).expect("decoded inline SVG") else { panic!("inline SVG must remain a vector resource") };
+        let svg = std::str::from_utf8(bytes).expect("hydrated SVG remains UTF-8");
+        assert!(svg.contains(r#"xlink:href="data:image/jpeg;base64,/9j/2Q==""#));
     }
 
     #[test]

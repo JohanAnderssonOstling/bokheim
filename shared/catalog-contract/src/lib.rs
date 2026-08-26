@@ -1,9 +1,17 @@
+pub use publication_model::{
+    AgeRange, AggregateRating, Audience, Collection, CollectionKind, Identifier, InteractionStatistic, LanguageTag, LocalizedText, PopularityRank, PublicationDate, PublicationImage, PublicationProperty, PublicationSubject,
+    PublicationTitle, Scheme, Scope,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+pub mod legacy;
 mod protocol;
 
-pub use protocol::{materialize_page, page_layout, CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse};
+pub use protocol::{
+    materialize_page, materialize_subject_browse_delta, page_layout, CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest,
+    CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry,
+};
 
 macro_rules! dual_serde {
     ($type:ty, $human:ident, $binary:ident) => {
@@ -159,6 +167,8 @@ dual_serde!(CatalogLinkTarget, CatalogLinkTargetHuman, CatalogLinkTargetBinary);
 pub struct CatalogLink {
     pub title: String,
     pub target: CatalogLinkTarget,
+    #[serde(default)]
+    pub relations: Vec<String>,
     pub number_of_items: Option<u32>,
     pub active: bool,
 }
@@ -224,108 +234,6 @@ pub struct CatalogSearchQuery {
     pub author: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogWideSearchResult {
-    pub query: String,
-    pub groups: Vec<CatalogWideSearchGroup>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogWideSearchGroup {
-    pub source: CatalogSource,
-    pub outcome: CatalogWideSearchOutcome,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogPublicationIdentifierScheme {
-    Isbn,
-    Asin,
-    Doi,
-    Oclc,
-    Lccn,
-    Google,
-    Goodreads,
-    Kobo,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-pub struct CatalogPublicationIdentifier {
-    pub scheme: CatalogPublicationIdentifierScheme,
-    pub value: String,
-}
-
-impl CatalogPublicationIdentifier {
-    pub fn normalized_value(&self) -> Option<String> {
-        match self.scheme {
-            CatalogPublicationIdentifierScheme::Isbn => catalog_model::canonical_isbn(&self.value),
-            CatalogPublicationIdentifierScheme::Doi => catalog_model::canonical_doi(&self.value),
-            _ if !self.value.trim().is_empty() && self.value.len() <= 512 && !self.value.chars().any(char::is_control) => Some(self.value.trim().to_lowercase()),
-            _ => None,
-        }
-    }
-
-    pub fn is_valid_search_identifier(&self) -> bool {
-        !self.value.trim().is_empty() && self.value.len() <= 512 && !self.value.chars().any(char::is_control) && self.normalized_value().is_some()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogAuthorDiscoveryRequest {
-    pub author_name: String,
-    pub book_identifiers: Vec<CatalogPublicationIdentifier>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Type)]
-#[specta(type = CatalogWideSearchOutcomeFrontend)]
-pub enum CatalogWideSearchOutcome {
-    Results { page: CatalogPage },
-    Unsupported,
-    TimedOut,
-    Failed { message: String },
-}
-
-#[derive(Serialize, Deserialize, Type)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[specta(inline, collect = false)]
-enum CatalogWideSearchOutcomeFrontend {
-    Results { page: CatalogPage },
-    Unsupported,
-    TimedOut,
-    Failed { message: String },
-}
-
-impl From<&CatalogWideSearchOutcome> for CatalogWideSearchOutcomeFrontend {
-    fn from(value: &CatalogWideSearchOutcome) -> Self {
-        match value {
-            CatalogWideSearchOutcome::Results { page } => Self::Results { page: page.clone() },
-            CatalogWideSearchOutcome::Unsupported => Self::Unsupported,
-            CatalogWideSearchOutcome::TimedOut => Self::TimedOut,
-            CatalogWideSearchOutcome::Failed { message } => Self::Failed { message: message.clone() },
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogWideSearchOutcome", tag = "kind", rename_all = "snake_case")]
-enum CatalogWideSearchOutcomeHuman {
-    Results { page: CatalogPage },
-    Unsupported,
-    TimedOut,
-    Failed { message: String },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogWideSearchOutcome")]
-enum CatalogWideSearchOutcomeBinary {
-    Results { page: CatalogPage },
-    Unsupported,
-    TimedOut,
-    Failed { message: String },
-}
-
-dual_serde!(CatalogWideSearchOutcome, CatalogWideSearchOutcomeHuman, CatalogWideSearchOutcomeBinary);
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CatalogPagination {
     pub first: Option<String>,
@@ -337,15 +245,42 @@ pub struct CatalogPagination {
     pub current_page: Option<u32>,
 }
 
+/// A contiguous range within one fully filtered and sorted catalogue result
+/// set. Provider page boundaries are deliberately absent from this contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogResultRange {
+    pub offset: u32,
+    pub limit: u32,
+}
+
+impl CatalogResultRange {
+    pub const DEFAULT_LIMIT: u32 = 100;
+
+    pub const fn new(offset: u32, limit: u32) -> Self {
+        Self { offset, limit }
+    }
+}
+
+impl Default for CatalogResultRange {
+    fn default() -> Self {
+        Self { offset: 0, limit: Self::DEFAULT_LIMIT }
+    }
+}
+
+/// Metadata describing the returned slice of a logical catalogue result set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogResultRangeResponse {
+    pub offset: u32,
+    pub returned_items: u32,
+    pub total_items: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogBookFormat {
     Epub,
     Pdf,
     Mobi,
-    Fb2,
-    Cbz,
-    WebPub,
     M4b,
 }
 
@@ -357,15 +292,55 @@ pub enum CatalogFreshness {
 }
 
 impl CatalogBookFormat {
+    pub const ALL: [Self; 4] = [Self::Epub, Self::Pdf, Self::Mobi, Self::M4b];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Epub => "EPUB",
             Self::Pdf => "PDF",
             Self::Mobi => "MOBI",
-            Self::Fb2 => "FB2",
-            Self::Cbz => "CBZ",
-            Self::WebPub => "WebPub",
             Self::M4b => "M4B",
+        }
+    }
+
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Epub => "application/epub+zip",
+            Self::Pdf => "application/pdf",
+            Self::Mobi => "application/x-mobipocket-ebook",
+            Self::M4b => "audio/mp4",
+        }
+    }
+
+    pub const fn file_extension(self) -> &'static str {
+        match self {
+            Self::Epub => "epub",
+            Self::Pdf => "pdf",
+            Self::Mobi => "mobi",
+            Self::M4b => "m4b",
+        }
+    }
+}
+
+/// Stable ordering for aggregated catalogue subject results. The client
+/// applies it to the synchronized locator collection before selecting the UI
+/// range. It is deliberately separate from local-library ordering, whose
+/// "recently read" state has no catalogue equivalent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogSubjectSort {
+    #[default]
+    Popularity,
+    Title,
+}
+
+impl CatalogSubjectSort {
+    pub const ALL: [Self; 2] = [Self::Popularity, Self::Title];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Popularity => "Popularity",
+            Self::Title => "Title",
         }
     }
 }
@@ -382,20 +357,10 @@ pub struct CatalogPublicationIdentity {
     pub work_id: Option<String>,
 }
 
-/// A canonical, versioned subject assignment used as an anonymous
-/// recommendation signal. Raw book titles and library membership never need
-/// to cross this boundary.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-pub struct CatalogSubjectPreference {
-    pub system_id: String,
-    pub subject_path: String,
-    pub weight: u32,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CatalogSubjectBrowseRequest {
-    /// Opaque locator returned by `navigation` or `pagination`. `None` opens
-    /// the subject-system roots.
+    /// Opaque collection locator returned by `navigation`. It never contains a
+    /// result offset. `None` opens the subject-system roots.
     pub locator: Option<String>,
     pub supported_languages: Vec<String>,
     /// Empty includes every catalogue source.
@@ -404,7 +369,16 @@ pub struct CatalogSubjectBrowseRequest {
     /// Case- and diacritic-insensitive title, author, or table-of-contents query.
     #[serde(default)]
     pub query: String,
-    pub limit: u32,
+    /// Ordering is applied across the logical collection before the requested
+    /// result range is selected.
+    #[serde(default)]
+    pub sort: CatalogSubjectSort,
+    /// Empty includes every importable format.
+    #[serde(default)]
+    pub book_formats: Vec<CatalogBookFormat>,
+    /// Range within the result after search, filters, and sorting are applied.
+    #[serde(default)]
+    pub range: CatalogResultRange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -413,25 +387,126 @@ pub struct CatalogSourcedPublication {
     pub publication: CatalogPublication,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectBrowseRefreshRequest {
+    pub request: CatalogSubjectBrowseRequest,
+    pub epoch: Option<String>,
+    /// Revision paired with `epoch`. Known entries are reusable only when both
+    /// still describe the server snapshot.
+    #[serde(default)]
+    pub revision: Option<u64>,
+    pub known_entry_ids: Vec<u64>,
+    /// Returns only the authoritative ordered entry IDs, navigation, range,
+    /// and capabilities. Clients use this first so they can resolve retained
+    /// publication payloads locally before asking for the missing entries.
+    #[serde(default)]
+    pub identifiers_only: bool,
+    /// Synchronizes the complete descendant collection for one subject
+    /// locator. Search, filters, sorting, and UI ranges are applied by the
+    /// client after this collection has been cached locally.
+    #[serde(default)]
+    pub collection_sync: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectCollectionManifestRequest {
+    /// Opaque subject locator whose collection may be synchronized.
+    pub locator: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectCollectionManifestResponse {
+    /// Stable namespace for publication entry IDs.
+    pub epoch: String,
+    /// Current catalogue snapshot containing membership, ordering, and local
+    /// search evidence.
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectBrowseEntryPayload {
+    pub entry_id: u64,
+    pub publication: CatalogSourcedPublication,
+    /// Additional normalized text that participates in local subject search,
+    /// such as table-of-contents titles not carried by the publication card.
+    #[serde(default)]
+    pub search_terms: Vec<String>,
+}
+
+/// Resolves immutable publication cards after a client has received their
+/// authoritative order from a subject browse request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectPublicationPayloadRequest {
+    pub epoch: String,
+    pub entry_ids: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectPublicationPayloadResponse {
+    pub epoch: String,
+    pub payloads: Vec<CatalogSubjectBrowseEntryPayload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogBookFormatFacetValue {
+    pub value: CatalogBookFormat,
+    pub number_of_items: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogLanguageFacetValue {
+    pub value: String,
+    pub number_of_items: u32,
+}
+
+/// Operations and facet values supported at one catalogue browse location.
+/// Empty vectors mean that the corresponding control is not available there.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogSubjectBrowseCapabilities {
+    #[serde(default)]
+    pub sorts: Vec<CatalogSubjectSort>,
+    #[serde(default)]
+    pub book_formats: Vec<CatalogBookFormatFacetValue>,
+    #[serde(default)]
+    pub languages: Vec<CatalogLanguageFacetValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectBrowseCapabilitiesResponse {
+    pub epoch: String,
+    pub revision: u64,
+    pub capabilities: CatalogSubjectBrowseCapabilities,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSubjectBrowseDeltaResponse {
+    pub epoch: String,
+    /// Changes whenever visible subject membership or ordering changes. A
+    /// client restarts a multi-chunk collection synchronization if this value
+    /// changes between chunks.
+    #[serde(default)]
+    pub revision: u64,
+    pub navigation: Vec<CatalogLink>,
+    pub entry_ids: Vec<u64>,
+    /// Entries assigned directly to this subject rather than only to one of
+    /// its descendants. This lets a local client preserve navigation-page
+    /// semantics while searching the complete cached subtree.
+    #[serde(default)]
+    pub exact_entry_ids: Vec<u64>,
+    pub payloads: Vec<CatalogSubjectBrowseEntryPayload>,
+    pub range: CatalogResultRangeResponse,
+    #[serde(default)]
+    pub capabilities: CatalogSubjectBrowseCapabilities,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CatalogSubjectBrowseResponse {
+    pub epoch: String,
     pub navigation: Vec<CatalogLink>,
     pub publications: Vec<CatalogSourcedPublication>,
-    pub pagination: CatalogPagination,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
-pub struct CatalogRecommendationExclusion {
-    pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogRecommendationRequest {
-    pub subjects: Vec<CatalogSubjectPreference>,
-    pub supported_languages: Vec<String>,
-    pub excluded_publications: Vec<CatalogRecommendationExclusion>,
-    pub limit: u32,
+    pub range: CatalogResultRangeResponse,
+    #[serde(default)]
+    pub capabilities: CatalogSubjectBrowseCapabilities,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -441,6 +516,16 @@ pub struct CatalogImportRequest {
     pub publication: CatalogPublicationIdentity,
     pub download_url: String,
     pub book_format: CatalogBookFormat,
+}
+
+impl CatalogImportRequest {
+    /// Produces a portable filename without trusting a provider-controlled URL
+    /// path. Platform adapters may still reject formats they cannot import.
+    pub fn suggested_file_name(&self) -> String {
+        let stem = self.publication.edition_id.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') { character } else { '-' }).collect::<String>();
+        let stem = stem.trim_matches('-');
+        format!("{}.{}", if stem.is_empty() { "catalog-book" } else { stem }, self.book_format.file_extension())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -536,9 +621,71 @@ dual_serde!(CatalogDescription, CatalogDescriptionHuman, CatalogDescriptionBinar
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct CatalogAuthorCredit {
     pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<LocalizedText>,
     pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<LocalizedText>,
     pub identifiers: Vec<String>,
     pub provider_link: Option<CatalogLinkTarget>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(default)]
+pub struct CatalogPublicationMetadata {
+    pub title_localizations: Vec<LocalizedText>,
+    pub sort_name: Option<String>,
+    pub sort_name_localizations: Vec<LocalizedText>,
+    pub published: Option<String>,
+    pub modified: Option<String>,
+    pub dates: Vec<PublicationDate>,
+    pub publishers: Vec<CatalogPublisherCredit>,
+    pub identifiers: Vec<Identifier>,
+    pub subjects: Vec<PublicationSubject>,
+    pub subtitle: Option<String>,
+    pub subtitle_localizations: Vec<LocalizedText>,
+    pub alternate_titles: Vec<PublicationTitle>,
+    pub collections: Vec<Collection>,
+    pub contributors: Vec<CatalogContributorCredit>,
+    pub rights: Vec<String>,
+    pub sources: Vec<String>,
+    pub types: Vec<String>,
+    pub formats: Vec<String>,
+    pub relations: Vec<String>,
+    pub coverage: Vec<String>,
+    pub properties: Vec<PublicationProperty>,
+    pub audiences: Vec<Audience>,
+    pub age_ranges: Vec<AgeRange>,
+    pub images: Vec<PublicationImage>,
+    pub ratings: Vec<AggregateRating>,
+    pub interactions: Vec<InteractionStatistic>,
+    pub popularity_ranks: Vec<PopularityRank>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogPublisherCredit {
+    pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<LocalizedText>,
+    pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<LocalizedText>,
+    pub identifiers: Vec<String>,
+    pub provider_link: Option<CatalogLinkTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct CatalogContributorCredit {
+    pub name: String,
+    #[serde(default)]
+    pub name_localizations: Vec<LocalizedText>,
+    pub sort_name: Option<String>,
+    #[serde(default)]
+    pub sort_name_localizations: Vec<LocalizedText>,
+    pub identifiers: Vec<String>,
+    pub provider_link: Option<CatalogLinkTarget>,
+    /// Exact OPDS role values; unknown roles remain available for later mapping.
+    pub roles: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -547,77 +694,12 @@ pub struct CatalogPublication {
     pub title: String,
     pub authors: Vec<CatalogAuthorCredit>,
     /// Canonical BCP-47 language tags advertised for this publication.
-    pub languages: Vec<String>,
+    pub languages: Vec<LanguageTag>,
     pub description: Option<CatalogDescription>,
     pub image_url: Option<String>,
+    #[serde(default)]
+    pub metadata: CatalogPublicationMetadata,
     pub actions: Vec<CatalogPublicationAction>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogRecommendation {
-    pub source_id: CatalogSourceId,
-    pub publication: CatalogPublication,
-    #[specta(type = f64)]
-    pub score: u64,
-    pub matched_subjects: Vec<CatalogSubjectPreference>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogRecommendationResponse {
-    pub recommendations: Vec<CatalogRecommendation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Type)]
-#[specta(type = CatalogAuthorDiscoveryEvidenceFrontend)]
-pub enum CatalogAuthorDiscoveryEvidence {
-    BookIdentifier { identifier: CatalogPublicationIdentifier },
-    AuthorName,
-}
-
-#[derive(Serialize, Deserialize, Type)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[specta(inline, collect = false)]
-enum CatalogAuthorDiscoveryEvidenceFrontend {
-    BookIdentifier { identifier: CatalogPublicationIdentifier },
-    AuthorName,
-}
-
-impl From<&CatalogAuthorDiscoveryEvidence> for CatalogAuthorDiscoveryEvidenceFrontend {
-    fn from(value: &CatalogAuthorDiscoveryEvidence) -> Self {
-        match value {
-            CatalogAuthorDiscoveryEvidence::BookIdentifier { identifier } => Self::BookIdentifier { identifier: identifier.clone() },
-            CatalogAuthorDiscoveryEvidence::AuthorName => Self::AuthorName,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogAuthorDiscoveryEvidence", tag = "kind", rename_all = "snake_case")]
-enum CatalogAuthorDiscoveryEvidenceHuman {
-    BookIdentifier { identifier: CatalogPublicationIdentifier },
-    AuthorName,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogAuthorDiscoveryEvidence")]
-enum CatalogAuthorDiscoveryEvidenceBinary {
-    BookIdentifier { identifier: CatalogPublicationIdentifier },
-    AuthorName,
-}
-
-dual_serde!(CatalogAuthorDiscoveryEvidence, CatalogAuthorDiscoveryEvidenceHuman, CatalogAuthorDiscoveryEvidenceBinary);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogAuthorDiscoveryMatch {
-    pub source: CatalogSource,
-    pub publication: CatalogPublication,
-    pub evidence: CatalogAuthorDiscoveryEvidence,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct CatalogAuthorDiscoveryResult {
-    pub author_name: String,
-    pub matches: Vec<CatalogAuthorDiscoveryMatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -672,17 +754,11 @@ mod tests {
         let search = CatalogSearchDefinition::OpdsUriTemplate { base_url: "https://catalog.example".to_owned(), template: "{?searchTerms}".to_owned() };
         assert_frontend_shape(&search, CatalogSearchDefinitionFrontend::from(&search));
 
-        let outcome = CatalogWideSearchOutcome::Failed { message: "offline".to_owned() };
-        assert_frontend_shape(&outcome, CatalogWideSearchOutcomeFrontend::from(&outcome));
-
         let action = CatalogPublicationAction::External { purpose: CatalogExternalActionKind::Open, url: "https://publisher.example/book".to_owned(), price: None, available_formats: vec![CatalogBookFormat::Epub] };
         assert_frontend_shape(&action, CatalogPublicationActionFrontend::from(&action));
 
         let description = CatalogDescription::RichHtml { safe_html: "<p>Book</p>".to_owned(), plain_text: "Book".to_owned() };
         assert_frontend_shape(&description, CatalogDescriptionFrontend::from(&description));
-
-        let evidence = CatalogAuthorDiscoveryEvidence::BookIdentifier { identifier: CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "9780306406157".to_owned() } };
-        assert_frontend_shape(&evidence, CatalogAuthorDiscoveryEvidenceFrontend::from(&evidence));
     }
 
     #[test]
@@ -701,15 +777,48 @@ mod tests {
     }
 
     #[test]
-    fn discovery_identifiers_compare_canonical_isbn_and_doi_values() {
-        let compact_isbn = CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "9780306406157".to_owned() };
-        let urn_isbn = CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "urn:isbn:978-0-306-40615-7".to_owned() };
-        assert_eq!(compact_isbn.normalized_value(), urn_isbn.normalized_value());
+    fn legacy_subject_browse_requests_use_default_sort_formats_and_range() {
+        let request: CatalogSubjectBrowseRequest = serde_json::from_value(serde_json::json!({
+            "locator": null,
+            "supported_languages": ["en"],
+            "source_ids": [],
+            "query": "history"
+        }))
+        .unwrap();
 
-        let doi = CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Doi, value: "https://doi.org/10.1000/Example".to_owned() };
-        assert_eq!(doi.normalized_value().as_deref(), Some("10.1000/example"));
+        assert_eq!(request.sort, CatalogSubjectSort::Popularity);
+        assert!(request.book_formats.is_empty());
+        assert_eq!(request.range, CatalogResultRange::default());
+    }
 
-        let invalid = CatalogPublicationIdentifier { scheme: CatalogPublicationIdentifierScheme::Isbn, value: "not an isbn".to_owned() };
-        assert!(!invalid.is_valid_search_identifier());
+    #[test]
+    fn legacy_subject_browse_responses_have_empty_capabilities() {
+        let response: CatalogSubjectBrowseResponse = serde_json::from_value(serde_json::json!({
+            "epoch": "catalogue-1",
+            "navigation": [],
+            "publications": [],
+            "range": {
+                "offset": 0,
+                "returned_items": 0,
+                "total_items": 0
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.capabilities, CatalogSubjectBrowseCapabilities::default());
+    }
+
+    #[test]
+    fn catalog_import_filenames_are_portable_and_format_aware() {
+        let request = CatalogImportRequest {
+            source_id: CatalogSourceId::parse("opds-test").unwrap(),
+            catalog_locator: "https://catalog.example/root".to_owned(),
+            publication: CatalogPublicationIdentity { edition_id: "urn:book/edition 1".to_owned(), work_id: None },
+            download_url: "https://catalog.example/download".to_owned(),
+            book_format: CatalogBookFormat::Epub,
+        };
+
+        assert_eq!(request.suggested_file_name(), "urn-book-edition-1.epub");
+        assert_eq!(request.book_format.media_type(), "application/epub+zip");
     }
 }

@@ -13,7 +13,7 @@ pub use wire;
 pub mod mutation_ids;
 pub use mutation_ids::{MutationId, MutationIdError};
 mod protocol;
-pub use protocol::{validate_pull_batch, validate_push_response, PullBatchError, PushResponseError, ValidatedPushResponse};
+pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse};
 
 pub use content_address::ContentHash;
 
@@ -52,7 +52,10 @@ pub const ROOT_DIR_ID: DirId = uuid::Uuid::nil();
 pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_PULL_CHANGES: usize = 1_000;
 pub const MAX_PUSH_MUTATIONS: usize = 1_000;
-pub const MAX_PUSH_MUTATION_BYTES: usize = 4 * 1024 * 1024;
+/// Target ceiling for the encoded mutations in one push request.
+pub const MAX_PUSH_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Backwards-compatible name for the batch ceiling.
+pub const MAX_PUSH_MUTATION_BYTES: usize = MAX_PUSH_BATCH_BYTES;
 /// Admission bound shared by the generic service and domain clients.
 pub const MAX_LWW_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
 

@@ -1,8 +1,8 @@
 use super::{
-    cache_error, default_cache_path, default_cover_cache_directory, endpoints_from_registry, opds_catalog_source_id, reconcile_cached_sources, validate_curated_registry, Arc, AtomicBool, BTreeMap, CatalogCache, CatalogCoverCache,
-    CatalogCoverPipeline, CatalogRegistry, CatalogService, CatalogServiceError, CatalogServiceState, CatalogSourceId, Duration, HashMap, Instant, MetadataBackfillRuntimeMetrics, Mutex, Notify, OpdsClient, OpdsEndpoint, Path, PathBuf,
-    RecentBrowserCovers, RegistrySnapshot, RegistrySource, RwLock, Semaphore, StdMutex, Url, BACKGROUND_DOWNLOAD_LIMIT, BUNDLED_REGISTRY, COVER_DOWNLOAD_WORKERS, COVER_THUMBNAIL_WORKERS, CRAWL_PAUSE_SENTINEL, DEFAULT_MAX_CRAWL_PAGES,
-    HARD_MAX_CRAWL_PAGES, MAX_CONCURRENT_EXTRACTIONS, MAX_INTERACTIVE_DOWNLOADS, MAX_QUEUED_DOWNLOADS, MAX_REGISTRY_BYTES,
+    cache_error, default_cache_path, default_cover_cache_directory, endpoints_from_registry, opds_catalog_source_id, opds_source, reconcile_cached_sources, validate_curated_registry, Arc, AtomicBool, BTreeMap, CatalogCache,
+    CatalogCoverCache, CatalogProcessRuntime, CatalogRegistry, CatalogService, CatalogServiceError, CatalogServiceState, CatalogSourceId, CatalogSourceRegistration, CatalogSourceRegistry, Duration, HashMap, Instant,
+    MetadataBackfillRuntimeMetrics, Mutex, Notify, OpdsClient, OpdsEndpoint, Path, PathBuf, RecentBrowserCovers, RegistrySnapshot, RegistrySource, RwLock, Semaphore, StdMutex, Url, BACKGROUND_DOWNLOAD_LIMIT, BUNDLED_REGISTRY,
+    CRAWL_PAUSE_SENTINEL, DEFAULT_MAX_CRAWL_PAGES, HARD_MAX_CRAWL_PAGES, MAX_CONCURRENT_EXTRACTIONS, MAX_INTERACTIVE_DOWNLOADS, MAX_QUEUED_DOWNLOADS, MAX_REGISTRY_BYTES,
 };
 use crate::http::public::read_registry_file;
 
@@ -27,6 +27,12 @@ impl CatalogService {
 
     pub async fn registry(&self) -> CatalogRegistry {
         self.state.snapshot.read().await.registry.clone()
+    }
+
+    pub async fn source_registry(&self) -> Result<CatalogSourceRegistry, CatalogServiceError> {
+        let registry = self.registry().await;
+        let endpoints = endpoints_from_registry(registry.clone()).map_err(|error| CatalogServiceError(error.to_string()))?;
+        Ok(CatalogSourceRegistry { revision: registry.revision, sources: endpoints.into_iter().map(|endpoint| CatalogSourceRegistration { source: opds_source(&endpoint), root_locator: endpoint.url }).collect() })
     }
 
     pub(crate) async fn refresh_registry(&self) {
@@ -93,9 +99,10 @@ impl CatalogService {
         let endpoints = endpoints_from_registry(registry.clone()).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_path = cache_path.unwrap_or_else(default_cache_path);
         let cache = CatalogCache::open(cache_path).map_err(cache_error)?;
+        cache.pause_all_processes().map_err(cache_error)?;
+        let process_settings = cache.process_settings().map_err(cache_error)?;
         reconcile_cached_sources(&cache, &endpoints)?;
         let covers = CatalogCoverCache::new_public_only(cover_cache_directory).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let cover_pipeline = CatalogCoverPipeline::new(covers.clone(), COVER_DOWNLOAD_WORKERS, COVER_THUMBNAIL_WORKERS).map_err(|error| CatalogServiceError(error.to_string()))?;
         Ok(Self {
             state: Arc::new(CatalogServiceState {
                 started_at: Instant::now(),
@@ -105,10 +112,10 @@ impl CatalogService {
                 opds: OpdsClient::new_public_only().map_err(|error| CatalogServiceError(error.to_string()))?,
                 cache,
                 covers,
-                cover_pipeline,
                 cache_write_lock: Mutex::new(()),
                 crawl_locks: Mutex::new(HashMap::new()),
                 crawl_progress: Mutex::new(HashMap::new()),
+                origin_throttles: Mutex::new(HashMap::new()),
                 source_update_locks: Mutex::new(HashMap::new()),
                 recent_browser_covers: Mutex::new(RecentBrowserCovers::default()),
                 epub_range_origins: Mutex::new(HashMap::new()),
@@ -117,6 +124,7 @@ impl CatalogService {
                 queued_download_slots: Semaphore::new(MAX_QUEUED_DOWNLOADS),
                 extraction_slots: Semaphore::new(MAX_CONCURRENT_EXTRACTIONS),
                 extraction_notify: Notify::new(),
+                processes: CatalogProcessRuntime::new(process_settings),
                 acquisition_directory: std::env::temp_dir().join("bokheim-catalog-acquisitions"),
                 metadata_endpoint: configured_metadata_endpoint()?,
                 metadata_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(15)).build().map_err(|error| CatalogServiceError(error.to_string()))?,

@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A concise, example-led lesson in idiomatic GPUI architecture drawn from the reader refactor.">
+  <title>GPUI lessons from a reader</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101311;
+      --surface: #181c19;
+      --raised: #202620;
+      --code: #0b0e0c;
+      --ink: #f1efe7;
+      --muted: #aaa9a1;
+      --dim: #71766f;
+      --line: #303730;
+      --green: #b4ef72;
+      --green-soft: rgba(180, 239, 114, .11);
+      --cyan: #7fd2d1;
+      --amber: #edb965;
+      --rose: #e78d9f;
+      --radius: 15px;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 78% 4%, rgba(127, 210, 209, .08), transparent 30rem),
+        linear-gradient(90deg, rgba(255,255,255,.017) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,.017) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, 38px 38px, 38px 38px, auto;
+      font-family: var(--sans);
+      line-height: 1.62;
+    }
+    ::selection { color: #111; background: var(--green); }
+    a { color: inherit; }
+    code { font-family: var(--mono); }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 800px);
+      gap: clamp(2rem, 6vw, 6rem);
+      width: min(1200px, calc(100% - 42px));
+      margin: 0 auto;
+      padding: 30px 0 96px;
+    }
+    aside {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 48px);
+      padding-right: 25px;
+      border-right: 1px solid var(--line);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      margin: 8px 0 38px;
+      font: 700 12px/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .brand-mark {
+      width: 25px;
+      height: 25px;
+      border: 1px solid var(--green);
+      border-radius: 8px;
+      box-shadow: inset 0 0 0 6px var(--green-soft);
+      transform: rotate(7deg);
+    }
+    nav { display: grid; gap: 4px; }
+    nav a {
+      position: relative;
+      padding: 8px 0 8px 17px;
+      color: var(--dim);
+      font: 500 12px/1.3 var(--mono);
+      text-decoration: none;
+      transition: color .16s ease;
+    }
+    nav a::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--line);
+      transform: translateY(-50%);
+    }
+    nav a:hover, nav a.active { color: var(--ink); }
+    nav a.active::before { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+    .progress { height: 2px; margin-top: auto; overflow: hidden; background: var(--line); }
+    .progress span { display: block; width: 0; height: 100%; background: var(--green); }
+    .aside-note { margin-top: 12px; color: var(--dim); font: 10px/1.5 var(--mono); }
+
+    main { min-width: 0; }
+    header { padding: clamp(58px, 10vw, 112px) 0 80px; }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 27px;
+      color: var(--green);
+      font: 600 11px/1 var(--mono);
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 35px; height: 1px; background: currentColor; }
+    h1 {
+      max-width: 760px;
+      margin: 0 0 28px;
+      font-size: clamp(3.2rem, 7vw, 6.1rem);
+      font-weight: 730;
+      letter-spacing: -.073em;
+      line-height: .92;
+    }
+    .lede { max-width: 700px; margin: 0; color: #c7c4bd; font-size: clamp(1.08rem, 2vw, 1.28rem); }
+    .formula {
+      margin-top: 44px;
+      padding: 22px 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(24, 28, 25, .8);
+      color: var(--muted);
+      font: 13px/1.8 var(--mono);
+    }
+    .formula strong { color: var(--green); font-weight: 650; }
+    .formula .arrow { color: var(--dim); padding: 0 7px; }
+
+    section { scroll-margin-top: 28px; padding: 66px 0; border-top: 1px solid var(--line); }
+    .kicker { color: var(--green); font: 600 10.5px/1 var(--mono); letter-spacing: .15em; text-transform: uppercase; }
+    h2 { margin: 13px 0 18px; font-size: clamp(2rem, 4vw, 3rem); letter-spacing: -.047em; line-height: 1.05; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    p { margin: 0 0 18px; color: var(--muted); }
+    p strong { color: var(--ink); }
+    .compact { max-width: 720px; }
+
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; margin: 29px 0; }
+    .card { min-height: 176px; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, var(--raised), var(--surface)); }
+    .card .tag { display: inline-block; margin-bottom: 15px; color: var(--green); font: 650 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .card:nth-child(2) .tag { color: var(--cyan); }
+    .card:nth-child(3) .tag { color: var(--amber); }
+    .card p { margin: 0; font-size: 13px; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 27px 1fr 27px 1fr 27px 1fr;
+      align-items: stretch;
+      margin: 32px 0 16px;
+    }
+    .node { padding: 17px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+    .node code { color: var(--cyan); font-size: 12px; }
+    .node small { display: block; margin-top: 8px; color: var(--dim); line-height: 1.45; }
+    .flow-arrow { display: grid; place-items: center; color: var(--dim); font-family: var(--mono); }
+    .branch {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 13px;
+      margin: 13px 0 30px;
+      padding: 17px;
+      border: 1px dashed #3d473d;
+      border-radius: 12px;
+      background: rgba(180,239,114,.035);
+    }
+    .branch b { color: var(--amber); font: 600 11px/1.5 var(--mono); }
+    .branch span { color: var(--muted); font-size: 13px; }
+
+    .code-card { margin: 27px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--code); }
+    .code-head { display: flex; justify-content: space-between; padding: 13px 16px; border-bottom: 1px solid var(--line); color: var(--dim); font: 10.5px/1 var(--mono); }
+    pre { margin: 0; padding: 19px; overflow: auto; color: #d7d8d2; font: 12px/1.65 var(--mono); tab-size: 4; }
+    .kw { color: var(--rose); } .ty { color: var(--cyan); } .fn { color: var(--green); } .st { color: var(--amber); } .cm { color: #697169; }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 28px 0; }
+    .choice { padding: 21px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .choice .label { display: inline-block; margin-bottom: 14px; color: var(--rose); font: 650 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .choice.good .label { color: var(--green); }
+    .choice p { margin: 0; font-size: 13px; }
+    .callout { margin: 27px 0; padding: 18px 20px; border-left: 2px solid var(--green); background: var(--green-soft); color: #dbe9ce; font-size: 14px; }
+    .callout code { color: var(--green); }
+
+    .rules { display: grid; gap: 1px; margin: 28px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--line); }
+    .rule { display: grid; grid-template-columns: 35px 1fr; gap: 14px; padding: 18px; background: var(--surface); }
+    .rule b { color: var(--green); font: 650 12px/1.6 var(--mono); }
+    .rule p { margin: 0; font-size: 13.5px; }
+    .quiz { margin-top: 29px; padding: 23px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--raised); }
+    .quiz summary { cursor: pointer; color: var(--ink); font-weight: 650; }
+    .quiz p { margin: 15px 0 0; font-size: 13px; }
+    footer { padding-top: 30px; color: var(--dim); font: 10.5px/1.6 var(--mono); }
+
+    @media (max-width: 900px) {
+      .shell { display: block; width: min(100% - 34px, 780px); }
+      aside { position: static; height: auto; padding: 0 0 20px; border: 0; }
+      .brand { margin-bottom: 18px; }
+      nav { grid-template-columns: repeat(4, 1fr); padding: 5px; border: 1px solid var(--line); border-radius: 12px; }
+      nav a { padding: 8px; text-align: center; }
+      nav a::before, .progress, .aside-note { display: none; }
+      header { padding-top: 56px; }
+    }
+    @media (max-width: 660px) {
+      .cards, .split { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; gap: 7px; }
+      .flow-arrow { transform: rotate(90deg); min-height: 20px; }
+      .branch { grid-template-columns: 1fr; }
+      nav { grid-template-columns: repeat(2, 1fr); }
+      h1 { font-size: clamp(3rem, 16vw, 4.8rem); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><span class="brand-mark"></span> GPUI lesson</div>
+      <nav aria-label="Lesson sections">
+        <a href="#model">Mental model</a>
+        <a href="#entities">Entities</a>
+        <a href="#render">Render</a>
+        <a href="#notify">Invalidation</a>
+        <a href="#elements">Elements</a>
+        <a href="#async">Async work</a>
+        <a href="#focus">Focus</a>
+        <a href="#checklist">Checklist</a>
+      </nav>
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <div class="aside-note">Concept-first · reader examples · ~8 min</div>
+    </aside>
+
+    <main>
+      <header>
+        <div class="eyebrow">Lessons from a real reader</div>
+        <h1>GPUI is a state machine with a view.</h1>
+        <p class="lede">The useful unit in GPUI is not “a component tree.” It is an owned piece of state, changed at explicit boundaries, whose current value is projected into elements. Once that is clear, entities, invalidation, custom elements, and background work fit together.</p>
+        <div class="formula"><strong>Events mutate entities</strong><span class="arrow">→</span>entities notify<span class="arrow">→</span>render projects<span class="arrow">→</span>elements lay out and paint</div>
+      </header>
+
+      <section id="model">
+        <div class="kicker">01 · Mental model</div>
+        <h2>One immediate loop, one slower branch</h2>
+        <p class="compact">User-visible state should complete its trip through GPUI immediately. Work that can wait—database writes, parsing, network access—branches away and later returns through an entity update only if it has a result the UI still needs.</p>
+
+        <div class="flow" aria-label="GPUI update flow">
+          <div class="node"><code>input / event</code><small>A click, action, renderer event, or task result.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>entity.update</code><small>Change the authoritative state synchronously.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>cx.notify()</code><small>Only when observable output changed.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>render</code><small>Describe the UI for that state.</small></div>
+        </div>
+        <div class="branch"><b>slower branch ↘</b><span>Queue persistence or computation after the visible mutation. Preserve ordering when operations depend on one another.</span></div>
+
+        <div class="cards">
+          <article class="card"><span class="tag">Entity</span><h3>Owns a behavior</h3><p>State, lifetime, subscriptions, and events that change together.</p></article>
+          <article class="card"><span class="tag">Render</span><h3>Projects state</h3><p>Builds elements from what is already true. It does not make it true.</p></article>
+          <article class="card"><span class="tag">Element</span><h3>Owns geometry</h3><p>Layout, prepaint, hit testing, and painting using final bounds.</p></article>
+        </div>
+      </section>
+
+      <section id="entities">
+        <div class="kicker">02 · Entities and widgets</div>
+        <h2>An entity is an ownership boundary</h2>
+        <p class="compact">Use an <code>Entity&lt;T&gt;</code> when <code>T</code> needs independent identity: it is updated elsewhere, receives events, owns subscriptions or tasks, or survives while parents re-render. Do not create an entity merely to split a large <code>render</code> function.</p>
+
+        <div class="split">
+          <div class="choice"><span class="label">Too mechanical</span><h3>Every visual box becomes an entity</h3><p>This creates duplicated models, synchronization calls, and unclear ownership without buying a useful lifetime boundary.</p></div>
+          <div class="choice good"><span class="label">Idiomatic</span><h3>Entity where behavior is independent</h3><p>The reader shell owns publication state; the toolbar entity owns interaction and a small projected model; plain layout remains plain elements.</p></div>
+        </div>
+
+        <div class="callout"><strong>Widget is a role, not one concrete GPUI type.</strong> A widget may be an entity-backed <code>Render</code> object, a reusable element, or both. Choose from ownership needs first, appearance second.</div>
+
+        <p><strong>Copied state is a warning sign.</strong> If both the reader and toolbar store progress, title, and history availability, name one source authoritative and one a projection. Synchronize at one explicit boundary:</p>
+        <div class="code-card">
+          <div class="code-head"><span>reader → toolbar projection</span><span>epub/state.rs</span></div>
+          <pre><span class="kw">fn</span> <span class="fn">sync_toolbar</span>(&amp;self, reason: &amp;<span class="kw">'static str</span>, cx: &amp;<span class="kw">mut</span> Context&lt;Self&gt;) {
+    <span class="kw">let</span> model = self.toolbar_model(cx);
+    self.toolbar_view.update(cx, |toolbar, cx| {
+        toolbar.set_model(model, reason, cx)
+    });
+}</pre>
+        </div>
+      </section>
+
+      <section id="render">
+        <div class="kicker">03 · Observational rendering</div>
+        <h2>Render answers a question</h2>
+        <p class="compact"><code>render</code> answers: “Given the state now, which elements should exist?” Treat it like a pure projection even though Rust and GPUI allow <code>&amp;mut self</code>. Re-rendering should not save data, change another entity, set authoritative state, or trigger a chain of updates.</p>
+
+        <div class="split">
+          <div class="choice"><span class="label">Effect during observation</span><h3>Setting the window title in render</h3><p>A repaint now changes external state. The effect may run repeatedly and its cause is hidden.</p></div>
+          <div class="choice good"><span class="label">Explicit lifecycle effect</span><h3>Set it when activating the reader</h3><p>The title changes at the moment the window’s content changes, while render merely describes its body.</p></div>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>observational render</span><span>shape, don’t synchronize</span></div>
+          <pre><span class="kw">impl</span> Render <span class="kw">for</span> ReaderView {
+    <span class="kw">fn</span> <span class="fn">render</span>(&amp;<span class="kw">mut</span> self, window: &amp;<span class="kw">mut</span> Window, cx: &amp;<span class="kw">mut</span> Context&lt;Self&gt;)
+        -&gt; <span class="kw">impl</span> IntoElement
+    {
+        <span class="kw">let</span> document = <span class="kw">match</span> &amp;self.load_state {
+            LoadState::Loading =&gt; empty_document().into_any_element(),
+            LoadState::Ready(view) =&gt; view.clone().into_any_element(),
+        };
+
+        reader_shell().child(document)
+    }
+}</pre>
+        </div>
+
+        <details class="quiz"><summary>Quick test: may render calculate whether a sidebar is visible?</summary><p>Yes, if that is a cheap derivation used only to build this frame. No, if it writes the answer back as a second authoritative state or updates another entity. Derive freely; mutate deliberately.</p></details>
+      </section>
+
+      <section id="notify">
+        <div class="kicker">04 · Invalidation</div>
+        <h2><code>notify</code> means the view changed</h2>
+        <p class="compact"><code>cx.notify()</code> invalidates the entity’s observation. It is not a generic “something happened” signal and not a request to redraw one tiny rectangle. Notify after a mutation only when the entity’s observable output can differ.</p>
+
+        <div class="code-card">
+          <div class="code-head"><span>conditional + semantic invalidation</span><span>reader event handling</span></div>
+          <pre><span class="kw">if</span> self.can_history_back != back || self.can_history_forward != forward {
+    self.can_history_back = back;
+    self.can_history_forward = forward;
+    self.<span class="fn">sync_toolbar</span>(<span class="st">"history_availability_changed"</span>, cx);
+}</pre>
+        </div>
+
+        <p>Semantic reasons such as <code>annotation_deleted</code> or <code>reading_progress_changed</code> make invalidation measurable. A label like <code>state_changed</code> only confirms that the application has state.</p>
+        <div class="callout"><strong>Correctness first.</strong> Notify the entity that owns the changed projection. Measure render counts before introducing elaborate fine-grained entity boundaries.</div>
+      </section>
+
+      <section id="elements">
+        <div class="kicker">05 · Layout and custom elements</div>
+        <h2>The calculator should publish its answer</h2>
+        <p class="compact">If an element decides column count from its final viewport, that element owns the truth. A parent should not duplicate the fitting formula from approximate window dimensions. Expose the observed geometry produced by layout or prepaint.</p>
+
+        <div class="flow" aria-label="Geometry ownership flow">
+          <div class="node"><code>request_layout</code><small>Declare constraints and obtain a layout id.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>prepaint</code><small>Read final bounds and compose geometry.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>observation</code><small>Publish column count or visible range.</small></div>
+          <div class="flow-arrow">→</div>
+          <div class="node"><code>paint</code><small>Draw the prepared result for those bounds.</small></div>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span>renderer-owned geometry</span><span>html-view-gpui</span></div>
+          <pre><span class="kw">let</span> previous = self.layout_geometry;
+<span class="kw">let</span> paint = self.<span class="fn">compose_viewport_display_list</span>(viewport);
+
+<span class="kw">if</span> self.layout_geometry != previous {
+    cx.notify(); <span class="cm">// observers can now read the real result</span>
+}
+
+<span class="cm">// Reader popup placement consumes, but does not recalculate:</span>
+<span class="kw">let</span> columns = renderer.read(cx)
+    .layout_geometry()
+    .map_or(1, |geometry| usize::from(geometry.column_count));</pre>
+        </div>
+      </section>
+
+      <section id="async">
+        <div class="kicker">06 · Async boundaries</div>
+        <h2>Async work should not hold the UI hostage</h2>
+        <p class="compact">A bookmark should appear when the user clicks, not after SQLite replies. Mutate visible state and notify synchronously; queue the durable write afterward. If writes are order-dependent, serialize them even when the worker pool is parallel.</p>
+
+        <div class="code-card">
+          <div class="code-head"><span>optimistic mutation</span><span>epub/state.rs</span></div>
+          <pre>self.marks.bookmarks.push(bookmark.clone());
+self.reader_state_visible = <span class="kw">true</span>;
+notify(cx, Component::ReaderShell, <span class="st">"bookmark_created"</span>);
+
+self.mark_writes.<span class="fn">record</span>(<span class="st">"save bookmark"</span>, <span class="kw">move</span> |library| {
+    library.create_bookmark(&amp;bookmark).map_err(|error| error.to_string())
+});</pre>
+        </div>
+
+        <div class="cards">
+          <article class="card"><span class="tag">Loads</span><h3>Return through the owner</h3><p>Compute off-thread, then use the entity handle to install the result.</p></article>
+          <article class="card"><span class="tag">Writes</span><h3>Preserve intent order</h3><p>Create then delete must reach storage in that order, regardless of worker count.</p></article>
+          <article class="card"><span class="tag">Staleness</span><h3>Check identity</h3><p>Use a generation or request key when an older result could overwrite a newer request.</p></article>
+        </div>
+
+        <p><strong>Choose a failure policy explicitly.</strong> The reader currently keeps optimistic state and logs persistence failures. Other domains may require rollback or an error badge. That is product behavior, not an async implementation detail.</p>
+      </section>
+
+      <section id="focus">
+        <div class="kicker">07 · Focus and events</div>
+        <h2>Express semantic ownership</h2>
+        <p class="compact">Keyboard behavior follows focus, so a composite widget should define what “focus this widget” means. The reader’s semantic focus target is the document—not whichever container happened to receive a click.</p>
+
+        <div class="code-card">
+          <div class="code-head"><span>one focus invariant</span><span>epub/render.rs</span></div>
+          <pre><span class="kw">impl</span> Focusable <span class="kw">for</span> ReaderView {
+    <span class="kw">fn</span> <span class="fn">focus_handle</span>(&amp;self, cx: &amp;App) -&gt; FocusHandle {
+        self.document_focus(cx)
+            .unwrap_or_else(|| self.focus.clone())
+    }
+}</pre>
+        </div>
+
+        <p>Likewise, use typed actions for commands and typed events for child-to-owner communication. Raw callbacks are fine for local glue, but shared behavior becomes easier to route, test, and reason about when its meaning has a type.</p>
+      </section>
+
+      <section id="checklist">
+        <div class="kicker">08 · Review checklist</div>
+        <h2>Questions to ask in code review</h2>
+        <div class="rules">
+          <div class="rule"><b>01</b><p>Where is the single authoritative value for this behavior?</p></div>
+          <div class="rule"><b>02</b><p>Does this type need its own identity and lifetime, or is it only visual structure?</p></div>
+          <div class="rule"><b>03</b><p>Can <code>render</code> run repeatedly without changing application or external state?</p></div>
+          <div class="rule"><b>04</b><p>Does every notification correspond to a possible observable change?</p></div>
+          <div class="rule"><b>05</b><p>Is layout-derived information produced by the code that performs layout?</p></div>
+          <div class="rule"><b>06</b><p>Does the UI update immediately while slow work follows a clear ordering and failure policy?</p></div>
+          <div class="rule"><b>07</b><p>Could an old async result overwrite newer intent?</p></div>
+          <div class="rule"><b>08</b><p>Does focus land on the semantic keyboard owner after overlays close?</p></div>
+        </div>
+
+        <div class="callout"><strong>The compact rule:</strong> Events mutate entities; entities notify; render projects; elements lay out and paint; background tasks persist or compute.</div>
+      </section>
+
+      <footer>Derived from the EPUB reader and html-view-gpui refactor · local project lesson · 2026-08-22</footer>
+    </main>
+  </div>
+
+  <script>
+    const links = [...document.querySelectorAll('nav a')];
+    const sections = links.map(link => document.querySelector(link.hash)).filter(Boolean);
+    const progress = document.querySelector('.progress span');
+
+    function updateReadingState() {
+      const extent = document.documentElement.scrollHeight - innerHeight;
+      progress.style.width = `${extent > 0 ? Math.min(100, scrollY / extent * 100) : 0}%`;
+      let active = sections[0];
+      for (const section of sections) {
+        if (section.getBoundingClientRect().top <= 160) active = section;
+      }
+      links.forEach(link => link.classList.toggle('active', link.hash === `#${active.id}`));
+    }
+
+    addEventListener('scroll', updateReadingState, { passive: true });
+    addEventListener('resize', updateReadingState);
+    updateReadingState();
+  </script>
+</body>
+</html>

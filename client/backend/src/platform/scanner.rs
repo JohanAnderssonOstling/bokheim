@@ -77,6 +77,7 @@ pub enum LibraryEvent {
     LibraryListChanged,
     /// Browsable content inside one library changed.
     LibraryChanged,
+    ScanStarted,
     ScanComplete,
 }
 
@@ -256,6 +257,13 @@ impl LibraryScanner {
     }
 
     pub(crate) fn start_scanning(&self) {
+        if self.state.scan_enabled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        Self::request_scan(&self.state);
+    }
+
+    pub(crate) fn request_scanning(&self) {
         self.state.scan_enabled.store(true, Ordering::Release);
         Self::request_scan(&self.state);
     }
@@ -263,6 +271,7 @@ impl LibraryScanner {
     fn scan_library(db: &Pool<SqliteConnectionManager>, state: &Arc<ScannerState>) {
         state.scan_active.store(true, Ordering::Release);
         let _activity = ScanActivity(state);
+        let _ = state.event_tx.send(LibraryEvent::ScanStarted);
         let mut conn = match db.get() {
             Ok(c) => c,
             Err(e) => {
@@ -418,15 +427,24 @@ impl LibraryScanner {
                         continue;
                     }
                     Some(db::KnownDirectoryState::Live(Some(expected_path))) if expected_path.as_path() != relative => {
-                        let expected = expected_path.resolve_under(&state.library_root);
-                        if !expected.exists() && db::materialize_dir_parent_with_markers(&transaction, state.library_root.as_path(), &dir_id.to_string()).is_ok() && fs::rename(entry.path(), &expected).is_ok() {
-                            drop(transaction);
-                            Self::request_scan(state);
-                            return;
+                        if seen_dir_ids.contains(&dir_id) {
+                            dir_id = DirId::new_v4();
+                            if let Err(error) = fs::write(&uuid_path, dir_id.to_string()) {
+                                log::error!("Scanner: cannot replace duplicate directory marker {}: {error}", uuid_path.display());
+                                walkdir.skip_current_dir();
+                                continue;
+                            }
+                        } else {
+                            let expected = expected_path.resolve_under(&state.library_root);
+                            if !expected.exists() && db::materialize_dir_parent_with_markers(&transaction, state.library_root.as_path(), &dir_id.to_string()).is_ok() && fs::rename(entry.path(), &expected).is_ok() {
+                                drop(transaction);
+                                Self::request_scan(state);
+                                return;
+                            }
+                            log::warn!("Scanner: skipping stale path {} for directory {} (expected {})", entry.path().display(), dir_id, expected.display());
+                            walkdir.skip_current_dir();
+                            continue;
                         }
-                        log::warn!("Scanner: skipping stale path {} for directory {} (expected {})", entry.path().display(), dir_id, expected.display());
-                        walkdir.skip_current_dir();
-                        continue;
                     }
                     None if parent_is_suppressed => {
                         seen_dir_ids.insert(dir_id.clone());
@@ -616,17 +634,21 @@ impl Drop for LibraryScanner {
         if let Some(thread) = self.state.park_thread.get() {
             thread.unpark();
         }
-        // Close the thumbnail queue channel to signal the thumbnail thread to stop
-        drop(self.state.thumbnail_queue.clone());
-        drop(self.state.hash_queue.clone());
-        drop(self.state.hash_result_queue.clone());
-        self.watcher_thread.take();
-        self.worker_thread.take();
+        if let Some(thread) = self.worker_thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self.watcher_thread.take() {
+            let _ = thread.join();
+        }
         for thread in self.hash_threads.drain(..) {
             let _ = thread.join();
         }
-        self.hash_inserter_thread.take();
-        self.thumbnail_thread.take();
+        if let Some(thread) = self.hash_inserter_thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self.thumbnail_thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -653,12 +675,8 @@ impl LibraryScanner {
                 // let the scanner index every supported local file extension.
                 let format = Self::book_format_from_path(&task.book_path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported book extension"))?;
                 let content_hash = generate_content_hash_blake3(&task.book_path, &mut hash_buffer)?;
-                let (metadata, audiobook) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| book_metadata::inspect_book(&task.book_path, format))) {
-                    Ok(Ok(inspection)) => (Some(inspection.metadata), inspection.audiobook),
-                    Ok(Err(error)) => {
-                        log::warn!("Skipping metadata read for {}: {error}", task.book_path.display());
-                        (None, None)
-                    }
+                let (metadata, audiobook) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| book_metadata::inspect_book_for_catalogue(&task.book_path, format))) {
+                    Ok(inspection) => (Some(inspection.metadata), inspection.audiobook),
                     Err(_) => {
                         log::warn!("Skipping metadata parser panic for {}", task.book_path.display());
                         (None, None)
@@ -947,29 +965,38 @@ impl LibraryScanner {
             log::error!("Failed to watch library path {}: {error}", state.library_root.as_path().display());
             return;
         }
+        Self::watcher_event_loop(&state, &event_rx);
+        drop(watcher);
+    }
+
+    #[cfg(feature = "watcher")]
+    fn watcher_event_loop(state: &ScannerState, event_rx: &std::sync::mpsc::Receiver<notify::Result<Event>>) {
         let debounce = Duration::from_millis(500);
-        let mut pending_scan = false;
-        let mut last_event = None;
+        let mut last_relevant_event: Option<Instant> = None;
         loop {
             if state.should_finish.load(Ordering::Acquire) {
                 break;
             }
-            match event_rx.recv_timeout(debounce) {
+
+            // Do not make dispatch depend on the entire notify channel becoming
+            // quiet. SQLite WAL and other ignored internal files can generate a
+            // continuous stream of events. They must not starve a pending book
+            // event after its own debounce period has elapsed.
+            if last_relevant_event.is_some_and(|event| event.elapsed() >= debounce) {
+                Self::request_scan(state);
+                last_relevant_event = None;
+            }
+            let wait = last_relevant_event.map_or(debounce, |event| debounce.saturating_sub(event.elapsed()));
+            match event_rx.recv_timeout(wait) {
                 Ok(Ok(event)) => {
                     if Self::should_trigger_scan(&event) {
-                        pending_scan = true;
-                        last_event = Some(Instant::now());
+                        last_relevant_event = Some(Instant::now());
                     }
                 }
                 Ok(Err(e)) => log::error!("Watch error: {:?}", e),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if pending_scan {
-                        if let Some(last_event) = last_event {
-                            if last_event.elapsed() >= debounce {
-                                Self::request_scan(&state);
-                                pending_scan = false;
-                            }
-                        }
+                    if last_relevant_event.take().is_some() {
+                        Self::request_scan(state);
                     }
                 }
                 Err(e) => {
@@ -978,7 +1005,6 @@ impl LibraryScanner {
                 }
             }
         }
-        drop(watcher);
     }
 
     #[cfg(not(feature = "watcher"))]
@@ -986,6 +1012,9 @@ impl LibraryScanner {
 
     #[cfg(feature = "watcher")]
     fn should_trigger_scan(event: &Event) -> bool {
+        if matches!(event.kind, notify::EventKind::Access(_) | notify::EventKind::Other) && !event.need_rescan() {
+            return false;
+        }
         if event.paths.is_empty() {
             return true;
         }
@@ -1088,6 +1117,72 @@ mod tests {
         let mut pending = HashSet::new();
         assert!(pending.insert(first));
         assert!(pending.insert(second));
+    }
+
+    #[test]
+    fn only_an_explicit_request_rescans_an_enabled_scanner() {
+        let app_data = tempdir().unwrap();
+        let library_root_path = app_data.path().join("library");
+        fs::create_dir_all(&library_root_path).unwrap();
+        let library_root = library_root_path.canonicalize().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::PlatformLocal(app_data.path().join("app"))).unwrap();
+        let (state, _hash_rx, _event_rx) = test_scanner_state(&context, &library_root);
+        state.scan_requested.store(false, Ordering::Release);
+        state.scan_active.store(false, Ordering::Release);
+        let scanner = LibraryScanner { state: Arc::clone(&state), watcher_thread: None, worker_thread: None, thumbnail_thread: None, hash_inserter_thread: None, hash_threads: Vec::new() };
+
+        scanner.start_scanning();
+        assert!(!state.scan_requested.load(Ordering::Acquire));
+
+        scanner.request_scanning();
+        assert!(state.scan_requested.load(Ordering::Acquire));
+    }
+
+    #[cfg(feature = "watcher")]
+    #[test]
+    fn reading_a_book_does_not_trigger_another_scan() {
+        let book_path = PathBuf::from("library/book.epub");
+        let access = Event::new(notify::EventKind::Access(notify::event::AccessKind::Any)).add_path(book_path.clone());
+        let modify = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any)).add_path(book_path);
+
+        assert!(!LibraryScanner::should_trigger_scan(&access));
+        assert!(LibraryScanner::should_trigger_scan(&modify));
+    }
+
+    #[cfg(feature = "watcher")]
+    #[test]
+    fn ignored_event_stream_does_not_starve_pending_scan() {
+        let app_data = tempdir().unwrap();
+        let library_root_path = app_data.path().join("library");
+        fs::create_dir_all(library_root_path.join(APP_HIDDEN_DIR)).unwrap();
+        let library_root = library_root_path.canonicalize().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::PlatformLocal(app_data.path().join("app"))).unwrap();
+        let (state, _hash_rx, _event_rx) = test_scanner_state(&context, &library_root);
+        state.scan_requested.store(false, Ordering::Release);
+
+        let (event_tx, event_rx) = std_channel();
+        let watcher_state = Arc::clone(&state);
+        let watcher = thread::spawn(move || LibraryScanner::watcher_event_loop(&watcher_state, &event_rx));
+
+        event_tx.send(Ok(Event::new(notify::EventKind::Any).add_path(library_root.join("incoming.epub")))).unwrap();
+        let noise_tx = event_tx.clone();
+        let hidden_path = library_root.join(APP_HIDDEN_DIR).join("library.db-wal");
+        let noise = thread::spawn(move || {
+            let until = Instant::now() + Duration::from_millis(900);
+            while Instant::now() < until {
+                noise_tx.send(Ok(Event::new(notify::EventKind::Any).add_path(hidden_path.clone()))).unwrap();
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        thread::sleep(Duration::from_millis(700));
+        let scan_requested_while_noise_was_active = state.scan_requested.load(Ordering::Acquire);
+        noise.join().unwrap();
+        state.should_finish.store(true, Ordering::Release);
+        drop(event_tx);
+        watcher.join().unwrap();
+
+        assert!(scan_requested_while_noise_was_active, "ignored filesystem traffic must not keep a relevant book event pending forever");
     }
 
     #[test]
@@ -1303,12 +1398,11 @@ mod tests {
     /// anyone later "helpfully" normalizing scanned names to the download
     /// template: nothing about a filename is synchronized, and nothing on disk
     /// is ever renamed.
-    /// Two folders carrying the same marker are not two identities. The first
-    /// one walked keeps the id; the second is recognized as a stale path for a
-    /// directory that already lives elsewhere, so it is skipped rather than
-    /// silently re-identified into a duplicate directory row.
+    /// Two physical folders copied with the same marker must both survive. The
+    /// first one walked keeps the shared id and the duplicate receives a fresh
+    /// identity, avoiding both aliasing and destructive cleanup of user data.
     #[test]
-    fn a_folder_reusing_another_folders_marker_is_skipped_as_a_stale_path() {
+    fn a_folder_reusing_another_folders_marker_receives_a_fresh_identity() {
         let app_data = tempdir().unwrap();
         let library_root_path = app_data.path().join("library");
         fs::create_dir_all(&library_root_path).unwrap();
@@ -1332,23 +1426,21 @@ mod tests {
         LibraryScanner::scan_library(&state.db, &state);
 
         let conn = state.db.get().unwrap();
-        let directories: i64 = conn.query_row("SELECT COUNT(*) FROM dir WHERE id != '00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL", (), |row| row.get(0)).unwrap();
-        assert_eq!(directories, 1, "one marker is one directory identity");
-        // Which folder wins depends on directory walk order, which is the
-        // filesystem's business; what must hold is that exactly one of them owns
-        // the identity and the other is left untouched on disk.
-        let name: String = conn.query_row("SELECT name FROM dir WHERE id=?1", [shared_uuid], |row| row.get(0)).unwrap();
-        assert!(name == "First" || name == "Second", "the surviving identity must be one of the two folders, got {name}");
-        let surviving_name = name;
+        let directories = conn
+            .prepare("SELECT id,name FROM dir WHERE id != '00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(directories.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
+        assert_eq!(directories.iter().filter(|(id, _)| id == shared_uuid).count(), 1, "exactly one folder keeps the copied identity");
         drop(conn);
 
-        // The loser is a stale path for a directory that lives elsewhere, and it
-        // holds nothing, so it is cleaned up rather than re-identified. The
-        // survivor keeps the marker it came with: no new identity is minted.
-        let survivors: Vec<&Path> = [first.as_path(), second.as_path()].into_iter().filter(|path| path.exists()).collect();
-        assert_eq!(survivors.len(), 1, "an empty duplicate folder is removed, not kept");
-        assert_eq!(fs::read_to_string(survivors[0].join(".biblos_uuid")).unwrap(), shared_uuid);
-        assert_eq!(survivors[0].file_name().unwrap().to_str().unwrap(), surviving_name, "the folder left on disk is the one that owns the identity");
+        let first_marker = fs::read_to_string(first.join(".biblos_uuid")).unwrap();
+        let second_marker = fs::read_to_string(second.join(".biblos_uuid")).unwrap();
+        assert_ne!(first_marker, second_marker, "duplicate marker is replaced on one physical folder");
+        assert!(first_marker == shared_uuid || second_marker == shared_uuid, "one physical folder keeps the copied identity");
 
         state.should_finish.store(true, Ordering::Release);
         state.hash_jobs_changed.notify_all();

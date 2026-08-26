@@ -24,6 +24,7 @@ pub enum LibraryEvent {
     TransferStatusChanged,
     LibraryListChanged,
     LibraryChanged,
+    ScanStarted,
     ScanComplete,
 }
 
@@ -50,4 +51,6 @@ impl LibraryScanner {
     /// discovery is disabled. Android manages library files through its own
     /// application flow, so starting the scanner is intentionally a no-op.
     pub(crate) fn start_scanning(&self) {}
+
+    pub(crate) fn request_scanning(&self) {}
 }

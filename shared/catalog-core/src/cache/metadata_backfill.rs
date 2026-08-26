@@ -1,8 +1,8 @@
 use super::{
-    active_generation_in, bounded_crawl_error, decode_cached, merge_extracted_author_names, merge_extracted_publication_authors, merge_publication_subjects, merge_publication_subjects_prepared, metadata_index_from_metadata, params,
-    prepare_catalog_subject_assignments, record_identity_review, record_identity_review_failure, sequence_in, sql_decode_error, storage_i64, unix_timestamp, CatalogCache, CatalogCacheError, CatalogEpubMetadata,
-    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPublicationIdentity, CatalogSourceId,
-    CatalogSubjectAssignment, Instant, TransactionBehavior, CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, decode_cached, merge_catalog_subject_evidence, merge_extracted_author_names, merge_extracted_publication_authors, metadata_index_from_metadata, params,
+    prepare_catalog_subject_assignments, record_identity_review, record_identity_review_failure, sequence_in, sequenced_publication_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, CatalogCache,
+    CatalogCacheError, CatalogEpubMetadata, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillJob, CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex,
+    CatalogPublicationIdentity, CatalogSourceId, CatalogSubjectAssignment, Instant, TransactionBehavior, CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
 };
 
 impl CatalogCache {
@@ -169,7 +169,12 @@ impl CatalogCache {
             transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&update.metadata)?])?;
             if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
                 merge_extracted_publication_authors(&transaction, &update.source_id, generation, &update.publication, &update.metadata)?;
-                merge_publication_subjects(&transaction, &update.source_id, generation, &update.publication, &update.subjects)?;
+                if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
+                    merge_catalog_subject_evidence(&mut active.publication, &update.subjects);
+                    merge_identity_evidence(&mut active.publication, update.identity_result.as_ref());
+                    upsert_active_publication(&transaction, &update.source_id, generation, &active.publication)?;
+                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
+                }
                 if let Some(popularity) = &update.popularity {
                     let work_id = update.publication.work_id.as_deref().unwrap_or("");
                     transaction.execute(
@@ -220,6 +225,9 @@ impl CatalogCache {
             transaction.execute("DELETE FROM catalog_description_backfill WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url])?;
             transaction.execute("UPDATE catalog_metadata_backfill SET status='succeeded',last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![update.source_id.as_str(), update.acquisition_url])?;
         }
+        if !updates.is_empty() {
+            advance_catalog_transport_revision(&transaction)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -238,14 +246,19 @@ impl CatalogCache {
         let mut identity_review_ms = 0;
         let mut index_ms = 0;
         let mut status_ms = 0;
-        for (update, prepared_assignments) in updates.iter().zip(prepared_assignments) {
+        for (update, _prepared_assignments) in updates.iter().zip(prepared_assignments) {
             let generation = active_generation_in(&transaction, &update.source_id)?;
             if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
                 let authors_started = Instant::now();
                 merge_extracted_author_names(&transaction, &update.source_id, generation, &update.publication, &update.index.authors)?;
                 authors_ms += u64::try_from(authors_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let subjects_started = Instant::now();
-                merge_publication_subjects_prepared(&transaction, &update.source_id, generation, &update.publication, &update.subjects, prepared_assignments)?;
+                if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
+                    merge_catalog_subject_evidence(&mut active.publication, &update.subjects);
+                    merge_identity_evidence(&mut active.publication, update.identity_result.as_ref());
+                    upsert_active_publication(&transaction, &update.source_id, generation, &active.publication)?;
+                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
+                }
                 subjects_ms += u64::try_from(subjects_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if let Some(popularity) = &update.popularity {
                     let work_id = update.publication.work_id.as_deref().unwrap_or("");
@@ -290,6 +303,9 @@ impl CatalogCache {
             transaction.execute("UPDATE catalog_metadata_backfill SET status='succeeded',last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![update.source_id.as_str(), update.acquisition_url])?;
             status_ms += u64::try_from(status_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         }
+        if !updates.is_empty() {
+            advance_catalog_transport_revision(&transaction)?;
+        }
         let transaction_ms = u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let commit_started = Instant::now();
         transaction.commit()?;
@@ -328,5 +344,26 @@ impl CatalogCache {
         }
         transaction.commit()?;
         Ok(())
+    }
+}
+
+fn merge_identity_evidence(publication: &mut catalog_contract::CatalogPublication, result: Option<&metadata_contract::EditionIdentityResult>) {
+    let Some(matched) = result.and_then(|result| result.matched.as_ref()) else { return };
+    let evidence = [
+        catalog_contract::Identifier::new(&matched.canonical_isbn13, catalog_contract::Scheme::Isbn, catalog_contract::Scope::Publication, "openlibrary:identity-match").expect("Open Library returned a bounded ISBN"),
+        catalog_contract::Identifier::new(&matched.open_library_edition_id, catalog_contract::Scheme::Other("openlibrary".to_owned()), catalog_contract::Scope::Edition, "openlibrary:identity-match")
+            .expect("Open Library returned a bounded edition identifier"),
+    ];
+    for identifier in evidence {
+        if !publication.metadata.identifiers.contains(&identifier) {
+            publication.metadata.identifiers.push(identifier);
+        }
+    }
+    if let Some(work_id) = &matched.open_library_work_id {
+        let identifier =
+            catalog_contract::Identifier::new(work_id, catalog_contract::Scheme::Other("openlibrary".to_owned()), catalog_contract::Scope::Work, "openlibrary:identity-match").expect("Open Library returned a bounded work identifier");
+        if !publication.metadata.identifiers.contains(&identifier) {
+            publication.metadata.identifiers.push(identifier);
+        }
     }
 }

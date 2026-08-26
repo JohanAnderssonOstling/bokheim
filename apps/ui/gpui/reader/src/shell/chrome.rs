@@ -6,7 +6,8 @@
 //! annotation genuinely offer different actions.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, IntoElement, div, px};
+use gpui::{AnyElement, App, IntoElement, Window, div, px};
+use ui_components::WindowWidthClass;
 
 use crate::settings::ReaderSettings;
 
@@ -19,9 +20,9 @@ const RESIZE_EPSILON: f32 = 1.0;
 ///
 /// On Kobo the divider is dropped: the screen is too narrow to show both, so
 /// the sidebar overlays the document instead of splitting it.
-pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, cx: &mut App) -> AnyElement {
-    let width = ReaderSettings::preferences(cx).toc_width;
-    if cfg!(feature = "kobo") {
+pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, window: &Window, cx: &mut App) -> AnyElement {
+    let width = ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width));
+    if sidebar_overlays_document(window) {
         return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(div().absolute().left_0().top_0().bottom_0().w(px(width)).child(sidebar)).into_any_element();
     }
     ui_components::reader_split(sidebar, document, width)
@@ -46,12 +47,17 @@ fn is_meaningful_resize(current: f32, next: f32) -> bool {
 
 /// The width the document must give up to a visible sidebar, used when sizing
 /// overlays against the remaining space.
-pub(crate) fn sidebar_width(visible: bool, cx: &App) -> f32 {
-    // A Kobo sidebar floats above the document rather than displacing it.
-    if !visible || cfg!(feature = "kobo") {
+pub(crate) fn sidebar_width(visible: bool, window: &Window, cx: &App) -> f32 {
+    // Compact readers and Kobo float the sidebar above the document rather
+    // than reducing the text viewport to an unusable sliver.
+    if !visible || sidebar_overlays_document(window) {
         return 0.0;
     }
     ReaderSettings::preferences(cx).toc_width
+}
+
+fn sidebar_overlays_document(window: &Window) -> bool {
+    cfg!(feature = "kobo") || WindowWidthClass::for_window(window).is_compact()
 }
 
 #[cfg(test)]

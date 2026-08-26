@@ -1,22 +1,21 @@
 //! Public handle for operations scoped to one concrete library.
 
-use std::fmt;
 use std::future::Future;
-use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::app::executor::BackendTask;
-use crate::catalog::{
-    CatalogAuthorDiscoveryResult, CatalogImportRequest, CatalogPublicationIdentity, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearch, CatalogSearchQuery, CatalogSourceId, CatalogSubjectBrowseRequest,
-};
+use crate::catalog::{CatalogImportRequest, CatalogPublicationIdentity, CatalogSearch, CatalogSearchQuery, CatalogSourceId, CatalogSubjectBrowseRequest};
 use crate::library::database as db;
-use crate::library::{AuthorSummary, BookCardRow, Dir, ResolvedBook};
+use crate::library::ResolvedBook;
 use crate::platform::scanner::{LibraryEvent, LibraryScanner};
 use crate::sync::SyncManager;
-use crate::{AuthorId, ContentHash, DirId, DownloadState, FolderDownloadStatus, LibraryId};
+use crate::{ContentHash, DirId, DownloadState, FolderDownloadStatus, LibraryId};
+use app_contract::catalog::CatalogSubjectBrowseView;
+use app_contract::library::{BookImportDestination, Dir, DirectoryImport, LibraryFolderDestination, LibraryTrashView};
 
-use crate::app::{AppBackend, AppState, BackendContext, BackendError, CatalogAuthorDiscoveryView, CatalogPageView, CatalogSubjectBrowseView, CatalogWideSearchView};
+use crate::app::{AppBackend, AppState, BackendContext, BackendError, CatalogPageView};
 use crossbeam_channel::Sender;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -34,8 +33,21 @@ pub struct LibraryBackend {
     pub(super) db: Pool<SqliteConnectionManager>,
     pub(super) sync_manager: Arc<SyncManager>,
     pub(super) event_tx: Sender<LibraryEvent>,
+    import_activity: Arc<AtomicUsize>,
     // Its Drop implementation stops and joins the scanner threads.
     pub(super) _scanner: Arc<LibraryScanner>,
+}
+
+struct ImportActivity {
+    active: Arc<AtomicUsize>,
+    events: Sender<LibraryEvent>,
+}
+
+impl Drop for ImportActivity {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+        let _ = self.events.send(LibraryEvent::LibraryChanged);
+    }
 }
 
 impl LibraryBackend {
@@ -49,7 +61,7 @@ impl LibraryBackend {
     pub(super) fn from_parts(
         app: Weak<AppState>, context: BackendContext, id: LibraryId, library_root: PathBuf, db: Pool<SqliteConnectionManager>, sync_manager: Arc<SyncManager>, event_tx: Sender<LibraryEvent>, scanner: LibraryScanner,
     ) -> Self {
-        Self { app, context, id, library_root, db, sync_manager, event_tx, _scanner: Arc::new(scanner) }
+        Self { app, context, id, library_root, db, sync_manager, event_tx, import_activity: Arc::new(AtomicUsize::new(0)), _scanner: Arc::new(scanner) }
     }
 
     pub(super) fn app(&self) -> Result<AppBackend, BackendError> {
@@ -63,12 +75,23 @@ impl LibraryBackend {
     /// True while the local filesystem scanner is scheduled or actively
     /// walking this library.
     pub fn scanner_running(&self) -> bool {
-        self._scanner.is_scanning()
+        self._scanner.is_scanning() || self.import_activity.load(Ordering::Acquire) != 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_scanner_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self._scanner, &other._scanner)
     }
 
     /// Enables the initial filesystem scan for a handle opened in deferred mode.
     pub fn start_scanner(&self) {
         self._scanner.start_scanning();
+    }
+
+    /// Queues a fresh local filesystem scan even when this scanner is already
+    /// enabled. Used by an explicit library switch, not ordinary handle access.
+    pub fn request_scan(&self) {
+        self._scanner.request_scanning();
     }
 
     pub(crate) fn recorded_taxonomy_codes(&self, content_hash: &ContentHash) -> Result<Vec<taxonomy_contract::TaxonomyCode>, BackendError> {
@@ -86,28 +109,6 @@ impl LibraryBackend {
         db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
         let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
         Ok(())
-    }
-
-    /// Requests catalogue recommendations using only a bounded weighted
-    /// subject profile and owned catalogue identities derived locally.
-    pub async fn catalog_recommendations(&self, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
-        self.app()?.catalog_recommendations_in(&self.id, limit).await
-    }
-
-    /// Reuses the canonical subject selected by the library hierarchy instead
-    /// of making a frontend infer its classification system from a label.
-    pub async fn catalog_subject_recommendations(&self, subject_path: &str, limit: u32) -> Result<CatalogRecommendationResponse, BackendError> {
-        self.app()?.catalog_subject_recommendations_in(&self.id, subject_path, limit).await
-    }
-
-    pub(crate) fn catalog_recommendation_request(&self, limit: u32) -> Result<CatalogRecommendationRequest, BackendError> {
-        let connection = self.db.get().map_err(BackendError::operation)?;
-        db::catalog_recommendation_request(&connection, limit).map_err(BackendError::operation)
-    }
-
-    pub(crate) fn catalog_subject_recommendation_request(&self, subject_path: &str, limit: u32) -> Result<CatalogRecommendationRequest, BackendError> {
-        let connection = self.db.get().map_err(BackendError::operation)?;
-        db::catalog_subject_recommendation_request(&connection, subject_path, limit).map_err(BackendError::operation)
     }
 
     pub fn spawn<T, F, Fut>(&self, operation: F) -> BackendTask<T>
@@ -207,8 +208,27 @@ impl LibraryBackend {
         self.load_folder_destinations().map_err(BackendError::operation)
     }
 
-    pub fn import_book(&self, parent_id: &DirId, source_path: &Path, file_name: &str) -> Result<ContentHash, BackendError> {
-        self.import_local_book(parent_id, source_path, file_name).map_err(BackendError::operation)
+    pub fn import_book(&self, parent_id: &DirId, source_path: &Path) -> Result<ContentHash, BackendError> {
+        self.import_local_book(parent_id, source_path).map_err(BackendError::operation)
+    }
+
+    pub fn import_book_bytes(&self, parent_id: &DirId, file_name: String, bytes: Vec<u8>) -> Result<ContentHash, BackendError> {
+        self.import_book_reader(parent_id, &mut std::io::Cursor::new(bytes), file_name, None).map_err(BackendError::operation)
+    }
+
+    pub fn import_folder(&self, parent_id: &DirId, source_path: &Path) -> Result<Vec<String>, BackendError> {
+        self.notify_library_changed(self.import_local_folder(parent_id, source_path).map_err(BackendError::operation))
+    }
+
+    pub fn import_directory(&self, parent_id: &DirId, source: DirectoryImport) -> Result<Vec<String>, BackendError> {
+        self.notify_library_changed(self.import_selected_directory(parent_id, source, true).map_err(BackendError::operation))
+    }
+
+    pub(crate) fn import_directory_contents(&self, source: DirectoryImport) -> Result<Vec<String>, BackendError> {
+        self.import_activity.fetch_add(1, Ordering::AcqRel);
+        let _activity = ImportActivity { active: self.import_activity.clone(), events: self.event_tx.clone() };
+        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
+        self.import_selected_directory(&sync_common::ROOT_DIR_ID, source, false).map_err(BackendError::operation)
     }
 
     pub(crate) fn import_downloaded_catalog_book(&self, parent_id: &DirId, source_path: &Path, file_name: &str, source_id: &CatalogSourceId, publication: &CatalogPublicationIdentity) -> Result<ContentHash, BackendError> {
@@ -220,20 +240,20 @@ impl LibraryBackend {
         db::owned_catalog_publications(&connection, source_id, identities).map_err(BackendError::operation)
     }
 
-    pub async fn search_catalogs(&self, query: &str) -> Result<CatalogWideSearchView, BackendError> {
-        self.app()?.search_catalogs_in(self.id(), query).await
-    }
-
-    pub async fn cached_search_catalogs(&self, query: &str) -> Result<CatalogWideSearchView, BackendError> {
-        self.app()?.cached_search_catalogs_in(self.id(), query).await
-    }
-
     pub async fn catalog_page(&self, source_id: &CatalogSourceId, locator: Option<&str>) -> Result<CatalogPageView, BackendError> {
         self.app()?.catalog_page_in(self.id(), source_id, locator).await
     }
 
-    pub async fn browse_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
-        self.app()?.browse_catalog_subjects_in(self.id(), request).await
+    pub async fn refresh_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
+        self.app()?.refresh_catalog_subjects_in(self.id(), request).await
+    }
+
+    pub async fn catalog_subject_capabilities(&self, request: CatalogSubjectBrowseRequest) -> Result<app_contract::catalog::CatalogSubjectBrowseCapabilities, BackendError> {
+        self.app()?.catalog_subject_capabilities(request).await
+    }
+
+    pub fn cached_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<Option<CatalogSubjectBrowseView>, BackendError> {
+        self.app()?.cached_catalog_subjects_in(self.id(), request)
     }
 
     pub async fn search_catalog(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPageView, BackendError> {
@@ -244,16 +264,8 @@ impl LibraryBackend {
         self.app()?.cached_search_catalog_in(self.id(), source_id, query).await
     }
 
-    pub async fn discover_author_books(&self, author_id: AuthorId) -> Result<CatalogAuthorDiscoveryView, BackendError> {
-        self.app()?.discover_catalog_author_view_in(self.id(), author_id).await
-    }
-
-    pub async fn discover_author_catalog(&self, author_id: AuthorId) -> Result<CatalogAuthorDiscoveryResult, BackendError> {
-        self.app()?.discover_catalog_author_books_in(self.id(), author_id).await
-    }
-
     pub async fn import_catalog_book(&self, directory_id: DirId, request: &CatalogImportRequest) -> Result<ContentHash, BackendError> {
-        let destination = crate::library::BookImportDestination::new(*self.id(), directory_id);
+        let destination = BookImportDestination::new(*self.id(), directory_id);
         self.app()?.import_catalog_book_in(&destination, request).await
     }
 
@@ -330,96 +342,4 @@ impl LibraryBackend {
     }
 }
 
-#[derive(Clone, serde::Serialize, specta::Type)]
-pub struct LibraryHomeView {
-    pub recently_read: Vec<BookCardRow>,
-    pub recently_added: Vec<BookCardRow>,
-}
-
-#[derive(Clone, serde::Serialize, specta::Type)]
-pub struct LibraryAuthorsView {
-    pub authors: Vec<AuthorSummary>,
-    pub books: Option<Vec<BookCardRow>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, specta::Type)]
-#[serde(transparent)]
-pub struct SubjectPath(String);
-
-impl SubjectPath {
-    pub fn new(path: impl Into<String>) -> Self {
-        Self(path.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for SubjectPath {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
-#[specta(bound = "")]
-pub struct LibraryHierarchyEntry<Id> {
-    #[specta(type = String)]
-    pub id: Id,
-    pub name: String,
-    #[specta(type = specta_typescript::Number)]
-    pub book_count: usize,
-    #[specta(type = specta_typescript::Number)]
-    pub downloaded_book_count: usize,
-}
-
-#[derive(Clone, serde::Serialize, specta::Type)]
-#[specta(bound = "")]
-pub struct LibraryHierarchyView<Id> {
-    #[specta(type = Vec<LibraryHierarchyEntry<String>>)]
-    pub children: Vec<LibraryHierarchyEntry<Id>>,
-    pub books: Vec<BookCardRow>,
-}
-
-pub type LibraryFolderEntry = LibraryHierarchyEntry<DirId>;
-pub type LibrarySubjectEntry = LibraryHierarchyEntry<SubjectPath>;
-pub type LibraryFolderView = LibraryHierarchyView<DirId>;
-pub type LibrarySubjectView = LibraryHierarchyView<SubjectPath>;
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
-pub struct TrashedBook {
-    #[specta(type = String)]
-    pub content_hash: ContentHash,
-    pub title: String,
-    pub format: String,
-    #[specta(type = f64)]
-    pub deleted_at: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
-pub struct TrashedFolder {
-    #[specta(type = String)]
-    pub id: DirId,
-    pub name: String,
-    #[specta(type = f64)]
-    pub deleted_at: i64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, specta::Type)]
-pub struct LibraryTrashView {
-    pub books: Vec<TrashedBook>,
-    pub folders: Vec<TrashedFolder>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
-pub struct LibraryFolderDestination {
-    #[specta(type = String)]
-    pub id: DirId,
-    #[specta(type = Option<String>)]
-    pub parent_id: Option<DirId>,
-    pub label: String,
-    /// Human-readable path for clients that present a flat destination list.
-    /// Hierarchical pickers must use `parent_id`, not parse this string.
-    pub path: String,
-}
+pub use library_sqlite::{LibraryAuthorsView, LibraryFolderEntry, LibraryFolderView, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySubjectEntry, LibrarySubjectView};

@@ -4,7 +4,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use gpui::{Hsla, TextRun, font, px, rgba};
 use html_view_core::text_backend::{

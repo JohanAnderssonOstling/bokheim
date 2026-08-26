@@ -1,6 +1,8 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
+use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, ReaderAnnotation, ReaderBookmark};
 use gpui::prelude::*;
 use gpui::{App, Context, FocusHandle, ScrollStrategy, Window};
 use gpui_component::input::{InputEvent, InputState};
@@ -8,41 +10,55 @@ use gpui_component::tree::{TreeItem, TreeState};
 use html_view_core::{InteractionPalette, RendererCommand, RendererEvent, RendererInitialConfig, SearchScope, TocEntry};
 use html_view_gpui::HtmlView;
 
-use crate::epub::audio::AudioMode;
-use crate::epub::audio::AudioState;
 use crate::epub::marks::{self, Selection};
 use crate::epub::progress::ProgressState;
 use crate::epub::search::{SearchFilters, SearchState};
 use crate::epub::toc::TocState;
-use crate::epub::toolbar::{AudioAffordance, ReaderToolbar, ToolbarEvent, ToolbarModel};
+use crate::epub::toolbar::{ReaderToolbar, ToolbarEvent, ToolbarModel};
 use crate::epub::{LoadState, PendingReader, ReaderView};
 use crate::invalidation::Component;
-use crate::settings::{ReaderPreferences, ReaderServices, ReaderSettings, library_paint_palette};
+use crate::settings::{ReaderPreferences, ReaderSettings, library_paint_palette};
 use crate::shell::marks::MarksState;
-use crate::shell::persistence::{self, PositionWriter};
-use epub_svelte_lib::app::preferences::{COLUMN_COUNT_MAX, COLUMN_COUNT_MIN, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, ReaderFontFamily, ReaderTextAlignment, ZOOM_MAX, ZOOM_MIN};
+use crate::shell::persistence::{self, MutationWriter, PositionWriter};
+use app_contract::preferences::{COLUMN_COUNT_MAX, COLUMN_COUNT_MIN, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, ReaderFontFamily, ReaderTextAlignment, ZOOM_MAX, ZOOM_MIN};
 
 /// How long typing settles before a search is applied.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+fn update_cfi_position(current: &mut Option<String>, next: &Option<String>, fraction: f32) -> Option<(String, f32)> {
+    if current == next {
+        return None;
+    }
+    current.clone_from(next);
+    current.clone().map(|cfi| (cfi, fraction))
+}
 
 /// Narrowest column the fit-columns control may produce. Below the
 /// hand-adjustable minimum on purpose: fitting four columns into a narrow
 /// window needs columns the width slider would refuse.
 const FITTED_COLUMN_WIDTH_MIN: f64 = 80.0;
 
-/// How often read-aloud is checked for having finished.
-const SPEECH_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// How often the current narration cue is checked for having finished. Tighter
-/// than speech polling so cues run together without an audible gap.
-const OVERLAY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
+    let preferences = ReaderSettings::preferences(cx).clone();
+    let column_width = if cfg!(feature = "kobo") { LINE_WIDTH_MAX } else { preferences.column_width };
+    RendererInitialConfig {
+        font_size: preferences.font_size,
+        column_width,
+        scale: preferences.scale,
+        max_column_count: cfg!(feature = "kobo").then_some(1),
+        style_overrides: preferences.style_overrides(),
+        paint_palette: library_paint_palette(cx),
+        interaction_palette: InteractionPalette::default(),
+        search_active: false,
+        search_query: String::new(),
+        ..Default::default()
+    }
+}
 
 impl ReaderView {
     pub(crate) fn new(pending: PendingReader, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let reader_started = Instant::now();
         startup_phase!("phase=reader_view_begin");
-        #[cfg(debug_assertions)]
-        crate::invalidation::initialize_performance_measurements();
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _window, cx| match event {
             InputEvent::Change => {
@@ -56,19 +72,7 @@ impl ReaderView {
         });
         let annotation_note_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add a note").multi_line(true));
         let publication = pending.publication.clone();
-        let media_overlay_cues = publication.media_overlay_cues.clone();
-        let generation = 1;
-        let load_publication = publication.clone();
-        let callback_scheduled_at = Instant::now();
-        let nav_state = pending.nav_state.clone();
-        let initial_target = pending.initial_target.clone();
-        startup_phase!("phase=loading_frame_wait_begin");
-        cx.on_next_frame(window, move |this, window, cx| {
-            startup_phase!("phase=loading_frame_rendered queue_ms={}", callback_scheduled_at.elapsed().as_millis());
-            this.finish_load(generation, Ok(load_publication), nav_state.as_deref(), initial_target.as_deref(), window, cx);
-        });
 
-        let bounds_subscription = crate::shell::geometry::observe(window, cx);
         let focus = cx.focus_handle();
         let toc_tree = cx.new(|cx| TreeState::new(cx));
         let toolbar_view = cx.new(|_| ReaderToolbar::default());
@@ -77,21 +81,16 @@ impl ReaderView {
         });
         focus.focus(window, cx);
         let reading_content_hash = pending.locator.content_hash();
-        let reading_positions = PositionWriter::new(
-            cx,
-            "save reading position",
-            move |library, (cfi, progress): &(String, f32)| library.update_reading_position(reading_content_hash.clone(), cfi, *progress).map_err(|error| error.to_string()),
-            pending.library.clone(),
-        );
+        let reading_positions =
+            PositionWriter::new(cx, "save reading position", move |library, (cfi, progress): &(String, f32)| library.update_reading_position(reading_content_hash.clone(), cfi.clone(), Some(*progress)), pending.library.clone());
+        let mark_writes = MutationWriter::new(cx, pending.library.clone());
 
-        let reader = Self {
-            id: pending.id,
+        let mut reader = Self {
             locator: pending.locator,
             library: pending.library,
             book_title: pending.title.clone(),
             title: pending.title,
             load_state: LoadState::Loading,
-            load_generation: generation,
             desired_column_count: if cfg!(feature = "kobo") { 1 } else { ReaderSettings::preferences(cx).max_column_count },
             toc: TocState::default(),
             toc_tree,
@@ -99,7 +98,7 @@ impl ReaderView {
             chrome_hidden: false,
             search_input,
             search: SearchState::default(),
-            publication,
+            publication: publication.clone(),
             current_cfi: None,
             progress: ProgressState::default(),
             toolbar_view,
@@ -111,62 +110,25 @@ impl ReaderView {
             annotation_popup_anchor: None,
             footnote: None,
             image_preview: None,
-            audio: AudioState::new(media_overlay_cues),
             can_history_back: false,
             can_history_forward: false,
-            unavailable: false,
             focus,
             renderer_subscription: None,
             reading_positions,
-            _subscriptions: vec![bounds_subscription, search_subscription, toolbar_subscription],
+            mark_writes,
+            return_to_library: pending.return_to_library,
+            _subscriptions: vec![search_subscription, toolbar_subscription],
         };
+        reader.finish_load(pending.preparation, window, cx);
         startup_phase!("phase=reader_view_ready phase_ms={}", reader_started.elapsed().as_millis());
         reader
     }
 
-    fn finish_load(&mut self, generation: u64, result: Result<Arc<crate::publication::NativePublication>, String>, nav_state: Option<&str>, initial_target: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_load(&mut self, preparation: html_view_core::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
         let finish_started = Instant::now();
         startup_phase!("phase=finish_load_begin");
-        if generation != self.load_generation {
-            return;
-        }
-        let publication = match result {
-            Ok(publication) => publication,
-            Err(error) => {
-                log::error!("failed to load reader {} for book {}: {error}", self.id.0, self.locator.content_hash());
-                self.load_state = LoadState::Failed;
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-                return;
-            }
-        };
-
-        let provider = publication.provider.clone();
-        let documents = publication.document_uris.clone();
-        let start_index = publication.start_index;
-        let preferences = ReaderSettings::preferences(cx).clone();
-        // Kobo always uses one edge-to-edge renderer column. A deliberately
-        // wide base column is reduced to the current viewport by HtmlViewCore,
-        // keeping its computed outer column gap at zero in either orientation.
-        let column_width = if cfg!(feature = "kobo") { LINE_WIDTH_MAX } else { preferences.column_width };
-        let initial_config = RendererInitialConfig {
-            font_size: preferences.font_size,
-            column_width,
-            scale: preferences.scale,
-            max_column_count: cfg!(feature = "kobo").then_some(1),
-            style_overrides: preferences.style_overrides(),
-            paint_palette: library_paint_palette(cx),
-            interaction_palette: InteractionPalette::default(),
-            search_active: self.search.active,
-            search_query: self.search.query().to_owned(),
-            ..Default::default()
-        };
         let renderer_started = Instant::now();
-        let renderer = cx.new(|cx| HtmlView::from_provider(provider, documents, start_index, nav_state, initial_config, window, cx));
-        if let Some(target) = initial_target {
-            renderer.update(cx, |renderer, cx| {
-                renderer.navigate_to_href(target, cx);
-            });
-        }
+        let renderer = cx.new(|cx| HtmlView::from_preparation(preparation, window, cx).expect("background-prepared renderer should finish shaping"));
         startup_phase!("phase=renderer_entity_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), renderer_started.elapsed().as_millis());
         self.renderer_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, event: &RendererEvent, window, cx| {
             this.handle_renderer_event(event, window, cx);
@@ -177,20 +139,40 @@ impl ReaderView {
             let renderer = renderer.read(cx);
             TocState::resolve(&toc, |href| renderer.resolve_href(href))
         };
+        let toc_anchors = TocState::anchor_strings_by_doc(&resolutions, self.publication.document_uris.len());
         self.set_toc(toc, resolutions, cx);
+        renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(toc_anchors, cx));
         startup_phase!("phase=toc_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), toc_started.elapsed().as_millis());
 
         startup_phase!("phase=initial_preferences_embedded elapsed_ms={}", finish_started.elapsed().as_millis());
         self.load_state = LoadState::Ready(renderer);
+        self.load_document_text_lengths(cx);
         // The window focused the page container before there was a document to
         // focus. Hand keyboard control to the document now that one exists, so
         // paging works without clicking the text first.
         self.focus_document(window, cx);
         self.load_reader_state(cx);
         startup_phase!("phase=reader_state_requested elapsed_ms={}", finish_started.elapsed().as_millis());
-        self.invalidate_toolbar("reader_ready", cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        self.sync_toolbar("reader_ready", cx);
+        crate::invalidation::notify(cx, Component::ReaderShell, "reader_ready");
         startup_phase!("phase=finish_load_complete elapsed_ms={}", finish_started.elapsed().as_millis());
+    }
+
+    /// Loads stable publication-wide progress weights without extending the
+    /// reader's startup path. Until these arrive the renderer deliberately
+    /// falls back to one unit per spine item, which is enough for navigation
+    /// but cannot report movement inside a long chapter.
+    fn load_document_text_lengths(&self, cx: &mut Context<Self>) {
+        let provider = self.publication.provider.clone();
+        let documents = self.publication.document_uris.clone();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let lengths = executor.spawn(async move { html_view_core::publication_text_lengths(provider.as_ref(), &documents) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetDocumentTextLengths(lengths), cx));
+            });
+        })
+        .detach();
     }
 
     fn load_reader_state(&mut self, cx: &mut Context<Self>) {
@@ -200,16 +182,16 @@ impl ReaderView {
             self.library.clone(),
             "load reader state",
             move |library| {
-                let annotations = library.annotations(content_hash.clone()).map_err(|error| error.to_string())?;
-                let bookmarks = library.bookmarks(content_hash).map_err(|error| error.to_string())?;
-                Ok((annotations, bookmarks))
+                let annotations = library.annotations(content_hash.clone());
+                let bookmarks = library.bookmarks(content_hash);
+                Box::pin(async move { Ok((annotations.await?, bookmarks.await?)) })
             },
             |this, cx, (annotations, bookmarks)| {
                 this.marks.annotations = annotations;
                 this.marks.bookmarks = bookmarks;
                 let overlays = marks::overlays(&this.marks);
                 this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetAnnotations(overlays), cx));
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+                crate::invalidation::notify(cx, Component::ReaderShell, "marks_loaded");
             },
         );
     }
@@ -218,33 +200,25 @@ impl ReaderView {
         let Some(selection) = self.selection.clone() else { return };
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let now = crate::shell::state_panel::now_millis();
-        let annotation = epub_svelte_lib::library::marks::ReaderAnnotation {
+        let annotation = ReaderAnnotation {
             id: uuid::Uuid::new_v4().to_string(),
             content_hash: self.locator.content_hash(),
-            anchor: epub_svelte_lib::library::marks::AnnotationAnchor::epub_cfi(selection.cfi_range),
+            anchor: AnnotationAnchor::epub_cfi(selection.cfi_range),
             exact_text: selection.text,
-            style: epub_svelte_lib::library::marks::AnnotationStyle::Highlight,
+            style: AnnotationStyle::Highlight,
             color: "#f6c945".to_owned(),
             note: String::new(),
             created_at: now,
             modified_at: now,
         };
-        let stored = annotation.clone();
-        persistence::write(
-            cx,
-            self.library.clone(),
-            "save reader annotation",
-            move |library| library.upsert_annotation(&stored).map_err(|error| error.to_string()),
-            move |this, cx, ()| {
-                let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
-                this.marks.selected_id = Some(annotation.id.clone());
-                this.marks.annotations.push(annotation);
-                this.selection = None;
-                this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
-                this.invalidate_toolbar("selection_cleared", cx);
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            },
-        );
+        let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
+        self.marks.selected_id = Some(annotation.id.clone());
+        self.marks.annotations.push(annotation.clone());
+        self.selection = None;
+        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
+        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_created");
+
+        self.mark_writes.record("save reader annotation", move |library| library.upsert_annotation(annotation));
     }
 
     pub(crate) fn copy_selection_citation(&self, cx: &mut Context<Self>) {
@@ -257,13 +231,13 @@ impl ReaderView {
         let note = self.marks.annotation(&id).map(|annotation| annotation.note.clone()).unwrap_or_default();
         self.marks.selected_id = Some(id);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_selected");
     }
 
     pub(crate) fn close_annotation_popup(&mut self, cx: &mut Context<Self>) {
         if self.marks.selected_id.take().is_some() {
             self.annotation_popup_anchor = None;
-            crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+            crate::invalidation::notify(cx, Component::ReaderShell, "annotation_closed");
         }
     }
 
@@ -276,7 +250,7 @@ impl ReaderView {
     /// The editor stays open afterwards so several styles or colours can be
     /// tried against the text; [`Self::close_annotation_popup`] is what
     /// dismisses it.
-    pub(crate) fn save_selected_annotation(&mut self, style: Option<epub_svelte_lib::library::marks::AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
+    pub(crate) fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
         let Some(id) = self.marks.selected_id.clone() else { return };
         let Some(mut annotation) = self.marks.annotation(&id).cloned() else { return };
         annotation.note = self.annotation_note_input.read(cx).value().to_string();
@@ -287,175 +261,135 @@ impl ReaderView {
             annotation.color = color.to_owned();
         }
         annotation.modified_at = crate::shell::state_panel::now_millis();
-        let stored = annotation.clone();
-        persistence::write(
-            cx,
-            self.library.clone(),
-            "update reader annotation",
-            move |library| library.upsert_annotation(&stored).map_err(|error| error.to_string()),
-            move |this, cx, ()| {
-                if let Some(overlay) = marks::renderer_annotation(&annotation) {
-                    this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
-                }
-                this.marks.replace(annotation);
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            },
-        );
+        if let Some(overlay) = marks::renderer_annotation(&annotation) {
+            self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
+        }
+        self.marks.replace(annotation.clone());
+        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_updated");
+
+        self.mark_writes.record("update reader annotation", move |library| library.upsert_annotation(annotation));
     }
 
     pub(crate) fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
         let modified_at = crate::shell::state_panel::now_millis();
-        let stored_id = id.clone();
-        persistence::write(
-            cx,
-            self.library.clone(),
-            "delete reader annotation",
-            move |library| library.delete_annotation(&stored_id, modified_at).map_err(|error| error.to_string()),
-            move |this, cx, ()| {
-                this.marks.remove_annotation(&id);
-                this.annotation_popup_anchor = None;
-                this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::RemoveAnnotation(id), cx));
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            },
-        );
+        self.marks.remove_annotation(&id);
+        self.annotation_popup_anchor = None;
+        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::RemoveAnnotation(id.clone()), cx));
+        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_deleted");
+
+        self.mark_writes.record("delete reader annotation", move |library| library.delete_annotation(id, modified_at));
     }
 
     pub(crate) fn add_bookmark(&mut self, cx: &mut Context<Self>) {
         let Some(cfi) = self.current_cfi.clone() else { return };
         let now = crate::shell::state_panel::now_millis();
-        let bookmark = epub_svelte_lib::library::marks::ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi, label: self.display_title(), created_at: now, modified_at: now };
-        let stored = bookmark.clone();
-        persistence::write(
-            cx,
-            self.library.clone(),
-            "save bookmark",
-            move |library| library.create_bookmark(&stored).map_err(|error| error.to_string()),
-            move |this, cx, ()| {
-                this.marks.bookmarks.push(bookmark);
-                this.reader_state_visible = true;
-                this.reader_state_bookmarks = true;
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            },
-        );
+        let bookmark = ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi, label: self.display_title(), created_at: now, modified_at: now };
+        self.marks.bookmarks.push(bookmark.clone());
+        self.reader_state_visible = true;
+        self.reader_state_bookmarks = true;
+        crate::invalidation::notify(cx, Component::ReaderShell, "bookmark_created");
+
+        self.mark_writes.record("save bookmark", move |library| library.create_bookmark(bookmark));
     }
 
     pub(crate) fn delete_bookmark(&mut self, id: String, cx: &mut Context<Self>) {
         let deleted_at = crate::shell::state_panel::now_millis();
-        let stored_id = id.clone();
-        persistence::write(
-            cx,
-            self.library.clone(),
-            "delete bookmark",
-            move |library| library.delete_bookmark(&stored_id, deleted_at).map_err(|error| error.to_string()),
-            move |this, cx, ()| {
-                this.marks.remove_bookmark(&id);
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
-            },
-        );
+        self.marks.remove_bookmark(&id);
+        crate::invalidation::notify(cx, Component::ReaderShell, "bookmark_deleted");
+
+        self.mark_writes.record("delete bookmark", move |library| library.delete_bookmark(id, deleted_at));
     }
 
     fn handle_renderer_event(&mut self, event: &RendererEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let should_notify = match event {
+        match event {
             RendererEvent::CfiChanged(cfi) => {
-                if self.current_cfi == *cfi {
-                    false
-                } else {
-                    let availability_changed = self.current_cfi.is_some() != cfi.is_some();
-                    self.current_cfi.clone_from(cfi);
-                    availability_changed
+                if self.current_cfi != *cfi {
+                    let bookmark_availability_changed = self.current_cfi.is_some() != cfi.is_some();
+                    if let Some(position) = update_cfi_position(&mut self.current_cfi, cfi, self.progress.fraction) {
+                        self.reading_positions.record(position, "reading-position");
+                    }
+                    if bookmark_availability_changed {
+                        crate::invalidation::notify(cx, Component::ReaderShell, "bookmark_availability_changed");
+                    }
                 }
             }
-            RendererEvent::TitleChanged(Some(title)) => {
-                if self.title == *title {
-                    false
-                } else {
-                    self.title = title.clone();
-                    true
+            RendererEvent::TitleChanged(title) => {
+                let title = title.clone().unwrap_or_else(|| self.book_title.clone());
+                if self.title != title {
+                    self.title = title;
+                    self.sync_toolbar("title_changed", cx);
                 }
             }
-            RendererEvent::TocChanged(_) => false,
+            RendererEvent::TocChanged(_) => {}
             RendererEvent::NavAnchorChanged { doc, anchor } => {
                 let next = self.toc.link_at(*doc, anchor);
-                if self.toc.active_link == next {
-                    false
-                } else {
-                    if let Some(link) = next.as_ref() {
-                        let selected = TreeItem::new(link.clone(), link.clone());
-                        self.toc_tree.update(cx, |tree, cx| {
+                if self.toc.active_link != next {
+                    self.toc_tree.update(cx, |tree, cx| {
+                        if let Some(link) = next.as_ref() {
+                            let selected = TreeItem::new(link.clone(), link.clone());
                             tree.set_selected_item(Some(&selected), cx);
                             tree.reveal_item(&selected.id, ScrollStrategy::Center, cx);
-                        });
-                    }
+                        } else {
+                            tree.set_selected_item(None, cx);
+                        }
+                    });
                     self.toc.active_link = next;
-                    true
+                    self.sync_toolbar("toc_position_changed", cx);
                 }
             }
             RendererEvent::HistoryAvailability { back, forward } => {
-                if self.can_history_back == *back && self.can_history_forward == *forward {
-                    false
-                } else {
+                if self.can_history_back != *back || self.can_history_forward != *forward {
                     self.can_history_back = *back;
                     self.can_history_forward = *forward;
-                    true
+                    self.sync_toolbar("history_availability_changed", cx);
                 }
             }
             RendererEvent::SearchActiveChanged(active) => {
-                if self.search.active == *active {
-                    false
-                } else {
+                if self.search.active != *active {
                     self.search.active = *active;
-                    true
+                    crate::invalidation::notify(cx, Component::ReaderShell, "search_visibility_changed");
                 }
             }
-            RendererEvent::FontSizeChanged(font_size) => ReaderSettings::update(cx, |preferences| {
-                preferences.font_size = *font_size;
-            }),
-            RendererEvent::ColumnWidthChanged(column_width) => ReaderSettings::update(cx, |preferences| {
-                preferences.column_width = *column_width;
-            }),
-            RendererEvent::ScaleChanged(scale) => ReaderSettings::update(cx, |preferences| {
-                preferences.scale = *scale;
-            }),
+            RendererEvent::FontSizeChanged(font_size) => {
+                if ReaderSettings::update(cx, |preferences| preferences.font_size = *font_size) {
+                    self.sync_toolbar("font_size_changed", cx);
+                }
+            }
+            RendererEvent::ColumnWidthChanged(column_width) => {
+                if ReaderSettings::update(cx, |preferences| preferences.column_width = *column_width) {
+                    self.sync_toolbar("column_width_changed", cx);
+                }
+            }
+            RendererEvent::ScaleChanged(scale) => {
+                if ReaderSettings::update(cx, |preferences| preferences.scale = *scale) {
+                    self.sync_toolbar("scale_changed", cx);
+                }
+            }
             RendererEvent::ReadingProgress { fraction, location, total_locations, doc, doc_count, .. } => {
                 // TODO(2026-08-19): wire this to the renderer's `doc_fraction`
                 // field once HtmlViewCore has been updated to emit it.
-                if !self.progress.update(*fraction, 0.0, *location, *total_locations, *doc, *doc_count) {
-                    return;
+                if self.progress.update(*fraction, 0.0, *location, *total_locations, *doc, *doc_count) {
+                    self.record_current_reading_position();
+                    self.sync_toolbar("reading_progress_changed", cx);
                 }
-                if let Some(cfi) = self.current_cfi.clone() {
-                    self.reading_positions.record((cfi, *fraction), "reading-position");
-                }
-                false
             }
-            RendererEvent::SelectionFinished { cfi_range, exact_text, prefix, suffix, .. } => {
-                if !marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
-                    return;
+            RendererEvent::SelectionFinished { cfi_range, exact_text, .. } => {
+                if marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
+                    self.annotation_popup_anchor = Some(window.mouse_position());
+                    crate::invalidation::notify(cx, Component::ReaderShell, "selection_finished");
                 }
-                self.annotation_popup_anchor = Some(window.mouse_position());
-                true
             }
             RendererEvent::AnnotationActivated { id } => {
                 self.annotation_popup_anchor = Some(window.mouse_position());
                 self.select_annotation(id.clone(), window, cx);
-                false
             }
             RendererEvent::FootnoteOpened(preview) => {
                 let prepared = match &self.load_state {
                     LoadState::Ready(renderer) => renderer.update(cx, |view, _| view.prepare_note()),
-                    LoadState::Loading | LoadState::Failed => None,
+                    LoadState::Loading => None,
                 };
                 self.footnote = prepared.map(|prepared| (preview.clone(), prepared));
-                true
-            }
-            RendererEvent::SpeakableText(text) => {
-                match ReaderServices::get(cx).speech.speak(text) {
-                    Ok(()) => {
-                        let generation = self.audio.begin_speech();
-                        self.poll_tts_completion(generation, cx);
-                    }
-                    Err(error) => log::warn!("{error}"),
-                }
-                true
+                crate::invalidation::notify(cx, Component::ReaderShell, "footnote_opened");
             }
             RendererEvent::ImageOpened { uri, bytes } => {
                 let extension = uri.rsplit('.').next().unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
@@ -471,42 +405,36 @@ impl ReaderView {
                     _ => gpui::ImageFormat::Png,
                 };
                 self.image_preview = Some((uri.clone(), Arc::new(gpui::Image::from_bytes(format, bytes.clone()))));
-                true
+                crate::invalidation::notify(cx, Component::ReaderShell, "image_preview_opened");
             }
             RendererEvent::MatchInfo { current, total } => {
                 let next = Some((*current, *total));
-                if self.search.match_position == next {
-                    false
-                } else {
+                if self.search.match_position != next {
                     self.search.match_position = next;
-                    true
+                    crate::invalidation::notify(cx, Component::ReaderShell, "search_match_changed");
                 }
             }
-            RendererEvent::SearchResults(results) => self.search.set_results(results),
+            RendererEvent::SearchResults(_) => {}
             RendererEvent::OperationFailed { operation, message } => {
                 log::warn!("renderer failed to {operation}: {message}");
-                false
             }
-            _ => false,
-        };
-        if should_notify {
-            match event {
-                RendererEvent::TitleChanged(_)
-                | RendererEvent::NavAnchorChanged { .. }
-                | RendererEvent::HistoryAvailability { .. }
-                | RendererEvent::FontSizeChanged(_)
-                | RendererEvent::ColumnWidthChanged(_)
-                | RendererEvent::ScaleChanged(_)
-                | RendererEvent::SelectionFinished { .. }
-                | RendererEvent::SpeakableText(_) => self.invalidate_toolbar("renderer_state_changed", cx),
-                _ => crate::invalidation::notify(cx, Component::ReaderShell, "renderer_state_changed"),
-            }
+            _ => {}
         }
     }
 
-    /// Pushes the toolbar everything it draws. Cheap to call after any event:
-    /// the toolbar compares the model and repaints only on a real change.
-    pub(crate) fn invalidate_toolbar(&self, reason: &'static str, cx: &mut Context<Self>) {
+    /// CFI and progress are emitted as separately deduplicated renderer
+    /// signals. Persist whenever either half changes: tying the durable CFI to
+    /// progress alone loses every page turn whose rounded/synthetic progress
+    /// happens to stay constant.
+    fn record_current_reading_position(&self) {
+        if let Some(cfi) = self.current_cfi.clone() {
+            self.reading_positions.record((cfi, self.progress.fraction), "reading-position");
+        }
+    }
+
+    /// Synchronizes the toolbar's projection from the authoritative reader
+    /// state. The toolbar performs an equality check before repainting.
+    pub(crate) fn sync_toolbar(&self, reason: &'static str, cx: &mut Context<Self>) {
         let model = self.toolbar_model(cx);
         self.toolbar_view.update(cx, |toolbar, cx| toolbar.set_model(model, reason, cx));
     }
@@ -516,7 +444,6 @@ impl ReaderView {
             title: self.spine_title(),
             can_history_back: self.can_history_back,
             can_history_forward: self.can_history_forward,
-            audio: self.audio_affordance(cx),
             progress: self.progress.summary(),
             column_count: self.desired_column_count,
             preferences: ReaderSettings::preferences(cx).clone(),
@@ -524,20 +451,9 @@ impl ReaderView {
         }
     }
 
-    fn audio_affordance(&self, cx: &App) -> AudioAffordance {
-        match self.audio.mode() {
-            AudioMode::MediaOverlay if self.audio.is_paused() => AudioAffordance::NarrationPaused,
-            AudioMode::MediaOverlay if self.audio.is_playing() => AudioAffordance::NarrationPlaying,
-            AudioMode::MediaOverlay => AudioAffordance::NarrationIdle,
-            AudioMode::ReadAloud if !ReaderServices::get(cx).speech.is_available() => AudioAffordance::Unavailable,
-            AudioMode::ReadAloud if self.audio.is_speaking() => AudioAffordance::Speaking,
-            AudioMode::ReadAloud => AudioAffordance::ReadAloud,
-        }
-    }
-
     fn handle_toolbar_event(&mut self, event: ToolbarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            ToolbarEvent::ReturnToLibrary => window.remove_window(),
+            ToolbarEvent::ReturnToLibrary => (self.return_to_library)(window, cx),
             ToolbarEvent::NavigateHistory(-1) if self.can_history_back => self.navigate_history(-1, cx),
             ToolbarEvent::NavigateHistory(1) if self.can_history_forward => self.navigate_history(1, cx),
             ToolbarEvent::NavigateHistory(_) => {}
@@ -548,13 +464,8 @@ impl ReaderView {
                 } else {
                     self.set_toc_visible(true, cx);
                 }
-                crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+                crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_visibility_changed");
             }
-            ToolbarEvent::ToggleAudio => match self.audio.mode() {
-                AudioMode::MediaOverlay => self.toggle_media_overlay(cx),
-                AudioMode::ReadAloud if self.audio.is_speaking() => self.stop_reading(cx),
-                AudioMode::ReadAloud => self.read_visible_page(cx),
-            },
             ToolbarEvent::AdjustColumnWidth(delta) => self.adjust_column_width(delta, cx),
             ToolbarEvent::AdjustColumnCount(delta) => self.adjust_desired_column_count(delta, window, cx),
             ToolbarEvent::AdjustFontSize(delta) => self.adjust_font_size(delta, cx),
@@ -565,7 +476,7 @@ impl ReaderView {
         }
     }
 
-    fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: std::collections::HashMap<String, crate::epub::toc::Resolution>, cx: &mut Context<Self>) {
+    fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: Vec<crate::epub::toc::ResolvedTocEntry>, cx: &mut Context<Self>) {
         let tree_items = Self::toc_tree_items(&entries);
         self.toc_tree.update(cx, |tree, cx| {
             tree.set_items(tree_items, cx);
@@ -629,121 +540,10 @@ impl ReaderView {
         });
     }
 
-    pub(crate) fn read_visible_page(&self, cx: &mut Context<Self>) {
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::RequestVisibleText, cx));
-    }
-
-    pub(crate) fn stop_reading(&mut self, cx: &mut Context<Self>) {
-        if !self.audio.stop_speech() {
-            return;
-        }
-        ReaderServices::get(cx).speech.stop();
-        self.invalidate_toolbar("audio_state_changed", cx);
-    }
-
-    fn poll_tts_completion(&self, generation: u64, cx: &mut Context<Self>) {
-        let timer = cx.background_executor().timer(SPEECH_POLL_INTERVAL);
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.audio.speech_poll_is_current(generation) {
-                    return;
-                }
-                match ReaderServices::get(cx).speech.status() {
-                    crate::TtsState::Speaking => this.poll_tts_completion(generation, cx),
-                    crate::TtsState::Idle | crate::TtsState::Unavailable => {
-                        this.audio.speech_finished();
-                        this.invalidate_toolbar("audio_state_changed", cx);
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
     pub(crate) fn copy_preview_image(&self, cx: &mut Context<Self>) {
         if let Some((_, image)) = &self.image_preview {
             cx.write_to_clipboard(gpui::ClipboardItem::new_image(image));
         }
-    }
-
-    pub(crate) fn play_media_overlay(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(cue) = self.audio.cues.get(index).cloned() else { return };
-        let generation = self.audio.begin_cue();
-        let provider = self.publication.provider.clone();
-        let worker = ReaderServices::get(cx).blocking.clone();
-        cx.spawn(async move |this, cx| {
-            let audio_href = cue.audio_href.split('#').next().unwrap_or(&cue.audio_href).to_owned();
-            let result = worker.dispatch(move || provider.read_bytes(&audio_href).map_err(|error| error.to_string())).recv().await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(Ok(audio)) => {
-                    let backend = ReaderServices::get(cx).audio.clone();
-                    match backend.play(&cue.audio_href, &audio, cue.clip_begin_seconds, cue.clip_end_seconds) {
-                        Ok(()) => {
-                            this.audio.cue_started(index);
-                            this.with_renderer(cx, |renderer, cx| {
-                                renderer.apply(RendererCommand::NavigateToHref(cue.text_href.clone()), cx);
-                                renderer.apply(RendererCommand::SetMediaOverlayTarget(Some(cue.text_href.clone())), cx);
-                            });
-                            this.poll_media_overlay_completion(index, generation, cx);
-                            this.invalidate_toolbar("audio_state_changed", cx);
-                        }
-                        Err(error) => log::warn!("media-overlay playback failed: {error}"),
-                    }
-                }
-                Ok(Err(error)) => log::warn!("media-overlay resource failed: {error}"),
-                Err(_) => log::warn!("media-overlay worker stopped"),
-            });
-        })
-        .detach();
-    }
-
-    fn poll_media_overlay_completion(&self, index: usize, generation: u64, cx: &mut Context<Self>) {
-        let timer = cx.background_executor().timer(OVERLAY_POLL_INTERVAL);
-        cx.spawn(async move |this, cx| {
-            timer.await;
-            let _ = this.update(cx, |this, cx| {
-                if !this.audio.cue_poll_is_current(index, generation) {
-                    return;
-                }
-                let state = ReaderServices::get(cx).audio.status().state;
-                if state == crate::NativeAudioState::Stopped {
-                    if this.audio.has_cue_after(index) {
-                        this.play_media_overlay(index + 1, cx);
-                    } else {
-                        this.stop_media_overlay(cx);
-                    }
-                } else {
-                    this.poll_media_overlay_completion(index, generation, cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn stop_media_overlay(&mut self, cx: &mut Context<Self>) {
-        if !self.audio.stop_overlay() {
-            return;
-        }
-        ReaderServices::get(cx).audio.stop();
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetMediaOverlayTarget(None), cx));
-        self.invalidate_toolbar("audio_state_changed", cx);
-    }
-
-    pub(crate) fn toggle_media_overlay(&mut self, cx: &mut Context<Self>) {
-        if !self.audio.is_playing() {
-            self.play_media_overlay(self.audio.cue_index, cx);
-            return;
-        }
-        let backend = ReaderServices::get(cx).audio.clone();
-        let result = if self.audio.is_paused() { backend.resume() } else { backend.pause() };
-        if let Err(error) = result {
-            log::warn!("media-overlay state change failed: {error}");
-            return;
-        }
-        let paused = !self.audio.is_paused();
-        self.audio.set_paused(paused);
-        self.invalidate_toolbar("audio_state_changed", cx);
     }
 
     /// Applies a preference change and tells the renderer about it.
@@ -759,7 +559,7 @@ impl ReaderView {
         }
         let command = command(ReaderSettings::preferences(cx));
         self.with_renderer(cx, |renderer, cx| renderer.apply(command, cx));
-        self.invalidate_toolbar("preferences_changed", cx);
+        self.sync_toolbar("preferences_changed", cx);
     }
 
     /// Applies a change to the reader stylesheet, which the renderer takes as
@@ -806,7 +606,7 @@ impl ReaderView {
             renderer.apply(RendererCommand::SetScale(preferences.scale), cx);
             renderer.apply(RendererCommand::SetReaderStyleOverrides(preferences.style_overrides()), cx);
         });
-        self.invalidate_toolbar("preferences_reset", cx);
+        self.sync_toolbar("preferences_reset", cx);
     }
 
     pub(crate) fn adjust_line_height(&self, delta: f32, cx: &mut Context<Self>) {
@@ -833,6 +633,7 @@ impl ReaderView {
         // LINE_WIDTH_MIN.
         let width = (((viewport_width + MIN_COLUMN_GAP) / f64::from(count)) - MIN_COLUMN_GAP - 0.01).clamp(FITTED_COLUMN_WIDTH_MIN, LINE_WIDTH_MAX);
         self.apply_appearance(cx, |preferences| preferences.column_width = width, |_| RendererCommand::SetColumnWidth(width));
+        self.sync_toolbar("column_count_changed", cx);
     }
 
     pub(crate) fn navigate_to(&self, href: String, cx: &mut Context<Self>) {
@@ -844,7 +645,7 @@ impl ReaderView {
     pub(crate) fn navigate_from_footnote(&mut self, cx: &mut Context<Self>) {
         let Some((preview, _)) = self.footnote.take() else { return };
         self.navigate_to(preview.href, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "footnote_navigated");
     }
 
     pub(crate) fn navigate_history(&self, direction: i8, cx: &mut Context<Self>) {
@@ -874,7 +675,7 @@ impl ReaderView {
         self.with_renderer(cx, |renderer, cx| {
             renderer.apply(if active { RendererCommand::ActivateSearch } else { RendererCommand::DeactivateSearch }, cx);
         });
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "search_visibility_changed");
     }
 
     pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -888,7 +689,7 @@ impl ReaderView {
         });
         // Focus is still on the search input that is about to disappear.
         self.focus_document(window, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "search_closed");
     }
 
     pub(crate) fn display_title(&self) -> String {
@@ -929,14 +730,14 @@ impl ReaderView {
         let provider = self.publication.provider.clone();
         let documents = self.publication.document_uris.clone();
         let cancellation = self.search.cancellation();
-        let worker = ReaderServices::get(cx).blocking.clone();
+        let executor = cx.background_executor().clone();
         self.with_renderer(cx, |renderer, cx| {
             renderer.apply(RendererCommand::SetSearchResults { query: renderer_query.clone(), options, results: Vec::new() }, cx);
         });
         self.search.index_task = Some(cx.spawn(async move |this, cx| {
             let query = renderer_query.clone();
             let (batch_tx, batch_rx) = async_channel::unbounded::<Vec<html_view_core::BookSearchMatch>>();
-            let result_rx = worker.dispatch(move || {
+            let result = executor.spawn(async move {
                 let results = html_view_core::search_publication_streaming(
                     provider.as_ref(),
                     &documents,
@@ -944,10 +745,10 @@ impl ReaderView {
                     options,
                     || cancellation.load(std::sync::atomic::Ordering::Acquire) != generation,
                     |batch| {
-                        let _ = batch_tx.send_blocking(batch.to_vec());
+                        let _ = batch_tx.try_send(batch.to_vec());
                     },
                 );
-                Ok::<_, String>(results.len())
+                results.len()
             });
             while let Ok(batch) = batch_rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
@@ -956,17 +757,7 @@ impl ReaderView {
                     }
                 });
             }
-            let result = result_rx.recv().await;
-            let _ = this.update(cx, |this, _cx| {
-                if !this.search.still_wants(generation, &renderer_query) {
-                    return;
-                }
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => log::warn!("whole-book search failed: {error}"),
-                    Err(_) => log::warn!("whole-book search worker stopped"),
-                }
-            });
+            let _ = result.await;
         }));
         true
     }
@@ -974,12 +765,36 @@ impl ReaderView {
     pub(crate) fn update_search_options(&mut self, update: impl FnOnce(&mut SearchFilters), cx: &mut Context<Self>) {
         self.search.update_filters(update);
         self.apply_pending_search(cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "state_changed");
+        crate::invalidation::notify(cx, Component::ReaderShell, "search_options_changed");
     }
 
     pub(crate) fn navigate_search(&self, direction: i8, cx: &mut Context<Self>) {
         self.with_renderer(cx, |renderer, cx| {
             renderer.apply(RendererCommand::NavigateSearch(direction), cx);
         });
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::update_cfi_position;
+
+    #[test]
+    fn a_changed_cfi_is_persisted_even_when_progress_is_unchanged() {
+        let mut current = Some("epubcfi(/6/14!/4/2[ch03]/2/2/2/1:0)".to_owned());
+        let next = Some("epubcfi(/6/14!/4/2[ch03]/54/1:121)".to_owned());
+
+        let update = update_cfi_position(&mut current, &next, 0.1875);
+
+        assert_eq!(update, Some((next.clone().unwrap(), 0.1875)));
+        assert_eq!(current, next);
+    }
+
+    #[test]
+    fn an_identical_cfi_does_not_queue_another_write() {
+        let mut current = Some("epubcfi(/6/14!/4/2[ch03]/54/1:121)".to_owned());
+        let next = current.clone();
+
+        assert_eq!(update_cfi_position(&mut current, &next, 0.1875), None);
     }
 }

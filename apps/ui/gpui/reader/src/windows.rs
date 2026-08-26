@@ -1,310 +1,199 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+//! Reader page lifecycle inside the application's single window.
+
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
-#[cfg(feature = "audiobooks")]
-use std::time::Duration;
-use std::time::Instant;
+use std::sync::Arc;
+use web_time::Instant;
 
-use epub_svelte_lib::library::ReaderFormat;
-#[cfg(any(feature = "pdf", feature = "audiobooks"))]
-use epub_svelte_lib::library::ResolvedBook;
-use epub_svelte_lib::{BookLocator, ContentHash, LibraryBackend, LibraryId};
-use gpui::{AnyWindowHandle, App, AppContext, Bounds, Global, SharedString, Subscription, WeakEntity, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
-use ui_runtime::BlockingWorker;
+use app_contract::backend::LibraryBackend;
+#[cfg(feature = "pdf")]
+use app_contract::library::BoxedBookReader;
+use app_contract::library::{BookFormat, BookLocator};
+use gpui::prelude::*;
+use gpui::{AnyView, App, AppContext, Context, IntoElement, Render, SharedString, Task, Window};
+use html_publication::PublicationFormat;
 
-#[cfg(not(feature = "kobo"))]
-static BOKHEIM_WINDOW_ICON: LazyLock<Option<Arc<image::RgbaImage>>> =
-    LazyLock::new(|| image::load_from_memory_with_format(include_bytes!("../../../design-tokens/assets/icon/bokheim-180.png"), image::ImageFormat::Png).ok().map(|image| Arc::new(image.into_rgba8())));
-
-#[cfg(feature = "kobo")]
-fn platform_content<V: gpui::Render + 'static>(content: gpui::Entity<V>, cx: &mut App) -> gpui::Entity<gpui_kobo::KoboKeyboardRoot<V>> {
-    cx.new(|_| gpui_kobo::KoboKeyboardRoot::new(content))
-}
-
-#[cfg(not(feature = "kobo"))]
-fn platform_content<V: gpui::Render + 'static>(content: gpui::Entity<V>, _: &mut App) -> gpui::Entity<V> {
-    content
-}
-
-use crate::cbz_reader::{CbzReaderView, PendingCbzReader, cbz_page_from_cfi};
-use crate::epub::{PendingReader, ReaderView, ReaderWindowId};
+use crate::epub::{PendingReader, ReaderView as EpubReaderView};
 #[cfg(feature = "pdf")]
 use crate::pdf_reader::{PdfReaderView, PendingPdfReader};
-use crate::settings::{ReaderPreferences, ReaderServices, ReaderSettings, ReaderWindowGeometry, SaveReaderSettings};
-#[cfg(feature = "audiobooks")]
-use crate::shell::persistence::PositionWriter;
+use crate::settings::{ReaderPreferences, ReaderSettings, SaveReaderSettings};
 
-enum ReaderViewHandle {
-    Epub(WeakEntity<ReaderView>),
-    Cbz(WeakEntity<CbzReaderView>),
-    #[cfg(feature = "audiobooks")]
-    Audiobook(WeakEntity<audiobook_player::AudiobookPlayer>),
-    #[cfg(feature = "pdf")]
-    Pdf(WeakEntity<PdfReaderView>),
-}
+/// Called by a reader's library button to restore the application library.
+pub type ReturnToLibrary = Rc<dyn Fn(&mut Window, &mut App)>;
 
-enum PreparedBook {
+enum LoadedBook {
     Publication {
         publication: Arc<crate::publication::NativePublication>,
-        nav_state: Option<String>,
+        preparation: html_view_core::RendererPreparation,
     },
     #[cfg(feature = "pdf")]
     Pdf {
-        book: ResolvedBook,
+        reader: BoxedBookReader,
         initial_page: usize,
         initial_full_page_position: f32,
     },
-    #[cfg(feature = "audiobooks")]
-    Audiobook {
-        book: ResolvedBook,
-        initial_position: Duration,
-    },
 }
 
-struct ReaderRecord {
-    locator: BookLocator,
-    handle: AnyWindowHandle,
-    view: ReaderViewHandle,
+enum ReaderState {
+    Loading(SharedString),
+    Ready(AnyView),
+    Error(SharedString),
 }
 
-#[derive(Default)]
-struct ReaderWindowRegistry {
-    next_id: u64,
-    windows: HashMap<ReaderWindowId, ReaderRecord>,
-    close_subscription: Option<Subscription>,
+/// The reader page installed directly in the application's single window.
+/// It owns publication loading and replaces its loading state with the
+/// format-specific reader when the book is ready.
+pub struct ReaderView {
+    state: ReaderState,
+    _load_task: Option<Task<()>>,
 }
 
-impl Global for ReaderWindowRegistry {}
-
-pub fn configure(preferences: ReaderPreferences, geometry: Option<ReaderWindowGeometry>, save: SaveReaderSettings, blocking_worker: BlockingWorker, persistence_worker: BlockingWorker, cx: &mut App) {
-    cx.set_global(ReaderSettings { preferences, geometry, save });
-    cx.set_global(ReaderServices { blocking: blocking_worker, persistence: persistence_worker, speech: Arc::new(crate::backends::SystemTtsProvider::default()), audio: Arc::new(crate::backends::SystemAudioBackend::default()) });
+pub fn configure(preferences: ReaderPreferences, save: SaveReaderSettings, cx: &mut App) {
+    cx.set_global(ReaderSettings { preferences, save });
 }
 
-pub fn configure_tts_provider(backend: Arc<dyn crate::TtsProvider>, cx: &mut App) {
-    cx.global_mut::<ReaderServices>().speech = backend;
+fn report_stage(progress: &async_channel::Sender<String>, stage: impl Into<String>) {
+    let _ = progress.try_send(stage.into());
 }
 
-pub fn configure_audio_backend(backend: Arc<dyn crate::NativeAudioBackend>, cx: &mut App) {
-    cx.global_mut::<ReaderServices>().audio = backend;
-}
+async fn load_book(
+    locator: BookLocator, library: Rc<dyn LibraryBackend>, executor: gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig, initial_target: Option<String>, startup_started: Instant,
+    progress: async_channel::Sender<String>,
+) -> Result<LoadedBook, String> {
+    let prepare_locator = locator;
+    let phase_started = Instant::now();
+    report_stage(&progress, "Reading book from browser storage…");
+    let content = library.open_reader_content(prepare_locator.content_hash()).await.map_err(|error| format!("stage=book_resolve: {error}"))?;
+    startup_phase!("phase=content_resolved content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
+    report_stage(&progress, "Book bytes loaded; detecting format…");
+    let (format, reader) = content.into_parts();
 
-pub fn open_reader_window(locator: BookLocator, title: String, initial_target: Option<String>, library: LibraryBackend, cx: &mut App) {
-    let startup_started = Instant::now();
-    startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
-    #[cfg(feature = "kobo")]
-    if let Err(error) = gpui_kobo::begin_book_launch_profile(startup_started) {
-        log::error!("failed to start Kobo book launch profile: {error}");
-    }
-    let prepare_locator = locator.clone();
-    let blocking_worker = ReaderServices::get(cx).blocking.clone();
-    let prepare_dispatched_at = Instant::now();
-    let prepare = blocking_worker.dispatch(move || {
-        let worker_started = Instant::now();
-        startup_phase!("phase=prepare_worker_started content_hash={} elapsed_ms={} queue_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), prepare_dispatched_at.elapsed().as_millis(),);
-
-        let phase_started = Instant::now();
-        let book = library.resolve_book_for_reader(prepare_locator.content_hash()).map_err(|error| format!("stage=book_resolve: {error}"))?;
-        startup_phase!("phase=path_resolved content_hash={} elapsed_ms={} phase_ms={} path={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(), book.path.display(),);
-
-        let prepared = match book.format {
-            #[cfg(feature = "pdf")]
-            ReaderFormat::Pdf => {
-                let phase_started = Instant::now();
-                let (initial_page, initial_full_page_position) = library.pdf_reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
-                startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
-                PreparedBook::Pdf { book, initial_page: initial_page as usize, initial_full_page_position }
-            }
-            #[cfg(feature = "audiobooks")]
-            ReaderFormat::Audiobook => {
-                let initial_position = library.audiobook_reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or(0);
-                PreparedBook::Audiobook { book, initial_position: Duration::from_millis(initial_position) }
-            }
-            #[cfg(not(feature = "audiobooks"))]
-            ReaderFormat::Audiobook => return Err("stage=prepare: audiobook support is disabled in this build".to_owned()),
-            _ => {
-                let phase_started = Instant::now();
-                let publication = crate::publication::NativePublication::from_reader(&book.publication_path, book.reader).map_err(|error| format!("stage=publication_open: {error}"))?;
-                startup_phase!("phase=publication_opened content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis(),);
-                let nav_state = library.reading_position(prepare_locator.content_hash()).map_err(|error| format!("stage=reading_position: {error}"))?;
-                PreparedBook::Publication { publication: Arc::new(publication), nav_state }
-            }
-        };
-        startup_phase!("phase=prepare_worker_complete content_hash={} elapsed_ms={} worker_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), worker_started.elapsed().as_millis(),);
-        Ok::<_, String>((library, prepared))
-    });
-    cx.spawn(async move |cx| {
-        let Ok(result) = prepare.recv().await else {
-            return;
-        };
-        startup_phase!("phase=prepare_result_received content_hash={} elapsed_ms={}", locator.content_hash(), startup_started.elapsed().as_millis(),);
-        cx.update(|cx| {
-            let (library, prepared) = match result {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    log::error!("cannot open book {} in library {}: {error}", locator.content_hash(), locator.library_id());
-                    return;
-                }
+    let prepared = match format {
+        #[cfg(feature = "pdf")]
+        BookFormat::Pdf => {
+            let phase_started = Instant::now();
+            report_stage(&progress, "Loading PDF reading position…");
+            let (initial_page, initial_full_page_position) = library.pdf_reading_position(prepare_locator.content_hash()).await.map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
+            startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
+            LoadedBook::Pdf { reader, initial_page: initial_page as usize, initial_full_page_position }
+        }
+        #[cfg(not(feature = "pdf"))]
+        BookFormat::Pdf => return Err("stage=prepare: PDF support is disabled".to_owned()),
+        BookFormat::M4b => return Err("stage=prepare: audiobooks are played in the library".to_owned()),
+        BookFormat::Epub | BookFormat::Mobi => {
+            let phase_started = Instant::now();
+            let publication_format = match format {
+                BookFormat::Epub => PublicationFormat::Epub,
+                BookFormat::Mobi => PublicationFormat::Mobi,
+                _ => unreachable!("reader format was matched by the enclosing arm"),
             };
-            startup_phase!("phase=prepared content_hash={} elapsed_ms={}", locator.content_hash(), startup_started.elapsed().as_millis());
-            open_prepared_reader_window(locator, title, initial_target, library, prepared, startup_started, cx);
-        });
-    })
-    .detach();
-}
-
-fn open_prepared_reader_window(locator: BookLocator, title: String, initial_target: Option<String>, library: LibraryBackend, prepared: PreparedBook, startup_started: Instant, cx: &mut App) {
-    install_close_observer(cx);
-    let id = {
-        let registry = cx.default_global::<ReaderWindowRegistry>();
-        registry.next_id = registry.next_id.wrapping_add(1);
-        ReaderWindowId(registry.next_id)
-    };
-    let bounds = cx
-        .global::<ReaderSettings>()
-        .geometry
-        .map(|geometry| WindowBounds::Windowed(Bounds { origin: gpui::point(px(geometry.x), px(geometry.y)), size: size(px(geometry.width), px(geometry.height)) }))
-        .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1100.0), px(780.0)), cx)));
-
-    let reader_out = Rc::new(RefCell::new(None));
-    let reader_for_window = reader_out.clone();
-    let locator_for_window = locator.clone();
-    let library_for_window = library.clone();
-    #[cfg(not(feature = "kobo"))]
-    let icon = BOKHEIM_WINDOW_ICON.clone();
-    #[cfg(feature = "kobo")]
-    let icon = None;
-    let handle = match cx.open_window(
-        WindowOptions {
-            window_bounds: Some(bounds),
-            titlebar: Some(gpui::TitlebarOptions { title: Some(SharedString::from(title.clone())), ..Default::default() }),
-            focus: true,
-            app_id: (!cfg!(feature = "kobo")).then(|| "se.bokheim.Bokheim".to_owned()),
-            icon,
-            ..Default::default()
-        },
-        move |window, cx| match prepared {
-            #[cfg(feature = "audiobooks")]
-            PreparedBook::Audiobook { book, initial_position } => {
-                let content_hash = locator_for_window.content_hash();
-                let positions = PositionWriter::new(
-                    cx,
-                    "persist audiobook position",
-                    move |library, (position, progress): &(Duration, f32)| library.update_audiobook_reading_position(content_hash.clone(), position.as_millis() as u64, *progress).map_err(|error| error.to_string()),
-                    library_for_window.clone(),
-                );
-                let save_position: audiobook_player::SavePlaybackPosition = Rc::new(move |position, progress| positions.record((position, progress), "audiobook position"));
-                let source = audiobook_player::AudiobookSource::new(book.reader, book.path);
-                let reader = audiobook_player::open_library_source(source, initial_position, save_position, cx);
-                *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Audiobook(reader.downgrade()));
-                cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
-            }
-            #[cfg(feature = "pdf")]
-            PreparedBook::Pdf { book, initial_page, initial_full_page_position } => {
-                let reader = cx.new(|cx| PdfReaderView::new(PendingPdfReader { id, locator: locator_for_window, title, library: library_for_window, book, initial_page, initial_full_page_position }, window, cx));
-                *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Pdf(reader.downgrade()));
-                cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
-            }
-            PreparedBook::Publication { publication, nav_state } if matches!(&publication.layout, html_publication::PublicationLayout::PagedImages { .. }) => {
-                let initial_page = cbz_page_from_cfi(nav_state.as_deref(), publication.document_uris.len());
-                let reader = cx.new(|cx| CbzReaderView::new(PendingCbzReader { id, locator: locator_for_window, title, library: library_for_window, publication, initial_page }, window, cx));
-                reader.update(cx, |reader, cx| reader.start(cx));
-                *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Cbz(reader.downgrade()));
-                cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
-            }
-            PreparedBook::Publication { publication, nav_state } => {
-                let reader = cx.new(|cx| ReaderView::new(PendingReader { id, locator: locator_for_window, title, library: library_for_window, publication, nav_state, initial_target }, window, cx));
-                *reader_for_window.borrow_mut() = Some(ReaderViewHandle::Epub(reader.downgrade()));
-                cx.new(|cx| Root::new(platform_content(reader, cx), window, cx))
-            }
-        },
-    ) {
-        Ok(handle) => handle,
-        Err(error) => {
-            log::error!("failed to open reader window for book {}: {error}", locator.content_hash());
-            return;
+            report_stage(&progress, "Opening publication…");
+            let publication = executor.spawn(async move { crate::publication::NativePublication::from_reader(publication_format, reader).map_err(|error| format!("stage=publication_open: {error}")) }).await?;
+            startup_phase!("phase=publication_opened content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
+            report_stage(&progress, "Publication parsed; loading reading position…");
+            let nav_state = library.reading_position(prepare_locator.content_hash()).await.map_err(|error| format!("stage=reading_position: {error}"))?;
+            report_stage(&progress, "Preparing first document…");
+            let publication = Arc::new(publication);
+            let prepare_publication = publication.clone();
+            let prepare_nav_state = nav_state.clone();
+            let preparation = executor
+                .spawn(async move {
+                    html_view_core::RendererPreparation::from_provider_with_nav_and_target(
+                        prepare_publication.provider.clone(),
+                        prepare_publication.document_uris.clone(),
+                        prepare_publication.start_index,
+                        prepare_nav_state.as_deref(),
+                        initial_target.as_deref(),
+                        renderer_config,
+                    )
+                    .map_err(|error| format!("stage=document_prepare: {error}"))
+                })
+                .await?;
+            LoadedBook::Publication { publication, preparation }
+        }
+        BookFormat::Fb2 | BookFormat::Cbz | BookFormat::Html | BookFormat::WebPub => {
+            return Err(format!("stage=prepare: {} is not supported by the GPUI reader", format.canonical_extension()));
         }
     };
-    let Some(reader) = reader_out.borrow_mut().take() else {
-        log::error!("reader window for book {} was created without a reader view", locator.content_hash());
-        return;
-    };
-    cx.default_global::<ReaderWindowRegistry>().windows.insert(id, ReaderRecord { locator, handle: handle.into(), view: reader });
-    startup_phase!("phase=window_created elapsed_ms={}", startup_started.elapsed().as_millis());
-    #[cfg(feature = "kobo")]
-    if let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::ReaderQuality) {
-        log::error!("failed to enter Kobo reader quality mode: {error}");
-    }
+    Ok(prepared)
 }
 
-pub fn handle_book_removed(library_id: &LibraryId, content_hash: ContentHash, cx: &mut App) {
-    let readers = cx
-        .default_global::<ReaderWindowRegistry>()
-        .windows
-        .values()
-        .filter(|record| record.locator.library_id() == library_id && record.locator.content_hash() == content_hash)
-        .map(|record| match &record.view {
-            ReaderViewHandle::Epub(view) => ReaderViewHandle::Epub(view.clone()),
-            ReaderViewHandle::Cbz(view) => ReaderViewHandle::Cbz(view.clone()),
-            #[cfg(feature = "audiobooks")]
-            ReaderViewHandle::Audiobook(view) => ReaderViewHandle::Audiobook(view.clone()),
-            #[cfg(feature = "pdf")]
-            ReaderViewHandle::Pdf(view) => ReaderViewHandle::Pdf(view.clone()),
-        })
-        .collect::<Vec<_>>();
-    for reader in readers {
-        match reader {
-            ReaderViewHandle::Epub(reader) => {
-                let _ = reader.update(cx, |reader, _| {
-                    reader.unavailable = true;
-                    log::warn!("book {} disappeared while reader {} remained open", reader.locator.content_hash(), reader.id.0);
-                });
-            }
-            #[cfg(feature = "pdf")]
-            ReaderViewHandle::Pdf(reader) => {
-                let _ = reader.update(cx, |reader, _| {
-                    reader.unavailable = true;
-                    log::warn!("book {} disappeared while PDF reader {} remained open", reader.locator.content_hash(), reader.id.0);
-                });
-            }
-            ReaderViewHandle::Cbz(reader) => {
-                let _ = reader.update(cx, |reader, _| {
-                    reader.unavailable = true;
-                    log::warn!("book {} disappeared while CBZ reader {} remained open", reader.locator.content_hash(), reader.id.0);
-                });
-            }
-            #[cfg(feature = "audiobooks")]
-            ReaderViewHandle::Audiobook(reader) => {
-                let _ = reader.update(cx, |_, _| log::warn!("audiobook disappeared while its reader remained open"));
-            }
-        }
-    }
-}
-
-pub fn close_readers_for_library(library_id: &LibraryId, cx: &mut App) {
-    let handles = cx.default_global::<ReaderWindowRegistry>().windows.values().filter(|record| record.locator.library_id() == library_id).map(|record| record.handle).collect::<Vec<_>>();
-    for handle in handles {
-        let _ = handle.update(cx, |_, window, _| {
-            window.remove_window();
-        });
-    }
-}
-
-fn install_close_observer(cx: &mut App) {
-    if cx.default_global::<ReaderWindowRegistry>().close_subscription.is_some() {
-        return;
-    }
-    let subscription = cx.on_window_closed(|cx, window_id| {
-        let registry = cx.default_global::<ReaderWindowRegistry>();
-        registry.windows.retain(|_, record| record.handle.window_id() != window_id);
+impl ReaderView {
+    pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<dyn LibraryBackend>, return_to_library: ReturnToLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let startup_started = Instant::now();
+        startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
         #[cfg(feature = "kobo")]
-        if registry.windows.is_empty()
-            && let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::LibraryFast)
-        {
-            log::error!("failed to return to Kobo library fast mode: {error}");
+        if let Err(error) = gpui_kobo::begin_book_launch_profile(startup_started) {
+            log::error!("failed to start Kobo book launch profile: {error}");
         }
-    });
-    cx.default_global::<ReaderWindowRegistry>().close_subscription = Some(subscription);
+        #[cfg(not(target_family = "wasm"))]
+        window.set_window_title(&title);
+        let mut reader = Self { state: ReaderState::Loading(SharedString::from("Starting book load…")), _load_task: None };
+        reader.start_load(locator, title, initial_target, library, return_to_library, startup_started, window, cx);
+        reader
+    }
+
+    pub fn fail_load(&mut self, error: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.state = ReaderState::Error(error.into());
+        cx.notify();
+    }
+
+    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<dyn LibraryBackend>, return_to_library: ReturnToLibrary, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
+        let load_locator = locator.clone();
+        let executor = cx.background_executor().clone();
+        let renderer_config = crate::epub::state::renderer_initial_config(cx);
+        let (progress_tx, progress_rx) = async_channel::unbounded::<String>();
+        cx.spawn(async move |reader_view, cx| {
+            while let Ok(stage) = progress_rx.recv().await {
+                let _ = reader_view.update(cx, |reader_view, cx| {
+                    if matches!(&reader_view.state, ReaderState::Loading(_)) {
+                        reader_view.state = ReaderState::Loading(SharedString::from(stage));
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+        let load_task = cx.spawn(async move |reader_view, cx| {
+            let result = load_book(load_locator, library.clone(), executor, renderer_config, initial_target, startup_started, progress_tx).await;
+            match result {
+                Ok(book) => {
+                    let _ = reader_view.update_in(cx, move |reader_view, window, cx| {
+                        reader_view.state = ReaderState::Loading(SharedString::from("Building reader interface…"));
+                        let view: AnyView = match book {
+                            #[cfg(feature = "pdf")]
+                            LoadedBook::Pdf { reader, initial_page, initial_full_page_position } => {
+                                cx.new(|cx| PdfReaderView::new(PendingPdfReader { locator, title, library, reader, initial_page, initial_full_page_position, return_to_library }, window, cx)).into()
+                            }
+                            LoadedBook::Publication { publication, preparation } => cx.new(|cx| EpubReaderView::new(PendingReader { locator, title, library, publication, preparation, return_to_library }, window, cx)).into(),
+                        };
+                        startup_phase!("phase=reader_ready elapsed_ms={}", startup_started.elapsed().as_millis());
+                        reader_view.state = ReaderState::Ready(view);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = reader_view.update(cx, move |reader_view, cx| {
+                        log::error!("cannot load reader page: {error}");
+                        reader_view.state = ReaderState::Error(SharedString::from(error));
+                        cx.notify();
+                    });
+                }
+            }
+        });
+        self._load_task = Some(load_task);
+        #[cfg(feature = "kobo")]
+        if let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::ReaderQuality) {
+            log::error!("failed to enter Kobo reader quality mode: {error}");
+        }
+    }
+}
+
+impl Render for ReaderView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        match &self.state {
+            ReaderState::Loading(stage) => gpui::div().size_full().flex().flex_col().items_center().justify_center().child("Loading book…").child(stage.clone()).into_any_element(),
+            ReaderState::Ready(view) => view.clone().into_any_element(),
+            ReaderState::Error(error) => gpui::div().size_full().flex().items_center().justify_center().child(error.clone()).into_any_element(),
+        }
+    }
 }

@@ -320,7 +320,7 @@ fn push_unique(urls: &mut Vec<String>, url: String) {
 fn endpoints(options: &Options) -> Vec<OpdsEndpoint> {
     if let Some(url) = &options.url {
         return vec![OpdsEndpoint {
-            id: OpdsEndpointId::parse(options.only_id.as_deref().unwrap_or("custom")).expect("--id must be a valid catalogue id"),
+            id: OpdsEndpointId::parse(options.only_id.as_deref().unwrap_or("probe")).expect("--id must be a valid catalogue id"),
             title: "Custom URL".to_owned(),
             description: "Ad hoc metadata probe target".to_owned(),
             languages: vec!["Unspecified".to_owned()],

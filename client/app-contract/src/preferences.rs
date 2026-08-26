@@ -51,6 +51,10 @@ pub enum ApplicationTheme {
     #[default]
     GrecoFuturistic,
     LibrarySerif,
+    /// Neutral greys and true-white cards. The two other themes are tinted
+    /// paper; this one is the absence of a tint, for people who want the
+    /// application to disappear behind the covers.
+    ClassicWhite,
 }
 
 /// Which of a theme's two palettes to draw.
@@ -136,7 +140,8 @@ impl ApplicationTheme {
     pub const fn next(self) -> Self {
         match self {
             Self::GrecoFuturistic => Self::LibrarySerif,
-            Self::LibrarySerif => Self::GrecoFuturistic,
+            Self::LibrarySerif => Self::ClassicWhite,
+            Self::ClassicWhite => Self::GrecoFuturistic,
         }
     }
 
@@ -144,6 +149,7 @@ impl ApplicationTheme {
         match self {
             Self::GrecoFuturistic => "Sage",
             Self::LibrarySerif => "Sepia",
+            Self::ClassicWhite => "Paper",
         }
     }
 
@@ -151,6 +157,7 @@ impl ApplicationTheme {
         match self {
             Self::GrecoFuturistic => "Cool, restrained surfaces with muted green accents.",
             Self::LibrarySerif => "Warm, bookish surfaces with brown accents.",
+            Self::ClassicWhite => "Neutral greys and white cards with a slate blue accent.",
         }
     }
 
@@ -202,6 +209,34 @@ impl ApplicationTheme {
                 danger_bg: 0xf9e2d7,
                 warning_text: 0x866300,
                 warning_bg: 0xf9ebcb,
+            },
+            (Self::ClassicWhite, ResolvedAppearance::Light) => ApplicationPalette {
+                surface_bg: 0xf1f3f5,
+                raised_bg: 0xffffff,
+                ink_text: 0x2d3237,
+                subtle_text: 0x656e77,
+                accent: 0x2c6ba5,
+                border: 0x7f8a96,
+                hover_overlay: 0x0000000d,
+                active_highlight: 0xdfe8f2,
+                danger_text: 0xb32218,
+                danger_bg: 0xfdeae7,
+                warning_text: 0x8a5900,
+                warning_bg: 0xfdf3d8,
+            },
+            (Self::ClassicWhite, ResolvedAppearance::Dark) => ApplicationPalette {
+                surface_bg: 0x17181a,
+                raised_bg: 0x232528,
+                ink_text: 0xe2e3e5,
+                subtle_text: 0x90979d,
+                accent: 0x74a0ca,
+                border: 0x69727b,
+                hover_overlay: 0xffffff12,
+                active_highlight: 0x2b3a49,
+                danger_text: 0xe08a84,
+                danger_bg: 0x3f1512,
+                warning_text: 0xd0a049,
+                warning_bg: 0x332a10,
             },
             (Self::LibrarySerif, ResolvedAppearance::Dark) => ApplicationPalette {
                 surface_bg: 0x24221e,
@@ -398,7 +433,7 @@ pub struct CatalogLanguageOption {
     pub label: String,
 }
 
-const CATALOG_LANGUAGE_OPTIONS: [(&str, &str); 15] = [
+pub const CATALOG_LANGUAGE_OPTIONS: [(&str, &str); 15] = [
     ("be", "Belarusian"),
     ("bg", "Bulgarian"),
     ("de", "German"),
@@ -438,7 +473,10 @@ impl Default for BrowsingPreferenceOptions {
             .into_iter()
             .map(|value| UiFontOption { value, label: value.label().to_string(), font_name: value.font_name().to_string(), generic_family: value.generic_family().to_string() })
             .collect();
-        let themes = [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif].into_iter().map(|value| ApplicationThemeOption { value, label: value.label().to_string(), description: value.description().to_string() }).collect();
+        let themes = [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite]
+            .into_iter()
+            .map(|value| ApplicationThemeOption { value, label: value.label().to_string(), description: value.description().to_string() })
+            .collect();
         let library_views = [LibraryView::Covers, LibraryView::Detailed].into_iter().map(|value| LibraryViewOption { value, label: value.label().to_string(), description: value.description().to_string() }).collect();
         let appearances = [ApplicationAppearance::System, ApplicationAppearance::Light, ApplicationAppearance::Dark]
             .into_iter()
@@ -1023,7 +1061,7 @@ mod palette_tests {
 
     fn palettes() -> Vec<(String, ApplicationPalette)> {
         let mut out = Vec::new();
-        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif] {
+        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite] {
             for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
                 out.push((format!("{theme:?}/{appearance:?}"), theme.palette(appearance)));
             }
@@ -1097,7 +1135,7 @@ mod palette_tests {
 
     #[test]
     fn light_and_dark_are_actually_light_and_dark() {
-        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif] {
+        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite] {
             let light = theme.palette(ResolvedAppearance::Light);
             let dark = theme.palette(ResolvedAppearance::Dark);
             assert!(luminance(light.surface_bg) > 0.5, "{theme:?} light background is not light");

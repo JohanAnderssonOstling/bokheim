@@ -8,13 +8,11 @@
   import { catalogLinkAction } from "./links";
   import { managedMenu } from "../../../lib/app/keyboard-navigation";
   import FileIcon from "../../../components/shared/FileIcon.svelte";
-  import SearchField from "../../../components/shared/SearchField.svelte";
   import MenuItemButton from "../../../components/shared/buttons/MenuItemButton.svelte";
   import PrimaryButton from "../../../components/shared/buttons/PrimaryButton.svelte";
   import SecondaryButton from "../../../components/shared/buttons/SecondaryButton.svelte";
   import TextButton from "../../../components/shared/buttons/TextButton.svelte";
   import magnifyingGlass from "@icons/phosphor/magnifying-glass.svg";
-  import { isNativeApp } from "../../../lib/app/platform";
   import {
     BROWSING_PREFERENCES_CONTRACT,
     SETTINGS_CONTRACT,
@@ -34,8 +32,6 @@
     CatalogPublicationKey,
     CatalogSearch,
     CatalogSource,
-    CatalogWideSearchResult,
-    CatalogWideSearchView,
   } from "../../../lib/bindings";
 
   let {
@@ -76,12 +72,6 @@
   let importErrors = $state<Record<string, string>>({});
   let ownership = $state<Record<string, boolean>>({});
   let sourceRefresh = $state<SourceRefresh>({ kind: "available" });
-  let customSourceIds = $state<string[]>([]);
-  let customSaving = $state(false);
-  let wideQuery = $state("");
-  let wideResult = $state<CatalogWideSearchResult | null>(null);
-  let wideSearching = $state(false);
-  let wideSearchGeneration = 0;
   let sourcesInitialized = false;
   const canSearch = $derived(
     Boolean(query.trim() || titleQuery.trim() || authorQuery.trim()),
@@ -118,11 +108,6 @@
     return `${included.length} languages`;
   });
 
-  type WideSearchRefresh = {
-    library_id: string;
-    query: string;
-    view: CatalogWideSearchView;
-  };
   type SourceSearchRefresh = {
     library_id: string;
     source_id: string;
@@ -187,35 +172,13 @@
   async function initializeSources() {
     try {
       sources = await commands.getCatalogSources();
-      if (isNativeApp)
-        customSourceIds = (await commands.getCustomCatalogSources()).map(
-          (source) => source.id,
-        );
     } catch (reason) {
       error = message(reason);
     }
     await refreshSources();
   }
 
-  async function removeCustomCatalog(sourceId: string) {
-    if (!isNativeApp || customSaving || !customSourceIds.includes(sourceId)) return;
-    customSaving = true;
-    error = "";
-    try {
-      await commands.removeCustomCatalog(sourceId);
-      sources = sources.filter((source) => source.id !== sourceId);
-      customSourceIds = customSourceIds.filter((id) => id !== sourceId);
-    } catch (reason) {
-      error = message(reason);
-    } finally {
-      customSaving = false;
-    }
-  }
-
   async function chooseSource(source: CatalogSource) {
-    wideSearchGeneration += 1;
-    wideSearching = false;
-    wideResult = null;
     selected = source;
     catalog = null;
     searchDefinition = null;
@@ -231,28 +194,6 @@
       await loadCatalog(null, source.title, true);
   }
 
-  async function runWideSearch(event: SubmitEvent) {
-    event.preventDefault();
-    const terms = wideQuery.trim();
-    await searchWide(terms);
-  }
-
-  async function searchWide(terms: string) {
-    if (!terms || wideSearching) return;
-    const generation = ++wideSearchGeneration;
-    wideSearching = true;
-    error = "";
-    try {
-      const view = await commands.searchCatalogs(activeLibraryId, terms);
-      if (generation !== wideSearchGeneration || wideQuery.trim() !== terms) return;
-      installWideSearch(view);
-    } catch (reason) {
-      if (generation === wideSearchGeneration) error = message(reason);
-    } finally {
-      if (generation === wideSearchGeneration) wideSearching = false;
-    }
-  }
-
   function catalogLanguageIncluded(language: string): boolean {
     return (
       preferences.included_catalog_languages.length === 0 ||
@@ -265,7 +206,6 @@
       preference: "included_catalog_languages",
       value: languages,
     });
-    if (wideResult && wideQuery.trim()) await searchWide(wideQuery.trim());
   }
 
   function toggleCatalogLanguage(language: string, included: boolean) {
@@ -279,20 +219,6 @@
       ? [...new Set([...current, language])]
       : current.filter((value) => value !== language);
     return setCatalogLanguages(next.length === catalogLanguageValues.length ? [] : next);
-  }
-
-  function installWideSearch(view: CatalogWideSearchView) {
-    ownership = ownedEditions(view.owned_publications);
-    wideResult = view.result;
-  }
-
-  function clearWideSearch() {
-    wideSearchGeneration += 1;
-    wideSearching = false;
-    wideResult = null;
-    wideQuery = "";
-    ownership = {};
-    error = "";
   }
 
   async function loadCatalog(url: string | null, title: string, root = false) {
@@ -458,10 +384,6 @@
     let disposed = false;
     const retain = (dispose: () => void) =>
       disposed ? dispose() : unlisten.push(dispose);
-    void listen<WideSearchRefresh>("catalog:search-refreshed", ({ payload }) => {
-      if (payload.library_id === activeLibraryId && payload.query === wideQuery.trim())
-        installWideSearch(payload.view);
-    }).then(retain);
     void listen<SourceSearchRefresh>("catalog:source-search-refreshed", ({ payload }) => {
       const label = query.trim() || titleQuery.trim() || authorQuery.trim();
       if (
@@ -503,13 +425,6 @@
         {error}
       </p>{/if}
     <div class="store-toolbar">
-      <SearchField
-        class="wide-search"
-        bind:value={wideQuery}
-        placeholder={STORE_CONTRACT.search_all_placeholder}
-        ariaLabel={STORE_CONTRACT.search_all_placeholder}
-        onsubmit={runWideSearch}
-      />
       <button
         class="toolbar-button"
         type="button"
@@ -557,100 +472,23 @@
         </div>
       </details>
     </div>
-    {#if wideResult}
-      <header class="wide-heading">
-        <h2>Results for “{wideResult.query}”</h2>
-        <TextButton onclick={clearWideSearch}>Clear search</TextButton>
-      </header>
-      <div class="wide-groups">
-        {#each wideResult.groups as group (group.source.id)}
-          <section class="wide-group">
-            <header>
-              <span class="source-mark">{group.source.title.slice(0, 1)}</span>
-              <div>
-                <h2>{group.source.title}</h2>
-                <small>OPDS · {group.source.languages.join(" · ")}</small>
-              </div>
-              <TextButton
-                onclick={() =>
-                  void goto(`/store/catalog/${encodeURIComponent(group.source.id)}`)}
-                >Open catalog</TextButton
-              >
-            </header>
-            {#if group.outcome.kind === "results"}
-              {@const resultCount =
-                group.outcome.page.publications.length +
-                group.outcome.page.groups.reduce(
-                  (count, catalogGroup) => count + catalogGroup.publications.length,
-                  0,
-                )}
-              {#if group.outcome.page.publications.length}
-                <div class="wide-result-section">
-                  <h3>Title matches</h3>
-                  <StoreBookGrid
-                    source={group.source}
-                    items={group.outcome.page.publications}
-                    isOwned={isOwnedPublication}
-                    actionStates={importStates}
-                    actionErrors={importErrors}
-                    onaction={runPublicationAction}
-                  />
-                </div>
-              {/if}
-              {#each group.outcome.page.groups as resultGroup, resultGroupIndex (`${resultGroup.title}:${resultGroupIndex}`)}
-                {#if resultGroup.publications.length}
-                  <div class="wide-result-section">
-                    <h3>{resultGroup.title}</h3>
-                    <StoreBookGrid
-                      source={group.source}
-                      items={resultGroup.publications}
-                      isOwned={isOwnedPublication}
-                      actionStates={importStates}
-                      actionErrors={importErrors}
-                      onaction={runPublicationAction}
-                    />
-                  </div>
-                {/if}
-              {/each}
-              {#if !resultCount}<p class="wide-status">
-                  No matching books were returned.
-                </p>{/if}
-            {:else if group.outcome.kind === "unsupported"}
-              <p class="wide-status">This catalog does not advertise search.</p>
-            {:else if group.outcome.kind === "timed_out"}
-              <p class="wide-status">This catalog did not respond in time.</p>
-            {:else}
-              <p class="wide-status error">Search failed: {group.outcome.message}</p>
-            {/if}
-          </section>
-        {/each}
-      </div>
-    {:else}
-      <div class="sources">
-        {#each sources as source (source.id)}
-          <div class="source-entry">
-            <button
-              class="source-card"
-              type="button"
-              onclick={() => void goto(`/store/catalog/${encodeURIComponent(source.id)}`)}
+    <div class="sources">
+      {#each sources as source (source.id)}
+        <div class="source-entry">
+          <button
+            class="source-card"
+            type="button"
+            onclick={() => void goto(`/store/catalog/${encodeURIComponent(source.id)}`)}
+          >
+            <span class="source-mark">{source.title.slice(0, 1)}</span>
+            <span class="source-copy"
+              ><strong>{source.title}</strong><small>{source.description}</small></span
             >
-              <span class="source-mark">{source.title.slice(0, 1)}</span>
-              <span class="source-copy"
-                ><strong>{source.title}</strong><small>{source.description}</small></span
-              >
-              <span class="chevron">›</span>
-            </button>
-            {#if customSourceIds.includes(source.id)}<button
-                class="remove-source"
-                type="button"
-                disabled={customSaving}
-                aria-label={`Remove ${source.title}`}
-                onclick={() => void removeCustomCatalog(source.id)}>Remove</button
-              >{/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
+            <span class="chevron">›</span>
+          </button>
+        </div>
+      {/each}
+    </div>
   {:else}
     <div class="catalog-bar">
       <FolderBreadcrumbs
@@ -878,34 +716,6 @@
     gap: 0.5rem;
     margin-bottom: 1rem;
   }
-  :global(.wide-search) {
-    display: grid;
-    flex: 1;
-    grid-template-columns: 1.2rem minmax(0, 1fr);
-    align-items: center;
-    min-width: 14rem;
-    max-width: 30rem;
-    height: 2.5rem;
-    border: 1px solid var(--color-border);
-    border-radius: 0;
-    background: var(--color-raised-bg);
-  }
-  :global(.wide-search:focus-within) {
-    border-color: var(--color-accent);
-  }
-  :global(.wide-search .file-icon) {
-    margin-left: 0.8rem;
-    color: var(--color-subtle-text);
-  }
-  :global(.wide-search .search-input) {
-    min-width: 0;
-    height: 100%;
-    padding: 0.5rem 0.8rem;
-    border: 0;
-    color: inherit;
-    background: transparent;
-    outline: none;
-  }
   .toolbar-button,
   .toolbar-menu > summary {
     display: inline-flex;
@@ -961,57 +771,6 @@
     justify-content: space-between;
     gap: 1rem;
   }
-  .wide-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin: 0.3rem 0 1rem;
-  }
-  .wide-heading h2 {
-    margin: 0;
-    color: var(--color-ink-text);
-    font: 650 1.05rem var(--font-interface-family);
-  }
-  .wide-groups {
-    display: grid;
-    gap: 1.25rem;
-  }
-  .wide-group {
-    display: grid;
-    gap: 0.8rem;
-  }
-  .wide-group > header {
-    display: grid;
-    grid-template-columns: 2.8rem minmax(0, 1fr) auto;
-    gap: 0.75rem;
-    align-items: center;
-  }
-  .wide-group > header h2 {
-    margin: 0 0 0.15rem;
-    color: var(--color-ink-text);
-    font: 700 1rem var(--font-interface-family);
-  }
-  .wide-group > header small,
-  .wide-status {
-    margin: 0;
-    color: var(--color-subtle-text);
-    font-size: 0.7rem;
-  }
-  .wide-result-section {
-    display: grid;
-    gap: 0.65rem;
-  }
-  .wide-result-section h3 {
-    margin: 0;
-    color: var(--color-ink-text);
-    font: 700 0.82rem var(--font-interface-family);
-  }
-  .wide-external-links {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
   .sources {
     display: grid;
     grid-template-columns: 1fr;
@@ -1043,21 +802,6 @@
       var(--color-hover-overlay),
       var(--color-hover-overlay)
     );
-  }
-  .source-entry:has(.remove-source) .source-card {
-    padding-bottom: 2.35rem;
-  }
-  .remove-source {
-    position: absolute;
-    right: 0.7rem;
-    bottom: 0.45rem;
-    padding: 0.25rem 0.35rem;
-    border: 0;
-    color: var(--color-danger-text);
-    background: transparent;
-    font-size: 0.64rem;
-    font-weight: 750;
-    cursor: pointer;
   }
   .source-mark {
     display: grid;
@@ -1224,12 +968,6 @@
     .search-fields input + input {
       border-top: 1px solid var(--color-border);
       border-left: 0;
-    }
-    .wide-group > header {
-      grid-template-columns: 2.8rem minmax(0, 1fr);
-    }
-    .wide-group > header :global(.text-button) {
-      grid-column: 1 / -1;
     }
   }
   @container (min-width: 720px) {

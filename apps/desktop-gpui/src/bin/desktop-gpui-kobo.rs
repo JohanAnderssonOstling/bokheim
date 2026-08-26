@@ -42,7 +42,7 @@ fn main() {
 
     Application::new_inaccessible(platform.clone()).with_assets(ui_components::Assets).run(move |cx| {
         println!("KOBO_APP_STARTUP phase=ui_open_begin elapsed_ms={}", startup_started.elapsed().as_millis());
-        desktop_gpui::open_ui(backend_context, desktop_gpui::UiLaunchOptions { kobo_auto_rotate: Some(auto_rotate), ..desktop_gpui::UiLaunchOptions::KOBO }, cx);
+        desktop_gpui::open_ui(backend_context, desktop_gpui::UiLaunchOptions { kobo_auto_rotate: Some(auto_rotate), ..desktop_gpui::UiLaunchOptions::KOBO }, None, cx);
         println!("KOBO_APP_STARTUP phase=ui_open_complete elapsed_ms={}", startup_started.elapsed().as_millis());
     });
 

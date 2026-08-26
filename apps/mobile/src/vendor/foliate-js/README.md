@@ -3,7 +3,7 @@
 Library for rendering e-books in the browser.
 
 Features:
-- Supports EPUB, MOBI, KF8 (AZW3), FB2, CBZ, PDF (experimental; requires PDF.js)
+- This vendored subset supports EPUB, MOBI, KF8 (AZW3), and PDF (experimental; requires PDF.js)
 - Add support for other formats yourself by implementing the book interface
 - Pure JavaScript
 - Small and modular
@@ -32,9 +32,7 @@ This project uses native ES modules. There's no build step, and you can import t
 There are mainly three kinds of modules:
 
 - Modules that parse and load books, implementing the "book" interface
-    - `comic-book.js`, for comic book archives (CBZ)
     - `epub.js` and `epubcfi.js`, for EPUB
-    - `fb2.js`, for FictionBook 2
     - `mobi.js`, for both Mobipocket files and KF8 (commonly known as AZW3) files
 - Modules that handle pagination, implementing the "renderer" interface
     - `fixed-layout.js`, for fixed layout books
@@ -118,9 +116,8 @@ Almost all of the properties and methods are optional. At minimum it needs `.sec
 
 ### Archived Files
 
-Reading Zip-based formats requires adapting an external library. Both `epub.js` and `comic-book.js` expect a `loader` object that implements the following interface:
+Reading EPUB requires adapting an external ZIP library. `epub.js` expects a `loader` object that implements the following interface:
 
-- `.entries`: (only used by `comic-book.js`) an array, each element of which has a `filename` property, which is a string containing the filename (the full path).
 - `.loadText(filename)`: given the path, returns the contents of the file as string.  May be async.
 - `.loadBlob(filename)`: given the path, returns the file as a `Blob` object. May be async.
 - `.getSize(filename)`: returns the file size in bytes. Used to set the `.size` property for `.sections` (see above).

@@ -19,7 +19,7 @@ type BackendEndpoint = {
 
 const COMMAND_TIMEOUT_MS = 5 * 60_000;
 
-let backendWorker: Worker | SharedWorker | undefined;
+let backendWorker: Worker | undefined;
 let backendEndpoint: BackendEndpoint | undefined;
 let nextCommandId = 1;
 const pendingCommands = new Map<number, PendingCommand>();
@@ -36,7 +36,7 @@ function resetBackendWorker(reason: Error, endpoint: BackendEndpoint): void {
   if (backendEndpoint !== endpoint) return;
   rejectPendingCommands(reason);
   endpoint.close?.();
-  if (backendWorker instanceof Worker) backendWorker.terminate();
+  backendWorker?.terminate();
   backendEndpoint = undefined;
   backendWorker = undefined;
 }
@@ -44,25 +44,12 @@ function resetBackendWorker(reason: Error, endpoint: BackendEndpoint): void {
 function getBackendWorker(): BackendEndpoint {
   if (backendEndpoint) return backendEndpoint;
 
-  if (typeof SharedWorker !== "undefined") {
-    const sharedWorker = new SharedWorker(
-      new URL("../../workers/backend.worker.ts", import.meta.url),
-      {
-        name: "bokheim-web-backend-v1",
-        type: "module",
-      },
-    );
-    backendWorker = sharedWorker;
-    backendEndpoint = sharedWorker.port as BackendEndpoint;
-    sharedWorker.port.start();
-  } else {
-    const dedicatedWorker = new Worker(
-      new URL("../../workers/backend.worker.ts", import.meta.url),
-      { type: "module" },
-    );
-    backendWorker = dedicatedWorker;
-    backendEndpoint = dedicatedWorker as BackendEndpoint;
-  }
+  const dedicatedWorker = new Worker(
+    new URL("../../workers/backend.worker.ts", import.meta.url),
+    { name: "bokheim-web-backend-rust-v1", type: "module" },
+  );
+  backendWorker = dedicatedWorker;
+  backendEndpoint = dedicatedWorker as BackendEndpoint;
 
   const endpoint = backendEndpoint;
   const worker = backendWorker;

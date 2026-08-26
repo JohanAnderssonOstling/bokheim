@@ -1,0 +1,634 @@
+<title>Bokheim — Login and account-access redesigns</title>
+<style>
+  :root {
+    --bg: #efece2; --surface: #fdfbf3; --sunk: #e7e3d6; --text: #1d2723; --dim: #4a5852;
+    --faint: #7d8a83; --line: #ddd7c6; --soft: #e6e1d2; --accent: #2f6a52; --accent-ink: #fff;
+    --warn: #b0801f; --bad: #a2402f;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+      --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+      --warn: #cfa53f; --bad: #d0705c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131b18; --surface: #1c2622; --sunk: #16201c; --text: #e7e3d5; --dim: #a9b3ac;
+    --faint: #7c8880; --line: #2c3833; --soft: #232e2a; --accent: #6aa887; --accent-ink: #101a16;
+    --warn: #cfa53f; --bad: #d0705c;
+  }
+  :root[data-theme="light"] {
+    --bg: #efece2; --surface: #fdfbf3; --sunk: #e7e3d6; --text: #1d2723; --dim: #4a5852;
+    --faint: #7d8a83; --line: #ddd7c6; --soft: #e6e1d2; --accent: #2f6a52; --accent-ink: #fff;
+    --warn: #b0801f; --bad: #a2402f;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 0.9375rem; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 70rem; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1rem, 3vw, 2rem) 4rem; display: flex; flex-direction: column; gap: 2.5rem; }
+  h1 { font-family: var(--serif); font-size: 1.75rem; font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; }
+  h2 { font-family: var(--serif); font-size: 1.1875rem; font-weight: 600; padding-bottom: 0.4rem; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 0.8125rem; font-weight: 650; color: var(--dim); }
+  p { max-width: 74ch; }
+  code { font-family: var(--mono); font-size: 0.84em; color: var(--dim); }
+  a { color: var(--accent); }
+  header { display: flex; flex-direction: column; gap: 0.5rem; }
+  header .eyebrow { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint); }
+  header p { color: var(--dim); }
+  section { display: flex; flex-direction: column; gap: 0.9rem; }
+  section > .lede { color: var(--dim); font-size: 0.875rem; }
+  .note { font-size: 0.8125rem; color: var(--dim); max-width: 74ch; }
+  ul { padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.25rem; }
+  li { max-width: 74ch; font-size: 0.875rem; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; background: var(--surface); border: 1px solid var(--line); min-width: 44rem; }
+  th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); font-weight: 500; background: var(--sunk); }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+  tbody th { font-weight: 650; white-space: nowrap; }
+  td.mono { font-family: var(--mono); font-size: 0.76rem; color: var(--faint); }
+
+  /* ---------------- device furniture ---------------- */
+  .devices { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: flex-start; }
+  .device { display: flex; flex-direction: column; gap: 0.4rem; }
+  .device .cap { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+  .frame { border: 1px solid var(--line); background: var(--bg); display: flex; overflow: hidden; }
+  .frame.desk { width: 42rem; height: 22rem; }
+  .frame.desk.tall { height: 26rem; }
+  .frame.phone { width: 18.5rem; height: 32rem; flex-direction: column; }
+  .rail { width: 3.2rem; flex: none; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 0.45rem; padding: 0.5rem 0; font-size: 0.48rem; color: var(--faint); text-align: center; }
+  .rail i { font-style: normal; font-size: 0.8rem; color: var(--dim); display: block; line-height: 1.15; }
+  .rail .on, .rail .on i { color: var(--accent); font-weight: 700; }
+  .rail .sp { flex: 1; }
+  .topbar { flex: none; height: 2.2rem; display: flex; align-items: center; gap: 0.5rem; padding: 0 0.6rem; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 0.72rem; font-weight: 650; }
+  .topbar .back { color: var(--accent); font-size: 0.8rem; }
+  .topbar .sp { flex: 1; }
+  .topbar .act { color: var(--accent); font-size: 0.62rem; font-weight: 600; }
+  .tabbar { flex: none; height: 2.5rem; display: flex; background: var(--surface); border-top: 1px solid var(--line); }
+  .tabbar div { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.1rem; font-size: 0.46rem; color: var(--faint); }
+  .tabbar i { font-style: normal; font-size: 0.78rem; color: var(--dim); }
+  .tabbar .on, .tabbar .on i { color: var(--accent); font-weight: 700; }
+  .stage { flex: 1; min-width: 0; min-height: 0; overflow: hidden; container-type: inline-size; display: flex; }
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.6rem; padding: 0.75rem; max-width: 26rem; margin: 0 auto; justify-content: center; }
+  @container (max-width: 30rem) { .content { padding: 0.6rem; gap: 0.5rem; } }
+
+  /* ---------------- form parts, shared ---------------- */
+  .card { background: var(--surface); border: 1px solid var(--line); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .ttl { font-family: var(--serif); font-size: 1rem; font-weight: 600; line-height: 1.2; }
+  .sub { font-size: 0.6rem; color: var(--faint); }
+  .field { display: flex; flex-direction: column; gap: 0.18rem; }
+  .field label { font-size: 0.58rem; font-weight: 600; color: var(--dim); }
+  .field .input { height: 1.7rem; border: 1px solid var(--line); background: var(--bg); display: flex; align-items: center; gap: 0.35rem; padding: 0 0.45rem; font-size: 0.64rem; color: var(--text); }
+  .field .input.ph { color: var(--faint); }
+  .field .input.focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .field .input.err { border-color: var(--bad); }
+  .field .input .sp { flex: 1; }
+  .field .input .eye { color: var(--faint); font-size: 0.7rem; }
+  .field .hint { font-size: 0.53rem; color: var(--faint); }
+  .field .hint.bad { color: var(--bad); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  @container (max-width: 30rem) { .pair { grid-template-columns: 1fr; } }
+  .btn { font-size: 0.63rem; padding: 0.34rem 0.65rem; border: 1px solid var(--line); background: var(--bg); color: var(--dim); white-space: nowrap; text-align: center; }
+  .btn.pri { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .btn.wide { display: block; }
+  .btn.busy { opacity: 0.55; }
+  .btns { display: flex; gap: 0.35rem; }
+  .btns.stack { flex-direction: column; }
+  .btns .btn { flex: 1; }
+  @container (max-width: 30rem) { .btns { flex-direction: column; } }
+  .link { font-size: 0.58rem; color: var(--accent); }
+  .linkrow { display: flex; gap: 0.7rem; flex-wrap: wrap; }
+  .alert { display: flex; gap: 0.4rem; align-items: flex-start; padding: 0.35rem 0.5rem; border: 1px solid var(--line); background: var(--bg); font-size: 0.58rem; color: var(--dim); }
+  .alert.err { border-color: var(--bad); color: var(--bad); }
+  .alert.ok { border-color: var(--accent); color: var(--accent); }
+  .alert i { font-style: normal; }
+  .otp { display: flex; gap: 0.28rem; }
+  .otp span { flex: 1; height: 2rem; border: 1px solid var(--line); background: var(--bg); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 0.8rem; }
+  .otp span.on { border-color: var(--accent); }
+  .strength { display: flex; gap: 0.15rem; }
+  .strength span { flex: 1; height: 3px; background: var(--sunk); }
+  .strength span.f { background: var(--accent); }
+  .spin { display: inline-block; width: 0.55rem; height: 0.55rem; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 999px; }
+
+  /* ---------------- L2 split hero ---------------- */
+  .l2 { display: flex; width: 100%; height: 100%; }
+  .l2 .hero { width: 42%; flex: none; background: var(--sunk); border-right: 1px solid var(--line); padding: 1rem 0.9rem; display: flex; flex-direction: column; gap: 0.55rem; justify-content: center; }
+  .l2 .hero .mark { font-family: var(--serif); font-size: 1.05rem; font-weight: 600; }
+  .l2 .hero .pitch { font-size: 0.62rem; color: var(--dim); }
+  .l2 .hero .pt { display: flex; gap: 0.4rem; align-items: flex-start; font-size: 0.6rem; color: var(--dim); }
+  .l2 .hero .pt i { font-style: normal; color: var(--accent); font-size: 0.62rem; }
+  .l2 .hero .foot { font-size: 0.52rem; color: var(--faint); margin-top: auto; }
+  .l2 .side { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; padding: 0.9rem; gap: 0.55rem; }
+  .l2phone .crest { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; padding: 0.5rem 0 0.2rem; }
+  .l2phone .crest .mk { width: 2.4rem; height: 2.4rem; border-radius: 999px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-family: var(--serif); font-size: 1.1rem; }
+  .l2phone .crest .nm { font-family: var(--serif); font-size: 0.9rem; font-weight: 600; }
+  .l2phone .crest .tag { font-size: 0.55rem; color: var(--faint); }
+
+  /* ---------------- L3 one question per screen ---------------- */
+  .l3 { display: flex; flex-direction: column; gap: 0.7rem; }
+  .l3 .steps { display: flex; gap: 0.25rem; align-items: center; }
+  .l3 .steps b { width: 1.4rem; height: 3px; background: var(--sunk); display: block; }
+  .l3 .steps b.on { background: var(--accent); }
+  .l3 .steps .lb { font-family: var(--mono); font-size: 0.52rem; color: var(--faint); margin-left: 0.3rem; }
+  .l3 .q { font-family: var(--serif); font-size: 1.15rem; font-weight: 600; line-height: 1.2; }
+  .l3 .why { font-size: 0.6rem; color: var(--faint); }
+  .l3 .big { height: 2.2rem; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; gap: 0.35rem; padding: 0 0.55rem; font-size: 0.78rem; }
+  .l3 .big.focus { border-color: var(--accent); }
+  .l3 .nav { display: flex; gap: 0.4rem; align-items: center; }
+  .l3 .nav .sp { flex: 1; }
+
+  /* ---------------- L4 server-first ---------------- */
+  .l4 .server { display: flex; align-items: center; gap: 0.45rem; padding: 0.4rem 0.5rem; border: 1px solid var(--line); background: var(--sunk); font-size: 0.6rem; }
+  .l4 .server .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--accent); flex: none; }
+  .l4 .server .dot.off { background: var(--faint); }
+  .l4 .server .url { flex: 1; min-width: 0; font-family: var(--mono); font-size: 0.58rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .l4 .server .ch { color: var(--accent); font-size: 0.56rem; }
+  .l4 .choice { display: flex; flex-direction: column; }
+  .l4 .opt { display: flex; align-items: center; gap: 0.45rem; padding: 0.5rem 0.55rem; border-top: 1px solid var(--soft); font-size: 0.64rem; }
+  .l4 .opt:first-child { border-top: 0; }
+  .l4 .opt .rd { width: 10px; height: 10px; border-radius: 999px; border: 1px solid var(--line); flex: none; }
+  .l4 .opt .rd.on { border-color: var(--accent); background: radial-gradient(var(--accent) 0 45%, transparent 46%); }
+  .l4 .opt .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.05rem; }
+  .l4 .opt .tx .d { font-size: 0.53rem; color: var(--faint); }
+  .l4 .caps { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .l4 .cap2 { font-size: 0.5rem; padding: 0.05rem 0.3rem; border: 1px solid var(--line); color: var(--faint); border-radius: 3px; }
+  .l4 .cap2.on { border-color: var(--accent); color: var(--accent); }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Bokheim · signed-out flows · four directions</div>
+    <h1>Login and account access, drawn at both widths</h1>
+    <p style="border-left:3px solid var(--accent);padding-left:0.7rem;color:var(--text)">
+      <b>Decided: L1 · One card</b>, built in <code>universal/sync/view.rs</code>. The inputs carry placeholders and
+      no labels, secondary flows are links rather than a row of equal buttons, and the feedback line sits under the
+      title so it is read above the action. The server is never selectable — L4's chooser is not built, and
+      <code>api_server_url()</code> stays fixed.
+    </p>
+    <p>
+      The companion to <code>account-page-redesigns.html</code>, covering everything before there is an account to
+      report on: sign in, create account, verify the six-digit PIN, request a reset, set a new password — plus the
+      error and busy states each of them can land in. Four directions, each drawn on desktop and phone from the same
+      markup. The shipping page is GPUI; the container queries here stand in for a width it measures itself.
+    </p>
+  </header>
+
+  <section>
+    <h2>The flows that have to fit</h2>
+    <p class="lede">
+      Taken from <code>AccountFlow</code> and <code>authentication.rs</code> — these are the real states, not
+      invented ones. Two of them are gated on what the server advertises, so any direction has to survive their
+      absence.
+    </p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Flow</th><th>Inputs</th><th>Leads to</th><th>Gated on</th></tr></thead>
+        <tbody>
+          <tr><th>Sign in</th><td>Email, password</td><td>Signed-in account page</td><td class="mono">always</td></tr>
+          <tr><th>Create account</th><td>Email, password (min length from contract)</td><td>Verify email</td><td class="mono">capabilities.public_registration</td></tr>
+          <tr><th>Verify email</th><td>6-digit PIN, resend</td><td>Signed in</td><td class="mono">capabilities.email_verification</td></tr>
+          <tr><th>Request reset</th><td>Email</td><td>Set new password</td><td class="mono">capabilities.password_recovery, after a failed sign-in</td></tr>
+          <tr><th>Set new password</th><td>Reset token, new password</td><td>Sign in</td><td class="mono">capabilities.password_recovery</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Two constraints fall out of this and apply to every direction below. Password recovery is only offered
+      <em>after</em> a sign-in has actually failed, so the first screen a user sees has one or two actions, never
+      three. And the reset token arrives by email as text the user pastes — it is not the six-digit PIN, and the two
+      must not look like the same control.
+    </p>
+  </section>
+
+  <section>
+    <h2>The four at a glance</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Direction</th><th>Shape</th><th>Best when</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><th>L1 · One card</th><td>A single card that swaps its fields per flow</td><td>You want the least code and the page is rarely seen</td><td>Anonymous; nothing tells you what signing in is for</td></tr>
+          <tr><th>L2 · Split hero</th><td>Desktop two-pane, pitch beside the form; phone crest above it</td><td>Sign-in is also the pitch for the sync account</td><td>Two layouts to keep in step; hero is dead weight on return visits</td></tr>
+          <tr><th>L3 · One question</th><td>One field per screen with a step indicator</td><td>Phone-first, and the PIN and token steps deserve room</td><td>More taps for the common case of a returning user</td></tr>
+          <tr><th>L4 · Server-first</th><td>Server chosen or confirmed before credentials</td><td>Self-hosting is a first-class case</td><td>Puts an infrastructure question in front of everyone</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ==================== L1 ==================== -->
+  <section>
+    <h2>L1 · One card</h2>
+    <p class="lede">
+      The current shape, tightened. One card holds whatever the flow needs; alternative flows are quiet links under
+      the primary action rather than a row of equal-weight buttons, so the eye lands on one thing. Messages and
+      errors appear inside the card, above the actions, where they are read before the button is pressed again.
+    </p>
+    <div class="devices">
+      <div class="device">
+        <div class="cap">Desktop — sign in</div>
+        <div class="frame desk">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="content">
+            <div class="card">
+              <div>
+                <div class="ttl">Sign in</div>
+                <div class="sub">Your libraries, reading positions and purchases on every device.</div>
+              </div>
+              <div class="pair">
+                <div class="field"><label>Email</label><div class="input ph">you@example.com</div></div>
+                <div class="field"><label>Password</label><div class="input ph"><span class="sp">Password</span><span class="eye">◉</span></div></div>
+              </div>
+              <div class="btns"><div class="btn pri">Sign in</div><div class="btn">Create account</div></div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Desktop — failed, reset revealed</div>
+        <div class="frame desk">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="content">
+            <div class="card">
+              <div>
+                <div class="ttl">Sign in</div>
+                <div class="sub">Your libraries, reading positions and purchases on every device.</div>
+              </div>
+              <div class="pair">
+                <div class="field"><label>Email</label><div class="input">johan@example.com</div></div>
+                <div class="field"><label>Password</label><div class="input err"><span class="sp">••••••••</span><span class="eye">◉</span></div></div>
+              </div>
+              <div class="alert err"><i>!</i><span>Email or password is incorrect.</span></div>
+              <div class="btns"><div class="btn pri">Sign in</div><div class="btn">Create account</div></div>
+              <div class="linkrow"><span class="link">Forgot your password?</span></div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — sign in</div>
+        <div class="frame phone">
+          <div class="topbar"><span>Account</span></div>
+          <div class="stage"><div class="content">
+            <div class="card">
+              <div>
+                <div class="ttl">Sign in</div>
+                <div class="sub">Your libraries on every device.</div>
+              </div>
+              <div class="field"><label>Email</label><div class="input focus ph">you@example.com</div></div>
+              <div class="field"><label>Password</label><div class="input ph"><span class="sp">Password</span><span class="eye">◉</span></div></div>
+              <div class="btns"><div class="btn pri">Sign in</div><div class="btn">Create account</div></div>
+            </div>
+            <div class="note" style="font-size:0.55rem;text-align:center;color:var(--faint)">You can keep reading without an account.</div>
+          </div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — create account, busy</div>
+        <div class="frame phone">
+          <div class="topbar"><span class="back">‹</span><span>Create account</span></div>
+          <div class="stage"><div class="content">
+            <div class="card">
+              <div class="ttl">Create account</div>
+              <div class="field"><label>Email</label><div class="input">johan@example.com</div></div>
+              <div class="field">
+                <label>Password</label>
+                <div class="input"><span class="sp">••••••••••</span><span class="eye">◉</span></div>
+                <div class="strength"><span class="f"></span><span class="f"></span><span class="f"></span><span></span></div>
+                <div class="hint">At least 10 characters.</div>
+              </div>
+              <div class="alert"><span class="spin"></span><span>Creating account…</span></div>
+              <div class="btns"><div class="btn pri busy">Create account</div></div>
+              <div class="linkrow"><span class="link">Already have an account? Sign in</span></div>
+            </div>
+          </div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+    </div>
+    <p class="note">
+      Narrow changes: the email/password pair goes from two columns to one, and the button row stacks. Everything
+      else is identical — which is why this is the cheapest of the four to build and the one closest to the code
+      that exists.
+    </p>
+  </section>
+
+  <!-- ==================== L2 ==================== -->
+  <section>
+    <h2>L2 · Split hero</h2>
+    <p class="lede">
+      Sign-in is where the sync account gets sold, so the desktop window uses its width for that: what an account
+      buys on the left, the form on the right. The phone cannot spare a pane, so the same content collapses to a
+      crest and one line of pitch above the fields.
+    </p>
+    <div class="devices">
+      <div class="device">
+        <div class="cap">Desktop — sign in</div>
+        <div class="frame desk tall">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="l2">
+            <div class="hero">
+              <div class="mark">Bokheim</div>
+              <div class="pitch">An account keeps your reading in one place.</div>
+              <div class="pt"><i>◫</i><span>Every library on every device, kept in step</span></div>
+              <div class="pt"><i>▸</i><span>Reading positions and bookmarks follow you</span></div>
+              <div class="pt"><i>⇩</i><span>Store purchases download anywhere you sign in</span></div>
+              <div class="pt"><i>▩</i><span>25 GB included</span></div>
+              <div class="foot">Reading works fine without one. Sign in when you want it on two devices.</div>
+            </div>
+            <div class="side">
+              <div class="ttl">Sign in</div>
+              <div class="field"><label>Email</label><div class="input focus ph">you@example.com</div></div>
+              <div class="field"><label>Password</label><div class="input ph"><span class="sp">Password</span><span class="eye">◉</span></div></div>
+              <div class="btns stack">
+                <div class="btn pri">Sign in</div>
+                <div class="btn">Create account</div>
+              </div>
+              <div class="linkrow"><span class="link">Use a different server</span></div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — sign in</div>
+        <div class="frame phone">
+          <div class="topbar"><span>Account</span></div>
+          <div class="stage"><div class="content l2phone">
+            <div class="crest">
+              <div class="mk">B</div>
+              <div class="nm">Bokheim</div>
+              <div class="tag">Your reading, on every device</div>
+            </div>
+            <div class="card">
+              <div class="field"><label>Email</label><div class="input focus ph">you@example.com</div></div>
+              <div class="field"><label>Password</label><div class="input ph"><span class="sp">Password</span><span class="eye">◉</span></div></div>
+              <div class="btns stack">
+                <div class="btn pri">Sign in</div>
+                <div class="btn">Create account</div>
+              </div>
+            </div>
+            <div class="linkrow" style="justify-content:center"><span class="link">Use a different server</span></div>
+          </div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — verify email</div>
+        <div class="frame phone">
+          <div class="topbar"><span class="back">‹</span><span>Verify email</span></div>
+          <div class="stage"><div class="content l2phone">
+            <div class="crest"><div class="mk">✉</div><div class="nm">Check your email</div><div class="tag">Six digits sent to johan@example.com</div></div>
+            <div class="card">
+              <div class="otp"><span>4</span><span>1</span><span>7</span><span class="on"></span><span></span><span></span></div>
+              <div class="btns stack">
+                <div class="btn pri">Verify email</div>
+                <div class="btn">Resend PIN</div>
+              </div>
+              <div class="sub" style="text-align:center">Expires in 10 minutes</div>
+            </div>
+            <div class="linkrow" style="justify-content:center"><span class="link">Wrong address? Start over</span></div>
+          </div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+    </div>
+    <p class="note">
+      Narrow changes: the hero pane is not rendered at all — the crest and its one line are a separate, smaller
+      element, not the same pane squeezed. That is the direction's real cost: two pieces of content saying the same
+      thing, which drift apart unless someone maintains both.
+    </p>
+  </section>
+
+  <!-- ==================== L3 ==================== -->
+  <section>
+    <h2>L3 · One question per screen</h2>
+    <p class="lede">
+      Every step asks exactly one thing, in type large enough to read at arm's length, with a step indicator so the
+      flow has a visible end. The same screens serve desktop — the column just stops growing and centres. This suits
+      the PIN and reset-token steps in particular, which are the steps people get wrong.
+    </p>
+    <div class="devices">
+      <div class="device">
+        <div class="cap">Desktop — step 1</div>
+        <div class="frame desk">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="content"><div class="l3">
+            <div class="steps"><b class="on"></b><b></b><span class="lb">1 of 2</span></div>
+            <div class="q">What's your email?</div>
+            <div class="why">We'll use it to find your account, or start a new one.</div>
+            <div class="big focus">johan@example.com</div>
+            <div class="nav"><div class="btn pri" style="min-width:6rem">Continue</div><div class="sp"></div><span class="link">Use a different server</span></div>
+          </div></div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — step 2, wrong password</div>
+        <div class="frame phone">
+          <div class="topbar"><span class="back">‹</span><span>Sign in</span></div>
+          <div class="stage"><div class="content"><div class="l3">
+            <div class="steps"><b class="on"></b><b class="on"></b><span class="lb">2 of 2</span></div>
+            <div class="q">Your password</div>
+            <div class="why">for johan@example.com</div>
+            <div class="big"><span style="flex:1">••••••••</span><span class="eye">◉</span></div>
+            <div class="alert err"><i>!</i><span>That password doesn't match. Try again or reset it.</span></div>
+            <div class="btns stack">
+              <div class="btn pri">Sign in</div>
+              <div class="btn">Email me a reset link</div>
+            </div>
+          </div></div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — PIN step</div>
+        <div class="frame phone">
+          <div class="topbar"><span class="back">‹</span><span>Create account</span></div>
+          <div class="stage"><div class="content"><div class="l3">
+            <div class="steps"><b class="on"></b><b class="on"></b><b class="on"></b><span class="lb">3 of 3</span></div>
+            <div class="q">Enter the six digits we emailed</div>
+            <div class="why">Sent to johan@example.com · expires in 10 minutes</div>
+            <div class="otp"><span>4</span><span>1</span><span>7</span><span class="on"></span><span></span><span></span></div>
+            <div class="btns stack"><div class="btn pri">Verify email</div><div class="btn">Resend PIN</div></div>
+          </div></div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — set new password</div>
+        <div class="frame phone">
+          <div class="topbar"><span class="back">‹</span><span>Reset password</span></div>
+          <div class="stage"><div class="content"><div class="l3">
+            <div class="steps"><b class="on"></b><b class="on"></b><span class="lb">2 of 2</span></div>
+            <div class="q">Paste the token, pick a password</div>
+            <div class="why">The token is the long code in the email — not the six-digit PIN.</div>
+            <div class="field"><label>Reset token</label><div class="input" style="font-family:var(--mono);font-size:0.56rem">7f3c-91ab-… <span class="sp"></span>⧉</div></div>
+            <div class="field">
+              <label>New password</label>
+              <div class="input"><span class="sp">••••••••••••</span><span class="eye">◉</span></div>
+              <div class="strength"><span class="f"></span><span class="f"></span><span class="f"></span><span class="f"></span></div>
+              <div class="hint">At least 10 characters.</div>
+            </div>
+            <div class="btns stack"><div class="btn pri">Set new password</div></div>
+          </div></div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+    </div>
+    <p class="note">
+      Narrow changes: none of consequence — the column is already one field wide, so the layout is width-independent
+      and the desktop version is the phone version with a maximum width. That makes it the cheapest direction to
+      make responsive and the most expensive in taps for the returning user who just wants two fields and a button.
+    </p>
+  </section>
+
+  <!-- ==================== L4 ==================== -->
+  <section>
+    <h2>L4 · Server-first</h2>
+    <p class="lede">
+      Bokheim can talk to a self-hosted server, and which server you are on decides whether registration and password
+      recovery exist at all. This direction makes that explicit: the server is a persistent line above the form,
+      confirmed once and then quiet, with the actions below it driven by what that server advertises.
+    </p>
+    <div class="devices">
+      <div class="device">
+        <div class="cap">Desktop — choose server</div>
+        <div class="frame desk">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="content l4">
+            <div class="card">
+              <div><div class="ttl">Where is your library?</div><div class="sub">You can change this later in Settings.</div></div>
+              <div class="choice" style="border:1px solid var(--line)">
+                <div class="opt"><span class="rd on"></span><span class="tx"><span>Bokheim</span><span class="d">bokheim.se · accounts, 25 GB included</span></span></div>
+                <div class="opt"><span class="rd"></span><span class="tx"><span>My own server</span><span class="d">Enter the address of a Bokheim server you run</span></span></div>
+              </div>
+              <div class="field"><label>Server address</label><div class="input ph" style="font-family:var(--mono);font-size:0.58rem">https://books.example.org</div></div>
+              <div class="btns"><div class="btn pri">Continue</div></div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Desktop — sign in, capabilities known</div>
+        <div class="frame desk">
+          <div class="rail"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div class="sp"></div><div class="on"><i>◉</i>Account</div><div><i>⚙</i>Settings</div></div>
+          <div class="stage"><div class="content l4">
+            <div class="server"><span class="dot"></span><span class="url">books.example.org</span><span class="ch">Change</span></div>
+            <div class="card">
+              <div class="ttl">Sign in</div>
+              <div class="pair">
+                <div class="field"><label>Email</label><div class="input ph">you@example.com</div></div>
+                <div class="field"><label>Password</label><div class="input ph"><span class="sp">Password</span><span class="eye">◉</span></div></div>
+              </div>
+              <div class="btns"><div class="btn pri">Sign in</div></div>
+              <div class="caps">
+                <span class="cap2">Open registration off</span>
+                <span class="cap2 on">Email verification</span>
+                <span class="cap2">Password recovery off</span>
+              </div>
+              <div class="sub">This server does not allow self-registration. Ask its administrator for an account.</div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+
+      <div class="device">
+        <div class="cap">Phone — server line, unreachable</div>
+        <div class="frame phone">
+          <div class="topbar"><span>Account</span></div>
+          <div class="stage"><div class="content l4">
+            <div class="server"><span class="dot off"></span><span class="url">books.example.org</span><span class="ch">Change</span></div>
+            <div class="card">
+              <div class="ttl">Sign in</div>
+              <div class="alert err"><i>!</i><span>Can't reach this server. Check the address or your connection.</span></div>
+              <div class="field"><label>Email</label><div class="input">johan@example.com</div></div>
+              <div class="field"><label>Password</label><div class="input"><span class="sp">••••••••</span><span class="eye">◉</span></div></div>
+              <div class="btns stack"><div class="btn pri">Try again</div><div class="btn">Use bokheim.se instead</div></div>
+            </div>
+            <div class="note" style="font-size:0.55rem;text-align:center;color:var(--faint)">Your local libraries are unaffected.</div>
+          </div></div>
+          <div class="tabbar"><div><i>◫</i>Library</div><div><i>⌕</i>Search</div><div><i>⇩</i>Store</div><div class="on"><i>◉</i>Account</div></div>
+        </div>
+      </div>
+    </div>
+    <p class="note">
+      Narrow changes: the server line and the card stack the same way L1 does; nothing is dropped, because the
+      server line is one row at any width. The cost is up front — a first-run user who has never heard of
+      self-hosting is asked an infrastructure question before an email address. Mitigation is to skip the chooser
+      entirely on first run, default to bokheim.se, and show only the quiet server line with its "Change" affordance.
+    </p>
+  </section>
+
+  <section>
+    <h2>Details that apply whichever direction wins</h2>
+    <ul>
+      <li>
+        <b>Recovery appears after failure, not before.</b> The first screen carries sign-in and, if the server
+        allows it, create-account. "Forgot your password?" is revealed once <code>login_failed</code> is set —
+        which is what the code does today and what keeps the first screen to two actions.
+      </li>
+      <li>
+        <b>The PIN and the reset token are different objects.</b> Six boxes for the PIN; a single monospace field
+        with a paste affordance for the token. Drawing the token as an OTP grid invites people to type six of its
+        characters and give up.
+      </li>
+      <li>
+        <b>Say what happens without an account.</b> Reading works offline and unsynced; every direction above says
+        so once, quietly, so the screen does not read as a wall.
+      </li>
+      <li>
+        <b>Errors sit above the button, inside the card.</b> They are read on the way back to the action that
+        produced them. Success messages take the same slot rather than a second one.
+      </li>
+      <li>
+        <b>Busy disables the primary action and names what is happening</b> — "Signing in…", "Creating account…",
+        exactly the strings <code>authentication.rs</code> already sets.
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Building it in GPUI</h2>
+    <ul>
+      <li>
+        <b>One <code>narrow: bool</code>, measured once.</b> No container queries exist; the field pair chooses
+        <code>flex_row()</code> or <code>flex_col()</code> from the same flag the signed-in page uses, and the
+        button row does the same.
+      </li>
+      <li>
+        <b>The flows are already a state machine.</b> <code>AccountFlow</code> is the switch; none of these
+        directions adds a state, they only change what each state renders. L3 splits sign-in into two screens,
+        which means one extra variant (email captured, password pending) and nothing else.
+      </li>
+      <li>
+        <b>L2's hero is a separate element, not a squeezed pane.</b> Render the pane when wide, the crest when
+        narrow, and keep the copy in one place — a slice of strings both read — so they cannot drift.
+      </li>
+      <li>
+        <b>L4 needs a capability probe before the form.</b> The contract's <code>capabilities</code> already carry
+        <code>public_registration</code>, <code>email_verification</code>, <code>resend_verification</code> and
+        <code>password_recovery</code>; the chips draw straight from them, and the reachability dot needs a cheap
+        ping the backend does not expose yet.
+      </li>
+      <li>
+        <b>Units.</b> Field heights, gaps and padding in <code>px</code>; all text in
+        <code>rems(x / 16.0)</code> so it follows the UI font, as <code>account.rs</code> does. L3's large type is
+        the one place to add a new text size constant rather than reusing <code>TITLE_LG</code>.
+      </li>
+      <li>
+        <b>Focus and submit.</b> Enter advances every one of these screens; the OTP field auto-advances between
+        boxes and submits on the sixth digit. That is behaviour, not layout, and it is the same in all four.
+      </li>
+    </ul>
+  </section>
+</div>

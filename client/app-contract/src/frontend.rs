@@ -5,12 +5,12 @@ use account_contract::{EMAIL_MAX_BYTES, EMAIL_VERIFICATION_PIN_DIGITS, ONE_TIME_
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-pub const BOOK_IMPORT_EXTENSIONS: [&str; 12] = ["epub", "pdf", "mobi", "azw", "azw3", "fb2", "cbz", "html", "htm", "xhtml", "webpub", "m4b"];
+pub const BOOK_IMPORT_EXTENSIONS: [&str; 6] = ["epub", "pdf", "mobi", "azw", "azw3", "m4b"];
 pub const SEMANTIC_LINK_RELATIONS: [&str; 8] = ["related to", "continues", "continued by", "inspired by", "adaptation of", "contrasts with", "commentary on", "translation of"];
 pub const BREADCRUMB_ITEM_MAX_CHARACTERS: u8 = 24;
 
 pub const LARGE_VIEWPORT_BREAKPOINT_PX: u16 = 720;
-pub const LARGE_SIDEBAR_WIDTH_PX: u16 = 96;
+pub const LARGE_SIDEBAR_WIDTH_PX: u16 = 64;
 pub const NAVIGATION_LABEL_SIZE_PX: u8 = 12;
 pub const NAVIGATION_LABEL_WEIGHT: u16 = 600;
 pub const NAVIGATION_ICON_SIZE_PX: u8 = 24;
@@ -30,8 +30,8 @@ pub const SURFACE_CORNER_RADIUS_PX: u8 = 0;
 pub const LARGE_BOOK_COVER_WIDTH_PX: u16 = 200;
 pub const LARGE_BOOK_COVER_HEIGHT_PX: u16 = 320;
 /// The sum of the card's children, not a round number chosen independently:
-/// 320 cover + 14 + 42 title + 5 + 22 author + 5 + 16 progress.
-pub const LARGE_BOOK_CARD_HEIGHT_PX: u16 = 424;
+/// 320 cover + 14 + 42 title + 5 + 22 author.
+pub const LARGE_BOOK_CARD_HEIGHT_PX: u16 = 403;
 pub const LARGE_BOOK_GRID_COLUMN_GAP_PX: u16 = 28;
 pub const BOOK_CARD_TITLE_SIZE_PX: u8 = 17;
 pub const BOOK_CARD_TITLE_WEIGHT: u16 = 600;
@@ -41,8 +41,6 @@ pub const BOOK_CARD_AUTHOR_SIZE_PX: u8 = 15;
 pub const BOOK_CARD_AUTHOR_LINE_HEIGHT_PX: u8 = 22;
 pub const BOOK_CARD_COVER_CONTENT_GAP_PX: u8 = 14;
 pub const BOOK_CARD_TEXT_GAP_PX: u8 = 5;
-pub const BOOK_CARD_PROGRESS_HEIGHT_PX: u8 = 16;
-pub const BOOK_GRID_ROW_TRAILING_SPACE_PX: u8 = 6;
 pub const CAROUSEL_TITLE_SIZE_PX: u8 = 21;
 pub const CAROUSEL_TITLE_WEIGHT: u16 = 600;
 pub const CAROUSEL_SECTION_GAP_PX: u8 = 28;
@@ -61,7 +59,7 @@ pub const AUTHOR_ROW_COVER_GAP_PX: u8 = 14;
 pub const AUTHOR_ROW_CONTENT_GAP_PX: u8 = 14;
 pub const AUTHOR_ROW_HORIZONTAL_PADDING_PX: u8 = 14;
 pub const AUTHOR_ROW_LABEL_SIZE_PX: u8 = BOOK_CARD_TITLE_SIZE_PX;
-pub const LARGE_BOOK_GRID_ROW_HEIGHT_PX: u16 = LARGE_BOOK_CARD_HEIGHT_PX + BOOK_GRID_ROW_TRAILING_SPACE_PX as u16;
+pub const LARGE_BOOK_GRID_ROW_HEIGHT_PX: u16 = LARGE_BOOK_CARD_HEIGHT_PX;
 
 /// Folder and subject navigation share one visual geometry across frontends.
 /// Pointer-first layouts keep the compact row; touch-first layouts use the
@@ -141,8 +139,6 @@ pub struct BrowsingLayoutContract {
     pub book_card_author_line_height_px: u8,
     pub book_card_cover_content_gap_px: u8,
     pub book_card_text_gap_px: u8,
-    pub book_card_progress_height_px: u8,
-    pub book_grid_row_trailing_space_px: u8,
     pub carousel_title_size_px: u8,
     pub carousel_title_weight: u16,
     pub carousel_section_gap_px: u8,
@@ -202,8 +198,6 @@ impl Default for BrowsingLayoutContract {
             book_card_author_line_height_px: BOOK_CARD_AUTHOR_LINE_HEIGHT_PX,
             book_card_cover_content_gap_px: BOOK_CARD_COVER_CONTENT_GAP_PX,
             book_card_text_gap_px: BOOK_CARD_TEXT_GAP_PX,
-            book_card_progress_height_px: BOOK_CARD_PROGRESS_HEIGHT_PX,
-            book_grid_row_trailing_space_px: BOOK_GRID_ROW_TRAILING_SPACE_PX,
             carousel_title_size_px: CAROUSEL_TITLE_SIZE_PX,
             carousel_title_weight: CAROUSEL_TITLE_WEIGHT,
             carousel_section_gap_px: CAROUSEL_SECTION_GAP_PX,
@@ -933,9 +927,8 @@ mod tests {
         const TITLE: u16 = BOOK_CARD_TITLE_LINE_HEIGHT_PX as u16 * BOOK_CARD_TITLE_LINES as u16;
         const ROW_GAP: u16 = BOOK_CARD_TEXT_GAP_PX as u16;
         const AUTHOR: u16 = BOOK_CARD_AUTHOR_LINE_HEIGHT_PX as u16;
-        const PROGRESS: u16 = BOOK_CARD_PROGRESS_HEIGHT_PX as u16;
-        assert_eq!(LARGE_BOOK_CARD_HEIGHT_PX, COVER + TEXT_GAP + TITLE + ROW_GAP + AUTHOR + ROW_GAP + PROGRESS);
-        assert_eq!(LARGE_BOOK_GRID_ROW_HEIGHT_PX, LARGE_BOOK_CARD_HEIGHT_PX + BOOK_GRID_ROW_TRAILING_SPACE_PX as u16);
+        assert_eq!(LARGE_BOOK_CARD_HEIGHT_PX, COVER + TEXT_GAP + TITLE + ROW_GAP + AUTHOR);
+        assert_eq!(LARGE_BOOK_GRID_ROW_HEIGHT_PX, LARGE_BOOK_CARD_HEIGHT_PX);
         let layout = FrontendContract::default().browsing_layout;
         assert_eq!(layout.book_card_title_lines, 2);
         assert_eq!(layout.book_card_title_weight, 600);

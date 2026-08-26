@@ -182,6 +182,7 @@ pub struct LibraryTransfers {
     #[specta(type = String)]
     pub library_id: LibraryId,
     pub library_name: String,
+    pub scanner_running: bool,
     pub transfers: Vec<TransferStatus>,
     pub history: Vec<TransferStatus>,
 }

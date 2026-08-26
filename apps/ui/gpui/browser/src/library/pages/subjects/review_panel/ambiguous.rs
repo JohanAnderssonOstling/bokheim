@@ -1,20 +1,36 @@
 use std::rc::Rc;
 
-use epub_svelte_lib::ContentHash;
-use epub_svelte_lib::library::{EditionIdentityReview, EditionIdentityReviewCandidate};
+use app_contract::library::{EditionIdentityReview, EditionIdentityReviewCandidate};
 use gpui::prelude::*;
-use gpui::{Context, Div, Entity, FontWeight, Render, Window, div, px, uniform_list};
+use gpui::{Context, Div, Entity, FontWeight, Render, Subscription, Window, div, px, rems};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{IconName, Sizable};
+use sync_common::ContentHash;
 use ui_components::{self as components, BrowserTheme};
 
 use crate::library::services::LibraryContext;
+use crate::library::widgets::{Paginator, PaginatorChild, PaginatorGapPolicy, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
 
 use super::super::review_cover::ReviewCoverView;
-use super::ReviewRejected;
+use super::{ReviewsChanged, review_paginator_controls};
 
 const CANDIDATE_ACTION_SIZE: f32 = 32.0;
 const ROW_EDGE_PADDING: f32 = 10.0;
+const COMPARISON_GAP: f32 = 8.0;
+const FIELD_HORIZONTAL_PADDING: f32 = 7.0;
+const COMPARISON_MINIMUM_TEXT_WIDTH_REM: f32 = 16.0;
+const COMPARISON_PREFERRED_TEXT_WIDTH_REM: f32 = 19.0;
+const COMPARISON_MAXIMUM_TEXT_WIDTH_REM: f32 = 24.0;
+
+fn paginator_policy() -> PaginatorGroupPolicy {
+    let fixed_width = components::BOOK_COVER_WIDTH + ROW_EDGE_PADDING + COMPARISON_GAP * 2.0 + FIELD_HORIZONTAL_PADDING * 4.0;
+    PaginatorGroupPolicy::new(
+        PaginatorWidthPolicy::new(rems(COMPARISON_MINIMUM_TEXT_WIDTH_REM * 2.0), rems(COMPARISON_PREFERRED_TEXT_WIDTH_REM * 2.0), rems(COMPARISON_MAXIMUM_TEXT_WIDTH_REM * 2.0)).with_pixels(px(fixed_width)),
+        PaginatorSizing::pixels(px(components::BOOK_COVER_HEIGHT)),
+        PaginatorGapPolicy::new(px(components::SPACE_SM), px(components::SPACE_MD)),
+        PaginatorGapPolicy::new(px(6.0), px(components::SPACE_SM)),
+    )
+}
 
 #[derive(Clone)]
 struct AmbiguousReviewItem {
@@ -23,26 +39,44 @@ struct AmbiguousReviewItem {
     cover: Entity<ReviewCoverView>,
 }
 
-pub(super) struct AmbiguousReviewPanel {
+pub(super) struct AmbiguousLane {
     ui: LibraryContext,
     items: Rc<Vec<AmbiguousReviewItem>>,
+    paginator: Entity<Paginator>,
+    _paginator_updates: Subscription,
     error: Option<String>,
 }
 
-impl gpui::EventEmitter<ReviewRejected> for AmbiguousReviewPanel {}
+impl gpui::EventEmitter<ReviewsChanged> for AmbiguousLane {}
 
-impl AmbiguousReviewPanel {
+impl AmbiguousLane {
     pub(super) fn new(ui: LibraryContext, reviews: Vec<EditionIdentityReview>, cx: &mut Context<Self>) -> Self {
-        let items = reviews.into_iter().map(|review| AmbiguousReviewItem { cover: ReviewCoverView::create(review.content_hash.clone(), ui.clone(), cx), review, selected_candidate: 0 }).collect();
-        Self { ui, items: Rc::new(items), error: None }
+        let items = Rc::new(reviews.into_iter().map(|review| AmbiguousReviewItem { cover: ReviewCoverView::create(review.content_hash, ui.clone(), cx), review, selected_candidate: 0 }).collect::<Vec<_>>());
+        let lane = cx.entity().downgrade();
+        let children = items
+            .iter()
+            .map(|item| {
+                let hash = item.review.content_hash;
+                let lane = lane.clone();
+                PaginatorChild::new(move |_, cx| {
+                    let Some(lane) = lane.upgrade() else {
+                        return div().into_any_element();
+                    };
+                    let state = lane.read(cx);
+                    let Some(item) = state.items.iter().find(|item| item.review.content_hash == hash) else {
+                        return div().into_any_element();
+                    };
+                    review_row(item, &lane, components::browser_theme(cx)).into_any_element()
+                })
+            })
+            .collect::<Vec<_>>();
+        let paginator = cx.new(|_| Paginator::new("ambiguous-review-paginator", [PaginatorGroup::new(paginator_policy(), children)]));
+        let paginator_updates = cx.observe(&paginator, |_, _, cx| cx.notify());
+        Self { ui, items, paginator, _paginator_updates: paginator_updates, error: None }
     }
 
     pub(super) fn count(&self) -> usize {
         self.items.len()
-    }
-
-    fn remove_review(&mut self, hash: &ContentHash) {
-        Rc::make_mut(&mut self.items).retain(|item| &item.review.content_hash != hash);
     }
 
     fn select_previous_candidate(&mut self, hash: &ContentHash, cx: &mut Context<Self>) {
@@ -52,6 +86,7 @@ impl AmbiguousReviewPanel {
         let candidate_count = item.review.candidates.len();
         if candidate_count > 0 {
             item.selected_candidate = if item.selected_candidate == 0 { candidate_count - 1 } else { item.selected_candidate - 1 };
+            self.paginator.update(cx, |_, cx| cx.notify());
             cx.notify();
         }
     }
@@ -63,18 +98,16 @@ impl AmbiguousReviewPanel {
         let candidate_count = item.review.candidates.len();
         if candidate_count > 0 {
             item.selected_candidate = (item.selected_candidate + 1) % candidate_count;
+            self.paginator.update(cx, |_, cx| cx.notify());
             cx.notify();
         }
     }
 
-    fn finish_action(&mut self, hash: &ContentHash, result: Result<(), String>, event: Option<ReviewRejected>, cx: &mut Context<Self>) {
+    fn finish_action(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
-                self.remove_review(hash);
                 self.error = None;
-                if let Some(event) = event {
-                    cx.emit(event);
-                }
+                cx.emit(ReviewsChanged);
             }
             Err(error) => self.error = Some(error),
         }
@@ -89,20 +122,16 @@ impl AmbiguousReviewPanel {
         let Some(candidate) = item.review.candidates.get(selected) else {
             return;
         };
-        let result = self.ui.select_edition_identity_candidate(hash.clone(), &candidate.edition_id, &candidate.isbn13).map(|_| ());
-        self.finish_action(&hash, result, None, cx);
+        let result = self.ui.backend().select_edition_identity_candidate(hash, &candidate.edition_id, &candidate.isbn13).map(|_| ());
+        self.finish_action(result, cx);
     }
 
     fn reject_candidates(&mut self, hash: ContentHash, cx: &mut Context<Self>) {
-        let Some(mut review) = self.items.iter().find(|item| item.review.content_hash == hash).map(|item| item.review.clone()) else {
+        if !self.items.iter().any(|item| item.review.content_hash == hash) {
             return;
-        };
-        review.status = epub_svelte_lib::library::EditionIdentityReviewStatus::NoMatch;
-        review.detail = Some("No suitable edition selected during manual review".to_owned());
-        review.candidates.clear();
-        review.candidates_truncated = false;
-        let result = self.ui.reject_edition_identity_candidates(hash.clone());
-        self.finish_action(&hash, result, Some(ReviewRejected(review)), cx);
+        }
+        let result = self.ui.backend().reject_edition_identity_candidates(hash);
+        self.finish_action(result, cx);
     }
 }
 
@@ -191,7 +220,7 @@ fn comparison_column(metadata: ReviewMetadata<'_>, footer: Option<Div>, theme: B
         .when_some(footer, |column, footer| column.child(footer))
 }
 
-fn candidate_controls(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousReviewPanel>, theme: BrowserTheme) -> Div {
+fn candidate_controls(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousLane>, theme: BrowserTheme) -> Div {
     let review = &item.review;
     let mut controls = div().flex_none().flex().items_center().gap(px(6.0));
     if review.candidates.len() <= 1 {
@@ -200,9 +229,9 @@ fn candidate_controls(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousReview
 
     let selected = item.selected_candidate.min(review.candidates.len() - 1);
     let previous_panel = panel.clone();
-    let previous_hash = review.content_hash.clone();
+    let previous_hash = review.content_hash;
     let next_panel = panel.clone();
-    let next_hash = review.content_hash.clone();
+    let next_hash = review.content_hash;
     controls = controls
         .child(components::outlined_icon_button(format!("isbn-candidate-prev-{}", review.content_hash), "Previous candidate", IconName::ArrowLeft, px(CANDIDATE_ACTION_SIZE), components::RADIUS_SM, theme).text_color(theme.accent).on_click(
             move |_, _, cx| {
@@ -222,18 +251,18 @@ fn local_column(review: &EditionIdentityReview, theme: BrowserTheme) -> Div {
     comparison_column(ReviewMetadata::local(review), None, theme)
 }
 
-fn external_column(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousReviewPanel>, theme: BrowserTheme) -> Div {
+fn external_column(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousLane>, theme: BrowserTheme) -> Div {
     let review = &item.review;
     let selected = item.selected_candidate.min(review.candidates.len().saturating_sub(1));
     let Some(candidate) = review.candidates.get(selected) else {
         return comparison_column(ReviewMetadata::empty(), None, theme);
     };
 
-    let hash = review.content_hash.clone();
+    let hash = review.content_hash;
     let choose_panel = panel.clone();
-    let choose_hash = hash.clone();
+    let choose_hash = hash;
     let reject_panel = panel.clone();
-    let reject_hash = hash.clone();
+    let reject_hash = hash;
     let actions = div().w_full().h(px(CANDIDATE_ACTION_SIZE + ROW_EDGE_PADDING * 2.0)).flex_none().p(px(ROW_EDGE_PADDING)).flex().items_center().justify_between().gap(px(8.0)).child(candidate_controls(item, panel, theme)).child(
         div()
             .flex_none()
@@ -241,42 +270,39 @@ fn external_column(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousReviewPan
             .items_center()
             .gap(px(8.0))
             .child(Button::new(format!("isbn-use-{hash}")).label("Choose").primary().small().on_click(move |_, _, cx| {
-                choose_panel.update(cx, |panel, cx| panel.choose_candidate(choose_hash.clone(), cx));
+                choose_panel.update(cx, |panel, cx| panel.choose_candidate(choose_hash, cx));
             }))
             .child(components::outlined_text_button(format!("isbn-reject-{hash}"), "Reject").on_click(move |_, _, cx| {
-                reject_panel.update(cx, |panel, cx| panel.reject_candidates(reject_hash.clone(), cx));
+                reject_panel.update(cx, |panel, cx| panel.reject_candidates(reject_hash, cx));
             })),
     );
     comparison_column(ReviewMetadata::external(candidate), Some(actions), theme)
 }
 
-fn review_row(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousReviewPanel>, theme: BrowserTheme) -> Div {
+fn review_row(item: &AmbiguousReviewItem, panel: &Entity<AmbiguousLane>, theme: BrowserTheme) -> Div {
     let cover_column = div().w(px(components::BOOK_COVER_WIDTH)).h(px(components::BOOK_COVER_HEIGHT)).flex_none().child(item.cover.clone());
-    let comparison_columns = div().flex_1().min_w_0().flex().items_start().gap(px(8.0)).child(local_column(&item.review, theme)).child(external_column(item, panel, theme));
+    let comparison_columns = div().flex_1().min_w_0().flex().items_start().gap(px(COMPARISON_GAP)).child(local_column(&item.review, theme)).child(external_column(item, panel, theme));
     div()
         .w_full()
         .h(px(components::BOOK_COVER_HEIGHT))
         .pr(px(ROW_EDGE_PADDING))
-        .mb(px(6.0))
         .border_1()
         .border_color(theme.border)
         .bg(theme.page_bg)
         .flex()
         .items_start()
-        .child(div().w_full().h_full().min_w_0().flex().items_start().gap(px(8.0)).child(cover_column).child(comparison_columns))
+        .child(div().w_full().h_full().min_w_0().flex().items_start().gap(px(COMPARISON_GAP)).child(cover_column).child(comparison_columns))
 }
 
-impl Render for AmbiguousReviewPanel {
+impl Render for AmbiguousLane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let panel = cx.entity();
-        let rows = self.items.clone();
-        let list = uniform_list("ambiguous-review-list", rows.len(), move |range, _, _| range.map(|index| review_row(&rows[index], &panel, theme)).collect::<Vec<_>>());
         let body = if self.items.is_empty() {
             components::browser_inline_note("No ambiguous metadata decisions need review.", theme).into_any_element()
         } else {
-            components::remaining_space_column().border_1().border_color(theme.border).overflow_hidden().child(components::virtual_list(list)).into_any_element()
+            components::remaining_space_column().overflow_hidden().child(self.paginator.clone()).into_any_element()
         };
-        components::full_size_column().gap(px(12.0)).when_some(self.error.clone(), |panel, error| panel.child(gpui_component::alert::Alert::error("ambiguous-review-error", error))).child(body)
+        let controls = (!self.items.is_empty() && !cx.supports_touch_input()).then(|| div().w_full().flex().justify_end().child(review_paginator_controls("ambiguous-review", &self.paginator, theme, cx)));
+        components::full_size_column().gap(px(12.0)).when_some(self.error.clone(), |panel, error| panel.child(gpui_component::alert::Alert::error("ambiguous-review-error", error))).children(controls).child(body)
     }
 }

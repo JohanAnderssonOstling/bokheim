@@ -6,12 +6,12 @@ use crate::{BrowserTheme, RADIUS_MD};
 /// The shared full-window layer for a centered modal. The caller supplies the
 /// scrim and surface so it can retain its own identity and dismissal behavior.
 pub fn modal_overlay() -> Div {
-    div().absolute().inset_0().size_full().flex().items_center().justify_center().p(px(crate::SPACE_XL))
+    crate::absolute_full_size().flex().items_center().justify_center().p(px(crate::SPACE_MD))
 }
 
 /// A modal's pointer-blocking backdrop.
 pub fn modal_scrim(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
-    div().id(id).absolute().inset_0().size_full().occlude().bg(theme.overlay_scrim).cursor_default()
+    crate::absolute_full_size().id(id).occlude().bg(theme.overlay_scrim).cursor_default()
 }
 
 /// The common elevated surface for dialogs, editors, and other modal content.

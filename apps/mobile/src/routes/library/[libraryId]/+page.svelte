@@ -37,6 +37,7 @@
 {:else}
   <HomePage
     libraryId={$home.libraryId}
+    continueReading={$home.continueReading}
     inProgress={$home.inProgress}
     finished={$home.finished}
     recentlyAdded={$home.recentlyAdded}

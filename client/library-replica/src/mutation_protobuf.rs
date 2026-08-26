@@ -7,9 +7,9 @@
 use super::{catalog_publication_state_subkey, MutationBody};
 use catalog_contract::{CatalogPublicationIdentity, CatalogSourceId};
 use library_model::{
-    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, Contributor, DirectoryLifecycleState, LanguageTag, MarcRelatorCode, PdfAnnotationAnchor,
-    PdfAnnotationRect, PublicationCollection, PublicationDate, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit,
-    ReadingPosition, ReadingPositionState,
+    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, Collection, CollectionKind, Contributor, DirectoryLifecycleState, Identifier, LanguageTag,
+    LocalizedText, MarcRelatorCode, PdfAnnotationAnchor, PdfAnnotationRect, PublicationDate, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit, ReadingPosition, ReadingPositionState, Scheme,
+    Scope,
 };
 use sync_common::transport::{self, protobuf as pb};
 use sync_common::{ContentHash, WireMutation};
@@ -276,26 +276,66 @@ fn decode_contributor(value: pb::Contributor) -> Result<Contributor, transport::
     Contributor::with_id(contributor_id, value.name, value.sort_name, MarcRelatorCode(role)).map_err(|error| decode_error(error.to_string()))
 }
 
+fn encode_localized_text(value: &LocalizedText) -> pb::LocalizedText {
+    pb::LocalizedText { language: value.language.clone(), value: value.value.clone() }
+}
+
+fn decode_localized_text(value: pb::LocalizedText) -> Result<LocalizedText, transport::WireError> {
+    LocalizedText::new(value.language, value.value).map_err(|error| decode_error(error.to_string()))
+}
+
+fn decode_collection(value: pb::PublicationCollection) -> Result<Collection, transport::WireError> {
+    let kind = value.collection_type.map(CollectionKind::from_label).transpose().map_err(|error| decode_error(error.to_string()))?;
+    let name_localizations = value.name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?;
+    let sort_name_localizations = value.sort_name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?;
+    Collection::with_details(value.name, name_localizations, value.sort_name, sort_name_localizations, value.identifiers, kind, value.position, value.source.unwrap_or_else(|| "legacy:protobuf-collection".to_owned()))
+        .map_err(|error| decode_error(error.to_string()))
+}
+
 fn encode_publication_metadata(value: &PublicationMetadata) -> pb::PublicationMetadata {
     pb::PublicationMetadata {
         identifiers: value.identifiers.iter().map(encode_publication_identifier).collect(),
         publishers: value.publishers.iter().map(|publisher| pb::Publisher { publisher_id: publisher.publisher_id().to_string(), name: publisher.name().as_str().to_owned() }).collect(),
         languages: value.languages.iter().map(|language| language.as_str().to_owned()).collect(),
-        dates: value.dates.iter().map(|date| pb::PublicationDate { id: date.id().map(str::to_owned), value: date.value().to_owned(), event: date.event().map(str::to_owned) }).collect(),
+        dates: value.dates.iter().map(|date| pb::PublicationDate { id: date.id().map(str::to_owned), value: date.value().to_owned(), event: date.event().map(str::to_owned), source: Some(date.source().to_owned()) }).collect(),
         subjects: value
             .subjects
             .iter()
-            .map(|subject| pb::PublicationSubject { id: subject.id().map(str::to_owned), name: subject.name().to_owned(), authority: subject.authority().map(str::to_owned), code: subject.code().map(str::to_owned) })
+            .map(|subject| pb::PublicationSubject {
+                id: subject.id().map(str::to_owned),
+                name: subject.name().to_owned(),
+                authority: subject.authority().map(str::to_owned),
+                code: subject.code().map(str::to_owned),
+                source: Some(subject.source().to_owned()),
+                name_localizations: subject.name_localizations.iter().map(encode_localized_text).collect(),
+                sort_name: subject.sort_name.clone(),
+                sort_name_localizations: subject.sort_name_localizations.iter().map(encode_localized_text).collect(),
+            })
             .collect(),
         collections: value
             .collections
             .iter()
-            .map(|collection| pb::PublicationCollection { name: collection.name().to_owned(), collection_type: collection.collection_type().map(str::to_owned), position: collection.position().map(str::to_owned) })
+            .map(|collection| pb::PublicationCollection {
+                name: collection.name.clone(),
+                collection_type: collection.kind.as_ref().map(|kind| kind.label().to_owned()),
+                position: collection.position.clone(),
+                name_localizations: collection.name_localizations.iter().map(encode_localized_text).collect(),
+                sort_name: collection.sort_name.clone(),
+                sort_name_localizations: collection.sort_name_localizations.iter().map(encode_localized_text).collect(),
+                identifiers: collection.identifiers.clone(),
+                source: Some(collection.source.clone()),
+            })
             .collect(),
         alternate_titles: value
             .alternate_titles
             .iter()
-            .map(|title| pb::PublicationTitle { id: title.id().map(str::to_owned), value: title.value().to_owned(), title_type: title.title_type().map(str::to_owned), sort_as: title.sort_as().map(str::to_owned) })
+            .map(|title| pb::PublicationTitle {
+                id: title.id().map(str::to_owned),
+                value: title.value().to_owned(),
+                title_type: title.title_type().map(str::to_owned),
+                sort_as: title.sort_as().map(str::to_owned),
+                source: Some(title.source().to_owned()),
+            })
             .collect(),
         rights: value.rights.clone(),
         sources: value.sources.clone(),
@@ -313,6 +353,7 @@ fn encode_publication_metadata(value: &PublicationMetadata) -> pb::PublicationMe
                 refines: property.refines().map(str::to_owned),
                 scheme: property.scheme().map(str::to_owned),
                 language: property.language().map(str::to_owned),
+                source: Some(property.source().to_owned()),
             })
             .collect(),
     }
@@ -330,10 +371,34 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
             })
             .collect::<Result<_, _>>()?,
         languages: value.languages.into_iter().map(|language| LanguageTag::parse(language).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
-        dates: value.dates.into_iter().map(|date| PublicationDate::new(date.id, date.value, date.event).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
-        subjects: value.subjects.into_iter().map(|subject| PublicationSubject::new(subject.id, subject.name, "dc:subject", subject.authority, subject.code).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
-        collections: value.collections.into_iter().map(|collection| PublicationCollection::new(collection.name, collection.collection_type, collection.position).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
-        alternate_titles: value.alternate_titles.into_iter().map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?,
+        dates: value
+            .dates
+            .into_iter()
+            .map(|date| PublicationDate::new(date.id, date.value, date.event, date.source.unwrap_or_else(|| "legacy:protobuf-date".to_owned())).map_err(|error| decode_error(error.to_string())))
+            .collect::<Result<_, _>>()?,
+        subjects: value
+            .subjects
+            .into_iter()
+            .map(|subject| {
+                PublicationSubject::with_details(
+                    subject.id,
+                    subject.name,
+                    subject.name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?,
+                    subject.sort_name,
+                    subject.sort_name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?,
+                    subject.source.unwrap_or_else(|| "dc:subject".to_owned()),
+                    subject.authority,
+                    subject.code,
+                )
+                .map_err(|error| decode_error(error.to_string()))
+            })
+            .collect::<Result<_, _>>()?,
+        collections: value.collections.into_iter().map(decode_collection).collect::<Result<_, _>>()?,
+        alternate_titles: value
+            .alternate_titles
+            .into_iter()
+            .map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as, title.source.unwrap_or_else(|| "legacy:protobuf-title".to_owned())).map_err(|error| decode_error(error.to_string())))
+            .collect::<Result<_, _>>()?,
         rights: value.rights,
         sources: value.sources,
         types: value.types,
@@ -343,51 +408,97 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
         properties: value
             .properties
             .into_iter()
-            .map(|property| PublicationProperty::new(property.id, property.property, property.value, property.refines, property.scheme, property.language).map_err(|error| decode_error(error.to_string())))
+            .map(|property| {
+                PublicationProperty::new(property.id, property.property, property.value, property.refines, property.scheme, property.language, property.source.unwrap_or_else(|| "legacy:protobuf-property".to_owned()))
+                    .map_err(|error| decode_error(error.to_string()))
+            })
             .collect::<Result<_, _>>()?,
     })
 }
 
-fn encode_publication_identifier(value: &PublicationIdentifier) -> pb::PublicationIdentifier {
+fn encode_publication_identifier(value: &Identifier) -> pb::PublicationIdentifier {
     let (scheme, other_scheme) = match value.scheme() {
-        PublicationIdentifierScheme::Unspecified => (pb::IdentifierScheme::Unspecified, None),
-        PublicationIdentifierScheme::Isbn => (pb::IdentifierScheme::Isbn, None),
-        PublicationIdentifierScheme::Asin => (pb::IdentifierScheme::Asin, None),
-        PublicationIdentifierScheme::Doi => (pb::IdentifierScheme::Doi, None),
-        PublicationIdentifierScheme::Issn => (pb::IdentifierScheme::Issn, None),
-        PublicationIdentifierScheme::Oclc => (pb::IdentifierScheme::Oclc, None),
-        PublicationIdentifierScheme::Lccn => (pb::IdentifierScheme::Lccn, None),
-        PublicationIdentifierScheme::Uuid => (pb::IdentifierScheme::Uuid, None),
-        PublicationIdentifierScheme::Calibre => (pb::IdentifierScheme::Calibre, None),
-        PublicationIdentifierScheme::Google => (pb::IdentifierScheme::Google, None),
-        PublicationIdentifierScheme::Goodreads => (pb::IdentifierScheme::Goodreads, None),
-        PublicationIdentifierScheme::Kobo => (pb::IdentifierScheme::Kobo, None),
-        PublicationIdentifierScheme::Other(value) => (pb::IdentifierScheme::Other, Some(value.clone())),
+        Scheme::Unspecified => (pb::IdentifierScheme::Unspecified, None),
+        Scheme::Isbn => (pb::IdentifierScheme::Isbn, None),
+        Scheme::Asin => (pb::IdentifierScheme::Asin, None),
+        Scheme::Doi => (pb::IdentifierScheme::Doi, None),
+        Scheme::Issn => (pb::IdentifierScheme::Issn, None),
+        Scheme::Oclc => (pb::IdentifierScheme::Oclc, None),
+        Scheme::Lccn => (pb::IdentifierScheme::Lccn, None),
+        Scheme::Uuid => (pb::IdentifierScheme::Uuid, None),
+        Scheme::Calibre => (pb::IdentifierScheme::Calibre, None),
+        Scheme::Google => (pb::IdentifierScheme::Google, None),
+        Scheme::Goodreads => (pb::IdentifierScheme::Goodreads, None),
+        Scheme::Kobo => (pb::IdentifierScheme::Kobo, None),
+        Scheme::Other(value) => (pb::IdentifierScheme::Other, Some(value.clone())),
     };
-    pb::PublicationIdentifier {
-        value: value.value().to_owned(),
-        scheme: scheme as i32,
-        other_scheme,
-        identifier_types: value.identifier_types().iter().map(|value| pb::PublicationIdentifierType { value: value.value().to_owned(), scheme: value.scheme().map(str::to_owned) }).collect(),
+    let mut identifier_types = vec![pb::PublicationIdentifierType { value: value.source().to_owned(), scheme: Some("bokheim:source".to_owned()) }];
+    if value.scope() != Scope::Publication {
+        let scope = match value.scope() {
+            Scope::Publication => "publication",
+            Scope::Edition => "edition",
+            Scope::Work => "work",
+        };
+        identifier_types.push(pb::PublicationIdentifierType { value: scope.to_owned(), scheme: Some("bokheim:scope".to_owned()) });
     }
+    pb::PublicationIdentifier { value: value.value().to_owned(), scheme: scheme as i32, other_scheme, identifier_types }
 }
 
-fn decode_publication_identifier(value: pb::PublicationIdentifier) -> Result<PublicationIdentifier, transport::WireError> {
+fn decode_publication_identifier(value: pb::PublicationIdentifier) -> Result<Identifier, transport::WireError> {
     let scheme = match pb::IdentifierScheme::try_from(value.scheme).map_err(|_| decode_error("unknown publication identifier scheme"))? {
-        pb::IdentifierScheme::Unspecified => PublicationIdentifierScheme::Unspecified,
-        pb::IdentifierScheme::Isbn => PublicationIdentifierScheme::Isbn,
-        pb::IdentifierScheme::Asin => PublicationIdentifierScheme::Asin,
-        pb::IdentifierScheme::Doi => PublicationIdentifierScheme::Doi,
-        pb::IdentifierScheme::Issn => PublicationIdentifierScheme::Issn,
-        pb::IdentifierScheme::Oclc => PublicationIdentifierScheme::Oclc,
-        pb::IdentifierScheme::Lccn => PublicationIdentifierScheme::Lccn,
-        pb::IdentifierScheme::Uuid => PublicationIdentifierScheme::Uuid,
-        pb::IdentifierScheme::Calibre => PublicationIdentifierScheme::Calibre,
-        pb::IdentifierScheme::Google => PublicationIdentifierScheme::Google,
-        pb::IdentifierScheme::Goodreads => PublicationIdentifierScheme::Goodreads,
-        pb::IdentifierScheme::Kobo => PublicationIdentifierScheme::Kobo,
-        pb::IdentifierScheme::Other => PublicationIdentifierScheme::Other(required(value.other_scheme, "other identifier scheme")?),
+        pb::IdentifierScheme::Unspecified => Scheme::Unspecified,
+        pb::IdentifierScheme::Isbn => Scheme::Isbn,
+        pb::IdentifierScheme::Asin => Scheme::Asin,
+        pb::IdentifierScheme::Doi => Scheme::Doi,
+        pb::IdentifierScheme::Issn => Scheme::Issn,
+        pb::IdentifierScheme::Oclc => Scheme::Oclc,
+        pb::IdentifierScheme::Lccn => Scheme::Lccn,
+        pb::IdentifierScheme::Uuid => Scheme::Uuid,
+        pb::IdentifierScheme::Calibre => Scheme::Calibre,
+        pb::IdentifierScheme::Google => Scheme::Google,
+        pb::IdentifierScheme::Goodreads => Scheme::Goodreads,
+        pb::IdentifierScheme::Kobo => Scheme::Kobo,
+        pb::IdentifierScheme::Other => Scheme::Other(required(value.other_scheme, "other identifier scheme")?),
     };
-    let identifier_types = value.identifier_types.into_iter().map(|value| PublicationIdentifierType::new(value.value, value.scheme).map_err(|error| decode_error(error.to_string()))).collect::<Result<_, _>>()?;
-    PublicationIdentifier::new(value.value, scheme, identifier_types).map_err(|error| decode_error(error.to_string()))
+    let source = value
+        .identifier_types
+        .iter()
+        .find(|value| value.scheme.as_deref() == Some("bokheim:source"))
+        .or_else(|| value.identifier_types.iter().find(|value| value.scheme.as_deref() == Some("bokheim:provenance")))
+        .map(|value| value.value.clone())
+        .unwrap_or_else(|| "legacy:identifier".to_owned());
+    let scope = value
+        .identifier_types
+        .iter()
+        .find(|value| value.scheme.as_deref() == Some("bokheim:scope"))
+        .and_then(|value| match value.value.as_str() {
+            "edition" => Some(Scope::Edition),
+            "work" => Some(Scope::Work),
+            "publication" => Some(Scope::Publication),
+            _ => None,
+        })
+        .unwrap_or(Scope::Publication);
+    Identifier::new(value.value, scheme, scope, source).map_err(|error| decode_error(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_protobuf_publication_values_receive_explicit_provenance() {
+        let encoded = pb::PublicationMetadata {
+            dates: vec![pb::PublicationDate { id: None, value: "1965".to_owned(), event: Some("publication".to_owned()), source: None }],
+            alternate_titles: vec![pb::PublicationTitle { id: None, value: "Dune World".to_owned(), title_type: Some("alternative".to_owned()), sort_as: None, source: None }],
+            properties: vec![pb::PublicationProperty { id: None, property: "belongs-to-collection".to_owned(), value: "Dune".to_owned(), refines: None, scheme: None, language: None, source: None }],
+            ..Default::default()
+        };
+
+        let decoded = decode_publication_metadata(encoded).unwrap();
+        assert_eq!(decoded.dates[0].value(), "1965");
+        assert_eq!(decoded.dates[0].event(), Some("publication"));
+        assert_eq!(decoded.dates[0].source(), "legacy:protobuf-date");
+        assert_eq!(decoded.alternate_titles[0].source(), "legacy:protobuf-title");
+        assert_eq!(decoded.properties[0].source(), "legacy:protobuf-property");
+    }
 }

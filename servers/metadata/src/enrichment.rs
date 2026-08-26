@@ -447,9 +447,9 @@ fn collect_sibling_edition_consensus(connection: &Connection, work_id: i64) -> R
 
 pub(crate) fn classification_similarity_keys(scheme: ClassificationScheme, notation: &str) -> Vec<String> {
     let system_id = match scheme {
-        ClassificationScheme::LibraryOfCongress => library_model::LCC_SYSTEM_ID,
-        ClassificationScheme::DeweyDecimal => library_model::DDC_SYSTEM_ID,
-        ClassificationScheme::Bisac => library_model::BISAC_SYSTEM_ID,
+        ClassificationScheme::LibraryOfCongress => subject_projection::LCC_SYSTEM_ID,
+        ClassificationScheme::DeweyDecimal => subject_projection::DDC_SYSTEM_ID,
+        ClassificationScheme::Bisac => subject_projection::BISAC_SYSTEM_ID,
     };
-    library_model::unified_subject_similarity_keys(system_id, notation)
+    subject_projection::unified_subject_similarity_keys(system_id, notation)
 }

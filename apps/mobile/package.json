@@ -23,7 +23,7 @@
     "test:app-utils": "node --test src/lib/app/app-utils.test.ts",
     "test:account-contract": "node --test src/lib/account/contract.test.ts",
     "test:sync-summary": "node --test src/lib/shared/sync-summary.test.ts",
-    "test:web-worker": "npm run build:web-core && node --test src/lib/web/worker-protocol.test.ts src/lib/web/worker-client.test.ts src/lib/web/database.test.ts src/lib/web/account-client.test.ts src/lib/web/catalog-client.test.ts src/lib/web/library-database.test.ts src/lib/web/library-sync.test.ts src/lib/web/blob-sync.test.ts src/lib/web/publication-metadata.test.ts src/lib/web/preferences-database.test.ts src/lib/web/taxonomy.test.ts src/lib/web/wasm-core.test.ts src/lib/reader/foliate-range-epub.test.ts",
+    "test:web-worker": "npm run build:web-core && node --test src/lib/web/worker-protocol.test.ts src/lib/web/worker-client.test.ts src/lib/reader/foliate-range-epub.test.ts",
     "generate:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings",
     "check:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings -- --check",
     "generate:tokens": "cargo run --manifest-path ../../client/app-contract/Cargo.toml --bin export_design_tokens",
@@ -37,7 +37,6 @@
   "license": "MIT",
   "dependencies": {
     "@lucide/svelte": "1.31.0",
-    "@sqlite.org/sqlite-wasm": "^3.53.0-build1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-fs": "^2.5.0",

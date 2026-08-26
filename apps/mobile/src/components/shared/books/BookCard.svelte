@@ -60,7 +60,6 @@
   let longPressOrigin: { x: number; y: number } | undefined;
   let suppressOpenUntil = 0;
   const title = $derived(book.title || "Untitled");
-  const progress = $derived(Math.min(100, Math.max(0, book.progress ?? 0)));
   const backendDownloadState = $derived(
     book.downloaded ? "Downloaded" : book.download_requested ? "Queued" : "NotDownloaded",
   );
@@ -230,16 +229,6 @@
       <span>{book.author || "Unknown author"}</span>
     </span>
     {#if detailed}<span class="book-description">{description}</span>{/if}
-    <span class="progress-slot">
-      {#if (book.progress ?? 0) > 0}
-        <span
-          class="progress-track"
-          aria-label={`${Math.round(progress)}% read`}
-        >
-          <i style={`width: ${progress}%`}></i>
-        </span>
-      {/if}
-    </span>
   </span>
   {#if detailed}<div class="wide-open">
       <SecondaryButton
@@ -508,11 +497,11 @@
   }
   .card-copy {
     display: grid;
-    gap: 2px;
+    gap: var(--book-card-text-gap);
     min-width: 0;
   }
   .card-copy strong,
-  .card-copy > span:not(.progress-track) {
+  .card-copy > span {
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -533,27 +522,6 @@
     font-size: var(--book-card-author-size);
     line-height: var(--book-card-author-line-height);
     white-space: nowrap;
-  }
-  .progress-slot {
-    display: flex;
-    align-items: start;
-    width: 100%;
-    height: var(--book-card-progress-height);
-    padding-top: 6px;
-  }
-  .progress-track {
-    display: block;
-    width: 100%;
-    height: 4px;
-    overflow: hidden;
-    border-radius: 0;
-    background: var(--color-border);
-  }
-  .progress-track i {
-    display: block;
-    height: 100%;
-    border-radius: 0;
-    background: var(--color-accent);
   }
   .opening {
     position: absolute;

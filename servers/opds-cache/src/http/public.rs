@@ -1,7 +1,7 @@
 use super::super::{
-    fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogRecommendationRequest, CatalogSearchRequest,
-    CatalogService, CatalogServiceError, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, MetadataEnrichmentRequest, Method, Path, Query, Response, Router,
-    State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL, MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
+    fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogSearchRequest, CatalogService, CatalogServiceError,
+    CatalogSource, CatalogSourceId, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue,
+    IntoResponse, Json, MetadataEnrichmentRequest, Method, Path, Query, Response, Router, State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL, MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
 };
 use super::operations::catalog_operations;
 
@@ -9,19 +9,24 @@ pub fn app(service: CatalogService) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/opds/catalogs", get(catalogs))
+        .route("/api/catalog/sources", get(catalog_source_registry))
         .route("/api/opds/sources/:source_id/page", post(catalog_page))
         .route("/api/opds/sources/:source_id/search", post(catalog_search))
-        .route("/api/opds/recommendations", post(catalog_recommendations))
         .route("/api/opds/subjects", post(catalog_subjects))
+        .route("/api/opds/subject-capabilities", post(catalog_subject_capabilities))
+        .route("/api/opds/subject-publications", post(catalog_subject_publications))
+        .route("/api/opds/subject-collection/manifest", post(catalog_subject_collection_manifest))
+        .route("/api/opds/sources/:source_id/acquire", post(catalog_acquire))
         .route("/api/opds/sources/:source_id/cover", get(catalog_cover))
+        .route("/api/opds/covers/:asset", get(catalog_cover_asset))
         .route("/api/web/catalogs", get(browser_catalogs))
         .route("/api/web/stats", get(browser_catalog_stats))
         .route("/api/metadata/enrichment", post(browser_metadata_enrichment))
         .route("/api/metadata/enrichment/v2", post(browser_metadata_enrichment_v2))
         .route("/api/web/sources/:source_id/page", post(browser_catalog_page))
         .route("/api/web/sources/:source_id/search", post(browser_catalog_search))
-        .route("/api/web/recommendations", post(browser_catalog_recommendations))
-        .route("/api/web/subjects", post(browser_catalog_subjects))
+        .route("/api/web/subject-collection", post(browser_catalog_subject_collection))
+        .route("/api/web/subject-collection/manifest", post(browser_catalog_subject_collection_manifest))
         .route("/api/web/sources/:source_id/acquire", post(browser_catalog_acquire))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET, Method::POST, Method::OPTIONS]).allow_headers([header::ACCEPT, header::CONTENT_TYPE, header::IF_NONE_MATCH]).expose_headers([
             header::CONTENT_DISPOSITION,
@@ -51,6 +56,21 @@ pub(crate) async fn catalogs(State(service): State<CatalogService>, headers: Hea
     Ok(response)
 }
 
+pub(crate) async fn catalog_source_registry(State(service): State<CatalogService>, headers: HeaderMap) -> Result<Response, ApiError> {
+    require_wire_accept(&headers)?;
+    let registry = service.source_registry().await.map_err(ApiError::internal)?;
+    let etag = format!("\"catalog-sources-{}\"", registry.revision);
+    if headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()).is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag)) {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        add_common_headers(&mut response, REGISTRY_CACHE_CONTROL);
+        response.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ASCII ETag"));
+        return Ok(response);
+    }
+    let mut response = wire_response(&registry, REGISTRY_CACHE_CONTROL)?;
+    response.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).expect("ASCII ETag"));
+    Ok(response)
+}
+
 pub(crate) async fn catalog_page(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
     require_wire_accept(&headers)?;
     let request: CatalogPageRequest = decode_wire_request(&headers, &body)?;
@@ -67,18 +87,37 @@ pub(crate) async fn catalog_search(State(service): State<CatalogService>, AxumPa
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn catalog_recommendations(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+pub(crate) async fn catalog_subjects(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
     require_wire_accept(&headers)?;
-    let request: CatalogRecommendationRequest = decode_wire_request(&headers, &body)?;
-    let response = service.recommendations(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let request: CatalogSubjectBrowseRefreshRequest = decode_wire_request(&headers, &body)?;
+    let response = service.browse_subjects_delta(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn catalog_subjects(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+pub(crate) async fn catalog_subject_capabilities(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
     require_wire_accept(&headers)?;
     let request: CatalogSubjectBrowseRequest = decode_wire_request(&headers, &body)?;
-    let response = service.browse_subjects(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let response = service.subject_browse_capabilities(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     wire_response(&response, DATA_CACHE_CONTROL)
+}
+
+pub(crate) async fn catalog_subject_publications(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+    require_wire_accept(&headers)?;
+    let request: CatalogSubjectPublicationPayloadRequest = decode_wire_request(&headers, &body)?;
+    let response = service.subject_publication_payloads(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    wire_response(&response, DATA_CACHE_CONTROL)
+}
+
+pub(crate) async fn catalog_subject_collection_manifest(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+    require_wire_accept(&headers)?;
+    let request: CatalogSubjectCollectionManifestRequest = decode_wire_request(&headers, &body)?;
+    let response = service.subject_collection_manifest(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    wire_response(&response, DATA_CACHE_CONTROL)
+}
+
+pub(crate) async fn catalog_acquire(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+    let request: CatalogImportRequest = decode_wire_request(&headers, &body)?;
+    catalog_acquisition_response(&service, &source_id, request).await
 }
 
 pub(crate) async fn browser_catalogs(State(service): State<CatalogService>) -> Result<Response, ApiError> {
@@ -141,19 +180,29 @@ pub(crate) async fn browser_catalog_search(State(service): State<CatalogService>
     json_response(&page, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn browser_catalog_recommendations(State(service): State<CatalogService>, Json(request): Json<CatalogRecommendationRequest>) -> Result<Response, ApiError> {
-    let response = service.recommendations(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+pub(crate) async fn browser_catalog_subject_collection(State(service): State<CatalogService>, Json(mut request): Json<CatalogSubjectBrowseRefreshRequest>) -> Result<Response, ApiError> {
+    request.request.supported_languages.clear();
+    request.request.source_ids.clear();
+    request.request.query.clear();
+    request.request.book_formats.clear();
+    request.identifiers_only = false;
+    request.collection_sync = true;
+    let response = service.browse_subjects_delta(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     json_response(&response, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn browser_catalog_subjects(State(service): State<CatalogService>, Json(request): Json<CatalogSubjectBrowseRequest>) -> Result<Response, ApiError> {
-    let response = service.browse_subjects(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+pub(crate) async fn browser_catalog_subject_collection_manifest(State(service): State<CatalogService>, Json(request): Json<CatalogSubjectCollectionManifestRequest>) -> Result<Response, ApiError> {
+    let response = service.subject_collection_manifest(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     json_response(&response, DATA_CACHE_CONTROL)
 }
 
 pub(crate) async fn browser_catalog_acquire(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, Json(request): Json<CatalogImportRequest>) -> Result<Response, ApiError> {
+    catalog_acquisition_response(&service, &source_id, request).await
+}
+
+async fn catalog_acquisition_response(service: &CatalogService, source_id: &str, request: CatalogImportRequest) -> Result<Response, ApiError> {
     let source_id = CatalogSourceId::parse(&source_id).map_err(ApiError::bad_request)?;
-    let downloaded = service.browser_acquisition(&source_id, &request).await.map_err(ApiError::unavailable)?;
+    let downloaded = service.acquisition(&source_id, &request).await.map_err(ApiError::unavailable)?;
     let length = tokio::fs::metadata(downloaded.path()).await.map_err(ApiError::internal)?.len();
     let file = tokio::fs::File::open(downloaded.path()).await.map_err(ApiError::internal)?;
     let stream = futures_util::stream::try_unfold((file, downloaded), |(mut file, guard)| async move {
@@ -191,9 +240,6 @@ pub(crate) fn book_media_type(format: CatalogBookFormat) -> &'static str {
         CatalogBookFormat::Epub => "application/epub+zip",
         CatalogBookFormat::Pdf => "application/pdf",
         CatalogBookFormat::Mobi => "application/x-mobipocket-ebook",
-        CatalogBookFormat::Fb2 => "application/fb2+zip",
-        CatalogBookFormat::Cbz => "application/vnd.comicbook+zip",
-        CatalogBookFormat::WebPub => "application/webpub+zip",
         CatalogBookFormat::M4b => "audio/mp4",
     }
 }
@@ -201,7 +247,21 @@ pub(crate) fn book_media_type(format: CatalogBookFormat) -> &'static str {
 pub(crate) async fn catalog_cover(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, Query(query): Query<CoverQuery>, request_headers: HeaderMap) -> Result<Response, ApiError> {
     let source_id = CatalogSourceId::parse(&source_id).map_err(ApiError::bad_request)?;
     let bytes = service.catalog_cover(&source_id, &query.image_url).await.map_err(ApiError::unavailable)?;
-    let etag = format!("\"{}\"", blake3::hash(&bytes).to_hex());
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    cover_response(bytes, &digest, &request_headers)
+}
+
+pub(crate) async fn catalog_cover_asset(State(service): State<CatalogService>, AxumPath(asset): AxumPath<String>, request_headers: HeaderMap) -> Result<Response, ApiError> {
+    let digest = asset.strip_suffix(".jpg").ok_or_else(|| ApiError::bad_request("catalog cover asset must end in .jpg"))?;
+    if catalog_core::catalog_cover_asset_digest(&format!("/api/opds/covers/{asset}")).is_none() {
+        return Err(ApiError::bad_request("catalog cover asset digest is invalid"));
+    }
+    let bytes = service.catalog_cover_asset(digest).await.map_err(ApiError::unavailable)?;
+    cover_response(bytes, digest, &request_headers)
+}
+
+fn cover_response(bytes: Vec<u8>, digest: &str, request_headers: &HeaderMap) -> Result<Response, ApiError> {
+    let etag = format!("\"{digest}\"");
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(COVER_CACHE_CONTROL));

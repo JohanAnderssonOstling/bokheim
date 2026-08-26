@@ -74,6 +74,15 @@ impl OperationalServices {
         self.catalog_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
     }
 
+    pub(crate) async fn catalog_process_action(&self, process: &str, action: &Value) -> Result<Value, String> {
+        if !matches!(process, "catalogue_crawling" | "cover_downloads" | "epub_enrichment" | "catalogue_enrichment") {
+            return Err("unknown catalogue process".to_owned());
+        }
+        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
+        let url = base.join(&format!("internal/processes/{process}")).map_err(|_| "invalid catalogue process endpoint")?;
+        self.catalog_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
+    }
+
     async fn catalog_json(&self, request: reqwest::RequestBuilder, limit: usize) -> Result<Value, String> {
         let response = request.header(reqwest::header::ACCEPT, "application/json").send().await.map_err(|_| "catalogue service request failed")?;
         if !response.status().is_success() {

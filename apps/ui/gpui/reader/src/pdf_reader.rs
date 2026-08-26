@@ -1,6 +1,6 @@
-use epub_svelte_lib::library::ResolvedBook;
-use epub_svelte_lib::library::marks::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
-use epub_svelte_lib::{BookLocator, LibraryBackend};
+use app_contract::backend::LibraryBackend;
+use app_contract::library::{BookLocator, BoxedBookReader};
+use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Focusable, KeyBinding, Pixels, Point, Render, ScrollStrategy, Subscription, Window, px};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -11,7 +11,6 @@ use ui_components as components;
 
 use std::rc::Rc;
 
-use crate::epub::ReaderWindowId;
 use crate::invalidation::Component;
 use crate::pdf::toc::{PdfTocState, nest_pdf_outline, pdf_toc_tree_items};
 use crate::settings::{PdfZoomModePreference, ReaderPreferences, ReaderSettings};
@@ -26,21 +25,19 @@ const PDF_READER_TOOLBAR_HEIGHT: f32 = 58.0;
 const ZOOM_STEP: f32 = 0.1;
 
 pub(crate) struct PendingPdfReader {
-    pub(crate) id: ReaderWindowId,
     pub(crate) locator: BookLocator,
     pub(crate) title: String,
-    pub(crate) library: LibraryBackend,
-    pub(crate) book: ResolvedBook,
+    pub(crate) library: Rc<dyn LibraryBackend>,
+    pub(crate) reader: BoxedBookReader,
     pub(crate) initial_page: usize,
     pub(crate) initial_full_page_position: f32,
+    pub(crate) return_to_library: crate::ReturnToLibrary,
 }
 
 pub(crate) struct PdfReaderView {
-    pub(crate) id: ReaderWindowId,
     pub(crate) locator: BookLocator,
-    pub(crate) unavailable: bool,
     title: String,
-    library: LibraryBackend,
+    library: Rc<dyn LibraryBackend>,
     pdf: Entity<PdfView>,
     search_input: Entity<InputState>,
     search_active: bool,
@@ -60,31 +57,21 @@ pub(crate) struct PdfReaderView {
     current_page: usize,
     page_count: usize,
     positions: PositionWriter<(usize, f32)>,
+    return_to_library: crate::ReturnToLibrary,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
 impl PdfReaderView {
     pub(crate) fn new(pending: PendingPdfReader, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        #[cfg(debug_assertions)]
-        crate::invalidation::initialize_performance_measurements();
         let zoom_mode = stored_zoom_mode(ReaderSettings::preferences(cx));
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
         let library = pending.library.clone();
-        let content_hash = pending.locator.content_hash();
-        let annotations = library.annotations(content_hash.clone()).map(|items| items.into_iter().filter(|item| item.pdf_anchor().is_some()).collect::<Vec<_>>()).unwrap_or_else(|error| {
-            log::warn!("failed to load PDF annotations for book {content_hash}: {error}");
-            Vec::new()
-        });
-        let bookmarks = library.bookmarks(content_hash.clone()).unwrap_or_else(|error| {
-            log::warn!("failed to load PDF bookmarks for book {content_hash}: {error}");
-            Vec::new()
-        });
+        let source_name = pending.title.clone();
         let pdf = cx.new(|cx| {
-            let mut pdf = PdfView::from_reader(pending.book.path, pending.book.reader, pending.initial_page, window, cx);
+            let mut pdf = PdfView::from_reader(source_name, pending.reader, pending.initial_page, window, cx);
             pdf.set_zoom_mode(zoom_mode, cx);
             pdf.set_trim_margins(trim_margins, cx);
-            pdf.set_annotations(annotation_overlays(&annotations), cx);
             pdf.set_full_page_position(pending.initial_full_page_position, cx);
             pdf
         });
@@ -128,7 +115,7 @@ impl PdfReaderView {
                 this.select_annotation(id.clone(), window, cx);
             }
             PdfViewEvent::LoadFailed(error) => {
-                log::error!("failed to load PDF reader {}: {error}", this.id.0);
+                log::error!("failed to load PDF reader for book {}: {error}", this.locator.content_hash());
             }
         });
         let pdf_for_search = pdf.clone();
@@ -146,7 +133,6 @@ impl PdfReaderView {
             }
             _ => {}
         });
-        let bounds_subscription = crate::shell::geometry::observe(window, cx);
         let focus = cx.focus_handle();
         // Only the page elements establish `PdfReaderDocument`, and there are
         // none until the document has been laid out, so the shell holds the
@@ -156,13 +142,11 @@ impl PdfReaderView {
         let positions = PositionWriter::new(
             cx,
             "persist PDF page",
-            move |library, (page, full_page_position): &(usize, f32)| library.update_pdf_reading_position(page_content_hash.clone(), *page as u32, *full_page_position).map_err(|error| error.to_string()),
+            move |library, (page, full_page_position): &(usize, f32)| library.update_reading_position(page_content_hash.clone(), library_model::pdf_page_position_reading_position(*page as u32, *full_page_position), None),
             library.clone(),
         );
-        Self {
-            id: pending.id,
+        let reader = Self {
             locator: pending.locator,
-            unavailable: false,
             title: pending.title,
             library,
             pdf,
@@ -175,15 +159,41 @@ impl PdfReaderView {
             annotations_visible: false,
             chrome_hidden: false,
             showing_bookmarks: false,
-            marks: MarksState { annotations, bookmarks, ..MarksState::default() },
+            marks: MarksState::default(),
             annotation_note_input,
             annotation_popup_anchor: None,
             current_page: 0,
             page_count: 0,
             positions,
+            return_to_library: pending.return_to_library,
             focus,
-            _subscriptions: vec![pdf_subscription, search_subscription, bounds_subscription],
-        }
+            _subscriptions: vec![pdf_subscription, search_subscription],
+        };
+        reader.load_reader_state(cx);
+        reader
+    }
+
+    fn load_reader_state(&self, cx: &mut Context<Self>) {
+        let content_hash = self.locator.content_hash();
+        persistence::write(
+            cx,
+            self.library.clone(),
+            "load PDF reader state",
+            move |library| {
+                let annotations = library.annotations(content_hash.clone());
+                let bookmarks = library.bookmarks(content_hash);
+                Box::pin(async move {
+                    let annotations = annotations.await?.into_iter().filter(|item| item.pdf_anchor().is_some()).collect();
+                    Ok((annotations, bookmarks.await?))
+                })
+            },
+            |this, cx, (annotations, bookmarks)| {
+                this.marks.annotations = annotations;
+                this.marks.bookmarks = bookmarks;
+                this.refresh_annotation_overlays(cx);
+                crate::invalidation::notify(cx, Component::PdfShell, "marks_loaded");
+            },
+        );
     }
 
     fn previous_page(&self, cx: &mut Context<Self>) {
@@ -255,7 +265,7 @@ impl PdfReaderView {
         });
         // Focus is still on the search input that is about to disappear.
         self.focus_document(window, cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+        crate::invalidation::notify(cx, Component::PdfShell, "search_closed");
     }
 
     /// Returns keyboard control to the page view.
@@ -304,7 +314,7 @@ impl PdfReaderView {
         self.pdf.update(cx, |pdf, cx| {
             pdf.set_trim_margins(trim_margins, cx);
         });
-        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+        crate::invalidation::notify(cx, Component::PdfShell, "trim_margins_changed");
     }
 
     fn reset_appearance(&self, cx: &mut Context<Self>) {
@@ -355,7 +365,7 @@ impl PdfReaderView {
             cx,
             library,
             "save PDF annotation",
-            move |library| library.upsert_annotation(&stored).map_err(|error| error.to_string()),
+            move |library| library.upsert_annotation(stored),
             move |this, cx, ()| {
                 if open_notes {
                     this.marks.selected_id = Some(annotation.id.clone());
@@ -366,17 +376,24 @@ impl PdfReaderView {
                 }
                 this.marks.annotations.insert(0, annotation);
                 this.refresh_annotation_overlays(cx);
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "annotation_created");
             },
         );
     }
 
     fn select_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(annotation) = self.marks.annotation(&id).filter(|annotation| annotation.is_external_pdf_annotation()).cloned() {
+            self.marks.selected_id = None;
+            self.annotation_popup_anchor = None;
+            self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
+            self.navigate_to_annotation(&annotation, cx);
+            return;
+        }
         let note = self.marks.annotation(&id).map(|annotation| annotation.note.clone()).unwrap_or_default();
         self.marks.selected_id = Some(id);
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(self.marks.selected_id.clone(), cx));
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
-        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+        crate::invalidation::notify(cx, Component::PdfShell, "annotation_selected");
     }
 
     fn close_annotation_editor(&mut self, cx: &mut Context<Self>) {
@@ -389,6 +406,9 @@ impl PdfReaderView {
     fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
         let Some(id) = self.marks.selected_id.clone() else { return };
         let Some(mut annotation) = self.marks.annotation(&id).cloned() else { return };
+        if annotation.is_external_pdf_annotation() {
+            return;
+        }
         annotation.note = self.annotation_note_input.read(cx).value().to_string();
         if let Some(style) = style {
             annotation.style = style;
@@ -402,23 +422,26 @@ impl PdfReaderView {
             cx,
             self.library.clone(),
             "update PDF annotation",
-            move |library| library.upsert_annotation(&stored).map_err(|error| error.to_string()),
+            move |library| library.upsert_annotation(stored),
             move |this, cx, ()| {
                 this.marks.replace(annotation);
                 this.refresh_annotation_overlays(cx);
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "annotation_updated");
             },
         );
     }
 
     fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.marks.annotation(&id).is_some_and(ReaderAnnotation::is_external_pdf_annotation) {
+            return;
+        }
         let modified_at = crate::shell::state_panel::now_millis();
         let stored_id = id.clone();
         persistence::write(
             cx,
             self.library.clone(),
             "delete PDF annotation",
-            move |library| library.delete_annotation(&stored_id, modified_at).map_err(|error| error.to_string()),
+            move |library| library.delete_annotation(stored_id, modified_at),
             move |this, cx, ()| {
                 this.marks.remove_annotation(&id);
                 if this.marks.selected_id.is_none() {
@@ -426,7 +449,7 @@ impl PdfReaderView {
                     this.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
                 }
                 this.refresh_annotation_overlays(cx);
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "annotation_deleted");
             },
         );
     }
@@ -443,26 +466,26 @@ impl PdfReaderView {
         self.toc.active_title()
     }
 
-    /// How a bookmark for the current page is named in the list.
-    fn bookmark_label(&self) -> String {
-        bookmark_label(self.current_page.max(1), self.active_outline_title())
+    /// The durable locator and display label for the current page.
+    fn bookmark_fields(&self) -> (String, String) {
+        pdf_bookmark_fields(self.current_page, self.active_outline_title())
     }
 
     fn add_bookmark(&mut self, cx: &mut Context<Self>) {
         let now = crate::shell::state_panel::now_millis();
-        let bookmark =
-            ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi: pdf_page_cfi(self.current_page.saturating_sub(1)), label: self.bookmark_label(), created_at: now, modified_at: now };
+        let (cfi, label) = self.bookmark_fields();
+        let bookmark = ReaderBookmark { id: uuid::Uuid::new_v4().to_string(), content_hash: self.locator.content_hash(), cfi, label, created_at: now, modified_at: now };
         let stored = bookmark.clone();
         persistence::write(
             cx,
             self.library.clone(),
             "save PDF bookmark",
-            move |library| library.create_bookmark(&stored).map_err(|error| error.to_string()),
+            move |library| library.create_bookmark(stored),
             move |this, cx, ()| {
                 this.marks.bookmarks.push(bookmark);
                 this.annotations_visible = true;
                 this.showing_bookmarks = true;
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "bookmark_created");
             },
         );
     }
@@ -474,10 +497,10 @@ impl PdfReaderView {
             cx,
             self.library.clone(),
             "delete PDF bookmark",
-            move |library| library.delete_bookmark(&stored_id, deleted_at).map_err(|error| error.to_string()),
+            move |library| library.delete_bookmark(stored_id, deleted_at),
             move |this, cx, ()| {
                 this.marks.remove_bookmark(&id);
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "bookmark_deleted");
             },
         );
     }
@@ -508,7 +531,7 @@ impl PdfReaderView {
             cx,
             |showing_bookmarks, this, cx| {
                 this.showing_bookmarks = showing_bookmarks;
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+                crate::invalidation::notify(cx, Component::PdfShell, "reader_state_tab_changed");
             },
         ));
 
@@ -592,13 +615,13 @@ impl PdfReaderView {
         components::reader_toc(theme).child(self.render_sidebar_tabs(false, true, cx)).child(toc).into_any_element()
     }
 
-    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let zoom = self.pdf.read(cx).zoom();
         let zoom_mode = self.pdf.read(cx).zoom_mode();
         let visible_page_count = self.pdf.read(cx).visible_page_count();
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
-        components::reader_settings_dropdown(theme)
+        components::reader_settings_dropdown(window.viewport_size().height, theme)
             .child(
                 components::reader_settings_section("Page layout", theme)
                     .child(components::reader_setting_row("Margins").child(components::reader_choice_button_group(
@@ -667,6 +690,7 @@ impl PdfReaderView {
             return;
         }
         self.chrome_hidden = true;
+        cx.set_system_bars_visible(false);
         crate::invalidation::notify(cx, Component::PdfShell, "chrome_hidden");
     }
 
@@ -675,13 +699,14 @@ impl PdfReaderView {
             return;
         }
         self.chrome_hidden = false;
+        cx.set_system_bars_visible(true);
         crate::invalidation::notify(cx, Component::PdfShell, "chrome_shown");
     }
 
     fn on_toggle_toc(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
         self.show_chrome(cx);
         self.set_toc_visible(!self.toc_visible, cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+        crate::invalidation::notify(cx, Component::PdfShell, "toc_visibility_changed");
     }
 
     fn set_toc_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -697,7 +722,7 @@ impl PdfReaderView {
         }
         self.search_active = true;
         self.search_input.read(cx).focus_handle(cx).focus(window, cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+        crate::invalidation::notify(cx, Component::PdfShell, "search_opened");
     }
 
     fn on_toggle_search(&mut self, _: &ToggleSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -707,7 +732,7 @@ impl PdfReaderView {
         } else {
             self.search_active = true;
             self.search_input.read(cx).focus_handle(cx).focus(window, cx);
-            crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
+            crate::invalidation::notify(cx, Component::PdfShell, "search_opened");
         }
     }
 
@@ -740,12 +765,11 @@ impl Render for PdfReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::invalidation::record_render(Component::PdfShell);
         let theme = components::browser_theme(cx);
-        window.set_window_title(&self.title);
         let entity = cx.entity();
         let pdf_document_focus = self.pdf.read(cx).focus_handle();
         let outline_available = self.pdf.read(cx).info().is_some_and(|info| !info.outline().is_empty());
         let sidebar_visible = self.annotations_visible || (self.toc_visible && outline_available);
-        let toc_width = chrome::sidebar_width(sidebar_visible, cx);
+        let toc_width = chrome::sidebar_width(sidebar_visible, window, cx);
         let available_width = (f32::from(window.viewport_size().width) - toc_width).max(0.0);
         self.pdf.update(cx, |pdf, cx| {
             pdf.set_available_width(available_width, cx);
@@ -775,15 +799,21 @@ impl Render for PdfReaderView {
             );
         }
         let content = if self.annotations_visible {
-            chrome::with_sidebar(self.render_annotations(outline_available, cx), body.into_any_element(), cx)
+            chrome::with_sidebar(self.render_annotations(outline_available, cx), body.into_any_element(), window, cx)
         } else if self.toc_visible && outline_available {
-            chrome::with_sidebar(self.render_toc(entity.clone(), theme, cx), body.into_any_element(), cx)
+            chrome::with_sidebar(self.render_toc(entity.clone(), theme, cx), body.into_any_element(), window, cx)
         } else {
             body.into_any_element()
         };
-        let settings = self.render_settings(cx);
-        let left = gpui::div().min_w_0().flex_1().flex().items_center().gap(gpui::px(components::SPACE_SM)).child(
-            components::reader_control_button_icon("pdf-sidebar", "Toggle contents and annotations", gpui_component::IconName::PanelLeftOpen, theme).on_click(cx.listener(move |this, _, _, cx| {
+        let settings = self.render_settings(window, cx);
+        let left = gpui::div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap(gpui::px(components::SPACE_SM))
+            .child(components::reader_control_button_icon("pdf-library", "Return to library", gpui_component::IconName::BookOpen, theme).on_click(cx.listener(|this, _, window, cx| (this.return_to_library)(window, cx))))
+            .child(components::reader_control_button_icon("pdf-sidebar", "Toggle contents and annotations", gpui_component::IconName::PanelLeftOpen, theme).on_click(cx.listener(move |this, _, _, cx| {
                 if this.annotations_visible || (this.toc_visible && outline_available) {
                     this.annotations_visible = false;
                     this.set_toc_visible(false, cx);
@@ -793,9 +823,8 @@ impl Render for PdfReaderView {
                 } else {
                     this.annotations_visible = true;
                 }
-                crate::invalidation::notify(cx, Component::PdfShell, "state_changed");
-            })),
-        );
+                crate::invalidation::notify(cx, Component::PdfShell, "sidebar_visibility_changed");
+            })));
         let right = gpui::div()
             .min_w_0()
             .flex_1()
@@ -892,8 +921,20 @@ impl Render for PdfReaderView {
                     }))
                     .into_any_element()
             }));
-        page.children(
-            (self.chrome_hidden && !cfg!(feature = "kobo"))
+        let touch_input = cx.supports_touch_input();
+        page.children((self.chrome_hidden && touch_input && !cfg!(feature = "kobo")).then(|| {
+            gpui::div()
+                .id("touch-pdf-show-toolbar-tap-zone")
+                .absolute()
+                .left(gpui::relative(0.25))
+                .right(gpui::relative(0.25))
+                .top_0()
+                .bottom_0()
+                .on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx)))
+                .into_any_element()
+        }))
+        .children(
+            (self.chrome_hidden && !cfg!(feature = "kobo") && !touch_input)
                 .then(|| components::reader_chrome_reveal().on_mouse_move(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).on_click(cx.listener(|reader: &mut Self, _, _, cx| reader.show_chrome(cx))).into_any_element()),
         )
     }
@@ -909,6 +950,13 @@ fn bookmark_label(page: usize, outline_title: Option<&str>) -> String {
         Some(title) => format!("{page} \u{2014} {title}"),
         None => page,
     }
+}
+
+/// Produces the persisted locator and reader-facing label for a zero-based PDF
+/// page index. Keeping both conversions here prevents the internal page index
+/// from being decremented twice or shown directly to the reader.
+fn pdf_bookmark_fields(page_index: usize, outline_title: Option<&str>) -> (String, String) {
+    (pdf_page_cfi(page_index), bookmark_label(page_index.saturating_add(1), outline_title))
 }
 
 /// Encodes a zero-based page as a PDF bookmark locator.
@@ -956,6 +1004,7 @@ fn store_zoom_mode(zoom_mode: PdfZoomMode, preferences: &mut ReaderPreferences) 
 fn annotation_overlays(annotations: &[ReaderAnnotation]) -> Vec<PdfAnnotationOverlay> {
     annotations
         .iter()
+        .filter(|annotation| !annotation.is_external_pdf_annotation())
         .filter_map(|annotation| {
             let anchor = annotation.pdf_anchor()?;
             let style = match annotation.style {
@@ -1008,7 +1057,7 @@ pub(crate) fn bind_pdf_keys(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotation_color, bookmark_label, format_page_indicator, pdf_page_cfi, pdf_page_from_cfi, pdf_progress};
+    use super::{annotation_color, bookmark_label, format_page_indicator, pdf_bookmark_fields, pdf_page_cfi, pdf_page_from_cfi, pdf_progress};
     use gpui::{point, px};
     use pdf_view_gpui::PdfAnnotationStyle;
 
@@ -1038,6 +1087,13 @@ mod tests {
         for page in [0usize, 1, 41, 339] {
             assert_eq!(pdf_page_from_cfi(&pdf_page_cfi(page)), Some(page), "page {page} must survive a round trip");
         }
+    }
+
+    #[test]
+    fn bookmark_fields_convert_internal_page_indices_once() {
+        assert_eq!(pdf_bookmark_fields(0, None), ("0".to_owned(), "Page 1".to_owned()));
+        assert_eq!(pdf_bookmark_fields(1, None), ("1".to_owned(), "Page 2".to_owned()));
+        assert_eq!(pdf_bookmark_fields(41, Some("Method")), ("41".to_owned(), "Page 42 \u{2014} Method".to_owned()));
     }
 
     #[test]

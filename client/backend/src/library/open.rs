@@ -4,7 +4,7 @@ use super::LibraryBackend;
 use crate::app::{AppBackend, BackendContext};
 use crate::library::database as db;
 use crate::platform::scanner::LibraryScanner;
-use crate::sync::SyncManager;
+use crate::sync::{SyncManager, SyncManagerConfig};
 use crate::LibraryId;
 use crate::{ServerUrl, ServerUrlError};
 use crossbeam_channel::{unbounded, Receiver};
@@ -13,6 +13,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(test)]
+const LIBRARY_DB_POOL_SIZE: u32 = 4;
+#[cfg(not(test))]
+const LIBRARY_DB_POOL_SIZE: u32 = 20;
 
 fn sync_server_url() -> Result<ServerUrl, ServerUrlError> {
     Ok(crate::api_server_url())
@@ -35,11 +40,6 @@ impl LibraryBackend {
         Self::open_with_server_url(app, context, library_path, library_id, sync_server_url()?, false)
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_for_test(app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId, server_url: ServerUrl) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
-        Self::open_with_server_url(app, context, library_path, library_id, server_url, true)
-    }
-
     fn open_with_server_url(
         app: &AppBackend, context: &BackendContext, library_path: &str, library_id: LibraryId, server_url: ServerUrl, start_scan: bool,
     ) -> Result<(Self, Receiver<crate::platform::scanner::LibraryEvent>), Box<dyn std::error::Error>> {
@@ -52,7 +52,7 @@ impl LibraryBackend {
         // mode. A stale, corrupt, or foreign database is rebuilt and the
         // scanner repopulates it from the library files.
         if db_path.exists() {
-            let current = rusqlite::Connection::open(&db_path).and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))).is_ok_and(|version| version == db::LIBRARY_SCHEMA_VERSION);
+            let current = rusqlite::Connection::open(&db_path).and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))).is_ok_and(db::library_schema_can_migrate_in_place);
             if !current {
                 for suffix in ["", "-wal", "-shm"] {
                     let mut path = db_path.as_os_str().to_os_string();
@@ -67,7 +67,7 @@ impl LibraryBackend {
         }
 
         let manager = SqliteConnectionManager::file(db_path).with_init(|conn| db::configure_connection(conn));
-        let pool = Pool::builder().max_size(20).connection_timeout(std::time::Duration::from_secs(30)).build(manager)?;
+        let pool = Pool::builder().max_size(LIBRARY_DB_POOL_SIZE).connection_timeout(std::time::Duration::from_secs(30)).build(manager)?;
         let replica_id = {
             let conn = pool.get()?;
             db::init_db(&conn)?
@@ -78,17 +78,17 @@ impl LibraryBackend {
             scanner.start_scanning();
         }
         let pending_thumbnail_jobs = scanner.pending_thumbnail_jobs();
-        let sync_manager = Arc::new(SyncManager::new(
-            pool.clone(),
+        let sync_manager = Arc::new(SyncManager::new(SyncManagerConfig {
+            db_pool: pool.clone(),
             replica_id,
             server_url,
-            library_id.clone(),
-            library_root.clone(),
-            context.app_data_dir().join("session.json"),
-            Some(event_tx.clone()),
-            context.transfer_runtime(),
+            library_id,
+            library_root: library_root.clone(),
+            session_path: context.app_data_dir().join("session.json"),
+            event_tx: Some(event_tx.clone()),
+            transfer_runtime: context.transfer_runtime(),
             pending_thumbnail_jobs,
-        )?);
+        })?);
         let library = Self::from_parts(app.downgrade(), context.clone(), library_id, library_root, pool, sync_manager, event_tx, scanner);
         Ok((library, event_rx))
     }

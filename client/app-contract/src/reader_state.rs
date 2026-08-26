@@ -148,6 +148,8 @@ pub struct ReaderAnnotation {
     pub modified_at: i64,
 }
 
+pub const EXTERNAL_PDF_ANNOTATION_ID_PREFIX: &str = "pdf-external:";
+
 #[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 pub struct ReaderBookmark {
     pub id: String,
@@ -162,6 +164,10 @@ pub struct ReaderBookmark {
 }
 
 impl ReaderAnnotation {
+    pub fn is_external_pdf_annotation(&self) -> bool {
+        self.id.starts_with(EXTERNAL_PDF_ANNOTATION_ID_PREFIX)
+    }
+
     pub fn pdf_anchor(&self) -> Option<PdfAnnotationAnchor> {
         self.anchor.pdf_anchor()
     }

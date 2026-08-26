@@ -6,18 +6,20 @@ use axum::routing::{get, post};
 use axum::Router;
 use catalog_contract::{
     materialize_page, CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPublication, CatalogPublicationAction,
-    CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogRecommendationRequest, CatalogRecommendationResponse, CatalogSearchRequest, CatalogSearchResponse, CatalogSource, CatalogSourceId,
-    CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse,
+    CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSource, CatalogSourceId, CatalogSourceRegistration, CatalogSourceRegistry,
+    CatalogSubjectBrowseCapabilitiesResponse, CatalogSubjectBrowseDeltaResponse, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest, CatalogSubjectCollectionManifestResponse,
+    CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
 };
 use catalog_core::{
     canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, prepare_catalog_subject_assignments, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogCacheError, CatalogCoverCache,
-    CatalogCoverPipeline, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter, CatalogMetadataBackfillIndexedJob,
-    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogPublicationPopularity,
+    CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter,
+    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity,
 };
-use library_model::{canonical_isbn, PublicationIdentifier, PublicationIdentifierScheme, PublicationIdentifierType, PublicationSubject};
+use library_model::{canonical_isbn, Identifier, PublicationSubject, Scheme, Scope};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, LookupStatus, MetadataEnrichmentRequest, RichWorkMetadataMatch};
 use opds::{
-    endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsHttpValidators, OpdsSearch,
+    endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsError, OpdsHttpValidators,
+    OpdsSearch,
 };
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -35,19 +37,24 @@ use url::Url;
 const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_CRAWL_PAGES: usize = 50_000;
 const HARD_MAX_CRAWL_PAGES: usize = 250_000;
-const COVER_DOWNLOAD_WORKERS: usize = 4;
-// Image decoders have a high transient working set and the system allocator
-// may retain those arenas after the image is dropped. One worker keeps cover
-// generation comfortably below the service's memory budget.
-const COVER_THUMBNAIL_WORKERS: usize = 1;
 const MAX_RECENT_BROWSER_COVERS: usize = 4_096;
-// SQLite has one writer. Sources are all persisted as queued immediately, but
-// staging their feed generations serially avoids writer-lock contention while
-// publication enrichment continues independently through its own bounded workers.
-// Catalogue traversal is dominated by upstream response latency. Sources have
-// independent origins, so overlap several source crawls while each individual
-// source remains serial and polite to its host.
+// SQLite still has one explicitly serialized writer while network-bound source
+// crawls overlap. Distinct origins run together; sources sharing an origin run
+// sequentially so their request windows cannot stack.
 const CRAWL_FRONTIER_BATCH_SIZE: usize = 64;
+// A small per-source window overlaps upstream latency without turning the
+// crawler into a burst client. Sources sharing an origin are scheduled in the
+// same serial origin group, so this is also the maximum concurrency per host.
+const CRAWL_PAGE_CONCURRENCY: usize = 4;
+const CRAWL_PAGE_CONCURRENCY_MAX: usize = 8;
+const CRAWL_ORIGIN_SUCCESS_WINDOW: u32 = 8;
+const CRAWL_ORIGIN_INITIAL_SPACING: Duration = Duration::from_millis(50);
+const CRAWL_ORIGIN_MIN_SPACING: Duration = Duration::from_millis(10);
+const CRAWL_ORIGIN_MAX_SPACING: Duration = Duration::from_secs(2);
+const CRAWL_ORIGIN_TRANSIENT_BACKOFF: Duration = Duration::from_secs(1);
+const CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(30);
+const CRAWL_ORIGIN_MAX_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
+const CRAWL_ORIGIN_MAX_ATTEMPTS: usize = 3;
 const CRAWL_WRITE_BATCH_INITIAL_PAGES: usize = 32;
 const CRAWL_WRITE_BATCH_MIN_PAGES: usize = 8;
 const CRAWL_WRITE_BATCH_MAX_PAGES: usize = 64;
@@ -58,6 +65,7 @@ const CRAWL_WRITE_BATCH_FAST_COMMIT: Duration = Duration::from_millis(75);
 const CRAWL_WRITE_BATCH_SLOW_COMMIT: Duration = Duration::from_millis(200);
 const CRAWL_ACTIVATION_BATCH: usize = 256;
 const EXTRACTION_RECONCILIATION_BATCH: usize = 256;
+const COVER_RECONCILIATION_BATCH: usize = 256;
 const INACTIVE_GENERATION_CLEANUP_BATCH: usize = 256;
 const PRIORITY_CRAWL_SOURCE: &str = "litteraturbanken";
 const CRAWL_PAUSE_SENTINEL: &str = "/var/lib/bokheim-deploy/catalog-crawls-disabled";
@@ -105,13 +113,13 @@ struct CatalogServiceState {
     opds: OpdsClient,
     cache: CatalogCache,
     covers: CatalogCoverCache,
-    cover_pipeline: CatalogCoverPipeline,
     // SQLite permits only one writer. Queue writes before entering the
     // blocking pool so in-process jobs never spend the busy timeout fighting
     // one another (or turn ordinary contention into extraction failures).
     cache_write_lock: Mutex<()>,
     crawl_locks: Mutex<HashMap<CatalogSourceId, Arc<Mutex<()>>>>,
     crawl_progress: Mutex<HashMap<CatalogSourceId, CrawlProgress>>,
+    origin_throttles: Mutex<HashMap<String, Arc<AdaptiveOriginThrottle>>>,
     source_update_locks: Mutex<HashMap<CatalogSourceId, Arc<Mutex<()>>>>,
     recent_browser_covers: Mutex<RecentBrowserCovers>,
     epub_range_origins: Mutex<HashMap<String, bool>>,
@@ -120,6 +128,7 @@ struct CatalogServiceState {
     queued_download_slots: Semaphore,
     extraction_slots: Semaphore,
     extraction_notify: Notify,
+    processes: CatalogProcessRuntime,
     acquisition_directory: PathBuf,
     metadata_endpoint: Option<Url>,
     metadata_client: reqwest::Client,
@@ -129,6 +138,43 @@ struct CatalogServiceState {
     writer_metrics: StdMutex<BTreeMap<String, WriterRuntimeMetric>>,
     max_crawl_pages: usize,
     started_at: Instant,
+}
+
+struct AdaptiveOriginThrottle {
+    state: Mutex<AdaptiveOriginThrottleState>,
+    notify: Notify,
+}
+
+struct AdaptiveOriginThrottleState {
+    in_flight: usize,
+    concurrency_limit: usize,
+    success_streak: u32,
+    minimum_spacing: Duration,
+    next_request_at: Instant,
+    blocked_until: Option<Instant>,
+    latency_ewma_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum OriginThrottleFeedback {
+    Success(Duration),
+    RateLimited(Option<Duration>),
+    TransientFailure,
+    OtherFailure,
+}
+
+#[derive(Clone, Copy)]
+struct OriginThrottleSnapshot {
+    in_flight: usize,
+    concurrency_limit: usize,
+    minimum_spacing_ms: u64,
+    blocked_for_ms: Option<u64>,
+}
+
+impl Default for OriginThrottleSnapshot {
+    fn default() -> Self {
+        Self { in_flight: 0, concurrency_limit: CRAWL_PAGE_CONCURRENCY, minimum_spacing_ms: CRAWL_ORIGIN_INITIAL_SPACING.as_millis() as u64, blocked_for_ms: None }
+    }
 }
 
 #[derive(Default)]
@@ -268,6 +314,79 @@ struct RecentBrowserCovers {
     order: VecDeque<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogProcess {
+    CatalogueCrawling,
+    CoverDownloads,
+    EpubEnrichment,
+    CatalogueEnrichment,
+}
+
+impl CatalogProcess {
+    const ALL: [Self; 4] = [Self::CatalogueCrawling, Self::CoverDownloads, Self::EpubEnrichment, Self::CatalogueEnrichment];
+
+    fn storage_key(self) -> &'static str {
+        match self {
+            Self::CatalogueCrawling => "catalogue_crawling",
+            Self::CoverDownloads => "cover_downloads",
+            Self::EpubEnrichment => "epub_enrichment",
+            Self::CatalogueEnrichment => "catalogue_enrichment",
+        }
+    }
+}
+
+struct CatalogProcessRuntime {
+    catalogue_crawling_enabled: AtomicBool,
+    catalogue_crawling_running: AtomicBool,
+    catalogue_crawling_notify: Notify,
+    cover_downloads_enabled: AtomicBool,
+    cover_downloads_running: AtomicBool,
+    cover_downloads_notify: Notify,
+    epub_enrichment_enabled: AtomicBool,
+    epub_enrichment_running: AtomicBool,
+    epub_enrichment_notify: Notify,
+    catalogue_enrichment_enabled: AtomicBool,
+    catalogue_enrichment_running: AtomicBool,
+    catalogue_enrichment_notify: Notify,
+}
+
+impl CatalogProcessRuntime {
+    fn new(settings: CatalogProcessSettings) -> Self {
+        Self {
+            catalogue_crawling_enabled: AtomicBool::new(settings.catalogue_crawling),
+            catalogue_crawling_running: AtomicBool::new(false),
+            catalogue_crawling_notify: Notify::new(),
+            cover_downloads_enabled: AtomicBool::new(settings.cover_downloads),
+            cover_downloads_running: AtomicBool::new(false),
+            cover_downloads_notify: Notify::new(),
+            epub_enrichment_enabled: AtomicBool::new(settings.epub_enrichment),
+            epub_enrichment_running: AtomicBool::new(false),
+            epub_enrichment_notify: Notify::new(),
+            catalogue_enrichment_enabled: AtomicBool::new(settings.catalogue_enrichment),
+            catalogue_enrichment_running: AtomicBool::new(false),
+            catalogue_enrichment_notify: Notify::new(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CatalogProcessStatus {
+    process: CatalogProcess,
+    enabled: bool,
+    running: bool,
+    pause_pending: bool,
+    blocked_by_configuration: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum CatalogProcessAction {
+    Pause,
+    Resume,
+    RunNow,
+}
+
 /// A per-crawl, private on-disk queue. Keeping both pending and visited URLs in
 /// this temporary database avoids duplicating a large graph in heap memory and
 /// does not contend with the catalogue index's SQLite writer.
@@ -276,6 +395,19 @@ struct DiskCrawlFrontier {
     connection: Connection,
     discovered: usize,
     limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CrawlLocator {
+    locator: String,
+    popular_listing: bool,
+}
+
+impl CrawlLocator {
+    #[cfg(test)]
+    fn regular(locator: impl Into<String>) -> Self {
+        Self { locator: locator.into(), popular_listing: false }
+    }
 }
 
 impl DiskCrawlFrontier {
@@ -290,38 +422,44 @@ impl DiskCrawlFrontier {
                  CREATE TABLE frontier(
                      ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
                      locator TEXT NOT NULL UNIQUE,
+                     popular_listing INTEGER NOT NULL CHECK(popular_listing IN (0,1)),
                      pending INTEGER NOT NULL CHECK(pending IN (0,1))
                  );
                  CREATE INDEX frontier_pending ON frontier(pending, ordinal);",
             )
             .map_err(|error| CatalogServiceError(error.to_string()))?;
-        connection.execute("INSERT INTO frontier(locator,pending) VALUES(?1,1)", [root]).map_err(|error| CatalogServiceError(error.to_string()))?;
+        connection.execute("INSERT INTO frontier(locator,popular_listing,pending) VALUES(?1,0,1)", [root]).map_err(|error| CatalogServiceError(error.to_string()))?;
         Ok(Self { _directory: directory, connection, discovered: 1, limit: limit.max(1) })
     }
 
-    fn enqueue(&mut self, locators: impl IntoIterator<Item = String>) -> Result<(), CatalogServiceError> {
+    fn enqueue(&mut self, locators: impl IntoIterator<Item = CrawlLocator>) -> Result<(), CatalogServiceError> {
         let transaction = self.connection.transaction().map_err(|error| CatalogServiceError(error.to_string()))?;
         for locator in locators {
-            let inserted = transaction.execute("INSERT OR IGNORE INTO frontier(locator,pending) VALUES(?1,1)", [locator]).map_err(|error| CatalogServiceError(error.to_string()))?;
+            let inserted =
+                transaction.execute("INSERT OR IGNORE INTO frontier(locator,popular_listing,pending) VALUES(?1,?2,1)", rusqlite::params![locator.locator, locator.popular_listing]).map_err(|error| CatalogServiceError(error.to_string()))?;
             if inserted != 0 {
                 self.discovered = self.discovered.saturating_add(1);
                 if self.discovered > self.limit {
                     return Err(CatalogServiceError(format!("catalog crawl exceeded {} discovered pages", self.limit)));
                 }
+            } else if locator.popular_listing {
+                // Revisit a page once when a later edge reveals that it is a
+                // provider-defined popular listing.
+                transaction.execute("UPDATE frontier SET popular_listing=1,pending=CASE WHEN popular_listing=0 THEN 1 ELSE pending END WHERE locator=?1", [locator.locator]).map_err(|error| CatalogServiceError(error.to_string()))?;
             }
         }
         transaction.commit().map_err(|error| CatalogServiceError(error.to_string()))
     }
 
-    fn claim_batch(&mut self) -> Result<Vec<String>, CatalogServiceError> {
+    fn claim_batch(&mut self) -> Result<Vec<CrawlLocator>, CatalogServiceError> {
         let transaction = self.connection.transaction().map_err(|error| CatalogServiceError(error.to_string()))?;
         let locators = {
-            let mut statement = transaction.prepare("SELECT locator FROM frontier WHERE pending=1 ORDER BY ordinal LIMIT ?1").map_err(|error| CatalogServiceError(error.to_string()))?;
-            let rows = statement.query_map([CRAWL_FRONTIER_BATCH_SIZE as i64], |row| row.get::<_, String>(0)).map_err(|error| CatalogServiceError(error.to_string()))?;
+            let mut statement = transaction.prepare("SELECT locator,popular_listing FROM frontier WHERE pending=1 ORDER BY ordinal LIMIT ?1").map_err(|error| CatalogServiceError(error.to_string()))?;
+            let rows = statement.query_map([CRAWL_FRONTIER_BATCH_SIZE as i64], |row| Ok(CrawlLocator { locator: row.get(0)?, popular_listing: row.get(1)? })).map_err(|error| CatalogServiceError(error.to_string()))?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|error| CatalogServiceError(error.to_string()))?
         };
         for locator in &locators {
-            transaction.execute("UPDATE frontier SET pending=0 WHERE locator=?1", [locator]).map_err(|error| CatalogServiceError(error.to_string()))?;
+            transaction.execute("UPDATE frontier SET pending=0 WHERE locator=?1", [&locator.locator]).map_err(|error| CatalogServiceError(error.to_string()))?;
         }
         transaction.commit().map_err(|error| CatalogServiceError(error.to_string()))?;
         Ok(locators)
@@ -330,11 +468,15 @@ impl DiskCrawlFrontier {
 
 impl RecentBrowserCovers {
     fn remember(&mut self, source_id: &CatalogSourceId, publication: &CatalogPublication) {
-        let Some(image_url) = publication.image_url.as_deref() else { return };
-        let key = format!("{}\n{image_url}", source_id.as_str());
-        let reference = RecentCoverReference { identity: publication.identity.clone(), acquisition: publication_metadata_acquisition(publication) };
-        self.entries.insert(key.clone(), reference);
-        self.touch(&key);
+        let mut urls = publication.image_url.iter().chain(publication.metadata.images.iter().map(|image| &image.url)).collect::<Vec<_>>();
+        urls.sort();
+        urls.dedup();
+        for image_url in urls {
+            let key = format!("{}\n{image_url}", source_id.as_str());
+            let reference = RecentCoverReference { identity: publication.identity.clone(), acquisition: publication_metadata_acquisition(publication) };
+            self.entries.insert(key.clone(), reference);
+            self.touch(&key);
+        }
         while self.entries.len() > MAX_RECENT_BROWSER_COVERS {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
@@ -374,15 +516,27 @@ struct CatalogInventoryResponse {
     active_page_count: u64,
     active_publication_count: u64,
     active_epub_count: u64,
+    cover_downloads: CoverDownloadInventoryResponse,
     epub_extractions: EpubExtractionInventoryResponse,
     metadata_backfill: MetadataBackfillInventoryResponse,
     description_backfill: DescriptionBackfillInventoryResponse,
     description_backfill_available: bool,
     metadata_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
     description_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
+    processes: Vec<CatalogProcessStatus>,
     writer_metrics: BTreeMap<String, WriterRuntimeMetricResponse>,
     identity_reviews: catalog_core::CatalogIdentityReviewInventory,
     sources: Vec<CatalogSourceInventoryResponse>,
+}
+
+#[derive(Serialize)]
+struct CoverDownloadInventoryResponse {
+    pending: u64,
+    running: u64,
+    succeeded: u64,
+    failed: u64,
+    attempts: u64,
+    last_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -453,6 +607,10 @@ struct CatalogSourceInventoryResponse {
     crawl_pages_fetched: u64,
     crawl_publications_seen: u64,
     crawl_elapsed_seconds: u64,
+    crawl_origin_in_flight: usize,
+    crawl_origin_concurrency: usize,
+    crawl_origin_spacing_ms: u64,
+    crawl_origin_blocked_ms: Option<u64>,
     active_page_count: u64,
     active_publication_count: u64,
     active_epub_count: u64,
@@ -496,6 +654,7 @@ mod extraction;
 mod http;
 mod metadata;
 mod metrics;
+mod processes;
 mod registry;
 mod service;
 
@@ -503,8 +662,8 @@ pub(crate) use crawl::{canonicalize_page_layout_locators, classify_catalog_failu
 pub use extraction::run_catalog_extraction_worker;
 pub use http::{app, operations_app};
 pub(crate) use metadata::{
-    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_popularity, metadata_publication_byte_limit, publication_cover_fallback, publication_has_acquisition_url,
-    publication_metadata_acquisition,
+    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_epub_metadata, merge_catalog_popularity, metadata_publication_byte_limit, publication_cover_fallback,
+    publication_has_acquisition_url, publication_metadata_acquisition,
 };
 pub(crate) use metrics::{duration_millis, writer_metrics_snapshot, BackfillBatchMetrics};
 pub(crate) use registry::catalog_crawls_disabled;

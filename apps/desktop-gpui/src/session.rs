@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::App;
-use reader_ui::{ReaderPreferences, ReaderWindowGeometry};
+use gpui::{App, Bounds, Pixels, point, px, size};
+use reader_ui::ReaderPreferences;
 use serde::{Deserialize, Serialize};
 use ui_runtime::BlockingWorker;
 
@@ -15,18 +15,41 @@ fn default_kobo_auto_rotate() -> bool {
     true
 }
 
+/// Geometry for the one application window.
+///
+/// This used to describe a separate reader window. Keeping the same serialized
+/// shape lets existing desktop sessions migrate without losing their layout.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowGeometry {
+    pub fn from_bounds(bounds: Bounds<Pixels>) -> Self {
+        Self { x: f32::from(bounds.origin.x), y: f32::from(bounds.origin.y), width: f32::from(bounds.size.width), height: f32::from(bounds.size.height) }
+    }
+
+    pub fn bounds(self) -> Bounds<Pixels> {
+        Bounds { origin: point(px(self.x), px(self.y)), size: size(px(self.width), px(self.height)) }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiSession {
     version: u32,
     #[serde(default = "default_kobo_auto_rotate")]
     pub kobo_auto_rotate: bool,
     pub reader_preferences: ReaderPreferences,
-    pub reader_window: Option<ReaderWindowGeometry>,
+    #[serde(default, alias = "reader_window")]
+    pub window: Option<WindowGeometry>,
 }
 
 impl Default for UiSession {
     fn default() -> Self {
-        Self { version: SESSION_VERSION, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), reader_window: None }
+        Self { version: SESSION_VERSION, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), window: None }
     }
 }
 
@@ -154,5 +177,23 @@ impl SessionSaveScheduler {
         let path = self.path.clone();
         let save = self.blocking_worker.dispatch(move || session.save(&path));
         let _ = save.recv_blocking();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_reader_window_geometry_migrates_to_application_window() {
+        let geometry = WindowGeometry { x: 12.0, y: 24.0, width: 900.0, height: 700.0 };
+        let mut session_value = serde_json::to_value(UiSession { window: Some(geometry), ..UiSession::default() }).expect("serialize session");
+        let object = session_value.as_object_mut().expect("session object");
+        let geometry_value = object.remove("window").expect("serialized window geometry");
+        object.insert("reader_window".to_owned(), geometry_value);
+
+        let session: UiSession = serde_json::from_value(session_value).expect("deserialize legacy session");
+
+        assert_eq!(session.window, Some(geometry));
     }
 }

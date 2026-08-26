@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("client/library-model/data/lcc-mdsconnect-2016.sqlite3"),
+        default=Path("shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"),
         help="generated SQLite path (default: %(default)s)",
     )
     return parser.parse_args()

@@ -7,28 +7,18 @@ publish = false
 [features]
 default = ["random-ids"]
 random-ids = ["uuid/v4"]
-authoritative-taxonomy = []
+authoritative-taxonomy = ["subject-projection/authoritative-taxonomy"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-csv = "1.3.1"
 catalog-model = { path = "../../shared/catalog-model" }
 content-address = { path = "../../shared/content-address" }
+publication-model = { path = "../../shared/publication-model" }
+subject-projection = { path = "../../shared/subject-projection" }
 unicode-normalization.workspace = true
 uuid = { version = "1", features = ["v5", "serde"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rusqlite = { version = "0.37.0", features = ["bundled", "serialize"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-bincode = "2.0.1"
 
 [dev-dependencies]
 wire = { path = "../../shared/wire" }
 serde_json = "1"
 tempfile = "3"
-
-[build-dependencies]
-bincode = "2.0.1"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
-uuid = { version = "1", features = ["v5"] }

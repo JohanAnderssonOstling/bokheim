@@ -1,8 +1,8 @@
 {
   "generated": "by `cargo run -p app-contract --bin export_design_tokens`; edit client/app-contract instead",
-  "spacing": { "xxs": 2, "xs": 5, "sm": 9, "md": 14, "lg": 18, "xl": 28 },
+  "spacing": { "xxs": 2, "xs": 4, "sm": 8, "md": 16 },
   "radius": { "sm": 8, "md": 11, "lg": 16 },
-  "size": { "control_sm": 34, "control_md": 40, "nav_rail_width": 96, "nav_item_height": 64, "book_cover_width": 200, "book_cover_height": 320 },
+  "size": { "control_sm": 34, "control_md": 40, "nav_rail_width": 64, "nav_item_height": 64, "book_cover_width": 200, "book_cover_height": 320 },
   "typography": { "text_xs": 12, "text_sm": 13, "text_md": 15, "text_lg": 17, "title_md": 21, "title_lg": 28 },
   "themes": {
     "library_serif": {
@@ -71,6 +71,40 @@
         "warning_bg": "#3a2f10",
         "box_shadow": "#9a8c6540",
         "overlay_scrim": "#e9ebe980"
+      }
+    },
+    "classic_white": {
+      "light": {
+        "surface_bg": "#f1f3f5",
+        "raised_bg": "#ffffff",
+        "ink_text": "#2d3237",
+        "subtle_text": "#656e77",
+        "accent": "#2c6ba5",
+        "border": "#7f8a96",
+        "hover_overlay": "#0000000d",
+        "active_highlight": "#dfe8f2",
+        "danger_text": "#b32218",
+        "danger_bg": "#fdeae7",
+        "warning_text": "#8a5900",
+        "warning_bg": "#fdf3d8",
+        "box_shadow": "#7f8a9640",
+        "overlay_scrim": "#2d323780"
+      },
+      "dark": {
+        "surface_bg": "#17181a",
+        "raised_bg": "#232528",
+        "ink_text": "#e2e3e5",
+        "subtle_text": "#90979d",
+        "accent": "#74a0ca",
+        "border": "#69727b",
+        "hover_overlay": "#ffffff12",
+        "active_highlight": "#2b3a49",
+        "danger_text": "#e08a84",
+        "danger_bg": "#3f1512",
+        "warning_text": "#d0a049",
+        "warning_bg": "#332a10",
+        "box_shadow": "#69727b40",
+        "overlay_scrim": "#e2e3e580"
       }
     }
   },

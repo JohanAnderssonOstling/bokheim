@@ -1,7 +1,61 @@
 //! Transport-independent validation for synchronization pages.
 
-use crate::{mutation_kind, LibraryRevision, MutationId, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor};
-use std::collections::HashSet;
+use crate::{mutation_kind, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor, WireMutation};
+use std::collections::{HashSet, VecDeque};
+
+#[derive(Debug)]
+struct EncodedMutation {
+    mutation: WireMutation,
+    bytes: usize,
+}
+
+/// Wire mutations prepared for bounded, order-preserving push requests.
+///
+/// A mutation larger than a complete batch is retained separately so it does
+/// not block later mutations. The caller remains responsible for deciding how
+/// to surface or quarantine those untransmittable mutations.
+#[derive(Debug, Default)]
+pub struct PushBatcher {
+    ready: VecDeque<EncodedMutation>,
+    untransmittable: Vec<MutationId>,
+}
+
+impl PushBatcher {
+    pub fn new(mutations: Vec<WireMutation>) -> Result<Self, crate::transport::WireError> {
+        let mut batcher = Self { ready: VecDeque::with_capacity(mutations.len()), untransmittable: Vec::new() };
+        for mutation in mutations {
+            let bytes = crate::transport::encode(&mutation)?.len();
+            if bytes > crate::MAX_PUSH_BATCH_BYTES {
+                batcher.untransmittable.push(mutation.mutation_id);
+            } else {
+                batcher.ready.push_back(EncodedMutation { mutation, bytes });
+            }
+        }
+        Ok(batcher)
+    }
+
+    pub fn untransmittable(&self) -> &[MutationId] {
+        &self.untransmittable
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty()
+    }
+
+    pub fn next_batch(&mut self) -> Vec<WireMutation> {
+        let mut batch = Vec::with_capacity(crate::MAX_PUSH_MUTATIONS.min(self.ready.len()));
+        let mut bytes = 0_usize;
+        while batch.len() < crate::MAX_PUSH_MUTATIONS {
+            let Some(next) = self.ready.front() else { break };
+            if !batch.is_empty() && bytes.saturating_add(next.bytes) > crate::MAX_PUSH_BATCH_BYTES {
+                break;
+            }
+            bytes = bytes.saturating_add(next.bytes);
+            batch.push(self.ready.pop_front().expect("the inspected mutation is still queued").mutation);
+        }
+        batch
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PushResponseError {
@@ -67,8 +121,35 @@ pub fn validate_pull_batch(response: &PullStateResponse, cursor: SyncCursor) -> 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ValidatedPushResponse {
     pub accepted: Vec<MutationId>,
-    pub transient_rejections: Vec<(MutationId, MutationRejectionReason)>,
-    pub permanent_rejections: Vec<(MutationId, MutationRejectionReason)>,
+    pub issues: Vec<MutationIssue>,
+}
+
+/// A local mutation that still needs attention after an otherwise successful
+/// synchronization exchange. Keeping these cases in one collection prevents
+/// callers from having to keep parallel vectors aligned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MutationIssue {
+    /// The server explicitly asked the client to submit this mutation later.
+    Retryable(MutationRejection),
+    /// The server conclusively rejected this mutation; it has left the outbox.
+    Rejected(MutationRejection),
+    /// The mutation cannot fit in a legal request and remains in the outbox.
+    Untransmittable(MutationId),
+}
+
+impl ValidatedPushResponse {
+    /// Mutations that must leave the durable outbox, whether accepted or
+    /// permanently rejected. Retrying either class cannot change the result.
+    pub fn completed_ids(&self) -> Vec<MutationId> {
+        self.accepted
+            .iter()
+            .copied()
+            .chain(self.issues.iter().filter_map(|issue| match issue {
+                MutationIssue::Rejected(rejection) => Some(rejection.mutation_id),
+                MutationIssue::Retryable(_) | MutationIssue::Untransmittable(_) => None,
+            }))
+            .collect()
+    }
 }
 
 pub fn validate_push_response(requested: &[MutationId], response: &PushMutationsResponse) -> Result<ValidatedPushResponse, PushResponseError> {
@@ -85,8 +166,7 @@ pub fn validate_push_response(requested: &[MutationId], response: &PushMutations
             return Err(PushResponseError::InvalidAcknowledgments(format!("server accounted for mutation {mutation_id} more than once")));
         }
     }
-    let mut transient_rejections = Vec::new();
-    let mut permanent_rejections = Vec::new();
+    let mut issues = Vec::new();
     for rejection in &response.rejected {
         if !requested_ids.contains(&rejection.mutation_id) {
             return Err(PushResponseError::InvalidAcknowledgments(format!("server rejected unsubmitted mutation {}", rejection.mutation_id)));
@@ -95,15 +175,15 @@ pub fn validate_push_response(requested: &[MutationId], response: &PushMutations
             return Err(PushResponseError::InvalidAcknowledgments(format!("server accounted for mutation {} more than once", rejection.mutation_id)));
         }
         if rejection.reason.is_transient() {
-            transient_rejections.push((rejection.mutation_id, rejection.reason));
+            issues.push(MutationIssue::Retryable(rejection.clone()));
         } else {
-            permanent_rejections.push((rejection.mutation_id, rejection.reason));
+            issues.push(MutationIssue::Rejected(rejection.clone()));
         }
     }
     if accounted != requested_ids {
         return Err(PushResponseError::InvalidAcknowledgments("server omitted one or more submitted mutations".into()));
     }
-    Ok(ValidatedPushResponse { accepted: response.accepted.clone(), transient_rejections, permanent_rejections })
+    Ok(ValidatedPushResponse { accepted: response.accepted.clone(), issues })
 }
 
 #[cfg(test)]
@@ -126,6 +206,48 @@ mod tests {
             replica_id: crate::ReplicaId::nil(),
             revision: LibraryRevision::new(revision).unwrap(),
         }
+    }
+
+    fn wire_mutation(sequence: u64, value_bytes: usize) -> WireMutation {
+        WireMutation {
+            mutation_id: MutationId::new(),
+            kind: mutation_kind::ANNOTATION.to_owned(),
+            entity_key: sequence.to_string(),
+            entity_subkey: String::new(),
+            value: vec![0; value_bytes],
+            conflict_rank: 0,
+            blob_reference: None,
+            changed_at: sequence,
+            replica_seq: crate::ReplicaSeq::new(sequence).unwrap(),
+        }
+    }
+
+    #[test]
+    fn push_batcher_preserves_order_and_sets_aside_untransmittable_mutations() {
+        let first = wire_mutation(1, 1);
+        let oversized = wire_mutation(2, crate::MAX_PUSH_BATCH_BYTES + 1);
+        let last = wire_mutation(3, 1);
+        let oversized_id = oversized.mutation_id;
+        let mut batcher = PushBatcher::new(vec![first.clone(), oversized, last.clone()]).unwrap();
+
+        assert_eq!(batcher.untransmittable(), &[oversized_id]);
+        assert_eq!(batcher.next_batch().iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>(), vec![first.mutation_id, last.mutation_id]);
+        assert!(batcher.is_empty());
+    }
+
+    #[test]
+    fn push_batcher_limits_both_count_and_encoded_bytes() {
+        let mut count_limited = PushBatcher::new((1..=crate::MAX_PUSH_MUTATIONS as u64 + 1).map(|sequence| wire_mutation(sequence, 1)).collect()).unwrap();
+        assert_eq!(count_limited.next_batch().len(), crate::MAX_PUSH_MUTATIONS);
+        assert_eq!(count_limited.next_batch().len(), 1);
+
+        let mut byte_limited = PushBatcher::new((1..=100).map(|sequence| wire_mutation(sequence, 64 * 1024)).collect()).unwrap();
+        let batch = byte_limited.next_batch();
+        let encoded_bytes = batch.iter().map(|mutation| crate::transport::encode(mutation).unwrap().len()).sum::<usize>();
+        assert!(!batch.is_empty());
+        assert!(batch.len() < 100);
+        assert!(encoded_bytes <= crate::MAX_PUSH_BATCH_BYTES);
+        assert!(!byte_limited.is_empty());
     }
 
     #[test]
@@ -154,8 +276,15 @@ mod tests {
 
         let validated = validate_push_response(&[accepted, transient, first_permanent, second_permanent], &response).unwrap();
         assert_eq!(validated.accepted, vec![accepted]);
-        assert_eq!(validated.transient_rejections, vec![(transient, MutationRejectionReason::MissingDependency)]);
-        assert_eq!(validated.permanent_rejections, vec![(first_permanent, MutationRejectionReason::InvalidPayload), (second_permanent, MutationRejectionReason::InvalidPayload),]);
+        assert_eq!(
+            validated.issues,
+            vec![
+                MutationIssue::Retryable(MutationRejection { mutation_id: transient, reason: MutationRejectionReason::MissingDependency }),
+                MutationIssue::Rejected(MutationRejection { mutation_id: first_permanent, reason: MutationRejectionReason::InvalidPayload }),
+                MutationIssue::Rejected(MutationRejection { mutation_id: second_permanent, reason: MutationRejectionReason::InvalidPayload }),
+            ]
+        );
+        assert_eq!(validated.completed_ids(), vec![accepted, first_permanent, second_permanent]);
     }
 
     #[test]
