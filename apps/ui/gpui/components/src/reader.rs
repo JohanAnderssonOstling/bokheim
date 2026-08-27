@@ -1,7 +1,6 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use app_contract::{ReaderSettingsAnchor, ReaderSettingsPresentationContract};
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style,
@@ -23,6 +22,10 @@ pub const READER_TOOLBAR_HEIGHT: f32 = 58.0;
 const READER_TOOLBAR_CONTROL_HEIGHT: f32 = 34.0;
 const READER_SETTINGS_POPOVER_GAP: f32 = 4.0;
 const READER_SETTINGS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
+const READER_SETTINGS_MAX_WIDTH: f32 = 400.0;
+const READER_SETTINGS_MAX_HEIGHT: f32 = 620.0;
+const READER_SETTINGS_PADDING_REM: f32 = 1.0;
+const READER_SETTINGS_GAP_REM: f32 = 13.0 / 16.0;
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
     div().h(px(READER_TOOLBAR_HEIGHT)).flex_none().w_full().min_w_0().px(px(SPACE_MD)).flex().items_center().gap(px(SPACE_SM)).bg(theme.surface)
@@ -36,16 +39,8 @@ pub fn reader_control_button_icon(id: impl Into<ElementId>, label: impl Into<Sha
     crate::outlined_icon_button(id, label, icon, px(READER_TOOLBAR_CONTROL_HEIGHT), RADIUS_SM, theme).px_0().bg(theme.surface)
 }
 
-pub fn reader_control_button_icon_state(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool, theme: BrowserTheme) -> Button {
-    reader_control_button_icon(id, label, icon, theme).disabled(!enabled)
-}
-
 pub fn reader_toolbar_title(title: impl Into<SharedString>) -> Div {
     div().min_w_0().max_w(px(520.0)).flex_none().text_align(gpui::TextAlign::Center).text_size(gpui::rems(TEXT_SM / 16.0)).line_clamp(1).child(title.into())
-}
-
-pub fn reader_control_button_state(id: impl Into<ElementId>, label: impl Into<SharedString>, enabled: bool, theme: BrowserTheme) -> Button {
-    reader_control_button(id, label, theme).disabled(!enabled)
 }
 
 pub fn reader_sidebar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Button {
@@ -74,8 +69,7 @@ pub fn reader_match_count(text: impl Into<SharedString>, theme: BrowserTheme) ->
 }
 
 fn reader_settings_trigger(theme: BrowserTheme) -> gpui_component::button::Button {
-    let presentation = ReaderSettingsPresentationContract::default();
-    reader_control_button_icon("reader-settings-trigger", presentation.trigger_label, IconName::Settings2, theme)
+    reader_control_button_icon("reader-settings-trigger", "Aa", IconName::Settings2, theme)
 }
 
 /// How far through the book, as a single percentage.
@@ -137,8 +131,8 @@ pub fn reader_state_actions() -> Div {
 }
 
 /// Compact non-modal annotation editor. Its caller supplies absolute placement
-/// relative to the document viewport.
-pub fn reader_annotation_editor(theme: BrowserTheme) -> Scrollable<Stateful<Div>> {
+/// relative to the document viewport and appends the action rows.
+pub fn reader_annotation_editor(quote: impl IntoElement, note: impl IntoElement, theme: BrowserTheme) -> Scrollable<Stateful<Div>> {
     div()
         .id("reader-annotation-editor")
         .w(px(360.0))
@@ -154,10 +148,8 @@ pub fn reader_annotation_editor(theme: BrowserTheme) -> Scrollable<Stateful<Div>
         .border_color(theme.border)
         .bg(theme.surface)
         .shadow(crate::overlay_shadow(theme))
-}
-
-pub fn reader_annotation_note_editor(theme: BrowserTheme) -> Div {
-    div().h(px(60.0)).w_full().overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.raised_bg)
+        .child(quote)
+        .child(div().h(px(60.0)).w_full().overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.raised_bg).child(note))
 }
 
 fn reader_toc_disclosure(id: impl Into<ElementId>, label: impl IntoElement, theme: BrowserTheme) -> Stateful<Div> {
@@ -184,24 +176,23 @@ pub fn reader_toc_title(id: impl Into<ElementId>, title: impl Into<SharedString>
 }
 
 pub fn reader_settings_dropdown(viewport_height: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
-    let presentation = ReaderSettingsPresentationContract::default();
     let available_height = (f32::from(viewport_height) - READER_TOOLBAR_HEIGHT - READER_SETTINGS_POPOVER_GAP - READER_SETTINGS_POPOVER_WINDOW_MARGIN).max(1.0);
-    let max_height = available_height.min(f32::from(presentation.max_height_px));
+    let max_height = available_height.min(READER_SETTINGS_MAX_HEIGHT);
     div()
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
-        .w(gpui::rems(f32::from(presentation.max_width_px) / 16.0))
+        .w(gpui::rems(READER_SETTINGS_MAX_WIDTH / 16.0))
         .max_h(px(max_height))
         .overflow_y_scrollbar()
         .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(theme.border)
         .shadow(crate::overlay_shadow(theme))
-        .p(gpui::rems(f32::from(presentation.padding_px) / 16.0))
+        .p(gpui::rems(READER_SETTINGS_PADDING_REM))
         .flex()
         .flex_col()
-        .gap(gpui::rems(f32::from(presentation.gap_px) / 16.0))
+        .gap(gpui::rems(READER_SETTINGS_GAP_REM))
         .bg(theme.surface)
 }
 
@@ -213,7 +204,7 @@ pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
     div().w_full().min_h(gpui::rems(38.0 / 16.0)).flex().items_center().gap(gpui::rems(SPACE_SM / 16.0)).child(div().w(gpui::rems(112.0 / 16.0)).flex_none().text_size(gpui::rems(TEXT_SM / 16.0)).child(label.into())).child(div().flex_1())
 }
 
-pub fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div()
         .w(gpui::rems(SETTINGS_STEPPER_VALUE_WIDTH / 16.0))
         .h(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0))
@@ -271,14 +262,6 @@ fn reader_image_preview(source: impl Into<ImageSource>) -> Img {
     img(source).size_full().object_fit(ObjectFit::Contain)
 }
 
-fn reader_modal_overlay() -> Div {
-    crate::modal_overlay()
-}
-
-fn reader_modal_scrim(theme: BrowserTheme) -> Stateful<Div> {
-    crate::modal_scrim("reader-modal-scrim", theme)
-}
-
 fn reader_modal_panel(width: Pixels, height: Pixels, theme: BrowserTheme) -> Div {
     crate::modal_surface(theme).w(width).h(height).max_w_full().max_h_full().p(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM))
 }
@@ -309,7 +292,7 @@ impl RenderOnce for ReaderModal {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = browser_theme(cx);
         let dismiss = self.on_dismiss;
-        reader_modal_overlay().child(reader_modal_scrim(theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content))
+        crate::modal_overlay().child(crate::modal_scrim("reader-modal-scrim", theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content))
     }
 }
 
@@ -448,10 +431,6 @@ pub fn reader_document_body() -> Div {
     div().relative().size_full().min_h_0().min_w_0().flex().flex_col().overflow_hidden()
 }
 
-pub fn empty_document() -> Div {
-    div().size_full()
-}
-
 /// Invisible strip along the top edge that brings a hidden toolbar back.
 ///
 /// Kept thin so it barely overlaps the document: a reader who is selecting text
@@ -473,15 +452,11 @@ pub fn reader_content() -> Div {
 /// Without this the popover focuses itself and the reader's navigation keys go
 /// dead until the document is clicked again.
 pub fn reader_settings_popover(document_focus: Option<&gpui::FocusHandle>, theme: BrowserTheme) -> Popover {
-    let presentation = ReaderSettingsPresentationContract::default();
-    let anchor = match presentation.anchor {
-        ReaderSettingsAnchor::ReaderToolbarEnd => gpui::Anchor::TopRight,
-    };
     // The trigger is vertically centered in the toolbar. Top-anchored GPUI
     // popovers begin at the trigger's top edge, so move this one past the
     // trigger and the remainder of the toolbar before drawing the panel.
     let top_offset = (READER_TOOLBAR_HEIGHT + READER_TOOLBAR_CONTROL_HEIGHT) / 2.0 + READER_SETTINGS_POPOVER_GAP;
-    Popover::new("reader-settings").anchor(anchor).top(px(top_offset)).p_0().when_some(document_focus, |popover, focus| popover.track_focus(focus)).trigger(reader_settings_trigger(theme).tooltip("Reader settings"))
+    Popover::new("reader-settings").anchor(gpui::Anchor::TopRight).top(px(top_offset)).p_0().when_some(document_focus, |popover, focus| popover.track_focus(focus)).trigger(reader_settings_trigger(theme).tooltip("Reader settings"))
 }
 
 #[cfg(test)]

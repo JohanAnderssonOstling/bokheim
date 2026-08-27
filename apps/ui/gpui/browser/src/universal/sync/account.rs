@@ -3,7 +3,46 @@
 use gpui::Context;
 
 use super::SyncPage;
-use app_contract::backend::{BackendFuture, CloudSnapshot};
+use crate::services::backend::{UiFuture, app_async};
+use bokheim_backend::{AppBackend, BackendError};
+
+#[derive(Clone, Debug)]
+pub(super) struct CloudSnapshot {
+    account: bokheim_backend::AccountStatus,
+    storage_usage: Option<bokheim_backend::AccountStorageUsage>,
+    sync_statuses: Vec<bokheim_backend::LibrarySyncStatus>,
+    local_storage_usage: Vec<bokheim_backend::LocalLibraryStorageUsage>,
+    server_storage_usage: Option<Vec<bokheim_backend::ServerLibraryStorageUsage>>,
+    transfers: Vec<bokheim_backend::LibraryTransfers>,
+}
+
+async fn load_snapshot(backend: &AppBackend) -> Result<CloudSnapshot, BackendError> {
+    let library_list = backend.reconcile_libraries().await?;
+    let account = backend.account_status()?;
+    let storage_usage = if account.signed_in() { backend.account_storage_usage_if_supported().await? } else { None };
+    let local_storage_usage = backend.scan_local_library_storage_usage().await?;
+    let server_storage_usage = if account.signed_in() { backend.account_library_storage_usage_if_supported().await? } else { None };
+    let transfers = backend.transfer_statuses()?;
+    Ok(CloudSnapshot { account, storage_usage, sync_statuses: library_list.sync_statuses, local_storage_usage, server_storage_usage, transfers })
+}
+
+fn snapshot(backend: &AppBackend) -> UiFuture<CloudSnapshot> {
+    app_async(backend, move |backend| async move { load_snapshot(&backend).await })
+}
+
+pub(super) fn login(backend: &AppBackend, email: String, password: String) -> UiFuture<CloudSnapshot> {
+    app_async(backend, move |backend| async move {
+        backend.login(&email, &password).await?;
+        load_snapshot(&backend).await
+    })
+}
+
+pub(super) fn verify_email(backend: &AppBackend, email: String, pin: String) -> UiFuture<CloudSnapshot> {
+    app_async(backend, move |backend| async move {
+        backend.verify_email(&email, &pin).await?;
+        load_snapshot(&backend).await
+    })
+}
 
 impl SyncPage {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -23,7 +62,7 @@ impl SyncPage {
             self.message = Some("Refreshing…".into());
         }
         cx.notify();
-        let operation = self.services.backend.cloud_snapshot();
+        let operation = snapshot(&self.services.backend);
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| match result {
@@ -60,7 +99,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: BackendFuture<CloudSnapshot>, cx: &mut Context<Self>) {
+    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: UiFuture<CloudSnapshot>, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -88,12 +127,18 @@ impl SyncPage {
     }
 
     pub(super) fn start_logout(&mut self, cx: &mut Context<Self>) {
-        let operation = self.services.backend.logout();
+        let operation = app_async(&self.services.backend, move |backend| async move {
+            backend.logout().await?;
+            load_snapshot(&backend).await
+        });
         self.start_snapshot_operation("Signing out…", "Signed out", false, operation, cx);
     }
 
     pub(super) fn start_sync(&mut self, cx: &mut Context<Self>) {
-        let operation = self.services.backend.sync_all_libraries();
+        let operation = app_async(&self.services.backend, move |backend| async move {
+            backend.sync_all_libraries().await?;
+            load_snapshot(&backend).await
+        });
         self.start_snapshot_operation("Syncing…", "All libraries synced", false, operation, cx);
     }
 }

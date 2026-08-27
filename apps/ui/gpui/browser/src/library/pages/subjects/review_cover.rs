@@ -29,7 +29,8 @@ impl ReviewCoverView {
         if !matches!(self.state, ReviewCoverState::Pending) || self.task.is_some() {
             return;
         }
-        let load = self.ui.backend().load_cover(self.content_hash);
+        let content_hash = self.content_hash;
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.thumbnail(content_hash));
         let decoder = cx.background_executor().clone();
         let svg_renderer = cx.svg_renderer();
         self.task = Some(cx.spawn(async move |cover, cx| {

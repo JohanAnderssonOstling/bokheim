@@ -3,7 +3,7 @@
 use super::*;
 use crate::app::BackendError;
 use crate::library::{LibraryAuthorsView, LibraryBackend, LibraryFolderView, LibrarySubjectView};
-use app_contract::library::{AuthorSort, BookDetail, BookTocEntry, BrowseBookSort, BrowseChipSort, BrowseContents, FolderSort, LibraryFileTypeFilter, LibraryHomeView, LibrarySearchResult};
+use library_model::{AuthorSort, BookDetail, BookTocEntry, BrowseBookSort, BrowseChipSort, BrowseContents, FolderSort, LibraryFileTypeFilter, LibraryHomeView, LibrarySearchResult};
 
 fn convert_toc_entry(entry: epub_provider::TocEntry) -> BookTocEntry {
     BookTocEntry { title: entry.title, target: entry.link, children: entry.children.into_iter().map(convert_toc_entry).collect() }
@@ -26,7 +26,7 @@ impl LibraryBackend {
             let resolved = self.resolve_book_for_reader(content_hash)?;
             epub_provider::EpubProvider::try_from_reader(resolved.reader).and_then(|provider| provider.toc()).ok().flatten().unwrap_or_default().into_iter().map(convert_toc_entry).collect()
         } else if self.is_audiobook(content_hash.clone())? {
-            self.audiobook_chapters(content_hash)?.into_iter().map(|chapter| BookTocEntry { title: chapter.title, target: app_contract::library::audiobook_toc_target(chapter.start_ms), children: Vec::new() }).collect()
+            self.audiobook_chapters(content_hash)?.into_iter().map(|chapter| BookTocEntry { title: chapter.title, target: library_model::audiobook_toc_target(chapter.start_ms), children: Vec::new() }).collect()
         } else {
             Vec::new()
         };

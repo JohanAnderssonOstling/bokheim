@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use epub_provider::EpubProvider;
 use html::engine::Engine;
 use html::layout::{FontSlant, GlyphId, GlyphMetric, GlyphRegistry, GlyphShaper, LayoutConstraints, LayoutTimings, ShapedTextRun, TextRunShapeRequest};
 use html::pipeline::{
@@ -12,6 +11,7 @@ use html::pipeline::{
     parse_html_document,
 };
 use html::resources::ResourceProvider;
+use html_publication::{PublicationFormat, PublicationSource};
 
 #[derive(Default)]
 struct ProfileShaper {
@@ -148,9 +148,10 @@ fn main() {
         let mut totals = Totals::default();
         for epub_path in &epub_files {
             totals.epubs += 1;
-            let provider: Arc<dyn ResourceProvider> = Arc::new(EpubProvider::new(epub_path.clone()));
+            let publication = PublicationSource::from_reader(PublicationFormat::Epub, fs::File::open(epub_path).expect("failed to open EPUB")).expect("failed to parse EPUB");
+            let provider = publication.provider();
             let stylesheet_cache = (book_cache_mode == BookCacheMode::On).then(BookStylesheetCache::default);
-            let mut chapters = provider.list_html_candidates("").map_err(|error| format!("{}: {error}", epub_path.display())).expect("failed to enumerate EPUB chapters");
+            let mut chapters = publication.document_uris().to_vec();
             chapters.sort();
             for uri in chapters {
                 match profile_file(provider.clone(), &uri, stylesheet_cache.as_ref(), &mut totals) {
@@ -177,8 +178,9 @@ fn main() {
         let mut totals = WarmTotals::default();
         for epub_path in &epub_files {
             totals.epubs += 1;
-            let provider: Arc<dyn ResourceProvider> = Arc::new(EpubProvider::new(epub_path.clone()));
-            let mut chapters = provider.list_html_candidates("").map_err(|error| format!("{}: {error}", epub_path.display())).expect("failed to enumerate EPUB chapters");
+            let publication = PublicationSource::from_reader(PublicationFormat::Epub, fs::File::open(epub_path).expect("failed to open EPUB")).expect("failed to parse EPUB");
+            let provider = publication.provider();
+            let mut chapters = publication.document_uris().to_vec();
             chapters.sort();
             for uri in chapters {
                 match profile_warm_file(provider.clone(), &uri, &mut totals) {

@@ -1,11 +1,8 @@
+use bokheim_backend::AppBackend;
+use gpui::{App, Window};
+use library_model::BookLocator;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
-
-use app_contract::FrontendContract;
-use app_contract::backend::AppBackend;
-use app_contract::library::BookLocator;
-use gpui::{App, Window};
 
 pub type OpenReader = Rc<dyn Fn(BookLocator, String, Option<String>, &mut Window, &mut App)>;
 #[cfg(feature = "kobo")]
@@ -64,8 +61,7 @@ impl DesktopUpdater {
 
 #[derive(Clone)]
 pub struct AppServices {
-    pub(crate) backend: Rc<dyn AppBackend>,
-    pub(crate) contracts: Arc<FrontendContract>,
+    pub(crate) backend: Rc<AppBackend>,
     pub(crate) open_reader: OpenReader,
     pub(crate) desktop_updater: Option<DesktopUpdater>,
     #[cfg(feature = "kobo")]
@@ -73,10 +69,9 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    pub fn new(backend: impl AppBackend + 'static, open_reader: OpenReader, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate) -> Self {
+    pub fn new(backend: AppBackend, open_reader: OpenReader, desktop_updater: Option<DesktopUpdater>, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate) -> Self {
         Self {
             backend: Rc::new(backend),
-            contracts: Arc::new(FrontendContract::default()),
             open_reader,
             desktop_updater,
             #[cfg(feature = "kobo")]

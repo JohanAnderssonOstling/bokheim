@@ -140,6 +140,16 @@ pub struct RichWorkMetadataMatch {
     /// Plain-text description from the matched Open Library work.
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub subjects: Vec<SubjectHeading>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct SubjectHeading {
+    pub source: String,
+    pub authority: String,
+    pub components: Vec<String>,
+    pub authority_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,6 +164,12 @@ pub struct WorkPopularity {
 impl WorkPopularity {
     pub fn reading_log_count(&self) -> u64 {
         self.want_to_read_count.saturating_add(self.currently_reading_count).saturating_add(self.already_read_count)
+    }
+
+    /// Stable ordering used when several works contribute metadata for one
+    /// ISBN cluster. Reading activity leads, followed by rating evidence.
+    pub fn evidence_rank(&self) -> (u64, u64, u64) {
+        (self.reading_log_count(), self.rating_count, self.rating_sum)
     }
 }
 
@@ -170,6 +186,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
     let mut people = BTreeMap::<(Option<String>, String), EntitySource>::new();
     let mut popularity = None;
     let mut descriptions = BTreeSet::new();
+    let mut subjects = BTreeSet::new();
     for matched in matches {
         work_ids.extend(matched.open_library_work_id.iter().cloned());
         edition_ids.extend(matched.exact_edition_ids.iter().cloned());
@@ -206,6 +223,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
             popularity = matched.popularity.clone();
         }
         descriptions.extend(matched.description.iter().cloned());
+        subjects.extend(matched.subjects.iter().cloned());
     }
     let classifications = filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { scheme, notation, source }), similarity_keys);
     RichWorkMetadataMatch {
@@ -219,6 +237,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         // Ambiguous ISBNs can point at unrelated works. Only expose a
         // description when all available Open Library evidence agrees.
         description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
+        subjects: subjects.into_iter().collect(),
     }
 }
 
@@ -406,6 +425,74 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
             (value.len() == 9 && value[..3].bytes().all(|byte| byte.is_ascii_alphabetic()) && value[3..].bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
         }
     }
+}
+
+/// Accumulates exact-edition classification support across alternative ISBN
+/// matches without allowing a repeated work-wide union to manufacture votes.
+#[derive(Debug, Default)]
+pub struct EditionClassificationConsensus {
+    support: BTreeMap<(ClassificationScheme, String), BTreeSet<String>>,
+}
+
+impl EditionClassificationConsensus {
+    /// Removes exact-edition classifications from alternative matches and
+    /// records each normalized classification once per independently queried
+    /// edition group. Work-level evidence remains on the matches.
+    pub fn record_alternative_matches(&mut self, matches: &mut [RichWorkMetadataMatch], requested_isbn: &str) {
+        for matched in matches {
+            let edition_group = if matched.exact_edition_ids.is_empty() {
+                format!("isbn:{requested_isbn}")
+            } else {
+                let mut edition_ids = matched.exact_edition_ids.clone();
+                edition_ids.sort();
+                edition_ids.dedup();
+                edition_ids.join(",")
+            };
+            matched.classifications.retain(|classification| {
+                if classification.source == ClassificationSource::ExactEdition {
+                    if let Some(notation) = classification_consensus_notation(classification.scheme, &classification.notation) {
+                        self.support.entry((classification.scheme, notation)).or_default().insert(edition_group.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            for author in &mut matched.authors {
+                if author.source == AuthorSource::ExactEdition {
+                    author.source = AuthorSource::Work;
+                }
+            }
+            for entity in matched.places.iter_mut().chain(&mut matched.people) {
+                if entity.source == EntitySource::ExactEdition {
+                    entity.source = EntitySource::Work;
+                }
+            }
+        }
+    }
+
+    /// Returns normalized classifications supported by at least two distinct
+    /// edition groups.
+    pub fn classifications(self) -> Vec<Classification> {
+        self.support.into_iter().filter_map(|((scheme, notation), edition_groups)| (edition_groups.len() >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect()
+    }
+}
+
+/// Returns normalized classifications supported by at least two exact
+/// editions. Duplicate formatting variants within one edition count once.
+pub fn exact_edition_classification_consensus<'a, E, C>(editions: E) -> Vec<Classification>
+where
+    E: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'a (ClassificationScheme, String)>,
+{
+    let mut support = BTreeMap::<(ClassificationScheme, String), usize>::new();
+    for classifications in editions {
+        let normalized = classifications.into_iter().filter_map(|(scheme, notation)| classification_consensus_notation(*scheme, notation).map(|notation| (*scheme, notation))).collect::<BTreeSet<_>>();
+        for classification in normalized {
+            *support.entry(classification).or_default() += 1;
+        }
+    }
+    support.into_iter().filter_map(|((scheme, notation), votes)| (votes >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect()
 }
 
 /// Keeps classification consensus across editions while removing small,
@@ -708,6 +795,11 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
             rating_sum: popularity.rating_sum,
         }),
         description: value.description.clone(),
+        subjects: value
+            .subjects
+            .iter()
+            .map(|subject| protobuf_v2::SubjectHeading { source: subject.source.clone(), authority: subject.authority.clone(), components: subject.components.clone(), authority_uri: subject.authority_uri.clone() })
+            .collect(),
     }
 }
 
@@ -833,6 +925,7 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
             rating_sum: popularity.rating_sum,
         }),
         description: value.description,
+        subjects: value.subjects.into_iter().map(|subject| SubjectHeading { source: subject.source, authority: subject.authority, components: subject.components, authority_uri: subject.authority_uri }).collect(),
     })
 }
 
@@ -894,6 +987,91 @@ mod tests {
     }
 
     #[test]
+    fn exact_edition_consensus_keeps_multiple_supported_branches_per_scheme() {
+        let editions = [
+            [(ClassificationScheme::LibraryOfCongress, "QA76.6".to_owned()), (ClassificationScheme::DeweyDecimal, "005.1".to_owned())].into_iter().collect::<BTreeSet<_>>(),
+            [(ClassificationScheme::LibraryOfCongress, "QA76.6.A1 2001".to_owned()), (ClassificationScheme::DeweyDecimal, "005.1".to_owned())].into_iter().collect(),
+            [(ClassificationScheme::LibraryOfCongress, "PN1993".to_owned()), (ClassificationScheme::DeweyDecimal, "791.43".to_owned())].into_iter().collect(),
+            [(ClassificationScheme::LibraryOfCongress, "PN1993.A2".to_owned()), (ClassificationScheme::DeweyDecimal, "791.43".to_owned())].into_iter().collect(),
+            [(ClassificationScheme::LibraryOfCongress, "B580".to_owned()), (ClassificationScheme::DeweyDecimal, "999".to_owned())].into_iter().collect(),
+        ];
+
+        let retained = exact_edition_classification_consensus(editions.iter().map(BTreeSet::iter));
+        let notations = retained.iter().map(|classification| classification.notation.as_str()).collect::<BTreeSet<_>>();
+        assert!(notations.contains("QA76.6"));
+        assert!(notations.contains("PN1993"));
+        assert!(notations.contains("005.1"));
+        assert!(notations.contains("791.43"));
+        assert!(!notations.contains("B580"));
+        assert!(!notations.contains("999"));
+    }
+
+    #[test]
+    fn classification_consensus_normalizes_item_specific_call_numbers() {
+        assert_eq!(classification_consensus_notation(ClassificationScheme::LibraryOfCongress, "PA4025.A5 R6 1999").as_deref(), Some("PA4025"));
+        assert_eq!(classification_consensus_notation(ClassificationScheme::LibraryOfCongress, "PA4025.A5W56 2018eb").as_deref(), Some("PA4025"));
+        assert_eq!(classification_consensus_notation(ClassificationScheme::DeweyDecimal, "883/.01").as_deref(), Some("883.01"));
+    }
+
+    #[test]
+    fn alternative_edition_consensus_removes_singletons_and_demotes_other_evidence() {
+        let matched = |work: &str, edition: &str, notation: &str| RichWorkMetadataMatch {
+            open_library_work_id: Some(work.to_owned()),
+            exact_edition_ids: vec![edition.to_owned()],
+            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: notation.to_owned(), source: ClassificationSource::ExactEdition }],
+            authors: vec![AuthorMetadata { open_library_author_id: "OL1A".to_owned(), name: None, biography: None, identifiers: Vec::new(), source: AuthorSource::ExactEdition, position: 0 }],
+            places: vec![EntityReference { wikidata_id: None, name: "Paris".to_owned(), source: EntitySource::ExactEdition }],
+            people: Vec::new(),
+            popularity: None,
+            description: None,
+            subjects: Vec::new(),
+        };
+        let mut consensus = EditionClassificationConsensus::default();
+        let mut first = vec![matched("OL1W", "OL1M", "PR4034.P7 1995")];
+        let mut second = vec![matched("OL2W", "OL2M", "PR4034 .P7 2006")];
+        let mut singleton = vec![matched("OL3W", "OL3M", "PS3558.A4758 P75t 1999")];
+        consensus.record_alternative_matches(&mut first, "9780000000001");
+        consensus.record_alternative_matches(&mut second, "9780000000002");
+        consensus.record_alternative_matches(&mut singleton, "9780000000003");
+
+        assert!(first[0].classifications.is_empty());
+        assert_eq!(first[0].authors[0].source, AuthorSource::Work);
+        assert_eq!(first[0].places[0].source, EntitySource::Work);
+        assert_eq!(consensus.classifications(), vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "PR4034".to_owned(), source: ClassificationSource::Work }]);
+    }
+
+    #[test]
+    fn rich_match_merging_combines_split_work_records() {
+        let first = RichWorkMetadataMatch {
+            open_library_work_id: Some("OL1W".to_owned()),
+            exact_edition_ids: vec!["OL1M".to_owned()],
+            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "GN496".to_owned(), source: ClassificationSource::ExactEdition }],
+            authors: Vec::new(),
+            places: Vec::new(),
+            people: Vec::new(),
+            popularity: None,
+            description: None,
+            subjects: Vec::new(),
+        };
+        let second = RichWorkMetadataMatch {
+            open_library_work_id: Some("OL2W".to_owned()),
+            exact_edition_ids: vec!["OL2M".to_owned()],
+            classifications: vec![Classification { scheme: ClassificationScheme::DeweyDecimal, notation: "306".to_owned(), source: ClassificationSource::Work }],
+            authors: Vec::new(),
+            places: vec![EntityReference { wikidata_id: None, name: "Developing countries".to_owned(), source: EntitySource::Work }],
+            people: Vec::new(),
+            popularity: None,
+            description: None,
+            subjects: Vec::new(),
+        };
+
+        let merged = merge_rich_work_matches([&first, &second], |_, _| Vec::new());
+        assert_eq!(merged.exact_edition_ids, ["OL1M", "OL2M"]);
+        assert_eq!(merged.classifications.len(), 2);
+        assert_eq!(merged.places.len(), 1);
+    }
+
+    #[test]
     fn protobuf_v2_round_trip_preserves_rich_entities() {
         let value = RichMetadataEnrichmentResponse {
             snapshot: SnapshotDescription { dump_date: "2026-08-01".to_owned(), imported_at_ms: 42 },
@@ -920,6 +1098,7 @@ mod tests {
                     people: Vec::new(),
                     popularity: Some(WorkPopularity { want_to_read_count: 12, currently_reading_count: 3, already_read_count: 8, rating_count: 4, rating_sum: 17 }),
                     description: Some("A description from Open Library.".to_owned()),
+                    subjects: vec![SubjectHeading { source: "library_of_congress".to_owned(), authority: "lcsh".to_owned(), components: vec!["Books".to_owned(), "History".to_owned()], authority_uri: None }],
                 }],
             }],
             places: vec![PlaceEntity {

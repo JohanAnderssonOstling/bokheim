@@ -1,6 +1,6 @@
 use super::*;
 use library_model::{BookFormat, DirectoryLifecycleState};
-use library_replica::{DirectoryIntent, project_directories};
+use library_replica::{project_directories, DirectoryIntent};
 
 /// Applies one remote change. Returns the placement to delete locally when the
 /// change was a removal that won the LWW gate; `None` otherwise.
@@ -83,18 +83,6 @@ pub fn apply_remote_change_in_tx(tx: &Transaction, change: &ServerMutation) -> R
             }
             true
         }
-        MutationBody::Bookmark { bookmark_id, value } => {
-            if !book_is_purged(tx, &value.content_hash)? {
-                apply_remote_bookmark(tx, change, bookmark_id, value)?;
-            }
-            true
-        }
-        MutationBody::BookLink { link_id, value } => {
-            if !book_is_purged(tx, &value.source_content_hash)? && !book_is_purged(tx, &value.target_content_hash)? {
-                apply_remote_book_link(tx, change, link_id, value)?;
-            }
-            true
-        }
         MutationBody::CatalogPublication { source_id, publication, content_hash } => {
             if !book_is_purged(tx, content_hash)? {
                 tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
@@ -131,7 +119,7 @@ fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, 
         library_model::AnnotationStyle::Squiggly => "squiggly",
         library_model::AnnotationStyle::Strikethrough => "strikethrough",
     };
-    let app_anchor = app_contract::reader_state::AnnotationAnchor::from(value.anchor.clone());
+    let app_anchor = library_model::AnnotationAnchor::from(value.anchor.clone());
     let anchor = super::marks::store_annotation_anchor(&app_anchor)?;
     let created_at = storage_i64(value.created_at, "annotation creation timestamp")?;
     let modified_at = storage_i64(value.modified_at, "annotation modification timestamp")?;
@@ -154,24 +142,6 @@ fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, 
     Ok(())
 }
 
-fn apply_remote_bookmark(tx: &Transaction, change: &ServerMutation, id: &str, value: &library_model::BookmarkState) -> Result<(), Box<dyn std::error::Error>> {
-    tx.first_book_insert(value.content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
-    let created_at = storage_i64(value.created_at, "bookmark creation timestamp")?;
-    let modified_at = storage_i64(value.modified_at, "bookmark modification timestamp")?;
-    tx.upsert_remote_bookmark(id, value.content_hash.as_str(), &value.cfi, &value.label, created_at, modified_at, value.deleted.then_some(modified_at))?;
-    Ok(())
-}
-
-fn apply_remote_book_link(tx: &Transaction, change: &ServerMutation, id: &str, value: &library_model::BookLinkState) -> Result<(), Box<dyn std::error::Error>> {
-    let changed_at = storage_i64(change.mutation.changed_at, "change timestamp")?;
-    tx.first_book_insert(value.source_content_hash.as_str(), changed_at)?;
-    tx.first_book_insert(value.target_content_hash.as_str(), changed_at)?;
-    let created_at = storage_i64(value.created_at, "book-link creation timestamp")?;
-    let modified_at = storage_i64(value.modified_at, "book-link modification timestamp")?;
-    tx.upsert_remote_book_link(id, value.source_content_hash.as_str(), value.target_content_hash.as_str(), &value.relation, &value.note, created_at, modified_at, value.deleted.then_some(modified_at))?;
-    Ok(())
-}
-
 fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
     match body {
         MutationBody::DirectoryName { dir_id, .. } => ("directory_name", dir_id.to_string(), String::new()),
@@ -181,8 +151,6 @@ fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
-        MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone(), String::new()),
-        MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone(), String::new()),
         MutationBody::CatalogPublication { source_id, publication, .. } => ("catalog_publication", source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref())),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
     }
@@ -346,11 +314,9 @@ fn apply_remote_book_purged(tx: &Transaction, content_hash: ContentHash, changed
         "book_publication_value",
         "catalog_publication_book",
         "annotation",
-        "bookmark",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE book_row_id=?1"), [row_id])?;
     }
-    tx.execute("DELETE FROM book_link WHERE source_book_row_id=?1 OR target_book_row_id=?1", [row_id])?;
     tx.execute("DELETE FROM book_dir WHERE book_row_id=?1", [row_id])?;
     tx.execute("DELETE FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()])?;
     tx.execute("UPDATE book SET title=NULL,description='',description_scanned=0,publication_metadata=X'',format='',hidden_at=NULL,read_pos=NULL,read_progress=0,added_at=NULL,trash_origin_dir_id=NULL WHERE row_id=?1", [row_id])?;

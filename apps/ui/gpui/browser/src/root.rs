@@ -3,22 +3,21 @@
 //! Owns application navigation, the selected library, and the current route
 //! root. Nested navigation and book detail stay inside page components.
 
-use app_contract::library::{BookLocator, LibrarySummary};
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, SelectedFile, SharedString, Subscription, Task, Window, px};
 use gpui_component::notification::Notification;
 use gpui_component::{Root, WindowExt};
+use library_model::BookLocator;
 use sync_common::{ContentHash, LibraryId, ROOT_DIR_ID};
 use ui_components as components;
 
 use crate::library::{AuthorsPage, HomePage, LibraryContext, TrashPage, folder_browse_page, store_browse_page, subject_browse_page};
-use crate::navigation::{NavigationRequest, NavigationState, NavigationView, Route};
+use crate::navigation::{LibrarySummary, NavigationRequest, NavigationState, NavigationView, Route};
 use crate::services::AppServices;
 use crate::stores::Preferences;
 use crate::universal::settings::SettingsPage;
 use crate::{DecreaseUiFontSize, DismissSettings, IncreaseUiFontSize, ShowSettings};
-use app_contract::backend::BrowserSession;
-use app_contract::backend::LibraryBackend;
+use bokheim_backend::{BrowserSession, LibraryBackend};
 
 #[cfg(feature = "audiobooks")]
 struct ActiveAudiobook {
@@ -47,7 +46,7 @@ impl BrowserRoot {
     pub fn new(services: AppServices, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.set_system_bars_visible(false);
         cx.set_volume_button_capture(true);
-        let libraries = services.backend.libraries().expect("the application backend must provide a library list");
+        let libraries = crate::services::backend::library_summaries(&services.backend).expect("the application backend must provide a library list");
         let session = services.backend.browser_session().unwrap_or_else(|error| {
             log::warn!("failed to restore browser session: {error}");
             BrowserSession::default()
@@ -62,7 +61,7 @@ impl BrowserRoot {
         let library = LibraryContext::new(services.clone(), library, cx);
         let restored_route = Route::Folders;
         let navigation_state = cx.new(|_| NavigationState::new(restored_route, libraries, active_library_id));
-        let import_extensions = services.contracts.browsing_content.import_extensions.clone();
+        let import_extensions = crate::BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect();
         let navigation = cx.new(|cx| NavigationView::new(services.backend.clone(), import_extensions, navigation_state.clone(), cx));
         let subscriptions = vec![cx.subscribe_in(&navigation, window, |root: &mut Self, _, event, window, cx| match event {
             NavigationRequest::Select(route) => root.navigate(*route, window, cx),
@@ -88,7 +87,7 @@ impl BrowserRoot {
         let list_backend = services.backend.clone();
         let library_list_updates = cx.spawn(async move |root, cx| {
             while library_list_changes.recv().await.is_ok() {
-                let result = list_backend.libraries();
+                let result = crate::services::backend::library_summaries(&list_backend);
                 let _ = root.update_in(cx, |root, window, cx| match result {
                     Ok(libraries) => root.update_library_list(libraries, window, cx),
                     Err(error) => root.notify_error(error.into(), window, cx),
@@ -96,7 +95,9 @@ impl BrowserRoot {
             }
         });
 
-        let reconciliation = services.backend.reconcile_libraries();
+        let reconciliation = crate::services::backend::app_async(&services.backend, move |backend| async move {
+            backend.reconcile_libraries().await.map(|state| state.libraries.into_iter().map(|entry| LibrarySummary::new(*entry.library_id(), entry.library_name())).collect())
+        });
         cx.spawn(async move |root, cx| match reconciliation.await {
             Ok(libraries) => {
                 let _ = root.update_in(cx, |root, window, cx| root.update_library_list(libraries, window, cx));
@@ -139,9 +140,9 @@ impl BrowserRoot {
         let title = std::path::Path::new(&file.name).file_stem().and_then(|title| title.to_str()).filter(|title| !title.is_empty()).unwrap_or(&file.name).to_owned();
         let open_reader = self.services.open_reader.clone();
         cx.spawn(async move |root, cx| {
-            let result = library.import_book(ROOT_DIR_ID, file.name, file.bytes).await;
+            let result = crate::services::backend::library_blocking(&library, move |library| library.import_book_bytes(&ROOT_DIR_ID, file.name, file.bytes)).await;
             let _ = root.update_in(cx, |_, window, cx| match result {
-                Ok(content_hash) => open_reader(app_contract::library::BookLocator::new(library_id, content_hash), title, None, window, cx),
+                Ok(content_hash) => open_reader(library_model::BookLocator::new(library_id, content_hash), title, None, window, cx),
                 Err(error) => window.push_notification(Notification::error(format!("Could not import downloaded book: {error}")).id1::<Self>("incoming-book-import-error").autohide(false), cx),
             });
         })
@@ -225,7 +226,7 @@ impl BrowserRoot {
         if self.navigation_state.read(cx).library_id() == &library_id {
             return;
         }
-        let result = self.services.backend.libraries().map_err(|error| error.to_string()).and_then(|libraries| self.replace_libraries(libraries, Some(library_id), window, cx));
+        let result = crate::services::backend::library_summaries(&self.services.backend).and_then(|libraries| self.replace_libraries(libraries, Some(library_id), window, cx));
         if let Err(error) = result {
             self.notify_error(error.into(), window, cx);
         }
@@ -233,8 +234,8 @@ impl BrowserRoot {
 
     fn replace_libraries(&mut self, libraries: Vec<LibrarySummary>, preferred_library_id: Option<LibraryId>, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let libraries = if libraries.is_empty() {
-            self.services.backend.ensure_default_library().map_err(|error| error.to_string())?;
-            self.services.backend.libraries().map_err(|error| error.to_string())?
+            crate::services::backend::ensure_default_library(&self.services.backend)?;
+            crate::services::backend::library_summaries(&self.services.backend)?
         } else {
             libraries
         };
@@ -307,13 +308,14 @@ impl BrowserRoot {
 
     fn adjust_ui_font_size(&mut self, delta: i16, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).ui_font_size_px();
-        let [minimum, maximum] = self.services.contracts.browsing_preferences.constraints.ui_font_size_px;
+        let minimum = app_preferences::UI_FONT_SIZE_MIN;
+        let maximum = app_preferences::UI_FONT_SIZE_MAX;
         let next = (i16::from(current) + delta).clamp(i16::from(minimum), i16::from(maximum)) as u8;
         if next == current {
             return;
         }
 
-        let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_contract::preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx));
+        let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx));
         if let Err(error) = result {
             self.notify_error(format!("Could not save interface font size: {error}").into(), window, cx);
         }
@@ -324,8 +326,8 @@ fn route_uses_volume_pagination(route: Route) -> bool {
     matches!(route, Route::Folders | Route::Subjects | Route::Store)
 }
 
-fn resolve_library(services: &AppServices, library_id: &LibraryId) -> Result<std::rc::Rc<dyn LibraryBackend>, String> {
-    services.backend.library(library_id).map_err(|error| {
+fn resolve_library(services: &AppServices, library_id: &LibraryId) -> Result<std::rc::Rc<LibraryBackend>, String> {
+    services.backend.library(library_id).map(std::rc::Rc::new).map_err(|error| {
         log::error!("failed to select library {library_id}: {error}");
         format!("Could not open library: {error}")
     })

@@ -144,7 +144,7 @@ impl SyncPage {
     /// Every flow has the same shape: what this screen is, the inputs it needs,
     /// one action that goes forward, and — quieter — the way to another flow.
     /// The inputs carry their own placeholders and are never labelled as well.
-    fn account_access_form(&self, contract: &app_contract::AccountContract, entity: &Entity<Self>, feedback: Option<gpui::AnyElement>, theme: components::BrowserTheme) -> Div {
+    fn account_access_form(&self, entity: &Entity<Self>, feedback: Option<gpui::AnyElement>, theme: components::BrowserTheme) -> Div {
         let form = components::access_form();
         match self.flow {
             AccountFlow::SignIn => {
@@ -154,11 +154,9 @@ impl SyncPage {
                 let mut actions = components::action_row().child(components::primary_action_button("account-sign-in", "Sign in", IconName::Globe, self.busy).on_click(move |_, _, cx| {
                     login.update(cx, |page, cx| page.start_login(cx));
                 }));
-                if contract.capabilities.public_registration {
-                    actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, window, cx| {
-                        register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
-                    }));
-                }
+                actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, window, cx| {
+                    register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
+                }));
                 let mut form = form
                     .child(components::section_header("Sign in", "Your libraries, reading positions and purchases, on every device you use.", theme))
                     .children(feedback)
@@ -168,7 +166,7 @@ impl SyncPage {
                 // Recovery is offered once a sign-in has actually failed, so
                 // the screen a returning user sees carries one action, not
                 // three. It stays a link: it is the way out, not the way on.
-                if self.login_failed && contract.capabilities.password_recovery {
+                if self.login_failed {
                     form = form.child(components::link_button("account-request-reset", "Forgot your password?", theme, self.busy).on_click(move |_, window, cx| {
                         reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, window, cx));
                     }));
@@ -182,7 +180,7 @@ impl SyncPage {
                     .children(feedback)
                     .child(Input::new(&self.authentication.email))
                     .child(self.password_input(&self.authentication.registration_password, "toggle-registration-password", entity))
-                    .child(components::form_hint(format!("At least {} characters.", contract.validation.password_min_characters), theme))
+                    .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
                     .child(components::action_row().child(components::primary_action_button("account-register", "Create account", IconName::User, self.busy).on_click(move |_, _, cx| {
                         register.update(cx, |page, cx| page.start_registration(cx));
                     })))
@@ -197,12 +195,10 @@ impl SyncPage {
                 let mut actions = components::action_row().child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.busy).on_click(move |_, _, cx| {
                     verify.update(cx, |page, cx| page.start_verify_email(cx));
                 }));
-                if contract.capabilities.resend_verification {
-                    actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
-                        resend.update(cx, |page, cx| page.start_resend_verification(cx));
-                    }));
-                }
-                form.child(components::section_header("Check your email", format!("Enter the {}-digit PIN we sent you.", contract.validation.verification_pin_digits), theme))
+                actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+                    resend.update(cx, |page, cx| page.start_resend_verification(cx));
+                }));
+                form.child(components::section_header("Check your email", format!("Enter the {}-digit PIN we sent you.", account_contract::EMAIL_VERIFICATION_PIN_DIGITS), theme))
                     .children(feedback)
                     .child(OtpInput::new(&self.authentication.verification_pin))
                     .child(actions)
@@ -233,7 +229,7 @@ impl SyncPage {
                     .children(feedback)
                     .child(Input::new(&self.authentication.reset_token))
                     .child(self.password_input(&self.authentication.new_password, "toggle-new-password", entity))
-                    .child(components::form_hint(format!("At least {} characters.", contract.validation.password_min_characters), theme))
+                    .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
                     .child(components::action_row().child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
                         reset.update(cx, |page, cx| page.start_password_reset(cx));
                     })))
@@ -252,7 +248,7 @@ impl SyncPage {
     /// never uploaded — so library shares are taken from the used bytes in
     /// descending order and stop once those are accounted for. The remainder of
     /// the track is free space.
-    fn storage_segments(&self, usage: AccountStorageUsage, rows: &[LibraryRow], theme: components::BrowserTheme, contract: &app_contract::AccountContract) -> Vec<(SharedString, u64, gpui::Hsla)> {
+    fn storage_segments(&self, usage: AccountStorageUsage, rows: &[LibraryRow], theme: components::BrowserTheme) -> Vec<(SharedString, u64, gpui::Hsla)> {
         let mut segments: Vec<(SharedString, u64, gpui::Hsla)> = Vec::new();
         let mut attributed = 0_u64;
         let mut other_bytes = 0_u64;
@@ -265,22 +261,22 @@ impl SyncPage {
             }
         }
         if other_bytes > 0 {
-            segments.push((contract.summary.other_libraries_label.clone().into(), other_bytes, components::usage_segment_color(LEGEND_LIBRARY_LIMIT, theme)));
+            segments.push(("Other libraries".into(), other_bytes, components::usage_segment_color(LEGEND_LIBRARY_LIMIT, theme)));
         }
         // Charged bytes belonging to no library the device knows about: a
         // library not enrolled here, or books released everywhere but not yet
         // reclaimed. Never negative, whatever the two sources disagree about.
         let unattributed = usage.used_bytes.saturating_sub(attributed);
         if unattributed > 0 {
-            segments.push((contract.summary.unattributed_label.clone().into(), unattributed, theme.text_muted));
+            segments.push(("Elsewhere on the account".into(), unattributed, theme.text_muted));
         }
         if usage.reserved_bytes > 0 {
-            segments.push((contract.summary.reserved_label.clone().into(), usage.reserved_bytes, theme.warning));
+            segments.push(("Reserved by uploads".into(), usage.reserved_bytes, theme.warning));
         }
         segments
     }
 
-    fn activity_section(&self, contract: &app_contract::AccountContract, theme: components::BrowserTheme) -> gpui::AnyElement {
+    fn activity_section(&self, theme: components::BrowserTheme) -> gpui::AnyElement {
         let mut events = components::activity_list();
         let mut event_count = 0_usize;
         for group in self.transfers.groups.iter().filter(|group| group.scanner_running) {
@@ -290,8 +286,8 @@ impl SyncPage {
         for group in self.transfers.groups.iter() {
             for transfer in &group.transfers {
                 let (color, progress) = match transfer.state {
-                    app_contract::transfer::TransferState::Running => (theme.accent, Some(transfer.completed_items as f32 / transfer.total_items.max(1) as f32)),
-                    app_contract::transfer::TransferState::Failed => (theme.danger, None),
+                    bokheim_backend::TransferState::Running => (theme.accent, Some(transfer.completed_items as f32 / transfer.total_items.max(1) as f32)),
+                    bokheim_backend::TransferState::Failed => (theme.danger, None),
                     _ => (theme.warning, None),
                 };
                 let detail = match transfer.last_error.as_deref() {
@@ -304,13 +300,13 @@ impl SyncPage {
         }
         for group in self.transfers.groups.iter() {
             for transfer in &group.history {
-                let completed = matches!(transfer.state, app_contract::transfer::TransferState::Completed);
+                let completed = matches!(transfer.state, bokheim_backend::TransferState::Completed);
                 let color = if completed { theme.text_muted } else { theme.danger };
                 let title = match transfer.kind {
-                    app_contract::transfer::TransferJobKind::UploadBook => "Uploaded books",
-                    app_contract::transfer::TransferJobKind::UploadThumbnail => "Uploaded thumbnails",
-                    app_contract::transfer::TransferJobKind::DownloadBook => "Downloaded books",
-                    app_contract::transfer::TransferJobKind::DownloadThumbnail => "Downloaded thumbnails",
+                    bokheim_backend::TransferJobKind::UploadBook => "Uploaded books",
+                    bokheim_backend::TransferJobKind::UploadThumbnail => "Uploaded thumbnails",
+                    bokheim_backend::TransferJobKind::DownloadBook => "Downloaded books",
+                    bokheim_backend::TransferJobKind::DownloadThumbnail => "Downloaded thumbnails",
                 };
                 let detail = match transfer.last_error.as_deref() {
                     Some(error) => format!("{} of {} · {} · {error}", transfer.completed_items, transfer.total_items, group.library_name),
@@ -321,12 +317,8 @@ impl SyncPage {
             }
         }
 
-        let activity = GroupBox::new().fill().child(components::section_header(contract.transfers_section_label.clone(), "", theme));
-        if event_count == 0 {
-            activity.child(Label::new(contract.summary.activity_idle_label.clone()).min_h(px(64.0)).flex().items_center().text_color(theme.text_muted)).into_any_element()
-        } else {
-            activity.child(events).into_any_element()
-        }
+        let activity = GroupBox::new().fill().child(components::section_header("Batch jobs", "", theme));
+        if event_count == 0 { activity.child(Label::new("Nothing queued").min_h(px(64.0)).flex().items_center().text_color(theme.text_muted)).into_any_element() } else { activity.child(events).into_any_element() }
     }
 }
 
@@ -336,7 +328,6 @@ impl SyncPage {
     /// container and page width that Settings now provides.
     pub(crate) fn settings_section(&mut self, cx: &mut Context<Self>) -> Div {
         let theme = components::browser_theme(cx);
-        let contract = self.services.contracts.account.clone();
         let entity = cx.entity();
         let mut content = components::browser_settings_sections();
         // Whichever of the two the last attempt produced. They are never both
@@ -348,29 +339,29 @@ impl SyncPage {
         };
 
         if !self.account_status.signed_in() {
-            return content.child(GroupBox::new().fill().child(self.account_access_form(&contract, &entity, feedback, theme))).child(self.activity_section(&contract, theme));
+            return content.child(GroupBox::new().fill().child(self.account_access_form(&entity, feedback, theme))).child(self.activity_section(theme));
         }
 
         let rows = self.library_rows(cx);
         let summary = LibrarySyncSummary::from_statuses(&rows.iter().map(|row| row.status.clone()).collect::<Vec<_>>());
         let settled = summary.all_synced();
         let headline = if self.busy {
-            contract.summary.syncing_label.clone()
+            "Syncing…"
         } else if settled {
-            contract.summary.all_synced_label.clone()
+            "Everything is synced"
         } else if summary.library_count == 0 {
-            contract.no_local_libraries_label.clone()
+            "No local libraries"
         } else {
-            contract.summary.attention_label.clone()
+            "Needs attention"
         };
 
         let sync_now = entity.clone();
         let sign_out = entity.clone();
         let actions = components::action_row()
-            .child(components::primary_action_button("account-sync-now", contract.summary.sync_now_label.clone(), IconName::Redo2, self.busy).on_click(move |_, _, cx| {
+            .child(components::primary_action_button("account-sync-now", "Sync now", IconName::Redo2, self.busy).on_click(move |_, _, cx| {
                 sync_now.update(cx, |page, cx| page.start_sync(cx));
             }))
-            .child(components::secondary_action_button("cloud-logout", contract.sign_out_label.clone(), IconName::Close, self.account_action_busy).on_click(move |_, _, cx| {
+            .child(components::secondary_action_button("cloud-logout", "Sign out", IconName::Close, self.account_action_busy).on_click(move |_, _, cx| {
                 sign_out.update(cx, |page, cx| page.start_logout(cx));
             }));
         let email = self.account_status.email().unwrap_or_default();
@@ -386,56 +377,50 @@ impl SyncPage {
                 theme,
             ));
             if usage.quota_bytes > 0 {
-                let segments = self.storage_segments(usage, &rows, theme, &contract);
-                let mut track = components::meter_track(theme);
-                let mut legend = components::meter_legend();
-                for (label, bytes, color) in segments {
-                    track = track.child(components::meter_segment(bytes as f32 / usage.quota_bytes as f32, color));
-                    legend = legend.child(components::meter_legend_entry(color, format!("{label} {}", format_storage_bytes(bytes)), theme));
-                }
-                storage = storage.child(track).child(legend);
+                let segments = self.storage_segments(usage, &rows, theme).into_iter().map(|(label, bytes, color)| (bytes as f32 / usage.quota_bytes as f32, color, SharedString::from(format!("{label} {}", format_storage_bytes(bytes)))));
+                storage = storage.child(components::storage_meter(segments, theme));
             }
-            content = content.child(GroupBox::new().fill().child(components::section_header(contract.summary.storage_section_label.clone(), "", theme)).child(storage));
+            content = content.child(GroupBox::new().fill().child(components::section_header("Server storage", "", theme)).child(storage));
         }
 
         let breakdown_supported = self.server_storage_usage.is_some();
-        let libraries_detail = if breakdown_supported { String::new() } else { contract.summary.breakdown_unavailable_label.clone() };
-        let mut libraries = GroupBox::new().fill().child(components::section_header(contract.libraries_section_label.clone(), libraries_detail, theme));
+        let libraries_detail = if breakdown_supported { String::new() } else { "This server does not report storage per library.".to_owned() };
+        let mut libraries = GroupBox::new().fill().child(components::section_header("Libraries on this device", libraries_detail, theme));
         if !rows.is_empty() {
-            libraries = libraries.child(components::usage_column_headings(breakdown_supported.then(|| SharedString::from(contract.summary.server_usage_label.clone())), contract.summary.device_usage_label.clone(), theme));
+            libraries = libraries.child(components::usage_column_headings(breakdown_supported.then(|| SharedString::from("On the server")), "On this device", theme));
         }
         if rows.is_empty() {
-            libraries = libraries.child(Label::new(contract.no_local_libraries_label.clone()).min_h(px(64.0)).flex().items_center().text_color(theme.text_muted));
+            libraries = libraries.child(Label::new("No local libraries").min_h(px(64.0)).flex().items_center().text_color(theme.text_muted));
         } else {
             let largest = rows.iter().map(LibraryRow::sort_bytes).max().unwrap_or_default();
-            let mut list = components::item_list();
+            let mut usage_rows = Vec::with_capacity(rows.len());
             for row in &rows {
-                let definition = contract.sync_states.iter().find(|definition| definition.state == row.status.state);
                 let detail = row.status.last_synced_at.map(|timestamp| format!("Last sync {}", format_last_sync(timestamp))).unwrap_or_default();
                 let (state_label, state_tag) = match row.status.state {
                     LibrarySyncState::Synced if row.status.last_synced_at.is_none() => ("Sync pending", Tag::secondary()),
                     LibrarySyncState::Synced if row.status.has_unsynced_changes => ("Changes pending", Tag::warning()),
                     LibrarySyncState::Synced => ("Synced", Tag::primary()),
-                    LibrarySyncState::SignInRequired | LibrarySyncState::RemoteMissing => (definition.map(|definition| definition.label.as_str()).unwrap_or("Unknown"), Tag::warning()),
-                    LibrarySyncState::DifferentAccount => (definition.map(|definition| definition.label.as_str()).unwrap_or("Unknown"), Tag::danger()),
-                    LibrarySyncState::LocalOnly => (definition.map(|definition| definition.label.as_str()).unwrap_or("Unknown"), Tag::secondary()),
+                    LibrarySyncState::SignInRequired => ("Sign in required", Tag::warning()),
+                    LibrarySyncState::RemoteMissing => ("Upload pending", Tag::warning()),
+                    LibrarySyncState::DifferentAccount => ("Unavailable", Tag::danger()),
+                    LibrarySyncState::LocalOnly => ("Local", Tag::secondary()),
                 };
                 let fraction = if largest == 0 { 0.0 } else { row.sort_bytes() as f32 / largest as f32 };
-                let mut item = components::item_row(theme).child(components::item_identity(row.status.library_name.clone(), detail, theme));
-                if let Some(server_bytes) = row.server_bytes {
-                    item = item.child(components::usage_amount(format_storage_bytes(server_bytes), theme));
-                }
-                list = list.child(
-                    item.child(components::usage_amount_secondary(format_storage_bytes(row.local_bytes), theme))
-                        .child(components::usage_bar(fraction, theme))
-                        .child(state_tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(state_label.to_owned())),
-                );
+                usage_rows.push(components::library_usage_row(
+                    row.status.library_name.clone(),
+                    detail,
+                    row.server_bytes.map(|bytes| SharedString::from(format_storage_bytes(bytes))),
+                    format_storage_bytes(row.local_bytes),
+                    fraction,
+                    state_tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(state_label.to_owned()),
+                    theme,
+                ));
             }
-            libraries = libraries.child(list);
+            libraries = libraries.child(components::library_usage_list(usage_rows));
         }
         content = content.child(libraries);
 
-        content = content.child(self.activity_section(&contract, theme));
+        content = content.child(self.activity_section(theme));
 
         content
     }

@@ -1,4 +1,4 @@
-use catalog_contract::{CatalogPage, CatalogPublication, CatalogSource};
+use catalog_model::{CatalogPage, CatalogPublication, CatalogSource};
 
 /// Explicit client language preferences used to constrain catalogue-wide
 /// search and multilingual feeds. An empty list means all languages.
@@ -96,7 +96,7 @@ fn canonical_language(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catalog_contract::{CatalogAuthentication, CatalogFreshness, CatalogPagination, CatalogPublicationIdentity, CatalogSourceId};
+    use catalog_model::{CatalogAuthentication, CatalogFreshness, CatalogPagination, CatalogPublicationIdentity, CatalogSourceId};
 
     fn source(languages: &[&str]) -> CatalogSource {
         CatalogSource {
@@ -114,7 +114,7 @@ mod tests {
             identity: CatalogPublicationIdentity { edition_id: "book".to_owned(), work_id: None },
             title: "Book".to_owned(),
             authors: Vec::new(),
-            languages: languages.iter().map(|language| catalog_contract::LanguageTag::parse(language).unwrap()).collect(),
+            languages: languages.iter().map(|language| catalog_model::LanguageTag::parse(language).unwrap()).collect(),
             description: None,
             image_url: None,
             metadata: Default::default(),

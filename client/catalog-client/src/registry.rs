@@ -1,22 +1,22 @@
 use super::*;
+use rusqlite::OptionalExtension;
 
 const MAX_CATALOG_LOCATOR_BYTES: usize = 16 * 1024;
 
-#[derive(Debug)]
 pub(super) struct ServerRegistryStore {
-    path: std::path::PathBuf,
     registry: CatalogSourceRegistry,
 }
 
 impl ServerRegistryStore {
-    pub(super) fn load(path: std::path::PathBuf) -> Self {
-        let registry = std::fs::read(&path)
-            .ok()
+    pub(super) fn load(store: &client_store::ClientCatalogStore) -> Result<Self, CatalogProviderError> {
+        let connection = store.connection.lock().map_err(|_| CatalogProviderError::new("catalogue client store lock was poisoned"))?;
+        let payload = connection.query_row("SELECT payload FROM catalog_client_registry WHERE singleton=1", [], |row| row.get::<_, Vec<u8>>(0)).optional().map_err(error)?;
+        let registry = payload
             .filter(|bytes| bytes.len() as u64 <= MAX_CATALOG_SERVER_RESPONSE_BYTES)
             .and_then(|bytes| serde_json::from_slice::<CatalogSourceRegistry>(&bytes).ok())
             .filter(|registry| validate_registry(registry).is_ok())
             .unwrap_or(CatalogSourceRegistry { revision: 0, sources: Vec::new() });
-        Self { path, registry }
+        Ok(Self { registry })
     }
 
     pub(super) fn sources(&self) -> Vec<CatalogSource> {
@@ -31,7 +31,7 @@ impl ServerRegistryStore {
         self.registry.sources.iter().find(|registration| &registration.source.id == source_id).cloned()
     }
 
-    pub(super) fn replace(&mut self, registry: CatalogSourceRegistry) -> Result<(), CatalogProviderError> {
+    pub(super) fn replace(&mut self, store: &client_store::ClientCatalogStore, registry: CatalogSourceRegistry) -> Result<(), CatalogProviderError> {
         validate_registry(&registry)?;
         if registry.revision < self.registry.revision {
             return Err(CatalogProviderError::new(format!("refusing stale catalogue registry revision {} because revision {} is cached", registry.revision, self.registry.revision)));
@@ -39,10 +39,24 @@ impl ServerRegistryStore {
         if registry.revision == self.registry.revision && self.registry.revision != 0 && registry != self.registry {
             return Err(CatalogProviderError::new(format!("catalogue registry revision {} changed without a revision increment", registry.revision)));
         }
-        persist_registry(&self.path, &registry)?;
+        let bytes = serde_json::to_vec(&registry).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        store
+            .connection
+            .lock()
+            .map_err(|_| CatalogProviderError::new("catalogue client store lock was poisoned"))?
+            .execute(
+                "INSERT INTO catalog_client_registry(singleton,payload) VALUES(1,?1)
+                 ON CONFLICT(singleton) DO UPDATE SET payload=excluded.payload",
+                [&bytes],
+            )
+            .map_err(error)?;
         self.registry = registry;
         Ok(())
     }
+}
+
+fn error(error: impl std::fmt::Display) -> CatalogProviderError {
+    CatalogProviderError::new(error.to_string())
 }
 
 pub(super) fn validate_locator(locator: &str) -> Result<(), CatalogProviderError> {
@@ -66,15 +80,5 @@ fn validate_registry(registry: &CatalogSourceRegistry) -> Result<(), CatalogProv
         }
         validate_locator(&registration.root_locator)?;
     }
-    Ok(())
-}
-
-fn persist_registry(path: &Path, registry: &CatalogSourceRegistry) -> Result<(), CatalogProviderError> {
-    let parent = path.parent().ok_or_else(|| CatalogProviderError::new("catalogue registry cache path has no parent directory"))?;
-    std::fs::create_dir_all(parent).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    serde_json::to_writer(temporary.as_file_mut(), registry).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    temporary.as_file_mut().sync_all().map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    temporary.persist(path).map_err(|error| CatalogProviderError::new(error.error.to_string()))?;
     Ok(())
 }

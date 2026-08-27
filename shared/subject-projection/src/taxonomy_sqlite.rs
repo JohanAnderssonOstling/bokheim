@@ -1,4 +1,4 @@
-use crate::{UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
+use crate::{UnifiedCodeResolution, UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -6,12 +6,27 @@ use std::path::Path;
 pub(crate) fn read_embedded_unified_taxonomy() -> Result<Vec<UnifiedConceptDefinition>, String> {
     let mut connection = Connection::open_in_memory().map_err(|error| format!("failed to open embedded taxonomy database: {error}"))?;
     connection.deserialize_bytes("main", DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to open embedded taxonomy database image: {error}"))?;
-    read_connection(&connection, "embedded unified taxonomy")
+    read_unified_taxonomy_connection(&connection, "embedded unified taxonomy")
 }
 
 pub fn read_unified_taxonomy_sqlite(path: &Path) -> Result<Vec<UnifiedConceptDefinition>, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
-    read_connection(&connection, &path.display().to_string())
+    read_unified_taxonomy_connection(&connection, &path.display().to_string())
+}
+
+pub fn reset_unified_taxonomy_connection(connection: &mut Connection) -> Result<(), String> {
+    let mut seed = Connection::open_in_memory().map_err(|error| format!("failed to open embedded taxonomy database: {error}"))?;
+    seed.deserialize_bytes("main", DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to open embedded taxonomy database image: {error}"))?;
+    let backup = rusqlite::backup::Backup::new(&seed, connection).map_err(|error| format!("failed to initialize taxonomy cache: {error}"))?;
+    loop {
+        match backup.step(-1).map_err(|error| format!("failed to initialize taxonomy cache: {error}"))? {
+            rusqlite::backup::StepResult::Done => break,
+            rusqlite::backup::StepResult::More => continue,
+            rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => return Err("taxonomy cache is busy while installing its bundled seed".to_owned()),
+            _ => return Err("taxonomy cache returned an unknown backup state while installing its bundled seed".to_owned()),
+        }
+    }
+    Ok(())
 }
 
 /// Checks whether the device-local copy contains server-provided concepts.
@@ -19,21 +34,28 @@ pub fn read_unified_taxonomy_sqlite(path: &Path) -> Result<Vec<UnifiedConceptDef
 /// taxonomy rows merely to discover that it is identical to the embedded one.
 pub fn has_unified_taxonomy_overlay(path: &Path) -> Result<bool, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
-    let format_version =
-        connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read taxonomy database format {}: {error}", path.display()))?;
+    has_unified_taxonomy_overlay_in(&connection, &path.display().to_string())
+}
+
+pub fn has_unified_taxonomy_overlay_in(connection: &Connection, source: &str) -> Result<bool, String> {
+    let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read taxonomy database format {source}: {error}"))?;
     if format_version != "2" {
-        return Err(format!("unsupported unified taxonomy database format {format_version} in {}", path.display()));
+        return Err(format!("unsupported unified taxonomy database format {format_version} in {source}"));
     }
-    connection.query_row("SELECT EXISTS(SELECT 1 FROM taxonomy_meta WHERE key='server_release_id')", [], |row| row.get::<_, bool>(0)).map_err(|error| format!("failed to inspect taxonomy overlay marker {}: {error}", path.display()))
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM taxonomy_meta WHERE key='server_release_id')", [], |row| row.get::<_, bool>(0)).map_err(|error| format!("failed to inspect taxonomy overlay marker {source}: {error}"))
 }
 
 pub fn is_unified_taxonomy_client_seed(path: &Path) -> Result<bool, String> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open unified taxonomy database {}: {error}", path.display()))?;
+    is_unified_taxonomy_client_seed_in(&connection, &path.display().to_string())
+}
+
+pub fn is_unified_taxonomy_client_seed_in(connection: &Connection, source: &str) -> Result<bool, String> {
     connection
         .query_row("SELECT value='2' FROM taxonomy_meta WHERE key='client_seed_depth'", [], |row| row.get::<_, bool>(0))
         .optional()
         .map(|value| value.unwrap_or(false))
-        .map_err(|error| format!("failed to inspect taxonomy client seed marker {}: {error}", path.display()))
+        .map_err(|error| format!("failed to inspect taxonomy client seed marker {source}: {error}"))
 }
 
 /// Returns the authoritative server release associated with the cached
@@ -43,32 +65,11 @@ pub fn unified_taxonomy_server_release_id(path: &Path) -> Result<Option<String>,
         return Ok(None);
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open local unified taxonomy database {}: {error}", path.display()))?;
-    connection.query_row("SELECT value FROM taxonomy_meta WHERE key='server_release_id'", [], |row| row.get(0)).optional().map_err(|error| format!("failed to read taxonomy server release {}: {error}", path.display()))
+    unified_taxonomy_server_release_id_in(&connection, &path.display().to_string())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnifiedCodeResolution {
-    system_id: String,
-    code: String,
-    matched_concept_ids: Vec<String>,
-}
-
-impl UnifiedCodeResolution {
-    pub fn new(system_id: String, code: String, matched_concept_ids: Vec<String>) -> Self {
-        Self { system_id, code, matched_concept_ids }
-    }
-
-    pub fn system_id(&self) -> &str {
-        &self.system_id
-    }
-
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub fn matched_concept_ids(&self) -> &[String] {
-        &self.matched_concept_ids
-    }
+pub fn unified_taxonomy_server_release_id_in(connection: &Connection, source: &str) -> Result<Option<String>, String> {
+    connection.query_row("SELECT value FROM taxonomy_meta WHERE key='server_release_id'", [], |row| row.get(0)).optional().map_err(|error| format!("failed to read taxonomy server release {source}: {error}"))
 }
 
 /// Returns precise system/code pairs previously resolved by the taxonomy
@@ -78,14 +79,20 @@ pub fn read_resolved_unified_taxonomy_codes(path: &Path, candidates: &[(String, 
         return Ok(BTreeSet::new());
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| format!("failed to open local unified taxonomy database {}: {error}", path.display()))?;
+    read_resolved_unified_taxonomy_codes_in(&connection, candidates, &path.display().to_string())
+}
+
+pub fn read_resolved_unified_taxonomy_codes_in(connection: &Connection, candidates: &[(String, String)], source: &str) -> Result<BTreeSet<(String, String)>, String> {
+    if candidates.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     let exists = connection
         .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='taxonomy_code_resolution')", [], |row| row.get::<_, bool>(0))
-        .map_err(|error| format!("failed to inspect local taxonomy resolution ledger {}: {error}", path.display()))?;
+        .map_err(|error| format!("failed to inspect local taxonomy resolution ledger {source}: {error}"))?;
     if !exists {
         return Ok(BTreeSet::new());
     }
-    let mut statement =
-        connection.prepare("SELECT EXISTS(SELECT 1 FROM taxonomy_code_resolution WHERE system_id=?1 AND code=?2)").map_err(|error| format!("failed to prepare local taxonomy resolution lookup {}: {error}", path.display()))?;
+    let mut statement = connection.prepare("SELECT EXISTS(SELECT 1 FROM taxonomy_code_resolution WHERE system_id=?1 AND code=?2)").map_err(|error| format!("failed to prepare local taxonomy resolution lookup {source}: {error}"))?;
     let mut resolved = BTreeSet::new();
     for (system_id, code) in candidates {
         let exists = statement.query_row(params![system_id, code], |row| row.get::<_, bool>(0)).map_err(|error| format!("failed to read local taxonomy resolution {system_id}:{code}: {error}"))?;
@@ -105,12 +112,16 @@ pub fn merge_unified_taxonomy_sqlite(path: &Path, server_release_id: &str, conce
 
 pub fn merge_unified_taxonomy_sqlite_with_resolutions(path: &Path, server_release_id: &str, concepts: &[UnifiedConceptDefinition], resolutions: &[UnifiedCodeResolution]) -> Result<(), String> {
     let mut connection = Connection::open(path).map_err(|error| format!("failed to open local unified taxonomy database {}: {error}", path.display()))?;
-    connection.pragma_update(None, "foreign_keys", true).map_err(|error| format!("failed to enable local taxonomy constraints {}: {error}", path.display()))?;
-    let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read local taxonomy format {}: {error}", path.display()))?;
+    merge_unified_taxonomy_connection(&mut connection, server_release_id, concepts, resolutions, &path.display().to_string())
+}
+
+pub fn merge_unified_taxonomy_connection(connection: &mut Connection, server_release_id: &str, concepts: &[UnifiedConceptDefinition], resolutions: &[UnifiedCodeResolution], source: &str) -> Result<(), String> {
+    connection.pragma_update(None, "foreign_keys", true).map_err(|error| format!("failed to enable local taxonomy constraints {source}: {error}"))?;
+    let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read local taxonomy format {source}: {error}"))?;
     if format_version != "2" {
-        return Err(format!("unsupported local unified taxonomy format {format_version} in {}", path.display()));
+        return Err(format!("unsupported local unified taxonomy format {format_version} in {source}"));
     }
-    let transaction = connection.transaction().map_err(|error| format!("failed to start local taxonomy merge {}: {error}", path.display()))?;
+    let transaction = connection.transaction().map_err(|error| format!("failed to start local taxonomy merge {source}: {error}"))?;
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS taxonomy_code_resolution(
@@ -128,12 +139,12 @@ pub fn merge_unified_taxonomy_sqlite_with_resolutions(path: &Path, server_releas
                  FOREIGN KEY(system_id,code) REFERENCES taxonomy_code_resolution(system_id,code) ON DELETE CASCADE
              );",
         )
-        .map_err(|error| format!("failed to initialize local taxonomy resolution ledger {}: {error}", path.display()))?;
+        .map_err(|error| format!("failed to initialize local taxonomy resolution ledger {source}: {error}"))?;
     let has_stale_resolutions = transaction
         .query_row("SELECT EXISTS(SELECT 1 FROM taxonomy_code_resolution WHERE server_release_id<>?1)", [server_release_id], |row| row.get::<_, bool>(0))
-        .map_err(|error| format!("failed to inspect taxonomy resolution releases {}: {error}", path.display()))?;
+        .map_err(|error| format!("failed to inspect taxonomy resolution releases {source}: {error}"))?;
     if has_stale_resolutions {
-        transaction.execute("DELETE FROM taxonomy_code_resolution", []).map_err(|error| format!("failed to invalidate stale taxonomy resolutions {}: {error}", path.display()))?;
+        transaction.execute("DELETE FROM taxonomy_code_resolution", []).map_err(|error| format!("failed to invalidate stale taxonomy resolutions {source}: {error}"))?;
     }
     for concept in concepts {
         transaction
@@ -193,15 +204,15 @@ pub fn merge_unified_taxonomy_sqlite_with_resolutions(path: &Path, server_releas
             [server_release_id],
         )
         .map_err(|error| format!("failed to record taxonomy server release: {error}"))?;
-    transaction.commit().map_err(|error| format!("failed to commit local taxonomy merge {}: {error}", path.display()))?;
-    let violations = connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| row.get::<_, i64>(0)).map_err(|error| format!("failed to verify local taxonomy merge {}: {error}", path.display()))?;
+    transaction.commit().map_err(|error| format!("failed to commit local taxonomy merge {source}: {error}"))?;
+    let violations = connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| row.get::<_, i64>(0)).map_err(|error| format!("failed to verify local taxonomy merge {source}: {error}"))?;
     if violations != 0 {
-        return Err(format!("local taxonomy merge left {violations} foreign-key violations in {}", path.display()));
+        return Err(format!("local taxonomy merge left {violations} foreign-key violations in {source}"));
     }
     Ok(())
 }
 
-fn read_connection(connection: &Connection, source: &str) -> Result<Vec<UnifiedConceptDefinition>, String> {
+pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -> Result<Vec<UnifiedConceptDefinition>, String> {
     connection.pragma_update(None, "foreign_keys", true).map_err(|error| format!("failed to enable taxonomy database constraints {source}: {error}"))?;
     let integrity = connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to verify taxonomy database {source}: {error}"))?;
     if integrity != "ok" {

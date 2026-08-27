@@ -3,12 +3,12 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use app_contract::library::LibraryFolderDestination;
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, IntoElement, MouseButton, Render, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, IconName, Sizable};
+use library_model::LibraryFolderDestination;
 use sync_common::{DirId, ROOT_DIR_ID};
 use ui_components as components;
 use ui_components::ScrollableElement as BokheimScrollableElement;

@@ -4,17 +4,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 use web_time::Instant;
 
-use app_contract::backend::LibraryBackend;
 #[cfg(feature = "pdf")]
-use app_contract::library::BoxedBookReader;
-use app_contract::library::{BookFormat, BookLocator};
+use bokheim_backend::BoxedBookReader;
+use bokheim_backend::LibraryBackend;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, Context, IntoElement, Render, SharedString, Task, Window};
 use html_publication::PublicationFormat;
+use library_model::{BookFormat, BookLocator};
 
-use crate::epub::{PendingReader, ReaderView as EpubReaderView};
+use crate::epub::ReaderView as EpubReaderView;
 #[cfg(feature = "pdf")]
-use crate::pdf_reader::{PdfReaderView, PendingPdfReader};
+use crate::pdf::PdfReaderView;
 use crate::settings::{ReaderPreferences, ReaderSettings, SaveReaderSettings};
 
 /// Called by a reader's library button to restore the application library.
@@ -56,23 +56,26 @@ fn report_stage(progress: &async_channel::Sender<String>, stage: impl Into<Strin
 }
 
 async fn load_book(
-    locator: BookLocator, library: Rc<dyn LibraryBackend>, executor: gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig, initial_target: Option<String>, startup_started: Instant,
+    locator: BookLocator, library: Rc<LibraryBackend>, executor: gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig, initial_target: Option<String>, startup_started: Instant,
     progress: async_channel::Sender<String>,
 ) -> Result<LoadedBook, String> {
     let prepare_locator = locator;
     let phase_started = Instant::now();
     report_stage(&progress, "Reading book from browser storage…");
-    let content = library.open_reader_content(prepare_locator.content_hash()).await.map_err(|error| format!("stage=book_resolve: {error}"))?;
+    let content_hash = prepare_locator.content_hash();
+    let content = crate::shell::persistence::run(&library, move |library| library.resolve_book_for_reader(content_hash).map(|book| (book.format, book.reader))).await.map_err(|error| format!("stage=book_resolve: {error}"))?;
     startup_phase!("phase=content_resolved content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
     report_stage(&progress, "Book bytes loaded; detecting format…");
-    let (format, reader) = content.into_parts();
+    let (format, reader) = content;
 
     let prepared = match format {
         #[cfg(feature = "pdf")]
         BookFormat::Pdf => {
             let phase_started = Instant::now();
             report_stage(&progress, "Loading PDF reading position…");
-            let (initial_page, initial_full_page_position) = library.pdf_reading_position(prepare_locator.content_hash()).await.map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
+            let content_hash = prepare_locator.content_hash();
+            let (initial_page, initial_full_page_position) =
+                crate::shell::persistence::run(&library, move |library| library.pdf_reading_position(content_hash)).await.map_err(|error| format!("stage=reading_position: {error}"))?.unwrap_or((0, 0.0));
             startup_phase!("phase=reading_position_ready content_hash={} elapsed_ms={} phase_ms={} format=pdf", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
             LoadedBook::Pdf { reader, initial_page: initial_page as usize, initial_full_page_position }
         }
@@ -90,7 +93,8 @@ async fn load_book(
             let publication = executor.spawn(async move { crate::publication::NativePublication::from_reader(publication_format, reader).map_err(|error| format!("stage=publication_open: {error}")) }).await?;
             startup_phase!("phase=publication_opened content_hash={} elapsed_ms={} phase_ms={}", prepare_locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
             report_stage(&progress, "Publication parsed; loading reading position…");
-            let nav_state = library.reading_position(prepare_locator.content_hash()).await.map_err(|error| format!("stage=reading_position: {error}"))?;
+            let content_hash = prepare_locator.content_hash();
+            let nav_state = crate::shell::persistence::run(&library, move |library| library.reading_position(content_hash)).await.map_err(|error| format!("stage=reading_position: {error}"))?;
             report_stage(&progress, "Preparing first document…");
             let publication = Arc::new(publication);
             let prepare_publication = publication.clone();
@@ -118,7 +122,7 @@ async fn load_book(
 }
 
 impl ReaderView {
-    pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<dyn LibraryBackend>, return_to_library: ReturnToLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<LibraryBackend>, return_to_library: ReturnToLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let startup_started = Instant::now();
         startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
         #[cfg(feature = "kobo")]
@@ -137,7 +141,7 @@ impl ReaderView {
         cx.notify();
     }
 
-    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<dyn LibraryBackend>, return_to_library: ReturnToLibrary, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
+    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<LibraryBackend>, return_to_library: ReturnToLibrary, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
         let load_locator = locator.clone();
         let executor = cx.background_executor().clone();
         let renderer_config = crate::epub::state::renderer_initial_config(cx);
@@ -162,9 +166,9 @@ impl ReaderView {
                         let view: AnyView = match book {
                             #[cfg(feature = "pdf")]
                             LoadedBook::Pdf { reader, initial_page, initial_full_page_position } => {
-                                cx.new(|cx| PdfReaderView::new(PendingPdfReader { locator, title, library, reader, initial_page, initial_full_page_position, return_to_library }, window, cx)).into()
+                                cx.new(|cx| PdfReaderView::new(locator, title, library, reader, initial_page, initial_full_page_position, return_to_library, window, cx)).into()
                             }
-                            LoadedBook::Publication { publication, preparation } => cx.new(|cx| EpubReaderView::new(PendingReader { locator, title, library, publication, preparation, return_to_library }, window, cx)).into(),
+                            LoadedBook::Publication { publication, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, library, publication, preparation, return_to_library, window, cx)).into(),
                         };
                         startup_phase!("phase=reader_ready elapsed_ms={}", startup_started.elapsed().as_millis());
                         reader_view.state = ReaderState::Ready(view);

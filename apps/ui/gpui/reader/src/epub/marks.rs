@@ -6,10 +6,10 @@
 //! [`crate::shell::marks`]. What is here depends on EPUB CFIs, which no other
 //! reader has.
 
-use app_contract::reader_state::{AnnotationStyle, ReaderAnnotation};
 use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
+use library_model::{AnnotationStyle, ReaderAnnotation};
 
-use crate::shell::marks::MarksState;
+use crate::epub::Selection;
 
 /// Highlight fill used when an annotation's colour cannot be parsed.
 const DEFAULT_HIGHLIGHT: [u8; 4] = [246, 201, 69, HIGHLIGHT_ALPHA];
@@ -17,17 +17,9 @@ const DEFAULT_HIGHLIGHT: [u8; 4] = [246, 201, 69, HIGHLIGHT_ALPHA];
 /// Highlights are drawn over text, so they are always translucent.
 const HIGHLIGHT_ALPHA: u8 = 96;
 
-/// The text the reader has selected, with enough context to anchor an
-/// annotation to it if they choose to highlight.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Selection {
-    pub(crate) cfi_range: String,
-    pub(crate) text: String,
-}
-
 /// Records a new selection, reporting whether it differs from the last one so
 /// an unchanged re-report does not repaint.
-pub(crate) fn set_selection(current: &mut Option<Selection>, selection: Selection) -> bool {
+pub(in crate::epub) fn set_selection(current: &mut Option<Selection>, selection: Selection) -> bool {
     if current.as_ref() == Some(&selection) {
         return false;
     }
@@ -36,8 +28,8 @@ pub(crate) fn set_selection(current: &mut Option<Selection>, selection: Selectio
 }
 
 /// Overlays for every annotation the renderer can place.
-pub(crate) fn overlays(marks: &MarksState) -> Vec<RendererAnnotation> {
-    marks.annotations.iter().filter_map(renderer_annotation).collect()
+pub(crate) fn overlays(annotations: &[ReaderAnnotation]) -> Vec<RendererAnnotation> {
+    annotations.iter().filter_map(renderer_annotation).collect()
 }
 
 /// Translates a stored annotation into a renderer overlay.
@@ -72,7 +64,7 @@ fn highlight_color(color: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle};
+    use library_model::{AnnotationAnchor, AnnotationStyle};
 
     const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
@@ -123,12 +115,12 @@ mod tests {
     #[test]
     fn overlays_skip_annotations_the_renderer_cannot_place() {
         let mut pdf_annotation = annotation("pdf", "#f6c945");
-        let rects = vec![app_contract::reader_state::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
-        let anchor = app_contract::reader_state::PdfAnnotationAnchor::new(0, rects, None);
+        let rects = vec![library_model::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
+        let anchor = library_model::PdfAnnotationAnchor::new(0, rects, None);
         pdf_annotation.anchor = AnnotationAnchor::pdf(anchor);
-        let marks = MarksState { annotations: vec![annotation("epub", "#f6c945"), pdf_annotation], ..MarksState::default() };
+        let annotations = vec![annotation("epub", "#f6c945"), pdf_annotation];
 
-        let overlays = overlays(&marks);
+        let overlays = overlays(&annotations);
 
         assert_eq!(overlays.len(), 1, "a PDF annotation shares the table but has no EPUB CFI");
         assert_eq!(overlays[0].id, "epub");

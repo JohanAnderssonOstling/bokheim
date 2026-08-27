@@ -12,7 +12,7 @@ preventing invalid final phase states from leaking across crates.
    - Removed direct `html-layout-model` dependency/export from top-level renderer crate:
      - `apps/renderers/html/Cargo.toml`
      - `apps/renderers/html/src/lib.rs`
-   - Removed direct internal `html_layout_model` type leakage from `html_renderer` public exports and converted renderer calls to contract types:
+   - Removed direct internal `html_layout_model` type leakage from the former renderer adapter's public exports and converted renderer calls to contract types:
      - `apps/renderers/html/crates/html-layout/src/lib.rs`
      - `apps/renderers/html/crates/html-layout/src/stages.rs`
      - `apps/renderers/html/src/renderer/painter.rs`
@@ -69,4 +69,3 @@ preventing invalid final phase states from leaking across crates.
   - `apps/renderers/html/plans/08-pipeline-boundary-hardening.md`
 - New report:
   - `apps/renderers/html/plans/08-pipeline-boundary-hardening-implementation-report-2026-08-01e.md`
-

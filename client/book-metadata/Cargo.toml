@@ -5,37 +5,34 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["native-formats"]
+default = ["native-formats", "external-metadata"]
 native-formats = [
     "dep:audiobook-library",
-    "dep:blake3",
-    "dep:lopdf",
     "dep:mobi",
     "dep:mp4ameta",
+]
+external-metadata = [
     "dep:reqwest",
     "dep:roxmltree",
     "dep:tokio",
-    "dep:sync-common",
-    "dep:uuid",
 ]
 
 [dependencies]
 audiobook-library = { path = "../audiobook-library", optional = true }
-blake3 = { version = "1", optional = true }
 library-model = { path = "../library-model" }
-epub_provider = { path = "../../apps/renderers/html/epub_provider" }
+publication-inspection = { path = "../../shared/publication-inspection" }
 mobi = { workspace = true, optional = true }
 mp4ameta = { version = "0.13.0", optional = true }
-lopdf = { version = "0.44", default-features = false, optional = true }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"], optional = true }
+reqwest = { version = "0.11", default-features = false, features = ["stream"], optional = true }
 roxmltree = { version = "0.20", optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
-sync-common = { path = "../../shared/sync-common", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"], optional = true }
 
 [lints]
 workspace = true

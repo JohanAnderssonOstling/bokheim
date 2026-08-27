@@ -29,7 +29,6 @@ flamegraph.svg
 
 # JavaScript dependencies, generated output, and tool caches
 **/node_modules/
-**/.svelte-kit/
 **/coverage/
 *.tsbuildinfo
 .npm/
@@ -112,7 +111,6 @@ venv/
 /client/backend/tests/test_folder/
 /reference/plato/
 /data-analysis/
-/apps/mobile/dummy-non-existing-folder/
 
 # Shared upstream Web Platform Tests checkout. Engine fixtures and GPUI ledgers
 # live outside this directory.

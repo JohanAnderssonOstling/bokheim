@@ -37,6 +37,42 @@ pub enum PublicationLayout {
     Reflowable,
 }
 
+struct EpubHtmlProvider {
+    epub: Arc<EpubProvider>,
+}
+
+impl EpubHtmlProvider {
+    fn new(epub: Arc<EpubProvider>) -> Self {
+        Self { epub }
+    }
+}
+
+impl ResourceProvider for EpubHtmlProvider {
+    fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
+        self.epub.read_bytes(uri)
+    }
+
+    fn exists(&self, uri: &str) -> bool {
+        self.epub.exists(uri)
+    }
+
+    fn resolve(&self, base: &str, href: &str) -> String {
+        self.epub.resolve(base, href)
+    }
+
+    fn list_html_candidates(&self, _root: &str) -> io::Result<Vec<String>> {
+        self.epub.document_uris()
+    }
+
+    fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
+        self.epub.toc().map(|entries| entries.map(|entries| entries.into_iter().map(renderer_toc_entry).collect()))
+    }
+}
+
+fn renderer_toc_entry(entry: epub_provider::TocEntry) -> TocEntry {
+    TocEntry { title: entry.title, link: entry.link, children: entry.children.into_iter().map(renderer_toc_entry).collect() }
+}
+
 impl PublicationSource {
     /// Opens a publication from a seekable source. EPUB retains the source and
     /// requests entries lazily; MOBI materializes its bytes.
@@ -122,10 +158,11 @@ impl PublicationSource {
     pub fn from_epub_provider(provider: Arc<EpubProvider>) -> Result<Self, String> {
         let metadata = provider.metadata().map_err(|error| error.to_string())?;
         let media_overlay_cues = provider.media_overlay_cues().map_err(|error| error.to_string())?;
-        let document_uris = provider.list_html_candidates("").map_err(|error| error.to_string())?;
+        let document_uris = provider.document_uris().map_err(|error| error.to_string())?;
         if document_uris.is_empty() {
             return Err("EPUB contains no readable documents".into());
         }
+        let provider = Arc::new(EpubHtmlProvider::new(provider));
         Ok(Self { provider, document_uris, start_index: 0, metadata, media_overlay_cues, layout: PublicationLayout::Reflowable })
     }
 
@@ -396,6 +433,9 @@ fn fallback_title(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn mobi_unset_content_bounds_fall_back_to_palmdoc_record_count() {
@@ -427,6 +467,46 @@ mod tests {
     #[test]
     fn virtual_resolution_stays_inside_publication_namespace() {
         assert_eq!(resolve_virtual("mobi/sections/4.html", "../resources/4"), "mobi/resources/4");
+    }
+
+    #[test]
+    fn epub_adapter_resolves_inline_svg_image_resources() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("mimetype", stored).unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        archive.start_file("META-INF/container.xml", stored).unwrap();
+        archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
+        archive.start_file("OEBPS/content.opf", stored).unwrap();
+        archive.write_all(br#"<package><manifest><item id="cover" href="Text/titlepage.xhtml" media-type="application/xhtml+xml"/><item id="image" href="Images/cover.jpeg" media-type="image/jpeg"/></manifest><spine><itemref idref="cover"/></spine></package>"#).unwrap();
+        archive.start_file("OEBPS/Text/titlepage.xhtml", stored).unwrap();
+        archive.write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><image width="1" height="1" xlink:href="../Images/cover.jpeg"/></svg></body></html>"#).unwrap();
+        archive.start_file("OEBPS/Images/cover.jpeg", stored).unwrap();
+        archive.write_all(&[0xff, 0xd8, 0xff, 0xd9]).unwrap();
+
+        let epub = Arc::new(EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap());
+        let publication = PublicationSource::from_epub_provider(epub).unwrap();
+        let provider = publication.provider();
+        let document_uri = "OEBPS/Text/titlepage.xhtml";
+        let source = provider.read_string(document_uri).unwrap();
+        assert!(source.contains(r#"xlink:href="../Images/cover.jpeg""#), "adapter must return unmodified publication bytes");
+
+        let mut factory = html::pipeline::DocumentFactory::new();
+        factory.set_resource_context(provider.clone(), document_uri);
+        let document = factory.parse_to_dom(&source);
+        let (image_idx, image) = document.images().iter().enumerate().find(|(_, image)| matches!(&image.source, html::document::ImageSource::InlineSvg { .. })).expect("inline SVG image resource");
+        assert!(matches!(&image.source, html::document::ImageSource::InlineSvg { base_uri, .. } if base_uri == document_uri));
+
+        let mut pipeline = html::resources::ImagePipeline::new(Arc::new(document.images().to_vec()), provider);
+        pipeline.ensure_window(&HashSet::from([image_idx as u32]));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pipeline.get_decoded(image_idx as u32).is_none() && Instant::now() < deadline {
+            pipeline.poll();
+            std::thread::yield_now();
+        }
+        let html::resources::DecodedImage::Svg { bytes, .. } = pipeline.get_decoded(image_idx as u32).expect("decoded inline SVG") else { panic!("inline SVG must remain a vector resource") };
+        let svg = std::str::from_utf8(bytes).expect("hydrated SVG remains UTF-8");
+        assert!(svg.contains(r#"xlink:href="data:image/jpeg;base64,/9j/2Q==""#));
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub fn import_description_snapshot(works_path: &Path, output_path: &Path, dump_d
             if let Some(description) = record.description.as_deref().and_then(valid_open_library_description) {
                 insert.execute(params![work_id, description]).map_err(error)?;
             }
-            let subjects = record.subjects.into_iter().filter_map(|subject| library_model::PublicationSubject::new(None, &subject, "openlibrary:subject", None, None).ok()).collect::<Vec<_>>();
+            let subjects = record.subjects.into_iter().filter_map(|subject| subject_projection::PublicationSubject::new(None, &subject, "openlibrary:subject", None, None).ok()).collect::<Vec<_>>();
             subject_heading_records = subject_heading_records.saturating_add(i64::try_from(subjects.len()).map_err(error)?);
             let mut matched_positions = BTreeSet::new();
             for assignment in subject_projection::match_bisac_subjects_with_minimum_adjacent(&subjects, 3) {

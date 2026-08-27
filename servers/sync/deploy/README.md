@@ -275,7 +275,7 @@ sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
 curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=16' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=17' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production
@@ -294,7 +294,7 @@ Run the complete deployment gate after DNS and certificate issuance settle:
 sudo servers/sync/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se meta.bokheim.se
 ```
 
-## Deploy the web reader
+## Deploy the GPUI web application
 
 Point `app.bokheim.se` at the same host as `api.bokheim.se`, then provision the
 deployment account once on the host:
@@ -304,7 +304,7 @@ sudo servers/sync/deploy/provision-web-deploy.sh johan
 ```
 
 Reconnect SSH so the new group membership applies. Future static application
-deployments need no root access and do not restart either Rust service,
+deployments build the GPUI WebAssembly target, need no root access, and do not restart either Rust service,
 PostgreSQL, or Caddy:
 
 ```sh

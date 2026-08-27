@@ -8,8 +8,6 @@ use gpui::Context;
 pub enum Component {
     /// The EPUB window: document, sidebars and overlays.
     ReaderShell,
-    /// The EPUB toolbar projection entity.
-    ReaderToolbar,
     /// The PDF window.
     PdfShell,
 }
@@ -18,7 +16,6 @@ impl Component {
     pub fn name(self) -> &'static str {
         match self {
             Self::ReaderShell => "reader_shell",
-            Self::ReaderToolbar => "reader_toolbar",
             Self::PdfShell => "pdf_shell",
         }
     }

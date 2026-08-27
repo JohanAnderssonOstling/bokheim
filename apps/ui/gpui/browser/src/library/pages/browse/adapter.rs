@@ -1,13 +1,17 @@
 //! Data-source boundary for the shared browse page.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_contract::catalog::{CatalogResultRange, CatalogResultRangeResponse};
-use app_contract::library::{BrowseChipSort, BrowseFuture, BrowseRow};
+use catalog_model::{CatalogResultRange, CatalogResultRangeResponse};
 use gpui::{AnyElement, App, Entity, Render, Window};
+use library_model::{BrowseChipSort, BrowseRow};
 
 use super::controls::{BrowseBookOrder, BrowseControls, BrowseFormatFilter};
+
+pub(crate) type BrowseFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BrowseQuery {
@@ -43,10 +47,6 @@ pub(crate) trait BrowseAdapter: Sized + 'static {
     fn children(&self) -> Rc<Vec<BrowseRow>>;
     fn books(&self) -> Rc<Vec<Entity<Self::Book>>>;
     fn controls(&self) -> &BrowseControls;
-    fn request_controls(&self, _query: &BrowseQuery) -> Option<BrowseFuture<Result<BrowseControls, String>>> {
-        None
-    }
-    fn install_controls(&mut self, _controls: BrowseControls) {}
     fn minimum_search_length() -> usize {
         1
     }

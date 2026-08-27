@@ -5,8 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-protocol-test-support = { path = "../../shared/protocol-test-support" }
-sync-common = { path = "../../shared/sync-common" }
+sync-common = { path = "../../shared/sync-common", features = ["test-support"] }
 uuid = "1"
 
 [lints]

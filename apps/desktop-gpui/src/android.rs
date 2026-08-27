@@ -1,4 +1,4 @@
-use epub_svelte_lib::app::{AppDataLocation, BackendContext};
+use bokheim_backend::app::{AppDataLocation, BackendContext};
 use gpui::SelectedFile;
 use gpui_android::AndroidApp;
 use jni::EnvUnowned;

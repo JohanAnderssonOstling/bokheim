@@ -61,6 +61,15 @@ pub fn create_directory_record(transaction: &Transaction, parent_id: &DirId, nam
     Ok(Dir::new(dir_id, name.clone(), 0, 0))
 }
 
+pub fn create_directory(conn: &mut Connection, parent_id: &DirId, name: &FileName) -> Result<CreatedDirectory, Box<dyn std::error::Error>> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let directory = create_directory_record(&tx, parent_id, name)?;
+    let components = get_dir_path_components(&tx, &directory.id().to_string())?;
+    let relative_path = dir_path_from_components(&components)?.ok_or("created directory has no path")?;
+    tx.commit()?;
+    Ok(CreatedDirectory { directory, relative_path })
+}
+
 pub fn folder_destinations(conn: &Connection) -> Result<Vec<LibraryFolderDestination>, rusqlite::Error> {
     let mut statement = conn.prepare(
         "WITH RECURSIVE tree(id,parent_id,label,path) AS (
@@ -259,11 +268,9 @@ pub fn purge_book_record(tx: &Transaction, content_hash: &ContentHash) -> Result
         "book_publication_value",
         "catalog_publication_book",
         "annotation",
-        "bookmark",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE book_row_id=?1"), [book_row_id])?;
     }
-    tx.execute("DELETE FROM book_link WHERE source_book_row_id=?1 OR target_book_row_id=?1", [book_row_id])?;
     tx.execute("DELETE FROM book_dir WHERE book_row_id=?1", [book_row_id])?;
     tx.execute("DELETE FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()])?;
     tx.execute("DELETE FROM blob_local_ref WHERE hash=?1", [content_hash.as_str()])?;
@@ -294,12 +301,14 @@ pub fn trash_directory_record(tx: &Transaction, directory_id: &DirId) -> Result<
     Ok(())
 }
 
-pub fn restore_directory_record(tx: &Transaction, directory_id: &DirId) -> Result<String, rusqlite::Error> {
+pub fn restore_directory_record(tx: &Transaction, directory_id: &DirId, requested_parent: Option<&DirId>) -> Result<String, rusqlite::Error> {
     let (stored_parent, name): (String, String) = tx
         .query_row("SELECT parent_id,name FROM dir WHERE id=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL", [directory_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?
         .ok_or_else(|| invalid_text_column(0, "folder is not in Trash"))?;
-    let parent = if tx.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE id=?1 AND deleted_at IS NULL)", [&stored_parent], |row| row.get::<_, bool>(0))? { parse_uuid_column(stored_parent, 0)? } else { sync_common::ROOT_DIR_ID };
+    let stored_parent = parse_uuid_column(stored_parent, 0)?;
+    let requested_parent = requested_parent.copied().unwrap_or(stored_parent);
+    let parent = if tx.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE id=?1 AND deleted_at IS NULL)", [requested_parent.to_string()], |row| row.get::<_, bool>(0))? { requested_parent } else { sync_common::ROOT_DIR_ID };
     let occupied =
         tx.prepare("SELECT name FROM dir WHERE parent_id=?1 AND id!=?2 AND deleted_at IS NULL")?.query_map(rusqlite::params![parent.to_string(), directory_id.to_string()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     let chosen = library_model::unique_folder_name(&name, occupied.iter().map(String::as_str));
@@ -429,6 +438,12 @@ pub fn insert_book(transaction: &Transaction, content_hash: ContentHash, format:
 
 pub fn insert_local_book_dir(transaction: &Transaction, dir_id: &DirId, content_hash: ContentHash, file_name: &FileName, local_hash: u64, last_scan: i64) -> Result<(), rusqlite::Error> {
     transaction.insert_book_dir(&dir_id.to_string(), content_hash.as_str(), file_name.as_str(), &local_hash.to_string(), last_scan, 1)?;
+    Ok(())
+}
+
+pub fn insert_imported_book_dir(transaction: &Transaction, dir_id: &DirId, content_hash: ContentHash, file_name: &FileName, local_hash: Option<u64>, last_scan: i64) -> Result<(), rusqlite::Error> {
+    let local_hash = local_hash.map(|value| value.to_string()).unwrap_or_default();
+    transaction.insert_book_dir(&dir_id.to_string(), content_hash.as_str(), file_name.as_str(), &local_hash, last_scan, 1)?;
     Ok(())
 }
 

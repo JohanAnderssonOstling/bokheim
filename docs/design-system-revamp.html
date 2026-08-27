@@ -111,9 +111,8 @@
     <div class="eyebrow">Bokheim · design system · proposal</div>
     <h1>A general revamp: colour, spacing, type, borders, layout</h1>
     <p>
-      Measured against what ships today in <code>apps/ui/gpui/components/src/tokens.rs</code>,
-      <code>client/app-contract/src/frontend.rs</code> and <code>client/app-contract/src/design_tokens.rs</code>.
-      Every number below is either read out of those files or computed from the exported palettes — the contrast
+      Measured against the GPUI tokens and the retired shared-token definitions that existed when this proposal was written.
+      Every number below was either read out of those sources or computed from the exported palettes — the contrast
       ratios are WCAG relative luminance, not impressions.
     </p>
     <div class="verdict">
@@ -179,7 +178,7 @@
             <th>Radius contradicts itself</th>
             <td>Native: <code>SURFACE_CORNER_RADIUS_PX = 0</code>. Exported to web: <span class="bad">sm 8, md 11, lg 16</span></td>
             <td>One decision, exported once</td>
-            <td class="mono">frontend.rs:28 vs design_tokens.rs:20</td>
+            <td class="mono">historical native tokens vs web export</td>
           </tr>
           <tr>
             <th>Exported sizes are mislabelled</th>
@@ -509,7 +508,7 @@
       <table>
         <thead><tr><th class="num">#</th><th>Step</th><th>Touches</th><th>Risk</th></tr></thead>
         <tbody>
-          <tr><td class="num">1</td><th>Repalette</th><td class="mono">app-contract palettes: page_bg, ink_text, border → new values</td><td class="ok">low — values only, no call sites</td></tr>
+          <tr><td class="num">1</td><th>Repalette</th><td class="mono">app-preferences palettes: page_bg, ink_text, border → new values</td><td class="ok">low — values only, no call sites</td></tr>
           <tr><td class="num">2</td><th>Split the border role</th><td class="mono">BrowserTheme + <code>hairline</code>, <code>border_strong</code>, <code>surface_sunk</code>; point row dividers at hairline</td><td class="ok">low — additive; existing <code>border</code> keeps working</td></tr>
           <tr><td class="num">3</td><th>Demote row weights</th><td class="mono">SEMIBOLD → MEDIUM in item_identity, book cards, list rows</td><td class="ok">low — mechanical</td></tr>
           <tr><td class="num">4</td><th>Extend the spacing scale</th><td class="mono">SPACE_MD 12, SPACE_LG 24, SPACE_XL 32, SPACE_2XL 48; migrate the ~22 ad-hoc 12/20 uses</td><td class="warnv">medium — renames SPACE_MD's meaning, so do it in one commit</td></tr>

@@ -17,6 +17,12 @@ pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, P
 
 pub use content_address::ContentHash;
 
+/// Deterministic content-address fixture shared by protocol client and server tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_content_hash(value: u64) -> ContentHash {
+    ContentHash::new(&format!("{value:064x}"))
+}
+
 /// A non-negative Unix timestamp measured in milliseconds.
 pub type UnixMillis = u64;
 
@@ -25,8 +31,6 @@ pub type UnixMillis = u64;
 pub mod mutation_kind {
     pub const ANNOTATION: &str = "annotation";
     pub const BOOK_LIFECYCLE: &str = "book_lifecycle";
-    pub const BOOK_LINK: &str = "book_link";
-    pub const BOOKMARK: &str = "bookmark";
     pub const CATALOG_PUBLICATION: &str = "catalog_publication";
     pub const DIRECTORY_LIFECYCLE: &str = "directory_lifecycle";
     pub const DIRECTORY_NAME: &str = "directory_name";

@@ -1,8 +1,0 @@
-node_modules/
-.svelte-kit/
-build/
-dist/
-dummy-non-existing-folder/
-src/vendor/
-src-tauri/gen/
-src-tauri/target/

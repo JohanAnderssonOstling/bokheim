@@ -1,5 +1,5 @@
-use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
-use epub_svelte_lib::{AppBackend, AppDataLocation, BackendContext};
+use bokheim_backend::{AppBackend, AppDataLocation, BackendContext};
+use library_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
 use lopdf::{dictionary, Document, Object, Stream};
 use std::path::Path;
 use std::sync::Mutex;

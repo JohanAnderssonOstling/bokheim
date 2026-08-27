@@ -130,6 +130,9 @@ pub(crate) fn import_snapshot_inner(
             let dump_date = dump_date(editions_path).or_else(|| dump_date(works_path)).or_else(|| dump_date(authors_path)).unwrap_or_else(|| "unknown".to_owned());
             let imported_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_err(error)?.as_millis();
             let imported_at_ms = i64::try_from(imported_at_ms).map_err(error)?;
+            let edition_count = i64::try_from(edition_count).map_err(error)?;
+            let work_count = i64::try_from(work_count).map_err(error)?;
+            let author_count = i64::try_from(author_count).map_err(error)?;
             let snapshot_schema_version = if wikidata_path.is_some() { WIKIDATA_SCHEMA_VERSION } else { SCHEMA_VERSION };
             connection
                 .execute(

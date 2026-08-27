@@ -4,12 +4,12 @@
 
 use std::rc::Rc;
 
-use app_contract::preferences::{ReaderFontFamily, ReaderTextAlignment};
+use app_preferences::{ReaderFontFamily, ReaderPreferencePatch, ReaderTextAlignment};
 
 /// The shared, synchronized description of how a PDF's layout is decided. The
 /// reader carries `pdf_page_count` and `pdf_zoom` alongside it, so each mode
 /// keeps the value it holds fixed.
-pub use app_contract::preferences::PdfZoomMode as PdfZoomModePreference;
+pub use app_preferences::PdfZoomMode as PdfZoomModePreference;
 use gpui::{App, Global};
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -89,6 +89,61 @@ fn default_max_column_count() -> u8 {
 }
 
 impl ReaderPreferences {
+    /// Applies the portion of reader state synchronized by the backend while
+    /// preserving UI-only state such as TOC visibility and width.
+    pub fn apply_synchronized(&mut self, saved: &app_preferences::ReaderPreferences) {
+        self.font_size = saved.font_size_px();
+        self.column_width = saved.max_line_width_px();
+        self.scale = saved.zoom();
+        self.line_height = saved.line_height();
+        self.font_family = saved.font_family();
+        self.text_alignment = saved.text_alignment();
+        self.max_column_count = saved.max_column_count();
+        self.pdf_zoom_mode = saved.pdf_zoom_mode();
+        self.pdf_page_count = saved.pdf_page_count();
+        self.pdf_zoom = saved.pdf_zoom();
+        self.pdf_trim_margins = saved.pdf_trim_margins();
+    }
+
+    /// Produces the backend preference updates represented by a UI change.
+    pub fn synchronized_patches(&self, next: &Self) -> Vec<ReaderPreferencePatch> {
+        let mut patches = Vec::new();
+        if self.font_size != next.font_size {
+            patches.push(ReaderPreferencePatch::FontSizePx(next.font_size));
+        }
+        if self.column_width != next.column_width {
+            patches.push(ReaderPreferencePatch::MaxLineWidthPx(next.column_width));
+        }
+        if self.scale != next.scale {
+            patches.push(ReaderPreferencePatch::Zoom(next.scale));
+        }
+        if self.line_height != next.line_height {
+            patches.push(ReaderPreferencePatch::LineHeight(next.line_height));
+        }
+        if self.font_family != next.font_family {
+            patches.push(ReaderPreferencePatch::FontFamily(next.font_family));
+        }
+        if self.text_alignment != next.text_alignment {
+            patches.push(ReaderPreferencePatch::TextAlignment(next.text_alignment));
+        }
+        if self.max_column_count != next.max_column_count {
+            patches.push(ReaderPreferencePatch::MaxColumnCount(next.max_column_count));
+        }
+        if self.pdf_zoom_mode != next.pdf_zoom_mode {
+            patches.push(ReaderPreferencePatch::PdfZoomMode(next.pdf_zoom_mode));
+        }
+        if self.pdf_page_count != next.pdf_page_count {
+            patches.push(ReaderPreferencePatch::PdfPageCount(next.pdf_page_count));
+        }
+        if self.pdf_zoom != next.pdf_zoom {
+            patches.push(ReaderPreferencePatch::PdfZoom(next.pdf_zoom));
+        }
+        if self.pdf_trim_margins != next.pdf_trim_margins {
+            patches.push(ReaderPreferencePatch::PdfTrimMargins(next.pdf_trim_margins));
+        }
+        patches
+    }
+
     pub(crate) fn style_overrides(&self) -> html::pipeline::ReaderStyleOverrides {
         let family = match self.font_family {
             ReaderFontFamily::Publisher => None,

@@ -1,5 +1,8 @@
+use crate::api::send;
+use crate::state::SyncRequestError;
 use crate::{AuthError, ServerUrl, Session};
 use std::{error::Error, fmt};
+use sync_common::api::assets::{validate_blob_manifest_response, BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::{ContentHash, LibraryId, MAX_THUMBNAIL_BYTES};
 
 /// Failures that can be classified without consuming a streaming asset body.
@@ -70,6 +73,13 @@ pub fn thumbnail_endpoint(server_url: &ServerUrl, library_id: &LibraryId, conten
 
 pub fn thumbnail_batch_endpoint(server_url: &ServerUrl, library_id: &LibraryId) -> reqwest::Url {
     server_url.endpoint(&format!("api/libraries/{library_id}/thumbnail-batch"))
+}
+
+pub async fn negotiate_blobs(client: &reqwest::Client, session: &Session, library_id: &LibraryId, blobs: Vec<BlobManifestEntry>) -> Result<BlobManifestResponse, SyncRequestError> {
+    let request = BlobManifestRequest { blobs };
+    let response: BlobManifestResponse = send(client.post(session.server_url().endpoint(&format!("api/libraries/{library_id}/blobs/negotiate"))).bearer_auth(session.token()), &request).await?;
+    validate_blob_manifest_response(&request, &response).map_err(|error| AuthError::InvalidData(error.to_string()))?;
+    Ok(response)
 }
 
 pub async fn upload_blob_stream(client: &reqwest::Client, server_url: &ServerUrl, access_token: &str, library_id: &LibraryId, content_hash: &ContentHash, content_length: u64, body: reqwest::Body) -> Result<(), AssetResponseError> {

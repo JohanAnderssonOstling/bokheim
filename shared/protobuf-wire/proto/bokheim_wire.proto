@@ -44,6 +44,7 @@ message MapEntry {
 // values form the mutation compatibility baseline: never renumber or reuse
 // them. Additive fields must remain optional or have a safe zero default.
 message MutationValue {
+  reserved 8, 9;
   oneof kind {
     string directory_name = 1;
     string directory_parent = 2;
@@ -52,8 +53,6 @@ message MutationValue {
     Placement placement = 5;
     ReadingPosition reading_position = 6;
     Annotation annotation = 7;
-    Bookmark bookmark = 8;
-    BookLink book_link = 9;
     CatalogPublication catalog_publication = 10;
     BookMetadata metadata = 11;
   }
@@ -147,25 +146,6 @@ enum AnnotationStyle {
   ANNOTATION_STYLE_UNDERLINE = 2;
   ANNOTATION_STYLE_SQUIGGLY = 3;
   ANNOTATION_STYLE_STRIKETHROUGH = 4;
-}
-
-message Bookmark {
-  string content_hash = 1;
-  string cfi = 2;
-  string label = 3;
-  uint64 created_at = 4;
-  uint64 modified_at = 5;
-  bool deleted = 6;
-}
-
-message BookLink {
-  string source_content_hash = 1;
-  string target_content_hash = 2;
-  string relation = 3;
-  string note = 4;
-  uint64 created_at = 5;
-  uint64 modified_at = 6;
-  bool deleted = 7;
 }
 
 message CatalogPublication {

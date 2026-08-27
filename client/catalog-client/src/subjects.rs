@@ -1,21 +1,6 @@
 use super::*;
 
 impl CatalogClient {
-    pub fn cached_subjects(&self, mut request: CatalogSubjectBrowseRequest) -> Result<Option<CatalogSubjectBrowseResponse>, CatalogProviderError> {
-        if request.supported_languages.is_empty() {
-            request.supported_languages = self.language_filter().supported().to_vec();
-        }
-        let cached = self.cache.cached_subject_browse_response(&request).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if let Some(cached) = cached {
-            let mut response = cached.response;
-            normalize_project_gutenberg_sourced_publication_descriptions(&mut response.publications);
-            self.covers.remember_subject_browse(&response);
-            Ok(Some(response))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub async fn refresh_subjects(&self, mut request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogProviderError> {
         if request.supported_languages.is_empty() {
             request.supported_languages = self.language_filter().supported().to_vec();
@@ -26,49 +11,35 @@ impl CatalogClient {
         // The server is authoritative for every filtered and sorted range.
         // Fetch its ordered IDs first, resolve the immutable payloads retained
         // locally, and ask for details only when an ID is missing.
-        let index_request = CatalogSubjectBrowseRefreshRequest { request: request.clone(), epoch: None, revision: None, known_entry_ids: Vec::new(), identifiers_only: true, collection_sync: false };
-        let index = self.server.refresh_subjects(&index_request).await?;
-        let known_entry_ids = self.cache.known_subject_publication_ids(&index.epoch, &index.entry_ids).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let index = self.server.subject_index(&request).await?;
+        if index.range.returned_items as usize != index.entry_ids.len() {
+            return Err(CatalogProviderError::new("catalogue returned an inconsistent subject result range"));
+        }
+        let known_entry_ids = self.store.known_entry_ids(&index.epoch, &index.entry_ids)?;
         let known = known_entry_ids.into_iter().collect::<HashSet<_>>();
         let missing_entry_ids = index.entry_ids.iter().copied().filter(|entry_id| !known.contains(entry_id)).collect::<Vec<_>>();
-        let mut delta = index;
+        let mut new_payloads = Vec::new();
         if !missing_entry_ids.is_empty() {
-            let payloads = self.server.subject_publication_payloads(&CatalogSubjectPublicationPayloadRequest { epoch: delta.epoch.clone(), entry_ids: missing_entry_ids }).await?;
-            if payloads.epoch != delta.epoch {
+            let payloads = self.server.subject_publication_payloads(&CatalogSubjectPublicationPayloadRequest { epoch: index.epoch.clone(), entry_ids: missing_entry_ids }).await?;
+            if payloads.epoch != index.epoch {
                 return Err(CatalogProviderError::new("catalogue changed while publication details were loading"));
             }
-            delta.payloads = payloads.payloads;
+            new_payloads = payloads.payloads;
         }
-        for payload in &mut delta.payloads {
-            if payload.publication.source_id.as_str() == "opds-project-gutenberg" {
-                normalize_project_gutenberg_publication(&mut payload.publication.publication);
-            }
-        }
-        let mut response = self.cache.cache_subject_browse_delta(delta).map_err(|error| CatalogProviderError::new(error.to_string()))?.ok_or_else(|| CatalogProviderError::new("catalog server omitted a missing publication payload"))?;
-        normalize_project_gutenberg_sourced_publication_descriptions(&mut response.publications);
+        let publications = self.store.resolve(&index.epoch, &index.entry_ids, &new_payloads)?.ok_or_else(|| CatalogProviderError::new("catalog server omitted a missing publication payload"))?;
+        let response = CatalogSubjectBrowseResponse { epoch: index.epoch, navigation: index.navigation, publications, range: index.range, capabilities: index.capabilities };
         self.covers.remember_subject_browse(&response);
         Ok(response)
-    }
-
-    pub async fn subject_browse_capabilities(&self, mut request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseCapabilities, CatalogProviderError> {
-        if request.supported_languages.is_empty() {
-            request.supported_languages = self.language_filter().supported().to_vec();
-        }
-        Ok(self.server.subject_browse_capabilities(&request).await?.capabilities)
     }
 }
 
 impl CatalogServerClient {
-    async fn refresh_subjects(&self, request: &CatalogSubjectBrowseRefreshRequest) -> Result<CatalogSubjectBrowseDeltaResponse, CatalogProviderError> {
+    async fn subject_index(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseIndexResponse, CatalogProviderError> {
         self.post_wire(self.endpoint("api/opds/subjects")?, request).await
     }
 
     async fn subject_publication_payloads(&self, request: &CatalogSubjectPublicationPayloadRequest) -> Result<CatalogSubjectPublicationPayloadResponse, CatalogProviderError> {
         self.post_wire(self.endpoint("api/opds/subject-publications")?, request).await
-    }
-
-    async fn subject_browse_capabilities(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseCapabilitiesResponse, CatalogProviderError> {
-        self.post_wire(self.endpoint("api/opds/subject-capabilities")?, request).await
     }
 }
 
@@ -79,7 +50,8 @@ mod tests {
     use axum::http::{header, Response};
     use axum::routing::post;
     use axum::Router;
-    use catalog_contract::{CatalogResultRangeResponse, CatalogSourceRegistration, CatalogSourceRegistry, CatalogSourcedPublication, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseEntryPayload, LanguageTag};
+    use catalog_model::{CatalogResultRangeResponse, CatalogSourcedPublication, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseEntryPayload, CatalogSubjectSort, LanguageTag};
+    use catalog_protocol::{CatalogSourceRegistration, CatalogSourceRegistry};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -89,7 +61,7 @@ mod tests {
             publication: CatalogSourcedPublication {
                 source_id: CatalogSourceId::parse("opds-test").unwrap(),
                 publication: CatalogPublication {
-                    identity: catalog_contract::CatalogPublicationIdentity { edition_id: format!("edition-{entry_id}"), work_id: None },
+                    identity: catalog_model::CatalogPublicationIdentity { edition_id: format!("edition-{entry_id}"), work_id: None },
                     title: title.into(),
                     authors: Vec::new(),
                     languages: vec![LanguageTag::parse("en").unwrap()],
@@ -99,7 +71,6 @@ mod tests {
                     actions: Vec::new(),
                 },
             },
-            search_terms: Vec::new(),
         }
     }
 
@@ -112,20 +83,17 @@ mod tests {
             post(move |body: Bytes| {
                 let request_count = handler_request_count.clone();
                 async move {
-                    let call = request_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _refresh: CatalogSubjectBrowseRefreshRequest = wire::decode(&body, wire::MAX_DECODED_RESPONSE_BYTES).unwrap();
+                    request_count.fetch_add(1, Ordering::SeqCst);
+                    let _request: CatalogSubjectBrowseRequest = wire::decode(&body, wire::MAX_DECODED_RESPONSE_BYTES).unwrap();
                     let entry_ids = vec![2, 1];
-                    let delta = CatalogSubjectBrowseDeltaResponse {
+                    let index = CatalogSubjectBrowseIndexResponse {
                         epoch: "epoch".to_owned(),
-                        revision: call,
                         navigation: Vec::new(),
-                        exact_entry_ids: entry_ids.clone(),
                         entry_ids,
-                        payloads: Vec::new(),
                         range: CatalogResultRangeResponse { offset: 0, returned_items: 2, total_items: 2 },
-                        capabilities: CatalogSubjectBrowseCapabilities::default(),
+                        capabilities: CatalogSubjectBrowseCapabilities { sorts: vec![CatalogSubjectSort::Popularity, CatalogSubjectSort::Title], ..Default::default() },
                     };
-                    Response::builder().header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(Body::from(wire::encode(&delta).unwrap())).unwrap()
+                    Response::builder().header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(Body::from(wire::encode(&index).unwrap())).unwrap()
                 }
             }),
         );
@@ -146,8 +114,16 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
         let temporary = tempfile::tempdir().unwrap();
-        let endpoint = OpdsEndpoint { id: OpdsEndpointId::parse("test").unwrap(), title: "Test".to_owned(), description: "Test".to_owned(), languages: vec!["English".to_owned()], url: format!("http://{address}/catalog") };
-        let registry = CatalogSourceRegistry { revision: 1, sources: vec![CatalogSourceRegistration { source: opds_source(&endpoint), root_locator: endpoint.url }] };
+        let root_locator = format!("http://{address}/catalog");
+        let source = CatalogSource {
+            id: CatalogSourceId::parse("opds-test").unwrap(),
+            title: "Test".to_owned(),
+            description: "Test".to_owned(),
+            languages: vec!["English".to_owned()],
+            authentication: catalog_model::CatalogAuthentication::None,
+            capabilities: vec![catalog_model::CatalogCapability::Browse],
+        };
+        let registry = CatalogSourceRegistry { revision: 1, sources: vec![CatalogSourceRegistration { source, root_locator }] };
         std::fs::write(temporary.path().join("catalog-sources.json"), serde_json::to_vec(&registry).unwrap()).unwrap();
         let client = CatalogClient::with_supported_languages(&format!("http://{address}"), temporary.path(), ["en"]).unwrap();
 
@@ -157,6 +133,8 @@ mod tests {
 
         assert_eq!(first.publications.iter().map(|item| item.publication.title.as_str()).collect::<Vec<_>>(), ["Book 2", "Book 1"]);
         assert_eq!(second.publications.iter().map(|item| item.publication.title.as_str()).collect::<Vec<_>>(), ["Book 2", "Book 1"]);
+        assert_eq!(first.capabilities.sorts, [CatalogSubjectSort::Popularity, CatalogSubjectSort::Title]);
+        assert_eq!(second.capabilities.sorts, [CatalogSubjectSort::Popularity, CatalogSubjectSort::Title]);
         assert_eq!(request_count.load(Ordering::SeqCst), 3, "the second navigation needs only the fresh ordered-ID request");
         server.abort();
     }

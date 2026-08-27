@@ -60,10 +60,9 @@ indices and parent links, invalid style categories and finish-time
 revalidation, private construction compile failures, checked render ranges,
 append-only glyph registration, and an exact zero-allocation render-view test.
 
-Root renderer tests:
+Historical root-adapter tests (the adapter has since been removed):
 
 ```text
-cargo test -p html-renderer --lib
 6 passed; 0 failed
 ```
 
@@ -71,10 +70,9 @@ These tests also consume metrics and branded font-family IDs through the real
 pipeline and `RenderView`; no test-only raw store or forged integer handle is
 required.
 
-Adapter and root build:
+Historical adapter build:
 
 ```text
-cargo build -p html-renderer -p html-gpui-smoke -p html-floem-smoke
 Finished `dev` profile successfully
 ```
 

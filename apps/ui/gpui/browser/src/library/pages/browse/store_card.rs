@@ -6,14 +6,15 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_contract::catalog::{CatalogImportRequest, CatalogPublication, CatalogPublicationAction, CatalogSourceId};
-use app_contract::library::BrowseFuture;
+use catalog_model::{CatalogImportRequest, CatalogPublication, CatalogPublicationAction, CatalogSourceId};
 use gpui::prelude::*;
 use gpui::{AppContext, Context, Entity, IntoElement, Render, SharedString, Task, WeakEntity, Window};
 use ui_components as components;
 
 use crate::library::services::LibraryContext;
 use crate::library::{LoadedCover, loaded_cover_from_jpeg};
+
+use super::adapter::BrowseFuture;
 
 const MAX_COVER_RETRIES: u8 = 5;
 
@@ -36,7 +37,7 @@ impl StoreBookServices {
     }
 
     fn load_cover(&self, source_id: CatalogSourceId, image_url: String) -> BrowseFuture<Result<Vec<u8>, String>> {
-        self.library.app_backend().catalog_cover(source_id, image_url)
+        crate::services::backend::app_async(self.library.app_backend(), move |backend| async move { backend.catalog_cover(&source_id, &image_url).await })
     }
 }
 

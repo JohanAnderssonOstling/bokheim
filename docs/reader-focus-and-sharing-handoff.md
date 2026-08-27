@@ -57,8 +57,8 @@ reader window needs, written once"):
   itself (`editor`). The two geometry functions were the same math with the same
   four constants under different names; EPUB keeps a thin wrapper because it
   derives its column count from requested width and scale rather than being told.
-- **`shell/state_panel.rs`** — sidebar tabs, state tabs, `reader_state_rows`
-  (bookmark and annotation lists), `reader_toc_tree`, `now_millis`. Moved here
+- **`shell/state_panel.rs`** — sidebar tabs, annotation rows,
+  `reader_toc_tree`, `now_millis`. Moved here
   from a crate-root `reader_state_panel.rs`.
 - **`shell/marks.rs`** — `MarksState`. EPUB-only pieces stayed in
   `epub/marks.rs`: `Selection` (PDF never used it), `set_selection`, and

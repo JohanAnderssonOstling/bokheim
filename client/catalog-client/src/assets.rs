@@ -1,13 +1,12 @@
 use super::*;
 use futures_util::StreamExt;
-use tokio::io::AsyncWriteExt;
 
 impl CatalogClient {
     pub async fn cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
         self.covers.cover_with(source_id, image_url, self.server.catalog_cover(source_id, image_url)).await
     }
 
-    pub async fn download_import(&self, request: &CatalogImportRequest, temporary_directory: &Path) -> Result<CatalogDownload, CatalogProviderError> {
+    pub async fn download_import(&self, request: &CatalogImportRequest) -> Result<CatalogDownload, CatalogProviderError> {
         let response = self.server.catalog_acquisition(request).await?;
         if !response.status().is_success() {
             return Err(CatalogProviderError::new(format!("catalog server returned HTTP {}", response.status())));
@@ -21,25 +20,21 @@ impl CatalogClient {
             return Err(CatalogProviderError::new("catalog server acquisition has an unexpected media type"));
         }
 
-        tokio::fs::create_dir_all(temporary_directory).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let temporary = tempfile::NamedTempFile::new_in(temporary_directory).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let (file, path) = temporary.into_parts();
-        let mut file = tokio::fs::File::from_std(file);
         let mut stream = response.bytes_stream();
         let mut written = 0_u64;
+        let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| CatalogProviderError::new(error.to_string()))?;
             written = written.checked_add(chunk.len() as u64).ok_or_else(|| CatalogProviderError::new("catalog acquisition size overflow"))?;
             if written > MAX_CATALOG_ACQUISITION_BYTES {
                 return Err(CatalogProviderError::new("catalog server acquisition is too large"));
             }
-            file.write_all(&chunk).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
+            bytes.extend_from_slice(&chunk);
         }
-        file.flush().await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         if written == 0 {
             return Err(CatalogProviderError::new("catalog server acquisition is empty"));
         }
-        Ok(CatalogDownload { path, file_name: request.suggested_file_name() })
+        Ok(CatalogDownload { bytes, file_name: request.suggested_file_name() })
     }
 }
 
@@ -47,14 +42,9 @@ impl CatalogServerClient {
     async fn catalog_acquisition(&self, request: &CatalogImportRequest) -> Result<reqwest::Response, CatalogProviderError> {
         let url = self.endpoint(&format!("api/opds/sources/{}/acquire", request.source_id.as_str()))?;
         let bytes = wire::encode(request).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        self.http
-            .post(url)
-            .timeout(CATALOG_ACQUISITION_TIMEOUT)
-            .header(reqwest::header::CONTENT_TYPE, wire::MEDIA_TYPE)
-            .header(reqwest::header::ACCEPT, request.book_format.media_type())
-            .body(bytes)
-            .send()
+        tokio::time::timeout(CATALOG_ACQUISITION_TIMEOUT, self.http.post(url).header(reqwest::header::CONTENT_TYPE, wire::MEDIA_TYPE).header(reqwest::header::ACCEPT, request.book_format.media_type()).body(bytes).send())
             .await
+            .map_err(|_| CatalogProviderError::new("catalog acquisition timed out"))?
             .map_err(|error| CatalogProviderError::new(error.to_string()))
     }
 
@@ -66,7 +56,8 @@ impl CatalogServerClient {
             url.query_pairs_mut().append_pair("image_url", image_url);
             url
         };
-        let response = self.http.get(url).send().await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let response =
+            tokio::time::timeout(Duration::from_secs(15), self.http.get(url).send()).await.map_err(|_| CatalogProviderError::new("catalog server cover request timed out"))?.map_err(|error| CatalogProviderError::new(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CatalogProviderError::new(format!("catalog server returned HTTP {}", response.status())));
         }
@@ -81,6 +72,6 @@ impl CatalogServerClient {
         if bytes.is_empty() || bytes.len() as u64 > MAX_CATALOG_COVER_SOURCE_BYTES {
             return Err(CatalogProviderError::new("catalog server cover is empty or too large"));
         }
-        tokio::task::spawn_blocking(move || validate_server_cover(bytes.to_vec())).await.map_err(|error| CatalogProviderError::new(error.to_string()))?
+        validate_server_cover(bytes.to_vec())
     }
 }

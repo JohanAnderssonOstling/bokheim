@@ -3,12 +3,12 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_contract::catalog::{CatalogResultRange, CatalogResultRangeResponse};
-use app_contract::library::BrowseChipSort;
+use catalog_model::{CatalogResultRange, CatalogResultRangeResponse};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Task, Window, div, rems};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, IconName};
+use library_model::BrowseChipSort;
 use ui_components as components;
 
 use super::adapter::{BrowseAdapter, BrowseCrumb, BrowseQuery, BrowseRequest};
@@ -149,7 +149,6 @@ pub(crate) struct BrowsePage<A: BrowseAdapter> {
     error: Option<SharedString>,
     request_generation: u64,
     request: Option<Task<()>>,
-    controls_request: LatestRequest,
     search_debounce: Option<Task<()>>,
     folder_actions: Option<Entity<FolderActions>>,
     _changes: Option<Subscription>,
@@ -179,7 +178,6 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             error: None,
             request_generation: 0,
             request: None,
-            controls_request: LatestRequest::default(),
             search_debounce: None,
             folder_actions: config.folder_actions,
             _changes: None,
@@ -238,28 +236,6 @@ impl<A: BrowseAdapter> BrowsePage<A> {
                 page.reload(cx);
             });
         }));
-    }
-
-    fn load_controls(&mut self, cx: &mut Context<Self>) {
-        let limit = A::result_window_limit().unwrap_or(CatalogResultRange::DEFAULT_LIMIT);
-        let offset = self.adapter.result_range().map_or(0, |range| range.offset);
-        let query = self.selection.query(self.location.clone(), CatalogResultRange::new(offset, limit));
-        let Some(operation) = self.adapter.request_controls(&query) else { return };
-        let generation = self.controls_request.begin();
-        let task = cx.spawn(async move |page, cx| {
-            let result = operation.await;
-            let _ = page.update(cx, |page, cx| {
-                if !page.controls_request.is_current(generation) {
-                    return;
-                }
-                match result {
-                    Ok(controls) => page.adapter.install_controls(controls),
-                    Err(error) => log::warn!("failed to load browse filter counts: {error}"),
-                }
-                cx.notify();
-            });
-        });
-        self.controls_request.install(task);
     }
 
     fn set_format(&mut self, format: BrowseFormatFilter, cx: &mut Context<Self>) {
@@ -466,7 +442,6 @@ impl<A: BrowseAdapter> BrowsePage<A> {
 
     fn load(&mut self, path: Vec<BrowseCrumb>, intent: LoadIntent, cx: &mut Context<Self>) {
         let location = path.last().map(|crumb| crumb.location.clone()).unwrap_or_else(|| self.root_location.clone());
-        self.controls_request.begin();
         if location != self.location {
             if let Some(actions) = &self.folder_actions {
                 actions.update(cx, |actions, cx| actions.cancel_move_selection(cx));
@@ -603,16 +578,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
                     .on_click(move |_, window, cx| search_page.update(cx, |page, cx| page.toggle_search(window, cx))),
             )
             .when(has_options, |controls| {
-                controls.child(browse_options_control(
-                    page.clone(),
-                    browse_controls,
-                    self.selection.options(),
-                    |page: &mut Self, event, cx| page.select_option(event, cx),
-                    |page: &mut Self, cx| page.load_controls(cx),
-                    window.viewport_size().height,
-                    window.rem_size(),
-                    theme,
-                ))
+                controls.child(browse_options_control(page.clone(), browse_controls, self.selection.options(), |page: &mut Self, event, cx| page.select_option(event, cx), window.viewport_size().height, window.rem_size(), theme))
             })
             .children(pagination);
         components::browser_topbar(theme).child(components::browser_topbar_left().child(self.breadcrumb(cx))).child(controls).into_any_element()

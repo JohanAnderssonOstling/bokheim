@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use app_contract::library::LibraryUpdate;
 use gpui::{AppContext, Context, Entity, EventEmitter, Task};
+use library_model::LibraryUpdate;
 use sync_common::{ContentHash, LibraryId};
 
 use crate::services::AppServices;

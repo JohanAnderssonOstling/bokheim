@@ -1,17 +1,14 @@
-use crate::app::BackendContext;
+use super::library_events::{LibraryEvent, LibraryEventSender};
 use crate::library::database as db;
 use crate::library::database::{get_book_dirs_by_local_fingerprint, get_tombstoned_book_file_keys, insert_book, insert_local_book_dir, mark_known_book_dirs_seen, upsert_dir};
-use crate::library::generate_content_hash_blake3;
-use crate::library::generate_thumbnail_for_sync;
-use crate::library::thumbnail_needs_repair;
 #[cfg(test)]
 use crate::APP_HIDDEN_LIBRARY_DB_PATH;
 use crate::{ContentHash, DirId, APP_HIDDEN_DIR};
 use library_model::BookFormat;
 #[cfg(feature = "watcher")]
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
-use serde::Serialize;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "watcher")]
@@ -33,52 +30,17 @@ const THUMBNAIL_EVENT_BATCH_SIZE: usize = 50;
 const THUMBNAIL_WORKER_LIMIT: usize = 4;
 const THUMBNAIL_QUEUE_CAPACITY: usize = 128;
 
-pub use crate::DownloadState;
-
-#[derive(Debug, Clone, Serialize)]
-pub enum LibraryEvent {
-    BookAdded {
-        content_hash: ContentHash,
-        path: String,
-    },
-    BookRemoved {
-        content_hash: ContentHash,
-        path: String,
-    },
-    DirectoryAdded {
-        path: String,
-    },
-    DirectoryRemoved {
-        path: String,
-    },
-    ThumbnailGenerated {
-        content_hash: ContentHash,
-    },
-    ThumbnailBatchProcessed {
-        content_hashes: Vec<ContentHash>,
-        finished: bool,
-    },
-    SubjectEnrichmentBatchProcessed {
-        processed: usize,
-        updated: usize,
-        finished: bool,
-    },
-    DownloadStatusChanged {
-        content_hash: ContentHash,
-        state: DownloadState,
-    },
-    FolderDownloadStatusChanged {
-        dir_id: crate::DirId,
-        downloaded_books: usize,
-        total_books: usize,
-    },
-    TransferStatusChanged,
-    /// The device-global set of configured libraries or its metadata changed.
-    LibraryListChanged,
-    /// Browsable content inside one library changed.
-    LibraryChanged,
-    ScanStarted,
-    ScanComplete,
+fn generate_content_hash_blake3(path: &Path, buffer: &mut [u8]) -> std::io::Result<ContentHash> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    loop {
+        let read = file.read(buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(ContentHash::new(hasher.finalize().to_hex().as_str()))
 }
 
 pub struct LibraryScanner {
@@ -91,9 +53,8 @@ pub struct LibraryScanner {
 }
 
 struct ScannerState {
-    context: BackendContext,
     library_root: PathBuf,
-    db: Pool<SqliteConnectionManager>,
+    db: Database,
     park_thread: OnceLock<thread::Thread>,
     scan_enabled: AtomicBool,
     scan_requested: AtomicBool,
@@ -107,7 +68,7 @@ struct ScannerState {
     pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
     hash_jobs_changed: Condvar,
     hash_persist_failed: AtomicBool,
-    event_tx: Sender<LibraryEvent>,
+    event_tx: LibraryEventSender,
     #[cfg(test)]
     thumbnail_tasks_started: std::sync::atomic::AtomicUsize,
 }
@@ -120,7 +81,7 @@ struct ScanActivity<'a>(&'a ScannerState);
 impl Drop for ScanActivity<'_> {
     fn drop(&mut self) {
         self.0.scan_active.store(false, Ordering::Release);
-        let _ = self.0.event_tx.send(LibraryEvent::ScanComplete);
+        let _ = self.0.event_tx.try_send(LibraryEvent::ScanComplete);
         let _ = self.0.thumbnail_queue.send(ThumbnailWork::ScanFinished);
     }
 }
@@ -190,22 +151,13 @@ impl HashResult {
 }
 
 impl LibraryScanner {
-    pub fn new(context: BackendContext, library_path: String, db: Pool<SqliteConnectionManager>, event_tx: Sender<LibraryEvent>) -> std::io::Result<Self> {
-        let library_root = Path::new(&library_path).canonicalize()?;
-        if !library_root.is_dir() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("library root is not a directory: {library_path}")));
-        }
-        Self::from_root(context, library_root, db, event_tx)
-    }
-
-    pub(crate) fn from_root(context: BackendContext, library_root: PathBuf, db: Pool<SqliteConnectionManager>, event_tx: Sender<LibraryEvent>) -> std::io::Result<Self> {
+    pub(crate) fn from_root(library_root: impl Into<PathBuf>, db: Database, event_tx: LibraryEventSender, pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>) -> std::io::Result<Self> {
         let (thumbnail_tx, thumbnail_rx) = crossbeam_channel::unbounded::<ThumbnailWork>();
         let (hash_tx, hash_rx) = crossbeam_channel::bounded::<HashTask>(HASH_QUEUE_CAPACITY);
         let (hash_result_tx, hash_result_rx) = crossbeam_channel::bounded::<HashResult>(HASH_RESULT_QUEUE_CAPACITY);
 
         let state = Arc::new(ScannerState {
-            context,
-            library_root,
+            library_root: library_root.into(),
             db,
             park_thread: OnceLock::new(),
             scan_enabled: AtomicBool::new(false),
@@ -217,7 +169,7 @@ impl LibraryScanner {
             hash_result_queue: hash_result_tx,
             hash_result_rx,
             pending_hash_jobs: std::sync::Mutex::new(HashSet::new()),
-            pending_thumbnail_jobs: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            pending_thumbnail_jobs,
             hash_jobs_changed: Condvar::new(),
             hash_persist_failed: AtomicBool::new(false),
             event_tx: event_tx.clone(),
@@ -248,10 +200,6 @@ impl LibraryScanner {
         Ok(Self { state, watcher_thread: Some(watcher_thread), worker_thread: Some(worker_thread), thumbnail_thread: Some(thumbnail_thread), hash_inserter_thread: Some(hash_inserter_thread), hash_threads })
     }
 
-    pub(crate) fn pending_thumbnail_jobs(&self) -> Arc<std::sync::Mutex<HashSet<ContentHash>>> {
-        Arc::clone(&self.state.pending_thumbnail_jobs)
-    }
-
     pub(crate) fn is_scanning(&self) -> bool {
         self.state.scan_active.load(Ordering::Acquire) || (self.state.scan_enabled.load(Ordering::Acquire) && self.state.scan_requested.load(Ordering::Acquire))
     }
@@ -268,10 +216,10 @@ impl LibraryScanner {
         Self::request_scan(&self.state);
     }
 
-    fn scan_library(db: &Pool<SqliteConnectionManager>, state: &Arc<ScannerState>) {
+    fn scan_library(db: &Database, state: &Arc<ScannerState>) {
         state.scan_active.store(true, Ordering::Release);
         let _activity = ScanActivity(state);
-        let _ = state.event_tx.send(LibraryEvent::ScanStarted);
+        let _ = state.event_tx.try_send(LibraryEvent::ScanStarted);
         let mut conn = match db.get() {
             Ok(c) => c,
             Err(e) => {
@@ -522,10 +470,9 @@ impl LibraryScanner {
                         // row look stale to this scan's cleanup pass. Accumulate
                         // these observations so one UPDATE marks the whole batch.
                         pending_seen_placements.push((known.dir_id, known.file_name, file_hash));
-                        match thumbnail_needs_repair(&state.context, &state.library_root, &known.content_hash) {
-                            Ok(true) => Self::queue_thumbnail_repair(state, ThumbnailTask { content_hash: known.content_hash, book_path: entry.path().to_path_buf() }),
-                            Ok(false) => {}
-                            Err(error) => log::warn!("Scanner: cannot inspect thumbnail state for {}: {error}", entry.path().display()),
+                        let thumbnail_is_local = state.db.get().ok().and_then(|conn| db::local_blob_exists(&conn, crate::BlobKind::Thumbnail, &known.content_hash).ok()).unwrap_or(false);
+                        if !thumbnail_is_local {
+                            Self::queue_thumbnail_repair(state, ThumbnailTask { content_hash: known.content_hash, book_path: entry.path().to_path_buf() });
                         }
                         continue;
                     }
@@ -798,6 +745,21 @@ impl LibraryScanner {
                 log::error!("Scanner inserter: database batch failed: {error}");
                 return false;
             }
+            let bytes = match fs::read(&task.book_path) {
+                Ok(bytes) if blake3::hash(&bytes).to_hex().as_str() == content_hash.as_str() => bytes,
+                Ok(_) => {
+                    log::error!("Scanner inserter: publication changed after hashing: {}", task.book_path.display());
+                    return false;
+                }
+                Err(error) => {
+                    log::error!("Scanner inserter: failed to read {}: {error}", task.book_path.display());
+                    return false;
+                }
+            };
+            if let Err(error) = db::put_local_blob(&tx, crate::BlobKind::Book, content_hash, &bytes) {
+                log::error!("Scanner inserter: failed to persist publication bytes: {error}");
+                return false;
+            }
             if !already_indexed || task.metadata_backfill {
                 if let Some(audiobook) = audiobook {
                     if let Err(error) = db::upsert_audiobook_metadata(&tx, content_hash, audiobook) {
@@ -900,7 +862,7 @@ impl LibraryScanner {
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break 'coordinator,
                             }
                         }
-                        let _ = state.event_tx.send(batch.finished());
+                        let _ = state.event_tx.try_send(batch.finished());
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         Self::drain_thumbnail_results(&state, &result_rx, &mut batch, &mut outstanding);
@@ -926,11 +888,11 @@ impl LibraryScanner {
             };
             #[cfg(test)]
             state.thumbnail_tasks_started.fetch_add(1, Ordering::Relaxed);
-            let content_hash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generate_thumbnail_for_sync(&state.context, &state.library_root, &task.book_path, &task.content_hash)))
+            let content_hash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| thumbnail::generate_thumbnail(&task.book_path)))
                 .ok()
                 .and_then(Result::ok)
-                .filter(|available| *available)
-                .map(|_| task.content_hash.clone());
+                .flatten()
+                .and_then(|bytes| state.db.get().ok().and_then(|conn| db::put_local_blob(&conn, crate::BlobKind::Thumbnail, &task.content_hash, &bytes).ok()).map(|_| task.content_hash));
             state.pending_thumbnail_jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&task.content_hash);
             if result_tx.send(content_hash).is_err() {
                 break;
@@ -947,7 +909,7 @@ impl LibraryScanner {
     fn record_thumbnail_result(state: &ScannerState, batch: &mut ThumbnailEventBatch, content_hash: Option<ContentHash>, outstanding: &mut usize) {
         *outstanding = outstanding.saturating_sub(1);
         if let Some(event) = batch.processed(content_hash) {
-            let _ = state.event_tx.send(event);
+            let _ = state.event_tx.try_send(event);
         }
     }
 
@@ -1053,9 +1015,7 @@ impl LibraryScanner {
     }
 }
 
-use crossbeam_channel::Sender;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
+use crate::platform::database::Database;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,18 +1024,15 @@ mod tests {
         home::{AppDataLocation, BackendContext},
         RelativeBookPath,
     };
-    use r2d2::Pool;
-    use r2d2_sqlite::SqliteConnectionManager;
     use std::{fs, thread, time::Duration};
     use tempfile::tempdir;
     use test_support::{fixture_content_hash, fixture_dir_id};
 
-    fn test_scanner_state(context: &BackendContext, library_root: &Path) -> (Arc<ScannerState>, crossbeam_channel::Receiver<HashTask>, crossbeam_channel::Receiver<LibraryEvent>) {
+    fn test_scanner_state(context: &BackendContext, library_root: &Path) -> (Arc<ScannerState>, crossbeam_channel::Receiver<HashTask>, super::super::library_events::LibraryEventReceiver) {
         let db_path = library_root.join(APP_HIDDEN_LIBRARY_DB_PATH);
         fs::create_dir_all(db_path.parent().expect("library db parent exists")).unwrap();
 
-        let manager = SqliteConnectionManager::file(db_path).with_init(|conn| db::configure_connection(conn));
-        let db = Pool::builder().max_size(4).connection_timeout(Duration::from_secs(30)).build(manager).unwrap();
+        let db = Database::open(db_path, db::configure_connection).unwrap();
         {
             let conn = db.get().unwrap();
             db::init_db(&conn).unwrap();
@@ -1084,10 +1041,9 @@ mod tests {
         let (thumbnail_tx, _thumbnail_rx) = crossbeam_channel::unbounded::<ThumbnailWork>();
         let (hash_tx, hash_rx) = crossbeam_channel::bounded::<HashTask>(HASH_QUEUE_CAPACITY);
         let (hash_result_tx, hash_result_rx) = crossbeam_channel::bounded::<HashResult>(HASH_RESULT_QUEUE_CAPACITY);
-        let (event_tx, event_rx) = crossbeam_channel::unbounded::<LibraryEvent>();
+        let (event_tx, event_rx) = super::super::library_events::library_event_channel();
 
         let state = Arc::new(ScannerState {
-            context: context.clone(),
             library_root: library_root.to_path_buf(),
             db,
             park_thread: OnceLock::new(),

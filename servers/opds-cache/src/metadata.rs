@@ -5,7 +5,7 @@ use super::{
     MAX_MOBI_METADATA_PUBLICATION_BYTES, MAX_PDF_METADATA_PUBLICATION_BYTES,
 };
 use crate::extraction::ExtractedCatalogMetadata;
-use catalog_contract::{AgeRange, Audience, CatalogContributorCredit, CatalogPublisherCredit};
+use catalog_model::{AgeRange, Audience, CatalogContributorCredit, CatalogPublisherCredit};
 impl CatalogService {
     pub(crate) async fn enrich_saved_metadata_batch(&self, jobs: &[CatalogMetadataBackfillIndexedJob]) -> Result<Vec<CatalogMetadataBackfillIndexedUpdate>, CatalogServiceError> {
         let isbn_groups = jobs.iter().map(|job| job.index.isbns.clone()).collect::<Vec<_>>();
@@ -93,7 +93,7 @@ impl CatalogService {
     pub(crate) async fn infer_catalog_epub_isbn(&self, metadata: &mut CatalogEpubMetadata) -> Result<Option<String>, CatalogServiceError> {
         let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect::<Vec<_>>();
         let publishers = metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect::<Vec<_>>();
-        let publication_year = library_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value()));
+        let publication_year = publication_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value()));
         if metadata.book.title.trim().is_empty() {
             return Ok(None);
         }
@@ -158,37 +158,6 @@ impl CatalogService {
         }
         let matched = catalog_metadata_match(matched_records.iter().collect(), &snapshot_date.unwrap_or_else(|| "unknown".to_owned()));
         Ok(enrichment_keys.into_iter().map(|isbn| (isbn, matched.clone())).collect())
-    }
-
-    pub async fn rich_metadata_enrichment(&self, request: MetadataEnrichmentRequest) -> Result<metadata_contract::RichMetadataEnrichmentResponse, CatalogServiceError> {
-        let Some(metadata_endpoint) = &self.state.metadata_endpoint else { return Err(CatalogServiceError("Open Library metadata enrichment is not configured".to_owned())) };
-        let mut endpoint = metadata_endpoint.clone();
-        endpoint.set_path("/v2/enrichment");
-        let body = metadata_contract::encode_v2_request(&request).map_err(|error| CatalogServiceError(error.to_string()))?;
-        let mut response = self
-            .state
-            .metadata_client
-            .post(endpoint)
-            .header(reqwest::header::CONTENT_TYPE, metadata_contract::MEDIA_TYPE_V2)
-            .header(reqwest::header::ACCEPT, metadata_contract::MEDIA_TYPE_V2)
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| CatalogServiceError(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(CatalogServiceError(format!("metadata service returned HTTP {}", response.status())));
-        }
-        if response.content_length().is_some_and(|length| length > metadata_contract::MAX_RESPONSE_BYTES as u64) {
-            return Err(CatalogServiceError("metadata service response exceeded its declared size limit".to_owned()));
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| CatalogServiceError(error.to_string()))? {
-            if bytes.len().saturating_add(chunk.len()) > metadata_contract::MAX_RESPONSE_BYTES {
-                return Err(CatalogServiceError("metadata service response exceeded its size limit".to_owned()));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        metadata_contract::decode_v2_response(&bytes, metadata_contract::MAX_RESPONSE_BYTES).map_err(|error| CatalogServiceError(error.to_string()))
     }
 
     pub async fn resolve_edition_identities(&self, request: EditionIdentityRequest) -> Result<EditionIdentityResponse, CatalogServiceError> {
@@ -311,7 +280,7 @@ pub(crate) fn merge_catalog_epub_metadata(publication: &mut CatalogPublication, 
         push_unique(&mut publication.metadata.collections, collection.clone());
     }
     for contributor in &book.contributors {
-        if contributor.role_code() == library_model::AUTHOR_MARC_RELATOR_CODE {
+        if contributor.role_code().0 == *b"aut" {
             continue;
         }
         let role = String::from_utf8_lossy(&contributor.role_code().0).into_owned();

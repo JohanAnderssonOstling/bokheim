@@ -7,9 +7,13 @@
 //! between the readers, so they are supplied by the caller.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, Pixels, Point, SharedString, Window, px};
+use std::rc::Rc;
+
+use gpui::{AnyElement, App, Context, Entity, Pixels, Point, SharedString, Window, px};
 use gpui_component::input::{Input, InputState};
 use ui_components as components;
+
+use library_model::{AnnotationStyle, ReaderAnnotation};
 
 const WIDTH: f32 = 360.0;
 const MAX_HEIGHT: f32 = 420.0;
@@ -20,14 +24,19 @@ const INSET: f32 = 12.0;
 /// Distance kept between the panel and the point it describes.
 const GAP: f32 = 10.0;
 
+/// Creates the note input used by every annotation editor.
+pub(crate) fn note_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
+    InputState::new(window, cx).placeholder("Add a note").multi_line(true)
+}
+
 /// Where to place the panel, in pixels relative to the document area.
 pub(crate) struct Geometry {
-    pub(crate) left: f32,
+    left: f32,
     /// Offset from whichever edge the panel is anchored to, named by `above`.
-    pub(crate) edge_offset: f32,
-    pub(crate) max_height: f32,
+    edge_offset: f32,
+    max_height: f32,
     /// Whether the panel sits above the anchor rather than below it.
-    pub(crate) above: bool,
+    above: bool,
 }
 
 /// The width the document occupies once the sidebar has taken its share.
@@ -64,24 +73,43 @@ pub(crate) fn geometry(anchor: Option<Point<Pixels>>, viewport_width: f32, viewp
 }
 
 /// One button in the editor's action rows.
-pub(crate) struct Action {
+struct Action {
     id: SharedString,
     label: SharedString,
     on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
 impl Action {
-    pub(crate) fn new(id: impl Into<SharedString>, label: impl Into<SharedString>, on_click: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+    fn new(id: impl Into<SharedString>, label: impl Into<SharedString>, on_click: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         Self { id: id.into(), label: label.into(), on_click: Box::new(on_click) }
     }
+}
+
+/// The common Save/Close/Delete, style, and colour rows used by both readers.
+///
+/// Readers provide the save action because applying an annotation to EPUB text
+/// and a PDF page remains format-specific. Keeping the choices here prevents
+/// their labels, colours, or styles from drifting apart.
+fn standard_action_rows(id_prefix: &'static str, mut save: impl FnMut(String, &'static str, Option<AnnotationStyle>, Option<&'static str>) -> Action, close: Action, delete: Action) -> Vec<Vec<Action>> {
+    let id = |suffix: &str| format!("{id_prefix}-{suffix}");
+    vec![
+        vec![save(id("save"), "Save", None, None), close, delete],
+        vec![
+            save(id("highlight"), "Highlight", Some(AnnotationStyle::Highlight), None),
+            save(id("underline"), "Underline", Some(AnnotationStyle::Underline), None),
+            save(id("squiggly"), "Squiggly", Some(AnnotationStyle::Squiggly), None),
+            save(id("strike"), "Strike", Some(AnnotationStyle::Strikethrough), None),
+        ],
+        vec![save(id("yellow"), "Yellow", None, Some("#f6c945")), save(id("blue"), "Blue", None, Some("#60a5fa")), save(id("pink"), "Pink", None, Some("#f472b6")), save(id("green"), "Green", None, Some("#4ade80"))],
+    ]
 }
 
 /// Builds the editor panel, absolutely placed by `geometry`.
 ///
 /// `rows` are rendered in order as separate wrapping action rows, so a reader
 /// that offers styles or colours can group them apart from save and delete.
-pub(crate) fn editor(geometry: Geometry, quote: &str, note: &Entity<InputState>, rows: Vec<Vec<Action>>, theme: components::BrowserTheme) -> AnyElement {
-    let mut panel = components::reader_annotation_editor(theme)
+fn editor(geometry: Geometry, quote: &str, note: &Entity<InputState>, rows: Vec<Vec<Action>>, theme: components::BrowserTheme) -> AnyElement {
+    let mut panel = components::reader_annotation_editor(components::reader_state_quote(format!("“{quote}”")), Input::new(note).appearance(false).size_full(), theme)
         .absolute()
         .left(px(geometry.left))
         .max_h(px(geometry.max_height))
@@ -89,9 +117,7 @@ pub(crate) fn editor(geometry: Geometry, quote: &str, note: &Entity<InputState>,
         .when(!geometry.above, |panel| panel.top(px(geometry.edge_offset)))
         // The panel floats over the document, which treats a click as "put the
         // cursor here" and would clear the very selection being annotated.
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(components::reader_state_quote(format!("“{quote}”")))
-        .child(components::reader_annotation_note_editor(theme).child(Input::new(note).appearance(false).size_full()));
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
     for row in rows {
         let mut actions = components::reader_state_actions();
         for action in row {
@@ -101,6 +127,36 @@ pub(crate) fn editor(geometry: Geometry, quote: &str, note: &Entity<InputState>,
         panel = panel.child(actions);
     }
     panel.into_any_element()
+}
+
+/// Builds the standard editor and connects its format-specific effects.
+pub(crate) fn standard_editor<C: 'static>(
+    id_prefix: &'static str, target: &Entity<C>, annotation: &ReaderAnnotation, geometry: Geometry, note: &Entity<InputState>, theme: components::BrowserTheme,
+    save: impl Fn(Option<AnnotationStyle>, Option<&'static str>, &mut C, &mut Context<C>) + 'static, close: impl Fn(&mut Window, &mut C, &mut Context<C>) + 'static, delete: impl Fn(String, &mut Window, &mut C, &mut Context<C>) + 'static,
+) -> AnyElement {
+    let save = Rc::new(save);
+    let save_target = target.clone();
+    let save_action = move |id: String, label: &'static str, style: Option<AnnotationStyle>, color: Option<&'static str>| {
+        let save = save.clone();
+        let target = save_target.clone();
+        Action::new(id, label, move |_, cx| {
+            let style = style.clone();
+            target.update(cx, |this, cx| save(style, color, this, cx));
+        })
+    };
+
+    let close_target = target.clone();
+    let close = Action::new(format!("{id_prefix}-close"), "Close", move |window, cx| {
+        close_target.update(cx, |this, cx| close(window, this, cx));
+    });
+
+    let delete_id = annotation.id.clone();
+    let delete_target = target.clone();
+    let delete = Action::new(format!("{id_prefix}-delete"), "Delete", move |window, cx| {
+        delete_target.update(cx, |this, cx| delete(delete_id.clone(), window, this, cx));
+    });
+
+    editor(geometry, &annotation.exact_text, note, standard_action_rows(id_prefix, save_action, close, delete), theme)
 }
 
 #[cfg(test)]

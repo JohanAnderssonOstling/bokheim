@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use epub_provider::{EpubProvider, ResourceProvider};
+use html::resources::ResourceProvider;
 use html::style::property_name_is_supported;
+use html_publication::{PublicationFormat, PublicationSource};
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::rules::CssRule;
@@ -112,10 +113,14 @@ fn collect_epubs(path: &Path, out: &mut Vec<PathBuf>) {
 
 fn audit_epub(path: &Path, rel_path: &str) -> HashMap<String, PropertyInfo> {
     let mut unsupported: HashMap<String, PropertyInfo> = HashMap::new();
-    let provider = EpubProvider::new(path.to_path_buf());
-    let Ok(html_entries) = provider.list_html_candidates("") else {
+    let Ok(file) = fs::File::open(path) else {
         return unsupported;
     };
+    let Ok(publication) = PublicationSource::from_reader(PublicationFormat::Epub, file) else {
+        return unsupported;
+    };
+    let provider = publication.provider();
+    let html_entries = publication.document_uris().to_vec();
 
     let mut seen_css_uris = HashSet::new();
 
@@ -124,7 +129,7 @@ fn audit_epub(path: &Path, rel_path: &str) -> HashMap<String, PropertyInfo> {
             continue;
         };
 
-        let css_sources = collect_css_from_html(&html, &provider, &html_entry, &mut seen_css_uris);
+        let css_sources = collect_css_from_html(&html, provider.as_ref(), &html_entry, &mut seen_css_uris);
         for (source, css) in css_sources {
             let sheet = match StyleSheet::parse(&css, ParserOptions::default()) {
                 Ok(sheet) => sheet,

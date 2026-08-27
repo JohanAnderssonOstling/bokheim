@@ -1,12 +1,11 @@
 use super::*;
 use super::{assets::*, browse::*, catalog::*, sync_state::*};
-use app_contract::library::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter};
+use library_model::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter};
 use test_support::{fixture_content_hash, fixture_dir_id, fixture_replica_id};
 
 const TEST_CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-/// What Home splits its recently-read list at, from the frontend contract both
-/// clients read.
-const FINISHED_THRESHOLD: f64 = 98.0;
+/// What Home splits its recently-read list at, matching the GPUI home view.
+const FINISHED_THRESHOLD: f64 = library_model::FINISHED_PROGRESS_THRESHOLD as f64;
 const DIR_A: &str = "61000000-0000-0000-0000-0000e40c292c";
 const DIR_B: &str = "62000000-0000-0000-0000-0000e70c2de5";
 const DIR_A_CHILD: &str = "612d6368-696c-6400-0000-000093ae1f6b";
@@ -17,6 +16,50 @@ const DIR_CHILD: &str = "6368696c-6400-0000-0000-0000e5a0205d";
 const DIR_OTHER: &str = "6f746865-7200-0000-0000-0000c87d8df5";
 const DIR_D1: &str = "64310000-0000-0000-0000-0000881d13e6";
 const DIR_D2: &str = "64320000-0000-0000-0000-0000871d1253";
+
+#[test]
+fn opening_a_library_removes_retired_bookmark_state_only() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE bookmark(id TEXT PRIMARY KEY);
+         CREATE TABLE sync_outbox(state_kind TEXT NOT NULL);
+         CREATE TABLE sync_state_version(state_kind TEXT NOT NULL);
+         INSERT INTO bookmark VALUES ('saved-page');
+         INSERT INTO sync_outbox VALUES ('bookmark'), ('annotation');
+         INSERT INTO sync_state_version VALUES ('bookmark'), ('reading_position');",
+    )
+    .unwrap();
+
+    remove_legacy_bookmark_state(&conn).unwrap();
+
+    let bookmark_table_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='bookmark')", [], |row| row.get(0)).unwrap();
+    assert!(!bookmark_table_exists);
+    assert_eq!(conn.query_row("SELECT state_kind FROM sync_outbox", [], |row| row.get::<_, String>(0)).unwrap(), "annotation");
+    assert_eq!(conn.query_row("SELECT state_kind FROM sync_state_version", [], |row| row.get::<_, String>(0)).unwrap(), "reading_position");
+}
+
+#[test]
+fn opening_a_library_removes_retired_semantic_link_state() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE book_link(id TEXT PRIMARY KEY);
+         CREATE TABLE sync_outbox(state_kind TEXT NOT NULL);
+         CREATE TABLE sync_state_version(state_kind TEXT NOT NULL);
+         CREATE TRIGGER trig_book_link_state_insert AFTER INSERT ON book_link BEGIN SELECT 1; END;
+         CREATE TRIGGER trig_book_link_state_update AFTER UPDATE ON book_link BEGIN SELECT 1; END;
+         INSERT INTO book_link VALUES ('retired-link');
+         INSERT INTO sync_outbox VALUES ('book_link'), ('annotation');
+         INSERT INTO sync_state_version VALUES ('book_link'), ('reading_position');",
+    )
+    .unwrap();
+
+    remove_legacy_semantic_link_state(&conn).unwrap();
+
+    let link_table_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='book_link')", [], |row| row.get(0)).unwrap();
+    assert!(!link_table_exists);
+    assert_eq!(conn.query_row("SELECT state_kind FROM sync_outbox", [], |row| row.get::<_, String>(0)).unwrap(), "annotation");
+    assert_eq!(conn.query_row("SELECT state_kind FROM sync_state_version", [], |row| row.get::<_, String>(0)).unwrap(), "reading_position");
+}
 
 #[test]
 fn shared_trash_lifecycle_restores_then_purges_folder_and_book() {
@@ -74,13 +117,13 @@ fn shared_catalog_ownership_returns_complete_live_keys() {
             rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), content_hash.as_str()],
         )
         .unwrap();
-    let source_id = app_contract::catalog::CatalogSourceId::parse("test-source").unwrap();
-    let publication = app_contract::catalog::CatalogPublicationIdentity { edition_id: "edition-1".to_owned(), work_id: Some("work-1".to_owned()) };
+    let source_id = catalog_model::CatalogSourceId::parse("test-source").unwrap();
+    let publication = catalog_model::CatalogPublicationIdentity { edition_id: "edition-1".to_owned(), work_id: Some("work-1".to_owned()) };
     catalog::record_catalog_publication(&transaction, &source_id, &publication, &content_hash).unwrap();
     transaction.commit().unwrap();
 
     let keys = catalog::all_owned_catalog_publications(&conn).unwrap();
-    assert_eq!(keys, vec![app_contract::catalog::CatalogPublicationKey::new(source_id, publication)]);
+    assert_eq!(keys, vec![(source_id, publication)]);
 }
 
 #[test]
@@ -417,7 +460,7 @@ fn subject_view_hides_empty_nodes_and_collapses_non_branching_routes() {
     )
     .unwrap();
 
-    let scope = FileTypeScope::load(&conn, app_contract::library::LibraryFileTypeFilter::All).unwrap();
+    let scope = FileTypeScope::load(&conn, library_model::LibraryFileTypeFilter::All).unwrap();
     let (taxonomy_roots, root_books) = compact_subject_children(&conn, "", false, &scope).unwrap();
     assert_eq!(taxonomy_roots.iter().map(|child| child.id.as_str()).collect::<Vec<_>>(), ["Test"]);
     assert!(root_books.is_empty());
@@ -1383,6 +1426,7 @@ fn rich_enrichment_persists_entity_graph_and_synchronized_subject_references() {
         people: vec![metadata_contract::EntityReference { wikidata_id: Some("Q7259".to_owned()), name: "Ada Lovelace".to_owned(), source: metadata_contract::EntitySource::Work }],
         popularity: None,
         description: None,
+        subjects: Vec::new(),
     };
     let places = vec![
         metadata_contract::PlaceEntity {
@@ -1593,7 +1637,7 @@ fn title_search_needs_no_derived_index_backfill() {
 
 #[test]
 fn catalog_publication_ownership_is_exact_and_ignores_deleted_books() {
-    use app_contract::catalog::{CatalogPublicationIdentity, CatalogSourceId};
+    use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
@@ -1625,7 +1669,7 @@ fn catalog_publication_ownership_is_exact_and_ignores_deleted_books() {
 
 #[test]
 fn remote_catalog_publication_relation_materializes_without_echoing_to_outbox() {
-    use app_contract::catalog::{CatalogPublicationIdentity, CatalogSourceId};
+    use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
@@ -2291,42 +2335,6 @@ fn compacted_dir_state_can_arrive_after_book_dir_add_in_same_batch() {
 }
 
 #[test]
-fn remote_book_link_binds_and_materializes_every_version_field() {
-    let mut conn = fk_conn();
-    let link_id = uuid::Uuid::new_v4().to_string();
-    let change = server_change_from(
-        MutationBody::BookLink {
-            link_id: link_id.clone(),
-            value: library_model::BookLinkState {
-                source_content_hash: fixture_content_hash(1),
-                target_content_hash: fixture_content_hash(2),
-                relation: "related".to_owned(),
-                note: "A link".to_owned(),
-                created_at: 10,
-                modified_at: 20,
-                deleted: false,
-            },
-        },
-        30,
-        0,
-        "remote-link-writer",
-        7,
-        9,
-    );
-    let expected_mutation_id = change.mutation.mutation_id.to_string();
-    let tx = conn.transaction().unwrap();
-    apply_remote_change_in_tx(&tx, &change).unwrap();
-    tx.commit().unwrap();
-
-    let stored: (String, String, i64, String, i64, String) = conn
-        .query_row("SELECT source.content_hash,target.content_hash,version.changed_at,version.replica_id,version.replica_seq,version.mutation_id FROM book_link link JOIN book source ON source.row_id=link.source_book_row_id JOIN book target ON target.row_id=link.target_book_row_id JOIN sync_state_version version ON version.state_kind='book_link' AND version.state_key=link.id AND version.state_subkey='' WHERE link.id=?1", [&link_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-        })
-        .unwrap();
-    assert_eq!(stored, (fixture_content_hash(1).to_string(), fixture_content_hash(2).to_string(), 30, fixture_replica_id("remote-link-writer").to_string(), 7, expected_mutation_id));
-}
-
-#[test]
 fn deferred_pull_tx_allows_child_dir_before_parent_in_same_batch() {
     let mut conn = fk_conn();
     let tx = conn.transaction().unwrap();
@@ -2945,7 +2953,10 @@ fn contributor_list_rewrite_coalesces_into_one_outbox_mutation_per_book_and_kind
 fn current_schema_has_integer_relationships_foreign_keys_and_lookup_indexes() {
     let conn = fk_conn();
 
-    for (table, column) in [("book_dir", "book_row_id"), ("book_contributor", "book_row_id"), ("annotation", "book_row_id"), ("bookmark", "book_row_id"), ("book_link", "source_book_row_id"), ("book_link", "target_book_row_id")] {
+    let retired_link_table_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='book_link')", [], |row| row.get(0)).unwrap();
+    assert!(!retired_link_table_exists);
+
+    for (table, column) in [("book_dir", "book_row_id"), ("book_contributor", "book_row_id"), ("annotation", "book_row_id")] {
         let declared_type: String = conn.query_row("SELECT type FROM pragma_table_info(?1) WHERE name=?2", rusqlite::params![table, column], |row| row.get(0)).unwrap();
         assert_eq!(declared_type.to_ascii_uppercase(), "INTEGER", "{table}.{column} must remain an integer relationship");
     }
@@ -2953,18 +2964,7 @@ fn current_schema_has_integer_relationships_foreign_keys_and_lookup_indexes() {
     let foreign_key_errors: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).unwrap();
     assert_eq!(foreign_key_errors, 0);
 
-    for index in [
-        "sqlite_autoindex_book_1",
-        "idx_book_dir_book",
-        "idx_book_dir_local_hash",
-        "idx_unified_concept_route_parent",
-        "idx_unified_concept_route_concept",
-        "idx_book_unified_concept_concept",
-        "idx_annotation_book",
-        "idx_bookmark_book",
-        "idx_book_link_source",
-        "idx_book_link_target",
-    ] {
+    for index in ["sqlite_autoindex_book_1", "idx_book_dir_book", "idx_book_dir_local_hash", "idx_unified_concept_route_parent", "idx_unified_concept_route_concept", "idx_book_unified_concept_concept", "idx_annotation_book"] {
         let present: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?1", [index], |row| row.get(0)).unwrap();
         assert_eq!(present, 1, "missing identity/relationship index {index}");
     }

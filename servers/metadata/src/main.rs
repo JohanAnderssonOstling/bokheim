@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !bind.ip().is_loopback() && std::env::var("BOKHEIM_METADATA_ALLOW_PUBLIC_HTTP").as_deref() != Ok("true") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "non-loopback plain HTTP requires BOKHEIM_METADATA_ALLOW_PUBLIC_HTTP=true; use a TLS reverse proxy in production").into());
     }
-    let service = MetadataService::open_with_supplements(database, description_database, author_profile_database)?;
+    let service = MetadataService::open_with_supplements(database, description_database, author_profile_database)?.with_default_library_of_congress()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(address = %listener.local_addr()?, "metadata server listening");
     axum::serve(listener, app(service)).with_graceful_shutdown(shutdown_signal()).await?;

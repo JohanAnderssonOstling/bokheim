@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{Div, ElementId, FontWeight, SharedString, Stateful, div, px};
+use gpui::{Div, ElementId, FontWeight, SharedString, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 
@@ -66,13 +66,10 @@ pub fn more_navigation_overlay() -> Div {
     crate::absolute_full_size().flex().items_end().justify_center()
 }
 
-pub fn more_navigation_scrim(theme: BrowserTheme) -> Stateful<Div> {
-    crate::modal_scrim("more-navigation-scrim", theme)
-}
-
-pub fn more_navigation_sheet(item_count: usize, theme: BrowserTheme) -> Scrollable<Div> {
-    let height = (72.0 + item_count as f32 * 44.0).min(480.0);
-    crate::modal_surface(theme).w_full().max_w(px(420.0)).h(px(height)).max_h_full().overflow_y_scrollbar().p(px(SPACE_MD))
+/// A modal list sized from its fixed-height header and rows.
+pub fn navigation_modal_list(item_count: usize, max_height: f32, theme: BrowserTheme) -> Scrollable<Div> {
+    let height = (72.0 + item_count as f32 * 44.0).min(max_height);
+    crate::modal_surface(theme).h(px(height)).max_h_full().overflow_y_scrollbar()
 }
 
 pub fn more_navigation_header(theme: BrowserTheme) -> Div {
@@ -95,34 +92,45 @@ pub fn more_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, lab
         .child(div().size_full().min_w_0().flex().items_center().gap(px(SPACE_SM)).child(Icon::new(icon)).child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)))
 }
 
-/// The GPUI rendering of the cross-frontend navigation icon contract.
-pub fn navigation_icon(icon: app_contract::NavigationIcon) -> Icon {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationIcon {
+    House,
+    BookOpen,
+    Folder,
+    Tags,
+    User,
+    Trash2,
+    Building2,
+    Settings,
+}
+
+pub fn navigation_icon(icon: NavigationIcon) -> Icon {
     let path = match icon {
-        app_contract::NavigationIcon::House => "icons/navigation/house.svg",
-        app_contract::NavigationIcon::BookOpen => "icons/navigation/book-open.svg",
-        app_contract::NavigationIcon::Folder => "icons/navigation/folder.svg",
-        app_contract::NavigationIcon::Asterisk => "icons/navigation/asterisk.svg",
-        app_contract::NavigationIcon::Tags => "icons/navigation/tags.svg",
-        app_contract::NavigationIcon::User => "icons/navigation/user.svg",
-        app_contract::NavigationIcon::Trash2 => "icons/navigation/trash-2.svg",
-        app_contract::NavigationIcon::Building2 => "icons/navigation/building-2.svg",
-        app_contract::NavigationIcon::CircleUser => "icons/navigation/circle-user.svg",
-        app_contract::NavigationIcon::Settings => "icons/navigation/settings.svg",
+        NavigationIcon::House => "icons/navigation/house.svg",
+        NavigationIcon::BookOpen => "icons/navigation/book-open.svg",
+        NavigationIcon::Folder => "icons/navigation/folder.svg",
+        NavigationIcon::Tags => "icons/navigation/tags.svg",
+        NavigationIcon::User => "icons/navigation/user.svg",
+        NavigationIcon::Trash2 => "icons/navigation/trash-2.svg",
+        NavigationIcon::Building2 => "icons/navigation/building-2.svg",
+        NavigationIcon::Settings => "icons/navigation/settings.svg",
     };
     Icon::empty().path(path)
 }
 
-pub fn browser_search_box() -> Div {
-    div().w_full().min_w_0().h(px(TOPBAR_ACTION_HEIGHT)).flex_1()
-}
-
-/// A text input that searches or filters.
+/// A centered topbar input that searches or filters.
 ///
-/// The surrounding page supplies the search affordance; individual pages may
-/// add a contextual placeholder through their `InputState`. `cleanable` gives
-/// a filter a way out that does not involve selecting and deleting its text.
-pub fn browser_search_input(state: &gpui::Entity<gpui_component::input::InputState>) -> gpui_component::input::Input {
-    gpui::Styled::h(gpui_component::input::Input::new(state).cleanable(true), px(TOPBAR_ACTION_HEIGHT))
+/// Individual pages may add a contextual placeholder through their
+/// `InputState`. `cleanable` gives a filter a way out that does not involve
+/// selecting and deleting its text.
+pub fn browser_search_control(state: &gpui::Entity<gpui_component::input::InputState>) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().w_full().min_w_0().h(px(TOPBAR_ACTION_HEIGHT)).flex_1().child(gpui::Styled::h(gpui_component::input::Input::new(state).cleanable(true), px(TOPBAR_ACTION_HEIGHT))))
 }
 
 pub fn browser_body() -> Div {
@@ -144,10 +152,6 @@ pub fn browser_topbar(theme: BrowserTheme) -> Div {
 
 pub fn browser_topbar_left() -> Div {
     div().flex_1().min_w_0().flex().items_center().justify_start()
-}
-
-pub fn browser_topbar_center() -> Div {
-    div().flex_1().min_w_0().flex().items_center().justify_center()
 }
 
 pub fn browser_topbar_right() -> Div {
@@ -207,30 +211,13 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTh
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_XXS))
-                .child(navigation_icon(app_contract::NavigationIcon::BookOpen).large())
+                .child(navigation_icon(NavigationIcon::BookOpen).large())
                 .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label)),
         )
 }
 
 pub fn library_switcher_panel() -> Div {
     div().w_full().flex().flex_col().gap(px(SPACE_XS))
-}
-
-pub fn library_switcher_overlay() -> Div {
-    crate::modal_overlay().occlude()
-}
-
-pub fn library_switcher_scrim(theme: BrowserTheme) -> Stateful<Div> {
-    crate::modal_scrim("library-switcher-scrim", theme)
-}
-
-pub fn library_switcher_dialog(library_count: usize, theme: BrowserTheme) -> Scrollable<Div> {
-    // Scrollable adds a size-full viewport, so an auto-height surface cannot
-    // derive its intrinsic height from the rows inside that viewport. Size the
-    // compact dialog from its fixed-height header and rows instead, while
-    // retaining a cap and scrollbar for longer library lists.
-    let height = (72.0 + library_count as f32 * 44.0).min(512.0);
-    crate::modal_surface(theme).w(px(328.0)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar().pt(px(SPACE_MD)).pr(px(SPACE_MD)).pb(px(SPACE_MD)).pl(px(SPACE_MD - SPACE_SM))
 }
 
 pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -263,11 +250,19 @@ pub fn library_switcher_row(library: impl IntoElement, delete: impl IntoElement)
 
 pub fn library_switcher_delete_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
     let label = label.into();
-    crate::outlined_icon_button(id, format!("Delete {label}"), navigation_icon(app_contract::NavigationIcon::Trash2), px(40.0), RADIUS_MD, theme).small().flex_none().bg(theme.surface)
+    crate::outlined_icon_button(id, format!("Delete {label}"), navigation_icon(NavigationIcon::Trash2), px(40.0), RADIUS_MD, theme).small().flex_none().bg(theme.surface)
 }
 
 pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    crate::outlined_action_button(id, label, icon, theme).h(px(TOPBAR_ACTION_HEIGHT)).px(px(TOPBAR_ACTION_HORIZONTAL_PADDING)).rounded(px(RADIUS_MD))
+    crate::outlined_button(id, theme)
+        .label(label)
+        .icon(icon)
+        .text_color(theme.accent)
+        .text_size(gpui::rems(TEXT_SM / 16.0))
+        .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
+        .h(px(TOPBAR_ACTION_HEIGHT))
+        .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
+        .rounded(px(RADIUS_MD))
 }
 
 pub fn topbar_icon_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
@@ -314,24 +309,12 @@ pub fn browser_settings_fieldset(title: impl Into<SharedString>, theme: BrowserT
     div().w_full().flex().flex_col().gap(px(SPACE_SM)).child(div().text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(title.into()))
 }
 
-pub fn browser_settings_font_choices(theme: BrowserTheme) -> Div {
-    browser_settings_button_group(theme)
-}
-
 pub fn browser_settings_button_group(theme: BrowserTheme) -> Div {
     div().flex().flex_row().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.border)
 }
 
-pub fn browser_settings_font_row(title: impl Into<SharedString>, choices: impl IntoElement, theme: BrowserTheme) -> Div {
-    browser_settings_compact_row(title, choices, theme)
-}
-
 pub fn browser_settings_compact_row(title: impl Into<SharedString>, choices: impl IntoElement, theme: BrowserTheme) -> Div {
     div().w_full().flex().flex_row().items_center().justify_between().gap(px(SPACE_MD)).child(div().text_size(gpui::rems(TEXT_XS / 16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(title.into())).child(choices)
-}
-
-pub fn browser_settings_font_button(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool, font_family: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    browser_settings_choice_button(id, label, checked, theme).font_family(font_family)
 }
 
 pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool, theme: BrowserTheme) -> Button {

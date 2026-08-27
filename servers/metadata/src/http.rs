@@ -184,11 +184,13 @@ async fn rich_classifications(State(service): State<MetadataService>, headers: H
     let item_count = u64::try_from(request.isbns.len()).unwrap_or(u64::MAX);
     let metrics = service.state.clone();
     let processing_started = Instant::now();
-    let result = match run_database(service, move |service| service.classify_rich(request)).await {
+    let fallback = service.clone();
+    let mut result = match run_database(service, move |service| service.classify_rich(request)).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return api_error(StatusCode::BAD_REQUEST, &error.to_string()),
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup worker failed: {error}")),
     };
+    fallback.apply_library_of_congress_fallback(&mut result).await;
     record_processed_items(&metrics, item_count, processing_started.elapsed());
     let (content_type, encoded) = if binary {
         match metadata_contract::encode_v2_response(&result) {
@@ -226,11 +228,13 @@ async fn rich_enrichment(State(service): State<MetadataService>, headers: Header
     let item_count = u64::try_from(request.isbns.len()).unwrap_or(u64::MAX);
     let metrics = service.state.clone();
     let processing_started = Instant::now();
-    let result = match run_database(service, move |service| service.enrich_rich(request)).await {
+    let fallback = service.clone();
+    let mut result = match run_database(service, move |service| service.enrich_rich(request)).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => return api_error(StatusCode::BAD_REQUEST, &error.to_string()),
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup worker failed: {error}")),
     };
+    fallback.apply_library_of_congress_fallback(&mut result).await;
     record_processed_items(&metrics, item_count, processing_started.elapsed());
     let (content_type, encoded) = if binary {
         match metadata_contract::encode_v2_response(&result) {

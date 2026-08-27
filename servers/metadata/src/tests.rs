@@ -82,7 +82,9 @@ fn edition_identity_candidate_query_uses_title_and_work_indexes() {
     let query = edition_candidate_query(1);
     let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
     let plan = statement
-        .query_map(params![0, "the example book", 16, MAX_RAW_TITLE_CANDIDATES, MAX_RAW_TITLE_CANDIDATES, MAX_REVERSE_TITLE_CANDIDATES + 1], |row| row.get::<_, String>(3))
+        .query_map(params![0, "the example book", 16, i64::try_from(MAX_RAW_TITLE_CANDIDATES).unwrap(), i64::try_from(MAX_RAW_TITLE_CANDIDATES).unwrap(), i64::try_from(MAX_REVERSE_TITLE_CANDIDATES + 1).unwrap()], |row| {
+            row.get::<_, String>(3)
+        })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()

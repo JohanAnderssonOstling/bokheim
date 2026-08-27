@@ -93,24 +93,17 @@ pub fn storage_figures(used: impl Into<SharedString>, of_quota: impl Into<Shared
         .child(div().text_size(gpui::rems(TEXT_SM / 16.0)).text_color(theme.text_muted).child(available.into()))
 }
 
-/// A horizontal track that the caller fills with [`meter_segment`] children.
-/// Whatever is left unfilled is free space, so the track keeps the page
-/// background rather than a colour of its own.
-pub fn meter_track(theme: BrowserTheme) -> Div {
-    div().w_full().h(px(METER_HEIGHT)).flex().flex_row().overflow_hidden().border_1().border_color(theme.border).bg(theme.page_bg)
-}
-
-/// `fraction` is the share of the whole quota this segment occupies.
-pub fn meter_segment(fraction: f32, color: Hsla) -> Div {
-    div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(color)
-}
-
-pub fn meter_legend() -> Div {
-    div().w_full().flex().flex_row().flex_wrap().gap_x(px(SPACE_MD)).gap_y(px(SPACE_XS))
-}
-
-pub fn meter_legend_entry(color: Hsla, label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().flex().flex_row().items_center().gap(px(SPACE_XS)).child(div().w(px(8.0)).h(px(8.0)).flex_none().bg(color)).child(div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(label.into()))
+/// The quota meter and its matching legend. Each tuple is `(fraction, color,
+/// label)`; fractions are clamped to the track while labels retain the same
+/// color association below it.
+pub fn storage_meter(segments: impl IntoIterator<Item = (f32, Hsla, SharedString)>, theme: BrowserTheme) -> Div {
+    let mut track = div().w_full().h(px(METER_HEIGHT)).flex().flex_row().overflow_hidden().border_1().border_color(theme.border).bg(theme.page_bg);
+    let mut legend = div().w_full().flex().flex_row().flex_wrap().gap_x(px(SPACE_MD)).gap_y(px(SPACE_XS));
+    for (fraction, color, label) in segments {
+        track = track.child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(color));
+        legend = legend.child(div().flex().flex_row().items_center().gap(px(SPACE_XS)).child(div().w(px(8.0)).h(px(8.0)).flex_none().bg(color)).child(div().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(label)));
+    }
+    div().w_full().flex().flex_col().gap(px(SPACE_SM)).child(track).child(legend)
 }
 
 /// Shades for the quota segments, walking the accent away from itself so
@@ -128,19 +121,6 @@ pub fn usage_segment_color(index: usize, theme: BrowserTheme) -> Hsla {
     color
 }
 
-/// A right-aligned amount in a fixed column so sizes stack into a readable
-/// column instead of drifting with the library name.
-pub fn usage_amount(amount: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w(px(USAGE_AMOUNT_WIDTH)).flex_none().text_right().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text).child(amount.into())
-}
-
-/// The second of the two amounts a library row carries. Quieter than
-/// [`usage_amount`] because the page leads with what the account is charged
-/// for; what is downloaded here answers a different question.
-pub fn usage_amount_secondary(amount: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w(px(USAGE_AMOUNT_WIDTH)).flex_none().text_right().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(amount.into())
-}
-
 /// Names the two amount columns, so a row of bare numbers cannot be read as one
 /// quantity measured twice.
 pub fn usage_column_headings(server: Option<SharedString>, device: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -154,10 +134,27 @@ pub fn usage_column_headings(server: Option<SharedString>, device: impl Into<Sha
     row.child(heading(device.into())).child(div().w(px(USAGE_BAR_WIDTH)).flex_none())
 }
 
-/// One library's share of the largest library on the device, so the rows can be
-/// compared to each other at a glance.
-pub fn usage_bar(fraction: f32, theme: BrowserTheme) -> Div {
-    div().w(px(USAGE_BAR_WIDTH)).h(px(USAGE_BAR_HEIGHT)).flex_none().flex().flex_row().overflow_hidden().bg(theme.page_bg).child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(theme.accent))
+/// A complete library-usage list with the shared row rhythm.
+pub fn library_usage_list(rows: impl IntoIterator<Item = Div>) -> Div {
+    div().w_full().flex().flex_col().gap(px(SPACE_SM)).children(rows)
+}
+
+/// One library's identity, optional server amount, device amount, comparison
+/// bar, and state control in their fixed columns.
+pub fn library_usage_row(title: impl Into<SharedString>, detail: impl Into<SharedString>, server_amount: Option<SharedString>, device_amount: impl Into<SharedString>, fraction: f32, state: impl IntoElement, theme: BrowserTheme) -> Div {
+    let detail = detail.into();
+    let mut identity = div().flex_1().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).child(div().line_clamp(1).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(FontWeight::SEMIBOLD).child(title.into()));
+    if !detail.is_empty() {
+        identity = identity.child(div().line_clamp(1).text_size(gpui::rems(TEXT_XS / 16.0)).text_color(theme.text_muted).child(detail));
+    }
+    let amount = |text: SharedString, color| div().w(px(USAGE_AMOUNT_WIDTH)).flex_none().text_right().text_size(gpui::rems(TEXT_XS / 16.0)).text_color(color).child(text);
+    let mut row = div().w_full().min_h(px(58.0)).px(px(SPACE_XS)).py(px(SPACE_SM)).flex().items_center().gap(px(SPACE_MD)).border_b_1().border_color(theme.border).child(identity);
+    if let Some(server_amount) = server_amount {
+        row = row.child(amount(server_amount, theme.text));
+    }
+    row.child(amount(device_amount.into(), theme.text_muted))
+        .child(div().w(px(USAGE_BAR_WIDTH)).h(px(USAGE_BAR_HEIGHT)).flex_none().flex().flex_row().overflow_hidden().bg(theme.page_bg).child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(theme.accent)))
+        .child(state)
 }
 
 /// The activity section: what the device has been doing, newest first.

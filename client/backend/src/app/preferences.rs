@@ -1,28 +1,18 @@
 //! Device and synchronized application preferences.
 
-pub use app_contract::preferences::*;
-use std::fs;
+pub use app_preferences::*;
 use std::io;
-use std::path::PathBuf;
 
 const PREFERENCES_FILE: &str = "reader_preferences.json";
 const BROWSING_PREFERENCES_FILE: &str = "browsing_preferences.json";
 impl crate::app::BackendContext {
-    pub fn browsing_preferences_path(&self) -> PathBuf {
-        self.app_data_dir().join(BROWSING_PREFERENCES_FILE)
-    }
-
     pub fn load_browsing_preferences(&self) -> io::Result<BrowsingPreferences> {
-        match fs::read(self.browsing_preferences_path()) {
-            Ok(bytes) => serde_json::from_slice::<BrowsingPreferences>(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BrowsingPreferences::default()),
-            Err(error) => Err(error),
-        }
+        self.read_platform_value(BROWSING_PREFERENCES_FILE)?.map_or_else(|| Ok(BrowsingPreferences::default()), |bytes| serde_json::from_slice(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
     }
 
     pub fn save_browsing_preferences(&self, preferences: &BrowsingPreferences) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        super::persistence::write_json_atomic(&self.browsing_preferences_path(), &bytes)
+        self.write_platform_value(BROWSING_PREFERENCES_FILE, &bytes)
     }
 
     pub fn apply_browsing_preference_patch(&self, patch: BrowsingPreferencePatch) -> io::Result<BrowsingPreferences> {
@@ -32,21 +22,13 @@ impl crate::app::BackendContext {
         Ok(preferences)
     }
 
-    pub fn reader_preferences_path(&self) -> PathBuf {
-        self.app_data_dir().join(PREFERENCES_FILE)
-    }
-
     pub fn load_reader_preferences(&self) -> io::Result<ReaderPreferences> {
-        match fs::read(self.reader_preferences_path()) {
-            Ok(bytes) => serde_json::from_slice::<ReaderPreferences>(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ReaderPreferences::default()),
-            Err(error) => Err(error),
-        }
+        self.read_platform_value(PREFERENCES_FILE)?.map_or_else(|| Ok(ReaderPreferences::default()), |bytes| serde_json::from_slice(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)))
     }
 
     pub fn save_reader_preferences(&self, preferences: ReaderPreferences) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        super::persistence::write_json_atomic(&self.reader_preferences_path(), &bytes)
+        self.write_platform_value(PREFERENCES_FILE, &bytes)
     }
 
     pub fn apply_reader_preference_patch(&self, patch: ReaderPreferencePatch) -> io::Result<ReaderPreferences> {
@@ -88,20 +70,6 @@ mod tests {
         assert_eq!(updated.interface_font(), UiFontFamily::Serif);
         assert_eq!(context.load_browsing_preferences().unwrap(), updated);
         assert!(serde_json::from_str::<BrowsingPreferences>(r#"{"interface_font":"unknown"}"#).is_err());
-    }
-
-    #[test]
-    fn browsing_options_cover_every_closed_value_once() {
-        let options = BrowsingPreferenceOptions::default();
-        assert_eq!(options.themes.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite]);
-        assert!(options.themes.iter().all(|option| !option.label.is_empty() && !option.description.is_empty()));
-        assert_eq!(ApplicationTheme::GrecoFuturistic.next(), ApplicationTheme::LibrarySerif);
-        assert_eq!(ApplicationTheme::LibrarySerif.next(), ApplicationTheme::ClassicWhite);
-        assert_eq!(ApplicationTheme::ClassicWhite.next(), ApplicationTheme::GrecoFuturistic);
-        assert_eq!(options.fonts.iter().map(|option| option.value).collect::<Vec<_>>(), vec![UiFontFamily::SansSerif, UiFontFamily::Serif]);
-        assert_eq!(options.fonts.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(), vec!["Sans Serif", "Serif"]);
-        assert!(options.fonts.iter().all(|option| !option.font_name.is_empty()));
-        assert!(options.fonts.iter().all(|option| !option.generic_family.is_empty()));
     }
 
     #[test]
@@ -157,16 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_preferences_write_replaces_the_complete_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reader_preferences.json");
-        super::super::persistence::write_json_atomic(&path, br#"{"font_size_px":20.0}"#).unwrap();
-        super::super::persistence::write_json_atomic(&path, br#"{"font_size_px":24.0}"#).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), br#"{"font_size_px":24.0}"#);
-        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
-    }
-
-    #[test]
     fn client_preference_contexts_do_not_leak_state_between_instances() {
         let first_dir = tempfile::tempdir().unwrap();
         let second_dir = tempfile::tempdir().unwrap();
@@ -178,7 +136,7 @@ mod tests {
 
         assert_eq!(first.load_reader_preferences().unwrap().zoom(), 1.75);
         assert_eq!(second.load_reader_preferences().unwrap().zoom(), ReaderPreferences::default().zoom());
-        assert!(!second.reader_preferences_path().exists());
+        assert!(second.read_platform_value(PREFERENCES_FILE).unwrap().is_none());
     }
 
     #[test]
@@ -186,11 +144,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::PlatformLocal(directory.path().to_path_buf())).unwrap();
         let malformed = br#"{"zoom":99.0}"#;
-        fs::write(context.reader_preferences_path(), malformed).unwrap();
+        context.write_platform_value(PREFERENCES_FILE, malformed).unwrap();
 
         let error = context.load_reader_preferences().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(fs::read(context.reader_preferences_path()).unwrap(), malformed);
+        assert_eq!(context.read_platform_value(PREFERENCES_FILE).unwrap().as_deref(), Some(malformed.as_slice()));
     }
 
     #[test]
@@ -200,46 +158,10 @@ mod tests {
         let updated = context.apply_reader_preference_patch(ReaderPreferencePatch::FontSizePx(28.0)).unwrap();
         assert_eq!(updated.font_size_px(), 28.0);
 
-        let before_invalid_patch = fs::read(context.reader_preferences_path()).unwrap();
+        let before_invalid_patch = context.read_platform_value(PREFERENCES_FILE).unwrap();
         let error = context.apply_reader_preference_patch(ReaderPreferencePatch::FontSizePx(100.0)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(fs::read(context.reader_preferences_path()).unwrap(), before_invalid_patch);
-    }
-
-    #[test]
-    fn reader_capabilities_make_renderer_specific_support_explicit() {
-        let native = ReaderCapabilities::for_engine(ReaderEngine::Native);
-        let foliate = ReaderCapabilities::for_engine(ReaderEngine::Foliate);
-        assert!(native.supports(ReaderPreferenceKey::PdfZoomMode));
-        assert!(native.supports(ReaderPreferenceKey::PdfPageCount));
-        assert!(native.supports(ReaderPreferenceKey::PdfZoom));
-        assert!(native.supports(ReaderPreferenceKey::PdfTrimMargins));
-        assert!(native.supports(ReaderPreferenceKey::LineHeight));
-        assert!(native.supports(ReaderPreferenceKey::FontFamily));
-        assert!(native.supports(ReaderPreferenceKey::TextAlignment));
-        assert!(!native.supports(ReaderPreferenceKey::Hyphenation));
-        assert!(native.supports(ReaderPreferenceKey::MaxColumnCount));
-        assert!(!foliate.supports(ReaderPreferenceKey::PdfZoomMode));
-        assert!(!foliate.supports(ReaderPreferenceKey::PdfTrimMargins));
-        assert!(foliate.supports(ReaderPreferenceKey::Hyphenation));
-    }
-
-    #[test]
-    fn exported_constraints_are_the_same_constants_used_by_validation() {
-        let constraints = ReaderPreferenceConstraints::default();
-        assert_eq!(constraints.font_size_px, [FONT_SIZE_MIN, FONT_SIZE_MAX]);
-        assert!(ReaderPreferences::default().set_font_size_px(constraints.font_size_px[0]).is_ok());
-        assert!(ReaderPreferences::default().set_font_size_px(constraints.font_size_px[1]).is_ok());
-        assert!(ReaderPreferences::default().set_font_size_px(constraints.font_size_px[1] + 1.0).is_err());
-    }
-
-    #[test]
-    fn preference_options_cover_every_closed_enum_value_once() {
-        let options = ReaderPreferenceOptions::default();
-        assert_eq!(options.flows.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFlow::Paginated, ReaderFlow::Scrolled]);
-        assert_eq!(options.font_families.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderFontFamily::Publisher, ReaderFontFamily::Serif, ReaderFontFamily::SansSerif]);
-        assert_eq!(options.text_alignments.iter().map(|option| option.value).collect::<Vec<_>>(), vec![ReaderTextAlignment::Publisher, ReaderTextAlignment::Start, ReaderTextAlignment::Justify]);
-        assert_eq!(options.pdf_zoom_modes.iter().map(|option| option.value).collect::<Vec<_>>(), vec![PdfZoomMode::FitWidth, PdfZoomMode::Fixed, PdfZoomMode::FitHeight]);
+        assert_eq!(context.read_platform_value(PREFERENCES_FILE).unwrap(), before_invalid_patch);
     }
 
     #[test]

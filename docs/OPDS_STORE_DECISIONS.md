@@ -6,17 +6,19 @@ Date: 2026-08-09
 
 Catalog support is split by responsibility:
 
-- `shared/opds` implements direct external OPDS behavior: registry validation,
+- `servers/opds-cache/crates/opds` implements direct external OPDS behavior: registry validation,
   OPDS 1/2 parsing, conditional requests, URL resolution, search templates, and
   verified acquisition downloads.
-- `shared/litteraturbanken` implements Litteraturbanken's public catalogue API,
+- `servers/opds-cache/crates/litteraturbanken` implements Litteraturbanken's public catalogue API,
   provider model, URL construction, and download request requirements. A thin
-  adapter in `shared/opds` presents it through the existing catalogue pipeline.
-- `shared/catalog-model` and `shared/catalog-contract` own provider-neutral
-  values and the client/cache-server protocol.
-- `shared/catalog-core` owns behavior shared by both providers: normalization,
-  SQLite storage, language filtering, OPDS-to-contract conversion, and cover
-  thumbnails.
+  adapter in `servers/opds-cache/crates/opds` presents it through the existing catalogue pipeline.
+- `shared/catalog-model` owns provider-neutral values, while
+  `shared/catalog-protocol` owns only the client/cache-server page and search
+  protocol.
+- `shared/catalog-core` owns provider-neutral catalogue models and low-level
+  SQLite storage primitives, plus language filtering and cover caching. It has
+  no OPDS routing, authoritative page/search/subject queries, response
+  materialization, or server job/operations types.
 - `client/catalog-client` talks only to the catalogue server for curated source
   discovery, pages, searches, covers, and acquisitions. Its SQLite cache holds
   only catalogue data the client has encountered and remains available for
@@ -28,11 +30,18 @@ Catalog support is split by responsibility:
   stale subject cards are not rejected against a temporarily empty local registry.
   The active client registry persists the provider-neutral `CatalogSource`
   records returned by `/api/catalog/sources`, together with opaque root
-  locators used only in server requests. OPDS endpoint identities, origin
-  canonicalization, and provider URL policy remain server responsibilities.
+  locators used only in server requests. One client-owned store and SQLite
+  connection serialize registry persistence, page/search materialization, and
+  partial subject-card caching. Those tables and behaviors live exclusively in
+  `client/catalog-client`; the shared schema contains no client-value table.
+  OPDS endpoint identities, origin canonicalization, and provider URL policy
+  remain server responsibilities.
 - `servers/opds-cache` crawls curated external catalogs and serves its complete
-  local SQLite snapshot. It never contacts an upstream catalog on a user search
-  or page request.
+  local SQLite snapshot. Its `store` module owns crawl generations, extraction
+  and cover queues, backfills, process controls, operational inventory, and
+  materialized index refreshes. Shared cache code exposes only the low-level
+  transaction primitives needed by that server-owned layer. The server never
+  contacts an upstream catalog on a user search or page request.
 - `client/backend` adds imports and a synchronized, library-owned relation from
   catalog source/publication identity to content hash, but contains no OPDS
   protocol implementation. Catalog URLs and cached metadata remain outside the
@@ -43,9 +52,16 @@ without duplicating OPDS or persistence types.
 
 ## Storage and refresh
 
-The client and cache server use the same SQLite schema and publication search
-implementation. A catalog URL change invalidates that catalog's stored pages.
-Existing caches from older implementations are ignored.
+The client and cache server use the same base SQLite catalogue schema, but not
+the same directional behavior. Authoritative page/search SQL and native delta
+assembly live in `servers/opds-cache`; offline page/search resolution and
+response materialization live in `client/catalog-client`. `catalog-core`
+exposes only the neutral row and transaction primitives both sides need. The
+server layers a separately versioned schema over the base for worker queues,
+process controls, enrichment state, operational review data, and materialized
+serving indexes. Opening a client cache never creates those server tables. A
+catalog URL change invalidates that catalog's stored pages. Existing caches
+from older base-schema implementations are ignored.
 
 The cache server owns one crawl task per catalog. Catalogs are spread evenly
 over a fixed 24-hour cycle. A crawl begins at the catalog root, follows the
@@ -64,19 +80,46 @@ Provider page compaction applies only to catalogue-page navigation. During
 ingestion the server follows an upstream continuation chain and stores it as
 one complete logical page; clients download and cache that page without a
 catalogue range or provider-pagination contract.
-Subject navigation instead synchronizes the complete descendant collection for
-one opaque subject locator in bounded transport chunks. Native and browser
-clients atomically replace that locator's membership in local SQLite, reuse
-unchanged publication payloads only when both epoch and revision match, and
-remove memberships no longer returned by the server. Search, source/language/
-format filters, facets, sorting, and UI ranges are then evaluated locally; they
-are not part of the network cache identity.
 
-A synchronized subject collection is reused without a request for five minutes.
-After that freshness window, the client fetches only the collection manifest's
-epoch and revision. It downloads and atomically replaces the collection only
-when that version changed. The server does not expose a subject endpoint that
-accepts client query, filter, sort, or range state.
+Project Gutenberg description cleanup, work identity, and illustrated-edition
+preference are server ingestion policy. Ordinary pages are canonicalized before
+they enter the authoritative snapshot, and subject indexing applies the same
+preference across the complete source generation. Clients neither rewrite nor
+deduplicate Gutenberg payloads, and the neutral shared schema stores no
+Gutenberg-specific presentation flag.
+
+Provider-native popularity extraction is also server-owned. The OPDS adapter
+interprets Gutenberg download counts and Litteraturbanken interaction tags,
+then passes an opaque numeric ordering score into neutral shared storage. The
+richer reading-log and rating popularity value is a server-local model.
+
+Crawl write preparation is server-owned as well. Encoding page batches,
+precomputing publication hashes and normalized inventory, assigning provider
+popularity, and staging authoritative generations all live in the server store;
+the shared cache exposes only neutral row primitives and the client's
+server-sequenced payload write.
+
+Replacement-generation carry-forward is server policy. Copying enriched
+subjects, extracted table-of-contents terms, and popularity observations from
+the active generation into a staged crawl is implemented by the server crawl
+store rather than the shared cache.
+
+Subject navigation is server-authoritative. Each request includes its opaque
+subject locator, search text, source/language/format filters, sort order, and
+display range. The server evaluates that complete query against one SQLite
+snapshot and returns ordered entry IDs, navigation, facets, totals, and range
+metadata together. Native clients retain only immutable publication-card
+payloads for the current server epoch and fetch missing cards by returned ID;
+they do not synchronize collection membership or reproduce subject queries in
+client SQLite. Browser clients receive the same authoritative result with the
+cards included directly.
+
+The native subject endpoint returns only that authoritative index. A separate
+bounded payload endpoint resolves missing immutable cards. The browser JSON
+endpoint returns the full card response directly; transport strategy is not a
+client-provided browse flag. Subject query, navigation, facet, ordering, and
+range SQL lives exclusively in the catalogue server. The publication-card
+cache table and its resolver live exclusively in `client/catalog-client`.
 
 ## Search
 
@@ -101,7 +144,7 @@ supported.
 ## Languages
 
 The Store exposes a persisted list of included language tags and sends that
-selection with internal search requests while applying the same filter locally.
+selection with subject and catalogue search requests for server-side filtering.
 An empty selection means all languages. All catalogue providers remain visible,
 and an explicitly selected single-language catalogue remains browsable.
 Catalogue-wide searches skip sources with no language overlap. A catalogue

@@ -11,9 +11,8 @@ it.
 | Surface | Tracks | Displays |
 |---|---|---|
 | CBZ | `current_page` / `page_count` | Yes — `"{}/{}"`, via the search match-count component |
-| PDF | `current_page` / `page_count` | No — only labels bookmarks |
+| PDF | `current_page` / `page_count` | Yes — page and percentage in the reader toolbar |
 | EPUB | `fraction`, `location`/`total_locations`, `section`/`section_count` | No |
-| Mobile | `currentLocation` / `totalLocations` | No — only labels bookmarks |
 
 EPUB has the richest position data of the four and shows none of it. A reader
 that cannot tell you how far through you are is missing the readout users want

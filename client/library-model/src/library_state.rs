@@ -1,4 +1,4 @@
-use crate::{Contributor, MarcRelatorCode, PublicationMetadata, ReadingPosition, UnixMillis};
+use crate::{BookMetadataState, ReadingPosition, UnixMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::BookFormat;
@@ -43,18 +43,4 @@ pub enum DirectoryLifecycleState {
 pub struct ReadingPositionState {
     pub location: ReadingPosition,
     pub progress: f32,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BookMetadataState {
-    pub title: String,
-    pub contributors: Vec<Contributor>,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub publication: PublicationMetadata,
-}
-impl BookMetadataState {
-    pub fn authors(&self) -> impl Iterator<Item = &Contributor> {
-        self.contributors.iter().filter(|contributor| contributor.role_code() == MarcRelatorCode(*b"aut"))
-    }
 }

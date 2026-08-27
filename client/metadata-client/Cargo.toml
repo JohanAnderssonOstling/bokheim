@@ -8,6 +8,11 @@ publish = false
 workspace = true
 
 [dependencies]
+futures-util = "0.3"
 metadata-contract = { path = "../../shared/metadata-contract" }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.11", default-features = false, features = ["stream"] }
+tokio = { version = "1", features = ["time"] }
 url = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }

@@ -10,14 +10,15 @@ workspace = true
 [dependencies]
 axum = "0.7"
 blake3 = "1"
-catalog-contract = { path = "../../shared/catalog-contract" }
-catalog-core = { path = "../../shared/catalog-core" }
-book-metadata = { path = "../../client/book-metadata" }
-library-model = { path = "../../client/library-model", features = ["authoritative-taxonomy"] }
+catalog-model = { path = "../../shared/catalog-model" }
+catalog-core = { path = "../../shared/catalog-core", features = ["server-extension"] }
+catalog-protocol = { path = "../../shared/catalog-protocol" }
+publication-inspection = { path = "../../shared/publication-inspection" }
+publication-model = { path = "../../shared/publication-model" }
 subject-projection = { path = "../../shared/subject-projection", features = ["authoritative-taxonomy"] }
 metadata-contract = { path = "../../shared/metadata-contract" }
 mobi.workspace = true
-opds = { path = "../../shared/opds" }
+opds = { path = "crates/opds" }
 lopdf = { version = "0.44", default-features = false }
 roxmltree = "0.20"
 thumbnail = { path = "../../client/thumbnail", features = ["pdf"] }

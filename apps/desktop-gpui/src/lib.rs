@@ -16,11 +16,10 @@ use std::sync::{Arc, LazyLock};
 #[cfg(feature = "audiobooks")]
 use std::time::Duration;
 
+use bokheim_backend::app::{AppBackend, BackendContext};
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, ApplicationRoot, BrowserRoot, OpenReader, OpenedBook};
-use epub_svelte_lib::app::preferences::ReaderPreferencePatch;
-use epub_svelte_lib::app::{AppBackend, BackendContext};
 use gpui::{App, AppContext, Bounds, Entity, SharedString, WeakEntity, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 #[cfg(feature = "kobo")]
@@ -132,18 +131,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
 
     match backend.reader_preferences() {
         Ok(preferences) => {
-            let mut session = saved_session.borrow_mut();
-            session.reader_preferences.font_size = preferences.font_size_px();
-            session.reader_preferences.column_width = preferences.max_line_width_px();
-            session.reader_preferences.scale = preferences.zoom();
-            session.reader_preferences.line_height = preferences.line_height();
-            session.reader_preferences.font_family = preferences.font_family();
-            session.reader_preferences.text_alignment = preferences.text_alignment();
-            session.reader_preferences.max_column_count = preferences.max_column_count();
-            session.reader_preferences.pdf_zoom_mode = preferences.pdf_zoom_mode();
-            session.reader_preferences.pdf_page_count = preferences.pdf_page_count();
-            session.reader_preferences.pdf_zoom = preferences.pdf_zoom();
-            session.reader_preferences.pdf_trim_margins = preferences.pdf_trim_margins();
+            saved_session.borrow_mut().reader_preferences.apply_synchronized(&preferences);
         }
         Err(error) => log::warn!("failed to load shared reader preferences: {error}"),
     }
@@ -155,40 +143,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
     let save_reader_settings: SaveReaderSettings = Rc::new(move |preferences: ReaderPreferences, cx: &mut App| {
         let mut session = reader_settings.borrow_mut();
         let previous = session.reader_preferences.clone();
-        let mut patches = Vec::new();
-        if previous.font_size != preferences.font_size {
-            patches.push(ReaderPreferencePatch::FontSizePx(preferences.font_size));
-        }
-        if previous.column_width != preferences.column_width {
-            patches.push(ReaderPreferencePatch::MaxLineWidthPx(preferences.column_width));
-        }
-        if previous.scale != preferences.scale {
-            patches.push(ReaderPreferencePatch::Zoom(preferences.scale));
-        }
-        if previous.line_height != preferences.line_height {
-            patches.push(ReaderPreferencePatch::LineHeight(preferences.line_height));
-        }
-        if previous.font_family != preferences.font_family {
-            patches.push(ReaderPreferencePatch::FontFamily(preferences.font_family));
-        }
-        if previous.text_alignment != preferences.text_alignment {
-            patches.push(ReaderPreferencePatch::TextAlignment(preferences.text_alignment));
-        }
-        if previous.max_column_count != preferences.max_column_count {
-            patches.push(ReaderPreferencePatch::MaxColumnCount(preferences.max_column_count));
-        }
-        if previous.pdf_zoom_mode != preferences.pdf_zoom_mode {
-            patches.push(ReaderPreferencePatch::PdfZoomMode(preferences.pdf_zoom_mode));
-        }
-        if previous.pdf_page_count != preferences.pdf_page_count {
-            patches.push(ReaderPreferencePatch::PdfPageCount(preferences.pdf_page_count));
-        }
-        if previous.pdf_zoom != preferences.pdf_zoom {
-            patches.push(ReaderPreferencePatch::PdfZoom(preferences.pdf_zoom));
-        }
-        if previous.pdf_trim_margins != preferences.pdf_trim_margins {
-            patches.push(ReaderPreferencePatch::PdfTrimMargins(preferences.pdf_trim_margins));
-        }
+        let patches = previous.synchronized_patches(&preferences);
         session.reader_preferences = preferences;
         drop(session);
         reader_session_saves.schedule(cx);
@@ -269,7 +224,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         }
         #[cfg(feature = "audiobooks")]
         if is_audiobook {
-            let requested_position = initial_target.as_deref().and_then(app_contract::library::audiobook_toc_position).map(Duration::from_millis);
+            let requested_position = initial_target.as_deref().and_then(library_model::audiobook_toc_position).map(Duration::from_millis);
             let content_hash = locator.content_hash();
             let prepare_library = library.clone();
             let persistence_library = library;
@@ -335,7 +290,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
             }
             return;
         }
-        let library: Rc<dyn app_contract::backend::LibraryBackend> = Rc::new(library);
+        let library = Rc::new(library);
         if root
             .update(cx, move |root, cx| {
                 let return_to_library = root.return_to_library_callback(cx);
@@ -363,7 +318,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         .open_window(
             WindowOptions {
                 window_bounds: Some(browser_bounds),
-                titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(epub_svelte_lib::APP_NAME)), ..Default::default() }),
+                titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(bokheim_backend::APP_NAME)), ..Default::default() }),
                 focus: true,
                 app_id,
                 icon,
@@ -392,7 +347,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
                         })
                         .detach();
                     }
-                    ApplicationRoot::new(browser, epub_svelte_lib::APP_NAME)
+                    ApplicationRoot::new(browser, bokheim_backend::APP_NAME)
                 });
                 *application_root.borrow_mut() = Some(application.downgrade());
                 let content = platform_content(application, cx);
@@ -429,7 +384,7 @@ fn forward_incoming_files(files: async_channel::Receiver<gpui::SelectedFile>, ap
     .detach();
 }
 
-fn forward_book_removals(removals: async_channel::Receiver<(epub_svelte_lib::LibraryId, epub_svelte_lib::ContentHash)>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
+fn forward_book_removals(removals: async_channel::Receiver<(bokheim_backend::LibraryId, bokheim_backend::ContentHash)>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Ok((library_id, content_hash)) = removals.recv().await {
             let Some(root) = application_root.borrow().clone() else { continue };

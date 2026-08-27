@@ -894,6 +894,7 @@ fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
     }
 
     compacted.pagination = Default::default();
+    canonicalize_gutenberg_page(&mut compacted);
     compacted
 }
 
@@ -942,7 +943,7 @@ fn page_has_popular_rank(page: &CatalogPage) -> bool {
     page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).any(|publication| publication.metadata.popularity_ranks.iter().any(|rank| rank.source.starts_with("opds:sort/popular:")))
 }
 
-pub(crate) fn canonicalize_page_layout_locators(endpoint: &OpdsEndpoint, page: &mut catalog_contract::CatalogPageLayout) -> Result<(), CatalogServiceError> {
+pub(crate) fn canonicalize_page_layout_locators(endpoint: &OpdsEndpoint, page: &mut catalog_protocol::CatalogPageLayout) -> Result<(), CatalogServiceError> {
     page.locator = canonicalize_opds_catalog_locator(endpoint, &page.locator).map_err(|error| CatalogServiceError(error.to_string()))?;
     for link in page.navigation.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.navigation.iter_mut())).chain(page.facets.iter_mut().flat_map(|facet| facet.links.iter_mut())) {
         if let CatalogLinkTarget::Page { locator } = &mut link.target {

@@ -32,12 +32,7 @@ impl MetadataClient {
         if !matches!(base_url.scheme(), "http" | "https") || !base_url.username().is_empty() || base_url.password().is_some() || base_url.query().is_some() || base_url.fragment().is_some() {
             return Err(MetadataClientError::new("metadata server URL must be an HTTP origin or base path without credentials, query, or fragment"));
         }
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .user_agent(format!("Bokheim/{} metadata-client", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| MetadataClientError::new(error.to_string()))?;
+        let http = reqwest::Client::new();
         Ok(Self { http, base_url })
     }
 
@@ -58,14 +53,18 @@ impl MetadataClient {
     }
 
     async fn post(&self, path: &str, media_type: &str, body: Vec<u8>) -> Result<Vec<u8>, MetadataClientError> {
-        let mut response =
-            self.http.post(self.endpoint(path)?).header(reqwest::header::ACCEPT, media_type).header(reqwest::header::CONTENT_TYPE, media_type).body(body).send().await.map_err(|error| MetadataClientError::new(error.to_string()))?;
+        let response = tokio::time::timeout(Duration::from_secs(30), self.http.post(self.endpoint(path)?).header(reqwest::header::ACCEPT, media_type).header(reqwest::header::CONTENT_TYPE, media_type).body(body).send())
+            .await
+            .map_err(|_| MetadataClientError::new("metadata request timed out"))?
+            .map_err(|error| MetadataClientError::new(error.to_string()))?;
         if !response.status().is_success() {
             let status = response.status();
             let mut detail = Vec::new();
             const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
+            let mut stream = response.bytes_stream();
             while detail.len() < MAX_ERROR_DETAIL_BYTES {
-                let Some(chunk) = response.chunk().await.map_err(|error| MetadataClientError::new(error.to_string()))? else { break };
+                let Some(chunk) = stream.next().await else { break };
+                let chunk = chunk.map_err(|error| MetadataClientError::new(error.to_string()))?;
                 let remaining = MAX_ERROR_DETAIL_BYTES - detail.len();
                 detail.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
             }
@@ -76,8 +75,10 @@ impl MetadataClient {
         if response.content_length().is_some_and(|length| length > metadata_contract::MAX_RESPONSE_BYTES as u64) {
             return Err(MetadataClientError::new("metadata response is too large"));
         }
+        let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| MetadataClientError::new(error.to_string()))? {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| MetadataClientError::new(error.to_string()))?;
             if bytes.len().saturating_add(chunk.len()) > metadata_contract::MAX_RESPONSE_BYTES {
                 return Err(MetadataClientError::new("metadata response is too large"));
             }
@@ -107,3 +108,4 @@ mod tests {
         assert!(MetadataClient::new("https://user@example.test/").is_err());
     }
 }
+use futures_util::StreamExt;

@@ -9,11 +9,6 @@ pub(crate) fn outlined_button(id: impl Into<ElementId>, theme: BrowserTheme) -> 
     Button::new(id).secondary().outline().border_color(theme.border)
 }
 
-/// An outlined text-and-icon action with the standard application treatment.
-pub fn outlined_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, theme: BrowserTheme) -> Button {
-    outlined_button(id, theme).label(label).icon(icon).text_color(theme.accent).text_size(gpui::rems(TEXT_SM / 16.0)).font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
-}
-
 /// An outlined square icon action. Semantic wrappers own their dimensions and
 /// any contextual colour or background treatment.
 pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, size: impl Into<Length> + Clone, radius: f32, theme: BrowserTheme) -> Button {

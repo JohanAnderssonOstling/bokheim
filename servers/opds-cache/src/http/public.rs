@@ -1,7 +1,7 @@
 use super::super::{
     fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogSearchRequest, CatalogService, CatalogServiceError,
-    CatalogSource, CatalogSourceId, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue,
-    IntoResponse, Json, MetadataEnrichmentRequest, Method, Path, Query, Response, Router, State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL, MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
+    CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, Method, Path, Query, Response, Router, State, StatusCode,
+    COVER_CACHE_CONTROL, DATA_CACHE_CONTROL, MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
 };
 use super::operations::catalog_operations;
 
@@ -13,20 +13,15 @@ pub fn app(service: CatalogService) -> Router {
         .route("/api/opds/sources/:source_id/page", post(catalog_page))
         .route("/api/opds/sources/:source_id/search", post(catalog_search))
         .route("/api/opds/subjects", post(catalog_subjects))
-        .route("/api/opds/subject-capabilities", post(catalog_subject_capabilities))
         .route("/api/opds/subject-publications", post(catalog_subject_publications))
-        .route("/api/opds/subject-collection/manifest", post(catalog_subject_collection_manifest))
         .route("/api/opds/sources/:source_id/acquire", post(catalog_acquire))
         .route("/api/opds/sources/:source_id/cover", get(catalog_cover))
         .route("/api/opds/covers/:asset", get(catalog_cover_asset))
         .route("/api/web/catalogs", get(browser_catalogs))
         .route("/api/web/stats", get(browser_catalog_stats))
-        .route("/api/metadata/enrichment", post(browser_metadata_enrichment))
-        .route("/api/metadata/enrichment/v2", post(browser_metadata_enrichment_v2))
         .route("/api/web/sources/:source_id/page", post(browser_catalog_page))
         .route("/api/web/sources/:source_id/search", post(browser_catalog_search))
-        .route("/api/web/subject-collection", post(browser_catalog_subject_collection))
-        .route("/api/web/subject-collection/manifest", post(browser_catalog_subject_collection_manifest))
+        .route("/api/web/subjects", post(browser_catalog_subjects))
         .route("/api/web/sources/:source_id/acquire", post(browser_catalog_acquire))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET, Method::POST, Method::OPTIONS]).allow_headers([header::ACCEPT, header::CONTENT_TYPE, header::IF_NONE_MATCH]).expose_headers([
             header::CONTENT_DISPOSITION,
@@ -89,15 +84,8 @@ pub(crate) async fn catalog_search(State(service): State<CatalogService>, AxumPa
 
 pub(crate) async fn catalog_subjects(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
     require_wire_accept(&headers)?;
-    let request: CatalogSubjectBrowseRefreshRequest = decode_wire_request(&headers, &body)?;
-    let response = service.browse_subjects_delta(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
-    wire_response(&response, DATA_CACHE_CONTROL)
-}
-
-pub(crate) async fn catalog_subject_capabilities(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
-    require_wire_accept(&headers)?;
     let request: CatalogSubjectBrowseRequest = decode_wire_request(&headers, &body)?;
-    let response = service.subject_browse_capabilities(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let response = service.subject_index(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
@@ -105,13 +93,6 @@ pub(crate) async fn catalog_subject_publications(State(service): State<CatalogSe
     require_wire_accept(&headers)?;
     let request: CatalogSubjectPublicationPayloadRequest = decode_wire_request(&headers, &body)?;
     let response = service.subject_publication_payloads(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
-    wire_response(&response, DATA_CACHE_CONTROL)
-}
-
-pub(crate) async fn catalog_subject_collection_manifest(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
-    require_wire_accept(&headers)?;
-    let request: CatalogSubjectCollectionManifestRequest = decode_wire_request(&headers, &body)?;
-    let response = service.subject_collection_manifest(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
@@ -127,41 +108,6 @@ pub(crate) async fn browser_catalogs(State(service): State<CatalogService>) -> R
 
 pub(crate) async fn browser_catalog_stats(State(service): State<CatalogService>) -> Result<Response, ApiError> {
     catalog_operations(State(service)).await
-}
-
-pub(crate) async fn browser_metadata_enrichment(State(service): State<CatalogService>, Json(request): Json<MetadataEnrichmentRequest>) -> Result<Response, ApiError> {
-    let response = service.rich_metadata_enrichment(request).await.map_err(ApiError::unavailable)?;
-    json_response(&legacy_metadata_enrichment(response), "no-store")
-}
-
-pub(crate) async fn browser_metadata_enrichment_v2(State(service): State<CatalogService>, Json(request): Json<MetadataEnrichmentRequest>) -> Result<Response, ApiError> {
-    let response = service.rich_metadata_enrichment(request).await.map_err(ApiError::unavailable)?;
-    json_response(&response, "no-store")
-}
-
-pub(crate) fn legacy_metadata_enrichment(response: metadata_contract::RichMetadataEnrichmentResponse) -> metadata_contract::MetadataEnrichmentResponse {
-    metadata_contract::MetadataEnrichmentResponse {
-        snapshot: response.snapshot,
-        results: response
-            .results
-            .into_iter()
-            .map(|result| metadata_contract::IsbnMetadataResult {
-                requested_isbn: result.requested_isbn,
-                canonical_isbn13: result.canonical_isbn13,
-                status: result.status,
-                matches: result
-                    .matches
-                    .into_iter()
-                    .map(|matched| metadata_contract::WorkMetadataMatch {
-                        open_library_work_id: matched.open_library_work_id,
-                        exact_edition_ids: matched.exact_edition_ids,
-                        classifications: matched.classifications,
-                        authors: matched.authors,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
 }
 
 pub(crate) async fn browser_catalog_page(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, Json(mut request): Json<CatalogPageRequest>) -> Result<Response, ApiError> {
@@ -180,19 +126,8 @@ pub(crate) async fn browser_catalog_search(State(service): State<CatalogService>
     json_response(&page, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn browser_catalog_subject_collection(State(service): State<CatalogService>, Json(mut request): Json<CatalogSubjectBrowseRefreshRequest>) -> Result<Response, ApiError> {
-    request.request.supported_languages.clear();
-    request.request.source_ids.clear();
-    request.request.query.clear();
-    request.request.book_formats.clear();
-    request.identifiers_only = false;
-    request.collection_sync = true;
-    let response = service.browse_subjects_delta(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
-    json_response(&response, DATA_CACHE_CONTROL)
-}
-
-pub(crate) async fn browser_catalog_subject_collection_manifest(State(service): State<CatalogService>, Json(request): Json<CatalogSubjectCollectionManifestRequest>) -> Result<Response, ApiError> {
-    let response = service.subject_collection_manifest(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+pub(crate) async fn browser_catalog_subjects(State(service): State<CatalogService>, Json(request): Json<CatalogSubjectBrowseRequest>) -> Result<Response, ApiError> {
+    let response = service.browse_subjects(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     json_response(&response, DATA_CACHE_CONTROL)
 }
 

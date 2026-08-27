@@ -1,4 +1,4 @@
-use super::authors::{AuthorIdPolicy, prepare_contributors, prepare_publication_agents, replace_book_contributors};
+use super::authors::{prepare_contributors, prepare_publication_agents, replace_book_contributors, AuthorIdPolicy};
 use super::*;
 use library_model::Contributor;
 #[cfg(test)]

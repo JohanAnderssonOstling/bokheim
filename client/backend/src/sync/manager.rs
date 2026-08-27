@@ -4,29 +4,27 @@ use super::asset_sync::{AssetSyncConfig, AssetSyncEngine};
 #[cfg(test)]
 use super::error::SyncError;
 use super::error::SyncResult;
-use super::filesystem::FilesystemProjector;
-#[cfg(test)]
-use super::state_sync::{StateExchangeResult, StateSyncResult, CURSOR_RECOVERY_PENDING_KEY};
 use super::state_sync::{StateSyncConfig, StateSyncEngine};
+#[cfg(test)]
+use super::state_sync::{StateSyncResult, CURSOR_RECOVERY_PENDING_KEY};
 #[cfg(test)]
 use super::transfer::TransferJob;
 use super::transfer::{TransferOrigin, TransferQueue, TransferRuntime, TransferWorker, TransferWorkerConfig};
 use crate::library::database as db;
-use crate::platform::scanner::LibraryEvent;
+use crate::platform::database::Database;
+use crate::platform::library_events::{LibraryEvent, LibraryEventSender};
 #[cfg(test)]
 use crate::BlobKind;
 #[cfg(test)]
 use crate::RelativeDirPath;
 use crate::{ContentHash, ServerUrl};
-use crossbeam_channel::Sender;
 #[cfg(test)]
 use library_replica::coalesce_mutations_for_push;
 #[cfg(test)]
 use library_replica::{mutations_ready_for_push, prepare_push};
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,31 +65,25 @@ pub(crate) struct SyncOutcome {
     pub mutation_issues: Vec<sync_common::MutationIssue>,
 }
 
-pub type DbPool = Pool<SqliteConnectionManager>;
-
 pub(crate) struct SyncManagerConfig {
-    pub(crate) db_pool: DbPool,
+    pub(crate) database: Database,
     pub(crate) replica_id: ReplicaId,
     pub(crate) server_url: ServerUrl,
     pub(crate) library_id: LibraryId,
-    pub(crate) library_root: PathBuf,
-    pub(crate) session_path: PathBuf,
-    pub(crate) event_tx: Option<Sender<LibraryEvent>>,
+    pub(crate) event_tx: Option<LibraryEventSender>,
     pub(crate) transfer_runtime: TransferRuntime,
     pub(crate) pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
 }
 
 #[derive(Debug)]
 pub struct SyncManager {
-    db_pool: DbPool,
+    database: Database,
     replica_id: ReplicaId,
     server_url: ServerUrl,
     http_client: reqwest::Client,
     library_id: LibraryId,
-    library_root: PathBuf,
-    event_tx: Option<Sender<LibraryEvent>>,
-    session: Arc<std::sync::RwLock<Option<crate::auth::Session>>>,
-    session_path: PathBuf,
+    event_tx: Option<LibraryEventSender>,
+    session: Arc<std::sync::RwLock<Option<sync_client::Session>>>,
     transfer_runtime: TransferRuntime,
     transfer_queue: Arc<TransferQueue>,
     pending_thumbnail_jobs: Arc<std::sync::Mutex<HashSet<ContentHash>>>,
@@ -101,18 +93,16 @@ pub struct SyncManager {
 
 impl SyncManager {
     pub(crate) fn new(config: SyncManagerConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let http_client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        let transfer_queue = Arc::new(TransferQueue::with_history_db(config.db_pool.clone()));
+        let http_client = reqwest::Client::new();
+        let transfer_queue = Arc::new(TransferQueue::with_history_db(config.database.clone()));
         Ok(Self {
-            db_pool: config.db_pool,
+            database: config.database,
             replica_id: config.replica_id,
             server_url: config.server_url,
             http_client,
             library_id: config.library_id,
-            library_root: config.library_root,
             event_tx: config.event_tx,
             session: Arc::new(std::sync::RwLock::new(None)),
-            session_path: config.session_path,
             transfer_runtime: config.transfer_runtime,
             transfer_queue,
             pending_thumbnail_jobs: config.pending_thumbnail_jobs,
@@ -130,29 +120,25 @@ impl SyncManager {
         self.session.read().map(|s| s.is_some()).unwrap_or(false)
     }
 
-    pub fn current_session(&self) -> Option<crate::auth::Session> {
+    pub fn current_session(&self) -> Option<sync_client::Session> {
         self.session.read().ok().and_then(|s| s.clone())
     }
 
-    pub fn server_url(&self) -> &ServerUrl {
-        &self.server_url
-    }
-
     pub fn bound_user_id(&self) -> Result<Option<String>, String> {
-        let conn = self.db_pool.get().map_err(|error| error.to_string())?;
+        let conn = self.database.get().map_err(|error| error.to_string())?;
         db::get_sync_metadata(&conn, "bound_user_id").map_err(|error| error.to_string())
     }
 
     /// Binds this local library to the session's server-issued user. Switching
     /// accounts clears account-specific remote presence and pull-cursor state,
     /// while retaining the local library itself.
-    pub fn adopt_session(&self, session: crate::auth::Session) -> Result<(), String> {
+    pub fn adopt_session(&self, session: sync_client::Session) -> Result<(), String> {
         if session.server_url() != &self.server_url {
             return Err(format!("session belongs to {}, but this library syncs with {}", session.server_url(), self.server_url));
         }
         let mut rebound = false;
         {
-            let conn = self.db_pool.get().map_err(|e| e.to_string())?;
+            let conn = self.database.get().map_err(|e| e.to_string())?;
             match db::get_sync_metadata(&conn, "bound_user_id").map_err(|error| error.to_string())? {
                 Some(bound) if bound != session.user_id() => {
                     db::rebind_sync_account(&conn, session.user_id()).map_err(|error| error.to_string())?;
@@ -165,7 +151,6 @@ impl SyncManager {
         if rebound {
             self.inventory_checked.store(false, Ordering::Release);
         }
-        crate::auth::save_session_to(&session, &self.session_path).map_err(|error| error.to_string())?;
         let mut guard = self.session.write().map_err(|_| "session lock is poisoned".to_string())?;
         *guard = Some(session);
         Ok(())
@@ -176,15 +161,11 @@ impl SyncManager {
             let mut guard = self.session.write().map_err(|_| "session lock is poisoned".to_string())?;
             *guard = None;
         }
-        crate::auth::clear_session_from(&self.session_path).map_err(|error| error.to_string())
+        Ok(())
     }
 
     pub(crate) async fn synchronize(&self, policy: SyncPolicy) -> SyncResult<SyncOutcome> {
         let _sync_guard = self.sync_gate.lock().await;
-        // Anything a previous run recorded but did not finish is owed to the
-        // disk before this one advances the cursor any further; the pull that
-        // queued it has already moved past it.
-        self.run_owed_fs_actions();
         if !self.is_signed_in() {
             return Ok(SyncOutcome::default());
         }
@@ -204,8 +185,8 @@ impl SyncManager {
         } else if state.assets_needed {
             self.sync_assets(TransferOrigin::Background).await?;
         }
-        let completed_at = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
-        let conn = self.db_pool.get()?;
+        let completed_at = u64::try_from(web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH)?.as_millis())?;
+        let conn = self.database.get()?;
         db::set_sync_metadata(&conn, "last_successful_sync_at", &completed_at.to_string())?;
         Ok(SyncOutcome { next_reading_upload_in: state.next_reading_upload_in, mutation_issues: state.mutation_issues })
     }
@@ -216,15 +197,7 @@ impl SyncManager {
     }
 
     fn state_engine(&self) -> StateSyncEngine<'_> {
-        StateSyncEngine::new(StateSyncConfig {
-            db_pool: &self.db_pool,
-            http_client: &self.http_client,
-            library_id: self.library_id,
-            replica_id: self.replica_id,
-            session: self.session.as_ref(),
-            inventory_checked: &self.inventory_checked,
-            filesystem: self.filesystem_projector(),
-        })
+        StateSyncEngine::new(StateSyncConfig { db_pool: &self.database, http_client: &self.http_client, library_id: self.library_id, replica_id: self.replica_id, session: self.session.as_ref(), inventory_checked: &self.inventory_checked })
     }
 
     #[cfg(test)]
@@ -247,13 +220,10 @@ impl SyncManager {
     fn transfer_worker(&self) -> TransferWorker {
         TransferWorker::new(TransferWorkerConfig {
             http_client: self.http_client.clone(),
-            server_url: self.server_url.clone(),
             library_id: self.library_id,
-            library_root: self.library_root.clone(),
-            db_pool: self.db_pool.clone(),
+            db_pool: self.database.clone(),
             event_tx: self.event_tx.clone(),
             session: Arc::clone(&self.session),
-            cache_root: self.session_path.parent().unwrap_or(Path::new(".")).join("remote-book-cache"),
             runtime: self.transfer_runtime.clone(),
             queue: Arc::clone(&self.transfer_queue),
         })
@@ -261,10 +231,9 @@ impl SyncManager {
 
     fn asset_engine(&self) -> AssetSyncEngine<'_> {
         AssetSyncEngine::new(AssetSyncConfig {
-            db_pool: &self.db_pool,
+            db_pool: &self.database,
             http_client: &self.http_client,
             library_id: self.library_id,
-            library_root: &self.library_root,
             session: self.session.as_ref(),
             pending_thumbnail_jobs: self.pending_thumbnail_jobs.as_ref(),
             transfer_worker: self.transfer_worker(),
@@ -288,12 +257,12 @@ impl SyncManager {
     }
 
     pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.db_pool.get()?;
+        let mut conn = self.database.get()?;
         db::request_book_downloads(&mut conn, content_hashes, TransferOrigin::UserInitiated)?;
         drop(conn);
         if let Some(tx) = &self.event_tx {
             for content_hash in content_hashes {
-                let _ = tx.send(LibraryEvent::DownloadStatusChanged { content_hash: *content_hash, state: crate::DownloadState::Queued });
+                let _ = tx.try_send(LibraryEvent::DownloadStatusChanged { content_hash: *content_hash, state: crate::DownloadState::Queued });
             }
         }
         Ok(())
@@ -310,39 +279,13 @@ impl SyncManager {
     }
 
     #[cfg(test)]
-    async fn exchange_events_with_server(&self, starting_cursor: sync_common::SyncCursor, reading_debounce: Option<Duration>) -> SyncResult<StateExchangeResult> {
+    async fn exchange_events_with_server(&self, starting_cursor: sync_common::SyncCursor, reading_debounce: Option<Duration>) -> SyncResult<StateSyncResult> {
         self.state_engine().exchange_events_with_server(starting_cursor, reading_debounce).await
     }
 
     #[cfg(test)]
     async fn pull_events_from_server(&self, cursor: sync_common::SyncCursor) -> SyncResult<()> {
         self.state_engine().pull_events_from_server(cursor).await
-    }
-
-    /// Performs the filesystem work recorded by applied pull pages, retiring
-    /// each entry as it completes.
-    ///
-    /// Every action re-derives what it needs from committed state and tolerates
-    /// having already been performed, so replaying whatever a crash left behind
-    /// is safe. An action that genuinely fails (a directory a user dropped
-    /// files into, say) is logged and retired rather than retried forever: the
-    /// log exists to survive a crash, not to make the filesystem obey.
-    pub(crate) fn run_owed_fs_actions(&self) {
-        self.filesystem_projector().run_owed_actions();
-    }
-
-    fn filesystem_projector(&self) -> FilesystemProjector<'_> {
-        FilesystemProjector::new(&self.db_pool, &self.library_root)
-    }
-
-    #[cfg(test)]
-    fn run_fs_action(&self, conn: &rusqlite::Connection, action: &db::FsAction) -> Result<(), Box<dyn std::error::Error>> {
-        self.filesystem_projector().run_action(conn, action)
-    }
-
-    #[cfg(test)]
-    fn remove_remote_dir(&self, path: &RelativeDirPath) {
-        self.filesystem_projector().remove_remote_dir(path);
     }
 }
 
@@ -351,7 +294,6 @@ mod tests {
     use super::*;
     use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookMetadataState, ReadingPositionState};
     use library_replica::{MutationBody, StateMutation};
-    use r2d2_sqlite::SqliteConnectionManager;
     use std::io::Write;
     use std::path::PathBuf;
     use sync_common::{LibraryRevision, MutationRejection, MutationRejectionReason, ReplicaSeq, ServerMutation, SyncCursor};
@@ -487,9 +429,9 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             let dir_id = fixture_dir_id("inventory/shelf");
             let hash = fixture_content_hash(7);
             conn.execute("INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle) VALUES(?1,'00000000-0000-0000-0000-000000000000','Shelf','00000000-0000-0000-0000-000000000000','Shelf',0)", [dir_id.to_string()])
@@ -510,7 +452,7 @@ mod tests {
         assert!(pushed.iter().any(|kind| kind == "directory_lifecycle"));
         assert!(pushed.iter().any(|kind| kind == "book_lifecycle"));
         assert!(pushed.iter().any(|kind| kind == "placement"));
-        assert!(db::get_pending_mutations(&manager.db_pool.get().unwrap()).unwrap().is_empty());
+        assert!(db::get_pending_mutations(&manager.database.get().unwrap()).unwrap().is_empty());
         server.abort();
     }
 
@@ -559,12 +501,12 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
         manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(2).ok()));
         server.abort();
     }
@@ -586,11 +528,11 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
         manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(10).ok()));
         server.abort();
     }
@@ -610,16 +552,16 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             db::set_sync_metadata(&conn, "last_pull_server_seq", "10").unwrap();
             assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(10).ok()));
         }
 
         manager.pull_events_from_server(cursor(LibraryRevision::new(10).ok())).await.unwrap();
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(12).ok()));
         assert_eq!(db::get_sync_metadata(&conn, "last_pull_server_seq").unwrap(), None);
         server.abort();
@@ -665,13 +607,72 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
         manager.exchange_events_with_server(SyncCursor::default(), None).await.unwrap();
 
         assert_eq!(state.exchanges.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(state.pulls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
+        assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(2).ok()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn push_and_pull_pagination_advance_in_the_same_exchange_loop() {
+        #[derive(Clone)]
+        struct ExchangeState(Arc<std::sync::atomic::AtomicUsize>);
+
+        async fn exchange_page(axum::extract::State(state): axum::extract::State<ExchangeState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+            let request = decode_sync_exchange(&headers, &body);
+            let call = state.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let pull = match call {
+                0 => {
+                    assert_eq!(request.cursor, SyncCursor::default());
+                    assert_eq!(request.mutations.len(), sync_common::MAX_PUSH_MUTATIONS);
+                    pull_response(vec![pulled_change(1, added(1, "Concurrent pages", 10))], LibraryRevision::new(1).ok(), true)
+                }
+                1 => {
+                    assert_eq!(request.cursor.state_revision, LibraryRevision::new(1).ok());
+                    assert_eq!(request.mutations.len(), 1, "the next push page shares the next pull request");
+                    pull_response(vec![pulled_change(2, deleted(1))], LibraryRevision::new(2).ok(), false)
+                }
+                _ => panic!("push and pull pagination should finish in two exchanges"),
+            };
+            binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() }, pull })
+        }
+
+        let state = ExchangeState(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(exchange_page)).with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let mut manager = test_manager(temp.path());
+        manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        {
+            let mut conn = manager.database.get().unwrap();
+            let tx = conn.transaction().unwrap();
+            for sequence in 1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 1 {
+                let mutation = reading_change(sequence, sequence, "epubcfi(/6/2)", sequence);
+                tx.execute(
+                    "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position',?3,?4,?5)",
+                    rusqlite::params![sequence as i64, mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let result = manager.exchange_events_with_server(SyncCursor::default(), None).await.unwrap();
+
+        assert!(result.mutation_issues.is_empty());
+        assert_eq!(state.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let conn = manager.database.get().unwrap();
+        assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(2).ok()));
         server.abort();
     }
@@ -710,9 +711,9 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         {
-            let mut conn = manager.db_pool.get().unwrap();
+            let mut conn = manager.database.get().unwrap();
             let tx = conn.transaction().unwrap();
             for sequence in 1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 1 {
                 let mutation = reading_change(sequence, sequence, "epubcfi(/6/2)", sequence);
@@ -730,7 +731,7 @@ mod tests {
         assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         let rejected = state.rejected.lock().unwrap().unwrap();
         assert_eq!(exchange.mutation_issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::MissingDependency })]);
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         let pending = db::get_pending_mutations(&conn).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].mutation_id, rejected);
@@ -738,7 +739,7 @@ mod tests {
     }
 
     fn queue_outbox_reading_change(manager: &SyncManager, mutation: &StateMutation, sequence: u64) {
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         conn.execute(
             "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position',?3,?4,?5)",
             rusqlite::params![sequence as i64, mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()],
@@ -778,7 +779,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         for sequence in 1..=2 {
             queue_outbox_reading_change(&manager, &reading_change(sequence, sequence, "epubcfi(/6/2)", sequence), sequence);
         }
@@ -787,7 +788,7 @@ mod tests {
 
         // Side effects first, so this test reports what the exchange actually
         // did before it reports how it answered.
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         let pending = db::get_pending_mutations(&conn).unwrap();
         assert_eq!(pending.len(), 1, "the deferred mutation stays queued for a later attempt");
         assert_eq!(pending[0].mutation_id, state.deferred.lock().unwrap().unwrap());
@@ -839,16 +840,16 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             db::set_pull_cursor(&conn, cursor(LibraryRevision::new(99).ok())).unwrap();
         }
 
         manager.sync_once().await.expect("a rejected cursor must be recoverable without operator intervention");
 
         assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 3, "recovery performs one clean pull before the one-shot publishing retry");
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()), "the device adopts the server's current head");
         assert_eq!(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY).unwrap(), None, "successful recovery clears its durable marker");
         server.abort();
@@ -860,13 +861,13 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             db::set_pull_cursor(&conn, cursor(LibraryRevision::new(99).ok())).unwrap();
         }
 
         manager.begin_cursor_recovery().unwrap();
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), SyncCursor::default());
         assert_eq!(db::get_sync_metadata(&conn, CURSOR_RECOVERY_PENDING_KEY).unwrap().as_deref(), Some("1"));
     }
@@ -914,9 +915,9 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             let hash = fixture_content_hash(77);
             conn.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES(?1,'Newer local value',10,'epub')", [hash.as_str()]).unwrap();
             assert!(!db::state_inventory(&conn).unwrap().is_empty());
@@ -931,7 +932,7 @@ mod tests {
 
         assert_eq!(state.calls.load(std::sync::atomic::Ordering::SeqCst), 3, "one rejected exchange is followed by a clean pull and one publishing retry");
         assert!(state.pushed_kinds.lock().unwrap().iter().any(|kind| kind == sync_common::mutation_kind::BOOK_LIFECYCLE), "the newer local lifecycle value must be republished even though its key still exists remotely");
-        assert_eq!(db::get_sync_metadata(&manager.db_pool.get().unwrap(), CURSOR_RECOVERY_PENDING_KEY).unwrap(), None, "successful recovery clears its durable marker");
+        assert_eq!(db::get_sync_metadata(&manager.database.get().unwrap(), CURSOR_RECOVERY_PENDING_KEY).unwrap(), None, "successful recovery clears its durable marker");
         server.abort();
     }
 
@@ -1027,9 +1028,7 @@ mod tests {
             StateMutation { mutation_id: sync_common::MutationId::new(), body: added(3, "send-now", 1), changed_at: millis(1), replica_seq: local_seq(2) },
             reading_change(3, 2, "epubcfi(/6/4)", 95_000),
         ];
-        let now = std::time::UNIX_EPOCH + Duration::from_millis(100_000);
-
-        let (ready, remaining) = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), now).unwrap();
+        let (ready, remaining) = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), 100_000).unwrap();
 
         assert_eq!(ready.len(), 1);
         assert!(matches!(ready[0].body, MutationBody::BookLifecycle { .. }));
@@ -1039,9 +1038,7 @@ mod tests {
     #[test]
     fn reading_upload_is_released_after_the_quiet_period() {
         let changes = vec![reading_change(1, 1, "epubcfi(/6/6)", 70_000)];
-        let now = std::time::UNIX_EPOCH + Duration::from_millis(100_000);
-
-        let (ready, remaining) = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), now).unwrap();
+        let (ready, remaining) = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), 100_000).unwrap();
 
         assert_eq!(ready.len(), 1);
         assert!(remaining.is_none());
@@ -1051,9 +1048,7 @@ mod tests {
     fn pathological_future_reading_timestamp_is_rejected_instead_of_scheduling_an_unbounded_delay() {
         let now_millis = 100_000;
         let changes = vec![reading_change(1, 1, "epubcfi(/6/8)", now_millis + sync_common::MAX_LWW_FUTURE_SKEW_MS + 1)];
-        let now = std::time::UNIX_EPOCH + Duration::from_millis(now_millis);
-
-        let error = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), now).unwrap_err();
+        let error = mutations_ready_for_push(changes, Some(Duration::from_secs(30)), now_millis).unwrap_err();
 
         assert!(error.to_string().contains("pathologically far in the future"));
     }
@@ -1139,7 +1134,7 @@ mod tests {
         let manager = test_manager(temp.path());
         let requested = reading_change(1, 1, "epubcfi(/6/24)", 1);
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute(
                 "INSERT INTO sync_outbox(replica_seq,mutation_id,state_kind,state_key,body,changed_at) VALUES(?1,?2,'reading_position','1',?3,?4)",
                 rusqlite::params![requested.replica_seq.get() as i64, requested.mutation_id.to_string(), sync_common::wire::encode(&requested.body).unwrap(), i64::try_from(requested.changed_at).unwrap()],
@@ -1150,7 +1145,7 @@ mod tests {
 
         assert!(manager.apply_push_response(&[requested.mutation_id], &response).is_err());
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
     }
 
@@ -1173,7 +1168,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
         let requested = reading_change(1, 1, "epubcfi(/6/24)", 1);
         queue_outbox_reading_change(&manager, &requested, 1);
 
@@ -1181,7 +1176,7 @@ mod tests {
         assert_eq!(outcome.mutation_issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { mutation_id: requested.mutation_id, reason: MutationRejectionReason::InvalidPayload })]);
         assert!(outcome.assets_needed, "the pull half's asset signal must survive the rejection");
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert!(db::get_pending_mutations(&conn).unwrap().is_empty());
         assert_eq!(db::get_pull_cursor(&conn).unwrap(), cursor(LibraryRevision::new(1).ok()));
         let pulled_title: String = conn.query_row("SELECT title FROM book WHERE content_hash=?1", [fixture_content_hash(9).as_str()], |row| row.get(0)).unwrap();
@@ -1225,7 +1220,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        *manager.session.write().unwrap() = Some(crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
+        *manager.session.write().unwrap() = Some(sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap());
 
         // A live placement whose file is on disk, which the pull then removes.
         // Seeded as remote-origin state: a local-origin insert would stamp the
@@ -1234,7 +1229,7 @@ mod tests {
         let dir_id = fixture_dir_id("Shelf");
         let content_hash = fixture_content_hash(1);
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             db::set_sync_metadata(&conn, "change_origin", "remote").unwrap();
             conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1,'00000000-0000-0000-0000-000000000000','Shelf')", [dir_id.to_string()]).unwrap();
             conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [content_hash.as_str()]).unwrap();
@@ -1252,7 +1247,7 @@ mod tests {
         manager.pull_events_from_server(SyncCursor::default()).await.unwrap();
 
         assert!(!on_disk.exists(), "the synchronized removal reaches the file, not only the database");
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_pull_cursor(&conn).unwrap().state_revision, LibraryRevision::new(1).ok());
         assert!(db::pending_fs_actions(&conn).unwrap().is_empty(), "work that completed is retired rather than replayed on every later sync");
         server.abort();
@@ -1264,7 +1259,7 @@ mod tests {
     fn seed_tombstoned_placement(manager: &SyncManager, dir: &str, file_name: &str) -> (DirId, ContentHash, PathBuf) {
         let dir_id = fixture_dir_id(dir);
         let content_hash = fixture_content_hash(1);
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1,'00000000-0000-0000-0000-000000000000',?2)", rusqlite::params![dir_id.to_string(), dir]).unwrap();
         conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [content_hash.as_str()]).unwrap();
         conn.execute(
@@ -1272,7 +1267,7 @@ mod tests {
             rusqlite::params![content_hash.as_str(), dir_id.to_string(), file_name],
         )
         .unwrap();
-        let on_disk = manager.library_root.join(dir).join(file_name);
+        let on_disk = Path::new(&manager.library_root).join(dir).join(file_name);
         std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
         std::fs::write(&on_disk, b"book bytes").unwrap();
         (dir_id, content_hash, on_disk)
@@ -1293,7 +1288,7 @@ mod tests {
         // The pull page committed its cursor and its owed work, then the
         // process died before performing any of it.
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             let tx = conn.unchecked_transaction().unwrap();
             db::enqueue_fs_actions(&tx, &[db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() }]).unwrap();
             tx.commit().unwrap();
@@ -1303,7 +1298,7 @@ mod tests {
         manager.run_owed_fs_actions();
 
         assert!(!on_disk.exists(), "the next run must still owe, and perform, the synchronized deletion");
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert!(db::pending_fs_actions(&conn).unwrap().is_empty(), "completed work is retired so it is not repeated");
     }
 
@@ -1318,7 +1313,7 @@ mod tests {
         let action = db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() };
 
         for _ in 0..2 {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             let tx = conn.unchecked_transaction().unwrap();
             db::enqueue_fs_actions(&tx, std::slice::from_ref(&action)).unwrap();
             tx.commit().unwrap();
@@ -1327,7 +1322,7 @@ mod tests {
         }
 
         assert!(!on_disk.exists());
-        assert!(db::pending_fs_actions(&manager.db_pool.get().unwrap()).unwrap().is_empty());
+        assert!(db::pending_fs_actions(&manager.database.get().unwrap()).unwrap().is_empty());
     }
 
     /// One unreadable row must not become a second wedge: everything queued
@@ -1340,7 +1335,7 @@ mod tests {
         let (dir_id, content_hash, on_disk) = seed_tombstoned_placement(&manager, "Shelf", "book.epub");
 
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute("INSERT INTO pending_fs_action(action, created_at) VALUES(?1, 1)", [b"not a decodable action".to_vec()]).unwrap();
             let tx = conn.unchecked_transaction().unwrap();
             db::enqueue_fs_actions(&tx, &[db::FsAction::RetirePlacementFile { dir_id: dir_id.to_string(), content_hash: content_hash.to_string() }]).unwrap();
@@ -1350,7 +1345,7 @@ mod tests {
         manager.run_owed_fs_actions();
 
         assert!(!on_disk.exists(), "work queued behind an unreadable row still runs");
-        assert!(db::pending_fs_actions(&manager.db_pool.get().unwrap()).unwrap().is_empty());
+        assert!(db::pending_fs_actions(&manager.database.get().unwrap()).unwrap().is_empty());
     }
 
     /// Directory removals are recorded deepest first, so a parent is never
@@ -1360,12 +1355,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
-        let parent = manager.library_root.join("Shelf");
+        let parent = Path::new(&manager.library_root).join("Shelf");
         let child = parent.join("Sub");
         std::fs::create_dir_all(&child).unwrap();
 
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             let tx = conn.unchecked_transaction().unwrap();
             let mut paths = vec![RelativeDirPath::parse("/Shelf").unwrap(), RelativeDirPath::parse("/Shelf/Sub").unwrap()];
             paths.sort_by_key(|path| std::cmp::Reverse(path.as_path().components().count()));
@@ -1384,22 +1379,20 @@ mod tests {
     }
 
     fn test_manager_with_replica(root: &Path, replica_id: &str) -> SyncManager {
-        let manager = SqliteConnectionManager::file(root.join(crate::APP_HIDDEN_LIBRARY_DB_PATH)).with_init(|conn| db::configure_connection(conn));
-        let pool = Pool::builder().max_size(2).build(manager).unwrap();
+        let database = Database::open(root.join(crate::APP_HIDDEN_LIBRARY_DB_PATH), db::configure_connection).unwrap();
         {
-            let conn = pool.get().unwrap();
+            let conn = database.get().unwrap();
             db::init_db(&conn).unwrap();
         }
         SyncManager {
-            db_pool: pool,
+            database,
             replica_id: fixture_replica_id(replica_id),
             server_url: ServerUrl::parse("http://127.0.0.1:9").unwrap(),
             http_client: reqwest::Client::new(),
             library_id: fixture_library_id("library"),
-            library_root: root.canonicalize().unwrap(),
+            library_root: root.canonicalize().unwrap().to_string_lossy().into_owned(),
             event_tx: None,
             session: Arc::new(std::sync::RwLock::new(None)),
-            session_path: root.join(crate::APP_HIDDEN_SESSION_PATH),
             transfer_runtime: TransferRuntime::default(),
             transfer_queue: Arc::new(TransferQueue::default()),
             pending_thumbnail_jobs: Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -1422,10 +1415,9 @@ mod tests {
         let mut manager = test_manager(temp.path());
         manager.server_url = server_url;
         manager.library_id = library_id.clone();
-        crate::auth::save_session_to(&session, &manager.session_path).unwrap();
         *manager.session.write().unwrap() = Some(session.clone());
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         let transaction = conn.unchecked_transaction().unwrap();
         db::upsert_dir(&transaction, &fixture_dir_id("backend-e2e-dir"), &sync_common::ROOT_DIR_ID, &"Backend E2E".to_owned()).unwrap();
         transaction.commit().unwrap();
@@ -1449,8 +1441,7 @@ mod tests {
         std::fs::create_dir_all(writer_root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut writer = test_manager_with_replica(writer_root.path(), "backend-e2e-offline-writer");
         writer.library_id = library_id.clone();
-        let offline_session = crate::auth::Session::try_new(ServerUrl::parse("http://127.0.0.1:9").unwrap(), session.user_id().to_owned(), session.email().to_owned(), session.token().to_owned()).unwrap();
-        crate::auth::save_session_to(&offline_session, &writer.session_path).unwrap();
+        let offline_session = sync_client::Session::try_new(ServerUrl::parse("http://127.0.0.1:9").unwrap(), session.user_id().to_owned(), session.email().to_owned(), session.token().to_owned()).unwrap();
         *writer.session.write().unwrap() = Some(offline_session);
 
         // The writer has no network route while it makes its local changes.
@@ -1459,7 +1450,7 @@ mod tests {
         let first_dir = fixture_dir_id("backend-e2e-offline-a");
         let second_dir = fixture_dir_id("backend-e2e-offline-b");
         {
-            let conn = writer.db_pool.get().unwrap();
+            let conn = writer.database.get().unwrap();
             let transaction = conn.unchecked_transaction().unwrap();
             db::upsert_dir(&transaction, &first_dir, &sync_common::ROOT_DIR_ID, &"Offline A".to_owned()).unwrap();
             db::upsert_dir(&transaction, &second_dir, &sync_common::ROOT_DIR_ID, &"Offline B".to_owned()).unwrap();
@@ -1468,16 +1459,15 @@ mod tests {
         assert!(writer.sync_once().await.is_err(), "the unavailable server must fail the sync attempt");
         assert!(writer.sync_once().await.is_err(), "a repeated offline attempt must not consume the durable outbox");
         {
-            let conn = writer.db_pool.get().unwrap();
+            let conn = writer.database.get().unwrap();
             assert_eq!(db::get_pending_mutations(&conn).unwrap().len(), 6, "all three registers for each directory remain queued while offline");
         }
 
         writer.server_url = server_url.clone();
-        crate::auth::save_session_to(&session, &writer.session_path).unwrap();
         *writer.session.write().unwrap() = Some(session.clone());
         writer.sync_once().await.expect("reconnect and publish offline outbox");
         {
-            let conn = writer.db_pool.get().unwrap();
+            let conn = writer.database.get().unwrap();
             assert!(db::get_pending_mutations(&conn).unwrap().is_empty(), "server acknowledgement clears only the published outbox");
         }
 
@@ -1486,11 +1476,10 @@ mod tests {
         let mut observer = test_manager_with_replica(observer_root.path(), "backend-e2e-offline-observer");
         observer.server_url = server_url;
         observer.library_id = library_id;
-        crate::auth::save_session_to(&session, &observer.session_path).unwrap();
         *observer.session.write().unwrap() = Some(session);
         observer.sync_once().await.expect("second backend pulls the writer's offline history");
 
-        let conn = observer.db_pool.get().unwrap();
+        let conn = observer.database.get().unwrap();
         for (id, expected_name) in [(&first_dir, "Offline A"), (&second_dir, "Offline B")] {
             let actual_name: String = conn.query_row("SELECT name FROM dir WHERE id = ?1", [id.to_string()], |row| row.get(0)).unwrap();
             assert_eq!(actual_name, expected_name);
@@ -1531,10 +1520,9 @@ mod tests {
         let mut observer = test_manager_with_replica(observer_root.path(), "backend-e2e-pagination-observer");
         observer.server_url = server_url;
         observer.library_id = library_id;
-        crate::auth::save_session_to(&session, &observer.session_path).unwrap();
         *observer.session.write().unwrap() = Some(session);
         observer.sync_once().await.expect("drain every remote synchronization page");
-        let conn = observer.db_pool.get().unwrap();
+        let conn = observer.database.get().unwrap();
         let positions: i64 = conn.query_row("SELECT COUNT(*) FROM book WHERE read_pos IS NOT NULL", [], |row| row.get(0)).unwrap();
         assert_eq!(positions, sync_common::MAX_PULL_CHANGES as i64 + 1);
         let cursor = db::get_pull_cursor(&conn).unwrap();
@@ -1543,22 +1531,15 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires the PostgreSQL sync server started by run_sync_e2e.sh"]
-    async fn production_http_postgres_serves_assets_and_notification_endpoints() {
+    async fn production_http_postgres_serves_asset_endpoints() {
         let server_url = ServerUrl::parse(&std::env::var("SYNC_E2E_SERVER_URL").expect("SYNC_E2E_SERVER_URL")).expect("valid E2E server URL");
         let password = std::env::var("SYNC_E2E_ADMIN_PASSWORD").expect("SYNC_E2E_ADMIN_PASSWORD");
         let observer_session = sync_client::login(&server_url, "admin@bokheim.local", &password).await.expect("log in observer");
         let publisher_session = sync_client::login(&server_url, "admin@bokheim.local", &password).await.expect("log in publisher");
         assert_eq!(sync_client::current_account(&observer_session).await.unwrap().email, observer_session.email());
 
-        // A second credential must receive the publisher's change notification;
-        // the publisher's own credential is intentionally filtered by the hub.
-        let mut notifications = sync_client::connect_notifications(&observer_session).await.expect("connect authenticated notifications");
-        assert!(matches!(tokio::time::timeout(Duration::from_secs(2), notifications.next()).await.unwrap().unwrap(), Some(sync_common::api::notifications::NotificationMessage::Hello { .. })));
-
         let library_id = fixture_library_id("backend-e2e-assets");
         sync_client::upsert_library(&publisher_session, library_id.clone(), "Backend asset E2E".to_owned()).await.expect("create E2E library");
-        assert_eq!(tokio::time::timeout(Duration::from_secs(2), notifications.next()).await.unwrap().unwrap(), Some(sync_common::api::notifications::NotificationMessage::LibrariesChanged));
-        notifications.close().await;
         assert!(sync_client::list_libraries(&observer_session).await.unwrap().iter().any(|library| library.library_id == library_id));
 
         let client = reqwest::Client::new();
@@ -1626,14 +1607,12 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        let session = crate::auth::Session::try_new_with_expiry(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string(), Some(now + 60)).unwrap();
-        crate::auth::save_session_to(&session, &manager.session_path).unwrap();
+        let session = sync_client::Session::try_new_with_expiry(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string(), Some(now + 60)).unwrap();
         *manager.session.write().unwrap() = Some(session);
 
         manager.sync_once().await.unwrap();
 
         assert!(!manager.is_signed_in());
-        assert!(!manager.session_path.exists());
     }
 
     #[tokio::test]
@@ -1647,15 +1626,13 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let mut manager = test_manager(temp.path());
         manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
-        let session = crate::auth::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap();
-        crate::auth::save_session_to(&session, &manager.session_path).unwrap();
+        let session = sync_client::Session::try_new(manager.server_url.clone(), "user-1".to_string(), "reader".to_string(), TEST_AUTH_TOKEN.to_string()).unwrap();
         *manager.session.write().unwrap() = Some(session);
 
         let error = manager.sync_once().await.unwrap_err();
 
         assert!(matches!(error, SyncError::AuthenticationRequired));
         assert!(manager.is_signed_in());
-        assert!(manager.session_path.exists());
         server.abort();
     }
 
@@ -1667,22 +1644,22 @@ mod tests {
         let dir_id = fixture_dir_id("d1");
         let dir_id_text = dir_id.to_string();
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1, '00000000-0000-0000-0000-000000000000', 'Old')", [dir_id_text.as_str()]).unwrap();
         }
         std::fs::create_dir_all(temp.path().join("Old")).unwrap();
         std::fs::write(temp.path().join("Old").join(".biblos_uuid"), &dir_id_text).unwrap();
 
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute("UPDATE dir SET name='New' WHERE id=?1", [dir_id_text.as_str()]).unwrap();
         }
-        manager.run_fs_action(&manager.db_pool.get().unwrap(), &db::FsAction::MoveDir { dir_id: dir_id.to_string(), old_path: "Old".to_owned(), new_path: "New".to_owned() }).expect("a synchronized directory move relocates the folder");
+        manager.run_fs_action(&manager.database.get().unwrap(), &db::FsAction::MoveDir { dir_id: dir_id.to_string(), old_path: "Old".to_owned(), new_path: "New".to_owned() }).expect("a synchronized directory move relocates the folder");
 
         assert!(!temp.path().join("Old").exists());
         assert_eq!(std::fs::read_to_string(temp.path().join("New").join(".biblos_uuid")).unwrap(), dir_id_text);
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         let before: i64 = conn.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get(0)).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         db::upsert_dir(&tx, &dir_id, &sync_common::ROOT_DIR_ID, &"New".to_owned()).unwrap();
@@ -1700,8 +1677,8 @@ mod tests {
         std::fs::write(temp.path().join("A").join(".biblos_uuid"), "a").unwrap();
         std::fs::write(temp.path().join("A").join("B").join(".biblos_uuid"), "b").unwrap();
 
-        // Recorded deepest first, the order `pull_events_from_server_with_first`
-        // enqueues them in.
+        // Recorded deepest first, the order each applied pull page enqueues
+        // them in.
         for path in ["A/B", "A"] {
             manager.remove_remote_dir(&RelativeDirPath::parse(path).unwrap());
         }
@@ -1730,7 +1707,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         let dir_id = fixture_dir_id("d1").to_string();
         conn.execute("INSERT INTO dir(id, parent_id, name) VALUES (?1, '00000000-0000-0000-0000-000000000000', 'Shelf')", [dir_id.as_str()]).unwrap();
         conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
@@ -1738,15 +1715,7 @@ mod tests {
             .unwrap();
 
         let job = manager.download_job(&conn, &test_content_hash(), TransferOrigin::UserInitiated).unwrap().expect("live placement should produce a download job");
-        match job {
-            TransferJob::DownloadBlob { content_hash, placement, origin } => {
-                assert_eq!(content_hash, test_content_hash());
-                assert_eq!(placement.content_hash, test_content_hash());
-                assert_eq!(placement.rel_path.as_str(), "/Shelf/aaaaaaaaaaaa.epub");
-                assert_eq!(origin, TransferOrigin::UserInitiated);
-            }
-            _ => panic!("expected blob download"),
-        }
+        assert_eq!(job, TransferJob::download_blob(test_content_hash(), crate::BookPlacement::new(test_content_hash(), crate::RelativeBookPath::parse("/Shelf/aaaaaaaaaaaa.epub").unwrap()), TransferOrigin::UserInitiated,));
     }
 
     #[test]
@@ -1755,14 +1724,14 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let manager = test_manager(temp.path());
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
         }
 
         assert!(manager.request_download(test_content_hash()).is_err());
 
         {
-            let conn = manager.db_pool.get().unwrap();
+            let conn = manager.database.get().unwrap();
             conn.execute(
                 "INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=?1), 'book.epub', 'fp', 0)",
                 [TEST_CONTENT_HASH],
@@ -1771,7 +1740,32 @@ mod tests {
         }
         manager.request_download(test_content_hash()).unwrap();
 
-        let conn = manager.db_pool.get().unwrap();
+        let conn = manager.database.get().unwrap();
         assert_eq!(db::get_asset_requests(&conn, BlobKind::Book).unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
+    }
+
+    #[test]
+    fn durable_download_intent_rederives_work_after_queue_recreation() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+        let manager = test_manager(temp.path());
+        {
+            let conn = manager.database.get().unwrap();
+            conn.execute("INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, 'epub')", [TEST_CONTENT_HASH]).unwrap();
+            conn.execute(
+                "INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=?1), 'book.epub', 'fp', 0)",
+                [TEST_CONTENT_HASH],
+            )
+            .unwrap();
+        }
+        manager.request_download(test_content_hash()).unwrap();
+        assert!(manager.transfer_queue.statuses().is_empty(), "the queue is not the durable source of intent");
+        drop(manager);
+
+        let restored = test_manager(temp.path());
+        let conn = restored.database.get().unwrap();
+        assert_eq!(db::get_asset_requests(&conn, BlobKind::Book).unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
+        assert!(restored.download_job(&conn, &test_content_hash(), TransferOrigin::UserInitiated).unwrap().is_some());
+        assert!(restored.transfer_queue.statuses().is_empty());
     }
 }

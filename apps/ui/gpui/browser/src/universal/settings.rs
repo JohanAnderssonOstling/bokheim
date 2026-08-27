@@ -9,7 +9,7 @@
 //! things it governs — quota, which libraries sync — are settings like any
 //! other. [`SyncPage`] keeps owning that state and is embedded here.
 
-use app_contract::preferences::BrowsingPreferencePatch;
+use app_preferences::{ApplicationAppearance, ApplicationTheme, BrowsingPreferencePatch, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN, UiFontFamily};
 use gpui::prelude::*;
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use gpui_component::IconName;
@@ -136,43 +136,40 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
-        let settings = self.services.contracts.settings.clone();
-        let contract = self.services.contracts.browsing_preferences.clone();
         let preferences = self.preferences.read(cx).browsing();
         let entity = cx.entity();
 
         let current_font_size = preferences.ui_font_size_px();
-        let [minimum_font_size, maximum_font_size] = contract.constraints.ui_font_size_px;
+        let [minimum_font_size, maximum_font_size] = [UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX];
 
         // Light/dark is a separate axis from which theme, but both are compact
         // choices and belong together rather than in tall descriptive cards.
         let mut appearances = components::browser_settings_button_group(theme);
-        for (index, option) in contract.options.appearances.iter().enumerate() {
-            let value = option.value;
+        for (index, value) in [ApplicationAppearance::System, ApplicationAppearance::Light, ApplicationAppearance::Dark].into_iter().enumerate() {
             let entity = entity.clone();
-            appearances = appearances.child(components::browser_settings_choice_button(format!("application-appearance-{index}"), option.label.clone(), value == preferences.appearance(), theme).on_click(move |_, _, cx| {
+            appearances = appearances.child(components::browser_settings_choice_button(format!("application-appearance-{index}"), value.label(), value == preferences.appearance(), theme).on_click(move |_, _, cx| {
                 entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Appearance(value), cx));
             }));
         }
 
         let mut application_themes = components::browser_settings_button_group(theme);
-        for (index, option) in contract.options.themes.iter().enumerate() {
-            let value = option.value;
+        for (index, value) in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite].into_iter().enumerate() {
             let entity = entity.clone();
-            application_themes = application_themes.child(components::browser_settings_choice_button(format!("application-theme-{index}"), option.label.clone(), value == preferences.theme(), theme).on_click(move |_, _, cx| {
+            application_themes = application_themes.child(components::browser_settings_choice_button(format!("application-theme-{index}"), value.label(), value == preferences.theme(), theme).on_click(move |_, _, cx| {
                 entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Theme(value), cx));
             }));
         }
-        let appearance_settings = components::browser_settings_fieldset(settings.appearance_section_label.clone(), theme)
-            .child(components::browser_settings_compact_row("Light or dark", appearances, theme))
-            .child(components::browser_settings_compact_row(settings.application_theme_label.clone(), application_themes, theme));
+        let appearance_settings = components::browser_settings_fieldset("Appearance", theme).child(components::browser_settings_compact_row("Light or dark", appearances, theme)).child(components::browser_settings_compact_row(
+            "Application theme",
+            application_themes,
+            theme,
+        ));
 
-        let mut interface_fonts = components::browser_settings_font_choices(theme);
-        for (index, option) in contract.options.fonts.iter().enumerate() {
-            let value = option.value;
+        let mut interface_fonts = components::browser_settings_button_group(theme);
+        for (index, value) in [UiFontFamily::SansSerif, UiFontFamily::Serif].into_iter().enumerate() {
             let interface_entity = entity.clone();
             interface_fonts =
-                interface_fonts.child(components::browser_settings_font_button(format!("interface-font-{index}"), option.label.clone(), value == preferences.interface_font(), option.font_name.clone(), theme).on_click(move |_, _, cx| {
+                interface_fonts.child(components::browser_settings_choice_button(format!("interface-font-{index}"), value.label(), value == preferences.interface_font(), theme).font_family(value.font_name()).on_click(move |_, _, cx| {
                     interface_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::InterfaceFont(value), cx));
                 }));
         }
@@ -189,10 +186,11 @@ impl Render for SettingsPage {
         });
         let font_size = components::browser_settings_font_size_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
-        let mut sections = components::browser_settings_sections()
-            .child(appearance_settings)
-            .child(components::browser_settings_font_row(settings.interface_font_label.clone(), interface_fonts, theme))
-            .child(components::browser_settings_font_row(settings.ui_font_size_label.clone(), font_size, theme));
+        let mut sections = components::browser_settings_sections().child(appearance_settings).child(components::browser_settings_compact_row("Interface font", interface_fonts, theme)).child(components::browser_settings_compact_row(
+            "UI font size",
+            font_size,
+            theme,
+        ));
 
         if let Some(updater) = self.services.desktop_updater.as_ref() {
             let current_version = updater.current_version().to_owned();

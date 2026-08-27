@@ -14,7 +14,7 @@ impl CatalogClient {
     }
 
     fn cached_search_page(&self, source: &CatalogSource, query: &str) -> Result<CatalogPage, CatalogProviderError> {
-        let matches = self.cache.search(&source.id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let matches = self.store.search(&source.id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let mut page = search_page(source.id.clone(), query.trim().to_owned(), matches);
         page.freshness = CatalogFreshness::Stale;
         self.prepare_page(source, &mut page);
@@ -32,7 +32,7 @@ impl CatalogClient {
         let request = self.page_request(source_id, &locator)?;
         match self.server.catalog_page(source_id, &request).await {
             Ok(response) => {
-                let mut page = self.cache.apply_page_response(&registration.root_locator, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+                let mut page = self.store.apply_page_response(&self.cache, &registration.root_locator, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
                 self.prepare_page(&registration.source, &mut page);
                 self.covers.remember_page(&page);
                 Ok(page)
@@ -64,7 +64,7 @@ impl CatalogClient {
         let registry = self.server.registry().await?;
         let mut store = self.registry.lock().map_err(|_| CatalogProviderError::new("catalogue server registry lock was poisoned"))?;
         let previous = store.registrations();
-        store.replace(registry)?;
+        store.replace(&self.store, registry)?;
         let current = store.registrations();
         drop(store);
         let retained = current.iter().map(|registration| registration.source.id.clone()).collect::<HashSet<_>>();
@@ -81,12 +81,12 @@ impl CatalogClient {
 
     fn page_request(&self, source_id: &CatalogSourceId, locator: &str) -> Result<CatalogPageRequest, CatalogProviderError> {
         let state = self.cache.source_state(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let known_publications = if state.is_some() { self.cache.known_page_publications(source_id, locator).map_err(|error| CatalogProviderError::new(error.to_string()))? } else { Vec::new() };
+        let known_publications = if state.is_some() { self.store.known_page_publications(source_id, locator).map_err(|error| CatalogProviderError::new(error.to_string()))? } else { Vec::new() };
         Ok(CatalogPageRequest { locator: Some(locator.to_owned()), supported_languages: self.language_filter().supported().to_vec(), epoch: state.and_then(|state| state.provider_epoch), known_publications })
     }
 
     async fn search_cached_source(&self, source_id: &CatalogSourceId, registration: &CatalogSourceRegistration, query: &str) -> Result<CatalogPage, CatalogProviderError> {
-        let cached = self.cache.search(source_id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let cached = self.store.search(source_id, query).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let state = self.cache.source_state(source_id).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         let known_publications = cached
             .title_matches
@@ -97,7 +97,7 @@ impl CatalogClient {
             .collect();
         let request = CatalogSearchRequest { query: query.to_owned(), supported_languages: self.language_filter().supported().to_vec(), epoch: state.and_then(|state| state.provider_epoch), known_publications };
         let response = self.server.search_catalog(source_id, &request).await?;
-        let matches = self.cache.apply_search_response(&registration.root_locator, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+        let matches = self.store.apply_search_response(&self.cache, &registration.root_locator, response).map_err(|error| CatalogProviderError::new(error.to_string()))?;
         Ok(search_page(source_id.clone(), query.to_owned(), matches))
     }
 }

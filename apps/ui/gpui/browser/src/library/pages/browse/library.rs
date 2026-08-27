@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use app_contract::library::{BrowseBookSort, BrowseContents, BrowseRow, LibraryBrowseQuery, LibraryFileTypeFilter, ROOT_SUBJECT_PATH, SubjectPath};
 use gpui::{AnyElement, App, AppContext, Context, Entity, IntoElement};
+use library_model::{BrowseBookSort, BrowseContents, BrowseRow, LibraryBrowseQuery, LibraryFileTypeFilter, ROOT_SUBJECT_PATH, SubjectPath};
 use sync_common::{DirId, ROOT_DIR_ID};
 
 use super::adapter::{BrowseAdapter, BrowseCrumb, BrowseQuery, BrowseRequest};
@@ -79,18 +79,24 @@ impl BrowseAdapter for LibraryBrowseAdapter {
             return BrowseRequest::Ready(LibraryBrowseResponse::MetadataReview);
         }
         if matches!(self.kind, LibraryBrowseKind::Subject) && query.location == RAW_SUBJECTS_LOCATION {
-            let load = self.ui.backend().load_unmapped_subject_texts();
+            let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.unmapped_subject_texts());
             return BrowseRequest::Async(Box::pin(async move { load.await.map(LibraryBrowseResponse::RawSubjects) }));
         }
         let subject_root = matches!(self.kind, LibraryBrowseKind::Subject) && query.location == ROOT_SUBJECT_PATH;
         let search = query.search.trim().to_lowercase();
         let show_metadata_review = subject_root && (search.is_empty() || "uncategorized".contains(&search));
         let show_raw_subjects = subject_root && (search.is_empty() || "raw subjects".contains(&search));
-        let metadata_reviews = show_metadata_review.then(|| self.ui.backend().load_prepared_edition_identity_reviews());
-        let raw_subjects = show_raw_subjects.then(|| self.ui.backend().load_unmapped_subject_texts());
+        let metadata_reviews = show_metadata_review.then(|| crate::services::backend::library_async(self.ui.backend(), move |library| async move { library.prepared_edition_identity_reviews().await }));
+        let raw_subjects = show_raw_subjects.then(|| crate::services::backend::library_blocking(self.ui.backend(), move |library| library.unmapped_subject_texts()));
         let request = match self.kind {
-            LibraryBrowseKind::Folder => self.ui.backend().folder_contents(query),
-            LibraryBrowseKind::Subject => self.ui.backend().subject_contents(query),
+            LibraryBrowseKind::Folder => crate::services::backend::library_blocking(self.ui.backend(), move |library| {
+                let languages = query.languages.iter().map(String::as_str).collect::<Vec<_>>();
+                library.folder_contents_filtered_sorted(&query.location, &query.search, &query.file_types, query.chip_sort, query.book_sort, &languages)
+            }),
+            LibraryBrowseKind::Subject => crate::services::backend::library_blocking(self.ui.backend(), move |library| {
+                let languages = query.languages.iter().map(String::as_str).collect::<Vec<_>>();
+                library.subject_contents_filtered_sorted(&query.location, &query.search, &query.file_types, query.chip_sort, query.book_sort, &languages)
+            }),
         };
         BrowseRequest::Async(Box::pin(async move {
             let contents = request.await?;
@@ -204,7 +210,7 @@ impl BrowseAdapter for LibraryBrowseAdapter {
         match self.kind {
             LibraryBrowseKind::Folder => {
                 let id = DirId::parse_str(&child.id).map_err(|error| error.to_string())?;
-                let path = self.ui.backend().directory_path(&id)?.into_iter().map(|directory| BrowseCrumb { location: directory.id.to_string(), label: directory.name }).collect();
+                let path = self.ui.backend().directory_path(&id).map_err(|error| error.to_string())?.into_iter().map(|directory| BrowseCrumb { location: directory.id.to_string(), label: directory.name }).collect();
                 Ok(Some(path))
             }
             LibraryBrowseKind::Subject => {
@@ -230,7 +236,11 @@ impl BrowseAdapter for LibraryBrowseAdapter {
 
 pub(crate) fn folder(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> BrowsePage<LibraryBrowseAdapter> {
     let changes = ui.updates();
-    let persisted_path = ui.app_backend().folder_navigation_path(ui.backend().id());
+    let library_id = *ui.backend().id();
+    let persisted_path = ui.app_backend().browser_session().map(|session| session.place(&library_id).folder_path).unwrap_or_else(|error| {
+        log::warn!("failed to restore folder path: {error}");
+        Vec::new()
+    });
     let current_id = persisted_path.last().map(|crumb| crumb.id).unwrap_or(ROOT_DIR_ID);
     let current_name = persisted_path.last().map(|crumb| crumb.label.clone());
     let path: Vec<_> = persisted_path.into_iter().map(|crumb| BrowseCrumb { location: crumb.id.to_string(), label: crumb.label }).collect();
@@ -238,10 +248,10 @@ pub(crate) fn folder(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrow
     let folder_actions = cx.new(|_| FolderActions::new(ui.clone(), current_id, current_name));
     let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Folder);
     let config = BrowsePageConfig::new(ROOT_DIR_ID.to_string(), "Folders", "folder").with_path(path).with_changes(changes).with_folder_actions(folder_actions).with_persist_path(move |path| {
-        let persisted = path.iter().map(|crumb| DirId::parse_str(&crumb.location).map(|id| app_contract::NavigationCrumb { id, label: crumb.label.clone() })).collect::<Result<Vec<_>, _>>();
+        let persisted = path.iter().map(|crumb| DirId::parse_str(&crumb.location).map(|id| bokheim_backend::NavigationCrumb { id, label: crumb.label.clone() })).collect::<Result<Vec<_>, _>>();
         match persisted {
             Ok(path) => {
-                if let Err(error) = persistence.app_backend().save_folder_navigation_path(persistence.backend().id(), path) {
+                if let Err(error) = persistence.app_backend().save_library_folder_path(*persistence.backend().id(), path) {
                     log::warn!("failed to persist folder path: {error}");
                 }
             }
@@ -253,15 +263,26 @@ pub(crate) fn folder(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrow
 
 pub(crate) fn subject(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> BrowsePage<LibraryBrowseAdapter> {
     let changes = ui.updates();
-    let path: Vec<_> = ui.app_backend().subject_navigation_path(ui.backend().id()).into_iter().map(|crumb| BrowseCrumb { location: crumb.id.to_string(), label: crumb.label }).collect();
+    let library_id = *ui.backend().id();
+    let path: Vec<_> = ui
+        .app_backend()
+        .browser_session()
+        .map(|session| session.place(&library_id).subject_path)
+        .unwrap_or_else(|error| {
+            log::warn!("failed to restore subject path: {error}");
+            Vec::new()
+        })
+        .into_iter()
+        .map(|crumb| BrowseCrumb { location: crumb.id.to_string(), label: crumb.label })
+        .collect();
     let persistence = ui.clone();
     let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Subject);
     let config = BrowsePageConfig::new(ROOT_SUBJECT_PATH, "Subjects", "subject").with_path(path).with_changes(changes).with_persist_path(move |path| {
         if path.iter().any(|crumb| matches!(crumb.location.as_str(), METADATA_REVIEW_LOCATION | RAW_SUBJECTS_LOCATION)) {
             return;
         }
-        let path = path.iter().map(|crumb| app_contract::NavigationCrumb { id: SubjectPath::new(crumb.location.clone()), label: crumb.label.clone() }).collect();
-        if let Err(error) = persistence.app_backend().save_subject_navigation_path(persistence.backend().id(), path) {
+        let path = path.iter().map(|crumb| bokheim_backend::NavigationCrumb { id: SubjectPath::new(crumb.location.clone()), label: crumb.label.clone() }).collect();
+        if let Err(error) = persistence.app_backend().save_library_subject_path(*persistence.backend().id(), path) {
             log::warn!("failed to persist subject path: {error}");
         }
     });

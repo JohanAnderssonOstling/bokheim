@@ -12,24 +12,42 @@ use pdf_reader_core::PdfOutlineEntry;
 /// One outline entry, flattened to what the reader needs from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PdfTocTarget {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) page_index: usize,
-    pub(crate) depth: usize,
+    id: String,
+    title: String,
+    page_index: usize,
+    depth: usize,
 }
 
 #[derive(Default)]
 pub(crate) struct PdfTocState {
-    pub(crate) targets: Vec<PdfTocTarget>,
+    targets: Vec<PdfTocTarget>,
     /// The entry the current page sits under, if any.
-    pub(crate) active_id: Option<String>,
+    active_id: Option<String>,
     /// Whether the outline has been read off the document yet. The PDF reports
     /// its outline only once loading finishes, so this distinguishes "no
     /// outline" from "not asked yet".
-    pub(crate) loaded: bool,
+    loaded: bool,
 }
 
 impl PdfTocState {
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    pub(crate) fn replace_targets(&mut self, targets: Vec<PdfTocTarget>) {
+        self.targets = targets;
+        self.loaded = true;
+    }
+
+    /// Changes the active outline entry and reports whether it moved.
+    pub(crate) fn set_active(&mut self, active_id: Option<String>) -> bool {
+        if self.active_id == active_id {
+            return false;
+        }
+        self.active_id = active_id;
+        true
+    }
+
     /// The entry covering `page_index`: the last one at or before that page.
     ///
     /// Ties break towards the deepest entry, then the latest in document
@@ -43,7 +61,7 @@ impl PdfTocState {
         self.targets.iter().find(|target| target.id == id).map(|target| target.page_index)
     }
 
-    /// The title of the active entry, used to name bookmarks.
+    /// The title of the active entry, shown in the reader toolbar.
     pub(crate) fn active_title(&self) -> Option<&str> {
         let id = self.active_id.as_ref()?;
         self.targets.iter().find(|target| target.id == *id).map(|target| target.title.as_str())
@@ -53,19 +71,19 @@ impl PdfTocState {
 /// A nested outline entry, ready to become a tree item.
 #[derive(Clone, Debug)]
 pub(crate) struct PdfTocNode {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) page_index: usize,
-    pub(crate) depth: usize,
-    pub(crate) children: Vec<PdfTocNode>,
+    id: String,
+    title: String,
+    page_index: usize,
+    depth: usize,
+    children: Vec<PdfTocNode>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct FlatPdfTocItem {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) page_index: usize,
-    pub(crate) depth: usize,
+struct FlatPdfTocItem {
+    id: String,
+    title: String,
+    page_index: usize,
+    depth: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -80,7 +98,7 @@ pub(crate) fn nest_pdf_outline(outline: &[PdfOutlineEntry]) -> Vec<PdfTocNode> {
     nest_pdf_toc_items(items)
 }
 
-pub(crate) fn nest_pdf_toc_items(items: Vec<FlatPdfTocItem>) -> Vec<PdfTocNode> {
+fn nest_pdf_toc_items(items: Vec<FlatPdfTocItem>) -> Vec<PdfTocNode> {
     let mut arena = Vec::<PdfTocArenaNode>::with_capacity(items.len());
     let mut roots = Vec::<usize>::new();
     let mut ancestors = Vec::<(usize, usize)>::new();
@@ -173,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn the_active_entry_names_itself_for_bookmarks() {
+    fn the_active_entry_exposes_its_title() {
         let mut toc = sample();
         toc.active_id = Some("method-a".to_owned());
         assert_eq!(toc.active_title(), Some("Sampling"));

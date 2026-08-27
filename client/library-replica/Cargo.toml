@@ -9,7 +9,7 @@ default = ["random-ids"]
 random-ids = ["library-model/random-ids", "sync-common/random-ids"]
 
 [dependencies]
-catalog-contract = { path = "../../shared/catalog-contract" }
+catalog-model = { path = "../../shared/catalog-model" }
 library-model = { path = "../library-model", default-features = false }
 serde = { version = "1", features = ["derive"] }
 sync-common = { path = "../../shared/sync-common", default-features = false }

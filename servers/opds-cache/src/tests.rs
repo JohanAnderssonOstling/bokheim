@@ -498,6 +498,7 @@ async fn missing_embedded_subjects_use_the_client_ambiguous_match_policy() {
                             people: Vec::new(),
                             popularity: Some(metadata_contract::WorkPopularity { want_to_read_count: 2, currently_reading_count: 0, already_read_count: 1, rating_count: 1, rating_sum: 3 }),
                             description: Some("Shared Open Library description".to_owned()),
+                            subjects: Vec::new(),
                         },
                         metadata_contract::RichWorkMetadataMatch {
                             open_library_work_id: Some("OL2W".to_owned()),
@@ -508,6 +509,7 @@ async fn missing_embedded_subjects_use_the_client_ambiguous_match_policy() {
                             people: Vec::new(),
                             popularity: Some(metadata_contract::WorkPopularity { want_to_read_count: 12, currently_reading_count: 2, already_read_count: 5, rating_count: 3, rating_sum: 13 }),
                             description: Some("Shared Open Library description".to_owned()),
+                            subjects: Vec::new(),
                         },
                     ],
                 }],
@@ -582,7 +584,7 @@ async fn crawl_enriches_publications_from_temporary_epubs_and_reuses_the_downloa
     assert!(publication.metadata.subjects.iter().any(|subject| subject.name_localizations.iter().any(|localized| localized.language == "sv" && localized.value == "Skönlitteratur / Noveller")));
     assert!(publication.metadata.subjects.iter().any(|subject| subject.source == "dc:subject" && subject.name == "History / United States / 20th Century"));
     assert!(publication.metadata.publishers.iter().any(|publisher| publisher.name == "Example Press"));
-    assert!(publication.metadata.identifiers.iter().any(|identifier| identifier.scheme == catalog_contract::Scheme::Isbn && identifier.value == "9780821338278"));
+    assert!(publication.metadata.identifiers.iter().any(|identifier| identifier.scheme == catalog_model::Scheme::Isbn && identifier.value == "9780821338278"));
     assert!(publication.metadata.dates.iter().any(|date| date.value == "2024-05-06" && date.source == "epub:package:date"));
     assert_eq!(publication.metadata.subtitle.as_deref(), Some("Embedded Subtitle"));
     assert!(publication.metadata.collections.iter().any(|collection| collection.name == "Archive Studies" && collection.position.as_deref() == Some("2")));
@@ -618,7 +620,7 @@ async fn crawl_enriches_publications_from_temporary_epubs_and_reuses_the_downloa
     assert_eq!(recrawled.payloads[0].publication.title, "Embedded Title");
     assert_eq!(recrawled.payloads[0].publication.metadata.subjects.len(), 2);
     assert_eq!(recrawled.payloads[0].publication.metadata.subtitle.as_deref(), Some("Embedded Subtitle"));
-    assert!(recrawled.payloads[0].publication.metadata.identifiers.iter().any(|identifier| identifier.scheme == catalog_contract::Scheme::Isbn));
+    assert!(recrawled.payloads[0].publication.metadata.identifiers.iter().any(|identifier| identifier.scheme == catalog_model::Scheme::Isbn));
 
     drop(catalog_service);
     let restarted = service(endpoint(format!("http://{address}/root")), temporary.path());
@@ -665,14 +667,14 @@ async fn independent_worker_resumes_a_persisted_pending_extraction() {
     };
     let page = CatalogPage {
         source_id: source_id.clone(),
-        freshness: catalog_contract::CatalogFreshness::Current,
+        freshness: catalog_model::CatalogFreshness::Current,
         title: "Books".to_owned(),
         locator: root.clone(),
         navigation: Vec::new(),
         publications: vec![publication],
         groups: Vec::new(),
         facets: Vec::new(),
-        pagination: catalog_contract::CatalogPagination::default(),
+        pagination: catalog_model::CatalogPagination::default(),
         search: None,
     };
     service.state.cache.put_page(&source_id, &root, &page, None, None).unwrap();
@@ -1214,7 +1216,7 @@ async fn browser_api_supports_cors_json_browsing_and_validated_acquisitions() {
         .actions
         .iter()
         .find_map(|action| match action {
-            catalog_contract::CatalogPublicationAction::Import { request } => Some(request.clone()),
+            catalog_model::CatalogPublicationAction::Import { request } => Some(request.clone()),
             _ => None,
         })
         .unwrap();
@@ -1411,10 +1413,10 @@ fn popular_feed_relation_reaches_publication_rank_evidence() {
     };
     let mut page = CatalogPage {
         source_id,
-        freshness: catalog_contract::CatalogFreshness::Current,
+        freshness: catalog_model::CatalogFreshness::Current,
         title: "Root".to_owned(),
         locator: "https://example.com/root".to_owned(),
-        navigation: vec![catalog_contract::CatalogLink {
+        navigation: vec![catalog_model::CatalogLink {
             title: "Popular".to_owned(),
             target: CatalogLinkTarget::Page { locator: "https://example.com/popular".to_owned() },
             relations: vec!["http://opds-spec.org/sort/popular".to_owned()],
@@ -1433,17 +1435,4 @@ fn popular_feed_relation_reaches_publication_rank_evidence() {
     page.locator = "https://example.com/popular".to_owned();
     annotate_popular_listing(&mut page, true);
     assert_eq!(page.publications[0].metadata.popularity_ranks, [PopularityRank { position: 1, source: "opds:sort/popular:https://example.com/popular".to_owned() }]);
-}
-
-#[tokio::test]
-async fn metadata_proxy_compatibility_routes_remain_registered() {
-    let temporary = tempfile::tempdir().unwrap();
-    let service = service(endpoint("http://127.0.0.1:9/root".to_owned()), temporary.path());
-    let body = Body::from(r#"{"isbns":["9780821338278"]}"#);
-    let request = |uri: &'static str, body| Request::builder().method(Method::POST).uri(uri).header(header::CONTENT_TYPE, "application/json").body(body).unwrap();
-
-    let legacy = app(service.clone()).oneshot(request("/api/metadata/enrichment", body)).await.unwrap();
-    assert_eq!(legacy.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let rich = app(service).oneshot(request("/api/metadata/enrichment/v2", Body::from(r#"{"isbns":["9780821338278"]}"#))).await.unwrap();
-    assert_eq!(rich.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

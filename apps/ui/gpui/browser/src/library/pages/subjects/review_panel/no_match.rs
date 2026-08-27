@@ -1,6 +1,9 @@
 use std::rc::Rc;
 
-use app_contract::library::EditionIdentityReview;
+use library_model::EditionIdentityReview;
+
+const REVIEW_ITEM_HEIGHT: f32 = 376.0;
+const REVIEW_ITEM_VERTICAL_PADDING: f32 = 9.0;
 use gpui::prelude::*;
 use gpui::{Context, Div, Entity, FontWeight, Render, Subscription, Window, div, px, rems};
 use gpui_component::Disableable;
@@ -24,7 +27,7 @@ fn paginator_policy() -> PaginatorGroupPolicy {
     let fixed_width = components::BOOK_COVER_WIDTH + ROW_HORIZONTAL_PADDING * 2.0 + COVER_CONTENT_GAP;
     PaginatorGroupPolicy::new(
         PaginatorWidthPolicy::new(rems(MINIMUM_TEXT_WIDTH_REM), rems(PREFERRED_TEXT_WIDTH_REM), rems(MAXIMUM_TEXT_WIDTH_REM)).with_pixels(px(fixed_width)),
-        PaginatorSizing::pixels(px(app_contract::METADATA_REVIEW_ITEM_HEIGHT_PX as f32)),
+        PaginatorSizing::pixels(px(REVIEW_ITEM_HEIGHT)),
         PaginatorGapPolicy::new(px(components::SPACE_SM), px(components::SPACE_MD)),
         PaginatorGapPolicy::new(px(6.0), px(components::SPACE_SM)),
     )
@@ -99,7 +102,7 @@ impl NoMatchLane {
         self.busy = Some(hash);
         self.error = None;
         self.paginator.update(cx, |_, cx| cx.notify());
-        let operation = self.ui.backend().apply_manual_edition_identity(hash, isbn);
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.apply_manual_edition_identity(hash, &isbn));
         cx.spawn(async move |panel, cx| {
             let result = operation.await;
             let _ = panel.update(cx, |panel, cx| {
@@ -132,9 +135,9 @@ fn review_row(item: &NoMatchReviewItem, busy: Option<ContentHash>, panel: &Entit
     let detail = review.detail.clone().unwrap_or_else(|| "No candidate was returned.".to_owned());
     div()
         .w_full()
-        .h(px(app_contract::METADATA_REVIEW_ITEM_HEIGHT_PX as f32))
+        .h(px(REVIEW_ITEM_HEIGHT))
         .px(px(ROW_HORIZONTAL_PADDING))
-        .py(px(app_contract::DETAILED_ROW_VERTICAL_PADDING_PX as f32))
+        .py(px(REVIEW_ITEM_VERTICAL_PADDING))
         .border_1()
         .border_color(theme.border)
         .bg(theme.page_bg)

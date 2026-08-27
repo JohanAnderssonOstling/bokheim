@@ -71,6 +71,22 @@ pub fn upsert_blob_local_ref(conn: &Connection, kind: BlobKind, content_hash: &C
     conn.upsert_blob_local_ref(kind.storage(), content_hash.as_str(), path, exists_flag, now)?;
     Ok(())
 }
+pub fn put_local_blob(conn: &Connection, kind: BlobKind, content_hash: &ContentHash, bytes: &[u8]) -> Result<(), rusqlite::Error> {
+    conn.execute("INSERT INTO local_blob(kind,hash,bytes) VALUES(?1,?2,?3) ON CONFLICT(kind,hash) DO UPDATE SET bytes=excluded.bytes", rusqlite::params![kind.storage(), content_hash.as_str(), bytes])?;
+    Ok(())
+}
+pub fn get_local_blob(conn: &Connection, kind: BlobKind, content_hash: &ContentHash) -> Result<Option<Vec<u8>>, rusqlite::Error> {
+    conn.query_row("SELECT bytes FROM local_blob WHERE kind=?1 AND hash=?2", rusqlite::params![kind.storage(), content_hash.as_str()], |row| row.get(0)).optional()
+}
+pub fn remove_local_blob(conn: &Connection, kind: BlobKind, content_hash: &ContentHash) -> Result<bool, rusqlite::Error> {
+    Ok(conn.execute("DELETE FROM local_blob WHERE kind=?1 AND hash=?2", rusqlite::params![kind.storage(), content_hash.as_str()])? != 0)
+}
+pub fn local_blob_exists(conn: &Connection, kind: BlobKind, content_hash: &ContentHash) -> Result<bool, rusqlite::Error> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM local_blob WHERE kind=?1 AND hash=?2)", rusqlite::params![kind.storage(), content_hash.as_str()], |row| row.get(0))
+}
+pub fn local_blob_total_bytes(conn: &Connection, kind: BlobKind) -> Result<u64, rusqlite::Error> {
+    conn.query_row("SELECT COALESCE(SUM(length(bytes)), 0) FROM local_blob WHERE kind=?1", [kind.storage()], |row| row.get::<_, i64>(0)).map(|bytes| bytes.max(0) as u64)
+}
 pub fn get_locally_present_blob_hashes(conn: &Connection, kind: BlobKind) -> Result<Vec<ContentHash>, rusqlite::Error> {
     let mut hashes = Vec::new();
     conn.get_locally_present_blob_hashes(kind.storage(), |row| {

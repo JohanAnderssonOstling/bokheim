@@ -9,8 +9,8 @@ use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
 use ui_components as components;
 
-use app_contract::catalog::{CatalogBookFormat, CatalogSubjectBrowseCapabilities, CatalogSubjectSort};
-use app_contract::library::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter};
+use catalog_model::{CatalogBookFormat, CatalogSubjectBrowseCapabilities, CatalogSubjectSort};
+use library_model::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter};
 
 const BROWSE_OPTIONS_POPOVER_GAP: f32 = 4.0;
 const BROWSE_OPTIONS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
@@ -102,7 +102,7 @@ impl BrowseControls {
             book_sorts: BrowseBookSort::ALL.into_iter().map(BrowseBookOrder::Library).collect(),
             formats: std::iter::once(BrowseFormatFilter::Any).chain(LibraryFileTypeFilter::ALL.into_iter().filter(|format| *format != LibraryFileTypeFilter::All).map(BrowseFormatFilter::Library)).collect(),
             format_counts: Vec::new(),
-            languages: app_contract::preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().map(|(value, _)| value).collect(),
+            languages: app_preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().map(|(value, _)| value).collect(),
             language_counts: Vec::new(),
         }
     }
@@ -113,7 +113,7 @@ impl BrowseControls {
             book_sorts: CatalogSubjectSort::ALL.into_iter().map(BrowseBookOrder::Catalog).collect(),
             formats: std::iter::once(BrowseFormatFilter::Any).chain(CatalogBookFormat::ALL.into_iter().map(BrowseFormatFilter::Catalog)).collect(),
             format_counts: Vec::new(),
-            languages: app_contract::preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().map(|(value, _)| value).collect(),
+            languages: app_preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().map(|(value, _)| value).collect(),
             language_counts: Vec::new(),
         }
     }
@@ -127,11 +127,11 @@ impl BrowseControls {
         let languages = if capabilities.languages.is_empty() {
             Self::catalog().languages
         } else {
-            app_contract::preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().filter_map(|(value, _)| capabilities.languages.iter().any(|language| language.value == value).then_some(value)).collect()
+            app_preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().filter_map(|(value, _)| capabilities.languages.iter().any(|language| language.value == value).then_some(value)).collect()
         };
         let format_counts = capabilities.book_formats.iter().map(|format| (BrowseFormatFilter::Catalog(format.value), format.number_of_items)).collect();
         let language_counts =
-            capabilities.languages.iter().filter_map(|language| app_contract::preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().find(|(value, _)| *value == language.value).map(|(value, _)| (value, language.number_of_items))).collect();
+            capabilities.languages.iter().filter_map(|language| app_preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().find(|(value, _)| *value == language.value).map(|(value, _)| (value, language.number_of_items))).collect();
         let book_sorts = if capabilities.sorts.is_empty() { Self::catalog().book_sorts } else { capabilities.sorts.iter().copied().map(BrowseBookOrder::Catalog).collect() };
         Self { collection_sorts: Vec::new(), book_sorts, formats, format_counts, languages, language_counts }
     }
@@ -195,35 +195,27 @@ impl SearchField {
     }
 
     pub(crate) fn render(&self) -> gpui::Div {
-        components::browser_topbar_center().child(components::browser_search_box().child(components::browser_search_input(&self.input)))
+        components::browser_search_control(&self.input)
     }
 }
 
 /// An intrinsic-size dropdown whose choices remain interactive until the user
 /// clicks outside it or presses Escape.
-pub(crate) fn browse_options_control<P, SelectOption, OpenOptions>(
-    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, open_options: OpenOptions, viewport_height: Pixels, rem_size: Pixels, theme: components::BrowserTheme,
+pub(crate) fn browse_options_control<P, SelectOption>(
+    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, viewport_height: Pixels, rem_size: Pixels, theme: components::BrowserTheme,
 ) -> impl IntoElement
 where
     P: 'static,
     SelectOption: Fn(&mut P, BrowseOptionsEvent, &mut Context<P>) + Clone + 'static,
-    OpenOptions: Fn(&mut P, &mut Context<P>) + Clone + 'static,
 {
     let geometry = browse_options_geometry(viewport_height, rem_size);
     let active = selection.chip_sort != controls.collection_sorts.first().copied() || selection.book_sort != controls.book_sorts.first().copied() || !selection.formats.is_empty() || !selection.languages.is_empty();
     let trigger = components::topbar_icon_action_button("browse-options", "Sort & filter", IconName::Settings2, theme).when(active, |button| button.bg(theme.accent_soft).border_color(theme.accent));
-    let open_page = page.clone();
     Popover::new("browse-options-popover")
         .anchor(Anchor::TopRight)
         .top(px(geometry.top_offset))
         .appearance(false)
         .overlay_closable(true)
-        .on_open_change(move |open, _, cx| {
-            if *open {
-                let open_options = open_options.clone();
-                open_page.update(cx, |page, cx| open_options(page, cx));
-            }
-        })
         .trigger(trigger)
         .content(move |_, _, _| browse_options_panel(page.clone(), controls.clone(), selection.clone(), select_option.clone(), geometry.max_height, theme))
 }
@@ -287,7 +279,7 @@ where
             languages = languages.child(components::browser_settings_choice_button("browse-language-any", "Any", selection.languages.is_empty(), theme).on_click(move |_, _, cx| {
                 page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
             }));
-            for (index, (language, label)) in app_contract::preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)).enumerate() {
+            for (index, (language, label)) in app_preferences::CATALOG_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)).enumerate() {
                 let label = controls.language_label(language, label);
                 let page = page.clone();
                 let select = select_option.clone();

@@ -1,10 +1,7 @@
 use std::panic::Location;
 
 use gpui::prelude::FluentBuilder;
-use gpui::{
-    App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, UniformList, UniformListScrollHandle, Window,
-    div,
-};
+use gpui::{App, Div, Element, ElementId, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window, div};
 use gpui_component::StyledExt;
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
 
@@ -165,40 +162,6 @@ where
         let scrollbar = self.show_scrollbar.then(|| Scrollbar::new(&scroll_handle).id((self.id.clone(), "scrollbar")).axis(self.axis));
         div().id(self.id).size_full().relative().refine_style(&root_style).on_key_down(page_with_arrow_keys(scroll_handle.clone())).child(scroll_area).children(scrollbar)
     }
-}
-
-/// A viewport-filling uniform list with Bokheim's keyboard paging behavior.
-#[derive(IntoElement)]
-pub struct VirtualList {
-    id: ElementId,
-    list: UniformList,
-}
-
-impl VirtualList {
-    #[track_caller]
-    fn new(list: UniformList) -> Self {
-        Self { id: ElementId::CodeLocation(*Location::caller()), list }
-    }
-}
-
-impl Styled for VirtualList {
-    fn style(&mut self) -> &mut StyleRefinement {
-        self.list.style()
-    }
-}
-
-impl RenderOnce for VirtualList {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let handle = window.use_keyed_state(self.id.clone(), cx, |_, _| UniformListScrollHandle::new()).read(cx).clone();
-        let base_handle = handle.0.borrow().base_handle.clone();
-        register_page_scroll_handle(self.id, base_handle.clone(), cx);
-        self.list.flex_1().track_scroll(&handle).on_key_down(page_with_arrow_keys(base_handle))
-    }
-}
-
-#[track_caller]
-pub fn virtual_list(list: UniformList) -> VirtualList {
-    VirtualList::new(list)
 }
 
 impl ScrollableElement for Div {}

@@ -89,7 +89,7 @@ existence.
 ## Administrator dashboard
 
 The dedicated administrator web application is deployed separately from the
-mobile/reader frontend and exposed at `/admin`. Configure it
+GPUI WebAssembly frontend and exposed at `/admin`. Configure it
 with `BOKHEIM_ADMIN_EMAIL` and either `BOKHEIM_ADMIN_PASSWORD` or the
 `admin_password` systemd credential. Administrator status is stored explicitly
 on the account and checked from PostgreSQL on every dashboard request; the
@@ -178,12 +178,12 @@ server stores and relays that state; it does not interpret it. Directories
 and physical placements keep a handful of typed columns because the server
 itself needs them (referential existence checks, and content-hash deltas
 computed transactionally for blob quota accounting); every other domain's
-payload -- book lifecycle, metadata, annotations, bookmarks, and semantic
-links -- is an opaque wire-encoded `value` column the server never reads
+payload -- book lifecycle, metadata, and annotations -- is an opaque
+wire-encoded `value` column the server never reads
 inside of. Adding or changing a synchronized field on those domains never
 touches this schema; only the client interprets what is inside. Pulls merge
 the indexed directory, book-lifecycle, physical-placement, reading-position,
-annotation, bookmark, semantic-link, and metadata tables. Winning LWW updates
+annotation and metadata tables. Winning LWW updates
 redraw the global sequence so offline clients receive the new value, while
 retries and losing versions do not grow storage or redraw the cursor. A push
 therefore needs only one row write, with no shared envelope join.
@@ -212,7 +212,7 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=16` representation. The wire body
+`application/vnd.bokheim+protobuf; version=17` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;

@@ -1,8 +1,9 @@
 # gpui desktop design findings
 
 Design audit of the gpui desktop UI — `apps/ui/gpui/{components,browser,reader}`, the theme
-bridge in `browser/src/stores/preferences.rs`, and the layout contract in
-`client/app-contract/src/{frontend,preferences}.rs`.
+bridge in `browser/src/stores/preferences.rs`, the preferences in
+`client/preferences/src/lib.rs`, and the layout tokens in
+`apps/ui/gpui/components/src/tokens.rs`.
 
 Read at the code level, not by rendering the app. Nothing here was measured from a
 screenshot; the contrast figures are computed from the palette constants and the
@@ -24,7 +25,7 @@ Part 2 covers layout flow and information architecture, and matters considerably
   appear across ~16.5k lines.
 - **Text contrast passes AA everywhere.** Body ink 13.5:1, muted text 4.8–4.9:1,
   accent-on-white 6.0–6.6:1, danger 6.0–6.9:1.
-- **Layout constants come from the shared contract**, so the mobile and desktop shells
+- **Layout constants come from the GPUI contract**, so native and WebAssembly targets
   agree on cover size, rail width, and topbar height.
 - **Retained entities.** `BookGrid::set_books` reuses card entities across refreshes
   (`browser/src/library/widgets/book_grid.rs:113`), and `ReaderToolbar::set_model`
@@ -38,7 +39,7 @@ Part 2 covers layout flow and information architecture, and matters considerably
 
 ## 1.1 There is no dark theme
 
-`ApplicationTheme` has exactly two variants (`client/app-contract/src/preferences.rs:42`):
+`ApplicationTheme` originally had exactly two variants (`client/preferences/src/lib.rs`):
 *Greco futuristic* (`app_bg #eeebe2`) and *Library serif* (`app_bg #efe8db`). Both are warm
 light creams. Nothing reads `cx.window_appearance()`.
 
@@ -78,10 +79,9 @@ Counted across the gpui tree:
 Radii are the worst: `rounded(px(7))`, `(8)`, `(9)`, `(10)`, `(11)`, `(12)` appear on
 adjacent components and read as inconsistency rather than intent.
 
-Meanwhile `apps/ui/design-tokens/design_tokens.json` declares a clean scale — spacing
-5/9/14/18/28, radius 8/11/16/24, type 12/13/15/17/21/28 — and **no Rust code reads it**.
-It has also drifted from the contract it nominally describes: the JSON says
-`nav_item_height: 88` and cover `204×326`; the code uses 64 and `204×306`.
+The old frontend-exported JSON scale drifted from the Rust contract and was removed
+with the Tauri frontend. GPUI now owns the spacing, radius, and type scale directly in
+`components/src/tokens.rs`.
 
 Fix: put 3–4 radii, 5–6 spacing steps, and 6 type sizes in `components/src/tokens.rs` and
 replace the literals. Then either generate that file from the JSON or delete the JSON.
@@ -287,8 +287,8 @@ is three pills followed by an unheaded wall of covers. No sort control, no resul
 no view toggle.
 
 `LibraryView::{Covers, Detailed}` exists in the contract
-(`client/app-contract/src/preferences.rs:166`) and is implemented in the mobile Svelte app,
-but **no gpui code reads it**. Desktop is covers-only.
+(`client/preferences/src/lib.rs`), but **no GPUI code reads it**. The browser
+is covers-only.
 
 ## 2.8 Reader chrome never gets out of the way, and shows no reading progress
 

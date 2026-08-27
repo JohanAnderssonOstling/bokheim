@@ -21,16 +21,24 @@ pub(crate) struct ResolvedTocEntry {
 
 #[derive(Default)]
 pub(crate) struct TocState {
-    pub(crate) entries: Arc<Vec<TocEntry>>,
+    entries: Arc<Vec<TocEntry>>,
     resolutions: Vec<ResolvedTocEntry>,
     /// The link the reader is currently inside, if any.
-    pub(crate) active_link: Option<String>,
+    active_link: Option<String>,
 }
 
 impl TocState {
     pub(crate) fn set(&mut self, entries: Vec<TocEntry>, resolutions: Vec<ResolvedTocEntry>) {
         self.entries = Arc::new(entries);
         self.resolutions = resolutions;
+    }
+
+    pub(crate) fn set_active_link(&mut self, active_link: Option<String>) -> bool {
+        if self.active_link == active_link {
+            return false;
+        }
+        self.active_link = active_link;
+        true
     }
 
     /// Resolves every link depth-first, preserving the publisher's TOC order

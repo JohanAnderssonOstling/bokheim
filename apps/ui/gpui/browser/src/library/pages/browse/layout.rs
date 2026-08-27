@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 
-use app_contract::library::BrowseRow;
 use gpui::prelude::*;
 use gpui::{Entity, SharedString, WeakEntity, div, px, rems};
+use library_model::BrowseRow;
 use ui_components as components;
 
 use super::adapter::BrowseAdapter;

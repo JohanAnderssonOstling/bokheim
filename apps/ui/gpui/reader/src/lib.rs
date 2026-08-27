@@ -15,8 +15,6 @@ mod epub;
 mod invalidation;
 #[cfg(feature = "pdf")]
 mod pdf;
-#[cfg(feature = "pdf")]
-mod pdf_reader;
 mod publication;
 mod settings;
 mod shell;
@@ -24,8 +22,8 @@ mod windows;
 
 use gpui::actions;
 
-pub use app_contract::preferences::PdfZoomMode;
-pub use app_contract::preferences::{ReaderFontFamily, ReaderTextAlignment};
+pub use app_preferences::PdfZoomMode;
+pub use app_preferences::{ReaderFontFamily, ReaderTextAlignment};
 pub use settings::{ReaderPreferences, SaveReaderSettings};
 pub use windows::{ReaderView, ReturnToLibrary, configure};
 
@@ -42,8 +40,6 @@ actions!(
         FocusReaderSearch,
         ToggleSearch,
         CloseSearch,
-        NavigateHistoryBack,
-        NavigateHistoryForward,
         IncreaseFont,
         DecreaseFont,
         IncreaseScale,
@@ -55,9 +51,10 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut gpui::App) {
+    shell::input::bind_reader_keys(cx);
     epub::render::bind_keys(cx);
     #[cfg(feature = "pdf")]
-    pdf_reader::bind_pdf_keys(cx);
+    pdf::bind_pdf_keys(cx);
 }
 
 /// Returns debug-only invalidation counts grouped by component and reason.

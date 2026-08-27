@@ -6,7 +6,10 @@ publish = false
 
 [dependencies]
 encoding_rs.workspace = true
-epub_provider = { path = "../../epub_provider" }
+epub_provider = { path = "../../../../../shared/epub" }
 html.workspace = true
 mobi.workspace = true
 regex = "1"
+
+[dev-dependencies]
+zip.workspace = true

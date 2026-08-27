@@ -1,8 +1,7 @@
 [package]
-name = "epub-svelte"
+name = "bokheim-backend"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Bokheim application backend"
 edition = "2021"
 autotests = false
 
@@ -12,8 +11,8 @@ autotests = false
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "epub_svelte_lib"
-crate-type = ["rlib", "cdylib", "staticlib"]
+name = "bokheim_backend"
+crate-type = ["rlib"]
 
 [[test]]
 name = "scan"
@@ -29,18 +28,18 @@ desktop = ["watcher", "pdf"]
 scanner = ["library-sqlite/scanner"]
 watcher = ["scanner", "dep:notify"]
 pdf = ["dep:pdf-reader-core", "thumbnail/pdf"]
-mobile = []
 
 [dependencies]
-book-metadata = { path = "../book-metadata" }
+book-metadata = { path = "../book-metadata", default-features = false, features = ["native-formats", "external-metadata"] }
+account-contract = { path = "../../shared/account-contract" }
 library-registry = { path = "../library-registry" }
-remote-reader = { path = "../remote-reader" }
-app-contract = { path = "../app-contract" }
+app-preferences = { path = "../preferences" }
 catalog-client = { path = "../catalog-client" }
+catalog-model = { path = "../../shared/catalog-model" }
 metadata-client = { path = "../metadata-client" }
 taxonomy-client = { path = "../taxonomy-client" }
 library-model = { path = "../library-model" }
-library-sqlite = { path = "../library-sqlite" }
+library-sqlite = { path = "../library-sqlite", default-features = false, features = ["audiobook-metadata"] }
 metadata-contract = { path = "../../shared/metadata-contract" }
 taxonomy-contract = { path = "../../shared/taxonomy-contract" }
 subject-projection = { path = "../../shared/subject-projection" }
@@ -53,29 +52,41 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.0", features = ["bundled", "functions"] }
 walkdir = "2.5.0"
+web-time = "1"
 uuid = { version = "1.0", features = ["v4"] }
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
-tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.0", features = ["macros", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
-r2d2 = "0.8"
-r2d2_sqlite = "0.35"
 notify = { version = "6.1", optional = true }
 futures-util = "0.3"
 futures-executor = "0.3"
-epub_provider = { path = "../../apps/renderers/html/epub_provider" }
+epub_provider = { path = "../../shared/epub" }
 crossbeam-channel = "0.5"
 async-channel = "2"
 sync-common = { path = "../../shared/sync-common" }
 blake3 = "1"
 pdf-reader-core = { path = "../../apps/renderers/pdf/core", optional = true }
 dirs = "6"
-specta = { version = "=2.0.0-rc.25", features = ["derive"] }
-specta-typescript = "0.0.12"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
+wasm-bindgen-futures = "0.4"
+sqlite-wasm-vfs = "0.2.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
 [dev-dependencies]
 test-support = { path = "../test-support" }
-lopdf = { version = "0.44", default-features = false }
-axum = "0.7"
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+lopdf = { version = "0.44", default-features = false }
 tempfile = "3"
 zip.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+axum = "0.7"
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }

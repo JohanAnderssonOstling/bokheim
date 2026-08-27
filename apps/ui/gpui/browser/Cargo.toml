@@ -12,7 +12,10 @@ mobile = ["ui-components/mobile"]
 
 [dependencies]
 async-channel = "2"
-app-contract = { path = "../../../../client/app-contract" }
+account-contract = { path = "../../../../shared/account-contract" }
+app-preferences = { path = "../../../../client/preferences" }
+bokheim-backend = { path = "../../../../client/backend", default-features = false }
+catalog-model = { path = "../../../../shared/catalog-model" }
 audiobook-player = { path = "../audiobook-player", optional = true }
 ui-components = { path = "../components" }
 gpui.workspace = true
@@ -22,6 +25,7 @@ html.workspace = true
 html-view-core.workspace = true
 html-view-gpui = { path = "../../../renderers/html/crates/html-view-gpui" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg"] }
+library-model = { path = "../../../../client/library-model" }
 log = "0.4"
 chrono = "0.4"
 futures-util = "0.3"

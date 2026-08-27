@@ -947,7 +947,7 @@ impl HtmlView {
     /// Handles only what the view owns exclusively.
     ///
     /// Reader navigation is not resolved here. The embedding reader binds
-    /// `READER_NAVIGATION_SHORTCUTS` to GPUI actions in the `ReaderDocument`
+    /// reader key bindings to GPUI actions in the `ReaderDocument`
     /// key context and drives the operations through this type's public API,
     /// so that reader keys are visible to GPUI's action system rather than
     /// being consumed before dispatch reaches it.

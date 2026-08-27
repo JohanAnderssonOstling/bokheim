@@ -12,7 +12,7 @@ pub(crate) fn query_connection_with_timeout(pool: &Pool<SqliteConnectionManager>
 
 pub(crate) fn install_query_deadline(connection: &Connection, timeout: Duration) {
     let started = Instant::now();
-    connection.progress_handler(QUERY_PROGRESS_OPS, Some(move || started.elapsed() >= timeout));
+    let _ = connection.progress_handler(QUERY_PROGRESS_OPS, Some(move || started.elapsed() >= timeout));
 }
 
 pub(crate) async fn run_database<T, F>(service: MetadataService, operation: F) -> Result<Result<T, MetadataError>, tokio::task::JoinError>

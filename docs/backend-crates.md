@@ -36,29 +36,32 @@ move into the backend ownership directory.
 - `content-address` owns `ContentHash`, the content-addressed identity required
   by both the library model and asset-transfer protocol.
 - `catalog-model` owns provider-neutral catalog values and the shared search
-  text normalizer.
-- `catalog-contract` owns the application and internal cache-server catalog
+  text normalizer. Applications, storage, and backend code depend on this
+  transport-independent model.
+- `catalog-protocol` owns only the internal client/cache-server page and search
   protocol, including sequenced publication payloads.
-- `catalog-core` owns shared SQLite catalog storage, language filtering, cover
-  thumbnails, and OPDS-to-contract conversion.
+- `catalog-core` owns the provider-neutral cached catalogue read model, shared
+  SQLite page/search/subject primitives, language filtering, and cover caching.
+  Its hidden `server-extension` surface exposes only low-level transactional
+  primitives to the catalogue server; it does not own crawl jobs, server
+  inventory, enrichment queues, or materialized-index orchestration.
 - `library-model` owns portable semantic book, publication, contributor,
-  annotation, bookmark, and reading-position values. Publication identifier
+  annotation and reading-position values. Publication identifier
   canonicalization and MARC types live here rather than in a catch-all
   algorithms crate.
 - `sync-common` owns the opaque synchronization envelope understood by clients
   and the sync server: protocol IDs, cursors, request/response DTOs, mutation
   kinds, limits, and server-visible blob declarations. It does not decode
   library payload values.
-- `account-contract` and `app-contract` own transport-neutral DTOs implemented
-  by servers and consumed by applications.
-- `opds` owns direct external OPDS parsing, conditional requests, downloads,
-  and registry validation.
+- `account-contract` owns account-service DTOs implemented by the sync server
+  and consumed by its client. App-local session and status models live with the
+  backend that implements them.
 - `wire` owns the common binary encoding helpers.
 - `test-support` owns fixtures shared by client and server tests.
 
 ## Client crates
 
-- `backend` (`epub-svelte`) owns SQLite, native paths, scanning, local file
+- `backend` (`bokheim-backend`) owns SQLite, native paths, scanning, local file
   materialization, session persistence, and composition for application UIs.
 - `catalog-client` consumes the catalogue server for curated registry, page,
   search, cover, and acquisition traffic, and owns the client's partial SQLite
@@ -90,4 +93,8 @@ project rather than as an application in this workspace.
 - `servers/sync` is a separate Cargo workspace. It owns accounts, synchronized
   state storage, blobs, thumbnails, HTTP endpoints, and PostgreSQL adapters.
 - `servers/opds-cache` serves the curated public OPDS registry and cached
-  catalogue data. It owns no synchronization or account state.
+  catalogue data. Its local `crates/opds` and `crates/litteraturbanken` own
+  upstream protocols, while `src/store` owns crawl generations, durable worker
+  queues, operational inventory, server-only indexes, and the separately
+  versioned SQLite schema for those facilities. The shared base schema remains
+  in `catalog-core`. It owns no synchronization or account state.

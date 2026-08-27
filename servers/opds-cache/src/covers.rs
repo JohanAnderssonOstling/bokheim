@@ -2,7 +2,8 @@ use super::{
     publication_cover_fallback, publication_metadata_acquisition, CatalogPage, CatalogProcess, CatalogService, CatalogServiceError, CatalogSourceId, BROWSER_UPSTREAM_TIMEOUT, COVER_RECONCILIATION_BATCH, EPUB_EXTRACTION_SWEEP_INTERVAL,
 };
 use crate::extraction::{generate_publication_thumbnail, is_synthetic_cover_key};
-use catalog_contract::{CatalogPublicationPayload, CatalogSubjectBrowseEntryPayload};
+use catalog_model::{CatalogSourcedPublication, CatalogSubjectBrowseEntryPayload};
+use catalog_protocol::CatalogPublicationPayload;
 use futures_util::future::join_all;
 impl CatalogService {
     pub(crate) async fn remember_browser_covers(&self, source_id: &CatalogSourceId, page: &CatalogPage) {
@@ -101,6 +102,16 @@ impl CatalogService {
         for (payload, reference) in payloads.iter_mut().zip(references) {
             if let Some(reference) = reference {
                 payload.publication.publication.image_url = Some(reference);
+            }
+        }
+    }
+
+    pub(crate) async fn publicize_sourced_covers(&self, publications: &mut [CatalogSourcedPublication]) {
+        let image_urls = publications.iter().map(|publication| publication.publication.image_url.clone()).collect::<Vec<_>>();
+        let references = self.public_cover_references(&image_urls).await;
+        for (publication, reference) in publications.iter_mut().zip(references) {
+            if let Some(reference) = reference {
+                publication.publication.image_url = Some(reference);
             }
         }
     }

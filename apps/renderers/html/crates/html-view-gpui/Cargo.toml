@@ -17,7 +17,7 @@ web-time = "1"
 
 [dev-dependencies]
 base64 = "0.22"
-epub_provider = { path = "../../epub_provider" }
+epub_provider = { path = "../../../../../shared/epub" }
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true, features = ["test-support"] }
 gpui_wgpu = { path = "../../../../../../GPUI-Fork/crates/gpui_wgpu", features = ["font-kit", "test-support"] }

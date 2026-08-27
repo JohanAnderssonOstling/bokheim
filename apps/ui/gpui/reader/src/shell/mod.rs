@@ -6,6 +6,10 @@
 
 pub(crate) mod annotation_editor;
 pub(crate) mod chrome;
+pub(crate) mod input;
 pub(crate) mod marks;
+pub(crate) mod page;
 pub(crate) mod persistence;
+pub(crate) mod search;
 pub(crate) mod state_panel;
+pub(crate) mod toolbar;

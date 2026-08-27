@@ -1,22 +1,20 @@
 //! API and shared resources scoped to one concrete library.
 
-mod covers;
 pub(crate) mod database;
+mod download;
 mod enrichment;
 mod handle;
+mod io;
 mod management;
 mod model;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_import;
 mod open;
 mod operations;
-#[cfg(feature = "pdf")]
-pub(crate) mod pdf_annotations;
 
 use library_sqlite::filenames;
 
-#[cfg(all(feature = "scanner", not(target_os = "android")))]
-pub(crate) use covers::{generate_thumbnail_for_sync, thumbnail_needs_repair};
-pub use enrichment::{MissingSubjectsBook, SubjectEnrichmentOutcome, SubjectEnrichmentStatus};
+pub use download::{BookDownloadStatus, DownloadProgress, DownloadProgressError, DownloadState, FolderDownloadStatus};
 pub use handle::{LibraryAuthorsView, LibraryBackend, LibraryFolderEntry, LibraryFolderView, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySubjectEntry, LibrarySubjectView};
-#[cfg(all(feature = "scanner", not(target_os = "android")))]
-pub(crate) use model::generate_content_hash_blake3;
+pub use io::{BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReaderFuture};
 pub use model::ResolvedBook;

@@ -13,6 +13,7 @@ use crate::library::widgets::{BookCardView, Paginator, PaginatorAxis, PaginatorC
 const HOME_BOOK_PREFERRED_WIDTH_REM: f32 = components::BOOK_COVER_WIDTH / 16.0;
 const HOME_BOOK_ASPECT_RATIO: f32 = components::BOOK_COVER_ASPECT_RATIO;
 const HOME_BOOK_EXTRA_HEIGHT_REM: f32 = components::BOOK_CARD_TITLE_HEIGHT_REM + components::BOOK_CARD_AUTHOR_HEIGHT_REM;
+const HOME_BOOK_LIMIT: i32 = 20;
 
 pub(crate) struct HomePage {
     ui: LibraryContext,
@@ -42,7 +43,7 @@ impl HomeSection {
 
     fn render(&self, index: usize, show_controls: bool, cx: &mut Context<HomePage>) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let mut heading = components::carousel_heading().child(components::carousel_title(self.title.clone()));
+        let mut heading = components::carousel_heading(self.title.clone());
         if show_controls {
             let paginator = self.paginator.read(cx);
             let has_previous = paginator.has_previous();
@@ -88,9 +89,9 @@ impl HomePage {
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        let limit = i32::from(self.ui.contracts().browsing_content.home_book_limit);
+        let limit = HOME_BOOK_LIMIT;
         let generation = self.refresh.begin();
-        let load = self.ui.backend().load_home(limit);
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.home(limit));
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             let _ = page.update(cx, |page, cx| {
@@ -119,7 +120,7 @@ impl HomePage {
     }
 
     fn install(&mut self, mut data: HomeBrowseRows, cx: &mut Context<Self>) {
-        let threshold = f32::from(self.ui.contracts().browsing_content.finished_progress_threshold);
+        let threshold = library_model::FINISHED_PROGRESS_THRESHOLD;
         let mut in_progress = Vec::new();
         let mut finished = Vec::new();
         for book in data.recently_read.drain(..) {
@@ -184,19 +185,17 @@ impl Render for HomePage {
         // because the library holds no books. Saying nothing at all leaves a
         // blank page in both cases.
         if !rendered_any && self.error.is_none() {
-            let states = &self.ui.contracts().browsing_states;
             page = page.child(if self.loaded && !self.ui.backend().scanner_running() {
                 library_empty_state(theme)
             } else {
-                let label = if self.ui.backend().scanner_running() { "Scanning library…".into() } else { states.loading_library_label.clone() };
+                let label = if self.ui.backend().scanner_running() { "Scanning library…" } else { "Loading library…" };
                 components::browser_loading_message(label, theme).into_any_element()
             });
         }
 
         let entity = cx.entity();
-        let retry_label = self.ui.contracts().browsing_states.retry_label.clone();
         if let Some(error) = self.error.clone() {
-            let retry = components::topbar_action_button("retry-section", retry_label, IconName::Redo2, theme).on_click(move |_, _, cx| entity.update(cx, |page, cx| page.refresh(cx)));
+            let retry = components::topbar_action_button("retry-section", "Retry", IconName::Redo2, theme).on_click(move |_, _, cx| entity.update(cx, |page, cx| page.refresh(cx)));
             components::browser_error_banner(error, retry, page.into_any_element()).into_any_element()
         } else {
             page.into_any_element()

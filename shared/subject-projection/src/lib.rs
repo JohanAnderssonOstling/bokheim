@@ -6,7 +6,6 @@ mod ddc;
 mod fast;
 mod lcc;
 mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
 mod taxonomy_sqlite;
 
 pub use publication_model::PublicationSubject;
@@ -20,11 +19,36 @@ pub use runtime::{
     unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy,
     BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use taxonomy_sqlite::{
-    has_unified_taxonomy_overlay, is_unified_taxonomy_client_seed, merge_unified_taxonomy_sqlite, merge_unified_taxonomy_sqlite_with_resolutions, read_resolved_unified_taxonomy_codes, read_unified_taxonomy_sqlite,
-    unified_taxonomy_server_release_id, UnifiedCodeResolution,
+    has_unified_taxonomy_overlay, has_unified_taxonomy_overlay_in, is_unified_taxonomy_client_seed, is_unified_taxonomy_client_seed_in, merge_unified_taxonomy_connection, merge_unified_taxonomy_sqlite,
+    merge_unified_taxonomy_sqlite_with_resolutions, read_resolved_unified_taxonomy_codes, read_resolved_unified_taxonomy_codes_in, read_unified_taxonomy_connection, read_unified_taxonomy_sqlite, reset_unified_taxonomy_connection,
+    unified_taxonomy_server_release_id, unified_taxonomy_server_release_id_in,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnifiedCodeResolution {
+    system_id: String,
+    code: String,
+    matched_concept_ids: Vec<String>,
+}
+
+impl UnifiedCodeResolution {
+    pub fn new(system_id: String, code: String, matched_concept_ids: Vec<String>) -> Self {
+        Self { system_id, code, matched_concept_ids }
+    }
+
+    pub fn system_id(&self) -> &str {
+        &self.system_id
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn matched_concept_ids(&self) -> &[String] {
+        &self.matched_concept_ids
+    }
+}
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";

@@ -13,6 +13,10 @@ use ui_components as components;
 use super::folder_picker::{FolderPicker, FolderPickerEvent};
 use crate::library::services::{LatestRequest, LibraryContext};
 
+fn book_import_extensions() -> Vec<String> {
+    crate::BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FolderActionsEvent {
     Reload,
@@ -97,7 +101,7 @@ impl FolderActions {
 
     fn choose_book(&mut self, cx: &mut Context<Self>) {
         let parent_id = self.current_id;
-        let extensions = self.ui.contracts().browsing_content.import_extensions.clone();
+        let extensions = book_import_extensions();
         let selection = cx.prompt_for_files_with_filters(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Add book".into()) }, vec![FileDialogFilter { name: "Books".to_owned(), extensions }]);
         let backend = self.ui.backend().id();
         let app_backend = self.ui.app_backend();
@@ -111,7 +115,7 @@ impl FolderActions {
         cx.spawn(async move |actions, cx| {
             let result = match selection.await {
                 Ok(Ok(Some(files))) => match files.into_iter().next() {
-                    Some(file) => library.import_book(parent_id, file.name, file.bytes).await,
+                    Some(file) => crate::services::backend::library_blocking(&library, move |library| library.import_book_bytes(&parent_id, file.name, file.bytes)).await,
                     None => return,
                 },
                 Ok(Ok(None)) => return,
@@ -128,7 +132,7 @@ impl FolderActions {
 
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
         let parent_id = self.current_id;
-        let extensions = self.ui.contracts().browsing_content.import_extensions.clone();
+        let extensions = book_import_extensions();
         let selection = cx.prompt_for_directories_with_filters(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Add folder".into()) }, vec![FileDialogFilter { name: "Books".to_owned(), extensions }]);
         let backend = self.ui.backend().id();
         let app_backend = self.ui.app_backend();
@@ -142,7 +146,10 @@ impl FolderActions {
         cx.spawn(async move |actions, cx| {
             let result = match selection.await {
                 Ok(Ok(Some(directories))) => match directories.into_iter().next() {
-                    Some(directory) => library.import_directory(parent_id, crate::directory_import(directory)).await,
+                    Some(directory) => {
+                        let directory = crate::directory_import(directory);
+                        crate::services::backend::library_blocking(&library, move |library| library.import_directory(&parent_id, directory)).await
+                    }
                     None => return,
                 },
                 Ok(Ok(None)) => return,
@@ -203,7 +210,8 @@ impl FolderActions {
         dialog.error = None;
         match dialog.mode {
             FolderNameMode::Create => {
-                let operation = self.ui.backend().create_directory(self.current_id, name);
+                let parent_id = self.current_id;
+                let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.create_directory(&parent_id, &name).map(|_| ()));
                 cx.spawn(async move |actions, cx| {
                     let result = operation.await;
                     let _ = actions.update(cx, |actions, cx| match result {
@@ -224,7 +232,8 @@ impl FolderActions {
                 .detach();
             }
             FolderNameMode::Rename => {
-                let operation = self.ui.backend().rename_directory(self.current_id, name);
+                let directory_id = self.current_id;
+                let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.rename_directory(&directory_id, &name));
                 cx.spawn(async move |actions, cx| {
                     let result = operation.await;
                     let _ = actions.update(cx, |actions, cx| match result {
@@ -254,7 +263,7 @@ impl FolderActions {
         }
         let source_id = self.current_id;
         let generation = self.move_request.begin();
-        let load = self.ui.backend().folder_destinations();
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.folder_destinations());
         let task = cx.spawn(async move |actions, cx| {
             let result = load.await;
             let _ = actions.update(cx, |actions, cx| {
@@ -285,7 +294,8 @@ impl FolderActions {
             cx.notify();
             return;
         };
-        let operation = self.ui.backend().move_directory(dialog.source_id, parent_id);
+        let source_id = dialog.source_id;
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.move_directory(&source_id, &parent_id));
         cx.spawn(async move |actions, cx| {
             let result = operation.await;
             let _ = actions.update_in(cx, |_, window, cx| match result {

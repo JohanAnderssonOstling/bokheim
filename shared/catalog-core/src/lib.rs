@@ -2,63 +2,63 @@ mod cache;
 #[cfg(feature = "provider")]
 mod language;
 
+#[cfg(feature = "server-extension")]
+#[doc(hidden)]
+pub use cache::server_extension;
 pub use cache::{
-    prepare_catalog_subject_assignments, CachedCatalogPage, CachedCatalogSubjectBrowseResponse, CachedCatalogSubjectCollectionState, CatalogCache, CatalogCacheError, CatalogCoverDownloadInventory, CatalogCoverDownloadJob,
-    CatalogCrawlGeneration, CatalogDescriptionBackfillInventory, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionInventory, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogIdentityReview,
-    CatalogIdentityReviewCandidate, CatalogIdentityReviewInventory, CatalogInventory, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillInventory, CatalogMetadataBackfillJob,
-    CatalogMetadataBackfillUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity, CatalogSearchMatches, CatalogSourceInventory, CatalogSourceState,
-    CatalogSubjectAssignment, PreparedCatalogPageWrite, SequencedCatalogPublication,
+    active_generation_in, ensure_source_in, prepare_catalog_subject_assignments, put_page_row, refresh_active_counts, sequence_in, sql_decode_error, storage_i64, stored_u64, upsert_publication_with_sequence, CachedCatalogPage,
+    CatalogCache, CatalogCacheError, CatalogSearchMatches, CatalogSourceState, CatalogSubjectAssignment, SequencedCatalogPublication,
 };
 #[cfg(feature = "provider")]
 pub use language::CatalogLanguageFilter;
 
 #[cfg(feature = "provider")]
 mod provider {
-    use catalog_contract::{
-        CatalogAuthentication, CatalogAuthorCredit, CatalogBookFormat, CatalogCapability, CatalogContributorCredit, CatalogDescription, CatalogExternalActionKind, CatalogFacet, CatalogFreshness, CatalogGroup, CatalogImportRequest,
-        CatalogLink, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPrice, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity, CatalogPublicationMetadata, CatalogPublisherCredit, CatalogSearch,
-        CatalogSearchDefinition, CatalogSearchField, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseResponse, Identifier, LanguageTag, LocalizedText, Scheme, Scope,
+    use catalog_model::{
+        CatalogAuthentication, CatalogAuthorCredit, CatalogBookFormat, CatalogCapability, CatalogContributorCredit, CatalogExternalActionKind, CatalogFacet, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLink,
+        CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPrice, CatalogPublicationIdentity, CatalogPublicationMetadata, CatalogPublisherCredit, CatalogSearch, CatalogSearchDefinition, CatalogSearchField, CatalogSearchQuery,
+        CatalogSource, CatalogSourceId, CatalogSubjectBrowseResponse, Identifier, LanguageTag, LocalizedText, Scheme, Scope,
     };
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     use futures_util::StreamExt;
     #[cfg(feature = "cover-cache")]
     use image::io::Reader as ImageReader;
-    use opds::{
-        OpdsAcquisition, OpdsAcquisitionKind, OpdsBookFormat, OpdsCatalog, OpdsCatalogLink, OpdsDescription, OpdsDirectAcquisition, OpdsEndpoint, OpdsEndpointId, OpdsFacet, OpdsGroup, OpdsLinkTarget, OpdsPrice, OpdsPublication,
-        OpdsPublicationIdentity, OpdsSearch, OpdsSearchQuery,
-    };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::fmt;
     use std::future::Future;
     #[cfg(feature = "cover-cache")]
     use std::io::Cursor;
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
+    use std::path::Path;
     #[cfg(feature = "cover-cache")]
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     #[cfg(feature = "cover-cache")]
     use std::sync::{Arc, Mutex};
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     use std::time::Duration;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     use tokio::io::AsyncWriteExt;
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
+    use tokio::sync::mpsc;
     #[cfg(feature = "cover-cache")]
-    use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
+    use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+    #[cfg(not(target_arch = "wasm32"))]
     use url::Url;
 
-    const OPDS_SOURCE_PREFIX: &str = "opds-";
     // Keep the queued compressed-image working set small. Catalogue crawls can
     // discover thousands of covers faster than the CPU can decode them, and each
     // queued body is retained until a resize worker receives it.
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const MAX_CATALOG_COVER_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const MAX_CATALOG_COVER_DECODE_WIDTH: u32 = 2048;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const MAX_CATALOG_COVER_DECODE_HEIGHT: u32 = 3072;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const MAX_CATALOG_COVER_DECODE_ALLOC: u64 = 28 * 1024 * 1024;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const CATALOG_COVER_WIDTH: u32 = 408;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const CATALOG_COVER_HEIGHT: u32 = 612;
     // Embedded EPUB thumbnails use the library thumbnail contract (600 px wide)
     // and may therefore be larger than covers normalized from upstream URLs.
@@ -74,71 +74,12 @@ mod provider {
     const MAX_REMEMBERED_COVER_REFERENCES: usize = 8_192;
     #[cfg(feature = "cover-cache")]
     const MAX_REMEMBERED_UNSUITABLE_COVERS: usize = 8_192;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const COVER_DOWNLOAD_QUEUE_CAPACITY: usize = 1_024;
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     const COVER_RESIZE_QUEUE_CAPACITY: usize = 4;
     #[cfg(feature = "cover-cache")]
     const CATALOG_COVER_ASSET_PATH_PREFIX: &str = "/api/opds/covers/";
-
-    /// Applies the Project Gutenberg cleanup and illustrated-edition preference
-    /// shared by native and browser clients.
-    pub fn normalize_project_gutenberg_publication(publication: &mut CatalogPublication) -> bool {
-        let previous = publication.description.clone();
-        let Some(description) = publication.description.take() else { return false };
-        publication.description = match description {
-            CatalogDescription::PlainText { text } => {
-                let text = opds::strip_project_gutenberg_plain_text(&text);
-                (!text.trim().is_empty()).then_some(CatalogDescription::PlainText { text })
-            }
-            CatalogDescription::RichHtml { safe_html, .. } => opds::project_gutenberg_description_parts(&safe_html).map(|(safe_html, plain_text)| CatalogDescription::RichHtml { safe_html, plain_text }),
-        };
-        publication.description != previous
-    }
-
-    fn project_gutenberg_edition_has_images(publication: &CatalogPublication) -> bool {
-        publication.actions.iter().any(|action| {
-            let CatalogPublicationAction::Import { request } = action else { return false };
-            let download_url = request.download_url.to_ascii_lowercase();
-            download_url.contains(".images") && !download_url.contains(".noimages")
-        })
-    }
-
-    pub fn normalize_project_gutenberg_publications(publications: &mut Vec<CatalogPublication>) {
-        let mut work_positions = HashMap::<String, usize>::new();
-        let mut normalized = Vec::with_capacity(publications.len());
-        for mut publication in publications.drain(..) {
-            normalize_project_gutenberg_publication(&mut publication);
-            let Some(work_id) = publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
-                normalized.push(publication);
-                continue;
-            };
-            if let Some(&position) = work_positions.get(work_id) {
-                if project_gutenberg_edition_has_images(&publication) && !project_gutenberg_edition_has_images(&normalized[position]) {
-                    normalized[position] = publication;
-                }
-            } else {
-                work_positions.insert(work_id.to_owned(), normalized.len());
-                normalized.push(publication);
-            }
-        }
-        *publications = normalized;
-    }
-
-    pub fn normalize_project_gutenberg_page(page: &mut CatalogPage) {
-        normalize_project_gutenberg_publications(&mut page.publications);
-        for group in &mut page.groups {
-            normalize_project_gutenberg_publications(&mut group.publications);
-        }
-    }
-
-    pub fn normalize_project_gutenberg_sourced_publication_descriptions(publications: &mut [catalog_contract::CatalogSourcedPublication]) {
-        for item in publications {
-            if item.source_id.as_str() == "opds-project-gutenberg" {
-                normalize_project_gutenberg_publication(&mut item.publication);
-            }
-        }
-    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum CatalogProviderErrorKind {
@@ -157,6 +98,7 @@ mod provider {
             Self { message: message.into(), kind: CatalogProviderErrorKind::Other }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         fn unsuitable_cover_dimensions(width: u32, height: u32) -> Self {
             Self { message: format!("catalog cover dimensions {width}x{height} are not suitable for a book cover"), kind: CatalogProviderErrorKind::UnsuitableCoverDimensions }
         }
@@ -181,29 +123,33 @@ mod provider {
     #[cfg(feature = "cover-cache")]
     #[derive(Clone)]
     pub struct CatalogCoverCache {
-        outbound_policy: opds::OutboundNetworkPolicy,
+        #[cfg(not(target_arch = "wasm32"))]
+        outbound_policy: outbound::OutboundNetworkPolicy,
+        #[cfg(not(target_arch = "wasm32"))]
         directory: Arc<PathBuf>,
         known: Arc<Mutex<BoundedStringSet>>,
         unsuitable: Arc<Mutex<BoundedStringSet>>,
         in_flight: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
         downloads: Arc<Semaphore>,
+        #[cfg(target_arch = "wasm32")]
+        cached: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
 
     #[derive(Clone)]
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     pub struct CatalogCoverPipeline {
         cache: CatalogCoverCache,
         downloads: mpsc::Sender<CatalogCoverDownload>,
         scheduled: Arc<Mutex<HashSet<String>>>,
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     struct CatalogCoverDownload {
         source_id: CatalogSourceId,
         image_url: String,
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     struct CatalogCoverResize {
         image_url: String,
         source: Vec<u8>,
@@ -253,16 +199,34 @@ mod provider {
     #[cfg(feature = "cover-cache")]
     impl CatalogCoverCache {
         pub fn new(directory: PathBuf) -> Result<Self, CatalogProviderError> {
-            Self::with_outbound_policy(directory, opds::OutboundNetworkPolicy::AllowPrivate)
+            Self::build(directory)
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         /// Creates the cover cache used by an Internet-facing service. Cover URLs
         /// and every redirect hop are restricted to publicly routed addresses.
         pub fn new_public_only(directory: PathBuf) -> Result<Self, CatalogProviderError> {
-            Self::with_outbound_policy(directory, opds::OutboundNetworkPolicy::PublicOnly)
+            Self::with_outbound_policy(directory, outbound::OutboundNetworkPolicy::PublicOnly)
         }
 
-        fn with_outbound_policy(directory: PathBuf, outbound_policy: opds::OutboundNetworkPolicy) -> Result<Self, CatalogProviderError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        fn build(directory: PathBuf) -> Result<Self, CatalogProviderError> {
+            Self::with_outbound_policy(directory, outbound::OutboundNetworkPolicy::AllowPrivate)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn build(_directory: PathBuf) -> Result<Self, CatalogProviderError> {
+            Ok(Self {
+                known: Arc::new(Mutex::new(BoundedStringSet::new(MAX_REMEMBERED_COVER_REFERENCES))),
+                unsuitable: Arc::new(Mutex::new(BoundedStringSet::new(MAX_REMEMBERED_UNSUITABLE_COVERS))),
+                in_flight: Arc::new(AsyncMutex::new(HashMap::new())),
+                downloads: Arc::new(Semaphore::new(MAX_CONCURRENT_CATALOG_COVERS)),
+                cached: Arc::new(Mutex::new(HashMap::new())),
+            })
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn with_outbound_policy(directory: PathBuf, outbound_policy: outbound::OutboundNetworkPolicy) -> Result<Self, CatalogProviderError> {
             std::fs::create_dir_all(&directory).map_err(|error| CatalogProviderError::new(error.to_string()))?;
             let directory = directory.canonicalize().map_err(|error| CatalogProviderError::new(error.to_string()))?;
             Ok(Self {
@@ -301,6 +265,7 @@ mod provider {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         pub async fn cover(&self, source_id: &CatalogSourceId, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
             self.cover_with(source_id, image_url, self.fetch_cover(image_url)).await
         }
@@ -312,7 +277,7 @@ mod provider {
             if image_url.len() > MAX_CATALOG_COVER_URL_BYTES {
                 return Err(CatalogProviderError::new("catalog cover URL is too long"));
             }
-            if let Some(bytes) = read_cached_cover(&cover_path(&self.directory, image_url)).await {
+            if let Some(bytes) = self.read_cover(image_url).await {
                 return Ok(bytes);
             }
             if self.unsuitable.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&cover_cache_key(image_url)) {
@@ -332,10 +297,9 @@ mod provider {
             if image_url.len() > MAX_CATALOG_COVER_URL_BYTES {
                 return None;
             }
-            let bytes = read_cached_cover(&cover_path(&self.directory, image_url)).await?;
+            let bytes = self.read_cover(image_url).await?;
             let digest = blake3::hash(&bytes).to_hex().to_string();
-            let path = cover_asset_path(&self.directory, &digest);
-            if read_cached_cover(&path).await.is_none() && self.publish_cover(&path, &bytes).await.is_err() {
+            if self.read_cover_asset(&digest).await.is_none() && self.write_cover_asset(&digest, &bytes).await.is_err() {
                 return None;
             }
             Some(catalog_cover_asset_reference(&digest))
@@ -346,7 +310,7 @@ mod provider {
             if !valid_cover_asset_digest(digest) {
                 return Err(CatalogProviderError::new("catalog cover asset digest is invalid"));
             }
-            let bytes = read_cached_cover(&cover_asset_path(&self.directory, digest)).await.ok_or_else(|| CatalogProviderError::new("catalog cover asset is not cached"))?;
+            let bytes = self.read_cover_asset(digest).await.ok_or_else(|| CatalogProviderError::new("catalog cover asset is not cached"))?;
             if blake3::hash(&bytes).to_hex().as_str() != digest {
                 return Err(CatalogProviderError::new("catalog cover asset does not match its digest"));
             }
@@ -360,8 +324,7 @@ mod provider {
             }
             let reference_key = cover_reference_key(source_id, image_url);
             let cache_key = cover_cache_key(image_url);
-            let path = cover_path(&self.directory, image_url);
-            if let Some(bytes) = read_cached_cover(&path).await {
+            if let Some(bytes) = self.read_cover(image_url).await {
                 return Ok(bytes);
             }
             if !self.known.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&reference_key) {
@@ -372,7 +335,7 @@ mod provider {
                 in_flight.entry(cache_key.clone()).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
             };
             let _fetch = lock.lock().await;
-            if let Some(bytes) = read_cached_cover(&path).await {
+            if let Some(bytes) = self.read_cover(image_url).await {
                 self.in_flight.lock().await.remove(&cache_key);
                 return Ok(bytes);
             }
@@ -384,7 +347,7 @@ mod provider {
                 }
             };
             let result = match fetch.await {
-                Ok(bytes) => self.publish_cover(&path, &bytes).await.map(|()| bytes),
+                Ok(bytes) => self.write_cover(image_url, &bytes).await.map(|()| bytes),
                 Err(error) => Err(error),
             };
             {
@@ -399,11 +362,55 @@ mod provider {
             result
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        async fn read_cover(&self, image_url: &str) -> Option<Vec<u8>> {
+            read_cached_cover(&cover_path(&self.directory, image_url)).await
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        async fn read_cover(&self, image_url: &str) -> Option<Vec<u8>> {
+            self.cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&format!("url\n{image_url}")).cloned()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        async fn write_cover(&self, image_url: &str, bytes: &[u8]) -> Result<(), CatalogProviderError> {
+            self.publish_cover(&cover_path(&self.directory, image_url), bytes).await
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        async fn write_cover(&self, image_url: &str, bytes: &[u8]) -> Result<(), CatalogProviderError> {
+            self.cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(format!("url\n{image_url}"), bytes.to_vec());
+            Ok(())
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        async fn read_cover_asset(&self, digest: &str) -> Option<Vec<u8>> {
+            read_cached_cover(&cover_asset_path(&self.directory, digest)).await
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        async fn read_cover_asset(&self, digest: &str) -> Option<Vec<u8>> {
+            self.cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&format!("asset\n{digest}")).cloned()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        async fn write_cover_asset(&self, digest: &str, bytes: &[u8]) -> Result<(), CatalogProviderError> {
+            self.publish_cover(&cover_asset_path(&self.directory, digest), bytes).await
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        async fn write_cover_asset(&self, digest: &str, bytes: &[u8]) -> Result<(), CatalogProviderError> {
+            self.cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(format!("asset\n{digest}"), bytes.to_vec());
+            Ok(())
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         async fn fetch_cover(&self, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
             let source = self.fetch_cover_source(image_url).await?;
             tokio::task::spawn_blocking(move || normalize_cover(&source)).await.map_err(|error| CatalogProviderError::new(error.to_string()))?
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         async fn fetch_cover_source(&self, image_url: &str) -> Result<Vec<u8>, CatalogProviderError> {
             let url = Url::parse(image_url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
@@ -411,7 +418,7 @@ mod provider {
             }
             let response = tokio::time::timeout(
                 Duration::from_secs(15),
-                opds::send_outbound_get(url, reqwest::header::HeaderMap::new(), self.outbound_policy, &format!("Bokheim/{} catalog-cover-client", env!("CARGO_PKG_VERSION")), Duration::from_secs(5), Duration::from_secs(15)),
+                outbound::send_get(url, reqwest::header::HeaderMap::new(), self.outbound_policy, &format!("Bokheim/{} catalog-cover-client", env!("CARGO_PKG_VERSION")), Duration::from_secs(5), Duration::from_secs(15)),
             )
             .await
             .map_err(|_| CatalogProviderError::new("catalog cover request timed out"))?
@@ -441,6 +448,7 @@ mod provider {
             Ok(source)
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         async fn publish_cover(&self, path: &Path, bytes: &[u8]) -> Result<(), CatalogProviderError> {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
@@ -462,7 +470,7 @@ mod provider {
         }
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     impl CatalogCoverPipeline {
         pub fn new(cache: CatalogCoverCache, download_workers: usize, thumbnail_workers: usize) -> Result<Self, CatalogProviderError> {
             let runtime = tokio::runtime::Handle::try_current().map_err(|_| CatalogProviderError::new("catalog cover pipeline requires a Tokio runtime"))?;
@@ -559,12 +567,12 @@ mod provider {
         blake3::hash(image_url.as_bytes()).to_hex().to_string()
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     fn cover_path(directory: &Path, image_url: &str) -> PathBuf {
         directory.join(format!("{}.jpg", cover_cache_key(image_url)))
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     fn cover_asset_path(directory: &Path, digest: &str) -> PathBuf {
         directory.join("assets").join(format!("{digest}.jpg"))
     }
@@ -585,7 +593,7 @@ mod provider {
         digest.len() == blake3::OUT_LEN * 2 && digest.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     fn normalize_cover(bytes: &[u8]) -> Result<Vec<u8>, CatalogProviderError> {
         let dimensions = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|error| CatalogProviderError::new(error.to_string()))?.into_dimensions().map_err(|error| CatalogProviderError::new(error.to_string()))?;
         if !thumbnail::reasonable_cover_dimensions(dimensions.0, dimensions.1) {
@@ -630,7 +638,7 @@ mod provider {
         Ok(bytes)
     }
 
-    #[cfg(feature = "cover-cache")]
+    #[cfg(all(feature = "cover-cache", not(target_arch = "wasm32")))]
     async fn read_cached_cover(path: &Path) -> Option<Vec<u8>> {
         let metadata = tokio::fs::metadata(path).await.ok()?;
         if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CATALOG_COVER_SOURCE_BYTES {
@@ -641,7 +649,7 @@ mod provider {
         thumbnail::reasonable_cover_dimensions(dimensions.0, dimensions.1).then_some(bytes)
     }
 
-    #[cfg(all(test, feature = "cover-cache"))]
+    #[cfg(all(test, feature = "cover-cache", not(target_arch = "wasm32")))]
     mod cover_tests {
         use super::*;
         use image::ImageOutputFormat;
@@ -687,375 +695,6 @@ mod provider {
             let digest = catalog_cover_asset_digest(&reference).unwrap();
             assert_eq!(cache.cached_cover_asset(digest).await.unwrap(), normalized);
             assert_eq!(cache.public_cover_reference(image_url).await.as_deref(), Some(reference.as_str()));
-        }
-    }
-
-    pub fn opds_source(endpoint: &OpdsEndpoint) -> CatalogSource {
-        CatalogSource {
-            id: opds_catalog_source_id(&endpoint.id),
-            title: endpoint.title.clone(),
-            description: endpoint.description.clone(),
-            languages: endpoint.languages.clone(),
-            authentication: CatalogAuthentication::None,
-            capabilities: vec![CatalogCapability::Browse, CatalogCapability::Search, CatalogCapability::Facets, CatalogCapability::Import, CatalogCapability::ExternalFulfillment],
-        }
-    }
-
-    pub fn opds_catalog_source_id(endpoint_id: &OpdsEndpointId) -> CatalogSourceId {
-        CatalogSourceId::parse(&format!("{OPDS_SOURCE_PREFIX}{}", endpoint_id.as_str())).expect("namespaced OPDS endpoint id is a catalog source id")
-    }
-
-    #[doc(hidden)]
-    pub fn opds_endpoint_id(source_id: &CatalogSourceId) -> Result<OpdsEndpointId, CatalogProviderError> {
-        let value = source_id.as_str().strip_prefix(OPDS_SOURCE_PREFIX).ok_or_else(|| CatalogProviderError::new("catalog source does not belong to the OPDS provider"))?;
-        OpdsEndpointId::parse(value).map_err(|error| CatalogProviderError::new(error.to_string()))
-    }
-
-    pub fn canonicalize_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<String, CatalogProviderError> {
-        let expected = url::Url::parse(&endpoint.url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        let mut actual = url::Url::parse(locator).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if !matches!(actual.scheme(), "http" | "https") || !actual.username().is_empty() || actual.password().is_some() {
-            return Err(CatalogProviderError::new("catalog page locator must be an HTTP URL without embedded credentials"));
-        }
-        // OpenEdition is served over HTTPS but currently publishes absolute HTTP
-        // links back to its own OPDS host. Preserve the origin boundary while
-        // refusing to follow that downgrade.
-        if expected.scheme() == "https" && actual.scheme() == "http" && expected.host_str() == actual.host_str() && expected.port_or_known_default() == Some(443) && actual.port_or_known_default() == Some(80) {
-            actual.set_scheme("https").map_err(|()| CatalogProviderError::new("could not upgrade the OPDS catalog locator to HTTPS"))?;
-            actual.set_port(expected.port()).map_err(|()| CatalogProviderError::new("could not restore the registered OPDS HTTPS port"))?;
-        }
-        if actual.origin() != expected.origin() {
-            return Err(CatalogProviderError::new("catalog page locator does not belong to the registered OPDS origin"));
-        }
-        Ok(actual.into())
-    }
-
-    pub fn validate_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<(), CatalogProviderError> {
-        canonicalize_opds_catalog_locator(endpoint, locator).map(|_| ())
-    }
-
-    pub fn opds_page(source_id: CatalogSourceId, catalog: OpdsCatalog) -> CatalogPage {
-        let catalog_locator = catalog.source_url.clone();
-        CatalogPage {
-            source_id: source_id.clone(),
-            freshness: match catalog.freshness {
-                opds::OpdsCatalogFreshness::Current => CatalogFreshness::Current,
-                opds::OpdsCatalogFreshness::Stale => CatalogFreshness::Stale,
-            },
-            title: catalog.title,
-            locator: catalog.source_url,
-            navigation: catalog.navigation.into_iter().map(catalog_link).collect(),
-            publications: catalog.publications.into_iter().map(|publication| opds_publication(&source_id, &catalog_locator, publication)).collect(),
-            groups: catalog.groups.into_iter().map(|group| opds_group(&source_id, &catalog_locator, group)).collect(),
-            facets: catalog.facets.into_iter().filter_map(catalog_facet).collect(),
-            pagination: CatalogPagination {
-                first: catalog.pagination.first,
-                previous: catalog.pagination.previous,
-                next: catalog.pagination.next,
-                last: catalog.pagination.last,
-                number_of_items: catalog.pagination.number_of_items,
-                items_per_page: catalog.pagination.items_per_page,
-                current_page: catalog.pagination.current_page,
-            },
-            search: catalog.search.map(opds_search),
-        }
-    }
-
-    pub fn opds_search_definition(search: &CatalogSearch) -> Result<OpdsSearch, CatalogProviderError> {
-        match &search.definition {
-            CatalogSearchDefinition::OpdsUriTemplate { base_url, template } => Ok(OpdsSearch::UriTemplate { base_url: base_url.clone(), template: template.clone() }),
-            CatalogSearchDefinition::OpdsOpenSearchDescription { url } => Ok(OpdsSearch::OpenSearchDescription { url: url.clone() }),
-        }
-    }
-
-    pub fn opds_search_query(query: CatalogSearchQuery) -> OpdsSearchQuery {
-        OpdsSearchQuery { query: query.query, title: query.title, author: query.author }
-    }
-
-    /// Revalidates a client-selected catalogue acquisition against a freshly
-    /// fetched OPDS page. Callers must separately validate that `catalog` belongs
-    /// to the registered endpoint before invoking this helper.
-    pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsPublicationIdentity, OpdsDirectAcquisition), CatalogProviderError> {
-        let requested_identity = OpdsPublicationIdentity { publication_id: request.publication.edition_id.clone(), work_id: request.publication.work_id.clone() };
-        requested_identity.validate().map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if catalog.source_url != request.catalog_locator {
-            return Err(CatalogProviderError::new("catalog import does not belong to the verified catalog page"));
-        }
-        let publication = catalog
-            .publications
-            .iter()
-            .chain(catalog.groups.iter().flat_map(|group| group.publications.iter()))
-            .find(|publication| publication.id == requested_identity.publication_id && publication.work_id == requested_identity.work_id)
-            .ok_or_else(|| CatalogProviderError::new("catalog publication is not present on the verified catalog page"))?;
-        let requested_format = opds_book_format(request.book_format);
-        let acquisition = publication
-            .acquisitions
-            .iter()
-            .find_map(|acquisition| match acquisition {
-                OpdsAcquisition::Direct(acquisition)
-                    if acquisition.url == request.download_url && acquisition.book_format == requested_format && acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) =>
-                {
-                    Some(acquisition.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| CatalogProviderError::new("catalog acquisition is not an importable link on the verified catalog page"))?;
-        Ok((requested_identity, acquisition))
-    }
-
-    fn opds_book_format(format: CatalogBookFormat) -> OpdsBookFormat {
-        match format {
-            CatalogBookFormat::Epub => OpdsBookFormat::Epub,
-            CatalogBookFormat::Pdf => OpdsBookFormat::Pdf,
-            CatalogBookFormat::Mobi => OpdsBookFormat::Mobi,
-            CatalogBookFormat::M4b => OpdsBookFormat::M4b,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn search_terms(query: &CatalogSearchQuery) -> Result<String, CatalogProviderError> {
-        let terms = [Some(query.query.trim()).filter(|value| !value.is_empty()), query.title.as_deref().map(str::trim).filter(|value| !value.is_empty()), query.author.as_deref().map(str::trim).filter(|value| !value.is_empty())]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if terms.is_empty() || terms.len() > 500 || terms.chars().any(char::is_control) {
-            return Err(CatalogProviderError::new("catalog search must contain between 1 and 500 characters without control characters"));
-        }
-        Ok(terms)
-    }
-
-    fn catalog_link(link: OpdsCatalogLink) -> CatalogLink {
-        let target = match link.target {
-            OpdsLinkTarget::Catalog => CatalogLinkTarget::Page { locator: link.url },
-            OpdsLinkTarget::Web => CatalogLinkTarget::External { url: link.url },
-        };
-        CatalogLink { title: link.title, target, relations: link.relations, number_of_items: link.number_of_items, active: link.active }
-    }
-
-    fn catalog_facet(mut facet: OpdsFacet) -> Option<CatalogFacet> {
-        if matches!(facet.title.trim().to_ascii_lowercase().as_str(), "license" | "collection") {
-            return None;
-        }
-        if facet.title.trim().eq_ignore_ascii_case("format") {
-            facet.links = facet.links.into_iter().filter_map(compact_format_facet_link).collect();
-        }
-        (!facet.links.is_empty()).then(|| CatalogFacet { title: facet.title, links: facet.links.into_iter().map(catalog_link).collect() })
-    }
-
-    fn compact_format_facet_link(mut link: OpdsCatalogLink) -> Option<OpdsCatalogLink> {
-        let words = link.title.split(|character: char| !character.is_ascii_alphanumeric()).filter(|word| !word.is_empty()).collect::<Vec<_>>();
-        link.title = if words.iter().any(|word| word.eq_ignore_ascii_case("epub")) {
-            "EPUB".to_owned()
-        } else if words.iter().any(|word| word.eq_ignore_ascii_case("pdf")) {
-            "PDF".to_owned()
-        } else if words.iter().any(|word| matches!(word.to_ascii_lowercase().as_str(), "mobi" | "azw" | "azw3")) {
-            "MOBI/AZW".to_owned()
-        } else if words.iter().any(|word| word.eq_ignore_ascii_case("m4b")) {
-            "M4B".to_owned()
-        } else {
-            return None;
-        };
-        Some(link)
-    }
-
-    fn opds_group(source_id: &CatalogSourceId, catalog_locator: &str, group: OpdsGroup) -> CatalogGroup {
-        CatalogGroup {
-            title: group.title,
-            page_locator: group.self_url,
-            number_of_items: group.number_of_items,
-            navigation: group.navigation.into_iter().map(catalog_link).collect(),
-            publications: group.publications.into_iter().map(|publication| opds_publication(source_id, catalog_locator, publication)).collect(),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publication: OpdsPublication) -> CatalogPublication {
-        let identity = CatalogPublicationIdentity { edition_id: publication.id, work_id: publication.work_id };
-        let mut import_formats = Vec::new();
-        let actions = publication
-            .acquisitions
-            .into_iter()
-            .filter_map(|acquisition| opds_action(source_id, catalog_locator, &identity, acquisition))
-            .filter(|action| match action {
-                CatalogPublicationAction::Import { request } if import_formats.contains(&request.book_format) => false,
-                CatalogPublicationAction::Import { request } => {
-                    import_formats.push(request.book_format);
-                    true
-                }
-                CatalogPublicationAction::External { .. } => true,
-            })
-            .collect();
-        let description = publication.description.map(|description| match description {
-            OpdsDescription::PlainText { text } => CatalogDescription::PlainText { text },
-            OpdsDescription::Html { safe_html, plain_text, .. } | OpdsDescription::Xhtml { safe_html, plain_text, .. } => CatalogDescription::RichHtml { safe_html, plain_text },
-        });
-        let authors = publication
-            .authors
-            .into_iter()
-            .map(|author| CatalogAuthorCredit {
-                name: author.name,
-                name_localizations: author.name_localizations.into_iter().map(localized_text).collect(),
-                sort_name: author.sort_name,
-                sort_name_localizations: author.sort_name_localizations.into_iter().map(localized_text).collect(),
-                identifiers: author.identifiers,
-                provider_link: author.provider_link.map(|link| match link.target {
-                    OpdsLinkTarget::Catalog => CatalogLinkTarget::Page { locator: link.url },
-                    OpdsLinkTarget::Web => CatalogLinkTarget::External { url: link.url },
-                }),
-            })
-            .collect();
-        let metadata = CatalogPublicationMetadata {
-            title_localizations: publication.metadata.title_localizations.into_iter().map(localized_text).collect(),
-            sort_name: publication.metadata.sort_name,
-            sort_name_localizations: publication.metadata.sort_name_localizations.into_iter().map(localized_text).collect(),
-            published: publication.metadata.published,
-            modified: publication.metadata.modified,
-            dates: publication.metadata.dates,
-            publishers: publication
-                .metadata
-                .publishers
-                .into_iter()
-                .map(|publisher| CatalogPublisherCredit {
-                    name: publisher.name,
-                    name_localizations: publisher.name_localizations.into_iter().map(localized_text).collect(),
-                    sort_name: publisher.sort_name,
-                    sort_name_localizations: publisher.sort_name_localizations.into_iter().map(localized_text).collect(),
-                    identifiers: publisher.identifiers,
-                    provider_link: publisher.provider_link.map(catalog_author_link),
-                })
-                .collect(),
-            identifiers: publication
-                .metadata
-                .identifiers
-                .into_iter()
-                .filter_map(|identifier| {
-                    let scope = catalog_identifier_scope(identifier.scope)?;
-                    Identifier::new(identifier.value, Scheme::from_label(identifier.scheme.as_deref()), scope, identifier.source).ok()
-                })
-                .collect(),
-            subjects: publication.metadata.subjects,
-            subtitle: publication.metadata.subtitle,
-            subtitle_localizations: publication.metadata.subtitle_localizations.into_iter().map(localized_text).collect(),
-            alternate_titles: publication.metadata.alternate_titles,
-            collections: publication.metadata.collections,
-            contributors: publication
-                .metadata
-                .contributors
-                .into_iter()
-                .map(|contributor| CatalogContributorCredit {
-                    name: contributor.name,
-                    name_localizations: contributor.name_localizations.into_iter().map(localized_text).collect(),
-                    sort_name: contributor.sort_name,
-                    sort_name_localizations: contributor.sort_name_localizations.into_iter().map(localized_text).collect(),
-                    identifiers: contributor.identifiers,
-                    provider_link: contributor.provider_link.map(catalog_author_link),
-                    roles: contributor.roles,
-                })
-                .collect(),
-            rights: publication.metadata.rights,
-            sources: publication.metadata.sources,
-            types: publication.metadata.types,
-            formats: publication.metadata.formats,
-            relations: publication.metadata.relations,
-            coverage: publication.metadata.coverage,
-            properties: publication.metadata.properties,
-            audiences: publication.metadata.audiences,
-            age_ranges: publication.metadata.age_ranges,
-            images: publication.metadata.images,
-            ratings: publication.metadata.ratings,
-            interactions: publication.metadata.interactions,
-            popularity_ranks: publication.metadata.popularity_ranks,
-        };
-        let languages = publication.languages.into_iter().filter_map(|language| LanguageTag::parse(language).ok()).collect();
-        CatalogPublication { identity, title: publication.title, authors, languages, description, image_url: publication.image_url, metadata, actions }
-    }
-
-    fn localized_text(value: opds::OpdsLocalizedText) -> LocalizedText {
-        LocalizedText { language: value.language, value: value.value }
-    }
-
-    fn catalog_identifier_scope(scope: opds::OpdsIdentifierScope) -> Option<Scope> {
-        match scope {
-            opds::OpdsIdentifierScope::Publication => Some(Scope::Publication),
-            opds::OpdsIdentifierScope::CatalogEntry => None,
-            opds::OpdsIdentifierScope::Edition => Some(Scope::Edition),
-            opds::OpdsIdentifierScope::Work => Some(Scope::Work),
-        }
-    }
-
-    fn catalog_author_link(link: opds::OpdsAuthorLink) -> CatalogLinkTarget {
-        match link.target {
-            OpdsLinkTarget::Catalog => CatalogLinkTarget::Page { locator: link.url },
-            OpdsLinkTarget::Web => CatalogLinkTarget::External { url: link.url },
-        }
-    }
-
-    fn opds_action(source_id: &CatalogSourceId, catalog_locator: &str, identity: &CatalogPublicationIdentity, acquisition: OpdsAcquisition) -> Option<CatalogPublicationAction> {
-        match acquisition {
-            OpdsAcquisition::Direct(acquisition) if acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) => Some(CatalogPublicationAction::Import {
-                request: CatalogImportRequest { source_id: source_id.clone(), catalog_locator: catalog_locator.to_owned(), publication: identity.clone(), download_url: acquisition.url, book_format: book_format(acquisition.book_format) },
-            }),
-            OpdsAcquisition::Direct(acquisition) => {
-                Some(CatalogPublicationAction::External { purpose: external_purpose(acquisition.kind), url: acquisition.url, price: acquisition.price.map(price), available_formats: vec![book_format(acquisition.book_format)] })
-            }
-            OpdsAcquisition::Indirect(acquisition) => Some(CatalogPublicationAction::External {
-                purpose: external_purpose(acquisition.kind),
-                url: acquisition.url,
-                price: acquisition.price.map(price),
-                available_formats: acquisition.available_formats.into_iter().map(book_format).collect(),
-            }),
-            OpdsAcquisition::Unsupported(acquisition) => Some(CatalogPublicationAction::External { purpose: external_purpose(acquisition.kind), url: acquisition.url, price: acquisition.price.map(price), available_formats: Vec::new() }),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn opds_search(search: OpdsSearch) -> CatalogSearch {
-        let mut fields = vec![CatalogSearchField::Query];
-        if let OpdsSearch::UriTemplate { template, .. } = &search {
-            if template_has_variable(template, "title") {
-                fields.push(CatalogSearchField::Title);
-            }
-            if template_has_variable(template, "author") {
-                fields.push(CatalogSearchField::Author);
-            }
-        }
-        let definition = match search {
-            OpdsSearch::UriTemplate { base_url, template } => CatalogSearchDefinition::OpdsUriTemplate { base_url, template },
-            OpdsSearch::OpenSearchDescription { url } => CatalogSearchDefinition::OpdsOpenSearchDescription { url },
-        };
-        CatalogSearch { definition, fields }
-    }
-
-    fn template_has_variable(template: &str, expected: &str) -> bool {
-        template
-            .split('{')
-            .skip(1)
-            .filter_map(|suffix| suffix.split_once('}').map(|(expression, _)| expression))
-            .flat_map(|expression| expression.trim_start_matches(['+', '#', '.', '/', ';', '?', '&']).split(','))
-            .any(|variable| variable.trim_end_matches(['?', '*']).split(':').next() == Some(expected))
-    }
-
-    fn book_format(format: OpdsBookFormat) -> CatalogBookFormat {
-        match format {
-            OpdsBookFormat::Epub => CatalogBookFormat::Epub,
-            OpdsBookFormat::Pdf => CatalogBookFormat::Pdf,
-            OpdsBookFormat::Mobi => CatalogBookFormat::Mobi,
-            OpdsBookFormat::M4b => CatalogBookFormat::M4b,
-        }
-    }
-
-    fn price(value: OpdsPrice) -> CatalogPrice {
-        CatalogPrice { currency: value.currency, value: value.value }
-    }
-
-    fn external_purpose(kind: OpdsAcquisitionKind) -> CatalogExternalActionKind {
-        match kind {
-            OpdsAcquisitionKind::Preview => CatalogExternalActionKind::Preview,
-            OpdsAcquisitionKind::Buy => CatalogExternalActionKind::Buy,
-            OpdsAcquisitionKind::Borrow => CatalogExternalActionKind::Borrow,
-            OpdsAcquisitionKind::Subscribe => CatalogExternalActionKind::Subscribe,
-            OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic => CatalogExternalActionKind::Open,
         }
     }
 }

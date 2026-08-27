@@ -10,72 +10,96 @@ pub(crate) mod toolbar;
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
-use app_contract::backend::LibraryBackend;
-use app_contract::library::BookLocator;
-use gpui::{Entity, FocusHandle, Pixels, Point, Subscription};
+use bokheim_backend::LibraryBackend;
+use gpui::{Entity, FocusHandle, Pixels, Point, Subscription, Task};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
 use html_view_gpui::HtmlView;
+use library_model::BookLocator;
 
-use crate::epub::marks::Selection;
-use crate::epub::progress::ProgressState;
-use crate::epub::search::SearchState;
 use crate::epub::toc::TocState;
-use crate::shell::marks::MarksState;
-use crate::shell::persistence::{MutationWriter, PositionWriter};
+use crate::shell::marks::MarkSession;
+use crate::shell::persistence::PositionWriter;
+use crate::shell::state_panel::SidebarState;
 
-pub(crate) enum LoadState {
+enum LoadState {
     Loading,
     Ready(Entity<HtmlView>),
 }
 
-pub(crate) struct ReaderView {
-    pub(crate) locator: BookLocator,
-    pub(crate) library: Rc<dyn LibraryBackend>,
-    pub(crate) book_title: String,
-    pub(crate) title: String,
-    pub(crate) load_state: LoadState,
-    pub(crate) desired_column_count: u8,
-    pub(crate) toc: TocState,
-    pub(crate) toc_tree: Entity<TreeState>,
-    pub(crate) toc_visible: bool,
-    /// Whether the toolbar is currently out of the way.
-    ///
-    /// Turning a page hides it; moving the pointer into the top strip brings it
-    /// back. Deliberately not animated — a reading surface should not have
-    /// something sliding about in the corner of the eye while you read.
-    pub(crate) chrome_hidden: bool,
-    pub(crate) search_input: Entity<InputState>,
-    pub(crate) search: SearchState,
-    pub(crate) publication: Arc<crate::publication::NativePublication>,
-    pub(crate) current_cfi: Option<String>,
-    pub(crate) progress: ProgressState,
-    pub(crate) toolbar_view: Entity<toolbar::ReaderToolbar>,
-    pub(crate) marks: MarksState,
-    /// The text the reader has selected, which only an EPUB anchors by CFI.
-    pub(crate) selection: Option<Selection>,
-    pub(crate) reader_state_visible: bool,
-    pub(crate) reader_state_bookmarks: bool,
-    pub(crate) annotation_note_input: Entity<InputState>,
-    pub(crate) annotation_popup_anchor: Option<Point<Pixels>>,
-    pub(crate) footnote: Option<(html_view_core::FootnotePreview, html_view_gpui::PreparedNote)>,
-    pub(crate) image_preview: Option<(String, Arc<gpui::Image>)>,
-    pub(crate) can_history_back: bool,
-    pub(crate) can_history_forward: bool,
-    pub(crate) focus: FocusHandle,
-    pub(crate) renderer_subscription: Option<Subscription>,
-    pub(crate) reading_positions: PositionWriter<(String, f32)>,
-    pub(crate) mark_writes: MutationWriter,
-    pub(crate) return_to_library: crate::ReturnToLibrary,
-    pub(crate) _subscriptions: Vec<Subscription>,
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Selection {
+    cfi_range: String,
+    text: String,
 }
 
-pub(crate) struct PendingReader {
-    pub(crate) locator: BookLocator,
-    pub(crate) title: String,
-    pub(crate) library: Rc<dyn LibraryBackend>,
-    pub(crate) publication: Arc<crate::publication::NativePublication>,
-    pub(crate) preparation: html_view_core::RendererPreparation,
-    pub(crate) return_to_library: crate::ReturnToLibrary,
+#[derive(Debug, PartialEq)]
+struct ProgressState {
+    fraction: f32,
+    doc_fraction: f32,
+    location: u64,
+    total_locations: u64,
+    section: usize,
+    section_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgressSummary {
+    percent: u8,
+    location: u64,
+    total_locations: u64,
+    section: usize,
+    section_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SearchFilters {
+    match_case: bool,
+    whole_word: bool,
+    match_diacritics: bool,
+    whole_book: bool,
+}
+
+struct SearchState {
+    /// `None` while search is closed; `Some` owns the active query.
+    query: Option<String>,
+    applied_query: String,
+    generation: u64,
+    cancellation: Arc<AtomicU64>,
+    debounce: Option<Task<()>>,
+    index_task: Option<Task<()>>,
+    filters: SearchFilters,
+    match_position: Option<(usize, usize)>,
+}
+
+pub(crate) struct ReaderView {
+    locator: BookLocator,
+    library: Rc<LibraryBackend>,
+    book_title: String,
+    title: String,
+    load_state: LoadState,
+    desired_column_count: u8,
+    toc: TocState,
+    toc_tree: Entity<TreeState>,
+    sidebar: SidebarState,
+    chrome: crate::shell::chrome::ChromeState,
+    search_input: Entity<InputState>,
+    search: SearchState,
+    publication: Arc<crate::publication::NativePublication>,
+    current_cfi: Option<String>,
+    progress: ProgressState,
+    marks: MarkSession,
+    /// The text the reader has selected, which only an EPUB anchors by CFI.
+    selection: Option<Selection>,
+    annotation_note_input: Entity<InputState>,
+    annotation_popup_anchor: Option<Point<Pixels>>,
+    footnote: Option<(html_view_core::FootnotePreview, html_view_gpui::PreparedNote)>,
+    image_preview: Option<(String, Arc<gpui::Image>)>,
+    focus: FocusHandle,
+    renderer_subscription: Option<Subscription>,
+    reading_positions: PositionWriter<(String, f32)>,
+    return_to_library: crate::ReturnToLibrary,
+    _search_subscription: Subscription,
 }

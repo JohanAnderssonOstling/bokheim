@@ -1,4 +1,4 @@
-const wireMediaType = "application/vnd.bokheim+protobuf; version=16";
+const wireMediaType = "application/vnd.bokheim+protobuf; version=17";
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 let hours = 24;
 let refreshing = false;

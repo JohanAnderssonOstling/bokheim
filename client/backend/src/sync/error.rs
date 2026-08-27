@@ -39,7 +39,7 @@ impl From<sync_client::SyncRequestError> for SyncError {
         match error {
             sync_client::SyncRequestError::AuthenticationRequired => Self::AuthenticationRequired,
             sync_client::SyncRequestError::CursorRejected => Self::CursorRejected,
-            error @ (sync_client::SyncRequestError::EndpointNotFound | sync_client::SyncRequestError::Retryable(_) | sync_client::SyncRequestError::InvalidResponse(_)) => Self::failed(error),
+            error @ sync_client::SyncRequestError::Other(_) => Self::failed(error),
         }
     }
 }
@@ -63,7 +63,23 @@ macro_rules! failed_from {
     )+};
 }
 
-failed_from!(r2d2::Error, rusqlite::Error, std::io::Error, std::time::SystemTimeError, std::num::TryFromIntError, sync_common::PullBatchError, sync_common::PushResponseError, crate::library::database::OutboxReadError,);
+failed_from!(
+    crate::platform::database::DatabaseError,
+    rusqlite::Error,
+    std::io::Error,
+    std::time::SystemTimeError,
+    std::num::TryFromIntError,
+    sync_common::PullBatchError,
+    sync_common::PushResponseError,
+    crate::library::database::OutboxReadError,
+);
+
+#[cfg(target_arch = "wasm32")]
+impl From<web_time::SystemTimeError> for SyncError {
+    fn from(error: web_time::SystemTimeError) -> Self {
+        Self::failed(error)
+    }
+}
 
 impl From<&'static str> for SyncError {
     fn from(message: &'static str) -> Self {

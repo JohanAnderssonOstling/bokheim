@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
-use app_contract::library::{EditionIdentityReview, EditionIdentityReviewCandidate};
 use gpui::prelude::*;
 use gpui::{Context, Div, Entity, FontWeight, Render, Subscription, Window, div, px, rems};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{IconName, Sizable};
+use library_model::{EditionIdentityReview, EditionIdentityReviewCandidate};
 use sync_common::ContentHash;
 use ui_components::{self as components, BrowserTheme};
 
@@ -122,7 +122,7 @@ impl AmbiguousLane {
         let Some(candidate) = item.review.candidates.get(selected) else {
             return;
         };
-        let result = self.ui.backend().select_edition_identity_candidate(hash, &candidate.edition_id, &candidate.isbn13).map(|_| ());
+        let result = self.ui.backend().select_edition_identity_candidate(hash, &candidate.edition_id, &candidate.isbn13).map(|_| ()).map_err(|error| error.to_string());
         self.finish_action(result, cx);
     }
 
@@ -130,7 +130,7 @@ impl AmbiguousLane {
         if !self.items.iter().any(|item| item.review.content_hash == hash) {
             return;
         }
-        let result = self.ui.backend().reject_edition_identity_candidates(hash);
+        let result = self.ui.backend().reject_edition_identity_candidates(hash).map_err(|error| error.to_string());
         self.finish_action(result, cx);
     }
 }

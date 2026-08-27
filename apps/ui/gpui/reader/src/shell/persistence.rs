@@ -6,11 +6,23 @@
 
 use std::rc::Rc;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
-use app_contract::backend::{BackendFuture, LibraryBackend};
+use bokheim_backend::app::executor::{BackendBlockingOperation, BackendOutput};
+use bokheim_backend::{BackendError, LibraryBackend};
 use gpui::{App, Context};
 
-type Mutation = Box<dyn FnOnce(&dyn LibraryBackend) -> BackendFuture<()> + 'static>;
+pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
+type Mutation = Box<dyn FnOnce(&LibraryBackend) -> PersistenceFuture<()> + 'static>;
+
+pub(crate) fn run<T, F>(library: &LibraryBackend, operation: F) -> PersistenceFuture<T>
+where
+    T: BackendOutput,
+    F: BackendBlockingOperation<LibraryBackend, Result<T, BackendError>>,
+{
+    let task = library.spawn_blocking(operation);
+    Box::pin(async move { task.await.map_err(|error| error.to_string())?.map_err(|error| error.to_string()) })
+}
 
 /// Awaits `op` against the library, then applies `apply` to the view with its
 /// result.
@@ -18,7 +30,7 @@ type Mutation = Box<dyn FnOnce(&dyn LibraryBackend) -> BackendFuture<()> + 'stat
 /// `what` names the write for log messages, phrased to follow "failed to" —
 /// for example `"save annotation"`. If the operation fails, the failure is
 /// logged and `apply` is not called.
-pub(crate) fn write<V, T>(view: &Context<V>, library: Rc<dyn LibraryBackend>, what: &'static str, op: impl FnOnce(&dyn LibraryBackend) -> BackendFuture<T> + 'static, apply: impl FnOnce(&mut V, &mut Context<V>, T) + 'static)
+pub(crate) fn write<V, T>(view: &Context<V>, library: Rc<LibraryBackend>, what: &'static str, op: impl FnOnce(&LibraryBackend) -> PersistenceFuture<T> + 'static, apply: impl FnOnce(&mut V, &mut Context<V>, T) + 'static)
 where
     V: 'static,
     T: 'static,
@@ -42,7 +54,7 @@ pub(crate) struct MutationWriter {
 }
 
 impl MutationWriter {
-    pub(crate) fn new(cx: &App, library: Rc<dyn LibraryBackend>) -> Self {
+    pub(crate) fn new(cx: &App, library: Rc<LibraryBackend>) -> Self {
         let (mutations, incoming) = async_channel::unbounded::<(&'static str, Mutation)>();
         cx.spawn(async move |_cx| {
             while let Ok((what, mutation)) = incoming.recv().await {
@@ -55,7 +67,7 @@ impl MutationWriter {
         Self { mutations }
     }
 
-    pub(crate) fn record(&self, what: &'static str, mutation: impl FnOnce(&dyn LibraryBackend) -> BackendFuture<()> + 'static) {
+    pub(crate) fn record(&self, what: &'static str, mutation: impl FnOnce(&LibraryBackend) -> PersistenceFuture<()> + 'static) {
         if self.mutations.try_send((what, Box::new(mutation))).is_err() {
             log::error!("failed to queue {what}");
         }
@@ -78,7 +90,7 @@ pub(crate) struct PositionWriter<P> {
 impl<P: 'static> PositionWriter<P> {
     /// Starts the debouncing task. `persist` performs the actual library
     /// write for the newest position; `what` names it for log messages.
-    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&dyn LibraryBackend, &P) -> BackendFuture<()> + 'static, library: Rc<dyn LibraryBackend>) -> Self {
+    pub(crate) fn new(cx: &App, what: &'static str, persist: impl Fn(&LibraryBackend, &P) -> PersistenceFuture<()> + 'static, library: Rc<LibraryBackend>) -> Self {
         let (updates, incoming) = async_channel::unbounded::<P>();
         let executor = cx.background_executor().clone();
         let persist = Rc::new(persist);

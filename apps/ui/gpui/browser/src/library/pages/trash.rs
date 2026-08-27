@@ -1,9 +1,9 @@
 //! Library Trash. Deleted items remain recoverable here until explicitly purged.
 
-use app_contract::library::{LibraryTrashView, TrashedBook, TrashedFolder};
 use gpui::prelude::*;
 use gpui::{Context, IntoElement, Render, SharedString, Subscription, Window, div, px};
 use gpui_component::IconName;
+use library_model::{LibraryTrashView, TrashedBook, TrashedFolder};
 use ui_components as components;
 
 use crate::library::pages::library_empty_state;
@@ -28,7 +28,7 @@ impl TrashPage {
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let generation = self.request.begin();
-        let load = self.ui.backend().load_trash();
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.trash());
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             let _ = page.update(cx, |page, cx| {
@@ -59,7 +59,8 @@ impl TrashPage {
     }
 
     fn restore_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
-        let operation = self.ui.backend().restore_book(book.content_hash);
+        let content_hash = book.content_hash;
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.restore_book(&content_hash));
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "restore book", cx));
@@ -68,7 +69,8 @@ impl TrashPage {
     }
 
     fn restore_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
-        let operation = self.ui.backend().restore_folder(folder.id, None);
+        let folder_id = folder.id;
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.restore_directory(&folder_id, None));
         cx.spawn(async move |page, cx| {
             let result = operation.await.map(|_| ());
             let _ = page.update(cx, |page, cx| page.finish(result, "restore folder", cx));
@@ -77,7 +79,8 @@ impl TrashPage {
     }
 
     fn purge_book(&mut self, book: TrashedBook, cx: &mut Context<Self>) {
-        let operation = self.ui.backend().purge_book(book.content_hash);
+        let content_hash = book.content_hash;
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.purge_book(&content_hash));
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "delete book permanently", cx));
@@ -86,7 +89,8 @@ impl TrashPage {
     }
 
     fn purge_folder(&mut self, folder: TrashedFolder, cx: &mut Context<Self>) {
-        let operation = self.ui.backend().purge_folder(folder.id);
+        let folder_id = folder.id;
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.purge_directory(&folder_id));
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "delete folder permanently", cx));
@@ -95,7 +99,7 @@ impl TrashPage {
     }
 
     fn empty(&mut self, cx: &mut Context<Self>) {
-        let operation = self.ui.backend().empty_trash();
+        let operation = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.empty_trash());
         cx.spawn(async move |page, cx| {
             let result = operation.await;
             let _ = page.update(cx, |page, cx| page.finish(result, "empty Trash", cx));

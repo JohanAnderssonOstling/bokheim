@@ -139,19 +139,6 @@ impl UnifiedConceptDefinition {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[derive(bincode::Decode)]
-struct SnapshotRow {
-    concept_id: String,
-    preferred_label: String,
-    parent_ids: String,
-    parent_sort_orders: String,
-    bisac_codes: String,
-    ddc_codes: String,
-    lcc_codes: String,
-    source_labels: String,
-}
-
 pub(super) fn current() -> Arc<UnifiedTaxonomyRuntime> {
     RUNTIME.get_or_init(|| RwLock::new(default_runtime())).read().expect("unified taxonomy runtime lock must not be poisoned").clone()
 }
@@ -301,7 +288,6 @@ fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
     Arc::new(runtime)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_concepts() -> Vec<UnifiedConceptDefinition> {
     crate::taxonomy_sqlite::read_embedded_unified_taxonomy().expect("embedded unified taxonomy SQLite must be readable")
 }
@@ -314,26 +300,6 @@ pub(super) fn install_authoritative_taxonomy_for_tests() {
         let concepts = crate::taxonomy_sqlite::read_unified_taxonomy_sqlite(&path).expect("authoritative taxonomy fixture must be readable");
         install_unified_taxonomy_concepts(concepts).expect("authoritative taxonomy fixture must be valid");
     });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn default_concepts() -> Vec<UnifiedConceptDefinition> {
-    let (rows, _) = bincode::decode_from_slice::<Vec<SnapshotRow>, _>(include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-v2.bin")), bincode::config::standard()).expect("embedded unified taxonomy snapshot must be readable");
-    rows.into_iter()
-        .map(|row| {
-            let split = |value: &str| value.split('|').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
-            let mut source_selectors = BTreeMap::new();
-            for (system, selectors) in [(super::BISAC_SYSTEM_ID, row.bisac_codes), (DDC_SYSTEM_ID, row.ddc_codes), (LCC_SYSTEM_ID, row.lcc_codes)] {
-                let selectors = split(&selectors);
-                if !selectors.is_empty() {
-                    source_selectors.insert(system.to_owned(), selectors);
-                }
-            }
-            let parent_ids = split(&row.parent_ids);
-            let parent_sort_orders = if row.parent_sort_orders.trim().is_empty() { vec![0; parent_ids.len()] } else { split(&row.parent_sort_orders).into_iter().map(|value| value.parse().expect("numeric sort order")).collect() };
-            UnifiedConceptDefinition { concept_id: row.concept_id, preferred_label: row.preferred_label, parent_ids, parent_sort_orders, source_selectors, source_labels: split(&row.source_labels) }
-        })
-        .collect()
 }
 
 fn build_runtime(concepts: Vec<UnifiedConceptDefinition>, retain_concepts: bool) -> Result<UnifiedTaxonomyRuntime, String> {

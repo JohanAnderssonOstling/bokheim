@@ -75,6 +75,14 @@ message WorkMatch {
   optional WorkPopularity popularity = 7;
   // Plain-text Open Library work description, when the snapshot has one.
   optional string description = 8;
+  repeated SubjectHeading subjects = 9;
+}
+
+message SubjectHeading {
+  string source = 1;
+  string authority = 2;
+  repeated string components = 3;
+  optional string authority_uri = 4;
 }
 
 // Aggregated public activity for a work. No patron-level rows leave the

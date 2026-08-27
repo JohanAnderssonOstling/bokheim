@@ -1,24 +1,23 @@
 //! Public handle for operations scoped to one concrete library.
 
-use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
-use crate::app::executor::BackendTask;
+use crate::app::executor::{BackendBlockingOperation, BackendFuture, BackendOutput, BackendTask};
 use crate::catalog::{CatalogImportRequest, CatalogPublicationIdentity, CatalogSearch, CatalogSearchQuery, CatalogSourceId, CatalogSubjectBrowseRequest};
 use crate::library::database as db;
 use crate::library::ResolvedBook;
-use crate::platform::scanner::{LibraryEvent, LibraryScanner};
+use crate::platform::database::Database;
+use crate::platform::library_events::{LibraryEvent, LibraryEventSender};
+#[cfg(all(feature = "scanner", not(target_os = "android")))]
+use crate::platform::scanner::LibraryScanner;
 use crate::sync::SyncManager;
+use crate::CatalogSubjectBrowseView;
+use crate::DirectoryImport;
 use crate::{ContentHash, DirId, DownloadState, FolderDownloadStatus, LibraryId};
-use app_contract::catalog::CatalogSubjectBrowseView;
-use app_contract::library::{BookImportDestination, Dir, DirectoryImport, LibraryFolderDestination, LibraryTrashView};
+use library_model::{BookImportDestination, Dir, LibraryFolderDestination, LibraryTrashView};
 
-use crate::app::{AppBackend, AppState, BackendContext, BackendError, CatalogPageView};
-use crossbeam_channel::Sender;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
+use crate::app::{AppBackend, AppState, BackendError, CatalogPageView};
 
 /// All operations whose meaning is scoped to one concrete library.
 ///
@@ -27,20 +26,19 @@ use r2d2_sqlite::SqliteConnectionManager;
 #[derive(Clone)]
 pub struct LibraryBackend {
     app: Weak<AppState>,
-    pub(super) context: BackendContext,
     pub(super) id: LibraryId,
-    pub(super) library_root: PathBuf,
-    pub(super) db: Pool<SqliteConnectionManager>,
+    pub(crate) db: Database,
     pub(super) sync_manager: Arc<SyncManager>,
-    pub(super) event_tx: Sender<LibraryEvent>,
+    pub(super) event_tx: LibraryEventSender,
     import_activity: Arc<AtomicUsize>,
     // Its Drop implementation stops and joins the scanner threads.
+    #[cfg(all(feature = "scanner", not(target_os = "android")))]
     pub(super) _scanner: Arc<LibraryScanner>,
 }
 
 struct ImportActivity {
     active: Arc<AtomicUsize>,
-    events: Sender<LibraryEvent>,
+    events: LibraryEventSender,
 }
 
 impl Drop for ImportActivity {
@@ -53,15 +51,22 @@ impl Drop for ImportActivity {
 impl LibraryBackend {
     fn notify_library_changed<T>(&self, result: Result<T, BackendError>) -> Result<T, BackendError> {
         if result.is_ok() {
-            let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
+            let _ = self.event_tx.try_send(LibraryEvent::LibraryChanged);
         }
         result
     }
 
-    pub(super) fn from_parts(
-        app: Weak<AppState>, context: BackendContext, id: LibraryId, library_root: PathBuf, db: Pool<SqliteConnectionManager>, sync_manager: Arc<SyncManager>, event_tx: Sender<LibraryEvent>, scanner: LibraryScanner,
-    ) -> Self {
-        Self { app, context, id, library_root, db, sync_manager, event_tx, import_activity: Arc::new(AtomicUsize::new(0)), _scanner: Arc::new(scanner) }
+    pub(super) fn from_parts(app: Weak<AppState>, id: LibraryId, db: Database, sync_manager: Arc<SyncManager>, event_tx: LibraryEventSender, #[cfg(all(feature = "scanner", not(target_os = "android")))] scanner: LibraryScanner) -> Self {
+        Self {
+            app,
+            id,
+            db,
+            sync_manager,
+            event_tx,
+            import_activity: Arc::new(AtomicUsize::new(0)),
+            #[cfg(all(feature = "scanner", not(target_os = "android")))]
+            _scanner: Arc::new(scanner),
+        }
     }
 
     pub(super) fn app(&self) -> Result<AppBackend, BackendError> {
@@ -75,21 +80,27 @@ impl LibraryBackend {
     /// True while the local filesystem scanner is scheduled or actively
     /// walking this library.
     pub fn scanner_running(&self) -> bool {
-        self._scanner.is_scanning() || self.import_activity.load(Ordering::Acquire) != 0
+        let importing = self.import_activity.load(Ordering::Acquire) != 0;
+        #[cfg(all(feature = "scanner", not(target_os = "android")))]
+        return self._scanner.is_scanning() || importing;
+        #[cfg(not(all(feature = "scanner", not(target_os = "android"))))]
+        importing
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "scanner", not(target_os = "android")))]
     pub(crate) fn shares_scanner_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self._scanner, &other._scanner)
     }
 
     /// Enables the initial filesystem scan for a handle opened in deferred mode.
+    #[cfg(all(feature = "scanner", not(target_os = "android")))]
     pub fn start_scanner(&self) {
         self._scanner.start_scanning();
     }
 
     /// Queues a fresh local filesystem scan even when this scanner is already
     /// enabled. Used by an explicit library switch, not ordinary handle access.
+    #[cfg(all(feature = "scanner", not(target_os = "android")))]
     pub fn request_scan(&self) {
         self._scanner.request_scanning();
     }
@@ -107,15 +118,15 @@ impl LibraryBackend {
     pub(crate) fn reload_unified_subject_assignments(&self) -> Result<(), BackendError> {
         let connection = self.db.get().map_err(BackendError::operation)?;
         db::reload_unified_subject_assignments(&connection).map_err(BackendError::operation)?;
-        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
+        let _ = self.event_tx.try_send(LibraryEvent::LibraryChanged);
         Ok(())
     }
 
     pub fn spawn<T, F, Fut>(&self, operation: F) -> BackendTask<T>
     where
-        T: Send + 'static,
+        T: BackendOutput,
         F: FnOnce(Self) -> Fut,
-        Fut: Future<Output = T> + Send + 'static,
+        Fut: BackendFuture<T>,
     {
         let library = self.clone();
         self.app().expect("a library operation requires its application").spawn(move |_| operation(library))
@@ -125,11 +136,11 @@ impl LibraryBackend {
     /// UI callers should prefer this over invoking browse methods directly.
     pub fn spawn_blocking<T, F>(&self, operation: F) -> BackendTask<Result<T, BackendError>>
     where
-        T: Send + 'static,
-        F: FnOnce(Self) -> Result<T, BackendError> + Send + 'static,
+        T: BackendOutput,
+        F: BackendBlockingOperation<Self, Result<T, BackendError>>,
     {
         let library = self.clone();
-        self.app().expect("a library operation requires its application").spawn(move |_| async move { tokio::task::spawn_blocking(move || operation(library)).await.map_err(BackendError::operation)? })
+        self.app().expect("a library operation requires its application").spawn(move |_| async move { crate::app::executor::run_blocking(move || operation(library)).await.map_err(BackendError::operation)? })
     }
 
     pub fn thumbnail(&self, content_hash: ContentHash) -> Result<Option<Vec<u8>>, BackendError> {
@@ -142,15 +153,15 @@ impl LibraryBackend {
     }
 
     pub fn create_directory(&self, parent_id: &DirId, name: &str) -> Result<Dir, BackendError> {
-        self.notify_library_changed(self.create_directory_on_disk(parent_id, name).map_err(BackendError::operation))
+        self.notify_library_changed(self.create_library_directory(parent_id, name).map_err(BackendError::operation))
     }
 
     pub fn rename_directory(&self, directory_id: &DirId, name: &str) -> Result<String, BackendError> {
-        self.notify_library_changed(self.rename_directory_on_disk(directory_id, name).map_err(BackendError::operation))
+        self.notify_library_changed(self.rename_library_directory(directory_id, name).map_err(BackendError::operation))
     }
 
     pub fn move_directory(&self, directory_id: &DirId, parent_id: &DirId) -> Result<String, BackendError> {
-        self.notify_library_changed(self.move_directory_on_disk(directory_id, Some(parent_id), None).map_err(BackendError::operation))
+        self.notify_library_changed(self.move_library_directory(directory_id, Some(parent_id), None).map_err(BackendError::operation))
     }
 
     pub fn move_directory_task(&self, directory_id: DirId, parent_id: DirId) -> BackendTask<Result<String, BackendError>> {
@@ -159,41 +170,41 @@ impl LibraryBackend {
     }
 
     pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.notify_library_changed(self.copy_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.copy_book_placement(content_hash, source_id, destination_id).map_err(BackendError::operation))
     }
 
     pub fn move_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.notify_library_changed(self.move_book_placement_on_disk(content_hash, source_id, destination_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.move_book_placement(content_hash, source_id, destination_id).map_err(BackendError::operation))
     }
 
     /// Removes one placement. Returns `true` when it was the final placement
     /// and the book consequently moved to Trash.
     pub fn remove_book_from_directory(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, BackendError> {
-        self.notify_library_changed(self.remove_book_placement_on_disk(content_hash, source_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.remove_book_placement(content_hash, source_id).map_err(BackendError::operation))
     }
 
     pub fn move_book_to_trash(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_library_changed(self.trash_book_on_disk(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.trash_book_record(content_hash).map_err(BackendError::operation))
     }
 
     pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_library_changed(self.restore_book_from_trash(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.restore_book_record(content_hash).map_err(BackendError::operation))
     }
 
     pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.notify_library_changed(self.purge_book_from_trash(content_hash).map_err(BackendError::operation))
+        self.notify_library_changed(self.purge_book_record(content_hash).map_err(BackendError::operation))
     }
 
     pub fn move_directory_to_trash(&self, directory_id: &DirId) -> Result<(), BackendError> {
-        self.notify_library_changed(self.trash_directory_on_disk(directory_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.trash_directory_record(directory_id).map_err(BackendError::operation))
     }
 
     pub fn restore_directory(&self, directory_id: &DirId, parent_id: Option<&DirId>) -> Result<String, BackendError> {
-        self.notify_library_changed(self.restore_directory_from_trash(directory_id, parent_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.restore_directory_record(directory_id, parent_id).map_err(BackendError::operation))
     }
 
     pub fn purge_directory(&self, directory_id: &DirId) -> Result<(), BackendError> {
-        self.notify_library_changed(self.purge_directory_from_trash(directory_id).map_err(BackendError::operation))
+        self.notify_library_changed(self.purge_directory_record(directory_id).map_err(BackendError::operation))
     }
 
     pub fn trash(&self) -> Result<LibraryTrashView, BackendError> {
@@ -201,23 +212,15 @@ impl LibraryBackend {
     }
 
     pub fn empty_trash(&self) -> Result<(), BackendError> {
-        self.notify_library_changed(self.empty_trash_on_disk().map_err(BackendError::operation))
+        self.notify_library_changed(self.empty_trash_records().map_err(BackendError::operation))
     }
 
     pub fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, BackendError> {
         self.load_folder_destinations().map_err(BackendError::operation)
     }
 
-    pub fn import_book(&self, parent_id: &DirId, source_path: &Path) -> Result<ContentHash, BackendError> {
-        self.import_local_book(parent_id, source_path).map_err(BackendError::operation)
-    }
-
     pub fn import_book_bytes(&self, parent_id: &DirId, file_name: String, bytes: Vec<u8>) -> Result<ContentHash, BackendError> {
         self.import_book_reader(parent_id, &mut std::io::Cursor::new(bytes), file_name, None).map_err(BackendError::operation)
-    }
-
-    pub fn import_folder(&self, parent_id: &DirId, source_path: &Path) -> Result<Vec<String>, BackendError> {
-        self.notify_library_changed(self.import_local_folder(parent_id, source_path).map_err(BackendError::operation))
     }
 
     pub fn import_directory(&self, parent_id: &DirId, source: DirectoryImport) -> Result<Vec<String>, BackendError> {
@@ -227,12 +230,12 @@ impl LibraryBackend {
     pub(crate) fn import_directory_contents(&self, source: DirectoryImport) -> Result<Vec<String>, BackendError> {
         self.import_activity.fetch_add(1, Ordering::AcqRel);
         let _activity = ImportActivity { active: self.import_activity.clone(), events: self.event_tx.clone() };
-        let _ = self.event_tx.send(LibraryEvent::LibraryChanged);
+        let _ = self.event_tx.try_send(LibraryEvent::LibraryChanged);
         self.import_selected_directory(&sync_common::ROOT_DIR_ID, source, false).map_err(BackendError::operation)
     }
 
-    pub(crate) fn import_downloaded_catalog_book(&self, parent_id: &DirId, source_path: &Path, file_name: &str, source_id: &CatalogSourceId, publication: &CatalogPublicationIdentity) -> Result<ContentHash, BackendError> {
-        self.import_catalog_book_file(parent_id, source_path, file_name, source_id, publication).map_err(BackendError::operation)
+    pub(crate) fn import_downloaded_catalog_book(&self, parent_id: &DirId, source: &mut dyn std::io::Read, file_name: &str, source_id: &CatalogSourceId, publication: &CatalogPublicationIdentity) -> Result<ContentHash, BackendError> {
+        self.import_book_reader(parent_id, source, file_name.to_owned(), Some((source_id, publication))).map_err(BackendError::operation)
     }
 
     pub(crate) fn owned_catalog_publications(&self, source_id: &CatalogSourceId, identities: &[CatalogPublicationIdentity]) -> Result<Vec<CatalogPublicationIdentity>, BackendError> {
@@ -246,14 +249,6 @@ impl LibraryBackend {
 
     pub async fn refresh_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseView, BackendError> {
         self.app()?.refresh_catalog_subjects_in(self.id(), request).await
-    }
-
-    pub async fn catalog_subject_capabilities(&self, request: CatalogSubjectBrowseRequest) -> Result<app_contract::catalog::CatalogSubjectBrowseCapabilities, BackendError> {
-        self.app()?.catalog_subject_capabilities(request).await
-    }
-
-    pub fn cached_catalog_subjects(&self, request: CatalogSubjectBrowseRequest) -> Result<Option<CatalogSubjectBrowseView>, BackendError> {
-        self.app()?.cached_catalog_subjects_in(self.id(), request)
     }
 
     pub async fn search_catalog(&self, source_id: &CatalogSourceId, search: &CatalogSearch, query: CatalogSearchQuery) -> Result<CatalogPageView, BackendError> {
@@ -292,18 +287,17 @@ impl LibraryBackend {
 
     pub fn book_file_name(&self, content_hash: ContentHash) -> Result<String, BackendError> {
         let path = self.book_path(content_hash)?;
-        path.file_name().and_then(|name| name.to_str()).map(str::to_owned).ok_or_else(|| BackendError::operation("book file name is not valid UTF-8"))
+        path.rsplit('/').next().filter(|name| !name.is_empty()).map(str::to_owned).ok_or_else(|| BackendError::operation("book file name is unavailable"))
     }
 
     pub fn book_asset_path(&self, content_hash: ContentHash) -> Result<String, BackendError> {
-        let path = self.book_path(content_hash)?;
-        path.to_str().map(str::to_owned).ok_or_else(|| BackendError::operation("book file path is not valid UTF-8"))
+        self.book_path(content_hash)
     }
 
-    fn book_path(&self, content_hash: ContentHash) -> Result<std::path::PathBuf, BackendError> {
+    fn book_path(&self, content_hash: ContentHash) -> Result<String, BackendError> {
         let relative =
             db::get_book_file_path(&*self.db.get().map_err(BackendError::operation)?, content_hash.clone()).map_err(BackendError::operation)?.ok_or_else(|| BackendError::operation(format!("book file is unavailable: {content_hash}")))?;
-        Ok(relative.resolve_under(&self.library_root))
+        Ok(relative.as_str().to_owned())
     }
 
     pub async fn download_book(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {

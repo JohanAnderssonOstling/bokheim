@@ -2,11 +2,11 @@
 
 use std::rc::Rc;
 
-use app_contract::library::BookLocator;
 use gpui::prelude::*;
 use gpui::{AnyView, App, Context, Entity, Focusable, IntoElement, Render, SelectedFile, SharedString, Task, Window};
 use gpui_component::WindowExt;
 use gpui_component::notification::Notification;
+use library_model::BookLocator;
 use sync_common::{ContentHash, LibraryId};
 
 use crate::{BrowserRoot, DismissSettings};

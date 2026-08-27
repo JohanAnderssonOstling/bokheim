@@ -1,13 +1,13 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use app_contract::library::BookCardRow;
 use gpui::prelude::*;
 use gpui::{Anchor, AppContext, Context, DismissEvent, Entity, Focusable, Image, ImageFormat, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, SvgRenderer, Task, Window, anchored, deferred, px};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::tag::Tag;
 use gpui_component::{Sizable, Size, WindowExt};
+use library_model::BookCardRow;
 use ui_components as components;
 
 use crate::library::pages::browse::{FolderPicker, FolderPickerEvent};
@@ -102,7 +102,7 @@ impl BookCardView {
 
     fn choose_destination(&mut self, action: PlacementAction, cx: &mut Context<Self>) {
         let Some(source_directory) = self.source_directory else { return };
-        let load = self.ui.backend().folder_destinations();
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.folder_destinations());
         cx.spawn(async move |card, cx| {
             let result = load.await;
             let _ = card.update(cx, |card, cx| match result {
@@ -133,8 +133,8 @@ impl BookCardView {
         let Some(source_id) = self.source_directory else { return };
         let content_hash = self.book.content_hash;
         let operation = match action {
-            PlacementAction::Copy => self.ui.backend().copy_book_to_directory(content_hash, source_id, destination_id),
-            PlacementAction::Move => self.ui.backend().move_book_to_directory(content_hash, source_id, destination_id),
+            PlacementAction::Copy => crate::services::backend::library_blocking(self.ui.backend(), move |library| library.copy_book_to_directory(&content_hash, &source_id, &destination_id)),
+            PlacementAction::Move => crate::services::backend::library_blocking(self.ui.backend(), move |library| library.move_book_to_directory(&content_hash, &source_id, &destination_id)),
         };
         cx.spawn(async move |card, cx| {
             let result = operation.await;
@@ -190,7 +190,7 @@ impl BookCardView {
 
     fn load_cover(&mut self, cx: &mut Context<Self>) {
         let content_hash = self.book.content_hash;
-        let load = self.ui.backend().load_cover(content_hash);
+        let load = crate::services::backend::library_blocking(self.ui.backend(), move |library| library.thumbnail(content_hash));
         let decoder = cx.background_executor().clone();
         let svg_renderer = cx.svg_renderer();
         self.cover_task = Some(cx.spawn(async move |view, cx| {
@@ -265,10 +265,10 @@ impl BookCardView {
                 removal_target.update(cx, |card, cx| {
                     let operation = match source_directory {
                         Some(source_id) => {
-                            let operation = card.ui.backend().remove_book_from_directory(content_hash, source_id);
-                            Box::pin(async move { operation.await.map(|_| ()) }) as app_contract::backend::BackendFuture<()>
+                            let operation = crate::services::backend::library_blocking(card.ui.backend(), move |library| library.remove_book_from_directory(&content_hash, &source_id));
+                            Box::pin(async move { operation.await.map(|_| ()) }) as crate::services::backend::UiFuture<()>
                         }
-                        None => card.ui.backend().trash_book(content_hash),
+                        None => crate::services::backend::library_blocking(card.ui.backend(), move |library| library.move_book_to_trash(&content_hash)),
                     };
                     cx.spawn(async move |card, cx| {
                         if answer.await.ok() != Some(0) {

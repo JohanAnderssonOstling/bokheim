@@ -15,7 +15,7 @@
 - Replaced `pub use html_layout_model::*` document re-export with
   `pub(crate)` imports of only renderer-internal metric/types required by this crate.
 - This prevents renderer public API consumers from being able to reach layout-model
-  types through `html_renderer`.
+  types through the renderer adapter that existed at the time.
 
 3. `apps/renderers/html/src/renderer/painter.rs`
 - Replaced `html_layout_model::GlyphId` usage with `crate::document::GlyphId`.

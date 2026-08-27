@@ -1,56 +1,6 @@
 use crate::MarcRelatorCode;
-
-pub const AUTHOR: MarcRelatorCode = MarcRelatorCode(*b"aut");
-pub const CONTRIBUTOR: MarcRelatorCode = MarcRelatorCode(*b"ctb");
-
-fn parse_three_letter_code(value: &str) -> Option<MarcRelatorCode> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 3 || !bytes.iter().all(u8::is_ascii_alphabetic) {
-        return None;
-    }
-    Some(MarcRelatorCode([bytes[0].to_ascii_lowercase(), bytes[1].to_ascii_lowercase(), bytes[2].to_ascii_lowercase()]))
-}
-
-/// Converts role evidence from an input metadata format into the canonical
-/// MARC vocabulary. Unknown format-specific values conservatively become the
-/// general contributor role instead of entering synchronized state.
-///
-/// This normalization is a client-side metadata-ingestion concern: sync and
-/// storage only ever carry the resulting three-byte [`MarcRelatorCode`].
-pub fn marc_relator_code_from_metadata_role(value: &str) -> MarcRelatorCode {
-    let trimmed = value.trim();
-    let token = trimmed.rsplit(['/', '#', ':']).next().unwrap_or(trimmed).trim();
-    if let Some(code) = parse_three_letter_code(token) {
-        return code;
-    }
-    let normalized = token.chars().filter(|character| character.is_ascii_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
-    let bytes = match normalized.as_str() {
-        "author" | "writer" => return AUTHOR,
-        "adapter" => b"adp",
-        "annotator" => b"ann",
-        "artist" => b"art",
-        "bookproducer" => b"bkp",
-        "blurbwriter" => b"blw",
-        "compiler" => b"com",
-        "coverartist" | "coverdesigner" => b"cov",
-        "editor" => b"edt",
-        "illustrator" => b"ill",
-        "interviewee" => b"ive",
-        "markupeditor" => b"mrk",
-        "narrator" => b"nrt",
-        "owner" => b"own",
-        "performer" => b"prf",
-        "proofreader" => b"pfr",
-        "sponsor" => b"spn",
-        "transcriber" => b"trc",
-        "translator" => b"trl",
-        "typedesigner" => b"tyd",
-        "typographer" => b"tyg",
-        "voiceactor" => b"vac",
-        _ => return CONTRIBUTOR,
-    };
-    MarcRelatorCode(*bytes)
-}
+#[cfg(test)]
+use crate::{marc_relator_code_from_metadata_role, CONTRIBUTOR_MARC_RELATOR_CODE as CONTRIBUTOR};
 
 /// Rich, human-facing interpretation of a synced [`MarcRelatorCode`].
 ///

@@ -47,8 +47,8 @@ is the wrong shape for all of them.
 - **Form validation** (`universal/sync/authentication.rs`, `account.rs`) stays
   inline. Field errors belong next to the field; "Email is required" as a toast
   would be strictly worse.
-- **The reader window** keeps swallowing failures for now. A failed bookmark
-  save or annotation delete currently reaches only `log::error!`, which is a
+- **The reader window** keeps swallowing failures for now. A failed annotation
+  save or delete currently reaches only `log::error!`, which is a
   real gap, but the reader is a separate window with its own root and needs its
   own layer wiring. It inherits this pattern as a follow-up.
 

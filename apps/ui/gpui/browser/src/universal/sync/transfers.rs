@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use app_contract::transfer::LibraryTransfers;
+use bokheim_backend::LibraryTransfers;
 use gpui::Context;
 
 use super::SyncPage;

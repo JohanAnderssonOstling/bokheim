@@ -5,7 +5,7 @@
 //! correctness counterexample remains enabled as a regression test.
 //!
 //! Run the controls:
-//! `cargo test -p epub-svelte convergence_tests`
+//! `cargo test -p bokheim-backend convergence_tests`
 //!
 //! Exercise the real HTTP/PostgreSQL boundary as well:
 //! `Backend/tests/run_sync_e2e.sh`
@@ -321,8 +321,6 @@ fn outbox_storage_key(body: &MutationBody) -> (&'static str, String) {
         MutationBody::Placement { content_hash, .. } => ("placement", content_hash.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone()),
-        MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone()),
-        MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone()),
         MutationBody::CatalogPublication { source_id, .. } => ("catalog_publication", source_id.as_str().to_owned()),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string()),
     }
@@ -337,8 +335,6 @@ fn outbox_storage_subkey(body: &MutationBody) -> String {
         | MutationBody::DirectoryLifecycle { .. }
         | MutationBody::ReadingPosition { .. }
         | MutationBody::Annotation { .. }
-        | MutationBody::Bookmark { .. }
-        | MutationBody::BookLink { .. }
         | MutationBody::Metadata { .. }
         | MutationBody::BookLifecycle { .. } => String::new(),
     }

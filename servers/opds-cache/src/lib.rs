@@ -4,23 +4,18 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use catalog_contract::{
-    materialize_page, CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPublication, CatalogPublicationAction,
-    CatalogPublicationIdentity, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSource, CatalogSourceId, CatalogSourceRegistration, CatalogSourceRegistry,
-    CatalogSubjectBrowseCapabilitiesResponse, CatalogSubjectBrowseDeltaResponse, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest, CatalogSubjectCollectionManifestResponse,
-    CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
+use catalog_core::{prepare_catalog_subject_assignments, CatalogCacheError, CatalogCoverCache, CatalogLanguageFilter};
+use catalog_model::{
+    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity, CatalogSource, CatalogSourceId,
+    CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
 };
-use catalog_core::{
-    canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, prepare_catalog_subject_assignments, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogCacheError, CatalogCoverCache,
-    CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogLanguageFilter,
-    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity,
-};
-use library_model::{canonical_isbn, Identifier, PublicationSubject, Scheme, Scope};
+use catalog_protocol::{materialize_page, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, LookupStatus, MetadataEnrichmentRequest, RichWorkMetadataMatch};
 use opds::{
     endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsError, OpdsHttpValidators,
     OpdsSearch,
 };
+use publication_model::{canonical_isbn, Identifier, PublicationSubject, Scheme, Scope};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -33,6 +28,14 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use url::Url;
+
+mod opds_adapter;
+mod store;
+use opds_adapter::{canonicalize_gutenberg_page, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import};
+use store::{
+    CatalogCache, CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogMetadataBackfillIndexedJob,
+    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity,
+};
 
 const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_CRAWL_PAGES: usize = 50_000;
@@ -525,7 +528,7 @@ struct CatalogInventoryResponse {
     description_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
     processes: Vec<CatalogProcessStatus>,
     writer_metrics: BTreeMap<String, WriterRuntimeMetricResponse>,
-    identity_reviews: catalog_core::CatalogIdentityReviewInventory,
+    identity_reviews: store::CatalogIdentityReviewInventory,
     sources: Vec<CatalogSourceInventoryResponse>,
 }
 
@@ -626,8 +629,8 @@ struct IdentityReviewQuery {
 
 #[derive(Serialize)]
 struct IdentityReviewResponse {
-    inventory: catalog_core::CatalogIdentityReviewInventory,
-    reviews: Vec<catalog_core::CatalogIdentityReview>,
+    inventory: store::CatalogIdentityReviewInventory,
+    reviews: Vec<store::CatalogIdentityReview>,
 }
 
 #[derive(Deserialize)]

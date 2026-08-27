@@ -6,14 +6,133 @@
 //! annotation genuinely offer different actions.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, IntoElement, Window, div, px};
+use gpui::{AnyElement, App, Context, IntoElement, Window, div, px};
 use ui_components::WindowWidthClass;
 
+use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
 
 /// Smallest divider drag worth persisting, in pixels. Resize events arrive on
 /// every mouse move; sub-pixel jitter must not write to disk.
 const RESIZE_EPSILON: f32 = 1.0;
+
+/// An interaction emitted by the shared reader-surface overlay.
+#[derive(Clone, Copy)]
+pub(crate) enum SurfaceAction {
+    PreviousPage,
+    NextPage,
+    ToggleChrome,
+    ShowChrome,
+}
+
+/// Owns toolbar visibility and applies its window/invalidation side effects.
+pub(crate) struct ChromeState {
+    hidden: bool,
+    component: Component,
+}
+
+impl ChromeState {
+    pub(crate) fn new(component: Component) -> Self {
+        Self { hidden: false, component }
+    }
+
+    pub(crate) fn is_visible(&self) -> bool {
+        !self.hidden
+    }
+
+    pub(crate) fn hide<C: 'static>(&mut self, cx: &mut Context<C>) {
+        self.set_hidden(true, cx);
+    }
+
+    pub(crate) fn show<C: 'static>(&mut self, cx: &mut Context<C>) {
+        self.set_hidden(false, cx);
+    }
+
+    pub(crate) fn toggle<C: 'static>(&mut self, cx: &mut Context<C>) {
+        self.set_hidden(!self.hidden, cx);
+    }
+
+    fn set_hidden<C: 'static>(&mut self, hidden: bool, cx: &mut Context<C>) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        cx.set_system_bars_visible(!hidden);
+        crate::invalidation::notify(cx, self.component, if hidden { "chrome_hidden" } else { "chrome_shown" });
+    }
+}
+
+/// Builds the platform-specific interaction layer over a reading surface.
+///
+/// Kobo uses left/right page zones and a central toolbar toggle. Other touch
+/// devices use the center to reveal hidden chrome, while pointer-driven
+/// readers reveal it from the top edge. Navigation itself remains owned by the
+/// format-specific reader through `on_action`.
+pub(crate) fn surface_interactions<C: 'static>(
+    reader_id: &'static str, chrome_visible: bool, sidebar_visible: bool, toolbar_height: f32, touch_input: bool, cx: &mut Context<C>, on_action: impl Fn(&mut C, SurfaceAction, &mut Window, &mut Context<C>) + Clone + 'static,
+) -> Vec<AnyElement> {
+    if cfg!(feature = "kobo") {
+        if sidebar_visible {
+            return Vec::new();
+        }
+        let top = px(if chrome_visible { toolbar_height } else { 0.0 });
+        let previous = on_action.clone();
+        let next = on_action.clone();
+        let toggle = on_action;
+        return vec![
+            div()
+                .id(format!("kobo-{reader_id}-previous-page-tap-zone"))
+                .absolute()
+                .left_0()
+                .top(top)
+                .bottom_0()
+                .w(gpui::relative(0.25))
+                .on_click(cx.listener(move |reader, _, window, cx| previous(reader, SurfaceAction::PreviousPage, window, cx)))
+                .into_any_element(),
+            div()
+                .id(format!("kobo-{reader_id}-next-page-tap-zone"))
+                .absolute()
+                .right_0()
+                .top(top)
+                .bottom_0()
+                .w(gpui::relative(0.25))
+                .on_click(cx.listener(move |reader, _, window, cx| next(reader, SurfaceAction::NextPage, window, cx)))
+                .into_any_element(),
+            div()
+                .id(format!("kobo-{reader_id}-toggle-toolbar-tap-zone"))
+                .absolute()
+                .left(gpui::relative(0.25))
+                .right(gpui::relative(0.25))
+                .top(top)
+                .bottom_0()
+                .on_click(cx.listener(move |reader, _, window, cx| toggle(reader, SurfaceAction::ToggleChrome, window, cx)))
+                .into_any_element(),
+        ];
+    }
+    if chrome_visible {
+        return Vec::new();
+    }
+    if touch_input {
+        return vec![
+            div()
+                .id(format!("touch-{reader_id}-show-toolbar-tap-zone"))
+                .absolute()
+                .left(gpui::relative(0.25))
+                .right(gpui::relative(0.25))
+                .top_0()
+                .bottom_0()
+                .on_click(cx.listener(move |reader, _, window, cx| on_action(reader, SurfaceAction::ShowChrome, window, cx)))
+                .into_any_element(),
+        ];
+    }
+    let reveal_on_move = on_action.clone();
+    vec![
+        ui_components::reader_chrome_reveal()
+            .on_mouse_move(cx.listener(move |reader, _, window, cx| reveal_on_move(reader, SurfaceAction::ShowChrome, window, cx)))
+            .on_click(cx.listener(move |reader, _, window, cx| on_action(reader, SurfaceAction::ShowChrome, window, cx)))
+            .into_any_element(),
+    ]
+}
 
 /// Places `sidebar` beside `document`, with a draggable divider whose width is
 /// remembered across windows and sessions.

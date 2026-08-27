@@ -1,12 +1,18 @@
+#[cfg(not(target_arch = "wasm32"))]
 use crate::ContentHash;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use library_registry::read_library_manifest;
+pub use library_registry::LibraryEntry;
 use library_registry::LibraryRegistry;
-pub use library_registry::{LibraryEntry, LIBRARY_MANIFEST_FILENAME};
+#[cfg(not(target_arch = "wasm32"))]
+pub use library_registry::LIBRARY_MANIFEST_FILENAME;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 use sync_common::LibraryId;
 
 const UNIFIED_TAXONOMY_RELATIVE_PATH: &str = "taxonomy/unified-taxonomy-v2.sqlite3";
+const ACCOUNT_SESSION_KEY: &str = "account_session";
 
 /// Selects where device-local application state is stored.
 ///
@@ -27,11 +33,15 @@ impl AppDataRoot {
             AppDataLocation::SharedDesktop => dirs::data_dir().ok_or("failed to resolve desktop data dir")?.join(crate::APP_NAME_LOWER),
             AppDataLocation::PlatformLocal(path) => path,
         };
-        fs::create_dir_all(&path).map_err(|error| format!("failed to create app data directory {}: {error}", path.display()))?;
-        let path = path.canonicalize().map_err(|error| format!("failed to validate app data directory {}: {error}", path.display()))?;
-        if !path.is_dir() {
-            return Err(format!("app data path is not a directory: {}", path.display()));
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let path = {
+            fs::create_dir_all(&path).map_err(|error| format!("failed to create app data directory {}: {error}", path.display()))?;
+            let path = path.canonicalize().map_err(|error| format!("failed to validate app data directory {}: {error}", path.display()))?;
+            if !path.is_dir() {
+                return Err(format!("app data path is not a directory: {}", path.display()));
+            }
+            path
+        };
         Ok(Self(path))
     }
 
@@ -87,6 +97,7 @@ impl BackendContext {
         self.transfer_runtime.clone()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_get_thumbnail(&self, content_hash: ContentHash) -> std::io::Result<Option<Vec<u8>>> {
         match self.resolve_thumbnail(content_hash)? {
             None => Ok(None),
@@ -94,6 +105,7 @@ impl BackendContext {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve_thumbnail(&self, content_hash: ContentHash) -> std::io::Result<Option<PathBuf>> {
         let thumb_path = self.app_data_root.as_path().join(crate::APP_HIDDEN_THUMBNAILS_PATH).join(format!("{content_hash}.jpg"));
         match fs::metadata(&thumb_path) {
@@ -104,6 +116,7 @@ impl BackendContext {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn thumbnails_dir(&self) -> std::io::Result<PathBuf> {
         let thumbnails_dir = self.app_data_root.as_path().join(crate::APP_HIDDEN_THUMBNAILS_PATH);
         fs::create_dir_all(&thumbnails_dir)?;
@@ -138,6 +151,7 @@ impl BackendContext {
         self.registry.entries()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn discover_libraries(&self, libraries_root: &Path) -> Result<Vec<LibraryEntry>, Box<dyn std::error::Error>> {
         self.registry.discover(libraries_root)
     }
@@ -148,6 +162,31 @@ impl BackendContext {
 
     pub fn remove_library(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.registry.remove(Path::new(path))
+    }
+
+    pub(crate) fn read_platform_value(&self, key: &str) -> std::io::Result<Option<Vec<u8>>> {
+        self.registry.read_value(key).map_err(|error| std::io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn write_platform_value(&self, key: &str, value: &[u8]) -> std::io::Result<()> {
+        self.registry.write_value(key, value).map_err(|error| std::io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn remove_platform_value(&self, key: &str) -> std::io::Result<()> {
+        self.registry.remove_value(key).map_err(|error| std::io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn load_account_session(&self) -> std::io::Result<Option<sync_client::Session>> {
+        self.read_platform_value(ACCOUNT_SESSION_KEY)?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))).transpose()
+    }
+
+    pub(crate) fn save_account_session(&self, session: &sync_client::Session) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(session).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        self.write_platform_value(ACCOUNT_SESSION_KEY, &bytes)
+    }
+
+    pub(crate) fn clear_account_session(&self) -> std::io::Result<()> {
+        self.remove_platform_value(ACCOUNT_SESSION_KEY)
     }
 }
 

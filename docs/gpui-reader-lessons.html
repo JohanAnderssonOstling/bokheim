@@ -372,17 +372,12 @@
       <section id="async">
         <div class="kicker">06 · Async boundaries</div>
         <h2>Async work should not hold the UI hostage</h2>
-        <p class="compact">A bookmark should appear when the user clicks, not after SQLite replies. Mutate visible state and notify synchronously; queue the durable write afterward. If writes are order-dependent, serialize them even when the worker pool is parallel.</p>
+        <p class="compact">An annotation should appear when the user clicks, not after SQLite replies. Mutate visible state and notify synchronously; queue the durable write afterward. If writes are order-dependent, serialize them even when the worker pool is parallel.</p>
 
         <div class="code-card">
           <div class="code-head"><span>optimistic mutation</span><span>epub/state.rs</span></div>
-          <pre>self.marks.bookmarks.push(bookmark.clone());
-self.reader_state_visible = <span class="kw">true</span>;
-notify(cx, Component::ReaderShell, <span class="st">"bookmark_created"</span>);
-
-self.mark_writes.<span class="fn">record</span>(<span class="st">"save bookmark"</span>, <span class="kw">move</span> |library| {
-    library.create_bookmark(&amp;bookmark).map_err(|error| error.to_string())
-});</pre>
+          <pre>self.marks.<span class="fn">append</span>(annotation, <span class="st">"save annotation"</span>);
+notify(cx, Component::ReaderShell, <span class="st">"annotation_created"</span>);</pre>
         </div>
 
         <div class="cards">

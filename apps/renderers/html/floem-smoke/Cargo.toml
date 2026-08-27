@@ -1,9 +1,0 @@
-[package]
-name = "html-floem-smoke"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-floem = { version = "0.2.0", features = ["rfd-async-std", "default-image-formats", "default", "vello"] }
-html-renderer = { path = ".." }
-kurbo.workspace = true

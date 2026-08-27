@@ -1,10 +1,15 @@
 //! Bibliographic values shared by catalogue and local-library metadata.
 
 mod canonical;
+mod credits;
+mod marc;
 
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid};
+pub use credits::{
+    agent_id_from_migration_seed, AgentId, AuthorId, BookMetadataState, Contributor, ContributorId, PublicationMetadata, PublicationMetadataError, PublicationTocEntry, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName,
+};
+pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE};
 use serde::{Deserialize, Serialize};
-use specta::Type;
 use std::fmt;
 
 const MAX_VALUE_BYTES: usize = 4096;
@@ -12,7 +17,25 @@ const LEGACY_SOURCE_SCHEME: &str = "bokheim:source";
 const LEGACY_SCOPE_SCHEME: &str = "bokheim:scope";
 const LEGACY_PROVENANCE_SCHEME: &str = "bokheim:provenance";
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+/// Returns a year only when the supplied date evidence contains exactly one
+/// plausible four-digit publication year.
+pub fn unique_publication_year<'a>(values: impl Iterator<Item = &'a str>) -> Option<i32> {
+    let mut years = std::collections::BTreeSet::new();
+    for value in values {
+        for run in value.split(|character: char| !character.is_ascii_digit()) {
+            if run.len() == 4 {
+                if let Ok(year) = run.parse::<i32>() {
+                    if (1000..=2100).contains(&year) {
+                        years.insert(year);
+                    }
+                }
+            }
+        }
+    }
+    (years.len() == 1).then(|| *years.first().expect("one publication year exists"))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scheme {
     Unspecified,
@@ -69,7 +92,7 @@ impl Scheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
     #[default]
@@ -99,7 +122,7 @@ impl Scope {
 
 /// One bibliographic identifier. Catalogue-entry keys are deliberately not
 /// represented here; they belong to the catalogue listing identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identifier {
     pub value: String,
     pub scheme: Scheme,
@@ -107,7 +130,7 @@ pub struct Identifier {
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalizedText {
     pub language: String,
     pub value: String,
@@ -117,7 +140,7 @@ pub struct LocalizedText {
 /// library metadata. Underscores are repaired at ingestion because they are a
 /// common POSIX-style provider error; serialized values always use BCP-47
 /// hyphens and canonical subtag casing.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct LanguageTag(String);
 
@@ -176,7 +199,7 @@ impl std::error::Error for LanguageTagError {}
 /// One date assertion carried by a publication, together with the metadata
 /// source that supplied it. `event` distinguishes publication, modification,
 /// copyright, and other date semantics without normalizing away the raw value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct PublicationDate {
     pub id: Option<String>,
     pub value: String,
@@ -238,7 +261,7 @@ impl fmt::Display for DateError {
 impl std::error::Error for DateError {}
 
 /// A secondary or specially typed title exactly as supplied by a publication.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct PublicationTitle {
     pub id: Option<String>,
     pub value: String,
@@ -297,7 +320,7 @@ impl<'de> Deserialize<'de> for PublicationTitle {
 
 /// Lossless metadata not yet projected into a dedicated publication field.
 /// `refines` retains EPUB relationships and `source` retains provenance.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct PublicationProperty {
     pub id: Option<String>,
     pub property: String,
@@ -380,19 +403,19 @@ impl fmt::Display for ValueError {
 
 impl std::error::Error for ValueError {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Audience {
     pub value: String,
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgeRange {
     pub value: String,
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicationImage {
     pub url: String,
     pub media_type: Option<String>,
@@ -402,37 +425,33 @@ pub struct PublicationImage {
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AggregateRating {
     pub value: String,
-    #[specta(type = Option<u32>)]
     pub rating_count: Option<u64>,
-    #[specta(type = Option<u32>)]
     pub review_count: Option<u64>,
     pub best_rating: Option<String>,
     pub worst_rating: Option<String>,
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct InteractionStatistic {
     pub interaction_type: String,
-    #[specta(type = u32)]
     pub count: u64,
     pub service: Option<String>,
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PopularityRank {
-    #[specta(type = u32)]
     pub position: u64,
     pub source: String,
 }
 
 /// Exact subject evidence supplied by a publication or catalogue. Taxonomy
 /// projection never rewrites this value; it produces separate assignments.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct PublicationSubject {
     pub id: Option<String>,
     pub name: String,
@@ -528,7 +547,7 @@ impl LocalizedText {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectionKind {
     Series,
@@ -557,7 +576,7 @@ impl CollectionKind {
 
 /// Membership of a publication in a bibliographic series or collection.
 /// Catalogue navigation groups are deliberately represented elsewhere.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Collection {
     pub name: String,
     pub name_localizations: Vec<LocalizedText>,

@@ -76,7 +76,7 @@ pub struct MapEntry {
 /// them. Additive fields must remain optional or have a safe zero default.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MutationValue {
-    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11")]
     pub kind: ::core::option::Option<mutation_value::Kind>,
 }
 /// Nested message and enum types in `MutationValue`.
@@ -97,10 +97,6 @@ pub mod mutation_value {
         ReadingPosition(super::ReadingPosition),
         #[prost(message, tag = "7")]
         Annotation(super::Annotation),
-        #[prost(message, tag = "8")]
-        Bookmark(super::Bookmark),
-        #[prost(message, tag = "9")]
-        BookLink(super::BookLink),
         #[prost(message, tag = "10")]
         CatalogPublication(super::CatalogPublication),
         #[prost(message, tag = "11")]
@@ -223,38 +219,6 @@ pub struct PdfAnnotationRect {
     pub width: f32,
     #[prost(float, tag = "4")]
     pub height: f32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Bookmark {
-    #[prost(string, tag = "1")]
-    pub content_hash: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub cfi: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "4")]
-    pub created_at: u64,
-    #[prost(uint64, tag = "5")]
-    pub modified_at: u64,
-    #[prost(bool, tag = "6")]
-    pub deleted: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct BookLink {
-    #[prost(string, tag = "1")]
-    pub source_content_hash: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub target_content_hash: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub relation: ::prost::alloc::string::String,
-    #[prost(string, tag = "4")]
-    pub note: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "5")]
-    pub created_at: u64,
-    #[prost(uint64, tag = "6")]
-    pub modified_at: u64,
-    #[prost(bool, tag = "7")]
-    pub deleted: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CatalogPublication {

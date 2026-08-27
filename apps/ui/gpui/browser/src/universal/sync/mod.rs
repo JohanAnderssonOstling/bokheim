@@ -12,7 +12,7 @@ mod view;
 
 use std::sync::Arc;
 
-use app_contract::account::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LibrarySyncSummary, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
+use bokheim_backend::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 use gpui::prelude::*;
 use gpui::{Context, Div, Entity, IntoElement, SharedString, Subscription, Task, Window, px};
 use gpui_component::IconName;
@@ -31,6 +31,23 @@ use crate::services::AppServices;
 
 use self::authentication::AuthenticationInputs;
 use self::transfers::TransferState;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LibrarySyncSummary {
+    library_count: u32,
+    attention_count: u32,
+    last_synced_at: Option<u64>,
+}
+
+impl LibrarySyncSummary {
+    fn from_statuses(statuses: &[LibrarySyncStatus]) -> Self {
+        Self { library_count: statuses.len() as u32, attention_count: statuses.iter().filter(|status| status.needs_attention()).count() as u32, last_synced_at: statuses.iter().filter_map(|status| status.last_synced_at).max() }
+    }
+
+    const fn all_synced(self) -> bool {
+        self.library_count > 0 && self.attention_count == 0
+    }
+}
 
 pub(crate) struct SyncPage {
     services: AppServices,

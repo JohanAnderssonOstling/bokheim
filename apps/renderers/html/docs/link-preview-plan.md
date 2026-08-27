@@ -1,6 +1,6 @@
 # Link Preview Plan
 
-Desktop-only feature: previewing the target of in-book links in a floating
+Pointer-oriented GPUI feature: previewing the target of in-book links in a floating
 popover, without navigating away or touching history.
 
 ## Scope
@@ -8,7 +8,7 @@ popover, without navigating away or touching history.
 - **Previewable** = the link resolves inside the book.
 - **Not previewable** = external links (`http(s)`, `mailto`, `tel`, `ftp`) and
   broken internal anchors.
-- **Desktop only.** No `apps/mobile/src-tauri` changes; no long-press path.
+- **Pointer targets only.** Touch targets need a separate long-press path.
 
 ## How links work today (the foundation)
 

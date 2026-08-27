@@ -16,7 +16,7 @@ workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_root"
 workload_args=("$@")
 
-cargo build --release -p html-renderer --bin pipeline_profile
+cargo build --release -p html-pipeline-tools --bin pipeline_profile
 
 repetitions="${PMC_REPEAT:-3}"
 metrics="${PMC_METRICS:-l1d_miss_rate,llc_miss_rate}"

@@ -197,7 +197,7 @@ pub(crate) async fn catalog_inventory_response(service: &CatalogService) -> Resu
     Ok(response)
 }
 
-pub(crate) fn epub_extraction_inventory_response(inventory: catalog_core::CatalogEpubExtractionInventory) -> EpubExtractionInventoryResponse {
+pub(crate) fn epub_extraction_inventory_response(inventory: crate::store::CatalogEpubExtractionInventory) -> EpubExtractionInventoryResponse {
     EpubExtractionInventoryResponse {
         pending: inventory.pending,
         running: inventory.running,

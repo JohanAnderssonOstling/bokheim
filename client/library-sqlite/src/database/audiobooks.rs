@@ -3,7 +3,7 @@
 use super::*;
 use rusqlite::OptionalExtension;
 
-pub fn audiobook_chapters(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<app_contract::library::AudiobookChapter>, rusqlite::Error> {
+pub fn audiobook_chapters(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<library_model::AudiobookChapter>, rusqlite::Error> {
     let chapters = conn.query_row("SELECT chapters_json FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()], |row| row.get::<_, String>(0)).optional()?;
     chapters.map_or_else(|| Ok(Vec::new()), |chapters| serde_json::from_str(&chapters).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))))
 }

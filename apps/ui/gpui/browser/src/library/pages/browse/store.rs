@@ -3,11 +3,12 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use app_contract::catalog::{CatalogLinkTarget, CatalogPublicationKey, CatalogResultRangeResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseView, CatalogSubjectSort};
-use app_contract::library::{BrowseFuture, BrowseRow};
+use bokheim_backend::{CatalogPublicationKey, CatalogSubjectBrowseView};
+use catalog_model::{CatalogLinkTarget, CatalogResultRangeResponse, CatalogSubjectBrowseRequest, CatalogSubjectSort};
 use gpui::{App, AppContext, Context, Entity};
+use library_model::BrowseRow;
 
-use super::adapter::{BrowseAdapter, BrowseQuery, BrowseRequest};
+use super::adapter::{BrowseAdapter, BrowseFuture, BrowseQuery, BrowseRequest};
 use super::controls::{BrowseBookOrder, BrowseControls, BrowseFormatFilter};
 use super::page::{BrowsePage, BrowsePageConfig};
 use super::store_card::{StoreBookCardView, StoreBookServices};
@@ -29,7 +30,7 @@ pub(crate) struct StoreBrowseAdapter {
 impl StoreBrowseAdapter {
     fn new(library: LibraryContext) -> Self {
         let import_library = library.clone();
-        let import = Rc::new(move |request| import_library.backend().import_catalog_book(request));
+        let import = Rc::new(move |request| crate::services::backend::library_async(import_library.backend(), move |library| async move { library.import_catalog_book(sync_common::ROOT_DIR_ID, &request).await.map(|_| ()) }));
         let book_services = StoreBookServices::new(library.clone(), import);
         Self { library, book_services, controls: BrowseControls::catalog(), children: Rc::new(Vec::new()), books: Rc::new(Vec::new()), range: CatalogResultRangeResponse::default() }
     }
@@ -58,7 +59,7 @@ impl BrowseAdapter for StoreBrowseAdapter {
 
     fn request(&self, query: &BrowseQuery) -> BrowseRequest<Self::Response> {
         let request = Self::catalog_request(query);
-        let refresh: BrowseFuture<Result<CatalogSubjectBrowseView, String>> = self.library.backend().refresh_catalog_subjects(request);
+        let refresh: BrowseFuture<Result<CatalogSubjectBrowseView, String>> = crate::services::backend::library_async(self.library.backend(), move |library| async move { library.refresh_catalog_subjects(request).await });
         // Ordering, filtering, facets, and navigation are server-authoritative.
         // The client-side catalogue cache is used only to resolve publication
         // payloads named by that current server range.
@@ -109,15 +110,6 @@ impl BrowseAdapter for StoreBrowseAdapter {
 
     fn controls(&self) -> &BrowseControls {
         &self.controls
-    }
-
-    fn request_controls(&self, query: &BrowseQuery) -> Option<BrowseFuture<Result<BrowseControls, String>>> {
-        let operation = self.library.backend().catalog_subject_capabilities(Self::catalog_request(query));
-        Some(Box::pin(async move { operation.await.map(|capabilities| BrowseControls::catalog_capabilities(&capabilities)) }))
-    }
-
-    fn install_controls(&mut self, controls: BrowseControls) {
-        self.controls = controls;
     }
 
     fn minimum_search_length() -> usize {

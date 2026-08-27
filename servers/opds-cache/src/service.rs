@@ -1,9 +1,8 @@
 use super::{
     canonicalize_opds_catalog_locator, canonicalize_page_layout_locators, fmt, materialize_page, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import, CatalogCache, CatalogImportRequest, CatalogInventory,
     CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogPageResponse, CatalogPageWrite, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogService, CatalogServiceError,
-    CatalogSource, CatalogSourceId, CatalogSubjectBrowseCapabilitiesResponse, CatalogSubjectBrowseDeltaResponse, CatalogSubjectBrowseRefreshRequest, CatalogSubjectBrowseRequest, CatalogSubjectCollectionManifestRequest,
-    CatalogSubjectCollectionManifestResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, CrawlProgress, DownloadedOpdsBook, HashMap, HashSet, Instant, OpdsEndpoint, OpdsSearch, PathBuf, Url,
-    BROWSER_UPSTREAM_TIMEOUT,
+    CatalogSource, CatalogSourceId, CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, CrawlProgress,
+    DownloadedOpdsBook, HashMap, HashSet, Instant, OpdsEndpoint, OpdsSearch, PathBuf, Url, BROWSER_UPSTREAM_TIMEOUT,
 };
 use crate::http::public::filter_browser_page;
 
@@ -175,27 +174,22 @@ impl CatalogService {
         self.publicize_page_covers(&mut page).await;
         Ok(page)
     }
-    pub async fn browse_subjects_delta(&self, request: &CatalogSubjectBrowseRefreshRequest) -> Result<CatalogSubjectBrowseDeltaResponse, CatalogServiceError> {
+    pub async fn subject_index(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseIndexResponse, CatalogServiceError> {
         let started = Instant::now();
-        let mut request = request.clone();
-        if !internalize_transport_epoch(&mut request.epoch) {
-            request.known_entry_ids.clear();
-        }
-        let identifiers_only = request.identifiers_only;
-        let collection_sync = request.collection_sync;
-        let mut response = self.cache_call(move |cache| cache.browse_subjects_delta(&request)).await?;
-        self.publicize_subject_covers(&mut response.payloads).await;
+        let request = request.clone();
+        let mut response = self.cache_call(move |cache| cache.browse_subject_index(&request)).await?;
         publicize_transport_epoch(&mut response.epoch);
-        tracing::info!(identifiers_only, collection_sync, returned = response.entry_ids.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject browse completed");
+        tracing::info!(returned = response.entry_ids.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject index completed");
         Ok(response)
     }
 
-    pub async fn subject_browse_capabilities(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseCapabilitiesResponse, CatalogServiceError> {
+    pub async fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogServiceError> {
         let started = Instant::now();
         let request = request.clone();
-        let mut response = self.cache_call(move |cache| cache.subject_browse_capabilities(&request)).await?;
+        let mut response = self.cache_call(move |cache| cache.browse_subjects(&request)).await?;
+        self.publicize_sourced_covers(&mut response.publications).await;
         publicize_transport_epoch(&mut response.epoch);
-        tracing::info!(elapsed_ms = started.elapsed().as_millis(), "catalogue subject capabilities completed");
+        tracing::info!(returned = response.publications.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue browser subject browse completed");
         Ok(response)
     }
 
@@ -212,13 +206,6 @@ impl CatalogService {
         self.publicize_subject_covers(&mut response.payloads).await;
         publicize_transport_epoch(&mut response.epoch);
         tracing::info!(requested, returned = response.payloads.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject publication payloads completed");
-        Ok(response)
-    }
-
-    pub async fn subject_collection_manifest(&self, request: &CatalogSubjectCollectionManifestRequest) -> Result<CatalogSubjectCollectionManifestResponse, CatalogServiceError> {
-        let request = request.clone();
-        let mut response = self.cache_call(move |cache| cache.subject_collection_manifest(&request)).await?;
-        publicize_transport_epoch(&mut response.epoch);
         Ok(response)
     }
 

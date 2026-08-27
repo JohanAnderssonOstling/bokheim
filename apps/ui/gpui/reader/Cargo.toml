@@ -12,7 +12,8 @@ pdf = ["dep:pdf-reader-core", "dep:pdf-view-gpui"]
 packaged-pdfium = ["pdf", "pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
-app-contract = { path = "../../../../client/app-contract" }
+app-preferences = { path = "../../../../client/preferences" }
+bokheim-backend = { path = "../../../../client/backend", default-features = false }
 async-channel = "2"
 ui-components = { path = "../components" }
 audiobook-player = { path = "../audiobook-player", optional = true }

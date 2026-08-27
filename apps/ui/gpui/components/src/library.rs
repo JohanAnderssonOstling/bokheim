@@ -2,12 +2,11 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Div, ElementId, FontWeight, ImageSource, ObjectFit, SharedString, Stateful, StyledImage, div, img, px};
 use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{Disableable, Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName, Sizable};
 
 use crate::{
     BOOK_CARD_AUTHOR_HEIGHT_REM, BOOK_CARD_AUTHOR_LINE_HEIGHT_EM, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT,
-    BOOK_COVER_ASPECT_RATIO, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, CATALOG_CONTROL_HEIGHT, RADIUS_SM, SPACE_SM, SPACE_XS, Scrollable, ScrollableElement,
-    TEXT_SM, TEXT_XS,
+    BOOK_COVER_ASPECT_RATIO, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_SECTION_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, RADIUS_SM, SPACE_XS, Scrollable, ScrollableElement, TEXT_SM, TEXT_XS,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -91,21 +90,24 @@ pub fn carousel_section() -> Div {
     div().w_full().min_w_0().flex().flex_col().gap(px(CAROUSEL_CONTENT_GAP))
 }
 
-/// The title line: the section's name, and its scroll controls pushed to the
-/// far end of the same row.
-pub fn carousel_heading() -> Div {
-    div().w_full().min_w_0().flex().flex_row().items_center().justify_between().gap(px(CAROUSEL_CONTENT_GAP))
-}
-
-pub fn carousel_title(text: impl Into<SharedString>) -> Div {
-    div().flex_1().min_w_0().text_size(gpui::rems(CAROUSEL_TITLE_SIZE / 16.0)).font_weight(CAROUSEL_TITLE_WEIGHT).child(text.into())
+/// The title line, with room for scroll controls at its far end.
+pub fn carousel_heading(title: impl Into<SharedString>) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(CAROUSEL_CONTENT_GAP))
+        .child(div().flex_1().min_w_0().text_size(gpui::rems(CAROUSEL_TITLE_SIZE / 16.0)).font_weight(CAROUSEL_TITLE_WEIGHT).child(title.into()))
 }
 
 pub fn paginator_controls(previous: Option<AnyElement>, next: Option<AnyElement>) -> Div {
     div().flex_none().flex().flex_row().items_center().gap(px(CAROUSEL_CONTROL_GAP)).children(previous).children(next)
 }
 
-/// One step of a carousel. Square, quiet, and the same size on both frontends;
+/// One step of a carousel. Square, quiet, and consistent across GPUI targets;
 /// a horizontal row of cards is otherwise reachable only by a pointer that can
 /// scroll sideways.
 pub fn carousel_arrow_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
@@ -118,7 +120,7 @@ pub fn folder_breadcrumb() -> Breadcrumb {
 
 pub fn folder_breadcrumb_item(label: impl Into<SharedString>, current: bool) -> BreadcrumbItem {
     let label = label.into();
-    let max_characters = usize::from(app_contract::frontend::BREADCRUMB_ITEM_MAX_CHARACTERS);
+    let max_characters = 24;
     let mut characters = label.chars();
     let visible = characters.by_ref().take(max_characters).collect::<String>();
     let visible = if characters.next().is_some() { format!("{}…", visible.chars().take(max_characters.saturating_sub(1)).collect::<String>()) } else { visible };
@@ -160,23 +162,4 @@ pub fn compact_hierarchy_item(id: impl Into<ElementId>, label: impl Into<SharedS
             .child(text)
             .child(div().flex_none().text_color(theme.text_muted).child(count.to_string())),
     )
-}
-
-/// A toolbar dropdown trigger. `active` keeps an applied selection visible
-/// while its menu is closed.
-pub fn browse_dropdown_button(id: impl Into<ElementId>, label: impl Into<SharedString>, active: bool, disabled: bool, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    Button::new(id)
-        .label(label.clone())
-        .secondary()
-        .outline()
-        .disabled(disabled)
-        .h(px(CATALOG_CONTROL_HEIGHT))
-        .max_w(px(crate::FOLDER_CARD_WIDTH))
-        .px(px(SPACE_SM))
-        .overflow_hidden()
-        .rounded(px(RADIUS_SM))
-        .when(active, |button| button.border_color(theme.accent).text_color(theme.accent))
-        .text_size(gpui::rems(TEXT_XS / 16.0))
-        .tooltip(label)
 }

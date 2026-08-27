@@ -2,12 +2,15 @@
 //!
 //! The sync service depends only on `sync-common` and never links this crate.
 
-use catalog_contract::{CatalogPublicationIdentity, CatalogSourceId};
-use library_model::{AnnotationState, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, DirectoryLifecycleState, ReadingPositionState};
+use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
+use library_model::{AnnotationState, BookLifecycleState, BookMetadataState, DirectoryLifecycleState, ReadingPositionState};
 use serde::{Deserialize, Serialize};
+
+mod transfer;
 use std::collections::HashMap;
 use sync_common::ContentHash;
 use sync_common::{DeclaredBlobReference, DirId, FileName, MutationId, ReplicaId, ReplicaSeq, UnixMillis, WireMutation};
+pub use transfer::{BlobKey, BlobKind, LibraryTransfers, NetworkStatus, NetworkTransport, TransferJobKind, TransferOrigin, TransferState, TransferStatus};
 
 mod directory_projection;
 mod mutation_protobuf;
@@ -22,8 +25,6 @@ pub enum StateKey {
     Placement { content_hash: ContentHash, dir_id: DirId },
     ReadingPosition(ContentHash),
     Annotation(String),
-    Bookmark(String),
-    BookLink(String),
     CatalogPublication { source_id: String, publication_key: String },
     Metadata(ContentHash),
 }
@@ -38,8 +39,6 @@ pub enum MutationBody {
     Placement { dir_id: DirId, content_hash: ContentHash, present: bool, origin_folder_id: Option<String> },
     ReadingPosition { content_hash: ContentHash, value: ReadingPositionState },
     Annotation { annotation_id: String, value: AnnotationState },
-    Bookmark { bookmark_id: String, value: BookmarkState },
-    BookLink { link_id: String, value: BookLinkState },
     CatalogPublication { source_id: CatalogSourceId, publication: CatalogPublicationIdentity, content_hash: ContentHash },
     Metadata { content_hash: ContentHash, value: BookMetadataState },
 }
@@ -89,7 +88,7 @@ pub fn coalesce_mutations_for_push(mutations: Vec<StateMutation>) -> Vec<StateMu
 
 /// Holds reading-position registers until their quiet period expires while
 /// allowing unrelated state cells to synchronize immediately.
-pub fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce: Option<std::time::Duration>, now: std::time::SystemTime) -> Result<(Vec<StateMutation>, Option<std::time::Duration>), Box<dyn std::error::Error>> {
+pub fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debounce: Option<std::time::Duration>, now_millis: u64) -> Result<(Vec<StateMutation>, Option<std::time::Duration>), Box<dyn std::error::Error>> {
     let Some(reading_debounce) = reading_debounce else {
         return Ok((mutations, None));
     };
@@ -97,7 +96,6 @@ pub fn mutations_ready_for_push(mut mutations: Vec<StateMutation>, reading_debou
     let Some(latest_reading_change) = latest_reading_change else {
         return Ok((mutations, None));
     };
-    let now_millis = u64::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
     if latest_reading_change > now_millis.saturating_add(sync_common::MAX_LWW_FUTURE_SKEW_MS) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "local reading-position timestamp is pathologically far in the future").into());
     }
@@ -156,8 +154,6 @@ impl MutationBody {
             Self::Placement { .. } => sync_common::mutation_kind::PLACEMENT,
             Self::ReadingPosition { .. } => sync_common::mutation_kind::READING_POSITION,
             Self::Annotation { .. } => sync_common::mutation_kind::ANNOTATION,
-            Self::Bookmark { .. } => sync_common::mutation_kind::BOOKMARK,
-            Self::BookLink { .. } => sync_common::mutation_kind::BOOK_LINK,
             Self::CatalogPublication { .. } => sync_common::mutation_kind::CATALOG_PUBLICATION,
             Self::Metadata { .. } => sync_common::mutation_kind::METADATA,
         }
@@ -179,8 +175,6 @@ impl MutationBody {
             Self::Placement { dir_id, content_hash, .. } => (content_hash.to_string(), dir_id.to_string(), None),
             Self::ReadingPosition { content_hash, .. } => (content_hash.to_string(), String::new(), None),
             Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new(), None),
-            Self::Bookmark { bookmark_id, .. } => (bookmark_id.clone(), String::new(), None),
-            Self::BookLink { link_id, .. } => (link_id.clone(), String::new(), None),
             Self::CatalogPublication { source_id, publication, content_hash: _ } => (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), None),
             Self::Metadata { content_hash, .. } => (content_hash.to_string(), String::new(), None),
         };
@@ -200,8 +194,6 @@ impl MutationBody {
                 | sync_common::mutation_kind::PLACEMENT
                 | sync_common::mutation_kind::READING_POSITION
                 | sync_common::mutation_kind::ANNOTATION
-                | sync_common::mutation_kind::BOOKMARK
-                | sync_common::mutation_kind::BOOK_LINK
                 | sync_common::mutation_kind::CATALOG_PUBLICATION
                 | sync_common::mutation_kind::METADATA
         ) {
@@ -222,8 +214,6 @@ impl MutationBody {
             Self::Placement { dir_id, content_hash, .. } => StateKey::Placement { content_hash: content_hash.clone(), dir_id: dir_id.clone() },
             Self::ReadingPosition { content_hash, value: _ } => StateKey::ReadingPosition(content_hash.clone()),
             Self::Annotation { annotation_id, value: _ } => StateKey::Annotation(annotation_id.clone()),
-            Self::Bookmark { bookmark_id, value: _ } => StateKey::Bookmark(bookmark_id.clone()),
-            Self::BookLink { link_id, value: _ } => StateKey::BookLink(link_id.clone()),
             Self::CatalogPublication { source_id, publication, content_hash: _ } => {
                 StateKey::CatalogPublication { source_id: source_id.as_str().to_owned(), publication_key: catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()) }
             }
@@ -236,11 +226,7 @@ impl MutationBody {
     pub fn conflict_rank(&self) -> u8 {
         match self {
             Self::Placement { present: false, .. } => 1,
-            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Deleted, .. }
-            | Self::BookLifecycle { value: BookLifecycleState::Deleted { .. }, .. }
-            | Self::Annotation { value: AnnotationState { deleted: true, .. }, .. }
-            | Self::Bookmark { value: BookmarkState { deleted: true, .. }, .. }
-            | Self::BookLink { value: BookLinkState { deleted: true, .. }, .. } => 1,
+            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Deleted, .. } | Self::BookLifecycle { value: BookLifecycleState::Deleted { .. }, .. } | Self::Annotation { value: AnnotationState { deleted: true, .. }, .. } => 1,
             Self::DirectoryLifecycle { value: DirectoryLifecycleState::Purged, .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } => 2,
             _ => 0,
         }
@@ -296,7 +282,6 @@ mod tests {
         let first_dir = dir_id("11111111-1111-4111-8111-111111111111");
         let second_dir = dir_id("22222222-2222-4222-8222-222222222222");
         let first_hash = content_hash('a');
-        let second_hash = content_hash('b');
         let bodies = vec![
             MutationBody::DirectoryName { dir_id: first_dir, name: "Shelf".to_owned() },
             MutationBody::DirectoryParent { dir_id: first_dir, parent_id: second_dir },
@@ -317,11 +302,6 @@ mod tests {
                     modified_at: 2,
                     deleted: false,
                 },
-            },
-            MutationBody::Bookmark { bookmark_id: "bookmark".to_owned(), value: BookmarkState { content_hash: first_hash, cfi: "epubcfi(/6/2)".to_owned(), label: "Start".to_owned(), created_at: 1, modified_at: 2, deleted: false } },
-            MutationBody::BookLink {
-                link_id: "link".to_owned(),
-                value: BookLinkState { source_content_hash: first_hash, target_content_hash: second_hash, relation: "references".to_owned(), note: String::new(), created_at: 1, modified_at: 2, deleted: false },
             },
             MutationBody::CatalogPublication {
                 source_id: CatalogSourceId::parse("standard-ebooks").unwrap(),

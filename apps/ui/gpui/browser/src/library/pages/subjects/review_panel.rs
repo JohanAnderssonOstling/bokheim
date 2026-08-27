@@ -2,11 +2,11 @@ mod ambiguous;
 mod no_match;
 mod raw_subjects;
 
-use app_contract::library::{EditionIdentityReview, EditionIdentityReviewStatus};
 use gpui::prelude::*;
 use gpui::{Context, Div, Entity, FontWeight, Render, Subscription, Task, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, IconName, Sizable};
+use library_model::{EditionIdentityReview, EditionIdentityReviewStatus};
 use ui_components as components;
 
 use crate::library::services::LibraryContext;
@@ -66,7 +66,7 @@ impl MetadataTriage {
         self.state = TriageState::Loading;
         self.lane_subscriptions.clear();
         let ui = self.ui.clone();
-        let reviews_load = ui.backend().load_prepared_edition_identity_reviews();
+        let reviews_load = crate::services::backend::library_async(ui.backend(), move |library| async move { library.prepared_edition_identity_reviews().await });
         self.load_task = Some(cx.spawn(async move |triage, cx| {
             let reviews = reviews_load.await;
             let _ = triage.update_in(cx, |triage, window, cx| match reviews {
@@ -129,7 +129,7 @@ impl MetadataTriage {
 
         self.retrying_failed = true;
         self.retry_error = None;
-        let operation = self.ui.backend().retry_failed_edition_identities();
+        let operation = crate::services::backend::library_async(self.ui.backend(), move |library| async move { library.retry_failed_edition_identities().await });
         cx.spawn(async move |triage, cx| {
             let result = operation.await;
             let _ = triage.update(cx, |triage, cx| {

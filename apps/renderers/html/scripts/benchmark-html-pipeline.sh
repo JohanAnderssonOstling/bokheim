@@ -7,7 +7,7 @@ set -euo pipefail
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_root"
-cargo build --release -p html-renderer --bin pipeline_profile
+cargo build --release -p html-pipeline-tools --bin pipeline_profile
 
 binary="${CARGO_TARGET_DIR:-$workspace_root/../target}/release/pipeline_profile"
 [[ -x "$binary" ]] || binary="$workspace_root/target/release/pipeline_profile"

@@ -4,7 +4,7 @@ use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::{InputState, OtpState};
 
 use crate::model::AccountFlow;
-use app_contract::backend::BackendFuture;
+use crate::services::backend::{UiFuture, app_async};
 
 use super::SyncPage;
 
@@ -52,7 +52,7 @@ impl SyncPage {
         cx.notify();
     }
 
-    fn start_account_request(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: BackendFuture<()>, cx: &mut Context<Self>) {
+    fn start_account_request(&mut self, progress: &'static str, success: &'static str, next_flow: AccountFlow, operation: UiFuture<()>, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -90,20 +90,19 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        let operation = self.services.backend.login(email, password);
+        let operation = super::account::login(&self.services.backend, email, password);
         self.start_snapshot_operation("Signing in…", "Signed in", true, operation, cx);
     }
 
     pub(super) fn start_registration(&mut self, cx: &mut Context<Self>) {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         let password = self.authentication.registration_password.read(cx).value().to_string();
-        let validation = &self.services.contracts.account.validation;
-        if email.is_empty() || password.chars().count() < usize::from(validation.password_min_characters) {
+        if email.is_empty() || password.chars().count() < account_contract::PASSWORD_MIN_CHARACTERS {
             self.error = Some("Check the email and password length".into());
             cx.notify();
             return;
         }
-        let operation = self.services.backend.request_registration(email, password);
+        let operation = app_async(&self.services.backend, move |backend| async move { backend.request_public_registration(&email, &password).await });
         self.start_account_request("Creating account…", "Check your email for a six-digit verification PIN", AccountFlow::VerifyEmail, operation, cx);
     }
 
@@ -114,20 +113,20 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        let operation = self.services.backend.resend_verification(email);
+        let operation = app_async(&self.services.backend, move |backend| async move { backend.resend_verification(&email).await });
         self.start_account_request("Resending PIN…", "Verification PIN sent if the address exists", AccountFlow::VerifyEmail, operation, cx);
     }
 
     pub(super) fn start_verify_email(&mut self, cx: &mut Context<Self>) {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         let pin = self.authentication.verification_pin.read(cx).value().trim().to_owned();
-        let pin_digits = usize::from(self.services.contracts.account.validation.verification_pin_digits);
+        let pin_digits = account_contract::EMAIL_VERIFICATION_PIN_DIGITS;
         if email.is_empty() || pin.len() != pin_digits || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
             self.error = Some(format!("Enter the {pin_digits}-digit verification PIN").into());
             cx.notify();
             return;
         }
-        let operation = self.services.backend.verify_email(email, pin);
+        let operation = super::account::verify_email(&self.services.backend, email, pin);
         self.start_snapshot_operation("Verifying email…", "Email verified", false, operation, cx);
     }
 
@@ -138,19 +137,19 @@ impl SyncPage {
             cx.notify();
             return;
         }
-        let operation = self.services.backend.request_password_reset(email);
+        let operation = app_async(&self.services.backend, move |backend| async move { backend.request_password_reset(&email).await });
         self.start_account_request("Requesting reset…", "Reset token sent if the address exists", AccountFlow::ResetPassword, operation, cx);
     }
 
     pub(super) fn start_password_reset(&mut self, cx: &mut Context<Self>) {
         let token = self.authentication.reset_token.read(cx).value().trim().to_owned();
         let password = self.authentication.new_password.read(cx).value().to_string();
-        if token.is_empty() || password.chars().count() < usize::from(self.services.contracts.account.validation.password_min_characters) {
+        if token.is_empty() || password.chars().count() < account_contract::PASSWORD_MIN_CHARACTERS {
             self.error = Some("Reset token and a long enough password are required".into());
             cx.notify();
             return;
         }
-        let operation = self.services.backend.reset_password(token, password);
+        let operation = app_async(&self.services.backend, move |backend| async move { backend.reset_password(&token, &password).await });
         self.start_account_request("Updating password…", "Password updated. Sign in with your new password.", AccountFlow::SignIn, operation, cx);
     }
 }

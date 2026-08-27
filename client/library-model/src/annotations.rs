@@ -10,6 +10,27 @@ pub enum AnnotationStyle {
     Strikethrough,
 }
 
+impl AnnotationStyle {
+    pub const fn storage(&self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Underline => "underline",
+            Self::Squiggly => "squiggly",
+            Self::Strikethrough => "strikethrough",
+        }
+    }
+
+    pub fn parse_storage(value: &str) -> Option<Self> {
+        match value {
+            "highlight" => Some(Self::Highlight),
+            "underline" => Some(Self::Underline),
+            "squiggly" => Some(Self::Squiggly),
+            "strikethrough" => Some(Self::Strikethrough),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PdfAnnotationRect {
     pub left: f32,

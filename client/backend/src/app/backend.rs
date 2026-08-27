@@ -1,18 +1,17 @@
 use super::data::{AppDataLocation, BackendContext, LibraryEntry};
 use super::executor::{BackendExecutor, BackendTask};
 use super::preferences::{BrowsingPreferencePatch, BrowsingPreferences, ReaderPreferencePatch, ReaderPreferences};
-use crate::catalog::{CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogPublicationKey, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse};
+use crate::catalog::{CatalogImportRequest, CatalogPage, CatalogPublicationIdentity, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse};
 use crate::library::database as db;
-use crate::platform::scanner::LibraryEvent;
+use crate::platform::library_events::{LibraryEvent, LibraryEventReceiver};
 use crate::sync::{AssetSync, ReadingPositionSync, SyncError, SyncPolicy};
 use crate::{ContentHash, FolderDownloadStatus, LibraryId, LibraryTransfers, NetworkStatus};
-use app_contract::library::BookImportDestination;
 use book_metadata::librarything::LibraryThingClient;
 use catalog_client::CatalogClient;
-use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use library_model::BookImportDestination;
 use metadata_client::MetadataClient;
 use serde::Serialize;
-use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
@@ -20,14 +19,17 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-use sync_common::api::notifications::NotificationMessage;
+use std::time::Duration;
 use taxonomy_client::TaxonomyClient;
+use web_time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, sync_client::AuthError>> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, sync_client::AuthError>> + 'a>>;
 
 use crate::library::LibraryBackend;
-use app_contract::catalog::CatalogSubjectBrowseView;
-use app_contract::library::LibraryUpdate;
+use library_model::LibraryUpdate;
 
 #[derive(Default)]
 struct AppEventSubscribers {
@@ -108,39 +110,17 @@ const READING_POSITION_SYNC_DEBOUNCE: Duration = Duration::from_secs(30);
 const AUTH_EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 const AUTH_REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
 
-fn account_status_from_session(session: Option<&crate::auth::Session>) -> AccountStatus {
+fn account_status_from_session(session: Option<&sync_client::Session>) -> AccountStatus {
     session.map(|session| AccountStatus::authenticated(session.server_url().as_str(), session.email())).unwrap_or_else(AccountStatus::signed_out)
 }
 
-fn session_is_usable(session: &crate::auth::Session, server: &crate::ServerUrl) -> bool {
+fn session_is_usable(session: &sync_client::Session, server: &crate::ServerUrl) -> bool {
     session.server_url() == server && if session.refresh_token().is_some() { !session.refresh_expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) } else { !session.expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) }
 }
 
-fn recover_library_account(backend: &BackendContext, server: &crate::ServerUrl) -> Result<Option<crate::auth::Session>, BackendError> {
-    let mut recovered: Option<crate::auth::Session> = None;
-    for entry in backend.try_get_library_entries().map_err(BackendError::operation)? {
-        let path = entry.library_path().join(crate::APP_HIDDEN_SESSION_PATH);
-        let session = match crate::auth::load_session_from(&path) {
-            Ok(Some(session)) if session_is_usable(&session, server) => session,
-            Ok(_) => continue,
-            Err(error) => {
-                log::warn!("could not inspect library session at {}: {error}", path.display());
-                continue;
-            }
-        };
-        if recovered.as_ref().is_some_and(|current| current.user_id() != session.user_id()) {
-            log::warn!("local libraries contain sessions for different accounts; global account recovery was skipped");
-            return Ok(None);
-        }
-        if recovered.is_none() {
-            recovered = Some(session);
-        }
-    }
-    Ok(recovered)
-}
+use super::account_models::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 
-pub use app_contract::account::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LibrarySyncSummary, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-
+#[cfg(not(target_arch = "wasm32"))]
 fn regular_files_apparent_size(paths: impl IntoIterator<Item = PathBuf>) -> Result<u64, BackendError> {
     let mut bytes = 0_u64;
     for path in paths {
@@ -154,7 +134,7 @@ fn regular_files_apparent_size(paths: impl IntoIterator<Item = PathBuf>) -> Resu
     Ok(bytes)
 }
 
-#[derive(Clone, Debug, serde::Serialize, specta::Type)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct AccountSessionSummary {
     pub session_id: String,
     pub created_at: f64,
@@ -162,15 +142,33 @@ pub struct AccountSessionSummary {
     pub current: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Type)]
+#[derive(Clone, Debug, Serialize)]
 pub struct LibraryListState {
     pub libraries: Vec<LibraryEntry>,
     pub sync_statuses: Vec<LibrarySyncStatus>,
 }
 
-#[derive(Clone, Debug, Serialize, Type)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CatalogPageView {
     pub page: CatalogPage,
+    pub owned_publications: HashSet<CatalogPublicationKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+pub struct CatalogPublicationKey {
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublicationIdentity,
+}
+
+impl CatalogPublicationKey {
+    pub fn new(source_id: CatalogSourceId, publication: CatalogPublicationIdentity) -> Self {
+        Self { source_id, publication }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct CatalogSubjectBrowseView {
+    pub response: CatalogSubjectBrowseResponse,
     pub owned_publications: HashSet<CatalogPublicationKey>,
 }
 
@@ -206,11 +204,12 @@ pub(crate) struct AppState {
     backend: BackendContext,
     active_library: Mutex<Option<LibraryBackend>>,
     open_libraries: Mutex<HashMap<LibraryId, LibraryBackend>>,
+    #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
     library_scanning_enabled: AtomicBool,
     library_list_updates: Mutex<()>,
     preference_updates: Mutex<()>,
     browser_session_updates: Mutex<()>,
-    account: Mutex<Option<crate::auth::Session>>,
+    account: Mutex<Option<sync_client::Session>>,
     account_refresh: tokio::sync::Mutex<()>,
     catalogs: CatalogClient,
     metadata: MetadataClient,
@@ -219,11 +218,10 @@ pub(crate) struct AppState {
     librarything: Option<LibraryThingClient>,
     events: AppEventBus,
     events_taken: AtomicBool,
-    sync_wake_tx: Sender<()>,
+    sync_wake_tx: async_channel::Sender<()>,
     pending_sync: Arc<Mutex<PendingSyncWork>>,
     sync_stop: Arc<AtomicBool>,
-    sync_thread: Mutex<Option<JoinHandle<()>>>,
-    notification_task: Mutex<Option<BackendTask<()>>>,
+    sync_task: Mutex<Option<BackendTask<()>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -281,13 +279,7 @@ impl Drop for AppState {
     fn drop(&mut self) {
         self.sync_stop.store(true, Ordering::Release);
         let _ = self.sync_wake_tx.try_send(());
-        self.notification_task.get_mut().ok().and_then(Option::take);
-        let thread = self.sync_thread.get_mut().ok().and_then(Option::take);
-        if let Some(thread) = thread {
-            if thread.thread().id() != std::thread::current().id() {
-                let _ = thread.join();
-            }
-        }
+        self.sync_task.get_mut().ok().and_then(Option::take);
     }
 }
 
@@ -296,27 +288,32 @@ pub struct AppBackend {
     state: Arc<AppState>,
 }
 
-fn run_sync_schedule(mut cycle: impl FnMut(bool), mut next_reading_deadline: impl FnMut() -> Option<Instant>, wake_rx: Receiver<()>, stop: &AtomicBool, retry_interval: Duration, reconcile_interval: Duration, debounce: Duration) {
+async fn run_sync_schedule<C, F>(
+    mut cycle: C, mut next_reading_deadline: impl FnMut() -> Option<Instant>, wake_rx: async_channel::Receiver<()>, stop: Arc<AtomicBool>, retry_interval: Duration, reconcile_interval: Duration, debounce: Duration,
+) where
+    C: FnMut(bool) -> F,
+    F: Future<Output = ()>,
+{
     let mut last_reconcile = Instant::now();
     loop {
         let until_reconcile = reconcile_interval.saturating_sub(last_reconcile.elapsed());
         let until_reading = next_reading_deadline().map(|deadline| deadline.saturating_duration_since(Instant::now())).unwrap_or(retry_interval);
-        match wake_rx.recv_timeout(retry_interval.min(until_reconcile).min(until_reading)) {
-            Ok(()) => {
+        match tokio::time::timeout(retry_interval.min(until_reconcile).min(until_reading), wake_rx.recv()).await {
+            Ok(Ok(())) => {
                 if stop.load(Ordering::Acquire) {
                     return;
                 }
                 loop {
-                    match wake_rx.recv_timeout(debounce) {
-                        Ok(()) if stop.load(Ordering::Acquire) => return,
-                        Ok(()) => {}
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => return,
+                    match tokio::time::timeout(debounce, wake_rx.recv()).await {
+                        Ok(Ok(())) if stop.load(Ordering::Acquire) => return,
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return,
+                        Err(_) => break,
                     }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Err(_)) => return,
+            Err(_) => {}
         }
         if stop.load(Ordering::Acquire) {
             return;
@@ -325,84 +322,7 @@ fn run_sync_schedule(mut cycle: impl FnMut(bool), mut next_reading_deadline: imp
         if periodic {
             last_reconcile = Instant::now();
         }
-        cycle(periodic);
-    }
-}
-
-async fn notification_retry_delay(stop: &AtomicBool, duration: Duration) {
-    let deadline = tokio::time::Instant::now() + duration;
-    while !stop.load(Ordering::Acquire) && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(250).min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
-    }
-}
-
-async fn run_notification_stream(state: Weak<AppState>, stop: Arc<AtomicBool>) {
-    let mut retry_seconds = 1_u64;
-    while !stop.load(Ordering::Acquire) {
-        let session = state.upgrade().and_then(|state| {
-            if !state.backend.transfer_runtime().network_status().connected {
-                return None;
-            }
-            state.account.lock().ok()?.clone()
-        });
-        let Some(session) = session else {
-            notification_retry_delay(&stop, Duration::from_secs(1)).await;
-            continue;
-        };
-
-        let mut stream = match sync_client::connect_notifications(&session).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                log::debug!("notification connection failed: {error}");
-                let jitter = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| u64::from(duration.subsec_millis()) % 500).unwrap_or(0);
-                notification_retry_delay(&stop, Duration::from_millis(retry_seconds * 1000 + jitter)).await;
-                retry_seconds = (retry_seconds * 2).min(60);
-                continue;
-            }
-        };
-        retry_seconds = 1;
-        if let Some(state) = state.upgrade() {
-            let core = AppBackend { state };
-            core.request_background_sync();
-        }
-
-        loop {
-            let notification = tokio::select! {
-                notification = stream.next() => notification,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    if stop.load(Ordering::Acquire) {
-                        stream.close().await;
-                        return;
-                    }
-                    let current = state.upgrade().and_then(|state| {
-                        let connected = state.backend.transfer_runtime().network_status().connected;
-                        let token = state.account.lock().ok()?.as_ref().map(|session| session.token().to_owned());
-                        Some((connected, token))
-                    });
-                    if !matches!(current, Some((true, Some(ref token))) if token == session.token()) {
-                        stream.close().await;
-                        break;
-                    }
-                    continue;
-                }
-            };
-            let notification = match notification {
-                Ok(Some(notification)) => notification,
-                Ok(None) => break,
-                Err(error) => {
-                    log::debug!("notification connection ended: {error}");
-                    break;
-                }
-            };
-            let Some(state) = state.upgrade() else { return };
-            let core = AppBackend { state };
-            match notification {
-                NotificationMessage::Hello { .. } => {}
-                NotificationMessage::LibraryChanged { library_id } => core.request_library_sync(library_id, false),
-                NotificationMessage::LibrariesChanged => core.request_library_list_sync(),
-                NotificationMessage::Reconcile => core.request_background_sync(),
-            }
-        }
+        cycle(periodic).await;
     }
 }
 
@@ -415,40 +335,31 @@ impl AppBackend {
         state.upgrade().map(|state| Self { state }).ok_or_else(|| BackendError::message("application backend has been closed"))
     }
 
-    fn start_background_sync(&self, wake_rx: Receiver<()>) -> Result<(), BackendError> {
+    fn start_background_sync(&self, wake_rx: async_channel::Receiver<()>) -> Result<(), BackendError> {
         let state: Weak<AppState> = Arc::downgrade(&self.state);
         let stop = self.state.sync_stop.clone();
-        let executor = self.state.executor.clone();
         let pending_sync = self.state.pending_sync.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("{}-sync", crate::APP_NAME_LOWER))
-            .spawn(move || {
-                run_sync_schedule(
-                    |periodic| {
-                        let Some(state) = state.upgrade() else {
-                            return;
-                        };
-                        let core = AppBackend { state };
-                        if let Err(error) = executor.block_on(core.background_sync_cycle(periodic)) {
-                            log::warn!("background synchronization failed: {error}");
-                        }
-                    },
-                    || pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).next_reading_deadline(),
-                    wake_rx,
-                    &stop,
-                    BACKGROUND_SYNC_RETRY_INTERVAL,
-                    BACKGROUND_RECONCILE_INTERVAL,
-                    BACKGROUND_SYNC_DEBOUNCE,
-                );
-            })
-            .map_err(BackendError::operation)?;
-        *self.lock(&self.state.sync_thread)? = Some(thread);
-        Ok(())
-    }
-
-    fn start_notification_stream(&self) -> Result<(), BackendError> {
-        let task = self.state.executor.spawn(run_notification_stream(Arc::downgrade(&self.state), self.state.sync_stop.clone()));
-        *self.lock(&self.state.notification_task)? = Some(task);
+        let task = self.state.executor.spawn(run_sync_schedule(
+            move |periodic| {
+                let state = state.clone();
+                async move {
+                    let Some(state) = state.upgrade() else {
+                        return;
+                    };
+                    let core = AppBackend { state };
+                    if let Err(error) = core.background_sync_cycle(periodic).await {
+                        log::warn!("background synchronization failed: {error}");
+                    }
+                }
+            },
+            move || pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).next_reading_deadline(),
+            wake_rx,
+            stop,
+            BACKGROUND_SYNC_RETRY_INTERVAL,
+            BACKGROUND_RECONCILE_INTERVAL,
+            BACKGROUND_SYNC_DEBOUNCE,
+        ));
+        *self.lock(&self.state.sync_task)? = Some(task);
         Ok(())
     }
 
@@ -471,54 +382,45 @@ impl AppBackend {
         let _ = self.state.sync_wake_tx.try_send(());
     }
 
-    fn request_library_list_sync(&self) {
-        self.state.pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library_list = true;
-        let _ = self.state.sync_wake_tx.try_send(());
-    }
-
     pub fn initialize(location: AppDataLocation) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         Self::initialize_with_executor(location, executor)
     }
 
     fn initialize_with_executor(location: AppDataLocation, executor: BackendExecutor) -> Result<Self, BackendError> {
-        Self::new_with_executor(BackendContext::initialize(location).map_err(BackendError::message)?, executor, true)
-    }
-
-    /// Reuses a host-owned Tokio runtime even when the calling thread is not
-    /// entered into that runtime, as is the case for Tauri's setup callback.
-    pub fn initialize_on_tokio_runtime(location: AppDataLocation, handle: tokio::runtime::Handle) -> Result<Self, BackendError> {
-        let executor = BackendExecutor::from_tokio_handle(handle).map_err(BackendError::operation)?;
-        Self::initialize_with_executor(location, executor)
+        Self::new_with_executor(
+            BackendContext::initialize(location).map_err(BackendError::message)?,
+            executor,
+            #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
+            true,
+        )
     }
 
     pub fn new(backend: BackendContext) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
-        Self::new_with_executor(backend, executor, true)
+        Self::new_with_executor(
+            backend,
+            executor,
+            #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
+            true,
+        )
     }
 
     /// Constructs a desktop backend whose library scanners remain parked until
     /// the graphical host has rendered its first frame.
+    #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
     pub fn new_deferred_scanning(backend: BackendContext) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         Self::new_with_executor(backend, executor, false)
     }
 
-    fn new_with_executor(backend: BackendContext, executor: BackendExecutor, library_scanning_enabled: bool) -> Result<Self, BackendError> {
+    fn new_with_executor(backend: BackendContext, executor: BackendExecutor, #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))] library_scanning_enabled: bool) -> Result<Self, BackendError> {
         let events = AppEventBus::default();
-        let (sync_wake_tx, sync_wake_rx) = bounded(1);
+        let (sync_wake_tx, sync_wake_rx) = async_channel::bounded(1);
         let pending_sync = Arc::new(Mutex::new(PendingSyncWork::default()));
         let sync_stop = Arc::new(AtomicBool::new(false));
         let api_server = crate::api_server_url();
-        let account_path = backend.app_data_dir().join("session.json");
-        let mut account = crate::auth::load_session_from(&account_path).map_err(BackendError::operation)?.filter(|session| session.server_url() == &api_server);
-        if account.is_none() {
-            account = recover_library_account(&backend, &api_server)?;
-            if let Some(session) = account.as_ref() {
-                crate::auth::save_session_to(session, &account_path).map_err(BackendError::operation)?;
-                log::info!("restored the application account from a signed-in local library");
-            }
-        }
+        let account = backend.load_account_session().map_err(BackendError::operation)?.filter(|session| session.server_url() == &api_server);
         let resume_sync = account.is_some();
         let browsing_preferences = backend.load_browsing_preferences().map_err(BackendError::operation)?;
         let catalogs = CatalogClient::with_persistent_cache(crate::catalog_server_url().as_str(), backend.app_data_dir()).map_err(BackendError::operation)?;
@@ -532,6 +434,7 @@ impl AppBackend {
                 backend,
                 active_library: Mutex::new(None),
                 open_libraries: Mutex::new(HashMap::new()),
+                #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
                 library_scanning_enabled: AtomicBool::new(library_scanning_enabled),
                 library_list_updates: Mutex::new(()),
                 preference_updates: Mutex::new(()),
@@ -548,12 +451,10 @@ impl AppBackend {
                 sync_wake_tx,
                 pending_sync,
                 sync_stop,
-                sync_thread: Mutex::new(None),
-                notification_task: Mutex::new(None),
+                sync_task: Mutex::new(None),
             }),
         };
         core.start_background_sync(sync_wake_rx)?;
-        core.start_notification_stream()?;
         if resume_sync {
             let session = core.require_account()?;
             if let Err(error) = core.enroll_default_libraries(&session) {
@@ -566,9 +467,9 @@ impl AppBackend {
 
     pub fn spawn<T, F, Fut>(&self, operation: F) -> BackendTask<T>
     where
-        T: Send + 'static,
+        T: super::executor::BackendOutput,
         F: FnOnce(Self) -> Fut,
-        Fut: Future<Output = T> + Send + 'static,
+        Fut: super::executor::BackendFuture<T>,
     {
         self.state.executor.spawn(operation(self.clone()))
     }
@@ -669,8 +570,8 @@ impl AppBackend {
         Ok((created_ids, errors))
     }
 
-    pub fn import_library_directory(&self, library_id: &LibraryId, directory: app_contract::library::DirectoryImport) -> Result<Vec<String>, BackendError> {
-        self.library_handle(library_id, false)?.import_directory_contents(directory)
+    pub fn import_library_directory(&self, library_id: &LibraryId, directory: crate::DirectoryImport) -> Result<Vec<String>, BackendError> {
+        self.library_handle(library_id)?.import_directory_contents(directory)
     }
 
     /// Ensures the application always has a local library to select.
@@ -725,7 +626,7 @@ impl AppBackend {
         self.remove_library_from_device(library_id)?;
         let remote_library_id = *library_id;
         match self.current_account() {
-            Ok(Some(_)) => match self.authenticated_request(|session| Box::pin(crate::auth::delete_library(session, remote_library_id))).await {
+            Ok(Some(_)) => match self.authenticated_request(|session| Box::pin(async move { sync_client::delete_library(session, &remote_library_id).await })).await {
                 Ok(_) => {
                     if let Err(error) = self.state.backend.complete_library_deletion(&remote_library_id) {
                         log::warn!("server deleted library {remote_library_id}, but its completed queue entry could not be cleared: {error}");
@@ -740,20 +641,21 @@ impl AppBackend {
     }
 
     pub fn library(&self, library_id: &LibraryId) -> Result<LibraryBackend, BackendError> {
-        let library = self.library_handle(library_id, true)?;
+        let library = self.library_handle(library_id)?;
         *self.lock(&self.state.active_library)? = Some(library.clone());
         Ok(library)
     }
 
+    #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
     pub fn request_library_scan(&self, library_id: &LibraryId) -> Result<(), BackendError> {
-        self.library_handle(library_id, false)?.request_scan();
+        self.library_handle(library_id)?.request_scan();
         Ok(())
     }
 
-    fn library_handle(&self, library_id: &LibraryId, start_scan: bool) -> Result<LibraryBackend, BackendError> {
-        let start_scan = start_scan && self.state.library_scanning_enabled.load(Ordering::Acquire);
+    fn library_handle(&self, library_id: &LibraryId) -> Result<LibraryBackend, BackendError> {
         if let Some(library) = self.lock(&self.state.open_libraries)?.get(library_id).cloned() {
-            if start_scan {
+            #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
+            if self.state.library_scanning_enabled.load(Ordering::Acquire) {
                 library.start_scanner();
             }
             return Ok(library);
@@ -766,14 +668,18 @@ impl AppBackend {
         // create a live handle for the same library.
         if let Some(library) = open_libraries.get(library_id).cloned() {
             drop(open_libraries);
-            if start_scan {
+            #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
+            if self.state.library_scanning_enabled.load(Ordering::Acquire) {
                 library.start_scanner();
             }
             return Ok(library);
         }
         let path = entry.library_path().to_string_lossy();
-        let (library, events) =
-            if start_scan { LibraryBackend::open(self, &self.state.backend, &path, *library_id) } else { LibraryBackend::open_deferred_scan(self, &self.state.backend, &path, *library_id) }.map_err(BackendError::operation)?;
+        let (library, events) = LibraryBackend::open_deferred_scan(self, &self.state.backend, &path, *library_id).map_err(BackendError::operation)?;
+        #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
+        if self.state.library_scanning_enabled.load(Ordering::Acquire) {
+            library.start_scanner();
+        }
         if let Some(session) = account {
             library.adopt_session(session).map_err(BackendError::message)?;
         }
@@ -786,6 +692,7 @@ impl AppBackend {
 
     /// Enables scanning after a deferred desktop startup and starts every
     /// library that background synchronization or the UI opened meanwhile.
+    #[cfg(all(feature = "scanner", not(target_os = "android"), not(target_arch = "wasm32")))]
     pub fn enable_library_scanning(&self) -> Result<(), BackendError> {
         if self.state.library_scanning_enabled.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -851,14 +758,6 @@ impl AppBackend {
         self.catalog_subject_browse_view(library_id, response)
     }
 
-    pub(crate) async fn catalog_subject_capabilities(&self, request: CatalogSubjectBrowseRequest) -> Result<app_contract::catalog::CatalogSubjectBrowseCapabilities, BackendError> {
-        self.state.catalogs.subject_browse_capabilities(request).await.map_err(BackendError::operation)
-    }
-
-    pub(crate) fn cached_catalog_subjects_in(&self, library_id: &LibraryId, request: CatalogSubjectBrowseRequest) -> Result<Option<CatalogSubjectBrowseView>, BackendError> {
-        self.state.catalogs.cached_subjects(request).map_err(BackendError::operation)?.map(|response| self.catalog_subject_browse_view(library_id, response)).transpose()
-    }
-
     fn catalog_subject_browse_view(&self, library_id: &LibraryId, response: CatalogSubjectBrowseResponse) -> Result<CatalogSubjectBrowseView, BackendError> {
         let owned_publications = self.catalog_ownership(library_id, response.publications.iter().map(|item| (item.source_id.clone(), item.publication.identity.clone())))?;
         Ok(CatalogSubjectBrowseView { response, owned_publications })
@@ -886,16 +785,18 @@ impl AppBackend {
 
     pub(crate) async fn import_catalog_book_in(&self, destination: &BookImportDestination, request: &CatalogImportRequest) -> Result<ContentHash, BackendError> {
         let library = self.library(destination.library_id())?;
-        let temporary_directory = self.state.backend.app_data_dir().join("opds-downloads");
-        let download = self.state.catalogs.download_import(request, &temporary_directory).await.map_err(BackendError::operation)?;
+        let download = self.state.catalogs.download_import(request).await.map_err(BackendError::operation)?;
         let directory_id = destination.directory_id().clone();
         let source_id = request.source_id.clone();
         let publication = request.publication.clone();
         let importing_library = library.clone();
-        let content_hash = tokio::task::spawn_blocking(move || importing_library.import_downloaded_catalog_book(&directory_id, download.path(), download.file_name(), &source_id, &publication).map_err(|error| error.to_string()))
-            .await
-            .map_err(BackendError::operation)?
-            .map_err(BackendError::message)?;
+        let content_hash = super::executor::run_blocking(move || {
+            let mut source = download.open().map_err(|error| error.to_string())?;
+            importing_library.import_downloaded_catalog_book(&directory_id, source.as_mut(), download.file_name(), &source_id, &publication).map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(BackendError::operation)?
+        .map_err(BackendError::message)?;
         if let Err(error) = self.hydrate_taxonomy_for_book(&library, &content_hash).await {
             log::warn!("catalog book was imported, but missing taxonomy codes could not be hydrated: {error}");
         }
@@ -934,7 +835,7 @@ impl AppBackend {
         let resolutions = taxonomy_client::code_resolutions(&response);
         let release_id = response.release_id;
         let backend = self.state.backend.clone();
-        tokio::task::spawn_blocking(move || backend.merge_unified_taxonomy_slice(&release_id, &definitions, &resolutions)).await.map_err(BackendError::operation)?.map_err(BackendError::message)?;
+        super::executor::run_blocking(move || backend.merge_unified_taxonomy_slice(&release_id, &definitions, &resolutions)).await.map_err(BackendError::operation)?.map_err(BackendError::message)?;
 
         // The taxonomy runtime is shared by every open library. Reseed each
         // library so previously recorded codes benefit from the fetched slice.
@@ -975,7 +876,7 @@ impl AppBackend {
         let resolutions = taxonomy_client::code_resolutions(&response);
         let release_id = response.release_id;
         let backend = self.state.backend.clone();
-        tokio::task::spawn_blocking(move || backend.merge_unified_taxonomy_slice(&release_id, &definitions, &resolutions)).await.map_err(BackendError::operation)?.map_err(BackendError::message)?;
+        super::executor::run_blocking(move || backend.merge_unified_taxonomy_slice(&release_id, &definitions, &resolutions)).await.map_err(BackendError::operation)?.map_err(BackendError::message)?;
         self.reload_taxonomy_assignments(library)
     }
 
@@ -1030,14 +931,10 @@ impl AppBackend {
         }
 
         let server = crate::api_server_url();
-        let account_path = self.state.backend.app_data_dir().join("session.json");
-        let mut restored = crate::auth::load_session_from(&account_path).map_err(BackendError::operation)?.filter(|session| session_is_usable(session, &server));
-        if restored.is_none() {
-            restored = recover_library_account(&self.state.backend, &server)?;
-        }
+        let restored = self.state.backend.load_account_session().map_err(BackendError::operation)?.filter(|session| session_is_usable(session, &server));
         let Some(session) = restored else { return Ok(()) };
 
-        crate::auth::save_session_to(&session, &account_path).map_err(BackendError::operation)?;
+        self.state.backend.save_account_session(&session).map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = Some(session.clone());
         if let Err(error) = self.enroll_default_libraries(&session) {
             log::warn!("persisted account could not synchronize every library: {error}");
@@ -1047,7 +944,7 @@ impl AppBackend {
     }
 
     pub async fn account_storage_usage(&self) -> Result<AccountStorageUsage, BackendError> {
-        self.authenticated_request(|session| Box::pin(crate::auth::account_storage_usage(session))).await.map(Into::into)
+        self.authenticated_request(|session| Box::pin(sync_client::account_storage_usage(session))).await.map(Into::into)
     }
 
     /// Returns no usage when connected to a server that does not expose the
@@ -1055,7 +952,7 @@ impl AppBackend {
     pub async fn account_storage_usage_if_supported(&self) -> Result<Option<AccountStorageUsage>, BackendError> {
         self.authenticated_request(|session| {
             Box::pin(async move {
-                match crate::auth::account_storage_usage(session).await {
+                match sync_client::account_storage_usage(session).await {
                     Ok(usage) => Ok(Some(usage.into())),
                     Err(error) if error.is_not_found() => Ok(None),
                     Err(error) => Err(error),
@@ -1071,7 +968,7 @@ impl AppBackend {
     pub async fn account_library_storage_usage_if_supported(&self) -> Result<Option<Vec<ServerLibraryStorageUsage>>, BackendError> {
         self.authenticated_request(|session| {
             Box::pin(async move {
-                match crate::auth::account_library_storage_usage(session).await {
+                match sync_client::account_library_storage_usage(session).await {
                     Ok(usage) => Ok(Some(usage.libraries.into_iter().filter_map(|entry| entry.library_id.parse().ok().map(|library_id| ServerLibraryStorageUsage { library_id, used_bytes: entry.used_bytes })).collect())),
                     Err(error) if error.is_not_found() => Ok(None),
                     Err(error) => Err(error),
@@ -1082,12 +979,12 @@ impl AppBackend {
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<AccountStatus, BackendError> {
-        let session = crate::auth::login(email, password).await.map_err(BackendError::operation)?;
+        let session = sync_client::login(&crate::api_server_url(), email, password).await.map_err(BackendError::operation)?;
         self.accept_authenticated_session(session).await
     }
 
-    async fn accept_authenticated_session(&self, session: crate::auth::Session) -> Result<AccountStatus, BackendError> {
-        crate::auth::save_session_to(&session, &self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
+    async fn accept_authenticated_session(&self, session: sync_client::Session) -> Result<AccountStatus, BackendError> {
+        self.state.backend.save_account_session(&session).map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = Some(session.clone());
         *self.lock(&self.state.active_library)? = None;
         if let Err(error) = self.enroll_default_libraries(&session) {
@@ -1098,47 +995,41 @@ impl AppBackend {
     }
 
     pub async fn request_public_registration(&self, email: &str, password: &str) -> Result<(), BackendError> {
-        crate::auth::request_public_registration(email, password).await.map_err(BackendError::operation)
+        sync_client::request_public_registration(&crate::api_server_url(), email, password).await.map_err(BackendError::operation)
     }
 
     pub async fn resend_verification(&self, email: &str) -> Result<(), BackendError> {
-        crate::auth::resend_verification(email).await.map_err(BackendError::operation)
+        sync_client::resend_verification(&crate::api_server_url(), email).await.map_err(BackendError::operation)
     }
 
     pub async fn verify_email(&self, email: &str, pin: &str) -> Result<AccountStatus, BackendError> {
-        let session = crate::auth::verify_email(email, pin).await.map_err(BackendError::operation)?;
+        let session = sync_client::verify_email(&crate::api_server_url(), email, pin).await.map_err(BackendError::operation)?;
         self.accept_authenticated_session(session).await
     }
 
     pub async fn request_password_reset(&self, email: &str) -> Result<(), BackendError> {
-        crate::auth::request_password_reset(email).await.map_err(BackendError::operation)
+        sync_client::request_password_reset(&crate::api_server_url(), email).await.map_err(BackendError::operation)
     }
 
     pub async fn reset_password(&self, token: &str, new_password: &str) -> Result<(), BackendError> {
-        crate::auth::reset_password(token, new_password).await.map_err(BackendError::operation)
+        sync_client::reset_password(&crate::api_server_url(), token, new_password).await.map_err(BackendError::operation)
     }
 
     pub async fn logout(&self) -> Result<AccountStatus, BackendError> {
         let session = self.lock(&self.state.account)?.clone();
         if let Some(session) = session.as_ref() {
-            if let Err(error) = crate::auth::logout(session).await {
+            if let Err(error) = sync_client::logout(session).await {
                 log::warn!("Failed to notify server about logout: {error}");
             }
-            let cache = self.state.backend.app_data_dir().join("remote-book-cache").join(session.user_id());
-            if let Err(error) = std::fs::remove_dir_all(&cache) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!("Failed to clear remote book cache on logout: {error}");
-                }
-            }
         }
-        crate::auth::clear_session_from(&self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
+        self.state.backend.clear_account_session().map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = None;
         *self.lock(&self.state.active_library)? = None;
         Ok(account_status_from_session(None))
     }
 
     pub async fn account_sessions(&self) -> Result<Vec<AccountSessionSummary>, BackendError> {
-        let sessions = self.authenticated_request(|session| Box::pin(crate::auth::list_account_sessions(session))).await?;
+        let sessions = self.authenticated_request(|session| Box::pin(sync_client::list_account_sessions(session))).await?;
         Ok(sessions.into_iter().map(|session| AccountSessionSummary { session_id: session.session_id, created_at: session.created_at as f64, expires_at: session.expires_at as f64, current: session.current }).collect())
     }
 
@@ -1147,7 +1038,7 @@ impl AppBackend {
         let revocation = self
             .authenticated_request(|session| {
                 let session_id = session_id.clone();
-                Box::pin(async move { crate::auth::revoke_account_session(session, &session_id).await })
+                Box::pin(async move { sync_client::revoke_account_session(session, &session_id).await })
             })
             .await?;
         if revocation.signed_out {
@@ -1158,7 +1049,7 @@ impl AppBackend {
     }
 
     pub async fn revoke_other_account_sessions(&self) -> Result<u32, BackendError> {
-        u32::try_from(self.authenticated_request(|session| Box::pin(crate::auth::revoke_other_account_sessions(session))).await?.revoked).map_err(BackendError::operation)
+        u32::try_from(self.authenticated_request(|session| Box::pin(sync_client::revoke_other_account_sessions(session))).await?.revoked).map_err(BackendError::operation)
     }
 
     pub async fn bootstrap_remote_libraries(&self) -> Result<Vec<LibraryEntry>, BackendError> {
@@ -1167,7 +1058,7 @@ impl AppBackend {
         self.enroll_default_libraries(&session)?;
         let mut attached = Vec::new();
         for entry in self.libraries()? {
-            let library = self.library_handle(entry.library_id(), true)?;
+            let library = self.library_handle(entry.library_id())?;
             self.publish_library(&library).await?;
             self.synchronize_library_with_retry(&library, AssetSync::Transfer(crate::TransferOrigin::UserInitiated)).await?;
             attached.push(entry);
@@ -1180,9 +1071,9 @@ impl AppBackend {
             return self.library_list_state(None, None);
         };
         self.flush_pending_library_deletions().await?;
-        let deleted = self.authenticated_request(|session| Box::pin(crate::auth::list_deleted_libraries(session))).await?;
+        let deleted = self.authenticated_request(|session| Box::pin(sync_client::list_deleted_libraries(session))).await?;
         self.apply_remote_library_deletions(&deleted.library_ids)?;
-        let remote = self.authenticated_request(|session| Box::pin(crate::auth::list_libraries(session))).await?;
+        let remote = self.authenticated_request(|session| Box::pin(sync_client::list_libraries(session))).await?;
         let session = self.require_account()?;
         let remote_ids = self.attach_remote_libraries(&remote)?;
         self.library_list_state(Some(&session), Some(&remote_ids))
@@ -1190,7 +1081,7 @@ impl AppBackend {
 
     async fn flush_pending_library_deletions(&self) -> Result<(), BackendError> {
         for library_id in self.state.backend.pending_library_deletions().map_err(BackendError::operation)? {
-            self.authenticated_request(|session| Box::pin(crate::auth::delete_library(session, library_id))).await?;
+            self.authenticated_request(|session| Box::pin(async move { sync_client::delete_library(session, &library_id).await })).await?;
             self.state.backend.complete_library_deletion(&library_id).map_err(BackendError::operation)?;
         }
         Ok(())
@@ -1230,19 +1121,15 @@ impl AppBackend {
         Ok(remote_ids)
     }
 
-    fn library_list_state(&self, session: Option<&crate::auth::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
+    fn library_list_state(&self, session: Option<&sync_client::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
         let libraries = self.libraries()?;
         let sync_statuses = libraries
             .iter()
             .map(|library| {
-                let bound_user_id = self.library_bound_user_id(library)?;
-                let database_path = library.library_path().join(crate::APP_HIDDEN_LIBRARY_DB_PATH);
-                let sync_details = if database_path.exists() {
-                    let connection = rusqlite::Connection::open(database_path).map_err(BackendError::operation)?;
-                    db::get_library_sync_details(&connection).map_err(BackendError::operation)?
-                } else {
-                    db::LibrarySyncDetails::default()
-                };
+                let backend = self.library_handle(library.library_id())?;
+                let bound_user_id = backend.account_state().map_err(BackendError::message)?.bound_user_id;
+                let connection = backend.db.get().map_err(BackendError::operation)?;
+                let sync_details = db::get_library_sync_details(&connection).map_err(BackendError::operation)?;
                 let (state, server_url, account_id) = match session {
                     None if bound_user_id.is_none() => (LibrarySyncState::LocalOnly, None, None),
                     None => (LibrarySyncState::SignInRequired, Some(crate::API_SERVER_ORIGIN.to_owned()), bound_user_id),
@@ -1270,15 +1157,15 @@ impl AppBackend {
         let session = self.require_account()?;
         self.enroll_default_libraries(&session)?;
         for entry in self.libraries()? {
-            let library = self.library_handle(entry.library_id(), true)?;
+            let library = self.library_handle(entry.library_id())?;
             self.publish_library(&library).await?;
             self.synchronize_library_with_retry(&library, AssetSync::Transfer(crate::TransferOrigin::UserInitiated)).await?;
         }
         Ok(())
     }
 
-    fn prepare_library_sync(&self, library_id: &LibraryId, session: &crate::auth::Session) -> Result<LibraryBackend, BackendError> {
-        let library = self.library_handle(library_id, true)?;
+    fn prepare_library_sync(&self, library_id: &LibraryId, session: &sync_client::Session) -> Result<LibraryBackend, BackendError> {
+        let library = self.library_handle(library_id)?;
         let account = library.account_state().map_err(BackendError::message)?;
         if account.user_id.as_deref() != Some(session.user_id()) {
             library.adopt_session(session.clone()).map_err(BackendError::message)?;
@@ -1287,28 +1174,16 @@ impl AppBackend {
     }
 
     /// Binds every local library to the account being adopted.
-    fn enroll_default_libraries(&self, session: &crate::auth::Session) -> Result<(), BackendError> {
+    fn enroll_default_libraries(&self, session: &sync_client::Session) -> Result<(), BackendError> {
         for entry in self.libraries()? {
             self.prepare_library_sync(entry.library_id(), session)?;
         }
         Ok(())
     }
 
-    fn library_bound_user_id(&self, entry: &LibraryEntry) -> Result<Option<String>, BackendError> {
-        if let Some(library) = self.lock(&self.state.open_libraries)?.get(entry.library_id()).cloned() {
-            return Ok(library.account_state().map_err(BackendError::message)?.bound_user_id);
-        }
-        let path = entry.library_path().join(crate::APP_HIDDEN_LIBRARY_DB_PATH);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let connection = rusqlite::Connection::open(path).map_err(BackendError::operation)?;
-        db::get_sync_metadata(&connection, "bound_user_id").map_err(BackendError::operation)
-    }
-
     pub async fn library_sync_statuses(&self) -> Result<Vec<LibrarySyncStatus>, BackendError> {
         let remote = if self.current_account()?.is_some() {
-            Some(self.authenticated_request(|session| Box::pin(crate::auth::list_libraries(session))).await?.into_iter().map(|library| library.library_id).collect::<std::collections::HashSet<_>>())
+            Some(self.authenticated_request(|session| Box::pin(sync_client::list_libraries(session))).await?.into_iter().map(|library| library.library_id).collect::<std::collections::HashSet<_>>())
         } else {
             None
         };
@@ -1334,14 +1209,14 @@ impl AppBackend {
             .libraries()?
             .into_iter()
             .map(|entry| {
-                let database_path = entry.library_path().join(crate::APP_HIDDEN_LIBRARY_DB_PATH);
-                let used_bytes = if database_path.exists() {
-                    let connection = rusqlite::Connection::open(database_path).map_err(BackendError::operation)?;
+                let backend = self.library_handle(entry.library_id())?;
+                let connection = backend.db.get().map_err(BackendError::operation)?;
+                let used_bytes = db::local_blob_total_bytes(&connection, crate::BlobKind::Book).map_err(BackendError::operation)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                let used_bytes = {
                     let downloaded_paths =
                         db::get_book_assets(&connection).map_err(BackendError::operation)?.into_iter().filter(|asset| asset.downloaded).map(|asset| asset.rel_path.resolve_under(entry.library_path())).collect::<HashSet<_>>();
-                    regular_files_apparent_size(downloaded_paths)?
-                } else {
-                    0
+                    used_bytes.saturating_add(regular_files_apparent_size(downloaded_paths)?)
                 };
                 Ok(LocalLibraryStorageUsage { library_id: *entry.library_id(), library_name: entry.library_name().to_owned(), used_bytes })
             })
@@ -1352,7 +1227,7 @@ impl AppBackend {
 
     pub async fn scan_local_library_storage_usage(&self) -> Result<Vec<LocalLibraryStorageUsage>, BackendError> {
         let core = self.clone();
-        tokio::task::spawn_blocking(move || core.local_library_storage_usage()).await.map_err(BackendError::operation)?
+        super::executor::run_blocking(move || core.local_library_storage_usage()).await.map_err(BackendError::operation)?
     }
 
     pub fn network_status(&self) -> NetworkStatus {
@@ -1362,8 +1237,11 @@ impl AppBackend {
     pub async fn update_network_status(&self, status: NetworkStatus) -> Result<NetworkStatus, BackendError> {
         let became_allowed = self.state.backend.transfer_runtime().set_network_status(status);
         if became_allowed {
-            self.resume_transfers().await?;
+            // Rebuild desired work from durable library facts even when an old
+            // in-memory queue cannot resume (for example because its access
+            // token has expired). The queue is only an execution cache.
             self.request_background_sync();
+            self.resume_transfers().await?;
         }
         Ok(self.network_status())
     }
@@ -1411,7 +1289,7 @@ impl AppBackend {
             // asset transfers, so another device never waits behind uploads to
             // discover libraries added later.
             for entry in &entries {
-                let library = self.library_handle(entry.library_id(), true)?;
+                let library = self.library_handle(entry.library_id())?;
                 if let Err(error) = self.publish_library(&library).await {
                     log::warn!("failed to publish {} during background synchronization: {error}", entry.library_name());
                     publish_failed.insert(*entry.library_id());
@@ -1426,7 +1304,7 @@ impl AppBackend {
             if publish_failed.contains(entry.library_id()) {
                 continue;
             }
-            let library = self.library_handle(entry.library_id(), true)?;
+            let library = self.library_handle(entry.library_id())?;
             let assets = if scope.assets { AssetSync::Transfer(crate::TransferOrigin::Background) } else { AssetSync::Skip };
             let result = self.synchronize_library_with_retry(&library, assets).await;
             if let Err(error) = result {
@@ -1449,15 +1327,15 @@ impl AppBackend {
         }
         let library_id = library.id().clone();
         let library_name = entry.library_name().to_owned();
-        self.authenticated_request(|session| Box::pin(crate::auth::upsert_library(session, library_id.clone(), library_name.clone()))).await?;
+        self.authenticated_request(|session| Box::pin(sync_client::upsert_library(session, library_id.clone(), library_name.clone()))).await?;
         Ok(())
     }
 
-    fn require_account(&self) -> Result<crate::auth::Session, BackendError> {
+    fn require_account(&self) -> Result<sync_client::Session, BackendError> {
         self.current_account()?.ok_or_else(|| BackendError::message("not signed in"))
     }
 
-    fn current_account(&self) -> Result<Option<crate::auth::Session>, BackendError> {
+    fn current_account(&self) -> Result<Option<sync_client::Session>, BackendError> {
         let account = self.lock(&self.state.account)?.clone();
         let expired = account.as_ref().is_some_and(|session| if session.refresh_token().is_some() { session.refresh_expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) } else { session.expires_within(AUTH_EXPIRY_SAFETY_WINDOW_SECONDS) });
         if expired {
@@ -1467,15 +1345,15 @@ impl AppBackend {
         Ok(account)
     }
 
-    async fn refresh_account_if_needed(&self) -> Result<Option<crate::auth::Session>, BackendError> {
+    async fn refresh_account_if_needed(&self) -> Result<Option<sync_client::Session>, BackendError> {
         self.refresh_account(false, None).await
     }
 
-    async fn refresh_account_after_unauthorized(&self, rejected_token: &str) -> Result<Option<crate::auth::Session>, BackendError> {
+    async fn refresh_account_after_unauthorized(&self, rejected_token: &str) -> Result<Option<sync_client::Session>, BackendError> {
         self.refresh_account(true, Some(rejected_token)).await
     }
 
-    async fn refresh_account(&self, force: bool, rejected_token: Option<&str>) -> Result<Option<crate::auth::Session>, BackendError> {
+    async fn refresh_account(&self, force: bool, rejected_token: Option<&str>) -> Result<Option<sync_client::Session>, BackendError> {
         let _refresh_guard = self.state.account_refresh.lock().await;
         let Some(session) = self.current_account()? else { return Ok(None) };
         if rejected_token.is_some_and(|token| token != session.token()) {
@@ -1497,22 +1375,25 @@ impl AppBackend {
         }
         let refreshed = match sync_client::refresh_session(&session).await {
             Ok(refreshed) => refreshed,
-            Err(error) if error.is_unauthorized() || matches!(error, crate::auth::AuthError::InvalidData(_)) => {
+            Err(error) if error.is_unauthorized() || matches!(error, sync_client::AuthError::InvalidData(_)) => {
                 self.clear_account_locally()?;
                 return Err(BackendError::operation(error));
             }
             Err(error) => return Err(BackendError::operation(error)),
         };
-        crate::auth::save_session_to(&refreshed, &self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
+        self.state.backend.save_account_session(&refreshed).map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = Some(refreshed.clone());
         let libraries = self.lock(&self.state.open_libraries)?.values().cloned().collect::<Vec<_>>();
         for library in libraries {
             library.adopt_session(refreshed.clone()).map_err(BackendError::message)?;
         }
+        // A refreshed credential is a recovery boundary: derive work again
+        // instead of depending on authentication-paused queue entries.
+        self.request_background_sync();
         Ok(Some(refreshed))
     }
 
-    async fn authenticated_request<T>(&self, mut request: impl for<'a> FnMut(&'a crate::auth::Session) -> Pin<Box<dyn Future<Output = Result<T, crate::auth::AuthError>> + Send + 'a>>) -> Result<T, BackendError> {
+    async fn authenticated_request<T>(&self, mut request: impl for<'a> FnMut(&'a sync_client::Session) -> AuthFuture<'a, T>) -> Result<T, BackendError> {
         let session = self.refresh_account_if_needed().await?.ok_or_else(|| BackendError::message("not signed in"))?;
         match request(&session).await {
             Ok(value) => Ok(value),
@@ -1535,11 +1416,11 @@ impl AppBackend {
             Ok(Err(error)) => log::warn!("Open Library edition matching unavailable before synchronizing library {}: {error}", library.id()),
             Err(_) => log::warn!("Open Library edition matching timed out before synchronizing library {}; continuing with local metadata", library.id()),
         }
-        match tokio::time::timeout(Duration::from_secs(30), library.enrich_open_library_rich(usize::MAX, true)).await {
-            Ok(Ok(updated)) if updated > 0 => log::info!("Open Library rich enrichment updated {updated} books before synchronizing library {}", library.id()),
+        match tokio::time::timeout(Duration::from_secs(30), library.enrich_rich_metadata(usize::MAX, true)).await {
+            Ok(Ok(updated)) if updated > 0 => log::info!("metadata enrichment updated {updated} books before synchronizing library {}", library.id()),
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::warn!("Open Library rich enrichment unavailable before synchronizing library {}: {error}", library.id()),
-            Err(_) => log::warn!("Open Library rich enrichment timed out before synchronizing library {}; continuing with local metadata", library.id()),
+            Ok(Err(error)) => log::warn!("metadata enrichment unavailable before synchronizing library {}: {error}", library.id()),
+            Err(_) => log::warn!("metadata enrichment timed out before synchronizing library {}; continuing with local metadata", library.id()),
         }
         // Resolve stable author identities through the same non-blocking gate.
         match tokio::time::timeout(Duration::from_secs(20), library.enrich_open_library_authors(usize::MAX, true)).await {
@@ -1586,17 +1467,12 @@ impl AppBackend {
     }
 
     fn clear_account_locally(&self) -> Result<(), BackendError> {
-        crate::auth::clear_session_from(&self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
+        self.state.backend.clear_account_session().map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = None;
         let mut clear_error = None;
         for library in self.lock(&self.state.open_libraries)?.values() {
             if let Err(error) = library.clear_session() {
                 clear_error.get_or_insert_with(|| BackendError::message(error));
-            }
-        }
-        for entry in self.libraries()? {
-            if let Err(error) = crate::auth::clear_session_from(&entry.library_path().join(crate::APP_HIDDEN_SESSION_PATH)) {
-                clear_error.get_or_insert_with(|| BackendError::operation(error));
             }
         }
         *self.lock(&self.state.active_library)? = None;
@@ -1624,11 +1500,11 @@ impl AppBackend {
         self.update_browser_session(|session| session.active_library_id = library_id)
     }
 
-    pub fn save_library_folder_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<crate::DirId>>) -> Result<(), BackendError> {
+    pub fn save_library_folder_path(&self, library_id: crate::LibraryId, path: Vec<crate::NavigationCrumb<crate::DirId>>) -> Result<(), BackendError> {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().folder_path = path)
     }
 
-    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<app_contract::NavigationCrumb<app_contract::library::SubjectPath>>) -> Result<(), BackendError> {
+    pub fn save_library_subject_path(&self, library_id: crate::LibraryId, path: Vec<crate::NavigationCrumb<library_model::SubjectPath>>) -> Result<(), BackendError> {
         self.update_browser_session(|session| session.places.entry(library_id).or_default().subject_path = path)
     }
 
@@ -1653,7 +1529,7 @@ impl AppBackend {
         self.state.backend.apply_reader_preference_patch(patch).map_err(BackendError::operation)
     }
 
-    pub fn adopt_session(&self, session: crate::auth::Session) -> Result<(), BackendError> {
+    pub fn adopt_session(&self, session: sync_client::Session) -> Result<(), BackendError> {
         if session.server_url() != &crate::api_server_url() {
             return Err(BackendError::message(format!("application sessions must belong to {}", crate::API_SERVER_ORIGIN)));
         }
@@ -1661,7 +1537,7 @@ impl AppBackend {
         if credentials_expired {
             return Err(BackendError::message("cannot adopt an expired session"));
         }
-        crate::auth::save_session_to(&session, &self.state.backend.app_data_dir().join("session.json")).map_err(BackendError::operation)?;
+        self.state.backend.save_account_session(&session).map_err(BackendError::operation)?;
         *self.lock(&self.state.account)? = Some(session.clone());
         *self.lock(&self.state.active_library)? = None;
         if let Err(error) = self.enroll_default_libraries(&session) {
@@ -1675,27 +1551,23 @@ impl AppBackend {
         self.libraries()?.into_iter().find(|entry| entry.library_id() == library_id).ok_or_else(|| BackendError::message(format!("library not found: {library_id}")))
     }
 
-    fn forward_library_events(&self, library: LibraryBackend, events: Receiver<LibraryEvent>) {
-        // The work batch is sized for network pacing: each book is a provider
-        // lookup, so a small batch keeps failures cheap and progress steady.
-        const SUBJECT_ENRICHMENT_BATCH_SIZE: usize = 25;
+    fn forward_library_events(&self, library: LibraryBackend, events: LibraryEventReceiver) {
         let library_id = *library.id();
         let event_tx = self.state.events.clone();
         let sync_wake_tx = self.state.sync_wake_tx.clone();
         let pending_sync = self.state.pending_sync.clone();
         let executor = self.state.executor.clone();
         let enrichment_running = Arc::new(AtomicBool::new(false));
-        std::thread::spawn(move || {
-            while let Ok(event) = events.recv() {
+        self.state.executor.spawn_detached(async move {
+            while let Ok(event) = events.recv().await {
                 if matches!(&event, LibraryEvent::ScanComplete) && enrichment_running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    eprintln!("SUBJECT_ENRICHMENT scheduled provider=library_of_congress library={library_id}");
+                    eprintln!("METADATA_ENRICHMENT scheduled library={library_id}");
                     let library = library.clone();
-                    let executor = executor.clone();
                     let enrichment_running = enrichment_running.clone();
                     let enrichment_pending_sync = pending_sync.clone();
                     let enrichment_sync_wake_tx = sync_wake_tx.clone();
-                    std::thread::spawn(move || {
-                        let result = executor.block_on(async {
+                    executor.spawn_detached(async move {
+                        let result = async {
                             let mut updated = match library.infer_open_library_isbns(usize::MAX, false).await {
                                 Ok(updated) => updated,
                                 Err(error) => {
@@ -1703,58 +1575,29 @@ impl AppBackend {
                                     0
                                 }
                             };
-                            updated += match library.enrich_open_library_rich(usize::MAX, true).await {
+                            updated += match library.enrich_rich_metadata(usize::MAX, true).await {
                                 Ok(updated) => updated,
                                 Err(error) => {
-                                    log::warn!("Open Library rich enrichment unavailable after scan: {error}");
+                                    log::warn!("metadata enrichment unavailable after scan: {error}");
                                     0
                                 }
                             };
-                            let provider = book_metadata::library_of_congress::LibraryOfCongressProvider::new().map_err(BackendError::operation)?;
-                            let providers = book_metadata::external::ExternalMetadataProviders::new().with(provider);
-                            loop {
-                                let outcomes = library.enrich_missing_subjects(&providers, SUBJECT_ENRICHMENT_BATCH_SIZE, false).await?;
-                                if outcomes.is_empty() {
-                                    break;
-                                }
-                                let batch_updated = outcomes.iter().filter(|outcome| outcome.status == crate::library::SubjectEnrichmentStatus::Updated).count();
-                                updated += batch_updated;
-                                if batch_updated > 0 {
-                                    enrichment_pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id, false);
-                                    let _ = enrichment_sync_wake_tx.try_send(());
-                                }
-                                if outcomes.iter().any(|outcome| outcome.status == crate::library::SubjectEnrichmentStatus::Failed) {
-                                    return Err(BackendError::operation("Library of Congress subject enrichment stopped after a provider failure"));
-                                }
+                            if updated > 0 {
+                                enrichment_pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id, false);
+                                let _ = enrichment_sync_wake_tx.try_send(());
                             }
                             Ok::<_, BackendError>(updated)
-                        });
+                        }
+                        .await;
                         match result {
-                            Ok(updated) if updated > 0 => log::info!("Library of Congress subject enrichment updated {updated} books"),
+                            Ok(updated) if updated > 0 => log::info!("metadata enrichment updated {updated} books"),
                             Ok(_) => {}
-                            Err(error) => log::warn!("Library of Congress subject enrichment paused: {error}"),
+                            Err(error) => log::warn!("metadata enrichment paused: {error}"),
                         }
                         enrichment_running.store(false, Ordering::Release);
                     });
                 }
-                let sync_assets = match &event {
-                    LibraryEvent::BookAdded { .. } | LibraryEvent::BookRemoved { .. } | LibraryEvent::ThumbnailBatchProcessed { finished: true, .. } => Some(true),
-                    LibraryEvent::DirectoryAdded { .. } | LibraryEvent::DirectoryRemoved { .. } | LibraryEvent::ScanComplete => Some(false),
-                    LibraryEvent::ThumbnailGenerated { .. }
-                    | LibraryEvent::ThumbnailBatchProcessed { .. }
-                    | LibraryEvent::DownloadStatusChanged { .. }
-                    | LibraryEvent::FolderDownloadStatusChanged { .. }
-                    | LibraryEvent::SubjectEnrichmentBatchProcessed { .. }
-                    | LibraryEvent::TransferStatusChanged
-                    | LibraryEvent::LibraryListChanged
-                    | LibraryEvent::LibraryChanged
-                    | LibraryEvent::ScanStarted => None,
-                };
-                if let Some(assets) = sync_assets {
-                    pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id.clone(), assets);
-                    let _ = sync_wake_tx.try_send(());
-                }
-                event_tx.send(AppEvent { library_id: library_id.clone(), event });
+                forward_library_event(&pending_sync, &sync_wake_tx, &event_tx, library_id, event);
             }
         });
     }
@@ -1762,6 +1605,27 @@ impl AppBackend {
     fn lock<'a, T>(&self, mutex: &'a Mutex<T>) -> Result<MutexGuard<'a, T>, BackendError> {
         mutex.lock().map_err(|_| BackendError::message("application state lock is poisoned"))
     }
+}
+
+fn forward_library_event(pending_sync: &Mutex<PendingSyncWork>, sync_wake_tx: &async_channel::Sender<()>, event_tx: &AppEventBus, library_id: LibraryId, event: LibraryEvent) {
+    let sync_assets = match &event {
+        LibraryEvent::BookAdded { .. } | LibraryEvent::BookRemoved { .. } | LibraryEvent::ThumbnailBatchProcessed { finished: true, .. } | LibraryEvent::DownloadStatusChanged { state: crate::DownloadState::Queued, .. } => Some(true),
+        LibraryEvent::DirectoryAdded { .. } | LibraryEvent::DirectoryRemoved { .. } | LibraryEvent::ScanComplete => Some(false),
+        LibraryEvent::ThumbnailGenerated { .. }
+        | LibraryEvent::ThumbnailBatchProcessed { .. }
+        | LibraryEvent::DownloadStatusChanged { .. }
+        | LibraryEvent::FolderDownloadStatusChanged { .. }
+        | LibraryEvent::SubjectEnrichmentBatchProcessed { .. }
+        | LibraryEvent::TransferStatusChanged
+        | LibraryEvent::LibraryListChanged
+        | LibraryEvent::LibraryChanged
+        | LibraryEvent::ScanStarted => None,
+    };
+    if let Some(assets) = sync_assets {
+        pending_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).library(library_id, assets);
+        let _ = sync_wake_tx.try_send(());
+    }
+    event_tx.send(AppEvent { library_id, event });
 }
 
 fn library_name_for_folder(path: &Path) -> String {
@@ -1776,7 +1640,7 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Barrier;
-    use test_support::fixture_library_id;
+    use test_support::{fixture_content_hash, fixture_library_id};
 
     fn write_test_pdf(path: &Path) {
         let mut document = Document::with_version("1.7");
@@ -1819,25 +1683,26 @@ mod tests {
         assert!(receiver.try_recv().is_ok());
     }
 
-    #[test]
-    fn background_sync_schedule_debounces_wake_bursts() {
-        let (wake_tx, wake_rx) = bounded(1);
+    #[tokio::test]
+    async fn background_sync_schedule_debounces_wake_bursts() {
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
         let stop = Arc::new(AtomicBool::new(false));
         let cycles = Arc::new(AtomicUsize::new(0));
         let worker_stop = stop.clone();
         let worker_cycles = cycles.clone();
-        let worker = std::thread::spawn(move || {
+        let worker = tokio::spawn(async move {
             run_sync_schedule(
-                |_periodic| {
+                |_periodic| async {
                     worker_cycles.fetch_add(1, Ordering::AcqRel);
                 },
                 || None,
                 wake_rx,
-                &worker_stop,
+                worker_stop,
                 Duration::from_secs(60),
                 Duration::from_secs(60),
                 Duration::from_millis(20),
-            );
+            )
+            .await;
         });
         wake_tx.try_send(()).unwrap();
         let _ = wake_tx.try_send(());
@@ -1845,26 +1710,27 @@ mod tests {
             if cycles.load(Ordering::Acquire) == 1 {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(cycles.load(Ordering::Acquire), 1);
         stop.store(true, Ordering::Release);
         let _ = wake_tx.try_send(());
-        worker.join().unwrap();
+        worker.await.unwrap();
     }
 
-    #[test]
-    fn background_sync_schedule_wakes_at_a_reading_deadline_not_the_retry_interval() {
-        let (_wake_tx, wake_rx) = bounded(1);
+    #[tokio::test]
+    async fn background_sync_schedule_wakes_at_a_reading_deadline_not_the_retry_interval() {
+        let (_wake_tx, wake_rx) = async_channel::bounded(1);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let cycle_stop = worker_stop.clone();
         let deadline = Instant::now() + Duration::from_millis(20);
         let started = Instant::now();
-        let worker = std::thread::spawn(move || {
-            run_sync_schedule(|_periodic| worker_stop.store(true, Ordering::Release), || Some(deadline), wake_rx, &worker_stop, Duration::from_secs(60), Duration::from_secs(60), Duration::from_millis(5));
+        let worker = tokio::spawn(async move {
+            run_sync_schedule(|_periodic| async { cycle_stop.store(true, Ordering::Release) }, || Some(deadline), wake_rx, worker_stop, Duration::from_secs(60), Duration::from_secs(60), Duration::from_millis(5)).await;
         });
 
-        worker.join().unwrap();
+        worker.await.unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -1883,6 +1749,17 @@ mod tests {
         assert!(!pending.full_reconcile);
         assert!(!pending.library_list);
         assert!(pending.reading_positions.is_empty());
+    }
+
+    #[test]
+    fn queued_download_event_schedules_asset_reconciliation() {
+        let library_id = fixture_library_id("library-download");
+        let pending = Mutex::new(PendingSyncWork::default());
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        forward_library_event(&pending, &wake_tx, &AppEventBus::default(), library_id, LibraryEvent::DownloadStatusChanged { content_hash: fixture_content_hash(17), state: crate::DownloadState::Queued });
+
+        assert!(pending.lock().unwrap().libraries[&library_id].assets);
+        assert!(wake_rx.try_recv().is_ok());
     }
 
     #[test]
@@ -1905,7 +1782,6 @@ mod tests {
     fn app_backend_opens_library_scoped_feature_handles() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        assert!(core.state.executor.owns_runtime());
         let entry = core.create_library("Test".to_string(), Some(root.path().join("library"))).unwrap();
         let library = core.library(entry.library_id()).unwrap();
         assert_eq!(library.id(), entry.library_id());
@@ -1970,14 +1846,6 @@ mod tests {
     }
 
     #[test]
-    fn tokio_host_constructor_borrows_the_host_runtime() {
-        let root = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-        let explicit = AppBackend::initialize_on_tokio_runtime(AppDataLocation::PlatformLocal(root.path().join("explicit")), runtime.handle().clone()).unwrap();
-        assert!(!explicit.state.executor.owns_runtime());
-    }
-
-    #[test]
     fn library_handle_keeps_imports_scoped_to_its_library() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
@@ -2035,7 +1903,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let entry = core.create_library("Local".to_owned(), Some(root.path().join("library"))).unwrap();
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
         core.adopt_session(session).unwrap();
 
         let library = core.library(entry.library_id()).unwrap();
@@ -2048,7 +1916,7 @@ mod tests {
     fn libraries_created_while_signed_in_are_synchronized_by_default() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
         core.adopt_session(session).unwrap();
 
         let entry = core.create_library("Default sync".to_owned(), Some(root.path().join("library"))).unwrap();
@@ -2063,8 +1931,8 @@ mod tests {
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data.clone())).unwrap();
         let entry = core.create_library("Restored".to_owned(), Some(library_path)).unwrap();
         let library_id = entry.library_id().clone();
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
-        crate::auth::save_session_to(&session, &app_data.join("session.json")).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        core.state.backend.save_account_session(&session).unwrap();
         drop(core);
 
         let restored = AppBackend::initialize(AppDataLocation::PlatformLocal(app_data)).unwrap();
@@ -2075,7 +1943,7 @@ mod tests {
     fn account_status_rehydrates_a_persisted_session_when_memory_is_empty() {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader@example.com".to_owned(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader@example.com".to_owned(), "a".repeat(43)).unwrap();
         core.adopt_session(session).unwrap();
         *core.lock(&core.state.account).unwrap() = None;
 
@@ -2090,15 +1958,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let entry = core.create_library("Linked".to_owned(), Some(root.path().join("library"))).unwrap();
-        let live = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        let live = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
         core.adopt_session(live).unwrap();
-        let expired = crate::auth::Session::try_new_with_expiry(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43), Some(1)).unwrap();
-        crate::auth::save_session_to(&expired, &core.state.backend.app_data_dir().join("session.json")).unwrap();
+        let expired = sync_client::Session::try_new_with_expiry(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43), Some(1)).unwrap();
+        core.state.backend.save_account_session(&expired).unwrap();
         *core.lock(&core.state.account).unwrap() = Some(expired);
 
         assert!(!core.account_status().unwrap().signed_in());
         assert_eq!(core.library(entry.library_id()).unwrap().account_state().unwrap().bound_user_id.as_deref(), Some("user-1"));
-        assert!(!core.state.backend.app_data_dir().join("session.json").exists());
+        assert!(core.state.backend.load_account_session().unwrap().is_none());
     }
 
     #[test]
@@ -2106,7 +1974,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        let session = crate::auth::Session::try_new_with_tokens(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43), Some(1), Some("b".repeat(43)), Some(now + 60 * 60)).unwrap();
+        let session = sync_client::Session::try_new_with_tokens(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43), Some(1), Some("b".repeat(43)), Some(now + 60 * 60)).unwrap();
 
         core.adopt_session(session).unwrap();
 
@@ -2121,7 +1989,7 @@ mod tests {
         let local = core.create_library("Local name".to_owned(), Some(root.path().join("library"))).unwrap();
         let open_library = core.library(local.library_id()).unwrap();
         let remote_only_id = fixture_library_id("remote-only");
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
         let remote = vec![
             sync_common::api::libraries::LibrarySummary { library_id: local.library_id().clone(), library_name: "Server name".to_owned() },
             sync_common::api::libraries::LibrarySummary { library_id: remote_only_id.clone(), library_name: "Remote only".to_owned() },
@@ -2168,7 +2036,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let entry = core.create_library("Local".to_owned(), Some(root.path().join("library"))).unwrap();
-        let session = crate::auth::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::api_server_url(), "user-1".to_owned(), "reader".to_owned(), "a".repeat(43)).unwrap();
 
         let library = core.prepare_library_sync(entry.library_id(), &session).unwrap();
         let account = library.account_state().unwrap();
@@ -2207,10 +2075,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         let library_id = core.create_library("Test".to_string(), None).unwrap().library_id().clone();
-        let first = crate::auth::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-a".to_string(), "reader-a".to_string(), "a".repeat(43)).unwrap();
+        let first = sync_client::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-a".to_string(), "reader-a".to_string(), "a".repeat(43)).unwrap();
         core.adopt_session(first).unwrap();
 
-        let second = crate::auth::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-b".to_string(), "reader-b".to_string(), "b".repeat(43)).unwrap();
+        let second = sync_client::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-b".to_string(), "reader-b".to_string(), "b".repeat(43)).unwrap();
         core.adopt_session(second).unwrap();
 
         let library = core.library(&library_id).unwrap();
@@ -2225,7 +2093,7 @@ mod tests {
         let core = AppBackend::initialize(AppDataLocation::PlatformLocal(root.path().join("app-data"))).unwrap();
         core.create_library("Biografi".to_string(), None).unwrap();
         core.create_library("Humaniora".to_string(), None).unwrap();
-        let session = crate::auth::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-a".to_string(), "reader-a".to_string(), "a".repeat(43)).unwrap();
+        let session = sync_client::Session::try_new(crate::ServerUrl::parse(crate::API_SERVER_ORIGIN).unwrap(), "user-a".to_string(), "reader-a".to_string(), "a".repeat(43)).unwrap();
 
         core.adopt_session(session).unwrap();
 

@@ -31,8 +31,8 @@ elif [[ $# -ne 0 ]]; then
     exit 2
 fi
 
-npm --prefix "${repository_root}/apps/mobile" run build
-tar -czf "${stage}/web-dist.tar.gz" -C "${repository_root}/apps/mobile/dist" .
+"${repository_root}/apps/web-gpui/scripts/build.sh"
+tar -czf "${stage}/web-dist.tar.gz" -C "${repository_root}/apps/web-gpui/dist" .
 tar -czf "${stage}/admin-dist.tar.gz" -C "${repository_root}/apps/admin-web" .
 install -m 0755 "${script_directory}/install-web-staged.sh" "${stage}/install-web-staged.sh"
 

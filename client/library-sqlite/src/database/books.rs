@@ -28,18 +28,18 @@ pub fn read_book_card_row(row: &rusqlite::Row<'_>) -> Result<BookCardRow, rusqli
     })
 }
 
-pub fn get_book_cards_in_dir_scoped(conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_type: app_contract::library::LibraryFileTypeFilter) -> Result<Vec<BookCardRow>, rusqlite::Error> {
-    get_book_cards_in_dir_sorted_scoped(conn, dir_id, downloaded_only, normalized_query, file_type, app_contract::library::BrowseBookSort::Alphabetical)
+pub fn get_book_cards_in_dir_scoped(conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_type: library_model::LibraryFileTypeFilter) -> Result<Vec<BookCardRow>, rusqlite::Error> {
+    get_book_cards_in_dir_sorted_scoped(conn, dir_id, downloaded_only, normalized_query, file_type, library_model::BrowseBookSort::Alphabetical)
 }
 
 pub fn get_book_cards_in_dir_sorted_scoped(
-    conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_type: app_contract::library::LibraryFileTypeFilter, book_sort: app_contract::library::BrowseBookSort,
+    conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_type: library_model::LibraryFileTypeFilter, book_sort: library_model::BrowseBookSort,
 ) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     get_book_cards_in_dir_filtered_sorted_scoped(conn, dir_id, downloaded_only, normalized_query, &[file_type], book_sort, &[])
 }
 
 pub fn get_book_cards_in_dir_filtered_sorted_scoped(
-    conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_types: &[app_contract::library::LibraryFileTypeFilter], book_sort: app_contract::library::BrowseBookSort, languages: &[&str],
+    conn: &Connection, dir_id: &str, downloaded_only: bool, normalized_query: &str, file_types: &[library_model::LibraryFileTypeFilter], book_sort: library_model::BrowseBookSort, languages: &[&str],
 ) -> Result<Vec<BookCardRow>, rusqlite::Error> {
     let mut cards = Vec::new();
     let languages = super::browse::languages_query_value(languages);

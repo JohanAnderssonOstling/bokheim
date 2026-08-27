@@ -1,7 +1,7 @@
 use super::books::{get_book_cards_by_author_scoped, get_book_cards_in_dir_scoped};
 use super::*;
-use app_contract::library::{AuthorSort, AuthorSummary, BookDetail, BookDetailAuthor, BrowseBookSort, BrowseChipSort, BrowseRow, FolderSort, LibraryFileTypeFilter, LibraryHomeView, LibrarySearchResult, SubjectPath};
 use library_model::ROOT_SUBJECT_PATH;
+use library_model::{AuthorSort, AuthorSummary, BookDetail, BookDetailAuthor, BrowseBookSort, BrowseChipSort, BrowseRow, FolderSort, LibraryFileTypeFilter, LibraryHomeView, LibrarySearchResult, SubjectPath};
 use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
@@ -9,6 +9,7 @@ pub const UNCATEGORIZED_SUBJECT_PATH: &str = "__uncategorized__";
 pub const OTHER_SUBJECT_SYSTEMS_PATH: &str = "__other_subject_systems__";
 pub const PLACES_SUBJECT_PATH: &str = "__places__";
 pub const PEOPLE_SUBJECT_PATH: &str = "__people__";
+const AUTHOR_ROW_COVER_COUNT: i32 = 3;
 
 /// Subject labels that have not yet been projected into the unified taxonomy.
 ///
@@ -591,10 +592,9 @@ pub fn get_author_cover_hashes_scoped(conn: &Connection, downloaded_only: bool, 
 /// Shared application projection for a library home screen. Platform hosts
 /// supply only the user's local-download preference.
 pub fn library_home(conn: &Connection, limit: i32, downloaded_only: bool) -> Result<LibraryHomeView, rusqlite::Error> {
-    let finished_threshold = f64::from(app_contract::BrowsingContentContract::default().finished_progress_threshold);
     Ok(LibraryHomeView {
-        most_progress: get_most_progress_cards(conn, limit, downloaded_only, finished_threshold)?,
-        recently_read: get_recently_read_cards(conn, limit, downloaded_only, finished_threshold)?,
+        most_progress: get_most_progress_cards(conn, limit, downloaded_only, f64::from(library_model::FINISHED_PROGRESS_THRESHOLD))?,
+        recently_read: get_recently_read_cards(conn, limit, downloaded_only, f64::from(library_model::FINISHED_PROGRESS_THRESHOLD))?,
         recently_added: get_recently_added_cards(conn, limit, downloaded_only)?,
     })
 }
@@ -617,7 +617,7 @@ pub fn library_folder(conn: &Connection, directory_id: &DirId, downloaded_only: 
 }
 
 pub fn library_authors(conn: &Connection, selected: Option<AuthorId>, sort: AuthorSort, downloaded_only: bool) -> Result<LibraryAuthorsView, rusqlite::Error> {
-    let mut covers = get_author_cover_hashes_scoped(conn, downloaded_only, i32::from(app_contract::frontend::AUTHOR_ROW_COVER_COUNT))?;
+    let mut covers = get_author_cover_hashes_scoped(conn, downloaded_only, AUTHOR_ROW_COVER_COUNT)?;
     let mut authors = get_authors_scoped(conn, downloaded_only)?
         .into_iter()
         .map(|(id, name, sort_name, book_count)| {

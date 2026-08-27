@@ -300,7 +300,7 @@ jobs:
         run: |
           $installer = "Bokheim-Windows-x86_64-Setup.exe"
           $sourceExe = (Resolve-Path "target/release/desktop-gpui.exe").Path
-          $iconFile = (Resolve-Path "apps/mobile/src-tauri/icons/icon.ico").Path
+          $iconFile = (Resolve-Path "apps/ui/design-tokens/assets/icon/favicon.ico").Path
           $outputDir = Join-Path $PWD "release"
           New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
           $isccCommand = Get-Command iscc.exe -ErrorAction SilentlyContinue

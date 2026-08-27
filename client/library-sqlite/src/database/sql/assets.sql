@@ -65,15 +65,22 @@ WHERE kind = :kind;
 SELECT DISTINCT hash
 FROM blob_local_ref
 WHERE kind = :kind
-  AND exists_flag = 1;
+  AND exists_flag = 1
+UNION
+SELECT hash
+FROM local_blob
+WHERE kind = :kind;
 
 -- name: get_blob_local_presence?
 -- param: kind: &str
 -- param: hash: &str
-SELECT COALESCE(MAX(exists_flag), 0)
-FROM blob_local_ref
-WHERE kind = :kind
-  AND hash = :hash;
+SELECT EXISTS(
+    SELECT 1 FROM blob_local_ref
+    WHERE kind = :kind AND hash = :hash AND exists_flag = 1
+    UNION ALL
+    SELECT 1 FROM local_blob
+    WHERE kind = :kind AND hash = :hash
+);
 
 -- name: get_blob_local_path?
 -- param: kind: &str

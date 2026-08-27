@@ -14,19 +14,18 @@ Public unauthenticated endpoints:
 - `POST /api/opds/sources/{source-id}/page`
 - `POST /api/opds/sources/{source-id}/search`
 - `POST /api/opds/subjects`
-- `POST /api/opds/subject-collection/manifest`
+- `POST /api/opds/subject-publications`
 - `POST /api/opds/sources/{source-id}/acquire`
 - `GET /api/opds/sources/{source-id}/cover?image_url={url}`
 - `GET /api/web/catalogs`
 - `GET /api/web/stats`
 - `POST /api/web/sources/{source-id}/page`
 - `POST /api/web/sources/{source-id}/search`
-- `POST /api/web/subject-collection`
-- `POST /api/web/subject-collection/manifest`
+- `POST /api/web/subjects`
 - `POST /api/web/sources/{source-id}/acquire`
 
 Structured requests and responses use
-`application/vnd.bokheim+protobuf; version=16` with identity encoding. OPDS
+`application/vnd.bokheim+protobuf; version=17` with identity encoding. OPDS
 upstreams remain XML or JSON, and covers are canonical JPEG thumbnails. The
 `/api/web` façade uses the provider-neutral contract's JSON representation so
 ordinary browsers do not need a second implementation of the protobuf codec.
@@ -50,10 +49,10 @@ links. Paginated logical pages are fully re-fetched on replacement crawls
 because an HTTP validator for the first provider page cannot validate the
 whole compacted collection.
 
-The cache database keeps queryable format, importability, upstream-cover,
-crawl-status, timestamp, and active inventory fields alongside the
-provider-neutral binary payloads. It supports only the current disposable cache
-schema; an older cache is replaced and repopulated by the crawler at startup.
+The cache database combines `catalog-core`'s provider-neutral base schema with
+a separately versioned server schema for crawl state, queues, operational
+inventory, and serving indexes. An incompatible base cache is replaced and
+repopulated by the crawler at startup.
 `GET /api/web/stats` reports process uptime, registry revision, metadata-service
 configuration, active page/publication/importable EPUB counts, crawl state,
 extraction queues, normalized failure categories, retry state, and at most
@@ -62,18 +61,22 @@ is available to the operations collector from the separate loopback-only
 listener on `127.0.0.1:8092` at `GET /internal/operations`. Raw errors and
 acquisition URLs never leave the protected catalogue cache.
 
-Search matches normalized contiguous substrings in title and author, returning
-title matches first and distinct author matches second. Requests include the
+Search matches normalized contiguous substrings in title, author, and table of
+contents, returning each as a distinct ordered section. Requests include the
 client's supported languages. The response protocol identifies publications by
 sequence so it sends payloads only for publications the client does not already
-have at the current epoch.
+have at the current epoch. The authoritative page/search queries and native
+delta assembly live in this server's `store` module; client-side materialization
+and offline querying are not part of the shared storage crate.
 
 Subject browsing treats every crawled provider page as part of one logical
-collection. The server transfers the complete descendant collection for an
-opaque subject locator in bounded chunks. It does not accept client query,
-filter, sort, or display-range state. Provider pagination links are crawler
-state and are never exposed as subject locators. The response epoch and revision
-prevent clients from reusing entries across catalogue changes.
+collection. The server is authoritative for subject search, source/language/
+format filters, sorting, facets, totals, and result ranges. Native clients first
+request the ordered IDs for the selected range, reuse immutable publication
+cards already cached for the returned epoch, and fetch only missing cards.
+The browser JSON endpoint receives full cards directly; neither transport sends
+a browse-mode flag. Provider pagination links remain crawler state and are never
+exposed as subject locators.
 
 The crawler also reads descriptions, covers, subjects, and ISBNs from bounded
 temporary EPUB, MOBI, and PDF files where each format supports them. EPUB
@@ -83,7 +86,7 @@ a sparse temporary file. Non-range origins, ZIP64 archives, and unusual cover
 layouts automatically fall back to the bounded full-file path. Range capability
 is remembered per origin so an incompatible host is not probed for every book. Raw
 subject evidence is stored separately from deterministic
-canonical assignments, using the same `library-model` projection as local
+canonical assignments, using the shared `subject-projection` rules as local
 libraries. When a supported publication has an ISBN but no embedded subjects,
 `BOKHEIM_METADATA_URL` enables batched LCC/DDC enrichment from the standalone
 Open Library snapshot service. Subject browsing reads that canonical projection
@@ -153,7 +156,7 @@ service.
 
 ```sh
 cargo run -p catalog-server
-curl --header 'Accept: application/vnd.bokheim+protobuf; version=16' \
+curl --header 'Accept: application/vnd.bokheim+protobuf; version=17' \
   --output /dev/null http://127.0.0.1:8090/api/opds/catalogs
 ```
 

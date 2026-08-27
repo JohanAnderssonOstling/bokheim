@@ -1,4 +1,4 @@
-pub use protocol_test_support::fixture_content_hash;
+pub use sync_common::fixture_content_hash;
 use sync_common::{DirId, LibraryId, ReplicaId, ROOT_DIR_ID};
 
 pub fn fixture_uuid(value: &str) -> uuid::Uuid {

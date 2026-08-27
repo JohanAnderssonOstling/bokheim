@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::UpsertLibraryRequest;
+use sync_common::fixture_content_hash;
 use sync_common::{ContentHash, DeclaredBlobReference, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
-use test_support::fixture_content_hash;
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -213,7 +213,8 @@ async fn verify_email(client: &Client, base: &Url) -> Result<Identity, AnyError>
     let email = std::env::var("BOKHEIM_STRESS_EMAIL").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_EMAIL is required"))?;
     let pin = std::env::var("BOKHEIM_STRESS_VERIFICATION_PIN").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_VERIFICATION_PIN is required"))?;
     let encoded = sync_common::transport::encode(&EmailVerificationRequest { email, pin })?;
-    let response = client.post(endpoint(base, "api/auth/verify-email")?).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).body(encoded).send().await?;
+    let response =
+        client.post(endpoint(base, "api/auth/verify-email")?).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE).body(encoded).send().await?;
     let (auth, _): (AuthResponse, _) = decode_api_response(response).await?;
     Ok(Identity { token: auth.token.into() })
 }

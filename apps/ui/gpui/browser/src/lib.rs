@@ -13,13 +13,15 @@ mod services;
 mod stores;
 mod universal;
 
+pub(crate) const BOOK_IMPORT_EXTENSIONS: [&str; 6] = ["epub", "pdf", "mobi", "azw", "azw3", "m4b"];
+
 use gpui::{App, KeyBinding, actions};
 
-fn directory_import(selected: gpui::SelectedDirectory) -> app_contract::library::DirectoryImport {
-    app_contract::library::DirectoryImport {
+fn directory_import(selected: gpui::SelectedDirectory) -> bokheim_backend::DirectoryImport {
+    bokheim_backend::DirectoryImport {
         name: selected.name,
         directories: selected.directories,
-        files: selected.files.into_iter().map(|file| app_contract::library::DirectoryImportFile { path: file.path.clone(), open: Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) })) }).collect(),
+        files: selected.files.into_iter().map(|file| bokheim_backend::DirectoryImportFile { path: file.path.clone(), open: Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) })) }).collect(),
     }
 }
 

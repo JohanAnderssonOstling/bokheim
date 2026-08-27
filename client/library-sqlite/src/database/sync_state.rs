@@ -60,8 +60,6 @@ fn canonical_outbox_key(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
-        MutationBody::Bookmark { bookmark_id, .. } => ("bookmark", bookmark_id.clone(), String::new()),
-        MutationBody::BookLink { link_id, .. } => ("book_link", link_id.clone(), String::new()),
         MutationBody::CatalogPublication { source_id, publication, .. } => ("catalog_publication", source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref())),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
     }
@@ -161,7 +159,7 @@ pub fn complete_cursor_recovery(conn: &mut Connection) -> Result<usize, rusqlite
     Ok(inserted)
 }
 
-pub fn load_transfer_history(conn: &Connection) -> Result<Vec<app_contract::transfer::TransferStatus>, rusqlite::Error> {
+pub fn load_transfer_history(conn: &Connection) -> Result<Vec<library_replica::TransferStatus>, rusqlite::Error> {
     let mut statement = conn.prepare("SELECT payload FROM transfer_history ORDER BY updated_at DESC, rowid DESC LIMIT ?1")?;
     let rows = statement.query_map([i64::try_from(TRANSFER_HISTORY_LIMIT).expect("transfer history limit fits SQLite integer")], |row| row.get::<_, String>(0))?;
     let mut history = Vec::new();
@@ -174,7 +172,7 @@ pub fn load_transfer_history(conn: &Connection) -> Result<Vec<app_contract::tran
     Ok(history)
 }
 
-pub fn store_transfer_history(conn: &Connection, status: &app_contract::transfer::TransferStatus) -> Result<(), rusqlite::Error> {
+pub fn store_transfer_history(conn: &Connection, status: &library_replica::TransferStatus) -> Result<(), rusqlite::Error> {
     let payload = serde_json::to_string(status).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let updated_at = status.updated_at.parse::<i64>().map_err(|error| invalid_text_column(2, format!("invalid transfer update timestamp: {error}")))?;
     let transaction = conn.unchecked_transaction()?;
@@ -249,20 +247,6 @@ fn current_state_body(transaction: &Transaction<'_>, cell: &StateCell) -> Result
             .query_row(
                 "SELECT bokheim_mutation('annotation',annotation.id,book.content_hash,annotation.anchor_kind,annotation.anchor_cfi,annotation.anchor_page,annotation.anchor_rects,annotation.anchor_fallback_cfi,annotation.exact_text,annotation.style,annotation.color,annotation.note,annotation.created_at,annotation.modified_at,annotation.deleted_at IS NOT NULL),annotation.deleted_at IS NOT NULL
                  FROM annotation JOIN book ON book.row_id=annotation.book_row_id WHERE annotation.id=?1",
-                [key], pair,
-            )
-            .optional()?,
-        "bookmark" => transaction
-            .query_row(
-                "SELECT bokheim_mutation('bookmark',bookmark.id,book.content_hash,bookmark.cfi,bookmark.label,bookmark.created_at,bookmark.modified_at,bookmark.deleted_at IS NOT NULL),bookmark.deleted_at IS NOT NULL
-                 FROM bookmark JOIN book ON book.row_id=bookmark.book_row_id WHERE bookmark.id=?1",
-                [key], pair,
-            )
-            .optional()?,
-        "book_link" => transaction
-            .query_row(
-                "SELECT bokheim_mutation('book_link',book_link.id,source.content_hash,target.content_hash,book_link.relation,book_link.note,book_link.created_at,book_link.modified_at,book_link.deleted_at IS NOT NULL),book_link.deleted_at IS NOT NULL
-                 FROM book_link JOIN book source ON source.row_id=book_link.source_book_row_id JOIN book target ON target.row_id=book_link.target_book_row_id WHERE book_link.id=?1",
                 [key], pair,
             )
             .optional()?,

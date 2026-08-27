@@ -2,7 +2,6 @@
 
 use std::rc::Rc;
 
-use app_contract::library::LibrarySummary;
 use gpui::prelude::*;
 use gpui::{Context, Edges, Entity, EventEmitter, FileDialogFilter, IntoElement, MouseButton, PathPromptOptions, Pixels, PromptLevel, Render, SharedString, Subscription, Window};
 use gpui_component::notification::Notification;
@@ -11,10 +10,31 @@ use sync_common::LibraryId;
 use ui_components as components;
 
 use crate::{FocusNextListItem, FocusPreviousListItem};
-use app_contract::backend::AppBackend;
+use bokheim_backend::AppBackend;
 
 const PRIMARY_ROUTES: [Route; 3] = [Route::Home, Route::Folders, Route::Subjects];
 const SECONDARY_ROUTES: [Route; 4] = [Route::Authors, Route::Trash, Route::Store, Route::Settings];
+
+/// The path-free library identity displayed by GPUI navigation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LibrarySummary {
+    library_id: LibraryId,
+    library_name: String,
+}
+
+impl LibrarySummary {
+    pub(crate) fn new(library_id: LibraryId, library_name: impl Into<String>) -> Self {
+        Self { library_id, library_name: library_name.into() }
+    }
+
+    pub(crate) fn library_id(&self) -> &LibraryId {
+        &self.library_id
+    }
+
+    pub(crate) fn library_name(&self) -> &str {
+        &self.library_name
+    }
+}
 
 /// The currently displayed browser page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -87,7 +107,7 @@ pub(crate) enum NavigationRequest {
 }
 
 pub(crate) struct NavigationView {
-    backend: Rc<dyn AppBackend>,
+    backend: Rc<AppBackend>,
     import_extensions: Vec<String>,
     state: Entity<NavigationState>,
     switcher_open: bool,
@@ -102,7 +122,7 @@ struct LibraryChoice {
 }
 
 fn route_definition(route: Route) -> (&'static str, Icon) {
-    use app_contract::NavigationIcon;
+    use components::NavigationIcon;
     let (label, icon) = match route {
         Route::Home => ("Home", NavigationIcon::House),
         Route::Authors => ("Authors", NavigationIcon::User),
@@ -118,7 +138,7 @@ fn route_definition(route: Route) -> (&'static str, Icon) {
 impl EventEmitter<NavigationRequest> for NavigationView {}
 
 impl NavigationView {
-    pub(crate) fn new(backend: Rc<dyn AppBackend>, import_extensions: Vec<String>, state: Entity<NavigationState>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(backend: Rc<AppBackend>, import_extensions: Vec<String>, state: Entity<NavigationState>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&state, |_: &mut Self, _, cx| cx.notify());
         Self { backend, import_extensions, state, switcher_open: false, more_open: false, _state_subscription: subscription }
     }
@@ -167,7 +187,7 @@ impl NavigationView {
             if paths.is_empty() {
                 return;
             }
-            let result = backend.create_libraries_from_paths(paths).await;
+            let result = crate::services::backend::app_async(&backend, move |backend| async move { backend.create_libraries_from_paths(paths) }).await;
             let _ = navigation.update_in(cx, |_, window, cx| match result {
                 Ok((created, errors)) => {
                     if !errors.is_empty() {
@@ -201,7 +221,12 @@ impl NavigationView {
             let mut errors = Vec::new();
             for directory in directories.into_iter().map(crate::directory_import) {
                 let name = directory.name.clone();
-                match backend.create_library(name.clone()).await {
+                match crate::services::backend::app_async(&backend, {
+                    let name = name.clone();
+                    move |backend| async move { backend.create_library(name, None).map(|entry| *entry.library_id()) }
+                })
+                .await
+                {
                     Ok(library_id) => created.push((library_id, name, directory)),
                     Err(error) => errors.push(format!("{name}: {error}")),
                 }
@@ -220,7 +245,10 @@ impl NavigationView {
             }
             let imports = created.into_iter().map(|(library_id, name, directory)| {
                 let backend = backend.clone();
-                async move { (name, backend.import_library_directory(library_id, directory).await) }
+                async move {
+                    let result = crate::services::backend::app_blocking(&backend, move |backend| backend.import_library_directory(&library_id, directory)).await;
+                    (name, result)
+                }
             });
             let mut import_errors = Vec::new();
             for (name, result) in futures_util::future::join_all(imports).await {
@@ -297,7 +325,7 @@ impl NavigationView {
                             if answer.await.ok() != Some(0) {
                                 return;
                             }
-                            if let Err(error) = backend.delete_library(remove_id).await {
+                            if let Err(error) = crate::services::backend::app_async(&backend, move |backend| async move { backend.delete_library(&remove_id).await }).await {
                                 let _ = navigation.update_in(cx, |_, window, cx| {
                                     window.push_notification(Notification::error(error).id1::<NavigationView>("library-removal-error"), cx);
                                 });
@@ -311,12 +339,22 @@ impl NavigationView {
 
         let dismiss = emitter;
         gpui::deferred(
-            components::library_switcher_overlay()
-                .child(components::library_switcher_scrim(theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
+            components::modal_overlay()
+                .occlude()
+                .child(components::modal_scrim("library-switcher-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     dismiss.update(cx, |navigation, cx| navigation.close_library_switcher(cx));
                 }))
-                .child(components::library_switcher_dialog(library_count, theme).child(panel)),
+                .child(
+                    components::navigation_modal_list(library_count, 512.0, theme)
+                        .w(gpui::px(328.0))
+                        .max_w_full()
+                        .pt(gpui::px(components::SPACE_MD))
+                        .pr(gpui::px(components::SPACE_MD))
+                        .pb(gpui::px(components::SPACE_MD))
+                        .pl(gpui::px(components::SPACE_MD - components::SPACE_SM))
+                        .child(panel),
+                ),
         )
         .with_priority(1)
         .into_any_element()
@@ -340,7 +378,7 @@ impl NavigationView {
         let item_count = SECONDARY_ROUTES.len() + 1 + usize::from(cfg!(feature = "kobo"));
         let open_libraries = emitter.clone();
         let mut items = gpui::div().w_full().flex().flex_col().gap(gpui::px(components::SPACE_XS)).child(components::more_navigation_header(theme)).child(
-            components::more_navigation_item("more-libraries", components::navigation_icon(app_contract::NavigationIcon::BookOpen), self.active_library_name(cx), false, theme).on_click(move |_, _, cx| {
+            components::more_navigation_item("more-libraries", components::navigation_icon(components::NavigationIcon::BookOpen), self.active_library_name(cx), false, theme).on_click(move |_, _, cx| {
                 open_libraries.update(cx, |navigation, cx| {
                     navigation.more_open = false;
                     navigation.switcher_open = true;
@@ -370,11 +408,11 @@ impl NavigationView {
                 .pr(safe_area.right)
                 .pb(safe_area.bottom)
                 .pl(safe_area.left)
-                .child(components::more_navigation_scrim(theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
+                .child(components::modal_scrim("more-navigation-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     dismiss.update(cx, |navigation, cx| navigation.close_more(cx));
                 }))
-                .child(components::more_navigation_sheet(item_count, theme).child(items)),
+                .child(components::navigation_modal_list(item_count, 480.0, theme).w_full().max_w(gpui::px(420.0)).p(gpui::px(components::SPACE_MD)).child(items)),
         )
         .with_priority(1)
         .into_any_element()

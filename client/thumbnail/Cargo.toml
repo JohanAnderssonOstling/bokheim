@@ -11,7 +11,7 @@ publication-memory = ["dep:epub_provider", "dep:mobi", "dep:resvg"]
 publication-extractors = ["publication-memory", "dep:mp4ameta"]
 
 [dependencies]
-epub_provider = { path = "../../apps/renderers/html/epub_provider", optional = true }
+epub_provider = { path = "../../shared/epub", optional = true }
 fast_image_resize = { version = "5.2.0", features = ["image"] }
 image = { version = "0.24.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 mobi = { workspace = true, optional = true }

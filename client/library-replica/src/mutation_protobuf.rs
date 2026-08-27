@@ -5,11 +5,10 @@
 //! Rust/Serde representation used for local persistence.
 
 use super::{catalog_publication_state_subkey, MutationBody};
-use catalog_contract::{CatalogPublicationIdentity, CatalogSourceId};
+use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 use library_model::{
-    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, Collection, CollectionKind, Contributor, DirectoryLifecycleState, Identifier, LanguageTag,
-    LocalizedText, MarcRelatorCode, PdfAnnotationAnchor, PdfAnnotationRect, PublicationDate, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit, ReadingPosition, ReadingPositionState, Scheme,
-    Scope,
+    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookMetadataState, Collection, CollectionKind, Contributor, DirectoryLifecycleState, Identifier, LanguageTag, LocalizedText, MarcRelatorCode,
+    PdfAnnotationAnchor, PdfAnnotationRect, PublicationDate, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit, ReadingPosition, ReadingPositionState, Scheme, Scope,
 };
 use sync_common::transport::{self, protobuf as pb};
 use sync_common::{ContentHash, WireMutation};
@@ -32,18 +31,6 @@ pub(super) fn encode(body: &MutationBody) -> Result<Vec<u8>, transport::WireErro
         MutationBody::Placement { present, origin_folder_id, .. } => Kind::Placement(pb::Placement { present: *present, origin_folder_id: origin_folder_id.clone() }),
         MutationBody::ReadingPosition { value, .. } => Kind::ReadingPosition(encode_reading_position(value)),
         MutationBody::Annotation { value, .. } => Kind::Annotation(encode_annotation(value)),
-        MutationBody::Bookmark { value, .. } => {
-            Kind::Bookmark(pb::Bookmark { content_hash: value.content_hash.to_string(), cfi: value.cfi.clone(), label: value.label.clone(), created_at: value.created_at, modified_at: value.modified_at, deleted: value.deleted })
-        }
-        MutationBody::BookLink { value, .. } => Kind::BookLink(pb::BookLink {
-            source_content_hash: value.source_content_hash.to_string(),
-            target_content_hash: value.target_content_hash.to_string(),
-            relation: value.relation.clone(),
-            note: value.note.clone(),
-            created_at: value.created_at,
-            modified_at: value.modified_at,
-            deleted: value.deleted,
-        }),
         MutationBody::CatalogPublication { publication, content_hash, .. } => {
             Kind::CatalogPublication(pb::CatalogPublication { edition_id: publication.edition_id.clone(), work_id: publication.work_id.clone(), content_hash: content_hash.to_string() })
         }
@@ -67,22 +54,6 @@ pub(super) fn decode(wire: &WireMutation) -> Result<MutationBody, transport::Wir
         }
         (sync_common::mutation_kind::READING_POSITION, Kind::ReadingPosition(value)) => Ok(MutationBody::ReadingPosition { content_hash: ContentHash::new(key), value: decode_reading_position(value)? }),
         (sync_common::mutation_kind::ANNOTATION, Kind::Annotation(value)) => Ok(MutationBody::Annotation { annotation_id: key.to_owned(), value: decode_annotation(value)? }),
-        (sync_common::mutation_kind::BOOKMARK, Kind::Bookmark(value)) => Ok(MutationBody::Bookmark {
-            bookmark_id: key.to_owned(),
-            value: BookmarkState { content_hash: ContentHash::new(&value.content_hash), cfi: value.cfi, label: value.label, created_at: value.created_at, modified_at: value.modified_at, deleted: value.deleted },
-        }),
-        (sync_common::mutation_kind::BOOK_LINK, Kind::BookLink(value)) => Ok(MutationBody::BookLink {
-            link_id: key.to_owned(),
-            value: BookLinkState {
-                source_content_hash: ContentHash::new(&value.source_content_hash),
-                target_content_hash: ContentHash::new(&value.target_content_hash),
-                relation: value.relation,
-                note: value.note,
-                created_at: value.created_at,
-                modified_at: value.modified_at,
-                deleted: value.deleted,
-            },
-        }),
         (sync_common::mutation_kind::CATALOG_PUBLICATION, Kind::CatalogPublication(value)) => {
             let source_id = CatalogSourceId::parse(key).map_err(decode_error)?;
             let publication = CatalogPublicationIdentity { edition_id: value.edition_id, work_id: value.work_id };

@@ -206,7 +206,7 @@
           <tr><td>Section titles are hard-coded English <code>SharedString</code>s, while the empty, loading and retry copy on the same page comes from <code>browsing_states</code>.</td><td class="where">home.rs:37</td></tr>
           <tr><td>No timestamps reach the page. <code>reading_position.changed_at</code> and <code>book.added_at</code> both order the queries but neither is carried in <code>BookCardRow</code>, so Home cannot say "yesterday" or group by day.</td><td class="where">library.rs:59–73<br>book_access.sql:14,26</td></tr>
           <tr><td><code>audiobook_duration_ms</code> and <code>audiobook_chapter_count</code> are selected, carried through the contract, and rendered by nothing anywhere in <code>apps/</code>. An audiobook on Home is a cover with a pill on it.</td><td class="where">library.rs:70–72</td></tr>
-          <tr><td>Vertical cost: 25&nbsp;px title + 18 + 430&nbsp;px row = 473&nbsp;px per section. A 700&nbsp;px window shows one section and a third of the next, whatever it holds.</td><td class="where">frontend.rs:23–25</td></tr>
+          <tr><td>Vertical cost: 25&nbsp;px title + 18 + 430&nbsp;px row = 473&nbsp;px per section. A 700&nbsp;px window shows one section and a third of the next, whatever it holds.</td><td class="where">historical layout constants</td></tr>
         </tbody>
       </table>
     </div>

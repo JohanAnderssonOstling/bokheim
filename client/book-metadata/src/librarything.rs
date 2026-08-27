@@ -26,11 +26,7 @@ impl LibraryThingClient {
         if token.is_empty() {
             return Err(ExternalMetadataError::new("LibraryThing token must not be empty"));
         }
-        let http = Client::builder()
-            .user_agent("Bokheim/1.0 (LibraryThing thingISBN classification fallback)")
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|error| ExternalMetadataError::new(format!("could not create LibraryThing client: {error}")))?;
+        let http = Client::new();
         Ok(Self { http, token: Arc::from(token), next_request: Arc::new(Mutex::new(Instant::now())) })
     }
 
@@ -40,7 +36,7 @@ impl LibraryThingClient {
 
         let mut url = Url::parse(LIBRARYTHING_ORIGIN).expect("LibraryThing origin is a valid URL");
         url.path_segments_mut().expect("LibraryThing origin can accept path segments").extend(["api", self.token.as_ref(), "thingISBN", canonical.as_str()]);
-        let response = self.http.get(url).send().await.map_err(safe_request_error)?;
+        let response = tokio::time::timeout(Duration::from_secs(20), self.http.get(url).send()).await.map_err(|_| ExternalMetadataError::new("LibraryThing request timed out"))?.map_err(safe_request_error)?;
         let status = response.status();
         if status != StatusCode::OK {
             return Err(ExternalMetadataError::new(format!("LibraryThing returned HTTP {status}")));
@@ -70,13 +66,7 @@ impl LibraryThingClient {
 }
 
 fn safe_request_error(error: reqwest::Error) -> ExternalMetadataError {
-    let message = if error.is_timeout() {
-        "LibraryThing request timed out"
-    } else if error.is_connect() {
-        "could not connect to LibraryThing"
-    } else {
-        "LibraryThing request failed"
-    };
+    let message = if error.is_timeout() { "LibraryThing request timed out" } else { "LibraryThing request failed" };
     ExternalMetadataError::new(message)
 }
 

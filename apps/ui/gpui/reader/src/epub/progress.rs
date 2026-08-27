@@ -4,19 +4,7 @@
 //! numbers. Folding that here keeps repaints and database writes tied to real
 //! movement rather than to layout churn.
 
-#[derive(Debug, PartialEq)]
-pub(crate) struct ProgressState {
-    /// Fraction of the whole book read, in `0.0..=1.0`.
-    pub(crate) fraction: f32,
-    /// Fraction of the current section read, in `0.0..=1.0`.
-    pub(crate) doc_fraction: f32,
-    /// One-based position within the book's synthetic locations.
-    pub(crate) location: u64,
-    pub(crate) total_locations: u64,
-    /// One-based index of the current document.
-    pub(crate) section: usize,
-    pub(crate) section_count: usize,
-}
+use crate::epub::{ProgressState, ProgressSummary};
 
 impl Default for ProgressState {
     fn default() -> Self {
@@ -24,20 +12,6 @@ impl Default for ProgressState {
         // positions are one-based, so zero is never a valid starting value.
         Self { fraction: 0.0, doc_fraction: 0.0, location: 1, total_locations: 1, section: 1, section_count: 1 }
     }
-}
-
-/// The progress numbers in the form the toolbar draws them.
-///
-/// A `Copy` summary rather than a borrow of [`ProgressState`] because the
-/// toolbar model is compared wholesale to decide whether to repaint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ProgressSummary {
-    /// Whole percent through the book, `0..=100`.
-    pub(crate) percent: u8,
-    pub(crate) location: u64,
-    pub(crate) total_locations: u64,
-    pub(crate) section: usize,
-    pub(crate) section_count: usize,
 }
 
 impl Default for ProgressSummary {
@@ -59,7 +33,7 @@ impl ProgressSummary {
 }
 
 impl ProgressState {
-    pub(crate) fn summary(&self) -> ProgressSummary {
+    pub(in crate::epub) fn summary(&self) -> ProgressSummary {
         // Clamped rather than trusted: the renderer reports a fraction derived
         // from layout, and a rounding overshoot must not print "101%".
         let percent = (self.fraction.clamp(0.0, 1.0) * 100.0).round() as u8;
@@ -70,7 +44,7 @@ impl ProgressState {
     ///
     /// `doc` is the renderer's zero-based document index; sections are shown
     /// one-based.
-    pub(crate) fn update(&mut self, fraction: f32, doc_fraction: f32, location: u64, total_locations: u64, doc: usize, doc_count: usize) -> bool {
+    pub(in crate::epub) fn update(&mut self, fraction: f32, doc_fraction: f32, location: u64, total_locations: u64, doc: usize, doc_count: usize) -> bool {
         let next = Self { fraction, doc_fraction, location, total_locations, section: doc + 1, section_count: doc_count };
         if *self == next {
             return false;

@@ -1,4 +1,3 @@
-#[derive(bincode::Encode)]
 struct UnifiedConceptSnapshotRow {
     concept_id: String,
     preferred_label: String,
@@ -42,12 +41,6 @@ fn main() {
     let release_id = release_id(&concepts);
     let release_path = output_dir.join("unified-taxonomy-release-id.txt");
     std::fs::write(&release_path, release_id).unwrap_or_else(|error| panic!("failed to write {}: {error}", release_path.display()));
-
-    if env::var("TARGET").expect("Cargo sets TARGET").starts_with("wasm32") {
-        let snapshot = bincode::encode_to_vec(concepts, bincode::config::standard()).expect("encode taxonomy snapshot");
-        let output_path = output_dir.join("unified-taxonomy-v2.bin");
-        std::fs::write(&output_path, snapshot).unwrap_or_else(|error| panic!("failed to write {}: {error}", output_path.display()));
-    }
 }
 
 fn read_concepts(connection: &Connection) -> Vec<UnifiedConceptSnapshotRow> {

@@ -3,15 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 use subject_projection::{project_subject_codes, unified_has_exact_source_code, UnifiedConceptDefinition};
 use taxonomy_contract::{TaxonomyBatchRequest, TaxonomyBatchResponse, TaxonomyCode, TaxonomyConcept, TaxonomySystem, MAX_CODES_PER_REQUEST, MAX_CODE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES};
 use url::Url;
+use web_time::Instant;
 
-#[cfg(not(target_arch = "wasm32"))]
 mod cache;
-#[cfg(not(target_arch = "wasm32"))]
 pub use cache::TaxonomyCache;
 
 #[derive(Clone)]
@@ -28,33 +25,16 @@ struct CachedRelease {
     checked_at: ReleaseCheckedAt,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 type ReleaseCheckedAt = Instant;
-#[cfg(target_arch = "wasm32")]
-type ReleaseCheckedAt = f64;
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn release_checked_at() -> ReleaseCheckedAt {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Instant::now()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        js_sys::Date::now()
-    }
+    Instant::now()
 }
 
 fn release_is_fresh(checked_at: ReleaseCheckedAt) -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        checked_at.elapsed() < RELEASE_CHECK_INTERVAL
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        js_sys::Date::now() - checked_at < RELEASE_CHECK_INTERVAL.as_millis() as f64
-    }
+    checked_at.elapsed() < RELEASE_CHECK_INTERVAL
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,10 +60,7 @@ impl TaxonomyClient {
         if !matches!(base_url.scheme(), "http" | "https") || !base_url.username().is_empty() || base_url.password().is_some() || base_url.query().is_some() || base_url.fragment().is_some() {
             return Err(TaxonomyClientError::new("taxonomy server URL must be an HTTP origin or base path without credentials, query, or fragment"));
         }
-        let builder = reqwest::Client::builder();
-        #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(30));
-        let http = builder.user_agent(format!("Bokheim/{} taxonomy-client", env!("CARGO_PKG_VERSION"))).build().map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        let http = reqwest::Client::new();
         Ok(Self { http, base_url, release_cache: Arc::new(Mutex::new(None)) })
     }
 
@@ -99,7 +76,7 @@ impl TaxonomyClient {
         if let Some(cached) = &cached {
             request = request.header(reqwest::header::IF_NONE_MATCH, &cached.etag);
         }
-        let response = request.send().await.map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        let response = tokio::time::timeout(Duration::from_secs(30), request.send()).await.map_err(|_| TaxonomyClientError::new("taxonomy release request timed out"))?.map_err(|error| TaxonomyClientError::new(error.to_string()))?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             let Some(mut cached) = cached else {
                 return Err(TaxonomyClientError::new("taxonomy server returned 304 without a cached release"));
@@ -163,15 +140,11 @@ impl TaxonomyClient {
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(TaxonomyClientError::new("taxonomy batch request is too large"));
         }
-        let response = self
-            .http
-            .post(self.endpoint("v1/resolve")?)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(encoded)
-            .send()
-            .await
-            .map_err(|error| TaxonomyClientError::new(error.to_string()))?;
+        let response =
+            tokio::time::timeout(Duration::from_secs(30), self.http.post(self.endpoint("v1/resolve")?).header(reqwest::header::ACCEPT, "application/json").header(reqwest::header::CONTENT_TYPE, "application/json").body(encoded).send())
+                .await
+                .map_err(|_| TaxonomyClientError::new("taxonomy resolve request timed out"))?
+                .map_err(|error| TaxonomyClientError::new(error.to_string()))?;
         if !response.status().is_success() {
             let status = response.status();
             let detail = response.text().await.map_err(|error| TaxonomyClientError::new(error.to_string()))?;
@@ -280,7 +253,6 @@ pub fn concept_definitions(concepts: &[TaxonomyConcept]) -> Vec<UnifiedConceptDe
         .collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn code_resolutions(response: &TaxonomyBatchResponse) -> Vec<subject_projection::UnifiedCodeResolution> {
     response.results.iter().map(|result| subject_projection::UnifiedCodeResolution::new(result.system.as_str().to_owned(), result.code.clone(), result.matched_concept_ids.clone())).collect()
 }

@@ -99,6 +99,7 @@ pub(crate) fn attach_rich_fields(connection: &Connection, metadata: Vec<IsbnMeta
                         people: references(people),
                         popularity: work_id.and_then(|work_id| popularity.get(&work_id).cloned()),
                         description: work_id.and_then(|work_id| descriptions.get(&work_id).cloned()),
+                        subjects: Vec::new(),
                     }
                 })
                 .collect();

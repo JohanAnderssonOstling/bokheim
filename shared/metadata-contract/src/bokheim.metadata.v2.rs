@@ -117,6 +117,19 @@ pub struct WorkMatch {
     /// Plain-text Open Library work description, when the snapshot has one.
     #[prost(string, optional, tag = "8")]
     pub description: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "9")]
+    pub subjects: ::prost::alloc::vec::Vec<SubjectHeading>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubjectHeading {
+    #[prost(string, tag = "1")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub authority: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "3")]
+    pub components: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub authority_uri: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Aggregated public activity for a work. No patron-level rows leave the
 /// snapshot importer.

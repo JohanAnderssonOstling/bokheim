@@ -39,7 +39,6 @@ server-http = { path = "crates/server-http" }
 server-account = { path = "crates/server-account" }
 
 [dev-dependencies]
-test-support = { package = "protocol-test-support", path = "../../shared/protocol-test-support" }
 account-contract = { path = "../../shared/account-contract" }
 wire = { package = "protobuf-wire", path = "../../shared/protobuf-wire" }
 blake3 = "1"
@@ -50,5 +49,5 @@ serde_json = "1"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-sync-common = { path = "../../shared/sync-common" }
+sync-common = { path = "../../shared/sync-common", features = ["test-support"] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

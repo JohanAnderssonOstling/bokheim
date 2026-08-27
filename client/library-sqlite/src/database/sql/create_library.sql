@@ -497,7 +497,7 @@ create table if not exists sync_outbox(
     state_kind      TEXT not null check(state_kind in (
         'directory_name', 'directory_parent', 'directory_lifecycle',
         'book_lifecycle', 'placement', 'reading_position',
-        'annotation', 'bookmark', 'book_link', 'catalog_publication', 'metadata'
+        'annotation', 'catalog_publication', 'metadata'
     )),
     state_key       TEXT not null,
     state_subkey    TEXT not null default '',
@@ -563,41 +563,6 @@ create table if not exists annotation(
 -- name: create_annotation_book_index!
 create index if not exists idx_annotation_book on annotation(book_row_id, deleted_at, modified_at);
 
--- name: create_bookmark_table!
-create table if not exists bookmark(
-    id              TEXT primary key,
-    book_row_id         INTEGER not null references book(row_id) on delete cascade,
-    cfi             TEXT not null,
-    label           TEXT not null default '',
-    created_at      INTEGER not null,
-    modified_at     INTEGER not null,
-    deleted_at      INTEGER
-);
-
--- name: create_bookmark_book_index!
-create index if not exists idx_bookmark_book on bookmark(book_row_id, deleted_at, created_at);
-
--- User-authored semantic graph edges. Rows are retained after deletion so the
--- tombstone and its LWW version can synchronize to every replica.
--- name: create_book_link_table!
-create table if not exists book_link(
-    id              TEXT primary key,
-    source_book_row_id         INTEGER not null references book(row_id) on delete cascade,
-    target_book_row_id         INTEGER not null references book(row_id) on delete cascade,
-    relation        TEXT not null,
-    note            TEXT not null default '',
-    created_at      INTEGER not null,
-    modified_at     INTEGER not null,
-    deleted_at      INTEGER,
-    check(source_book_row_id != target_book_row_id)
-);
-
--- name: create_book_link_source_index!
-create index if not exists idx_book_link_source on book_link(source_book_row_id, deleted_at, modified_at);
-
--- name: create_book_link_target_index!
-create index if not exists idx_book_link_target on book_link(target_book_row_id, deleted_at, modified_at);
-
 -- name: create_sync_metadata_table!
 create table if not exists sync_metadata(
     key     TEXT primary key,
@@ -620,6 +585,17 @@ create table if not exists blob_local_ref(
     exists_flag     INTEGER not null default 0 check(exists_flag in (0, 1)),
     last_seen       INTEGER not null default 0,
     primary key (kind, hash, path)
+);
+
+-- Content bytes use the same SQLite store on native and browser targets.
+-- Native files remain a materialized projection for scanners and external
+-- tools; this table is the target-independent source used by readers/sync.
+-- name: create_local_blob_table!
+create table if not exists local_blob(
+    kind    TEXT not null check(kind in ('book', 'thumbnail')),
+    hash    TEXT not null,
+    bytes   BLOB not null,
+    primary key (kind, hash)
 );
 
 -- Durable download intent for content-addressed assets.

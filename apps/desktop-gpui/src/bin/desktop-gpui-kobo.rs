@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use epub_svelte_lib::app::{AppDataLocation, BackendContext, LIBRARY_MANIFEST_FILENAME};
+use bokheim_backend::app::{AppDataLocation, BackendContext, LIBRARY_MANIFEST_FILENAME};
 use gpui::Application;
 use gpui_kobo::{KoboExperienceMode, KoboPlatform, KoboPlatformOptions, PageButtonBehavior};
 
@@ -22,7 +22,7 @@ fn main() {
     backend_context.discover_libraries(&libraries_dir).expect("failed to discover Kobo libraries");
     ensure_default_library(&backend_context, &libraries_dir).expect("failed to initialize Kobo library");
     println!("KOBO_APP_STARTUP phase=libraries_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-    epub_svelte_lib::init_logging();
+    bokheim_backend::init_logging();
 
     let platform = KoboPlatform::new(KoboPlatformOptions {
         display: !no_display,

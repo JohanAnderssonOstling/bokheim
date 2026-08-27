@@ -6,18 +6,17 @@ publish = false
 
 [features]
 default = ["provider", "cover-cache"]
-provider = ["dep:futures-util", "dep:image", "dep:opds", "dep:reqwest", "dep:sys-locale", "dep:thumbnail", "dep:tokio"]
-cover-cache = ["provider", "tokio/fs"]
+provider = ["dep:futures-util", "dep:image", "dep:outbound", "dep:reqwest", "dep:sys-locale", "dep:thumbnail", "dep:tokio"]
+cover-cache = ["provider"]
+server-extension = []
 
 [lints]
 workspace = true
 
 [dependencies]
-catalog-contract = { path = "../catalog-contract" }
 catalog-model = { path = "../catalog-model" }
-library-model = { path = "../../client/library-model" }
 metadata-contract = { path = "../metadata-contract" }
-opds = { path = "../opds", optional = true }
+outbound = { package = "outbound-http", path = "../outbound-http", optional = true }
 publication-model = { path = "../publication-model" }
 subject-projection = { path = "../subject-projection" }
 thumbnail = { path = "../../client/thumbnail", default-features = false, optional = true }
@@ -36,17 +35,18 @@ sys-locale = { version = "0.3.2", optional = true }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"], optional = true }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.11", default-features = false, features = ["brotli", "gzip", "rustls-tls"] }
 rusqlite = { version = "0.40.0", features = ["bundled"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["fs", "net"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+uuid = { version = "1", features = ["js", "v4"] }
 
 [dev-dependencies]
 axum = "0.7"
-library-model = { path = "../../client/library-model", features = ["authoritative-taxonomy"] }
 subject-projection = { path = "../subject-projection", features = ["authoritative-taxonomy"] }
 tempfile = "3"

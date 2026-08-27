@@ -10,8 +10,8 @@ audiobook-metadata = ["dep:book-metadata", "book-metadata/native-formats"]
 scanner = []
 
 [dependencies]
-app-contract = { path = "../app-contract" }
 book-metadata = { path = "../book-metadata", default-features = false, optional = true }
+catalog-model = { path = "../../shared/catalog-model" }
 include-sqlite-sql = "0.2.1"
 library-model = { path = "../library-model", default-features = false }
 library-replica = { path = "../library-replica", default-features = false }
@@ -24,10 +24,8 @@ subject-projection = { path = "../../shared/subject-projection" }
 sync-common = { path = "../../shared/sync-common", default-features = false }
 taxonomy-contract = { path = "../../shared/taxonomy-contract" }
 uuid = { version = "1", default-features = false, features = ["serde", "v4", "js"] }
+web-time = "1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
 
 [dev-dependencies]
 test-support = { path = "../test-support" }

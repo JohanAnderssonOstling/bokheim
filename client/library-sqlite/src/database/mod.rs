@@ -3,9 +3,7 @@
 
 use crate::RelativeDirPath;
 use crate::{BookPlacement, RelativeBookPath};
-use app_contract::catalog::{CatalogPublicationIdentity, CatalogSourceId};
-use app_contract::library::{AuthorSummary, BookCardRow, Dir, LibraryFolderDestination, LibraryTrashView, SubjectPath, TrashedBook, TrashedFolder};
-use app_contract::transfer::{BlobKind, TransferOrigin};
+use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 use include_sqlite_sql::{impl_sql, include_sql};
 #[cfg(test)]
 use library_model::AuthorAuthority;
@@ -13,13 +11,14 @@ use library_model::AuthorName;
 #[cfg(test)]
 use library_model::MarcRelatorCode;
 use library_model::{AgentId, AuthorId, Contributor, ExternalAuthorId, PublicationMetadata, PublicationSubject, PublisherCredit, Scheme, Scope};
-use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookLifecycleState, BookLinkState, BookMetadataState, BookmarkState, DirectoryLifecycleState, PdfAnnotationAnchor, PdfAnnotationRect, ReadingPositionState};
+use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookLifecycleState, BookMetadataState, DirectoryLifecycleState, PdfAnnotationAnchor, PdfAnnotationRect, ReadingPositionState};
+use library_model::{AuthorSummary, BookCardRow, Dir, LibraryFolderDestination, LibraryTrashView, SubjectPath, TrashedBook, TrashedFolder};
 use library_model::{BookFormat, EpubCfi, ReadProgress};
-use library_replica::{MutationBody, StateMutation, VersionKey, catalog_publication_state_subkey};
-#[cfg(test)]
-use rusqlite::OptionalExtension;
+use library_replica::{catalog_publication_state_subkey, MutationBody, StateMutation, VersionKey};
+use library_replica::{BlobKind, TransferOrigin};
 use rusqlite::functions::{Context as FunctionContext, FunctionFlags};
 use rusqlite::types::Type;
+use rusqlite::OptionalExtension;
 use rusqlite::{Connection, Transaction};
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -30,11 +29,9 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::SystemTime;
 use std::time::{Duration, UNIX_EPOCH};
 use subject_projection::{
-    BISAC_MATCHER_VERSION, DDC_MATCHER_VERSION, DDC_SYSTEM_ID, DDC_VERSION, LCC_MATCHER_VERSION, LCC_SYSTEM_ID, LCC_VERSION, UNIFIED_MATCHER_VERSION, UNIFIED_SYSTEM_ID, bisac_subject_system, ddc_subject_path, lcc_subject_path,
+    bisac_subject_system, ddc_subject_path, lcc_subject_path, BISAC_MATCHER_VERSION, DDC_MATCHER_VERSION, DDC_SYSTEM_ID, DDC_VERSION, LCC_MATCHER_VERSION, LCC_SYSTEM_ID, LCC_VERSION, UNIFIED_MATCHER_VERSION, UNIFIED_SYSTEM_ID,
 };
 use sync_common::{ContentHash, ContentHash as SyncContentHash, DirId, FileName, MutationId, ReplicaId, ReplicaSeq, ServerMutation, UnixMillis};
 use taxonomy_contract::{TaxonomyCode, TaxonomySystem};
@@ -81,16 +78,7 @@ pub type LibrarySubjectEntry = LibraryHierarchyEntry<SubjectPath>;
 pub type LibraryFolderView = LibraryHierarchyView<DirId>;
 pub type LibrarySubjectView = LibraryHierarchyView<SubjectPath>;
 
-// Version 15 uses the full content hash as the portable book identity and
-// uses integer row IDs for every local relationship. Pre-15 databases are
-// intentionally rebuilt by LibraryBackend::open; there is no compatibility
-// representation or mixed-key migration.
-pub const LIBRARY_SCHEMA_VERSION: i64 = 24;
-const MINIMUM_IN_PLACE_SCHEMA_VERSION: i64 = 23;
-
-pub fn library_schema_can_migrate_in_place(version: i64) -> bool {
-    (MINIMUM_IN_PLACE_SCHEMA_VERSION..=LIBRARY_SCHEMA_VERSION).contains(&version)
-}
+pub const LIBRARY_SCHEMA_VERSION: i64 = 25;
 
 pub fn directory_exists(conn: &Connection, directory_id: &str) -> rusqlite::Result<bool> {
     let mut exists = false;
@@ -102,7 +90,6 @@ pub fn directory_exists(conn: &Connection, directory_id: &str) -> rusqlite::Resu
 }
 
 pub mod external_metadata;
-pub mod links;
 pub mod marks;
 pub mod remote_reducer;
 
@@ -110,10 +97,10 @@ use assets::materialize_dir_components_with_markers;
 use books::read_book_card_row;
 
 pub use external_metadata::{
-    AuthorEnrichmentCandidate, AuthorEnrichmentCredit, EditionIdentityCandidate, EditionIdentityReviewRow, RichEnrichmentCandidate, SubjectEnrichmentCandidate, apply_alternative_edition_isbns, apply_author_enrichment,
-    apply_edition_identity, apply_external_subjects, apply_filename_isbn, apply_manual_edition_identity, apply_reviewed_edition_identity, apply_rich_enrichment, author_enrichment_candidates, edition_identity_candidate,
-    edition_identity_candidates, edition_identity_reviews, record_external_metadata_attempt, record_external_metadata_failures, reject_edition_identity_candidates, rich_enrichment_candidates, subject_enrichment_candidates,
-    update_edition_identity_candidate_classifications,
+    apply_alternative_edition_isbns, apply_author_enrichment, apply_edition_identity, apply_external_subjects, apply_filename_isbn, apply_manual_edition_identity, apply_reviewed_edition_identity, apply_rich_enrichment,
+    author_enrichment_candidates, edition_identity_candidate, edition_identity_candidates, edition_identity_reviews, record_external_metadata_attempt, record_external_metadata_failures, reject_edition_identity_candidates,
+    rich_enrichment_candidates, subject_enrichment_candidates, update_edition_identity_candidate_classifications, AuthorEnrichmentCandidate, AuthorEnrichmentCredit, EditionIdentityCandidate, EditionIdentityReviewRow,
+    RichEnrichmentCandidate, SubjectEnrichmentCandidate,
 };
 pub use remote_reducer::apply_remote_change_in_tx;
 
@@ -287,29 +274,6 @@ fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite::Result<Ve
                 },
             }
         }
-        "bookmark" if context.len() == 8 => MutationBody::Bookmark {
-            bookmark_id: context.get(1)?,
-            value: BookmarkState {
-                content_hash: function_content_hash(context, 2)?,
-                cfi: context.get(3)?,
-                label: context.get(4)?,
-                created_at: function_timestamp(context, 5)?,
-                modified_at: function_timestamp(context, 6)?,
-                deleted: context.get(7)?,
-            },
-        },
-        "book_link" if context.len() == 9 => MutationBody::BookLink {
-            link_id: context.get(1)?,
-            value: BookLinkState {
-                source_content_hash: function_content_hash(context, 2)?,
-                target_content_hash: function_content_hash(context, 3)?,
-                relation: context.get(4)?,
-                note: context.get(5)?,
-                created_at: function_timestamp(context, 6)?,
-                modified_at: function_timestamp(context, 7)?,
-                deleted: context.get(8)?,
-            },
-        },
         "catalog_publication" if context.len() == 5 => MutationBody::CatalogPublication {
             source_id: CatalogSourceId::parse(&context.get::<String>(1)?).map_err(function_error)?,
             publication: CatalogPublicationIdentity { edition_id: context.get(2)?, work_id: context.get(3)? },
@@ -381,24 +345,12 @@ impl StoredVersion {
 }
 
 pub(crate) fn unix_millis() -> Result<i64, rusqlite::Error> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        return Ok(js_sys::Date::now() as i64);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?.as_millis();
-    #[cfg(not(target_arch = "wasm32"))]
+    let millis = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?.as_millis();
     i64::try_from(millis).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 fn unix_secs() -> Result<i64, rusqlite::Error> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        return Ok((js_sys::Date::now() / 1_000.0) as i64);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?.as_secs();
-    #[cfg(not(target_arch = "wasm32"))]
+    let seconds = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?.as_secs();
     i64::try_from(seconds).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
@@ -435,16 +387,14 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     conn.create_sync_outbox_table()?;
     conn.create_pending_fs_action_table()?;
     conn.create_sync_state_version_table()?;
+    remove_legacy_bookmark_state(conn)?;
+    remove_legacy_semantic_link_state(conn)?;
     conn.create_annotation_table()?;
     conn.create_annotation_book_index()?;
-    conn.create_bookmark_table()?;
-    conn.create_bookmark_book_index()?;
-    conn.create_book_link_table()?;
-    conn.create_book_link_source_index()?;
-    conn.create_book_link_target_index()?;
     conn.create_sync_metadata_table()?;
     conn.create_remote_asset_table()?;
     conn.create_blob_local_ref_table()?;
+    conn.create_local_blob_table()?;
     conn.create_download_requests_table()?;
     conn.create_audiobook_metadata_table()?;
     conn.execute_batch(
@@ -467,6 +417,28 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     conn.pragma_update(None, "user_version", LIBRARY_SCHEMA_VERSION)?;
 
     get_or_create_replica_id(conn)
+}
+
+/// Permanently removes saved bookmarks and any unsent/synchronized remnants
+/// when an existing library is opened after the feature was removed.
+fn remove_legacy_bookmark_state(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "DELETE FROM sync_outbox WHERE state_kind='bookmark';
+         DELETE FROM sync_state_version WHERE state_kind='bookmark';
+         DROP TABLE IF EXISTS bookmark;",
+    )
+}
+
+/// Removes the retired semantic-link domain from databases created by older
+/// versions, including queued and synchronized tombstones.
+fn remove_legacy_semantic_link_state(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS trig_book_link_state_insert;
+         DROP TRIGGER IF EXISTS trig_book_link_state_update;
+         DELETE FROM sync_outbox WHERE state_kind='book_link';
+         DELETE FROM sync_state_version WHERE state_kind='book_link';
+         DROP TABLE IF EXISTS book_link;",
+    )
 }
 
 fn ensure_identifier_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -780,9 +752,10 @@ pub mod catalog;
 /// Local and remote asset state, paths, and durable download intent.
 pub mod assets;
 pub use assets::{
-    BookPath, add_asset_request, book_placement_expects_hash, complete_asset_request, forget_remote_asset, get_asset_requests, get_blob_local_path, get_blob_local_paths, get_book_assets, get_book_dir_entry_by_path, get_book_file_path,
-    get_book_format, get_book_hashes, get_book_paths_by_content_hash, get_live_dir_paths_tx, get_locally_present_blob_hashes, get_remote_asset_hashes, is_blob_local, is_book_download_requested, is_book_downloaded, local_file_fingerprint,
-    materialize_dir_parent_with_markers, materialize_dir_with_markers, materialize_download_path, record_remote_asset, request_book_downloads, resolve_removed_book_dir, stamp_book_dir_local_hash_by_rel_path, upsert_blob_local_ref,
+    add_asset_request, book_placement_expects_hash, complete_asset_request, forget_remote_asset, get_asset_requests, get_blob_local_path, get_blob_local_paths, get_book_assets, get_book_dir_entry_by_path, get_book_file_path,
+    get_book_format, get_book_hashes, get_book_paths_by_content_hash, get_live_dir_paths_tx, get_local_blob, get_locally_present_blob_hashes, get_remote_asset_hashes, is_blob_local, is_book_download_requested, is_book_downloaded,
+    local_blob_exists, local_blob_total_bytes, local_file_fingerprint, materialize_dir_parent_with_markers, materialize_dir_with_markers, materialize_download_path, put_local_blob, record_remote_asset, remove_local_blob,
+    request_book_downloads, resolve_removed_book_dir, stamp_book_dir_local_hash_by_rel_path, upsert_blob_local_ref, BookPath,
 };
 
 /// Durable reader progress for EPUB, PDF, and audiobook formats.
@@ -796,9 +769,9 @@ pub mod sync_state;
 #[cfg(test)]
 pub(crate) use sync_state::decode_outbox_row;
 pub use sync_state::{
-    CURSOR_RECOVERY_PENDING_KEY, FsAction, LibrarySyncDetails, RemovedBookDir, acknowledge_mutations, begin_cursor_recovery, complete_cursor_recovery, complete_fs_action, cursor_recovery_pending, enqueue_fs_actions,
-    enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor, get_sync_metadata, load_transfer_history, next_scan_id, pending_fs_actions, rebind_sync_account, set_pull_cursor, set_sync_metadata,
-    state_inventory, store_transfer_history,
+    acknowledge_mutations, begin_cursor_recovery, complete_cursor_recovery, complete_fs_action, cursor_recovery_pending, enqueue_fs_actions, enqueue_missing_state_cells, get_library_sync_details, get_pending_mutations, get_pull_cursor,
+    get_sync_metadata, load_transfer_history, next_scan_id, pending_fs_actions, rebind_sync_account, set_pull_cursor, set_sync_metadata, state_inventory, store_transfer_history, FsAction, LibrarySyncDetails, RemovedBookDir,
+    CURSOR_RECOVERY_PENDING_KEY,
 };
 #[cfg(test)]
 pub(crate) use sync_state::{count_pending_vanish_candidates, mark_vanished_book_dirs_unavailable};
@@ -820,8 +793,9 @@ pub use metadata::{insert_scanned_book_metadata, update_book_metadata_contributo
 /// Directory and physical publication placement persistence.
 pub mod placements;
 pub use placements::{
-    BookPurgeInfo, book_purge_info, create_directory_record, create_local_directory, directory_relative_path, empty_trash_records, folder_destinations, insert_local_book_dir, library_trash, move_directory_record, purge_book_record,
-    purge_directory_record, remove_book_placement_record, restore_book_record, restore_directory_record, set_book_downloaded, transfer_book_placement_record, trash_book_record, trash_directory_record,
+    book_purge_info, create_directory, create_directory_record, create_local_directory, directory_relative_path, empty_trash_records, folder_destinations, insert_imported_book_dir, insert_local_book_dir, library_trash,
+    move_directory_record, purge_book_record, purge_directory_record, remove_book_placement_record, restore_book_record, restore_directory_record, set_book_downloaded, transfer_book_placement_record, trash_book_record,
+    trash_directory_record, BookPurgeInfo,
 };
 
 /// Metadata derived specifically from audiobook files.

@@ -18,13 +18,13 @@ desktop = [
     "dep:semver",
     "dep:sha2",
     "browser-ui/filesystem-libraries",
-    "epub_svelte_lib/desktop",
+    "bokheim-backend/desktop",
     "reader-ui/pdf",
 ]
 # Flatpak installs PDFium as /app/lib/libpdfium.so. Keep this separate from the
 # normal desktop feature so standalone binaries remain self-contained.
 flatpak = ["desktop", "reader-ui/packaged-pdfium"]
-kobo = ["dep:gpui_kobo", "dep:kobo-device", "epub_svelte_lib/scanner", "browser-ui/kobo", "reader-ui/kobo"]
+kobo = ["dep:gpui_kobo", "dep:kobo-device", "bokheim-backend/scanner", "browser-ui/kobo", "reader-ui/kobo"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile", "ui-components/mobile"]
 android = ["mobile", "dep:gpui_android", "dep:gpui_platform"]
 
@@ -39,13 +39,12 @@ path = "src/bin/desktop-gpui-kobo.rs"
 required-features = ["kobo"]
 
 [dependencies]
-app-contract = { path = "../../client/app-contract" }
 async-channel = "2"
 audiobook-player = { path = "../ui/gpui/audiobook-player", optional = true }
 ui-runtime = { path = "../ui/gpui/runtime" }
 ui-components = { path = "../ui/gpui/components" }
 browser-ui = { path = "../ui/gpui/browser", default-features = false }
-epub_svelte_lib = { package = "epub-svelte", path = "../../client/backend", default-features = false }
+bokheim-backend = { path = "../../client/backend", default-features = false }
 gpui.workspace = true
 gpui_android = { path = "../../../GPUI-Fork/crates/gpui_android", optional = true }
 gpui-component.workspace = true

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use epub_svelte_lib::app::{AppBackend, AppDataLocation, BackendContext};
-use epub_svelte_lib::platform::scanner::LibraryEvent;
+use bokheim_backend::app::{AppBackend, AppDataLocation, BackendContext};
+use bokheim_backend::platform::scanner::LibraryEvent;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1);

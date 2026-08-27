@@ -1,12 +1,11 @@
-//! Persistent reader annotations and bookmarks for a library.
+//! Persistent reader annotations for a library.
 
-use app_contract::reader_state::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation, ReaderBookmark};
 use include_sqlite_sql::{impl_sql, include_sql};
-use rusqlite::{Connection, Row, types::Type};
+use library_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
+use rusqlite::{types::Type, Connection, Row};
 use sync_common::ContentHash;
 
 include_sql!("src/database/sql/annotations.sql");
-include_sql!("src/database/sql/bookmarks.sql");
 
 pub fn load_annotations(conn: &Connection, content_hash: ContentHash) -> Result<Vec<ReaderAnnotation>, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
@@ -53,36 +52,6 @@ pub fn remove_annotation(conn: &Connection, id: &str, modified_at: i64) -> Resul
     deleted.modified_at = modified_at;
     deleted.validate(true)?;
     conn.delete_annotation(id, modified_at)?;
-    Ok(())
-}
-
-pub fn load_bookmarks(conn: &Connection, content_hash: ContentHash) -> Result<Vec<ReaderBookmark>, Box<dyn std::error::Error>> {
-    let mut bookmarks = Vec::new();
-    conn.get_bookmarks(content_hash.as_str(), |row| {
-        bookmarks.push(ReaderBookmark { id: row.get(0)?, content_hash: ContentHash::new(&row.get::<_, String>(1)?), cfi: row.get(2)?, label: row.get(3)?, created_at: row.get(4)?, modified_at: row.get(5)? });
-        Ok(())
-    })?;
-    Ok(bookmarks)
-}
-
-pub fn insert_bookmark(conn: &Connection, value: &ReaderBookmark) -> Result<(), Box<dyn std::error::Error>> {
-    value.validate(false)?;
-    if value.modified_at != value.created_at {
-        return Err("a new bookmark's modified_at must equal created_at".into());
-    }
-    conn.create_bookmark(&value.id, value.content_hash.as_str(), &value.cfi, &value.label, value.created_at)?;
-    Ok(())
-}
-
-pub fn remove_bookmark(conn: &Connection, id: &str, deleted_at: i64) -> Result<(), Box<dyn std::error::Error>> {
-    let mut existing = None;
-    conn.get_live_bookmark(id, |row| {
-        existing = Some((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?));
-        Ok(())
-    })?;
-    let existing = existing.ok_or("bookmark not found")?;
-    ReaderBookmark { id: id.to_owned(), content_hash: ContentHash::new(&existing.0), cfi: existing.1, label: existing.2, created_at: existing.3, modified_at: deleted_at }.validate(true)?;
-    conn.delete_bookmark(id, deleted_at)?;
     Ok(())
 }
 
@@ -149,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn annotation_and_bookmark_mutations_create_syncable_tombstones() {
+    fn annotation_mutations_create_syncable_tombstones() {
         let connection = database();
         let annotation = ReaderAnnotation {
             id: "9f58fba8-f7d8-4f87-8e1d-5fe5b82f2a21".to_owned(),
@@ -171,12 +140,8 @@ mod tests {
         remove_annotation(&connection, &annotation.id, 11).unwrap();
         assert!(load_annotations(&connection, fixture_content_hash(1)).unwrap().is_empty());
 
-        let bookmark = ReaderBookmark { id: "91b27f15-50c5-47b6-af88-88136253f9aa".to_owned(), content_hash: fixture_content_hash(1), cfi: "epubcfi(/6/2!/4/1:0)".to_owned(), label: "Start".to_owned(), created_at: 12, modified_at: 12 };
-        insert_bookmark(&connection, &bookmark).unwrap();
-        remove_bookmark(&connection, &bookmark.id, 13).unwrap();
-
-        let events: i64 = connection.query_row("SELECT count(*) FROM sync_outbox WHERE state_kind IN ('annotation','bookmark')", [], |row| row.get(0)).unwrap();
-        assert_eq!(events, 2);
+        let events: i64 = connection.query_row("SELECT count(*) FROM sync_outbox WHERE state_kind='annotation'", [], |row| row.get(0)).unwrap();
+        assert_eq!(events, 1);
         let body: Vec<u8> = connection.query_row("SELECT body FROM sync_outbox WHERE state_kind='annotation' AND state_key=?1", [&annotation.id], |row| row.get(0)).unwrap();
         let synced: library_replica::MutationBody = sync_common::wire::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
         assert!(matches!(synced, library_replica::MutationBody::Annotation { value, .. } if value.deleted));

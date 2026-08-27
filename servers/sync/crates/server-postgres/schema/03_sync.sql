@@ -1,6 +1,6 @@
 -- Sync domain: one row-per-logical-update state table per entity kind
--- (directories, books, placements, reading positions, annotations,
--- bookmarks, book links, metadata). Depends only on 01_core.sql
+-- (directories, books, placements, reading positions, annotations, metadata).
+-- Depends only on 01_core.sql
 -- (libraries).
 --
 -- The server stores and relays synchronized state; it does not interpret

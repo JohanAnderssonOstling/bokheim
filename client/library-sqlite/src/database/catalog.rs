@@ -1,5 +1,5 @@
 use super::*;
-use app_contract::catalog::{CatalogPublicationIdentity, CatalogPublicationKey, CatalogSourceId};
+use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 
 pub fn record_catalog_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, publication: &CatalogPublicationIdentity, content_hash: &ContentHash) -> rusqlite::Result<()> {
     transaction.upsert_catalog_publication_book(source_id.as_str(), &publication.edition_id, publication.work_id.as_deref().unwrap_or_default(), content_hash.as_str())?;
@@ -29,7 +29,7 @@ pub fn owned_catalog_publications(connection: &Connection, source_id: &CatalogSo
     Ok(owned)
 }
 
-pub fn all_owned_catalog_publications(connection: &Connection) -> rusqlite::Result<Vec<CatalogPublicationKey>> {
+pub fn all_owned_catalog_publications(connection: &Connection) -> rusqlite::Result<Vec<(CatalogSourceId, CatalogPublicationIdentity)>> {
     let mut statement = connection.prepare(
         "SELECT DISTINCT publication.source_id,publication.edition_id,publication.work_id
          FROM catalog_publication_book publication
@@ -42,7 +42,7 @@ pub fn all_owned_catalog_publications(connection: &Connection) -> rusqlite::Resu
             let raw_source_id: String = row.get(0)?;
             let source_id = CatalogSourceId::parse(&raw_source_id).map_err(|error| invalid_text_column(0, error))?;
             let work_id: String = row.get(2)?;
-            Ok(CatalogPublicationKey::new(source_id, CatalogPublicationIdentity { edition_id: row.get(1)?, work_id: (!work_id.is_empty()).then_some(work_id) }))
+            Ok((source_id, CatalogPublicationIdentity { edition_id: row.get(1)?, work_id: (!work_id.is_empty()).then_some(work_id) }))
         })?
         .collect()
 }

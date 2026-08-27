@@ -6,6 +6,8 @@ use super::{
     MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, QUERY_CONCURRENCY, SCHEMA_VERSION, WIKIDATA_SCHEMA_VERSION,
 };
 use crate::http::validate_isbn_count;
+use crate::library_of_congress::{LibraryOfCongressClient, LibraryOfCongressLookup};
+use futures_util::future::join_all;
 
 impl MetadataService {
     pub fn open(database: impl Into<PathBuf>) -> Result<Self, MetadataError> {
@@ -83,7 +85,55 @@ impl MetadataService {
                 classifications: EndpointMetrics::default(),
                 enrichment: EndpointMetrics::default(),
             }),
+            library_of_congress: None,
         })
+    }
+
+    pub fn with_library_of_congress(mut self, endpoint: &str) -> Result<Self, MetadataError> {
+        self.library_of_congress = Some(LibraryOfCongressClient::with_endpoint(endpoint)?);
+        Ok(self)
+    }
+
+    pub fn with_default_library_of_congress(self) -> Result<Self, MetadataError> {
+        let mut service = self;
+        service.library_of_congress = Some(LibraryOfCongressClient::new()?);
+        Ok(service)
+    }
+
+    pub(crate) async fn apply_library_of_congress_fallback(&self, response: &mut RichMetadataEnrichmentResponse) {
+        let Some(provider) = &self.library_of_congress else { return };
+        let pending = response
+            .results
+            .iter()
+            .enumerate()
+            .filter(|(_, result)| {
+                result.status != metadata_contract::LookupStatus::InvalidIsbn
+                    && result.matches.iter().all(|matched| matched.classifications.is_empty() && matched.subjects.is_empty() && matched.places.is_empty() && matched.people.is_empty())
+            })
+            .map(|(index, result)| (index, result.requested_isbn.clone()))
+            .collect::<Vec<_>>();
+        let lookups = join_all(pending.iter().map(|(_, isbn)| provider.lookup_isbn(isbn))).await;
+        for ((index, isbn), lookup) in pending.into_iter().zip(lookups) {
+            let enrichment = match lookup {
+                Ok(LibraryOfCongressLookup::Matched { classifications, subjects }) if !classifications.is_empty() || !subjects.is_empty() => {
+                    Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), places: Vec::new(), people: Vec::new(), popularity: None, description: None, subjects })
+                }
+                Ok(LibraryOfCongressLookup::Matched { .. } | LibraryOfCongressLookup::NoMatch | LibraryOfCongressLookup::Ambiguous) => None,
+                Err(error) => {
+                    tracing::warn!(isbn = %isbn, %error, "Library of Congress fallback unavailable");
+                    None
+                }
+            };
+            let Some(enrichment) = enrichment else { continue };
+            let result = &mut response.results[index];
+            if result.canonical_isbn13.is_none() {
+                result.canonical_isbn13 = crate::canonical_isbn13(&isbn).map(|isbn| format!("{isbn:013}"));
+            }
+            result.matches.push(enrichment);
+            if result.status == metadata_contract::LookupStatus::NoMatch {
+                result.status = metadata_contract::LookupStatus::Matched;
+            }
+        }
     }
 
     pub fn lookup(&self, request: ClassificationRequest) -> Result<ClassificationResponse, MetadataError> {
@@ -156,6 +206,7 @@ impl MetadataService {
                         people: Vec::new(),
                         popularity: work_id.and_then(|work_id| popularity.get(&work_id).cloned()),
                         description: work_id.and_then(|work_id| descriptions.get(&work_id).cloned()),
+                        subjects: Vec::new(),
                     }
                 })
                 .collect();

@@ -287,7 +287,7 @@ impl CatalogService {
     }
 }
 
-fn merge_catalog_publication_subjects(publication: &mut catalog_contract::CatalogPublication, subjects: &[PublicationSubject]) {
+fn merge_catalog_publication_subjects(publication: &mut catalog_model::CatalogPublication, subjects: &[PublicationSubject]) {
     for subject in subjects {
         let candidate = subject.clone();
         if !publication.metadata.subjects.contains(&candidate) {
@@ -400,7 +400,7 @@ pub fn run_catalog_extraction_worker(input: &Path, format: &str, mode: &str, out
 }
 
 pub(crate) fn extract_epub_catalog_metadata(path: &Path, extract_cover: bool) -> Result<ExtractedCatalogData, String> {
-    let inspected = book_metadata::inspect_epub(path).map_err(|error| error.to_string())?;
+    let inspected = publication_inspection::inspect_epub(path).map_err(|error| error.to_string())?;
     let book = inspected.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
     let authors = book
@@ -456,7 +456,7 @@ pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCata
 }
 
 pub(crate) fn extract_pdf_catalog_metadata(path: &Path, extract_cover: bool) -> Result<ExtractedCatalogData, String> {
-    let book = book_metadata::inspect_pdf(path).map_err(|error| error.to_string())?.metadata;
+    let book = publication_inspection::inspect_pdf(path).map_err(|error| error.to_string())?.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
     let authors = book
         .authors()

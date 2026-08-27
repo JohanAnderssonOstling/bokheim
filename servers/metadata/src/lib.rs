@@ -10,8 +10,8 @@ use flate2::read::MultiGzDecoder;
 use metadata_contract::{
     AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationRequest, ClassificationResponse, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityRequest,
     EditionIdentityResponse, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch, EntityReference, EntitySource, IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataEnrichmentRequest, MetadataEnrichmentResponse,
-    PersonEntity, PlaceEntity, RichIsbnMetadataResult, RichMetadataEnrichmentResponse, RichWorkMetadataMatch, SnapshotDescription, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    PersonEntity, PlaceEntity, RichIsbnMetadataResult, RichMetadataEnrichmentResponse, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST,
+    MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -73,6 +73,7 @@ const BULK_EVIDENCE_IDS_PER_QUERY: usize = 30_000;
 #[derive(Clone)]
 pub struct MetadataService {
     state: Arc<ServiceState>,
+    library_of_congress: Option<library_of_congress::LibraryOfCongressClient>,
 }
 
 struct ServiceState {
@@ -289,6 +290,7 @@ mod enrichment;
 mod http;
 mod identity;
 mod import;
+mod library_of_congress;
 mod openlibrary;
 mod query;
 mod service;
