@@ -1,0 +1,20 @@
+[package]
+name = "publication-inspection"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+epub_provider = { path = "../epub" }
+lopdf = { version = "0.44", default-features = false }
+publication-model = { path = "../publication-model" }
+roxmltree = "0.20"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tempfile = "3"

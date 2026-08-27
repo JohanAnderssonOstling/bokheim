@@ -1,0 +1,12 @@
+[package]
+name = "catalog-protocol"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+catalog-model = { path = "../catalog-model" }
+serde = { version = "1", features = ["derive"] }
