@@ -1,0 +1,17 @@
+# Native bibliographic OCR
+
+Page extraction is implemented: bounded PDF/EPUB text inspection, metadata ISBN recovery, copyright/cataloguing blocks at either end, and a native Tesseract fallback. OCR is entirely excluded from WASM builds; their text and metadata inspection remains available. Rotation recovery is out of scope.
+
+When no usable ISBN identity or printed ISBN reference is available, native inspection tries Tesseract with the English `tessdata_fast` model. Finding LCC alone does not suppress ISBN inspection. PDF images use PDFium, the same renderer as the reader. EPUBs use images referenced by the first/last eight spine documents. Small ISBN strips are retained and upscaled; bounded decoding prevents unbounded image allocation. A final blank page does not hide the preceding back cover.
+
+One OCR session runs at a time per process. Linux launches Tesseract at nice level 10, with one OpenMP thread. Each book has a 20-second OCR budget, each subprocess a five-second timeout, and at most 24 images (12 selected pages for PDFs). Images are processed individually in a temporary directory, deleted on completion. Selected PDF rendering and image decoding also take time outside a running Tesseract subprocess. Inspection callers must continue to run outside UI threads and database transactions.
+
+Empty recognition can retry a dark-text mask for coloured copyright pages. Recognized numbers are never corrected by guessing digits. Results still need ISBN checksum/context validation and LCC resolution. OCR LCC values without a recognizable lettered Cutter remain unpromoted candidates: the colour-page test misread `.S76` as `.576`, so a plausible class number alone is insufficient. Its validated ISBN can still drive subject lookup. Bibliographies, indexes, promotions and cited-book references remain excluded. OCR of a back cover or a standalone ISBN strip contributes ISBN references, not arbitrary LCC-looking text from a cover blurb.
+
+The existing enrichment pipeline receives accepted evidence through publication metadata. Repeated Oxford-style `actrade-ISBN-...` EPUB resource names are retained separately as lookup hints. They do not become file identifiers or enter direct ISBN lookup: returned edition candidates must verify the title and authors before their classifications can be used.
+
+Native inspection requires a runnable `tesseract` command and English language data. Language data is read from `TESSDATA_PREFIX`, or `$XDG_DATA_HOME/bokheim/ocr/tessdata` (default `$HOME/.local/share/bokheim/ocr/tessdata`), then Tesseract's system default. Install the English fast model as `eng.traineddata`. Native distributions must provide these dependencies; this does not package an Android or Windows Tesseract binary. No runtime model download occurs. This workstation has Tesseract 5.5.3 and the audited fast English model in its user data directory.
+
+Missing engines/models, timeouts and recognition errors are best-effort outcomes recorded in `inspection:ocr-status`; they do not reject the book. A previously inspected entry needs metadata refresh after OCR dependencies become available. Inspection version is 5. Source books are never rewritten.
+
+The engine comparison and smoke results are under `tmp/ocr-engine-comparison-20260907` and `tmp/native-tesseract-integration-20260908`. Some degraded images still need review, including the tested copies of Envisioning Information and Theory of International Politics. Completion of extraction support does not imply every document contains a recoverable identifier.
