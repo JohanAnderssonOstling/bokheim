@@ -1,0 +1,1 @@
+SELECT target FROM book_reading_entry WHERE content_hash=?1

@@ -1,0 +1,1 @@
+INSERT INTO subject_system(id,version,matcher_version) VALUES(?1,?2,?3)

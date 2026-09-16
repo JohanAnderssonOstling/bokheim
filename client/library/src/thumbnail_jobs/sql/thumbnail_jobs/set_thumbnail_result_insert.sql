@@ -1,0 +1,1 @@
+INSERT INTO local_thumbnail_work(content_hash,state) VALUES (?1,?2) ON CONFLICT(content_hash) DO UPDATE SET state=excluded.state,retry_after=0

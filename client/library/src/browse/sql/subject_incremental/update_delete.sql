@@ -1,0 +1,1 @@
+DELETE FROM subject_browse_member WHERE book_row_id=?1

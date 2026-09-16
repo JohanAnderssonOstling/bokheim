@@ -1,0 +1,1 @@
+SELECT content_hash FROM book WHERE deleted_at IS NOT NULL AND purged_at IS NULL

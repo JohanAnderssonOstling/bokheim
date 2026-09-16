@@ -1,0 +1,1 @@
+SELECT id, name, deleted_at IS NOT NULL FROM dir WHERE id IN (?1,?2) ORDER BY id

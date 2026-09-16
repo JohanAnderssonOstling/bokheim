@@ -1,0 +1,1 @@
+INSERT INTO book(content_hash,publication_metadata) VALUES(?1,x'010203')

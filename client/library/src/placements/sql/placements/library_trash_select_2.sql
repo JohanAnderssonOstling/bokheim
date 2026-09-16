@@ -1,0 +1,1 @@
+SELECT id,name,deleted_at FROM dir WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND intent_lifecycle=1 ORDER BY deleted_at DESC,name_key,id

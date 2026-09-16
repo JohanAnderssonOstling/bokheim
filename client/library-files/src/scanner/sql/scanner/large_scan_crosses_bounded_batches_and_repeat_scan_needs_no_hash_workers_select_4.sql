@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM dir_write_audit

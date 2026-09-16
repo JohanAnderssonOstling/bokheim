@@ -1,0 +1,1 @@
+SELECT json_array(state_key,changed_at,conflict_rank,replica_id,replica_seq,mutation_id) FROM sync_state_version WHERE state_kind='metadata' AND state_key<=?1 ORDER BY state_key

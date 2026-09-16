@@ -1,0 +1,1 @@
+SELECT deleted_at,purged_at FROM book WHERE content_hash=?1

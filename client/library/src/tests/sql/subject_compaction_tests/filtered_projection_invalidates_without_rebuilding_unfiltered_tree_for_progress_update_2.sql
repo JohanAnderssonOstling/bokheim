@@ -1,0 +1,1 @@
+UPDATE book_language SET language_tag='sv' WHERE book_row_id=(SELECT row_id FROM book WHERE title='Gamma book')

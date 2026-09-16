@@ -1,0 +1,1 @@
+UPDATE local_file_projection SET relative_path=?2 || substr(relative_path,length(?1)+1) WHERE relative_path>=?1 COLLATE BINARY AND relative_path<?3 COLLATE BINARY

@@ -1,0 +1,1 @@
+UPDATE book_contributor SET name='Changed author'

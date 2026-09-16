@@ -1,0 +1,1 @@
+INSERT INTO asset_work(content_hash) SELECT content_hash FROM book WHERE content_hash!='' ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM local_file_work)

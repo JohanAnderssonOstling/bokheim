@@ -1,0 +1,1 @@
+INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,'00000000-0000-0000-0000-000000000000','/original.epub')

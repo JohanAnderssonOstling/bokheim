@@ -1,0 +1,1 @@
+DELETE FROM sync_outbox WHERE state_kind='metadata' AND state_key=?1

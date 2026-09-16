@@ -1,0 +1,1 @@
+UPDATE author_identity SET preferred_name=?1, normalized_name=?2, is_provisional=0 WHERE id=?3

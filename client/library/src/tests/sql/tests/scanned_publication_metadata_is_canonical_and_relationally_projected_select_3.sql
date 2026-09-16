@@ -1,0 +1,1 @@
+SELECT canonical_value FROM book_identifier WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1))

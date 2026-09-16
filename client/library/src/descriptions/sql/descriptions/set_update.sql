@@ -1,0 +1,1 @@
+UPDATE book SET description_scanned=1 WHERE content_hash=?1 AND description_scanned IS NOT 1

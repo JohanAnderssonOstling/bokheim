@@ -1,0 +1,1 @@
+SELECT language_tag FROM book_language

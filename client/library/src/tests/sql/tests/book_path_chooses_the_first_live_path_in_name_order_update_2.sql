@@ -1,0 +1,1 @@
+UPDATE book_dir SET deleted_at=1 WHERE dir_id=?1

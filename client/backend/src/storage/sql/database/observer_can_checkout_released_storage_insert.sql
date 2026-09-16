@@ -1,0 +1,1 @@
+INSERT INTO value VALUES(42)

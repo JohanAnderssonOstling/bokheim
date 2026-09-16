@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM pending_metadata_payload

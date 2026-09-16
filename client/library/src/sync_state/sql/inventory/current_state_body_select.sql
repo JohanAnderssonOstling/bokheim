@@ -1,0 +1,1 @@
+SELECT bokheim_mutation('directory_name',id,name),0 FROM dir WHERE id=?1

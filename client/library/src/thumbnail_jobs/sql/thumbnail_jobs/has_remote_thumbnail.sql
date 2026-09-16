@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM remote_asset WHERE kind='thumbnail' AND hash=?1)

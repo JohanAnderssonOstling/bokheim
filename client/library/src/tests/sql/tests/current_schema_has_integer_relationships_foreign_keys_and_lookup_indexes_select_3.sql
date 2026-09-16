@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM pragma_foreign_key_check

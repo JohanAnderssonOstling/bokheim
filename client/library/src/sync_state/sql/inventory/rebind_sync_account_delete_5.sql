@@ -1,0 +1,1 @@
+DELETE FROM sync_metadata WHERE key = 'cursor_recovery_pending'

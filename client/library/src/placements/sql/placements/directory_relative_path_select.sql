@@ -1,0 +1,1 @@
+SELECT parent_id=?2 FROM dir WHERE id=?1

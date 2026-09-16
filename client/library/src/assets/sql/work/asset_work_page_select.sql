@@ -1,0 +1,1 @@
+SELECT id,content_hash FROM asset_work WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 32

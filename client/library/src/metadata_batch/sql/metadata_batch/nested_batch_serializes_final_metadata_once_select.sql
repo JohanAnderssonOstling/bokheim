@@ -1,0 +1,1 @@
+SELECT body=bokheim_mutation('metadata',b.content_hash,COALESCE(b.title,''),contributors_for_book(b.row_id),b.publication_metadata) FROM sync_outbox s JOIN book b ON b.content_hash=s.state_key WHERE s.state_kind='metadata'

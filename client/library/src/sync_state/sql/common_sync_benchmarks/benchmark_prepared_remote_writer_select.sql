@@ -1,0 +1,1 @@
+SELECT content_hash,title,publication_metadata FROM book ORDER BY content_hash

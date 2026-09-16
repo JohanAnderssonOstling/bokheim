@@ -4,24 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[features]
-default = ["native-formats"]
-native-formats = [
-    "publication-inspection/mobi",
-    "dep:audiobook-library",
-    "dep:mobi",
-    "dep:mp4ameta",
-]
-
 [dependencies]
 pdf-reader-core = { path = "../../apps/reader/crates/pdf/core" }
 pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
 metadata-contract = { path = "../../shared/metadata-contract" }
-audiobook-library = { path = "../audiobook-library", optional = true }
+audiobook-library = { path = "../audiobook-library" }
 library-model = { path = "../library-model" }
-publication-inspection = { path = "../../shared/publication-inspection" }
-mobi = { workspace = true, optional = true }
-mp4ameta = { version = "0.13.0", optional = true }
+publication-inspection = { path = "../../shared/publication-inspection", features = ["mobi"] }
+mobi = { workspace = true }
+mp4ameta = { version = "0.13.0" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
@@ -33,4 +24,3 @@ workspace = true
 
 [[example]]
 name = "survey_titles"
-required-features = ["native-formats"]

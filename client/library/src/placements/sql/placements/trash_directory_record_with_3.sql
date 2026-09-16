@@ -1,0 +1,1 @@
+WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id) UPDATE book_dir SET deleted_at=?2,is_downloaded=0,trash_origin_dir_id=?1 WHERE dir_id IN (SELECT id FROM subtree) AND deleted_at IS NULL

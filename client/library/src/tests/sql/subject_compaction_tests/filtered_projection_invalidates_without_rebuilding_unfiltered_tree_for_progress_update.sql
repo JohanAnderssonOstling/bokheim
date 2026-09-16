@@ -1,0 +1,1 @@
+UPDATE book SET read_progress=100 WHERE title='Beta book'

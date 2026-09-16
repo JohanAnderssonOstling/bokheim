@@ -1,0 +1,1 @@
+DELETE FROM subject_browse_raw_book WHERE location=?1

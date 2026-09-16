@@ -1,0 +1,1 @@
+INSERT OR IGNORE INTO book_subject_assignment(book_row_id,system_id,subject_path,matcher_version) VALUES(?1,?2,?3,?4)

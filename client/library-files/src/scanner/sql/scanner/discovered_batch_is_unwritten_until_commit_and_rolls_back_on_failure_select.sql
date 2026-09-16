@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM dir WHERE id=?1

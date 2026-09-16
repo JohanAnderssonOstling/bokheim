@@ -1,0 +1,1 @@
+SELECT code FROM book_subject_code WHERE system_id='lcc'

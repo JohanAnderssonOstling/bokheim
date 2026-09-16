@@ -1,0 +1,1 @@
+SELECT contributors_for_book(1)

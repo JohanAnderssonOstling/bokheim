@@ -1,0 +1,1 @@
+SELECT file_name FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2) ORDER BY deleted_at IS NULL DESC, deleted_at DESC LIMIT 1

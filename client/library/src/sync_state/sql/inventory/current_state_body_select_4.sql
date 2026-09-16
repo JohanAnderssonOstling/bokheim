@@ -1,0 +1,1 @@
+SELECT CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END FROM book WHERE content_hash=?1

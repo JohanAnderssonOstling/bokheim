@@ -1,0 +1,1 @@
+UPDATE subject_browse_state SET built_revision=built_revision WHERE id=1

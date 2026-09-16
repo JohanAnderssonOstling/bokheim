@@ -1,0 +1,1 @@
+SELECT type FROM pragma_table_info(?1) WHERE name=?2

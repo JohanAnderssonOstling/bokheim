@@ -1,0 +1,1 @@
+UPDATE book_dir SET deleted_at=NULL WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)

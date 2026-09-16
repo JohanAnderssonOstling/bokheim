@@ -1,0 +1,1 @@
+DELETE FROM local_purge_work WHERE content_hash=?1

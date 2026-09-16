@@ -1,0 +1,1 @@
+SELECT a.id,a.stable_id FROM author_external_identifier e JOIN author_identity a ON a.id=e.author_identity_id WHERE e.authority=?1 AND e.external_id=?2

@@ -1,0 +1,1 @@
+INSERT INTO subject_book_ownership SELECT 'Subject',book_row_id,COUNT(*) FROM book_unified_concept WHERE book_row_id=?1 GROUP BY book_row_id ON CONFLICT(subject_path,book_row_id) DO UPDATE SET assignment_count=excluded.assignment_count

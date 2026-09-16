@@ -1,0 +1,1 @@
+INSERT INTO subject_browse_child VALUES(?1,?2)

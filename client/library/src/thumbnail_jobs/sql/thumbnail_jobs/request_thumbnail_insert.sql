@@ -1,0 +1,1 @@
+INSERT INTO local_thumbnail_work(content_hash,state) VALUES (?1,'pending') ON CONFLICT(content_hash) DO UPDATE SET state='pending',retry_after=0

@@ -1,0 +1,1 @@
+ROLLBACK TO metadata_payload_batch; RELEASE metadata_payload_batch;

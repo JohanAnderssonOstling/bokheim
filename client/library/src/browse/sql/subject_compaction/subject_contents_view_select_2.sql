@@ -1,0 +1,1 @@
+SELECT value FROM sync_metadata WHERE key='replica_id'

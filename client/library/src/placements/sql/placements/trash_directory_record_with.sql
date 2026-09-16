@@ -1,0 +1,1 @@
+WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 UNION ALL SELECT d.id FROM dir d JOIN subtree s ON d.parent_id=s.id WHERE d.id!=d.parent_id) SELECT b.content_hash,bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id IN (SELECT id FROM subtree) AND bd.deleted_at IS NULL AND b.deleted_at IS NULL

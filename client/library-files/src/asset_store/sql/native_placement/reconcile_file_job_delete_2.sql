@@ -1,0 +1,1 @@
+DELETE FROM local_file_work WHERE id=?1

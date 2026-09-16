@@ -1,0 +1,1 @@
+UPDATE book SET title='Edited'

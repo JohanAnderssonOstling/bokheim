@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book_dir WHERE dir_id=?1 AND file_name=?2 AND deleted_at IS NULL)

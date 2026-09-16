@@ -1,0 +1,1 @@
+EXPLAIN QUERY PLAN SELECT 1 FROM book_dir WHERE dir_id='dest' AND portable_name_key(file_name)='free' AND deleted_at IS NULL

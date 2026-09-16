@@ -1,0 +1,1 @@
+DELETE FROM local_file_projection WHERE content_hash=?1 AND relative_path=?2

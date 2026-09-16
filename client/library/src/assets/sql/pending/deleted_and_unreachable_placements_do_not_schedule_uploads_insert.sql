@@ -1,0 +1,1 @@
+INSERT INTO local_book_upload VALUES(1,'book')

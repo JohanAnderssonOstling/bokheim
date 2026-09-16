@@ -1,0 +1,2 @@
+SELECT DISTINCT book.content_hash FROM book_external_entity reference JOIN book ON book.row_id=reference.book_row_id
+         WHERE reference.wikidata_id=?1 AND book.deleted_at IS NULL AND book.hidden_at IS NULL ORDER BY book.content_hash

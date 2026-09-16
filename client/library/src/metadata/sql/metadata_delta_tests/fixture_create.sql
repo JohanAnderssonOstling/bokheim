@@ -1,0 +1,1 @@
+CREATE TEMP TABLE write_audit(table_name TEXT,operation TEXT);

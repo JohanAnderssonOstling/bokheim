@@ -1,0 +1,3 @@
+CREATE TEMP TRIGGER preserve_INSERT BEFORE INSERT ON subject_browse_count WHEN NEW.path LIKE 'World / U.S. / B%' OR NEW.path LIKE 'World / U.S. / C%' BEGIN SELECT RAISE(ABORT,'unrelated subject branch rewritten'); END;
+CREATE TEMP TRIGGER preserve_UPDATE BEFORE UPDATE ON subject_browse_count WHEN OLD.path LIKE 'World / U.S. / B%' OR OLD.path LIKE 'World / U.S. / C%' BEGIN SELECT RAISE(ABORT,'unrelated subject branch rewritten'); END;
+CREATE TEMP TRIGGER preserve_DELETE BEFORE DELETE ON subject_browse_count WHEN OLD.path LIKE 'World / U.S. / B%' OR OLD.path LIKE 'World / U.S. / C%' BEGIN SELECT RAISE(ABORT,'unrelated subject branch rewritten'); END;

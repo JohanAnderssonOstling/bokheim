@@ -1,0 +1,1 @@
+UPDATE book SET title='New title' WHERE content_hash=?1

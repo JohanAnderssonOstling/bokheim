@@ -1,0 +1,1 @@
+SELECT id FROM publisher WHERE normalized_name=?1

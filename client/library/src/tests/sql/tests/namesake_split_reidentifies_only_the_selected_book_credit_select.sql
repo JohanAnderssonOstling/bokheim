@@ -1,0 +1,1 @@
+SELECT COUNT(DISTINCT normalized_name) FROM author_identity

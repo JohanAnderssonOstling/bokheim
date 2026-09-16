@@ -1,0 +1,1 @@
+SELECT version.changed_at, version.conflict_rank, version.replica_id, version.replica_seq, book.deleted_at IS NOT NULL FROM book JOIN sync_state_version version ON version.state_kind='book_lifecycle' AND version.state_key=book.content_hash AND version.state_subkey='' WHERE book.content_hash=printf('%064x',1)

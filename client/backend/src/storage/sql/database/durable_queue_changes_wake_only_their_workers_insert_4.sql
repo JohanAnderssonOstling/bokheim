@@ -1,0 +1,1 @@
+INSERT INTO local_book_work(content_hash) VALUES(?1) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id

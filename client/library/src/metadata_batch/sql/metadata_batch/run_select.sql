@@ -1,0 +1,1 @@
+SELECT metadata_batch_flag(NULL)

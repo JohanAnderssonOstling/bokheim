@@ -1,0 +1,1 @@
+INSERT INTO local_file_work VALUES(?1,'trash',?2,?3)

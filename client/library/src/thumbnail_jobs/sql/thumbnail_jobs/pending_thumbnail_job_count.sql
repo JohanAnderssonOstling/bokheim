@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM local_thumbnail_work WHERE state='pending'

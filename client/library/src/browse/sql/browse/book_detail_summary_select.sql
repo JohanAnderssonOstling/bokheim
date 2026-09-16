@@ -1,0 +1,1 @@
+SELECT content_hash,title,author,description,progress,downloaded,download_requested,format_category,audiobook_duration_ms,audiobook_chapter_count,added_at,NULL,subtitle FROM book_cards WHERE content_hash=?1 AND EXISTS (SELECT 1 FROM book_dir WHERE book_row_id=book_cards.book_row_id AND deleted_at IS NULL)

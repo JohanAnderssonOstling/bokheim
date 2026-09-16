@@ -1,0 +1,1 @@
+INSERT INTO book_unified_concept SELECT row_id,909999,1 FROM book WHERE title='Alpha book'

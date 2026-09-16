@@ -1,0 +1,1 @@
+INSERT INTO book(content_hash, added_at, format) VALUES (printf('%064x',1), 1, 'epub')

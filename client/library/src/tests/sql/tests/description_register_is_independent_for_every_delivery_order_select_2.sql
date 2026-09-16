@@ -1,0 +1,1 @@
+SELECT description FROM book_description

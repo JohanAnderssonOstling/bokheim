@@ -1,0 +1,1 @@
+INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, last_scan, is_downloaded) VALUES (?1, (SELECT row_id FROM book WHERE content_hash=?2), 'legacy.epub', ?3, 1, 0)

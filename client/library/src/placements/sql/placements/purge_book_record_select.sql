@@ -1,0 +1,1 @@
+SELECT row_id FROM book WHERE content_hash=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL

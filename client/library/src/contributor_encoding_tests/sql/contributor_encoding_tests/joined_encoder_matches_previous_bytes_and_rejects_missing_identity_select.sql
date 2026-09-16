@@ -1,0 +1,1 @@
+SELECT contributors_for_book(row_id),legacy_contributors(row_id) FROM book

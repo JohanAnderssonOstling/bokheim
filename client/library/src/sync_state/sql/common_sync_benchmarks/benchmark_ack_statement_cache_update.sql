@@ -1,0 +1,1 @@
+UPDATE book SET title=?1 WHERE row_id<=?2

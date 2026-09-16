@@ -1,0 +1,1 @@
+UPDATE book SET deleted_at=1,purged_at=1

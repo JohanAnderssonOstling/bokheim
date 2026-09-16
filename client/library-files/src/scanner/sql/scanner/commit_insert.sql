@@ -1,0 +1,1 @@
+INSERT INTO local_directory_projection(dir_id,relative_path) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM dir WHERE id=?1 AND deleted_at IS NULL) ON CONFLICT(dir_id) DO UPDATE SET relative_path=excluded.relative_path WHERE relative_path!=excluded.relative_path

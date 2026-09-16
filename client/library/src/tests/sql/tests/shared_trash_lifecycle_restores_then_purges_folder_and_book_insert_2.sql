@@ -1,0 +1,1 @@
+INSERT INTO audiobook_metadata(content_hash,duration_ms,chapter_count,chapter_source,chapters_json) VALUES(?1,1000,1,'embedded_m4b','[{"title":"One","start_ms":0,"end_ms":1000}]')

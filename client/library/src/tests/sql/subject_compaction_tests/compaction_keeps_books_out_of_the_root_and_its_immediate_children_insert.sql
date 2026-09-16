@@ -1,0 +1,1 @@
+INSERT INTO curated.unified_concept_route VALUES('Subject',909998,'','Subject')

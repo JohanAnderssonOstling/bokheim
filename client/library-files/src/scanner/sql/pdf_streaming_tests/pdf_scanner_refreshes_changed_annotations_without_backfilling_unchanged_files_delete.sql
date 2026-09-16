@@ -1,0 +1,1 @@
+DELETE FROM pdf_reader_metadata WHERE content_hash=?1

@@ -1,0 +1,1 @@
+SELECT format_category FROM book_browse_format

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1 AND row_id=?2 AND publication_metadata=?3 AND COALESCE(title,'')=?4 AND COALESCE((SELECT description FROM book_description WHERE book_row_id=book.row_id),'')=?5 AND contributors_for_book(row_id)=?6 AND deleted_at IS NULL AND hidden_at IS NULL)

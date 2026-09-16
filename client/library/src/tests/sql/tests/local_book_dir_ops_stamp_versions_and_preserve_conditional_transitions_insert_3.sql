@@ -1,0 +1,1 @@
+INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded, last_scan) VALUES (?1,(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)),'f.epub','fp',1,1)

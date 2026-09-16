@@ -1,0 +1,1 @@
+SELECT publication_metadata FROM book

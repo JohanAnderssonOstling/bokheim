@@ -1,0 +1,1 @@
+SELECT removed.dir_id, removed.file_name FROM book_dir removed WHERE removed.deleted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM book_dir live WHERE live.dir_id=removed.dir_id AND live.file_name=removed.file_name AND live.deleted_at IS NULL)

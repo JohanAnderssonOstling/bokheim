@@ -1,0 +1,1 @@
+INSERT INTO local_directory_projection(dir_id,relative_path) VALUES(?1,'/OldChild')

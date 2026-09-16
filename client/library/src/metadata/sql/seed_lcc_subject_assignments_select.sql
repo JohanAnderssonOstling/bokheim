@@ -1,0 +1,1 @@
+SELECT version,matcher_version FROM subject_system WHERE id=?1

@@ -1,0 +1,1 @@
+SELECT d.name, COUNT(bd.book_row_id) FROM dir d JOIN book_dir bd ON bd.dir_id=d.id WHERE d.id=?1 AND bd.book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1))

@@ -1,0 +1,1 @@
+SELECT toc_json FROM book_toc WHERE content_hash=?1

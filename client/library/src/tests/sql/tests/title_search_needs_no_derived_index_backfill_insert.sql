@@ -1,0 +1,2 @@
+INSERT INTO book(content_hash, title, added_at, format) VALUES (printf('%064x',2), 'Parable of the Sower', 1, 'epub');
+             INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash) VALUES ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',2)), 'parable.epub', 'parable');

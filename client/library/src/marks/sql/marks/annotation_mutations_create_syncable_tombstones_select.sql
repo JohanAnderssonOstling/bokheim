@@ -1,0 +1,1 @@
+SELECT body FROM sync_outbox WHERE state_kind='annotation' AND state_key=?1

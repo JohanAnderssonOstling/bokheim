@@ -1,0 +1,1 @@
+SELECT DISTINCT state_kind FROM sync_outbox ORDER BY state_kind

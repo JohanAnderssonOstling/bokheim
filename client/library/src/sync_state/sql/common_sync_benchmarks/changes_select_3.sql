@@ -1,0 +1,1 @@
+SELECT json_array(b.content_hash,l.position,l.language_tag) FROM book_language l JOIN book b ON b.row_id=l.book_row_id WHERE b.content_hash<=?1 ORDER BY b.content_hash,l.position

@@ -1,0 +1,1 @@
+SELECT count(*) FROM book_contributor WHERE role=X'74726C' AND name='Local Translator'

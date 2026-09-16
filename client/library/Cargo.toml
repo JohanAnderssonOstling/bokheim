@@ -1,0 +1,36 @@
+[package]
+name = "client-library"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["audiobook-metadata"]
+audiobook-metadata = ["dep:book-metadata"]
+scanner = []
+
+[dependencies]
+pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
+publication-enrichment = { path = "../../shared/publication-enrichment" }
+publication-inspection = { path = "../../shared/publication-inspection" }
+book-metadata = { path = "../book-metadata", optional = true }
+catalog-model = { path = "../../shared/catalog-model" }
+include-sqlite-sql = "0.2.1"
+library-model = { path = "../library-model", default-features = false }
+library-replica = { path = "../library-replica", default-features = false }
+log = "0.4"
+metadata-contract = { path = "../../shared/metadata-contract" }
+rusqlite = { version = "0.40.0", features = ["functions", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+subject-projection = { path = "../../shared/subject-projection" }
+sync-common = { path = "../../shared/sync-common", default-features = false }
+taxonomy-contract = { path = "../../shared/taxonomy-contract" }
+uuid = { version = "1", default-features = false, features = ["serde", "v4", "js"] }
+web-time = "1"
+
+[dev-dependencies]
+rusqlite = { version = "0.40.0", features = ["hooks", "trace"] }
+test-support = { path = "../test-support" }
+tempfile = "3"

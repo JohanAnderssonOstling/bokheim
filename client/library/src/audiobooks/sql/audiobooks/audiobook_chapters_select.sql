@@ -1,0 +1,1 @@
+SELECT chapters_json FROM audiobook_metadata WHERE content_hash=?1

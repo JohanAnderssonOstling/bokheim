@@ -1,0 +1,1 @@
+SELECT status<>'failed' FROM external_metadata_attempt WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND provider_id=?2

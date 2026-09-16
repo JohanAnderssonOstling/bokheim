@@ -1,0 +1,1 @@
+SELECT DISTINCT route.path FROM book_unified_concept assignment JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id WHERE assignment.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY route.path COLLATE NOCASE,route.path

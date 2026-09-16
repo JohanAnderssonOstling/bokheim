@@ -1,0 +1,1 @@
+SELECT count(*) FROM main.sqlite_schema WHERE name=?1

@@ -1,0 +1,1 @@
+SELECT COALESCE(title,'Untitled'),author FROM book_cards WHERE content_hash=?1

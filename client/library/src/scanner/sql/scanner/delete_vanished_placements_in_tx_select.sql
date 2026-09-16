@@ -1,0 +1,1 @@
+SELECT b.content_hash,bd.dir_id FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND bd.is_downloaded=1 AND bd.local_hash!='' AND bd.last_scan>0 AND (?1-bd.last_scan)>=?2

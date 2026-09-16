@@ -1,0 +1,1 @@
+DELETE FROM local_file_work WHERE content_hash=?1 AND operation='restore'

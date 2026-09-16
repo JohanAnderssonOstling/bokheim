@@ -1,0 +1,1 @@
+INSERT INTO subject_browse_count SELECT ?1,COUNT(*) FROM subject_browse_member WHERE path=?1 ON CONFLICT(path) DO UPDATE SET book_count=excluded.book_count

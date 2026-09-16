@@ -1,0 +1,1 @@
+INSERT INTO book(content_hash, added_at, format) VALUES (?1, 1, ?2)

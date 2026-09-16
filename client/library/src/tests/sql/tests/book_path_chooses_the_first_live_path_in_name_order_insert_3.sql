@@ -1,0 +1,1 @@
+INSERT INTO book_dir(book_row_id,dir_id,file_name,local_hash) SELECT row_id,?1,'book.epub','' FROM book WHERE content_hash=?2

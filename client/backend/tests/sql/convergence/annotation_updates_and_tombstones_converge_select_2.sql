@@ -1,0 +1,1 @@
+SELECT deleted_at IS NOT NULL FROM annotation WHERE id=?1

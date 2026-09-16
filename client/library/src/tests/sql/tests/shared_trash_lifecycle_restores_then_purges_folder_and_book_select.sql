@@ -1,0 +1,1 @@
+SELECT intent_lifecycle FROM dir WHERE id=?1

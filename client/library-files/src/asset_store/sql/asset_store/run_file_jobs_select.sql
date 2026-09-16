@@ -1,0 +1,1 @@
+SELECT content_hash FROM local_purge_work WHERE content_hash>?1 ORDER BY content_hash LIMIT 32

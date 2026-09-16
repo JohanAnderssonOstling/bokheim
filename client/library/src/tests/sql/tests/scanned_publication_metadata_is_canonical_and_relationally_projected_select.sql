@@ -1,0 +1,1 @@
+SELECT publication_metadata FROM book WHERE content_hash=printf('%064x',1)

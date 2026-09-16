@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM dir WHERE name='Old' AND deleted_at IS NULL

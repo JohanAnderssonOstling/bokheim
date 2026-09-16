@@ -1,0 +1,1 @@
+INSERT INTO local_thumbnail_work VALUES('book','ready')

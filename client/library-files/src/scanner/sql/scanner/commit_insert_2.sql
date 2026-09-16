@@ -1,0 +1,1 @@
+INSERT INTO local_file_projection(content_hash,dir_id,relative_path) SELECT b.content_hash,bd.dir_id,?3 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=?1 AND bd.file_name=?2 AND bd.deleted_at IS NULL AND b.deleted_at IS NULL ON CONFLICT(content_hash,dir_id) DO UPDATE SET relative_path=excluded.relative_path WHERE relative_path!=excluded.relative_path

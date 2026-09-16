@@ -1,0 +1,1 @@
+SELECT policy FROM audible_enrichment_jobs

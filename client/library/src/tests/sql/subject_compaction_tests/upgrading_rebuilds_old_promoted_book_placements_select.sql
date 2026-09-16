@@ -1,0 +1,1 @@
+SELECT built_revision FROM subject_browse_state

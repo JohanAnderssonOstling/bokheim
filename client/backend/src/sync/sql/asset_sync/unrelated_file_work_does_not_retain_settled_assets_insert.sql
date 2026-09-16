@@ -1,0 +1,1 @@
+INSERT INTO local_directory_work(dir_id) VALUES('unrelated-unavailable-directory')

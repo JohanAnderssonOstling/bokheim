@@ -1,0 +1,1 @@
+SELECT parent_id,deleted_at IS NULL AND purged_at IS NULL FROM dir WHERE id=?1

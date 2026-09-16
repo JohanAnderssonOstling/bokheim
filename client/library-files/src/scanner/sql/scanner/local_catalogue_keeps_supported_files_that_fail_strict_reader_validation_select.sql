@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM book_dir WHERE file_name = 'legacy.epub' AND deleted_at IS NULL

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM subject_browse_dirty_book)

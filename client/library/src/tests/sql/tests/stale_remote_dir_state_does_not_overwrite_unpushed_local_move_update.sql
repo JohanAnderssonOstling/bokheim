@@ -1,0 +1,1 @@
+UPDATE dir SET name='LocalNew' WHERE id=?1

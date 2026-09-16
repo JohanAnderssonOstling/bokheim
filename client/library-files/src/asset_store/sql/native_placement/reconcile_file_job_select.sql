@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1 AND id<?2)

@@ -1,0 +1,1 @@
+SELECT revision,tree_revision,built_revision FROM subject_browse_state

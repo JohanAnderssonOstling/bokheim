@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL)

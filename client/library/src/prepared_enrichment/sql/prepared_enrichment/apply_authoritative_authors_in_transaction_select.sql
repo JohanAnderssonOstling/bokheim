@@ -1,0 +1,1 @@
+SELECT ai.stable_id,bc.name,bc.sort_name,bc.role FROM book_contributor bc JOIN author_identity ai ON ai.id=bc.author_identity_id WHERE bc.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND bc.role<>X'617574' ORDER BY bc.position

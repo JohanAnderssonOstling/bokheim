@@ -1,0 +1,1 @@
+INSERT INTO remote_asset VALUES('thumbnail','book')

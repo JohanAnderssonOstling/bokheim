@@ -1,0 +1,1 @@
+DELETE FROM audible_enrichment_jobs WHERE content_hash=?1

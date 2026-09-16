@@ -1,0 +1,1 @@
+UPDATE book_dir SET last_scan=?2 WHERE dir_id=?1 AND deleted_at IS NULL

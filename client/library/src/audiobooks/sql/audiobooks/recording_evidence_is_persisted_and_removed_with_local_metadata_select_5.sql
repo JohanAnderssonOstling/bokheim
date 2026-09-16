@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM audible_enrichment_jobs

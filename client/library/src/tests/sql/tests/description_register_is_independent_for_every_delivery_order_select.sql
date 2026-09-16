@@ -1,0 +1,1 @@
+SELECT b.title,d.description FROM book b JOIN book_description d ON d.book_row_id=b.row_id WHERE b.content_hash=?1

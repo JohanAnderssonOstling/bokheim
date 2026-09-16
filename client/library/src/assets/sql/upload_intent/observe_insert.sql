@@ -1,0 +1,1 @@
+INSERT INTO local_book_versions(content_hash,checksum,size_bytes,origin) VALUES(?1,?2,?3,?4) ON CONFLICT(content_hash,checksum) DO NOTHING

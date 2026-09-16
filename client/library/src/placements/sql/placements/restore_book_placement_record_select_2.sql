@@ -1,0 +1,1 @@
+SELECT COALESCE(NULLIF(title,''),content_hash) FROM book WHERE content_hash=?1

@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM local_file_work

@@ -1,0 +1,1 @@
+INSERT INTO local_file_work VALUES(4,'restore',?1,'/obsolete.epub')

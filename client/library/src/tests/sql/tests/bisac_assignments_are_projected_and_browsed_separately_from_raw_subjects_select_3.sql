@@ -1,0 +1,1 @@
+SELECT unified_path FROM subject_code_mapping WHERE source_system_id='bisac' AND source_code='HIS000000'

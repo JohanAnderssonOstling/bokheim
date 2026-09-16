@@ -1,0 +1,1 @@
+CREATE TABLE sync_outbox(id INTEGER PRIMARY KEY); INSERT INTO sync_outbox VALUES(1);

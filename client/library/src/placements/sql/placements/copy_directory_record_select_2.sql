@@ -1,0 +1,1 @@
+SELECT name FROM dir WHERE parent_id=?1 AND deleted_at IS NULL

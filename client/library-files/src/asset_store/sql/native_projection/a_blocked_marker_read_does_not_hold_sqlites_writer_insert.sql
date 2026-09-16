@@ -1,0 +1,1 @@
+INSERT INTO sync_metadata(key,value) VALUES('unrelated-write','ok')

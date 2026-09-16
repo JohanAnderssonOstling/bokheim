@@ -1,0 +1,1 @@
+SELECT id FROM dir WHERE name='Shelf' AND deleted_at IS NULL

@@ -1,0 +1,1 @@
+CREATE TEMP TRIGGER fail_recovery BEFORE INSERT ON main.sync_outbox WHEN (SELECT COUNT(*) FROM sync_outbox)>0 BEGIN SELECT RAISE(ABORT,'test failure'); END;

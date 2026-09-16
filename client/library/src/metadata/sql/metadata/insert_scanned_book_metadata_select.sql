@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)

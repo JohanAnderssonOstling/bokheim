@@ -1,0 +1,1 @@
+UPDATE book SET title=NULL,description_scanned=0,publication_metadata=X'',format='',hidden_at=NULL,read_pos=NULL,read_progress=0,added_at=NULL,trash_origin_dir_id=NULL WHERE row_id=?1

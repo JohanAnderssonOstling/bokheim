@@ -1,0 +1,1 @@
+SELECT MIN(rejected_at+300) FROM rejected_asset_upload WHERE rejected_at+300>unixepoch()

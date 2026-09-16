@@ -1,0 +1,1 @@
+SELECT r.path FROM library_subject r JOIN subject_browse_count c ON c.path=r.path WHERE r.parent_path=?1 AND r.path!=?1 AND c.book_count>0

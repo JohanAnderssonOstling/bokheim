@@ -1,0 +1,1 @@
+SELECT origin FROM local_publication_current ORDER BY origin

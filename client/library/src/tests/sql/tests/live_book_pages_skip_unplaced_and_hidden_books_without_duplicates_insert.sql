@@ -1,0 +1,1 @@
+INSERT INTO dir(id,parent_id,name,deleted_at) VALUES(?1,?2,'Hidden',1)

@@ -1,0 +1,16 @@
+CREATE TABLE dir(id TEXT PRIMARY KEY,parent_id TEXT,deleted_at INTEGER);
+            CREATE TABLE book(row_id INTEGER PRIMARY KEY,content_hash TEXT UNIQUE);
+            CREATE TABLE book_dir(dir_id TEXT,book_row_id INTEGER,is_downloaded INTEGER,deleted_at INTEGER);
+            CREATE TABLE remote_asset(kind TEXT,hash TEXT,PRIMARY KEY(kind,hash));
+            CREATE TABLE local_book_upload(id INTEGER PRIMARY KEY,content_hash TEXT UNIQUE);
+            CREATE TABLE local_thumbnail_source(content_hash TEXT PRIMARY KEY,origin TEXT);
+            INSERT INTO local_thumbnail_source VALUES('book','local');
+            CREATE TABLE rejected_asset_upload(kind TEXT,hash TEXT,rejected_at INTEGER,PRIMARY KEY(kind,hash));
+            CREATE TABLE local_thumbnail_work(content_hash TEXT PRIMARY KEY,state TEXT);
+            CREATE TABLE download_requests(target_kind TEXT,origin TEXT);
+            INSERT INTO dir VALUES('00000000-0000-0000-0000-000000000000',NULL,NULL);
+            INSERT INTO dir VALUES('shelf','00000000-0000-0000-0000-000000000000',NULL);
+            INSERT INTO book VALUES(1,'book');
+            INSERT INTO book_dir VALUES('shelf',1,1,NULL);
+            INSERT INTO remote_asset VALUES('book','book');
+            INSERT INTO local_thumbnail_work VALUES('book','no_cover');

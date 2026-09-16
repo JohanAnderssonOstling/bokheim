@@ -1,0 +1,1 @@
+UPDATE local_thumbnail_work SET state='pending'

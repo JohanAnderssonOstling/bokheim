@@ -1,0 +1,1 @@
+DELETE FROM external_entity_alias WHERE wikidata_id=?1

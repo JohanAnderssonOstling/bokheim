@@ -1,0 +1,1 @@
+UPDATE book_contributor SET author_identity_id=?1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2) AND position=?3 AND role=X'617574'

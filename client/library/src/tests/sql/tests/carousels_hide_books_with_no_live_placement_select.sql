@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM book WHERE content_hash=?1 AND deleted_at IS NULL

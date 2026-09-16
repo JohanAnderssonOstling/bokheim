@@ -1,0 +1,1 @@
+UPDATE book SET deleted_at=1 WHERE content_hash=?1

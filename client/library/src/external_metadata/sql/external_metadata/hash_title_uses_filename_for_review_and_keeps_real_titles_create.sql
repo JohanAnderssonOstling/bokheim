@@ -1,0 +1,1 @@
+CREATE TABLE book(row_id INTEGER,content_hash TEXT); CREATE TABLE book_dir(book_row_id INTEGER,file_name TEXT,deleted_at INTEGER);

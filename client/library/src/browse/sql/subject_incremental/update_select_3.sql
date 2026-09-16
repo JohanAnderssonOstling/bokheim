@@ -1,0 +1,1 @@
+SELECT book_row_id FROM subject_browse_dirty_book

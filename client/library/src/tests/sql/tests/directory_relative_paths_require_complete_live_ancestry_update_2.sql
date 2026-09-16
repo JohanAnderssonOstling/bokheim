@@ -1,0 +1,1 @@
+UPDATE dir SET deleted_at=NULL WHERE id=?1

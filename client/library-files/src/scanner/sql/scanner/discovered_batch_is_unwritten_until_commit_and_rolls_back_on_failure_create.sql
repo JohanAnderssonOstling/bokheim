@@ -1,0 +1,1 @@
+CREATE TRIGGER reject_child BEFORE INSERT ON dir WHEN NEW.name='Child' BEGIN SELECT RAISE(ABORT, 'injected batch failure'); END;

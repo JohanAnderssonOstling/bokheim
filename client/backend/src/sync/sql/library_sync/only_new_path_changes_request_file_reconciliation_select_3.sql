@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM local_directory_work

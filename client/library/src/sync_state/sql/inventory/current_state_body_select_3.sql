@@ -1,0 +1,1 @@
+SELECT bokheim_mutation('directory_lifecycle',id,CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END),CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END FROM dir WHERE id=?1

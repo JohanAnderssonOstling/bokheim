@@ -1,0 +1,1 @@
+SELECT bokheim_mutation('book_lifecycle',content_hash,1,'',X'',X'',0,'',trash_origin_dir_id),1 FROM book WHERE content_hash=?1

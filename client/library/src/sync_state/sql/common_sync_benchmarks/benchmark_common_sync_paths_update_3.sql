@@ -1,0 +1,1 @@
+UPDATE book_description SET description=?1 WHERE book_row_id<=?2

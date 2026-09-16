@@ -1,0 +1,1 @@
+SELECT title FROM book WHERE content_hash=?1 AND deleted_at IS NULL AND hidden_at IS NULL

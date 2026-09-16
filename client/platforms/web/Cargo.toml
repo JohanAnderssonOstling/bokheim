@@ -1,0 +1,27 @@
+[package]
+name = "client-platform-web"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+storage-contract-tests = []
+web-runtime-tests = ["client-platform-runtime/web-runtime-tests"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = "0.3"
+futures-util = "0.3"
+async-channel = "2"
+client-platform-runtime = { path = "../runtime" }
+sync-common = { path = "../../../shared/sync-common" }
+sqlite-wasm-vfs = "0.2.0"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "js"] }
+log = "0.4"
+tokio = { version = "1", features = ["sync"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["WebSocket", "BinaryType", "Url", "File", "RequestInit", "WorkerGlobalScope", "Blob", "MessagePort", "MessageChannel", "MessageEvent", "MessageEventInit", "Event", "EventTarget", "Worker", "SharedWorker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope", "AbortController", "AbortSignal", "Request", "Response", "Headers", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamDefaultController", "Window", "Location", "PageTransitionEvent"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.40.0", features = ["bundled"] }

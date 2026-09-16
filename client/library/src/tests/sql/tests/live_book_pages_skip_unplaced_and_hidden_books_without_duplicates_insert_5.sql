@@ -1,0 +1,1 @@
+INSERT INTO book_dir(book_row_id,dir_id,file_name,deleted_at,local_hash) VALUES(?1,?2,?3,?4,'')

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=?1 AND operation=?2 AND content_hash=?3 AND relative_path=?4)

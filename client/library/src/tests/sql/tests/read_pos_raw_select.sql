@@ -1,0 +1,1 @@
+SELECT read_pos FROM book WHERE content_hash=printf('%064x',1)

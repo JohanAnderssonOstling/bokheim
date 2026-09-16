@@ -1,0 +1,1 @@
+UPDATE dir SET parent_id=?2 WHERE id=?1

@@ -1,0 +1,1 @@
+INSERT INTO sync_metadata (key, value) VALUES ('bound_user_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value

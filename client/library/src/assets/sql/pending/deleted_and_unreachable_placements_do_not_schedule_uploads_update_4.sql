@@ -1,0 +1,1 @@
+UPDATE book_dir SET deleted_at=NULL; UPDATE dir SET deleted_at=NULL,parent_id='00000000-0000-0000-0000-000000000000' WHERE id='shelf';

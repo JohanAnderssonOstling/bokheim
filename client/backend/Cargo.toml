@@ -32,7 +32,7 @@ pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
 publication-enrichment = { path = "../../shared/publication-enrichment" }
 publication-inspection = { path = "../../shared/publication-inspection" }
 publication-identity = { path = "../../shared/publication-identity" }
-book-metadata = { path = "../book-metadata", default-features = false, features = ["native-formats"] }
+book-metadata = { path = "../book-metadata" }
 device-sqlite = { path = "../device-sqlite" }
 account-contract = { path = "../../shared/account-contract" }
 asset-transfer = { path = "../sync/asset-transfer" }

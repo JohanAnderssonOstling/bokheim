@@ -1,0 +1,1 @@
+SELECT subject_path FROM book_subject_assignment WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)) ORDER BY subject_path

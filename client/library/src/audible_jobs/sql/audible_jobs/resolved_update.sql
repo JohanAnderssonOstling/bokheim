@@ -1,0 +1,2 @@
+UPDATE audible_enrichment_jobs SET status=?3,response_json=?4,retry_at=?5,claim_token=NULL,lease_until=NULL,updated_at=?6
+        WHERE content_hash=?1 AND claim_token=?2 AND status='resolving' AND lease_until>?6

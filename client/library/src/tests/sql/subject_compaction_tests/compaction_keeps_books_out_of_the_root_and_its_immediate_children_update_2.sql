@@ -1,0 +1,1 @@
+UPDATE curated.unified_concept_route SET path='Subject / ' || path, parent_path=CASE WHEN parent_path='' THEN 'Subject' ELSE 'Subject / ' || parent_path END

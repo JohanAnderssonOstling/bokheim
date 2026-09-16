@@ -1,0 +1,1 @@
+SELECT name FROM dir WHERE id = ?1

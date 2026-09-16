@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM rejected_asset_upload WHERE hash=?1 AND rejected_at>unixepoch()-300)

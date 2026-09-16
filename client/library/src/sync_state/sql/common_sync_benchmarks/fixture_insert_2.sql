@@ -1,0 +1,1 @@
+INSERT INTO book_description SELECT row_id,?1 FROM book

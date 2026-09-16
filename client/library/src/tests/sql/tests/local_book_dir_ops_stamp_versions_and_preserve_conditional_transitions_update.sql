@@ -1,0 +1,1 @@
+UPDATE book_dir SET deleted_at=1 WHERE file_name='f.epub'

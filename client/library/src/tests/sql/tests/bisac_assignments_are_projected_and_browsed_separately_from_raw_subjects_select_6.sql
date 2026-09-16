@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM book_unified_concept WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1))

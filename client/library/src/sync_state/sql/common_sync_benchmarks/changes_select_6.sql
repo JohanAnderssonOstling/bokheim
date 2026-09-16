@@ -1,0 +1,1 @@
+SELECT b.row_id,b.purged_at IS NOT NULL FROM json_each(?1) j JOIN book b ON b.content_hash=j.value

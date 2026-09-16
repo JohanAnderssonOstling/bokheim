@@ -1,0 +1,1 @@
+SELECT author_identity.normalized_name, book_contributor.name, book_contributor.sort_name FROM book_contributor JOIN author_identity ON author_identity.id=book_contributor.author_identity_id WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)) ORDER BY position

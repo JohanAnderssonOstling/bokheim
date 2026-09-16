@@ -1,0 +1,1 @@
+SELECT relative_path FROM local_file_projection ORDER BY content_hash

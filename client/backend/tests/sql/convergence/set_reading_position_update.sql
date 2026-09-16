@@ -1,0 +1,1 @@
+UPDATE book SET read_pos=?2 WHERE content_hash=?1

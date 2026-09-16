@@ -1,0 +1,1 @@
+CREATE TABLE saved_data(value TEXT); INSERT INTO saved_data VALUES('keep');

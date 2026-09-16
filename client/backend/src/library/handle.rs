@@ -120,7 +120,7 @@ impl LibraryActor {
             }
             LibraryActorCommand::Control(LibraryControl::SetDisplayName { name }) => {
                 let result = (|| -> Result<(), BackendError> {
-                    client_library::sync_state::set_sync_metadata(&self.session.db.get()?, "remote_library_name", &name)?;
+                    self.session.db.set_remote_library_name(&name)?;
                     Ok(())
                 })();
                 if let Err(error) = result {
@@ -129,7 +129,7 @@ impl LibraryActor {
             }
             LibraryActorCommand::Control(LibraryControl::Rename { name }) => {
                 let result = (|| -> Result<(), BackendError> {
-                    client_library::sync_state::set_sync_metadata(&self.session.db.get()?, "remote_library_name", &name)?;
+                    self.session.db.set_remote_library_name(&name)?;
                     Ok(())
                 })();
                 if let Err(error) = result {
@@ -153,7 +153,7 @@ pub(crate) struct LibraryHandle {
     subscriptions: LibraryEventSubscriptions,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum LibraryControl {
     WakeSync { refresh_remote: bool },
     WakeAssets,
@@ -295,12 +295,11 @@ impl LibraryHandle {
     }
 }
 
-#[derive(Default)]
 impl LibrarySession {
     /// Combines library-owned durable sync details with the application-owned
     /// account/discovery snapshot for settings presentation.
     fn sync_status(&self, library_name: String, account: Option<&account_client::Session>, fallback_server_url: &str, remote_present: Option<bool>) -> Result<crate::LibrarySyncStatus, BackendError> {
-        let (bound_user_id, sync_details) = client_library::sync_state::stored_sync_status(&self.db.get()?)?;
+        let (bound_user_id, sync_details) = self.db.stored_sync_status()?;
         let (state, server_url, account_id) = match account {
             None if bound_user_id.is_none() => (crate::LibrarySyncState::LocalOnly, None, None),
             None => (crate::LibrarySyncState::SignInRequired, Some(fallback_server_url.to_owned()), bound_user_id),

@@ -1,0 +1,1 @@
+UPDATE audiobook_metadata SET chapter_count=?2,chapter_source='audnexus',chapters_json=?3 WHERE content_hash=?1

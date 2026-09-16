@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='local_blob'

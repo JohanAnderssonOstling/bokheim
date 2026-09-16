@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book_subject WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1))

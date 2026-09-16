@@ -1,0 +1,1 @@
+DELETE FROM audiobook_metadata WHERE content_hash=?1

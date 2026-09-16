@@ -1,0 +1,1 @@
+UPDATE book_dir SET is_downloaded=1 WHERE dir_id=?1 AND book_row_id=?2

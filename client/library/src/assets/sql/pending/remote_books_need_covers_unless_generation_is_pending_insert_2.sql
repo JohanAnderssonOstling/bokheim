@@ -1,0 +1,1 @@
+INSERT INTO download_requests VALUES('book','user_initiated')

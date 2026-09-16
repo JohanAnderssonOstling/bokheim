@@ -1,0 +1,1 @@
+SELECT content_hash,retry_after FROM local_thumbnail_work WHERE state='pending' AND content_hash>?1 ORDER BY content_hash LIMIT 32

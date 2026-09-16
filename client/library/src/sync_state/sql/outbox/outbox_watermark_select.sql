@@ -1,0 +1,1 @@
+SELECT COALESCE(MAX(replica_seq),0) FROM sync_outbox

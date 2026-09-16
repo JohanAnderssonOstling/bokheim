@@ -1,0 +1,1 @@
+SELECT mutation_id FROM sync_outbox WHERE state_kind='reading_position' AND state_key=?1

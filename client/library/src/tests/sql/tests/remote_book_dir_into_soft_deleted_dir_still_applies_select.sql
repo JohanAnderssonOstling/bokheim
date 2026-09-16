@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1)) AND dir_id=?1 AND file_name=printf('%064x',1) AND deleted_at IS NULL

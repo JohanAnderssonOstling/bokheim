@@ -1,0 +1,1 @@
+UPDATE dir SET parent_id='missing' WHERE id='shelf'

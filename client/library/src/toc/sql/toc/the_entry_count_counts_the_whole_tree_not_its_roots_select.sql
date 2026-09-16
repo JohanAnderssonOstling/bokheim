@@ -1,0 +1,1 @@
+SELECT entry_count FROM book_toc WHERE content_hash=?1

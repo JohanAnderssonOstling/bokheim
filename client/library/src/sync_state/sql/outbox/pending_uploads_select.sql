@@ -1,0 +1,1 @@
+SELECT content_hash FROM local_book_upload

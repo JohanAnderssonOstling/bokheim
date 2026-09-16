@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM local_thumbnail_work WHERE state='pending')

@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM sync_outbox WHERE state_kind IN ('placement','book_lifecycle')

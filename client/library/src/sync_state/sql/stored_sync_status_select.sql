@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sync_metadata' AND type='table')

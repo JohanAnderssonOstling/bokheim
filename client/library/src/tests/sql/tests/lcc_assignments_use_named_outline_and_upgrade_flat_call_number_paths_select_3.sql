@@ -1,0 +1,1 @@
+SELECT version FROM subject_system WHERE id='lcc'

@@ -1,0 +1,1 @@
+SELECT count(*) FROM book_subject_code

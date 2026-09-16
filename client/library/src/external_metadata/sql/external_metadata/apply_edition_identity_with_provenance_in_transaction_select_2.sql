@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book_identifier WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND scheme='isbn' AND canonical_value IS NOT NULL)

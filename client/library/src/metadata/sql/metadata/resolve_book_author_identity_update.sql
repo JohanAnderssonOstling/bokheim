@@ -1,0 +1,1 @@
+UPDATE author_identity SET stable_id=?1 WHERE id=?2

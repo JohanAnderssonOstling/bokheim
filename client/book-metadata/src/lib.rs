@@ -1,34 +1,27 @@
 //! Extracts typed book and audiobook metadata without application or database state.
 
-#[cfg(feature = "native-formats")]
 use library_model::BookFormat;
 use library_model::{BookMetadataState, Contributor, PublicationMetadataError, AUTHOR_MARC_RELATOR_CODE};
-#[cfg(feature = "native-formats")]
 use std::collections::HashSet;
-#[cfg(feature = "native-formats")]
 use std::io::{Read, Seek};
 use std::path::Path;
-#[cfg(feature = "native-formats")]
 use std::time::Duration;
 
 mod identity;
 
 pub use identity::{edition_identity_evidence, isbn_from_filename_like_title, EditionIdentityEvidence};
 
-#[cfg(feature = "native-formats")]
 pub use audiobook_library::ChapterOrigin;
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[cfg(feature = "native-formats")]
 pub struct AudiobookChapterMetadata {
     pub title: String,
     pub start_ms: u64,
     pub end_ms: u64,
 }
 
-#[cfg(feature = "native-formats")]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AudiobookMetadata {
     pub title: String,
@@ -41,7 +34,6 @@ pub struct AudiobookMetadata {
     pub recording: metadata_contract::audible::RecordingEvidence,
 }
 
-#[cfg(feature = "native-formats")]
 impl AudiobookMetadata {
     /// Original recording evidence used for lookup and enrichment invalidation.
     pub fn audible_lookup_request(&self) -> metadata_contract::audible::LookupRequest {
@@ -60,7 +52,6 @@ impl AudiobookMetadata {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(feature = "native-formats")]
 pub struct M4bMetadata {
     pub title: String,
     pub authors: Vec<String>,
@@ -71,7 +62,6 @@ pub struct M4bMetadata {
     pub recording: metadata_contract::audible::RecordingEvidence,
 }
 
-#[cfg(feature = "native-formats")]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct InspectedBook {
     #[serde(default)]
@@ -92,13 +82,11 @@ pub use publication_inspection::{inspect_epub, inspect_epub_reader, inspect_pdf,
 
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 /// metadata receive a title derived from the file name.
-#[cfg(feature = "native-formats")]
 pub fn inspect_book(path: &Path, format: BookFormat) -> MetadataResult<InspectedBook> {
     inspect_book_reader(path, format, std::fs::File::open(path)?)
 }
 
 /// Inspects a seekable publication using the same validation on every platform.
-#[cfg(feature = "native-formats")]
 pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static) -> MetadataResult<InspectedBook> {
     let mut pdf = None;
     let reader = if format == BookFormat::Pdf {
@@ -128,7 +116,6 @@ pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl 
 }
 
 /// Inspects picker or network bytes through the shared reader contract.
-#[cfg(feature = "native-formats")]
 pub fn inspect_book_bytes(source_name: &str, format: BookFormat, bytes: Vec<u8>) -> MetadataResult<InspectedBook> {
     inspect_book_reader(Path::new(source_name), format, std::io::Cursor::new(bytes))
 }
@@ -139,7 +126,6 @@ pub fn inspect_book_bytes(source_name: &str, format: BookFormat, bytes: Vec<u8>)
 /// strict validation. A scanner must still index a supported local file when
 /// its embedded metadata is malformed or unavailable, so it falls back to the
 /// filename and leaves format validation to the eventual open operation.
-#[cfg(feature = "native-formats")]
 pub fn inspect_book_for_catalogue(path: &Path, format: BookFormat) -> InspectedBook {
     inspect_book(path, format).unwrap_or_else(|_| InspectedBook { metadata: fallback_metadata(path), audiobook: None, toc: Vec::new(), pdf: None })
 }
@@ -155,7 +141,6 @@ fn author_credit(name: String, sort_name: Option<String>) -> Result<Contributor,
     Contributor::new(name, sort_name, AUTHOR_MARC_RELATOR_CODE)
 }
 
-#[cfg(feature = "native-formats")]
 fn m4b_metadata_from_tag(tag: mp4ameta::Tag) -> MetadataResult<M4bMetadata> {
     // An empty title here is intentional: `normalize_with_filename` supplies a
     // proper title from the source filename, more thoroughly than a bare stem.
@@ -172,19 +157,16 @@ fn m4b_metadata_from_tag(tag: mp4ameta::Tag) -> MetadataResult<M4bMetadata> {
     Ok(M4bMetadata { title, authors, description, duration, chapters, chapter_origin, recording })
 }
 
-#[cfg(feature = "native-formats")]
 fn audiobook_metadata_from(tag: mp4ameta::Tag) -> MetadataResult<AudiobookMetadata> {
     audiobook_metadata_from_m4b(m4b_metadata_from_tag(tag)?)
 }
 
-#[cfg(feature = "native-formats")]
 fn audiobook_metadata_from_m4b(metadata: M4bMetadata) -> MetadataResult<AudiobookMetadata> {
     let authors = metadata.authors.into_iter().map(|author| author_credit(author, None)).collect::<Result<Vec<_>, _>>()?;
     let chapters = metadata.chapters.into_iter().map(|chapter| AudiobookChapterMetadata { title: chapter.title, start_ms: duration_ms(chapter.start), end_ms: duration_ms(chapter.end) }).collect();
     Ok(AudiobookMetadata { title: metadata.title, authors, description: metadata.description, duration_ms: duration_ms(metadata.duration), chapters, chapter_origin: metadata.chapter_origin, recording: metadata.recording })
 }
 
-#[cfg(feature = "native-formats")]
 fn recording_publication(evidence: &metadata_contract::audible::RecordingEvidence) -> MetadataResult<library_model::PublicationMetadata> {
     use library_model::{Identifier, Scheme, Scope};
     let mut publication = library_model::PublicationMetadata::default();
@@ -200,7 +182,6 @@ fn recording_publication(evidence: &metadata_contract::audible::RecordingEvidenc
     Ok(publication)
 }
 
-#[cfg(feature = "native-formats")]
 fn recording_evidence(tag: &mp4ameta::Tag, authors: &[String]) -> metadata_contract::audible::RecordingEvidence {
     fn values(tag: &mp4ameta::Tag, names: &[&str]) -> Vec<String> {
         let mut values = Vec::new();
@@ -239,7 +220,6 @@ fn recording_evidence(tag: &mp4ameta::Tag, authors: &[String]) -> metadata_contr
 /// where a producer puts whichever name it considers the performer — sometimes
 /// the writer, sometimes the narrator. Where it is absent the older order
 /// stands: artist, then album artist.
-#[cfg(feature = "native-formats")]
 fn m4b_authors(tag: &mp4ameta::Tag) -> Vec<String> {
     let mut authors = freeform_values(tag, &["AUTHOR", "author"]);
     if authors.is_empty() {
@@ -255,7 +235,6 @@ fn m4b_authors(tag: &mp4ameta::Tag) -> Vec<String> {
 
 /// Non-empty values of one or more freeform iTunes atoms, in the order asked
 /// for and without repeats.
-#[cfg(feature = "native-formats")]
 fn freeform_values(tag: &mp4ameta::Tag, names: &[&str]) -> Vec<String> {
     let mut values: Vec<String> = Vec::new();
     for name in names {
@@ -269,23 +248,16 @@ fn freeform_values(tag: &mp4ameta::Tag, names: &[&str]) -> Vec<String> {
     values
 }
 
-#[cfg(feature = "native-formats")]
-fn explicit_narrator(tag: &mp4ameta::Tag) -> Option<String> {
-    freeform_values(tag, &["NARRATOR", "narrator"]).into_iter().next()
-}
-
 /// `composer` is the usual home for a narrator in audiobooks that carry no
 /// freeform atom — but a good many files repeat the author there instead, so it
 /// is only believed when it names somebody else. Reading it unconditionally
 /// would credit an author as their own narrator.
-#[cfg(feature = "native-formats")]
 fn composer_narrator(tag: &mp4ameta::Tag, authors: &[String]) -> Option<String> {
     let composer = tag.composers().map(str::trim).find(|value| !value.is_empty())?;
     let repeats_an_author = authors.iter().any(|author| author.eq_ignore_ascii_case(composer));
     (!repeats_an_author).then(|| composer.to_owned())
 }
 
-#[cfg(feature = "native-formats")]
 fn normalize_m4b_chapters(embedded: &[mp4ameta::Chapter], duration: Duration) -> (Vec<audiobook_library::AudiobookChapter>, ChapterOrigin) {
     let full_audiobook = || vec![audiobook_library::AudiobookChapter { title: "Full audiobook".to_owned(), start: Duration::ZERO, end: duration }];
     let mut normalized = embedded.iter().filter(|chapter| chapter.start < duration).map(|chapter| (chapter.start, (!chapter.title.trim().is_empty()).then(|| chapter.title.trim().to_owned()))).collect::<Vec<_>>();
@@ -307,7 +279,6 @@ fn normalize_m4b_chapters(embedded: &[mp4ameta::Chapter], duration: Duration) ->
     (chapters, ChapterOrigin::EmbeddedM4b)
 }
 
-#[cfg(feature = "native-formats")]
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -316,12 +287,10 @@ fn duration_ms(duration: Duration) -> u64 {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "native-formats")]
     fn chapter(title: &str, start: u64, end: u64) -> audiobook_library::AudiobookChapter {
         audiobook_library::AudiobookChapter { title: title.to_owned(), start: Duration::from_secs(start), end: Duration::from_secs(end) }
     }
 
-    #[cfg(feature = "native-formats")]
     #[test]
     fn m4b_chapters_form_a_complete_non_empty_timeline() {
         let embedded = vec![mp4ameta::Chapter::new(Duration::from_secs(50), "  Last  "), mp4ameta::Chapter::new(Duration::from_secs(10), "  "), mp4ameta::Chapter::new(Duration::from_secs(120), "Past end")];
@@ -332,7 +301,6 @@ mod tests {
         assert_eq!(chapters, vec![chapter("Chapter 1", 0, 50), chapter("Last", 50, 100)]);
     }
 
-    #[cfg(feature = "native-formats")]
     #[test]
     fn invalid_m4b_chapters_use_full_book_fallback() {
         let embedded = vec![mp4ameta::Chapter::new(Duration::from_secs(100), "At end"), mp4ameta::Chapter::new(Duration::from_secs(200), "Past end")];
@@ -347,7 +315,6 @@ mod tests {
         assert_eq!(chapters, vec![chapter("Full audiobook", 0, 100)]);
     }
 
-    #[cfg(feature = "native-formats")]
     #[test]
     fn duplicate_m4b_chapter_starts_are_collapsed() {
         let embedded = vec![mp4ameta::Chapter::new(Duration::from_secs(10), "First"), mp4ameta::Chapter::new(Duration::from_secs(10), "Duplicate"), mp4ameta::Chapter::new(Duration::from_secs(60), "Second")];
@@ -358,19 +325,6 @@ mod tests {
         assert_eq!(chapters, vec![chapter("First", 0, 60), chapter("Second", 60, 100)]);
     }
 
-    #[cfg(feature = "native-formats")]
-    #[test]
-    fn m4b_narrator_does_not_relabel_composer() {
-        let mut tag = mp4ameta::Tag::default();
-        tag.set_composer("A composer");
-        assert_eq!(explicit_narrator(&tag), None);
-
-        let narrator = mp4ameta::FreeformIdent::new_static("com.apple.iTunes", "NARRATOR");
-        tag.set_data(narrator, mp4ameta::Data::Utf8("  A narrator  ".to_owned()));
-        assert_eq!(explicit_narrator(&tag).as_deref(), Some("A narrator"));
-    }
-
-    #[cfg(feature = "native-formats")]
     #[test]
     fn catalogue_inspection_falls_back_when_embedded_metadata_is_invalid() {
         let directory = tempfile::tempdir().unwrap();
@@ -384,7 +338,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "native-formats"))]
+#[cfg(test)]
 mod recording_evidence_tests {
     use super::*;
     fn set(tag: &mut mp4ameta::Tag, name: &'static str, value: &str) {
@@ -437,7 +391,7 @@ mod recording_evidence_tests {
 ///
 /// The helpers are exercised directly because a tag's duration comes from the
 /// audio track and cannot be set on a synthetic one.
-#[cfg(all(test, feature = "native-formats"))]
+#[cfg(test)]
 mod m4b_credit_tests {
     use super::*;
 
@@ -447,7 +401,7 @@ mod m4b_credit_tests {
 
     fn narrator(tag: &mp4ameta::Tag) -> Option<String> {
         let authors = m4b_authors(tag);
-        explicit_narrator(tag).or_else(|| composer_narrator(tag, &authors))
+        recording_evidence(tag, &authors).narrators.into_iter().next()
     }
 
     #[test]

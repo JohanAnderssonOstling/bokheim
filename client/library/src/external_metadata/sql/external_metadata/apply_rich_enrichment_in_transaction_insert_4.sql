@@ -1,0 +1,1 @@
+INSERT OR IGNORE INTO external_place_edge(child_id,parent_id,relation) VALUES(?1,?2,?3)

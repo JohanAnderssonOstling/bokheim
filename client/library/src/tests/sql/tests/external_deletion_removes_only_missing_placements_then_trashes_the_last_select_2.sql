@@ -1,0 +1,1 @@
+SELECT read_progress FROM book

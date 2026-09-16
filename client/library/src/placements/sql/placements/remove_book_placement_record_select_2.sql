@@ -1,0 +1,1 @@
+SELECT NOT EXISTS(SELECT 1 FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND dir_id!=?2 AND deleted_at IS NULL)

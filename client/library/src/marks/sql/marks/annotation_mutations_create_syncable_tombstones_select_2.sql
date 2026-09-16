@@ -1,0 +1,1 @@
+SELECT count(*) FROM sync_outbox WHERE state_kind='annotation'

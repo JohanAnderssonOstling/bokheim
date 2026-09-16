@@ -1,0 +1,1 @@
+SELECT (SELECT COUNT(*) FROM book_subject_code WHERE book_row_id=b.row_id) + (SELECT COUNT(*) FROM book_external_entity WHERE book_row_id=b.row_id) FROM book b WHERE content_hash=?1

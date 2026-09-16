@@ -1,0 +1,132 @@
+//! Browser file and worker adapters for the platform-independent staged workflow.
+use crate::{
+    browser_adapter::import_worker::Client,
+    import_journal::{self, Progress},
+    runtime::library_requests,
+    staged_import::{self, Error, Manifest},
+};
+use client_platform_web::transport::import_io::{ImportIo, OpenFile};
+use std::rc::Rc;
+use wasm_bindgen::prelude::*;
+fn error(value: impl ToString) -> JsValue {
+    JsValue::from_str(&value.to_string())
+}
+fn from_js(value: JsValue) -> Error {
+    Error { message: client_platform_web::transport::import_io::error_text(&value), transport: client_platform_web::transport::field(&value, "transport").as_bool().unwrap_or(false) }
+}
+fn to_js(value: Error) -> JsValue {
+    if value.transport {
+        {
+            let error = js_sys::Error::new(&value.message);
+            let _ = js_sys::Reflect::set(&error, &"transport".into(), &true.into());
+            error.into()
+        }
+    } else {
+        error(value.message)
+    }
+}
+pub(crate) type ProgressSink = Rc<dyn Fn(JsValue) -> Result<(), JsValue>>;
+
+struct Reporter {
+    progress: ProgressSink,
+    id: String,
+    name: String,
+}
+impl Reporter {
+    fn emit(&self, phase: staged_import::Phase, counts: Progress, current_file: Option<&str>, failures: Option<&[crate::ImportFailure]>) -> Result<(), JsValue> {
+        let phase = match phase {
+            staged_import::Phase::Copying => "copying",
+            staged_import::Phase::Adding => "adding",
+            staged_import::Phase::Complete => "complete",
+        };
+        let value = crate::browser_adapter::object(&[
+            ("id", self.id.as_str().into()),
+            ("name", self.name.as_str().into()),
+            ("phase", phase.into()),
+            ("totalBytes", (counts.total_bytes as f64).into()),
+            ("copiedBytes", (counts.copied_bytes as f64).into()),
+            ("totalFiles", (counts.total_files as f64).into()),
+            ("copiedFiles", (counts.copied_files as f64).into()),
+            ("processed", (counts.processed as f64).into()),
+            ("failed", (counts.failed as f64).into()),
+        ]);
+        if let Some(file) = current_file {
+            js_sys::Reflect::set(&value, &"currentFile".into(), &file.into())?;
+        }
+        if let Some(failures) = failures {
+            js_sys::Reflect::set(&value, &"failures".into(), &failures_value(failures)?)?;
+        }
+        (self.progress)(value)
+    }
+}
+
+pub(crate) fn failures_value(values: &[crate::ImportFailure]) -> Result<JsValue, JsValue> {
+    js_sys::JSON::parse(&serde_json::to_string(values).map_err(error)?)
+}
+
+pub(crate) fn recover(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValue> {
+    if import_journal::replay(journal).map_err(error)?.completed.is_some() {
+        return Ok(JsValue::UNDEFINED);
+    }
+    let manifest: Manifest = serde_json::from_slice(manifest).map_err(error)?;
+    // One conversion at the worker boundary; no workflow or progress JSON round trips.
+    js_sys::JSON::parse(&serde_json::to_string(&manifest).map_err(error)?)
+}
+
+impl staged_import::FileAccess for OpenFile {
+    fn read(&self) -> Result<Vec<u8>, Error> {
+        self.0.read().map(|bytes| bytes.to_vec()).map_err(from_js)
+    }
+    fn write(&self, bytes: &[u8], offset: u64) -> Result<(), Error> {
+        OpenFile::write(self, bytes, offset).map_err(from_js)
+    }
+    fn truncate(&self, offset: u64) -> Result<(), Error> {
+        self.0.truncate(offset as f64).map_err(from_js)
+    }
+    fn flush(&self) -> Result<(), Error> {
+        self.0.flush().map_err(from_js)
+    }
+}
+impl staged_import::Storage for ImportIo {
+    type File = OpenFile;
+    async fn open_file(&self, name: &str) -> Result<OpenFile, Error> {
+        ImportIo::open_file(self, name).await.map_err(from_js)
+    }
+    fn source_metadata(&self, index: u32) -> Result<(u64, f64), Error> {
+        ImportIo::source_metadata(self, index).map_err(from_js)
+    }
+    async fn read_source(&self, index: u32, start: u64, end: u64) -> Result<Vec<u8>, Error> {
+        ImportIo::read_source(self, index, start as f64, end as f64).await.map(|value| value.unchecked_into::<js_sys::Uint8Array>().to_vec()).map_err(from_js)
+    }
+}
+impl staged_import::Library for Client {
+    async fn prepare(&self, activity: uuid::Uuid, manifest: &Manifest) -> Result<crate::library::PreparedDirectoryImport, Error> {
+        self.request(library_requests::PrepareStagedDirectoryImport { activity, job: manifest.id.clone(), parent_id: manifest.parent, name: manifest.create_root.then(|| manifest.name.clone()), directories: manifest.directories.clone() })
+            .await
+            .map_err(from_js)
+    }
+    async fn import(&self, book: staged_import::StagedBook) -> Result<(), Error> {
+        self.request(crate::browser_adapter::requests::library_requests::ImportStagedBook { parent_id: book.parent_id, file_name: book.file_name, physical: book.physical, length: book.length, hash: book.hash })
+            .await
+            .map(|_: crate::ContentHash| ())
+            .map_err(from_js)
+    }
+    async fn advance(&self, command: crate::runtime::LibraryCommand) -> Result<(), Error> {
+        self.request(command).await.map_err(from_js)
+    }
+    async fn finish(&self, activity: uuid::Uuid) -> Result<(), Error> {
+        self.request(library_requests::FinishDirectoryImport { activity }).await.map_err(from_js)
+    }
+    async fn cleanup(&self, job: String, files: u32) -> Result<(), Error> {
+        self.request(crate::browser_adapter::requests::library_requests::CleanupStagedImport { job, files }).await.map_err(from_js)
+    }
+}
+pub(crate) async fn run(job: JsValue, io: ImportIo, client: &Client, progress: ProgressSink) -> Result<Vec<crate::ImportFailure>, JsValue> {
+    let manifest: Manifest = serde_json::from_str(&String::from(js_sys::JSON::stringify(&job)?)).map_err(error)?;
+    staged_import::run(manifest, io, client, move |update| {
+        let reporter = Reporter { progress: progress.clone(), id: update.id, name: update.name };
+        reporter.emit(update.phase, update.counts, update.current_file.as_deref(), update.failures.as_deref()).map_err(from_js)
+    })
+    .await
+    .map_err(to_js)
+}

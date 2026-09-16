@@ -1,0 +1,1 @@
+UPDATE dir SET deleted_at=?2,purged_at=NULL,intent_lifecycle=1 WHERE id=?1

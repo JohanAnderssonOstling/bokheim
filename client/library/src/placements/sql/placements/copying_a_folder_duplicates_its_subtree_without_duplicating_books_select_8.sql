@@ -1,0 +1,1 @@
+SELECT placement_count FROM folder_book_ownership WHERE folder_id=?1

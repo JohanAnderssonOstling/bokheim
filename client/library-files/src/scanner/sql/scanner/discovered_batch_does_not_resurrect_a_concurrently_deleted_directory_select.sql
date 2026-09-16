@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM dir WHERE id IN (?1,?2) AND deleted_at IS NULL

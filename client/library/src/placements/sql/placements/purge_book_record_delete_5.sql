@@ -1,0 +1,1 @@
+DELETE FROM download_requests WHERE target_key=?1

@@ -1,0 +1,1 @@
+INSERT INTO book(content_hash,title,format) VALUES(?1,'PDF','pdf')

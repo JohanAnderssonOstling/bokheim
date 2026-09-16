@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=?1 AND portable_name_key(bd.file_name)=?2 AND b.content_hash!=?3 AND bd.deleted_at IS NULL)

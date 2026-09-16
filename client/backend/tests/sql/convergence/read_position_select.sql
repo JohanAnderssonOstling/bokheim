@@ -1,0 +1,1 @@
+SELECT read_pos FROM book WHERE content_hash=?1

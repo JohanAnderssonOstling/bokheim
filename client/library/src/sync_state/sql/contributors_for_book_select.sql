@@ -1,0 +1,1 @@
+SELECT author_identity_id, name, sort_name, role FROM book_contributor WHERE book_row_id = ?1 ORDER BY position

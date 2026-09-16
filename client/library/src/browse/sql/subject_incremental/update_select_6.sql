@@ -1,0 +1,1 @@
+SELECT book_row_id FROM subject_browse_member WHERE path=?1 AND direct=1

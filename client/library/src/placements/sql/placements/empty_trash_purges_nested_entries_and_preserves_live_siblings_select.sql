@@ -1,0 +1,1 @@
+SELECT purged_at IS NOT NULL FROM dir WHERE id=?1

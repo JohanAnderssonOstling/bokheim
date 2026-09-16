@@ -1,0 +1,2 @@
+INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
+         VALUES ('placement',printf('%064x',1),?1,10,0,?2,1,'00000000-0000-0000-0000-000000000000')

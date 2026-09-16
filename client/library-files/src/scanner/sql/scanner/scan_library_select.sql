@@ -1,0 +1,1 @@
+SELECT content_hash FROM audible_enrichment_jobs WHERE policy=?1

@@ -1,0 +1,1 @@
+SELECT response FROM local_isbn_response WHERE isbn=?1 AND expires_at>CAST(strftime('%s','now') AS INTEGER)

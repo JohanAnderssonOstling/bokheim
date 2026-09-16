@@ -1,0 +1,1 @@
+UPDATE book_dir SET last_scan=?2 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND deleted_at IS NULL

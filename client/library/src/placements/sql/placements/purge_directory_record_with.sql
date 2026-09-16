@@ -1,0 +1,1 @@
+WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 AND deleted_at IS NOT NULL AND purged_at IS NULL UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id) UPDATE dir SET deleted_at=?2,purged_at=?2,intent_lifecycle=2 WHERE id IN (SELECT id FROM subtree)
