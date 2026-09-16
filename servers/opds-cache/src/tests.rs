@@ -68,10 +68,10 @@ fn endpoint(url: String) -> OpdsEndpoint {
 
 fn service(endpoint: OpdsEndpoint, directory: &Path) -> CatalogService {
     let registry = registry_from_endpoints(1, std::slice::from_ref(&endpoint));
-    let cache = CatalogCache::open(directory.join("catalog-cache.db")).unwrap();
-    cache.ensure_source(&opds_catalog_source_id(&endpoint.id), &endpoint.url).unwrap();
-    for process in ["catalogue_crawling", "cover_downloads", "epub_enrichment", "catalogue_enrichment"] {
-        cache.set_process_enabled(process, true).unwrap();
+    let store = CatalogStore::open(directory.join("catalog-cache.db")).unwrap();
+    store.ensure_source(&opds_catalog_source_id(&endpoint.id), &endpoint.url).unwrap();
+    for process in ["catalogue_crawling", "cover_downloads", "enrichment"] {
+        store.set_process_enabled(process, true).unwrap();
     }
     let covers = CatalogCoverCache::new(directory.join("covers")).unwrap();
     CatalogService {
@@ -80,26 +80,27 @@ fn service(endpoint: OpdsEndpoint, directory: &Path) -> CatalogService {
             snapshot: RwLock::new(RegistrySnapshot { observed_bytes: serde_json::to_vec(&registry).unwrap(), registry }),
             endpoints: RwLock::new(vec![endpoint]),
             opds: OpdsClient::new().unwrap(),
-            cache,
+            store,
             covers,
-            cache_write_lock: Mutex::new(()),
+            cover_cache_directory: directory.join("covers"),
+            store_write_lock: Mutex::new(()),
             crawl_locks: Mutex::new(HashMap::new()),
             crawl_progress: Mutex::new(HashMap::new()),
             origin_throttles: Mutex::new(HashMap::new()),
             source_update_locks: Mutex::new(HashMap::new()),
-            recent_browser_covers: Mutex::new(RecentBrowserCovers::default()),
             epub_range_origins: Mutex::new(HashMap::new()),
             background_download_slots: Semaphore::new(BACKGROUND_DOWNLOAD_LIMIT),
             interactive_download_slots: Semaphore::new(MAX_INTERACTIVE_DOWNLOADS),
             queued_download_slots: Semaphore::new(MAX_QUEUED_DOWNLOADS),
             extraction_slots: Semaphore::new(MAX_CONCURRENT_EXTRACTIONS),
             extraction_notify: Notify::new(),
-            processes: CatalogProcessRuntime::new(CatalogProcessSettings { catalogue_crawling: true, cover_downloads: true, epub_enrichment: true, catalogue_enrichment: true }),
+            processes: CatalogProcessRuntime::new(CatalogProcessSettings { catalogue_crawling: true, cover_downloads: true, enrichment: true }),
             acquisition_directory: directory.join("acquisitions"),
             metadata_endpoint: None,
             metadata_client: reqwest::Client::new(),
             metadata_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
             description_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
+            extraction_metrics: CatalogExtractionRuntimeMetrics::default(),
             description_backfill_available: AtomicBool::new(false),
             writer_metrics: StdMutex::new(BTreeMap::new()),
             max_crawl_pages: DEFAULT_MAX_CRAWL_PAGES,
@@ -110,7 +111,7 @@ fn service(endpoint: OpdsEndpoint, directory: &Path) -> CatalogService {
 
 async fn wait_for_successful_extractions(service: &CatalogService, expected: u64) {
     service.resume_pending_epub_extractions().await;
-    let state = service.state.cache.inventory().unwrap().epub_extractions;
+    let state = service.state.store.inventory().unwrap().epub_extractions;
     assert!(
         state.succeeded >= expected,
         "EPUB extraction did not finish: pending={}, running={}, downloading={}, extracting={}, enriching={}, succeeded={}, failed={}",
@@ -164,11 +165,11 @@ async fn first_crawl_publishes_root_before_descendant_traversal_finishes() {
     .unwrap();
     let root = service.page_response(&source_id, CatalogPageRequest { locator: None, supported_languages: Vec::new(), epoch: None, known_publications: Vec::new() }).await.unwrap();
     assert_eq!(root.page.title, "Root");
-    assert_eq!(service.state.cache.inventory().unwrap().sources[0].crawl_status, "running");
+    assert_eq!(service.state.store.inventory().unwrap().sources[0].crawl_status, "running");
 
     release_child.notify_waiters();
     crawl_task.await.unwrap().unwrap();
-    let inventory = service.state.cache.inventory().unwrap();
+    let inventory = service.state.store.inventory().unwrap();
     assert_eq!(inventory.active_page_count, 2);
     assert_eq!(inventory.sources[0].crawl_status, "succeeded");
     upstream_task.abort();
@@ -253,7 +254,7 @@ async fn source_crawl_honors_retry_after_then_recovers() {
     tokio::time::timeout(Duration::from_secs(3), service.crawl_source(&source_id)).await.unwrap().unwrap();
     assert!(started.elapsed() >= Duration::from_millis(900));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(service.state.cache.inventory().unwrap().sources[0].crawl_status, "succeeded");
+    assert_eq!(service.state.store.inventory().unwrap().sources[0].crawl_status, "succeeded");
     task.abort();
 }
 
@@ -335,6 +336,18 @@ fn extracts_subject_and_canonical_isbn_from_epub_once() {
     assert_eq!(saved.book.publication.dates[0].value(), "2024-05-06");
     assert_eq!(saved.toc[0].title, "The Hidden Chapter");
     assert!(extracted.thumbnail.is_none());
+}
+
+#[test]
+fn extracts_local_back_matter_evidence_without_advertised_book_isbn() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("book.epub");
+    std::fs::write(&path, include_bytes!("../../../shared/publication-inspection/tests/fixtures/back-matter-evidence.epub")).unwrap();
+    let extracted = extract_epub_catalog_metadata(&path, false).unwrap();
+    assert_eq!(extracted.isbns, ["9780393243277"]);
+    assert!(extracted.subjects.iter().any(|s| s.code() == Some("Q125 .A12 2023")));
+    let saved = extracted.saved_metadata.unwrap();
+    assert!(saved.book.publication.properties.iter().any(|p| p.source() == "inspection:local:v2"));
 }
 
 #[test]
@@ -433,12 +446,12 @@ fn schedules_epub_mobi_and_pdf_for_the_same_extraction_pipeline() {
 #[test]
 fn startup_reconciliation_removes_sources_no_longer_in_the_registry() {
     let temporary = tempfile::tempdir().unwrap();
-    let cache = CatalogCache::open(temporary.path().join("catalog-cache.db")).unwrap();
+    let cache = CatalogStore::open(temporary.path().join("catalog-cache.db")).unwrap();
     let stale = CatalogSourceId::parse("opds-stale").unwrap();
     cache.ensure_source(&stale, "https://stale.example/opds").unwrap();
     let configured = endpoint("https://example.com/opds".to_owned());
 
-    assert_eq!(reconcile_cached_sources(&cache, std::slice::from_ref(&configured)).unwrap(), vec![stale]);
+    assert_eq!(reconcile_stored_sources(&cache, std::slice::from_ref(&configured), None).unwrap(), vec![stale]);
     let sources = cache.inventory().unwrap().sources;
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].source_id, opds_catalog_source_id(&configured.id));
@@ -485,6 +498,7 @@ async fn missing_embedded_subjects_use_the_client_ambiguous_match_policy() {
             let response = metadata_contract::RichMetadataEnrichmentResponse {
                 snapshot: metadata_contract::SnapshotDescription { dump_date: "2026-08".to_owned(), imported_at_ms: 1 },
                 results: vec![metadata_contract::RichIsbnMetadataResult {
+                    wikidata_books: Vec::new(),
                     requested_isbn: request.isbns[0].clone(),
                     canonical_isbn13: Some("9780821338278".to_owned()),
                     status: LookupStatus::Ambiguous,
@@ -492,7 +506,7 @@ async fn missing_embedded_subjects_use_the_client_ambiguous_match_policy() {
                         metadata_contract::RichWorkMetadataMatch {
                             open_library_work_id: Some("OL1W".to_owned()),
                             exact_edition_ids: vec!["OL1M".to_owned()],
-                            classifications: vec![metadata_contract::Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.9".to_owned(), source: ClassificationSource::ExactEdition }],
+                            classifications: vec![metadata_contract::Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.9".to_owned(), source: ClassificationSource::ExactEdition }],
                             authors: Vec::new(),
                             places: Vec::new(),
                             people: Vec::new(),
@@ -503,7 +517,7 @@ async fn missing_embedded_subjects_use_the_client_ambiguous_match_policy() {
                         metadata_contract::RichWorkMetadataMatch {
                             open_library_work_id: Some("OL2W".to_owned()),
                             exact_edition_ids: vec!["OL2M".to_owned()],
-                            classifications: vec![metadata_contract::Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.9".to_owned(), source: ClassificationSource::Work }],
+                            classifications: vec![metadata_contract::Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.9".to_owned(), source: ClassificationSource::Work }],
                             authors: Vec::new(),
                             places: Vec::new(),
                             people: Vec::new(),
@@ -599,16 +613,12 @@ async fn crawl_enriches_publications_from_temporary_epubs_and_reuses_the_downloa
     assert!(publication.metadata.age_ranges.iter().any(|age| age.value == "12-17"));
     assert_eq!(epub_requests.load(Ordering::SeqCst), 2, "non-range test origin receives one range probe and one full download");
     assert_eq!(std::fs::read_dir(temporary.path().join("acquisitions")).unwrap().count(), 0);
-    let extraction = &catalog_service.state.cache.inventory().unwrap().sources[0].epub_extractions;
+    let extraction = &catalog_service.state.store.inventory().unwrap().sources[0].epub_extractions;
     assert_eq!((extraction.pending, extraction.running, extraction.succeeded, extraction.failed), (0, 0, 1, 0));
     assert_eq!(extraction.attempts, 1);
     assert_eq!(extraction.downloaded_bytes, epub.len() as u64);
-    let stored = catalog_service.state.cache.epub_metadata(&source_id, &format!("http://{address}/one.epub")).unwrap().unwrap();
-    assert_eq!(stored.book.publication.publishers[0].name().as_str(), "Example Press");
-    assert_eq!(stored.book.publication.dates[0].value(), "2024-05-06");
-    assert_eq!(stored.toc[0].title, "The Hidden Chapter");
     let toc_search = catalog_service.search_response(&source_id, CatalogSearchRequest { query: "hidden chapter".to_owned(), supported_languages: vec!["sv".to_owned()], epoch: None, known_publications: Vec::new() }).await.unwrap();
-    assert_eq!(toc_search.toc_matches[0].identity.edition_id, "one");
+    assert_eq!(toc_search.search.toc_matches[0].identity.edition_id, "one");
 
     let image_url = publication.image_url.as_deref().unwrap();
     assert_eq!(image::guess_format(&catalog_service.catalog_cover(&source_id, image_url).await.unwrap()).unwrap(), image::ImageFormat::Jpeg);
@@ -626,7 +636,7 @@ async fn crawl_enriches_publications_from_temporary_epubs_and_reuses_the_downloa
     let restarted = service(endpoint(format!("http://{address}/root")), temporary.path());
     restarted.crawl_source(&source_id).await.unwrap();
     assert_eq!(epub_requests.load(Ordering::SeqCst), 2, "persistent extraction state should prevent a redownload after restart");
-    assert_eq!(restarted.state.cache.inventory().unwrap().epub_extractions.succeeded, 1);
+    assert_eq!(restarted.state.store.inventory().unwrap().epub_extractions.succeeded, 1);
     task.abort();
 }
 
@@ -675,12 +685,12 @@ async fn independent_worker_resumes_a_persisted_pending_extraction() {
         groups: Vec::new(),
         facets: Vec::new(),
         pagination: catalog_model::CatalogPagination::default(),
-        search: None,
     };
-    service.state.cache.put_page(&source_id, &root, &page, None, None).unwrap();
+    let prepared = CatalogStore::prepare_page_writes(vec![CatalogPageWrite { page, etag: None, last_modified: None, provider_paginated: false }]).unwrap();
+    service.state.store.put_prepared_pages(&source_id, &root, &prepared).unwrap();
     service.resume_pending_epub_extractions().await;
 
-    let extraction = &service.state.cache.inventory().unwrap().epub_extractions;
+    let extraction = &service.state.store.inventory().unwrap().epub_extractions;
     assert_eq!((extraction.pending, extraction.running, extraction.succeeded, extraction.failed), (0, 0, 1, 0));
     assert_eq!(requests.load(Ordering::SeqCst), 2, "non-range test origin receives one range probe and one full download");
     task.abort();
@@ -730,7 +740,7 @@ async fn crawl_activates_before_extraction_and_refresh_returns_an_incremental_de
     tokio::time::timeout(Duration::from_secs(1), service.crawl_source(&source_id)).await.expect("crawl waited for EPUB extraction").unwrap();
     let base = service.page_response(&source_id, CatalogPageRequest { locator: None, supported_languages: Vec::new(), epoch: None, known_publications: Vec::new() }).await.unwrap();
     assert_eq!(base.payloads[0].publication.title, "Feed Title");
-    assert_eq!(service.state.cache.inventory().unwrap().sources[0].crawl_status, "succeeded");
+    assert_eq!(service.state.store.inventory().unwrap().sources[0].crawl_status, "succeeded");
     let extraction_service = service.clone();
     let extraction_task = tokio::spawn(async move { extraction_service.resume_pending_epub_extractions().await });
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -819,10 +829,11 @@ async fn crawl_is_atomic_and_search_never_contacts_upstream() {
     service.crawl_source(&source_id).await.unwrap();
     let before_search = requests.load(Ordering::SeqCst);
     let response = service.search_response(&source_id, CatalogSearchRequest { query: "harry".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() }).await.unwrap();
-    assert_eq!(response.title_matches.len(), 1);
-    assert!(response.author_matches.is_empty());
+    assert_eq!(response.search.title_matches.len(), 1);
+    assert!(response.search.author_matches.is_empty());
     assert_eq!(response.payloads.len(), 1);
-    let second = service.search_response(&source_id, CatalogSearchRequest { query: "harry".to_owned(), supported_languages: vec!["en".to_owned()], epoch: Some(response.epoch), known_publications: response.title_matches }).await.unwrap();
+    let second =
+        service.search_response(&source_id, CatalogSearchRequest { query: "harry".to_owned(), supported_languages: vec!["en".to_owned()], epoch: Some(response.epoch), known_publications: response.search.title_matches }).await.unwrap();
     assert!(second.payloads.is_empty());
     assert_eq!(requests.load(Ordering::SeqCst), before_search);
     task.abort();
@@ -877,8 +888,8 @@ async fn replacement_crawl_reuses_cached_leaf_pages_without_fetching_them() {
 
     assert_eq!(root_requests.load(Ordering::SeqCst), 2);
     assert_eq!(leaf_requests.load(Ordering::SeqCst), 1);
-    assert_eq!(service.state.cache.inventory().unwrap().active_page_count, 2);
-    assert_eq!(service.search_response(&source_id, CatalogSearchRequest { query: "one".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().title_matches.len(), 1);
+    assert_eq!(service.state.store.inventory().unwrap().active_page_count, 2);
+    assert_eq!(service.search_response(&source_id, CatalogSearchRequest { query: "one".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().search.title_matches.len(), 1);
     task.abort();
 }
 
@@ -937,11 +948,14 @@ async fn successful_crawl_removes_pages_no_longer_reachable_from_root() {
     let source_id = CatalogSourceId::parse("opds-test").unwrap();
 
     service.crawl_source(&source_id).await.unwrap();
-    assert_eq!(service.search_response(&source_id, CatalogSearchRequest { query: "removed".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().title_matches.len(), 1);
+    assert_eq!(
+        service.search_response(&source_id, CatalogSearchRequest { query: "removed".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().search.title_matches.len(),
+        1
+    );
 
     include_old_page.store(false, Ordering::SeqCst);
     service.crawl_source(&source_id).await.unwrap();
-    assert!(service.search_response(&source_id, CatalogSearchRequest { query: "removed".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().title_matches.is_empty());
+    assert!(service.search_response(&source_id, CatalogSearchRequest { query: "removed".to_owned(), supported_languages: vec!["en".to_owned()], epoch: None, known_publications: Vec::new() },).await.unwrap().search.title_matches.is_empty());
     task.abort();
 }
 
@@ -1119,7 +1133,8 @@ async fn tiny_catalog_and_epub_covers_make_publication_coverless() {
 
 #[tokio::test]
 async fn public_registry_is_uncompressed_binary_and_needs_no_authentication() {
-    let service = CatalogService::bundled().unwrap();
+    let temporary=tempfile::tempdir().unwrap();
+    let service = CatalogService::bundled_with_storage(Some(temporary.path().join("catalog.db")),temporary.path().join("covers")).unwrap();
     let router = app(service);
     let response = router.clone().oneshot(Request::builder().uri("/api/opds/catalogs").header(header::ACCEPT, transport_wire::MEDIA_TYPE).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1127,6 +1142,7 @@ async fn public_registry_is_uncompressed_binary_and_needs_no_authentication() {
     let bytes = to_bytes(response.into_body(), transport_wire::MAX_DECODED_RESPONSE_BYTES).await.unwrap();
     let registry: CatalogRegistry = transport_wire::decode(&bytes, transport_wire::MAX_DECODED_RESPONSE_BYTES).unwrap();
     assert!(!registry.catalogs.is_empty());
+    assert!(registry.catalogs.iter().all(|source| source.id!="office-of-the-historian"));
 
     let response = router.oneshot(Request::builder().uri("/api/catalog/sources").header(header::ACCEPT, transport_wire::MEDIA_TYPE).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1214,10 +1230,9 @@ async fn browser_api_supports_cors_json_browsing_and_validated_acquisitions() {
 
     let request = page.publications[0]
         .actions
-        .iter()
-        .find_map(|action| match action {
-            catalog_model::CatalogPublicationAction::Import { request } => Some(request.clone()),
-            _ => None,
+        .first()
+        .map(|action| match action {
+            catalog_model::CatalogPublicationAction::Import { request } => request.clone(),
         })
         .unwrap();
     let acquisition =
@@ -1264,10 +1279,9 @@ async fn acquisition_waits_for_the_background_extraction_worker() {
     let page = service.browser_page(&source_id, CatalogPageRequest { locator: None, supported_languages: Vec::new(), epoch: None, known_publications: Vec::new() }).await.unwrap();
     let request = page.publications[0]
         .actions
-        .iter()
-        .find_map(|action| match action {
-            CatalogPublicationAction::Import { request } => Some(request.clone()),
-            _ => None,
+        .first()
+        .map(|action| match action {
+            CatalogPublicationAction::Import { request } => request.clone(),
         })
         .unwrap();
 
@@ -1315,8 +1329,7 @@ async fn startup_refresh_activates_every_registered_source_without_hourly_spacin
     let service = service(endpoint(format!("http://{address}/root")), temporary.path());
     service.refresh_all_sources().await;
     wait_for_successful_extractions(&service, 1).await;
-    let source_id = CatalogSourceId::parse("opds-test").unwrap();
-    assert_eq!(service.state.cache.pages(&source_id).unwrap().len(), 1);
+    assert_eq!(service.state.store.inventory().unwrap().sources[0].active_page_count, 1);
     let router = app(service.clone());
     let response = router.clone().oneshot(Request::builder().uri("/api/web/stats").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1340,17 +1353,16 @@ async fn startup_refresh_activates_every_registered_source_without_hourly_spacin
     assert_eq!(response.status(), StatusCode::OK);
     let operations: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
     assert_eq!(operations["extraction_failures"], serde_json::json!([]));
-    assert_eq!(operations["processes"].as_array().unwrap().len(), 4);
-    let pause = operations_router.oneshot(Request::post("/internal/processes/epub_enrichment").header(header::CONTENT_TYPE, "application/json").body(Body::from(r#"{"action":"pause"}"#)).unwrap()).await.unwrap();
+    assert_eq!(operations["processes"].as_array().unwrap().len(), 3);
+    let pause = operations_router.oneshot(Request::post("/internal/processes/enrichment").header(header::CONTENT_TYPE, "application/json").body(Body::from(r#"{"action":"pause"}"#)).unwrap()).await.unwrap();
     assert_eq!(pause.status(), StatusCode::OK);
     let paused: serde_json::Value = serde_json::from_slice(&to_bytes(pause.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert_eq!(paused["process"], "epub_enrichment");
+    assert_eq!(paused["process"], "enrichment");
     assert_eq!(paused["enabled"], false);
-    let settings = service.state.cache.process_settings().unwrap();
+    let settings = service.state.store.process_settings().unwrap();
     assert!(settings.catalogue_crawling);
     assert!(settings.cover_downloads);
-    assert!(!settings.epub_enrichment);
-    assert!(settings.catalogue_enrichment);
+    assert!(!settings.enrichment);
     task.abort();
 }
 
@@ -1358,14 +1370,14 @@ async fn startup_refresh_activates_every_registered_source_without_hourly_spacin
 async fn service_start_pauses_every_administrator_controlled_worker() {
     let temporary = tempfile::tempdir().unwrap();
     let cache_path = temporary.path().join("catalog-cache.db");
-    let cache = CatalogCache::open(&cache_path).unwrap();
-    for process in ["catalogue_crawling", "cover_downloads", "epub_enrichment", "catalogue_enrichment"] {
+    let cache = CatalogStore::open(&cache_path).unwrap();
+    for process in ["catalogue_crawling", "cover_downloads", "enrichment"] {
         cache.set_process_enabled(process, true).unwrap();
     }
     drop(cache);
 
     let service = CatalogService::bundled_with_storage(Some(cache_path), temporary.path().join("covers")).unwrap();
-    assert_eq!(service.state.cache.process_settings().unwrap(), CatalogProcessSettings::default());
+    assert_eq!(service.state.store.process_settings().unwrap(), CatalogProcessSettings::default());
     assert!(CatalogProcess::ALL.into_iter().all(|process| !service.process_enabled(process)));
 }
 
@@ -1380,7 +1392,7 @@ fn catalogue_failures_are_normalized_into_stable_retry_categories() {
 #[test]
 fn catalogue_server_embeds_the_complete_authoritative_taxonomy() {
     let paths = subject_projection::unified_subject_paths("bisac", "HIS036000");
-    assert!(paths.contains(&"Humanities / History / History by Region / Americas / North America / United States".to_owned()), "the server taxonomy must retain deep History routes, got {paths:?}");
+    assert!(paths.contains(&"Humanities / History / History by Region / North American History / U.S. History".to_owned()), "the curated server taxonomy must retain the resolved History route, got {paths:?}");
 }
 
 #[test]
@@ -1427,7 +1439,6 @@ fn popular_feed_relation_reaches_publication_rank_evidence() {
         groups: Vec::new(),
         facets: Vec::new(),
         pagination: Default::default(),
-        search: None,
     };
     let links = internal_page_links(&Url::parse("https://example.com/root").unwrap(), &page, false).unwrap();
     assert_eq!(links, [CrawlLocator { locator: "https://example.com/popular".to_owned(), popular_listing: true }]);
@@ -1435,4 +1446,212 @@ fn popular_feed_relation_reaches_publication_rank_evidence() {
     page.locator = "https://example.com/popular".to_owned();
     annotate_popular_listing(&mut page, true);
     assert_eq!(page.publications[0].metadata.popularity_ranks, [PopularityRank { position: 1, source: "opds:sort/popular:https://example.com/popular".to_owned() }]);
+}
+
+#[tokio::test]
+async fn inspected_print_isbn_fetches_lcc_without_changing_ebook_identity() {
+    let metadata = Router::new()
+        .route(
+            "/v2/edition-identities",
+            post(|body: Bytes| async move {
+                let request = metadata_contract::decode_v2_edition_identity_request(&body, metadata_contract::MAX_REQUEST_BYTES).unwrap();
+                let query = &request.queries[0];
+                assert_eq!(query.title, "Science History");
+                assert_eq!(query.authors, ["Ada Author"]);
+                let response = EditionIdentityResponse {
+                    snapshot: metadata_contract::SnapshotDescription { dump_date: "2026-08".into(), imported_at_ms: 1 },
+                    results: vec![metadata_contract::EditionIdentityResult {
+                        catalog_subjects: None,
+                        query_id: query.query_id.clone(),
+                        status: EditionIdentityStatus::Matched,
+                        candidates: Vec::new(),
+                        candidates_truncated: false,
+                        matched: Some(metadata_contract::EditionIdentityMatch {
+                            subtitle: None,
+                            canonical_isbn13: "9780821338278".into(),
+                            open_library_edition_id: "OL1M".into(),
+                            open_library_work_id: Some("OL1W".into()),
+                            title: query.title.clone(),
+                            work_title: None,
+                            title_match: metadata_contract::EditionTitleMatch::Edition,
+                            authors: query.authors.clone(),
+                            publishers: Vec::new(),
+                            publication_year: None,
+                            matched_publisher: false,
+                            matched_publication_year: false,
+                            classifications: Vec::new(),
+                        }),
+                    }],
+                };
+                ([(header::CONTENT_TYPE, metadata_contract::MEDIA_TYPE_V2)], metadata_contract::encode_v2_edition_identity_response(&response).unwrap())
+            }),
+        )
+        .route(
+            "/v2/classifications",
+            post(|body: Bytes| async move {
+                let request = metadata_contract::decode_v2_request(&body, metadata_contract::MAX_REQUEST_BYTES).unwrap();
+                assert_eq!(request.isbns, ["9780821338278"]);
+                let record = publication_enrichment::related_isbn::classification_record(vec![metadata_contract::Classification {
+                    scheme: ClassificationScheme::LibraryOfCongress,
+                    notation: "Q125".into(),
+                    source: ClassificationSource::ExactEdition,
+                    evidence: Vec::new(),
+                }]);
+                let response = metadata_contract::RichMetadataEnrichmentResponse {
+                    snapshot: metadata_contract::SnapshotDescription { dump_date: "2026-08".into(), imported_at_ms: 1 },
+                    results: vec![metadata_contract::RichIsbnMetadataResult {
+                        wikidata_books: Vec::new(),
+                        requested_isbn: request.isbns[0].clone(),
+                        canonical_isbn13: Some(request.isbns[0].clone()),
+                        status: LookupStatus::Matched,
+                        matches: vec![record],
+                    }],
+                    places: Vec::new(),
+                    people: Vec::new(),
+                };
+                ([(header::CONTENT_TYPE, metadata_contract::MEDIA_TYPE_V2)], metadata_contract::encode_v2_response(&response).unwrap())
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, metadata).await.unwrap() });
+    let temporary = tempfile::tempdir().unwrap();
+    let mut service = service(endpoint("http://127.0.0.1:9/root".into()), temporary.path());
+    Arc::get_mut(&mut service.state).unwrap().metadata_endpoint = Some(Url::parse(&format!("http://{address}")).unwrap());
+    let mut book = publication_model::BookMetadataState {
+        title: "Science History".into(),
+        description: String::new(),
+        publication: Default::default(),
+        contributors: vec![publication_model::Contributor::new("Ada Author", None, publication_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+    };
+    let section = publication_inspection::evidence::inspect_section(&book, "copyright.xhtml", "Copyright Ada Author\nScience History\nISBN 9780821338278 (hardcover)\nISBN 9780393243277 (epub)");
+    publication_inspection::evidence::apply_evidence(&mut book, &[section], "epub");
+    let before = book.publication.identifiers.clone();
+    let subjects = service.inspected_print_subjects(&book).await.unwrap();
+    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects[0].code(), Some("Q125"));
+    assert_eq!(subjects[0].source(), "inspection:verified-print-isbn:9780821338278");
+    assert_eq!(book.publication.identifiers, before);
+    assert_eq!(book.publication.identifiers[0].canonical_value().as_deref(), Some("9780393243277"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn year_only_catalogue_matches_supply_subjects_without_an_isbn() {
+    let router = Router::new().route(
+        "/v2/edition-identities",
+        post(|body: Bytes| async move {
+            let request = metadata_contract::decode_v2_edition_identity_request(&body, metadata_contract::MAX_REQUEST_BYTES).unwrap();
+            let results = request
+                .queries
+                .into_iter()
+                .map(|q| metadata_contract::EditionIdentityResult {
+                    catalog_subjects: None,
+                    query_id: q.query_id,
+                    status: EditionIdentityStatus::Ambiguous,
+                    matched: None,
+                    candidates_truncated: false,
+                    candidates: [1999, 2013]
+                        .into_iter()
+                        .map(|year| metadata_contract::EditionIdentityMatch {
+                            subtitle: None,
+                            canonical_isbn13: if year == 1999 { "9780821338278" } else { "9780393243277" }.into(),
+                            open_library_edition_id: format!("OL{year}M"),
+                            open_library_work_id: Some(format!("OL{year}W")),
+                            title: q.title.clone(),
+                            work_title: None,
+                            title_match: metadata_contract::EditionTitleMatch::Edition,
+                            authors: q.authors.clone(),
+                            publishers: vec!["Example Press".into()],
+                            publication_year: Some(year),
+                            matched_publisher: false,
+                            matched_publication_year: false,
+                            classifications: vec![metadata_contract::Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: format!("E806 .S89 {year}"), source: ClassificationSource::ExactEdition, evidence: vec![] }],
+                        })
+                        .collect(),
+                })
+                .collect();
+            metadata_contract::encode_v2_edition_identity_response(&EditionIdentityResponse { snapshot: metadata_contract::SnapshotDescription { dump_date: "test".into(), imported_at_ms: 0 }, results }).unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let temp = tempfile::tempdir().unwrap();
+    let mut service = service(endpoint("http://127.0.0.1:9/root".into()), temp.path());
+    Arc::get_mut(&mut service.state).unwrap().metadata_endpoint = Some(Url::parse(&format!("http://{address}")).unwrap());
+    let mut metadata = CatalogEpubMetadata {
+        book: publication_model::BookMetadataState {
+            title: "Example History".into(),
+            description: String::new(),
+            publication: Default::default(),
+            contributors: vec![publication_model::Contributor::new("Ada Author", None, publication_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+        },
+        toc: Vec::new(),
+    };
+    assert!(service.infer_catalog_epub_isbn(&mut metadata).await.unwrap().is_none());
+    assert!(metadata.book.publication.identifiers.is_empty());
+    assert_eq!(metadata.book.publication.subjects.len(), 1);
+    assert_eq!(metadata.book.publication.subjects[0].code(), Some("E806"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn shared_subject_catalogue_matches_supply_art_history_without_an_isbn() {
+    let router = Router::new().route(
+        "/v2/edition-identities",
+        post(|body: Bytes| async move {
+            let request = metadata_contract::decode_v2_edition_identity_request(&body, metadata_contract::MAX_REQUEST_BYTES).unwrap();
+            let results = request
+                .queries
+                .into_iter()
+                .map(|q| metadata_contract::EditionIdentityResult {
+                    catalog_subjects: None,
+                    query_id: q.query_id,
+                    status: EditionIdentityStatus::Ambiguous,
+                    matched: None,
+                    candidates_truncated: false,
+                    candidates: [1999, 2013]
+                        .into_iter()
+                        .map(|year| metadata_contract::EditionIdentityMatch {
+                            subtitle: None,
+                            canonical_isbn13: if year == 1999 { "9780821338278" } else { "9780393243277" }.into(),
+                            open_library_edition_id: format!("OL{year}M"),
+                            open_library_work_id: Some(format!("OL{year}W")),
+                            title: "Art History".into(),
+                            work_title: None,
+                            title_match: metadata_contract::EditionTitleMatch::Edition,
+                            authors: q.authors.clone(),
+                            publishers: vec![if year == 1999 { "Oxford University Press, USA" } else { "Oxford University Press" }.into()],
+                            publication_year: Some(year),
+                            matched_publisher: false,
+                            matched_publication_year: false,
+                            classifications: vec![metadata_contract::Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "N5300".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }],
+                        })
+                        .collect(),
+                })
+                .collect();
+            metadata_contract::encode_v2_edition_identity_response(&EditionIdentityResponse { snapshot: metadata_contract::SnapshotDescription { dump_date: "test".into(), imported_at_ms: 0 }, results }).unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let temp = tempfile::tempdir().unwrap();
+    let mut service = service(endpoint("http://127.0.0.1:9/root".into()), temp.path());
+    Arc::get_mut(&mut service.state).unwrap().metadata_endpoint = Some(Url::parse(&format!("http://{address}")).unwrap());
+    let mut metadata = CatalogEpubMetadata {
+        book: publication_model::BookMetadataState {
+            title: "Art History: A Very Short Introduction".into(),
+            description: String::new(),
+            publication: Default::default(),
+            contributors: vec![publication_model::Contributor::new("Ada Author", None, publication_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+        },
+        toc: Vec::new(),
+    };
+    assert!(service.infer_catalog_epub_isbn(&mut metadata).await.unwrap().is_none());
+    assert!(metadata.book.publication.identifiers.is_empty());
+    assert_eq!(metadata.book.publication.subjects.len(), 1);
+    assert_eq!(metadata.book.publication.subjects[0].code(), Some("N5300"));
+    task.abort();
 }

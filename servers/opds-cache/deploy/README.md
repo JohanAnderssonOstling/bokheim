@@ -12,8 +12,11 @@ Author enrichment additionally requires a healthy loopback-only
 lookup service is temporarily unavailable.
 
 ```sh
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
 cargo build --release -p catalog-server
 sudo install -o root -g root -m 0755 target/release/catalog-server /usr/local/bin/catalog-server
+sudo install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+sudo install -o root -g root -m 0644 .pdfium/x86_64-unknown-linux-gnu/libpdfium.so .pdfium/x86_64-unknown-linux-gnu/LICENSE /usr/local/bin/pdfium/
 sudo install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 sudo install -o root -g root -m 0644 servers/opds-cache/opds.json /usr/local/share/catalog-providers/opds.json
 sudo install -o root -g root -m 0644 servers/opds-cache/deploy/bokheim-catalogs.service /etc/systemd/system/bokheim-catalogs.service
@@ -28,7 +31,7 @@ sudo systemctl enable --now bokheim-catalogs.service
 sudo systemctl reload caddy.service
 curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=17' \
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=18' \
   --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
@@ -43,7 +46,7 @@ sudo mv /usr/local/share/catalog-providers/opds.next.json /usr/local/share/catal
 No restart is needed. The next registry request activates a valid higher
 revision; invalid contents retain the previous registry.
 
-For a catalogue-only binary deployment, stage `catalog-server`, `opds.json`,
+For a catalogue-only binary deployment, stage `catalog-server`, its prepared `pdfium/` directory, `opds.json`,
 `bokheim-catalogs.service`, and `install-catalog-staged.sh` in one remote
 directory, then run:
 

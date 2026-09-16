@@ -9,12 +9,23 @@ pub fn app(service: MetadataService) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/health/descriptions", get(description_capability))
         .route("/internal/operations", get(operational_stats))
+        .route("/internal/librarything", get(librarything_stats))
         .route("/v2/classifications", post(rich_classifications))
         .route("/v2/enrichment", post(rich_enrichment))
         .route("/v2/edition-identities", post(edition_identities))
+        .route("/v2/audiobooks/audible", post(audible_lookup).layer(DefaultBodyLimit::max(metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), record_request_metrics))
         .with_state(service)
+}
+
+async fn librarything_stats(State(service): State<MetadataService>) -> Response {
+    let Some(client) = service.librarything.clone() else { return axum::Json(serde_json::json!({"enabled":false})).into_response(); };
+    match tokio::task::spawn_blocking(move ||crate::librarything_background::stats(&client)).await {
+        Ok(Ok(stats)) => axum::Json(stats).into_response(),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 async fn description_capability(State(service): State<MetadataService>) -> (StatusCode, &'static str) {
@@ -68,7 +79,8 @@ async fn operational_stats(State(service): State<MetadataService>) -> Response {
 }
 
 pub(crate) fn load_operational_stats(state: &ServiceState) -> Result<OperationalStats, MetadataError> {
-    let connection = query_connection(&state.pool)?;
+    let statistics_pool = state.pool.as_ref().unwrap_or(&state.rich_pool);
+    let connection = query_connection(statistics_pool)?;
     let (edition_records, work_records, author_records): (i64, i64, i64) =
         connection.query_row("SELECT edition_records,work_records,author_records FROM snapshot WHERE singleton=1", (), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(error)?;
     let mut metrics = BTreeMap::new();
@@ -83,7 +95,7 @@ pub(crate) fn load_operational_stats(state: &ServiceState) -> Result<Operational
     let total_duration_ms = state.total_duration_ms.load(Ordering::Relaxed);
     let processed_items = state.processed_items.load(Ordering::Relaxed);
     let item_processing_duration_ms = state.item_processing_duration_ms.load(Ordering::Relaxed);
-    let pool_state = state.pool.state();
+    let pool_state = state.pool.as_ref().map_or_else(|| state.rich_pool.state(), |pool| pool.state());
     let endpoint_metrics = [("edition_identities", endpoint_metrics_snapshot(&state.edition_identities)), ("classifications", endpoint_metrics_snapshot(&state.classifications)), ("enrichment", endpoint_metrics_snapshot(&state.enrichment))]
         .into_iter()
         .collect();
@@ -191,6 +203,7 @@ async fn rich_classifications(State(service): State<MetadataService>, headers: H
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup worker failed: {error}")),
     };
     fallback.apply_library_of_congress_fallback(&mut result).await;
+    fallback.apply_librarything_fallback(&mut result).await;
     record_processed_items(&metrics, item_count, processing_started.elapsed());
     let (content_type, encoded) = if binary {
         match metadata_contract::encode_v2_response(&result) {
@@ -235,6 +248,7 @@ async fn rich_enrichment(State(service): State<MetadataService>, headers: Header
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup worker failed: {error}")),
     };
     fallback.apply_library_of_congress_fallback(&mut result).await;
+    fallback.apply_librarything_fallback(&mut result).await;
     record_processed_items(&metrics, item_count, processing_started.elapsed());
     let (content_type, encoded) = if binary {
         match metadata_contract::encode_v2_response(&result) {
@@ -263,4 +277,10 @@ pub(crate) fn record_processed_items(state: &ServiceState, count: u64, duration:
 
 pub(crate) fn api_error(status: StatusCode, message: &str) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], message.to_owned()).into_response()
+}
+
+async fn audible_lookup(axum::Json(request): axum::Json<metadata_contract::audible::LookupRequest>) -> axum::Json<metadata_contract::audible::LookupResponse> {
+    static CLIENT: std::sync::OnceLock<crate::audible::AudibleClient> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(crate::audible::AudibleClient::new);
+    axum::Json(client.lookup(request).await)
 }

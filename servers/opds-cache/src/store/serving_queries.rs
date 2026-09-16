@@ -20,7 +20,7 @@ const SERVING_SUBJECT_FILTER: &str = "EXISTS(
        AND (?2='' OR subject.node_path=?2)
 )";
 
-pub(super) fn load_publications_if_ready(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<Option<CatalogSubjectPublicationPage>, CatalogCacheError> {
+pub(super) fn load_publications_if_ready(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<Option<CatalogSubjectPublicationPage>, CatalogStoreError> {
     if !serving_index_ready(connection)? {
         return Ok(None);
     }
@@ -29,14 +29,37 @@ pub(super) fn load_publications_if_ready(connection: &Connection, query: &Catalo
 
 pub(super) fn load_capabilities_if_ready(
     connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String],
-) -> Result<Option<CatalogSubjectBrowseCapabilities>, CatalogCacheError> {
+) -> Result<Option<CatalogSubjectBrowseCapabilities>, CatalogStoreError> {
     if !serving_index_ready(connection)? {
         return Ok(None);
     }
     load_capabilities(connection, query, selected_formats, selected_languages).map(Some)
 }
 
-fn serving_index_ready(connection: &Connection) -> Result<bool, CatalogCacheError> {
+pub(super) fn load_navigation_if_ready(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>) -> Result<Option<Vec<(String, String)>>, CatalogStoreError> {
+    if !serving_index_ready(connection)? || !query.normalized_query.is_empty() {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT DISTINCT node.title,node.node_path
+           FROM catalog_subject_node node
+           JOIN catalog_browse_subject subject
+             ON subject.system_id=node.system_id AND subject.node_path=node.node_path
+           JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+          WHERE node.system_id=?1 AND node.parent_path=?2
+            AND {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER} AND {SERVING_FORMAT_FILTER}
+          ORDER BY node.title"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params![query.system_id, query.subject_path, query.normalized_query, query.source_ids, query.supported_languages, query.book_formats], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    Ok(Some(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
+fn serving_index_ready(connection: &Connection) -> Result<bool, CatalogStoreError> {
+    // Legacy in-catalog serving tables are no longer maintained.
+    if !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='projection_state' AND type='table')", [], |r| r.get::<_, bool>(0))? {
+        return Ok(false);
+    }
     connection
         .query_row(
             "SELECT EXISTS(
@@ -68,26 +91,40 @@ fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_p
         }
         CatalogSubjectSort::Title => "page.normalized_title,page.source_id,page.edition_id,page.work_id",
     };
-    let selection = if include_payloads { "publication.source_id,publication.payload,page.entry_id,page.total" } else { "page.entry_id,page.total" };
+    let selection = if include_payloads { "publication.source_id,publication.payload,page.entry_id" } else { "page.entry_id" };
     let payload_join = if include_payloads {
         "JOIN catalog_publication publication
-           ON publication.source_id=page.source_id AND publication.generation=page.generation
-          AND publication.edition_id=page.edition_id AND publication.work_id=page.work_id"
+           ON publication.entry_id=page.entry_id"
     } else {
         ""
     };
+    let scope = if normalized_query.is_empty() {
+        format!(
+            "WITH filtered AS MATERIALIZED (
+                 SELECT browse.*
+                   FROM catalog_browse_subject subject
+                   JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+                  WHERE subject.system_id=?1 AND subject.node_path=?2
+                    AND {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER} AND {SERVING_FORMAT_FILTER}
+             )"
+        )
+    } else {
+        format!(
+            "WITH matching(entry_id) AS MATERIALIZED (
+                 SELECT rowid FROM catalog_browse_search_fts
+                  WHERE catalog_browse_search_fts MATCH ?3
+             ), filtered AS MATERIALIZED (
+                 SELECT browse.*
+                   FROM matching
+                   JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
+                  WHERE {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER}
+                    AND {SERVING_FORMAT_FILTER} AND {SERVING_SUBJECT_FILTER}
+             )"
+        )
+    };
     let sql = format!(
-        "WITH matching(entry_id) AS MATERIALIZED (
-             SELECT rowid FROM catalog_browse_search_fts
-              WHERE catalog_browse_search_fts MATCH ?3
-         ), filtered AS MATERIALIZED (
-             SELECT browse.*
-               FROM matching
-               JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
-              WHERE {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER}
-                AND {SERVING_FORMAT_FILTER} AND {SERVING_SUBJECT_FILTER}
-         ), page AS MATERIALIZED (
-             SELECT filtered.*,COUNT(*) OVER() AS total
+        "{scope}, page AS MATERIALIZED (
+             SELECT filtered.*
                FROM filtered
               ORDER BY {ordering_filtered}
               LIMIT ?7 OFFSET ?8
@@ -101,22 +138,29 @@ fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_p
     ServingQuery { sql, search_parameter: search_parameter(normalized_query) }
 }
 
-fn count_query(normalized_query: &str) -> ServingQuery {
-    let sql = format!(
-        "WITH matching(entry_id) AS MATERIALIZED (
-             SELECT rowid FROM catalog_browse_search_fts
-              WHERE catalog_browse_search_fts MATCH ?3
-         )
-         SELECT COUNT(*)
-           FROM matching
-           JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
-          WHERE {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER}
-            AND {SERVING_FORMAT_FILTER} AND {SERVING_SUBJECT_FILTER}"
-    );
-    ServingQuery { sql, search_parameter: search_parameter(normalized_query) }
-}
-
 fn capabilities_query(normalized_query: &str) -> ServingQuery {
+    if normalized_query.is_empty() {
+        let language_filter = SERVING_LANGUAGE_FILTER.replace("browse.", "filtered.");
+        let format_filter = SERVING_FORMAT_FILTER.replace("browse.", "filtered.");
+        let sql = format!(
+            "WITH filtered AS MATERIALIZED (
+                 SELECT browse.entry_id,browse.has_language
+                   FROM catalog_browse_subject subject
+                   JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+                  WHERE subject.system_id=?1 AND subject.node_path=?2 AND {SERVING_SOURCE_FILTER}
+             )
+             SELECT 'format',format.book_format,COUNT(*)
+               FROM filtered JOIN catalog_browse_format format ON format.entry_id=filtered.entry_id
+              WHERE {language_filter}
+              GROUP BY format.book_format
+             UNION ALL
+             SELECT 'language',language.language,COUNT(*)
+               FROM filtered JOIN catalog_browse_language language ON language.entry_id=filtered.entry_id
+              WHERE {format_filter}
+              GROUP BY language.language"
+        );
+        return ServingQuery { sql, search_parameter: String::new() };
+    }
     let sql = format!(
         "WITH matching(entry_id) AS MATERIALIZED (
              SELECT rowid FROM catalog_browse_search_fts
@@ -141,7 +185,7 @@ fn capabilities_query(normalized_query: &str) -> ServingQuery {
     ServingQuery { sql, search_parameter: search_parameter(normalized_query) }
 }
 
-fn load_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogCacheError> {
+fn load_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogStoreError> {
     let query = publication_query(browse.normalized_query, browse.sort, include_payloads);
     let started = Instant::now();
     let mut statement = connection.prepare(&query.sql)?;
@@ -152,39 +196,32 @@ fn load_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery
         browse.source_ids,
         browse.supported_languages,
         browse.book_formats,
-        storage_i64(browse.limit as u64, "subject result limit")?,
+        storage_i64(browse.limit.saturating_add(1) as u64, "subject result limit")?,
         storage_i64(browse.offset as u64, "subject result offset")?
     ];
     let mut publications = Vec::new();
-    let mut total = 0_usize;
     if include_payloads {
-        let rows = statement.query_map(parameters, |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?;
+        let rows = statement.query_map(parameters, |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?;
         for row in rows {
-            let (source, payload, entry_id, row_total) = row?;
-            total = usize::try_from(stored_u64(row_total, "subject result count")?).unwrap_or(usize::MAX);
+            let (source, payload, entry_id) = row?;
             publications.push(CatalogSequencedSubjectPublication {
-                item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogCacheError::new)?, publication: decode_cached(&payload)? }),
+                item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, publication: decode_cached(&payload)? }),
                 entry_id: stored_u64(entry_id, "subject publication entry ID")?,
             });
         }
     } else {
-        let rows = statement.query_map(parameters, |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+        let rows = statement.query_map(parameters, |row| row.get::<_, i64>(0))?;
         for row in rows {
-            let (entry_id, row_total) = row?;
-            total = usize::try_from(stored_u64(row_total, "subject result count")?).unwrap_or(usize::MAX);
-            publications.push(CatalogSequencedSubjectPublication { item: None, entry_id: stored_u64(entry_id, "subject publication entry ID")? });
+            publications.push(CatalogSequencedSubjectPublication { item: None, entry_id: stored_u64(row?, "subject publication entry ID")? });
         }
     }
-    if publications.is_empty() && browse.offset > 0 {
-        let count = count_query(browse.normalized_query);
-        let stored_total = connection.query_row(&count.sql, params![browse.system_id, browse.subject_path, count.search_parameter, browse.source_ids, browse.supported_languages, browse.book_formats], |row| row.get::<_, i64>(0))?;
-        total = usize::try_from(stored_u64(stored_total, "subject result count")?).unwrap_or(usize::MAX);
-    }
-    tracing::info!(include_payloads, total, returned = publications.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject serving page loaded");
-    Ok(CatalogSubjectPublicationPage { publications, total })
+    let has_more = publications.len() > browse.limit;
+    publications.truncate(browse.limit);
+    tracing::info!(include_payloads, has_more, returned = publications.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject serving page loaded");
+    Ok(CatalogSubjectPublicationPage { publications, has_more })
 }
 
-fn load_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogCacheError> {
+fn load_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogStoreError> {
     let capability_query = capabilities_query(query.normalized_query);
     let mut statement = connection.prepare(&capability_query.sql)?;
     let rows = statement.query_map(params![query.system_id, query.subject_path, capability_query.search_parameter, query.source_ids, query.supported_languages, query.book_formats], |row| {
@@ -202,7 +239,7 @@ fn load_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<
                 }
             }
             "language" => languages.push(CatalogLanguageFacetValue { value, number_of_items: count }),
-            _ => return Err(CatalogCacheError::new("catalogue serving index returned an unknown facet")),
+            _ => return Err(CatalogStoreError::new("catalogue serving index returned an unknown facet")),
         }
     }
     let book_formats = CatalogBookFormat::ALL

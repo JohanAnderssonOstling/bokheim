@@ -1,12 +1,11 @@
 use super::transfer::TransferError;
+use library_runtime::database::DatabaseError;
 
 pub(crate) type SyncResult<T> = Result<T, SyncError>;
 
 #[derive(Debug)]
 pub(crate) enum SyncError {
     AuthenticationRequired,
-    /// Used internally by state synchronization to trigger cursor recovery.
-    CursorRejected,
     Failed(String),
 }
 
@@ -20,7 +19,6 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
-            Self::CursorRejected => formatter.write_str("the synchronization cursor was rejected after recovery"),
             Self::Failed(error) => error.fmt(formatter),
         }
     }
@@ -28,19 +26,9 @@ impl std::fmt::Display for SyncError {
 
 impl std::error::Error for SyncError {}
 
-impl From<Box<dyn std::error::Error>> for SyncError {
-    fn from(error: Box<dyn std::error::Error>) -> Self {
-        Self::failed(error)
-    }
-}
-
-impl From<sync_client::SyncRequestError> for SyncError {
-    fn from(error: sync_client::SyncRequestError) -> Self {
-        match error {
-            sync_client::SyncRequestError::AuthenticationRequired => Self::AuthenticationRequired,
-            sync_client::SyncRequestError::CursorRejected => Self::CursorRejected,
-            error @ sync_client::SyncRequestError::Other(_) => Self::failed(error),
-        }
+impl From<sync_transport::SyncRequestError> for SyncError {
+    fn from(error: sync_transport::SyncRequestError) -> Self {
+        sync_engine::SyncError::from(error).into()
     }
 }
 
@@ -63,26 +51,14 @@ macro_rules! failed_from {
     )+};
 }
 
-failed_from!(
-    crate::platform::database::DatabaseError,
-    rusqlite::Error,
-    std::io::Error,
-    std::time::SystemTimeError,
-    std::num::TryFromIntError,
-    sync_common::PullBatchError,
-    sync_common::PushResponseError,
-    crate::library::database::OutboxReadError,
-);
+failed_from!(Box<dyn std::error::Error>, &'static str, DatabaseError, library_files::asset_store::AssetStoreError, rusqlite::Error, std::io::Error, web_time::SystemTimeError, std::num::TryFromIntError,);
 
-#[cfg(target_arch = "wasm32")]
-impl From<web_time::SystemTimeError> for SyncError {
-    fn from(error: web_time::SystemTimeError) -> Self {
-        Self::failed(error)
-    }
-}
-
-impl From<&'static str> for SyncError {
-    fn from(message: &'static str) -> Self {
-        Self::failed(std::io::Error::other(message))
+impl From<sync_engine::SyncError> for SyncError {
+    fn from(error: sync_engine::SyncError) -> Self {
+        match error {
+            sync_engine::SyncError::AuthenticationRequired => Self::AuthenticationRequired,
+            error @ sync_engine::SyncError::CursorRejected => Self::failed(error),
+            sync_engine::SyncError::Failed(message) => Self::Failed(message),
+        }
     }
 }

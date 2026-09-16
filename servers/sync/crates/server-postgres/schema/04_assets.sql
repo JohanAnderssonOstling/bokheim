@@ -82,3 +82,28 @@ CREATE TABLE thumbnail_upload_reservation (
 );
 
 CREATE INDEX idx_thumbnail_upload_reservation_expiry ON thumbnail_upload_reservation USING btree (expires_at);
+
+-- Permanent publication identities are account scoped. Blob checksums remain
+-- global, immutable addresses of verified bytes.
+CREATE TABLE user_book_revision (
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    blob_hash text NOT NULL REFERENCES blob_object(content_hash) ON DELETE RESTRICT,
+    PRIMARY KEY (user_id, content_hash)
+);
+CREATE INDEX idx_user_book_revision_blob ON user_book_revision(user_id, blob_hash);
+
+CREATE TABLE IF NOT EXISTS library_blob_claim (
+    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content_hash text NOT NULL,
+    blob_hash text NOT NULL REFERENCES blob_object(content_hash),
+    PRIMARY KEY(library_id, content_hash)
+);
+CREATE INDEX IF NOT EXISTS library_blob_claim_user_blob ON library_blob_claim(user_id, blob_hash);
+
+CREATE TABLE IF NOT EXISTS cloud_storage_change (
+ library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+ change_id uuid NOT NULL,
+ PRIMARY KEY(library_id,change_id)
+);

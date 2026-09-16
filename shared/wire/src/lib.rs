@@ -10,7 +10,7 @@ pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 const MAGIC: &[u8; 4] = b"BKHM";
-const VERSION: u8 = 12;
+const VERSION: u8 = 13;
 const HEADER_BYTES: usize = MAGIC.len() + 1;
 
 /// The magic+version header bytes prefixing every persisted value.
@@ -91,9 +91,9 @@ mod tests {
     #[test]
     fn bincode_round_trip_uses_the_versioned_storage_header() {
         let encoded = encode(&example(8)).unwrap();
-        assert_eq!(encoded, b"BKHM\x0c\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07");
+        assert_eq!(encoded, b"BKHM\x0d\x07Bokheim\x08\x00\x01\x02\x03\x04\x05\x06\x07");
         assert_eq!(decode::<Example>(&encoded, MAX_DECODED_REQUEST_BYTES).unwrap(), example(8));
-        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x0c\x01\x2a");
+        assert_eq!(encode(&NumericVariant::Second(42)).unwrap(), b"BKHM\x0d\x01\x2a");
     }
 
     #[test]

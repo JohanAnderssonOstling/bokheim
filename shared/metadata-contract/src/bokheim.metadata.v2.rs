@@ -41,6 +41,8 @@ pub struct EditionIdentityResult {
     pub candidates: ::prost::alloc::vec::Vec<EditionIdentityMatch>,
     #[prost(bool, tag = "5")]
     pub candidates_truncated: bool,
+    #[prost(message, optional, tag = "6")]
+    pub catalog_subjects: ::core::option::Option<CatalogSubjectMatch>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EditionIdentityMatch {
@@ -68,6 +70,9 @@ pub struct EditionIdentityMatch {
     pub matched_publication_year: bool,
     #[prost(message, repeated, tag = "12")]
     pub classifications: ::prost::alloc::vec::Vec<Classification>,
+    #[prost(string, optional, tag = "13")]
+    pub subtitle: ::core::option::Option<::prost::alloc::string::String>,
+
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EnrichmentResponse {
@@ -89,6 +94,8 @@ pub struct Snapshot {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IsbnResult {
+    #[prost(message, repeated, tag = "5")]
+    pub wikidata_books: ::prost::alloc::vec::Vec<crate::wikidata::WikidataBookEvidence>,
     #[prost(string, tag = "1")]
     pub requested_isbn: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "2")]
@@ -148,6 +155,8 @@ pub struct WorkPopularity {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Classification {
+    #[prost(message, repeated, tag = "4")]
+    pub evidence: ::prost::alloc::vec::Vec<ClassificationEvidence>,
     #[prost(enumeration = "ClassificationScheme", tag = "1")]
     pub scheme: i32,
     #[prost(string, tag = "2")]
@@ -438,4 +447,32 @@ impl EntitySource {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClassificationEvidence {
+    #[prost(string, tag = "1")]
+    pub method: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub isbn13: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub open_library_work_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub open_library_edition_id: ::prost::alloc::string::String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CatalogSubjectMatch {
+    #[prost(string, tag = "6")]
+    pub main_title: String,
+    #[prost(string, tag = "1")]
+    pub provider_id: String,
+    #[prost(string, repeated, tag = "2")]
+    pub record_ids: Vec<String>,
+    #[prost(string, tag = "3")]
+    pub title: String,
+    #[prost(string, repeated, tag = "4")]
+    pub authors: Vec<String>,
+    #[prost(message, repeated, tag = "5")]
+    pub classifications: Vec<Classification>,
 }

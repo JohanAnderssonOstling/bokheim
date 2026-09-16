@@ -4,10 +4,12 @@
 //! schema and conversion live in `library-replica`.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fmt;
 use std::num::NonZeroU64;
 
 pub mod api;
+pub mod book_batch;
 pub use protobuf_wire as transport;
 pub use wire;
 pub mod mutation_ids;
@@ -36,6 +38,8 @@ pub mod mutation_kind {
     pub const DIRECTORY_NAME: &str = "directory_name";
     pub const DIRECTORY_PARENT: &str = "directory_parent";
     pub const METADATA: &str = "metadata";
+    pub const PDF_READER_METADATA: &str = "pdf_reader_metadata";
+    pub const DESCRIPTION: &str = "description";
     pub const PLACEMENT: &str = "placement";
     pub const READING_POSITION: &str = "reading_position";
 }
@@ -110,6 +114,39 @@ macro_rules! sequence_type {
 sequence_type!(ReplicaSeq);
 sequence_type!(LibraryRevision);
 
+/// Canonical total order for last-writer-wins state cells.
+///
+/// Payload interpretation remains client-owned, but every Rust component that
+/// selects a winner must compare this shared key. PostgreSQL mirrors this exact
+/// field order in `enforce_lww_order()` so the atomic upsert has the same law.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VersionKey {
+    pub changed_at: UnixMillis,
+    pub conflict_rank: u8,
+    pub replica_id: ReplicaId,
+    pub replica_seq: u64,
+    pub mutation_id: MutationId,
+}
+
+impl VersionKey {
+    pub fn new(changed_at: UnixMillis, conflict_rank: u8, replica_id: ReplicaId, replica_seq: u64, mutation_id: MutationId) -> Self {
+        Self { changed_at, conflict_rank, replica_id, replica_seq, mutation_id }
+    }
+
+    pub fn from_wire(mutation: &WireMutation, replica_id: ReplicaId) -> Self {
+        Self::new(mutation.changed_at, mutation.conflict_rank, replica_id, mutation.replica_seq.get(), mutation.mutation_id)
+    }
+}
+
+/// Compares versions known to have been produced by the same replica.
+///
+/// Replica identity is constant in this case, so omitting it produces exactly
+/// the same ordering as [`VersionKey`] without requiring callers to manufacture
+/// an identity they do not otherwise need.
+pub fn compare_same_replica_versions(left: (UnixMillis, u8, ReplicaSeq, MutationId), right: (UnixMillis, u8, ReplicaSeq, MutationId)) -> Ordering {
+    left.cmp(&right)
+}
+
 /// A checkpoint over independently paged synchronization channels.
 /// A component advances only after that channel has been inspected.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,7 +175,8 @@ pub struct WireMutation {
     pub replica_seq: ReplicaSeq,
 }
 
-/// The server-visible lifecycle fact used solely for book-blob accounting.
+/// Server-visible publication prerequisite. Lifecycle declarations also own the
+/// reference count; declarations on other state kinds do not affect accounting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeclaredBlobReference {
     pub present: bool,
@@ -187,7 +225,7 @@ impl MutationRejectionReason {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PullStateResponse {
     pub mutations: Vec<ServerMutation>,
     pub next_cursor: SyncCursor,
@@ -252,6 +290,31 @@ fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mutation_id(value: u128) -> MutationId {
+        MutationId::parse(&uuid::Uuid::from_u128(value).to_string()).unwrap()
+    }
+
+    #[test]
+    fn version_key_orders_every_tie_breaker_in_protocol_order() {
+        let replica = uuid::Uuid::from_u128(10);
+        let base = VersionKey::new(10, 1, replica, 10, mutation_id(10));
+
+        assert!(VersionKey::new(11, 0, uuid::Uuid::nil(), 1, mutation_id(1)) > base);
+        assert!(VersionKey::new(10, 2, uuid::Uuid::nil(), 1, mutation_id(1)) > base);
+        assert!(VersionKey::new(10, 1, uuid::Uuid::from_u128(11), 1, mutation_id(1)) > base);
+        assert!(VersionKey::new(10, 1, replica, 11, mutation_id(1)) > base);
+        assert!(VersionKey::new(10, 1, replica, 10, mutation_id(11)) > base);
+    }
+
+    #[test]
+    fn same_replica_comparison_is_the_version_key_order_without_replica_identity() {
+        let replica = uuid::Uuid::from_u128(10);
+        let left = (10, 1, ReplicaSeq::new(3).unwrap(), mutation_id(4));
+        let right = (10, 1, ReplicaSeq::new(3).unwrap(), mutation_id(5));
+
+        assert_eq!(compare_same_replica_versions(left, right), VersionKey::new(left.0, left.1, replica, left.2.get(), left.3).cmp(&VersionKey::new(right.0, right.1, replica, right.2.get(), right.3)));
+    }
 
     #[test]
     fn protocol_identifiers_use_their_canonical_strings_in_json_and_bincode_storage() {

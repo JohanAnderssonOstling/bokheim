@@ -18,11 +18,14 @@ android {
 
     defaultConfig {
         applicationId = "se.bokheim.reader.gpui"
+        ndk { abiFilters += rustAbi }
         minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.6"
     }
+
+    testOptions.unitTests.isIncludeAndroidResources = true
 
     sourceSets.getByName("main").manifest.srcFile("AndroidManifest.xml")
     sourceSets.getByName("debug").jniLibs.srcDir(stagedRustDebugLibraries)
@@ -36,13 +39,23 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    implementation("androidx.media3:media3-exoplayer:1.8.0")
+    implementation("androidx.media3:media3-session:1.8.0")
     implementation(platform("org.jetbrains.kotlin:kotlin-bom:1.8.22"))
     implementation("androidx.games:games-activity:4.4.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.core:core:1.16.0")
 }
 
+val preparePdfium by tasks.registering(Exec::class) {
+    workingDir(workspaceRoot)
+    commandLine("python3", "shared/pdfium/prepare.py", "--target", rustTarget)
+}
+
 val buildRustDebug by tasks.registering(Exec::class) {
+    dependsOn(preparePdfium)
     workingDir(workspaceRoot)
     commandLine(
         "cargo",
@@ -79,10 +92,12 @@ val buildRustDebug by tasks.registering(Exec::class) {
 val stageRustDebug by tasks.registering(Copy::class) {
     dependsOn(buildRustDebug)
     from(rustDebugLibrary)
+    from(workspaceRoot.resolve(".pdfium/$rustTarget/libpdfium.so"))
     into(stagedRustDebugLibraries.map { it.dir(rustAbi) })
 }
 
 val buildRustRelease by tasks.registering(Exec::class) {
+    dependsOn(preparePdfium)
     workingDir(workspaceRoot)
     commandLine(
         "cargo",
@@ -120,6 +135,7 @@ val buildRustRelease by tasks.registering(Exec::class) {
 val stageRustRelease by tasks.registering(Copy::class) {
     dependsOn(buildRustRelease)
     from(rustReleaseLibrary)
+    from(workspaceRoot.resolve(".pdfium/$rustTarget/libpdfium.so"))
     into(stagedRustReleaseLibraries.map { it.dir(rustAbi) })
 }
 

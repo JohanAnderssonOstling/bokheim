@@ -111,21 +111,12 @@ pub struct EpubTitle {
     pub sort_as: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct MediaOverlayCue {
-    pub text_href: String,
-    pub audio_href: String,
-    pub clip_begin_seconds: f64,
-    pub clip_end_seconds: Option<f64>,
-}
-
 #[derive(Clone, Debug)]
 struct ManifestItem {
     id: String,
     href: String,
     media_type: Option<String>,
     properties: Option<String>,
-    media_overlay: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +131,7 @@ trait ReadSeekSend: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ReadSeekSend for T {}
 
 pub struct EpubProvider {
+    entry_names: std::collections::HashSet<String>,
     archive: Arc<Mutex<zip::ZipArchive<Box<dyn ReadSeekSend>>>>,
     opf_path: String,
     opf_dir: String,
@@ -186,7 +178,8 @@ impl EpubProvider {
         // Pre-compute OPF directory for path resolution
         let opf_dir = opf_path.rsplit_once('/').map(|x| x.0).unwrap_or("").to_string();
 
-        Ok(Self { archive: Arc::new(Mutex::new(archive)), opf_path, opf_dir, opf_xml, manifest_cache: OnceLock::new() })
+        let entry_names = archive.file_names().map(str::to_owned).collect();
+        Ok(Self { entry_names, archive: Arc::new(Mutex::new(archive)), opf_path, opf_dir, opf_xml, manifest_cache: OnceLock::new() })
     }
 
     pub fn new(epub_path: PathBuf) -> Self {
@@ -194,7 +187,30 @@ impl EpubProvider {
     }
 
     pub fn metadata(&self) -> io::Result<EpubMetadata> {
-        Ok(parse_opf_metadata(&self.opf_xml))
+        let mut metadata = parse_opf_metadata(&self.opf_xml);
+        add_metadata_isbns(&mut metadata, self.ncx_property_values());
+        Ok(metadata)
+    }
+
+    /// Complete property values from package metadata and the bounded NCX head.
+    /// No spine documents or images are opened by this metadata-only stage.
+    pub fn bibliographic_property_values(&self) -> Vec<String> {
+        let mut values = metadata_block_values(&self.opf_xml, "metadata");
+        values.extend(self.ncx_property_values());
+        values
+    }
+
+    fn ncx_property_values(&self) -> Vec<String> {
+        let mut values = Vec::new();
+        if let Some(href) = &self.get_or_parse_manifest().ncx_href {
+            let path = normalize_epub_path(&resolve_href(&self.opf_dir, href));
+            if let Ok(extra) = self.with_document_reader(&path, 65_536, |reader| {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes)?;
+                Ok(metadata_block_values(&String::from_utf8_lossy(&bytes), "head"))
+            }) { values.extend(extra); }
+        }
+        values
     }
 
     /// Archive-relative package-document path declared by container.xml.
@@ -202,20 +218,6 @@ impl EpubProvider {
     /// evidence, but only after validating the identifier itself.
     pub fn package_document_path(&self) -> &str {
         &self.opf_path
-    }
-
-    pub fn media_overlay_cues(&self) -> io::Result<Vec<MediaOverlayCue>> {
-        let manifest = self.get_or_parse_manifest();
-        let mut cues = Vec::new();
-        for idref in &manifest.spine {
-            let Some(content) = manifest.items.iter().find(|item| &item.id == idref) else { continue };
-            let Some(overlay_id) = content.media_overlay.as_deref() else { continue };
-            let Some(overlay) = manifest.items.iter().find(|item| item.id == overlay_id) else { continue };
-            let smil_path = normalize_epub_path(&resolve_href(&self.opf_dir, &overlay.href));
-            let smil = self.read_entry_string(&smil_path)?;
-            cues.extend(parse_smil_cues(&smil, &smil_path));
-        }
-        Ok(cues)
     }
 
     pub fn is_fixed_layout(&self) -> bool {
@@ -306,6 +308,28 @@ impl EpubProvider {
         self.read_entry_string(uri)
     }
 
+    /// Inspect a bounded stream without allocating the complete document.
+    /// The callback must not call back into this provider while its archive is locked.
+    pub fn with_document_reader<T>(&self, uri: &str, max_bytes: u64, visit: impl FnOnce(&mut dyn Read) -> io::Result<T>) -> io::Result<T> {
+        let mut archive = self.archive.lock().map_err(|_| io::Error::other("EPUB archive lock is poisoned"))?;
+        let entry = archive.by_name(uri).map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+        visit(&mut entry.take(max_bytes))
+    }
+
+    /// Returns cheap publication-progress weights for the resolved documents.
+    /// ZIP central-directory metadata provides the uncompressed sizes without
+    /// reading or parsing every spine document.
+    pub fn document_progress_weights(&self, documents: &[String]) -> io::Result<Vec<u64>> {
+        let mut archive = self.archive.lock().map_err(|_| io::Error::other("EPUB archive lock is poisoned"))?;
+        documents
+            .iter()
+            .map(|uri| {
+                let entry = archive.by_name(uri).map_err(|error| io::Error::new(io::ErrorKind::NotFound, error))?;
+                Ok(entry.size().max(1))
+            })
+            .collect()
+    }
+
     pub fn resolve(&self, base: &str, href: &str) -> String {
         resolve_resource_href(base, href)
     }
@@ -315,11 +339,7 @@ impl EpubProvider {
     }
 
     pub fn exists(&self, uri: &str) -> bool {
-        let mut archive = match self.archive.lock() {
-            Ok(archive) => archive,
-            Err(_) => return false,
-        };
-        archive.by_name(uri).is_ok()
+        self.entry_names.contains(uri)
     }
 
     fn find_declared_cover_href(&self) -> Option<String> {
@@ -526,7 +546,6 @@ impl EpubProvider {
                         let mut href = None;
                         let mut media_type = None;
                         let mut properties = None;
-                        let mut media_overlay = None;
 
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
@@ -538,8 +557,6 @@ impl EpubProvider {
                                 media_type = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             } else if key.ends_with(b"properties") {
                                 properties = Some(String::from_utf8_lossy(&attr.value).into_owned());
-                            } else if key.ends_with(b"media-overlay") {
-                                media_overlay = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             }
                         }
 
@@ -549,7 +566,7 @@ impl EpubProvider {
                             {
                                 nav_href = Some(href.clone());
                             }
-                            items.push(ManifestItem { id, href, media_type, properties, media_overlay });
+                            items.push(ManifestItem { id, href, media_type, properties });
                         }
                     } else if in_spine
                         && e.name().as_ref().ends_with(b"itemref")
@@ -741,13 +758,12 @@ impl EpubProvider {
         let mut out = Vec::new();
 
         for idref in &manifest.spine {
-            let href = manifest.items.iter().find(|item| &item.id == idref).map(|item| &item.href);
-            let Some(href) = href else {
+            let Some(item) = manifest.items.iter().find(|item| &item.id == idref) else {
                 continue;
             };
-            let resolved = resolve_href(&self.opf_dir, href);
+            let resolved = resolve_href(&self.opf_dir, &item.href);
             let normalized = normalize_epub_path(&resolved);
-            if Self::is_html_entry(&normalized) {
+            if matches!(item.media_type.as_deref(), Some("application/xhtml+xml" | "text/html")) || (item.media_type.is_none() && Self::is_html_entry(&normalized)) {
                 out.push(normalized);
             }
         }
@@ -880,6 +896,26 @@ mod streaming_tests {
     }
 
     #[test]
+    fn spine_uses_declared_xhtml_type_for_xml_filenames() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"OPS/book.opf\"/></rootfiles></container>"),
+            (
+                "OPS/book.opf",
+                r#"<package><manifest><item id="chapter" href="chapter.xml" media-type="application/xhtml+xml"/><item id="image" href="image.svg" media-type="image/svg+xml"/></manifest><spine><itemref idref="chapter"/><itemref idref="image"/></spine></package>"#,
+            ),
+            ("OPS/chapter.xml", "<html><body>Chapter</body></html>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes.as_bytes()).unwrap();
+        }
+        let provider = EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap();
+        assert_eq!(provider.document_uris().unwrap(), vec!["OPS/chapter.xml"]);
+        assert!(provider.read_string("OPS/chapter.xml").unwrap().contains("Chapter"));
+    }
+
+    #[test]
     fn opening_and_reading_a_chapter_does_not_read_the_whole_epub() {
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -889,16 +925,20 @@ mod streaming_tests {
         archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
         archive.start_file("OEBPS/content.opf", stored).unwrap();
         archive
-            .write_all(br#"<package><metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#)
+            .write_all(br#"<package><metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="notes" href="notes.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/><itemref idref="notes" linear="no"/></spine></package>"#)
             .unwrap();
         archive.start_file("OEBPS/chapter.xhtml", stored).unwrap();
         archive.write_all(b"<html><body>Only this chapter</body></html>").unwrap();
+        archive.start_file("OEBPS/notes.xhtml", stored).unwrap();
+        archive.write_all(b"<html><body>Auxiliary notes</body></html>").unwrap();
         archive.start_file("OEBPS/unused.bin", stored).unwrap();
         archive.write_all(&vec![7_u8; 4 * 1024 * 1024]).unwrap();
         let bytes = archive.finish().unwrap().into_inner();
         let bytes_read = Arc::new(AtomicUsize::new(0));
         let provider = EpubProvider::try_from_reader(CountingReader { cursor: Cursor::new(bytes.clone()), bytes_read: Arc::clone(&bytes_read) }).unwrap();
-        assert_eq!(provider.list_html_candidates("").unwrap(), vec!["OEBPS/chapter.xhtml"]);
+        let documents = provider.list_html_candidates("").unwrap();
+        assert_eq!(documents, vec!["OEBPS/chapter.xhtml", "OEBPS/notes.xhtml"]);
+        assert_eq!(provider.document_progress_weights(&documents).unwrap(), vec![43, 41]);
         assert_eq!(provider.read_string("OEBPS/chapter.xhtml").unwrap(), "<html><body>Only this chapter</body></html>");
         assert!(bytes_read.load(Ordering::Relaxed) < bytes.len() / 2, "EPUB provider read the unused archive payload");
     }
@@ -920,49 +960,6 @@ mod streaming_tests {
     fn ordinary_document_links_remain_relative_to_the_current_chapter() {
         assert_eq!(resolve_resource_href("OEBPS/Text/current.xhtml", "next.xhtml#section"), "OEBPS/Text/next.xhtml");
     }
-}
-
-fn parse_clock_seconds(value: &str) -> Option<f64> {
-    let value = value.trim().strip_prefix("npt=").unwrap_or(value.trim()).trim_end_matches('s');
-    let parts = value.split(':').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [seconds] => seconds.parse().ok(),
-        [minutes, seconds] => Some(minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?),
-        [hours, minutes, seconds] => Some(hours.parse::<f64>().ok()? * 3600.0 + minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?),
-        _ => None,
-    }
-}
-
-fn parse_smil_cues(smil: &str, smil_path: &str) -> Vec<MediaOverlayCue> {
-    let mut reader = quick_xml::Reader::from_str(smil);
-    reader.trim_text(true);
-    let mut buffer = Vec::new();
-    let mut text_href = None;
-    let mut cues = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(quick_xml::events::Event::Start(element)) | Ok(quick_xml::events::Event::Empty(element)) => {
-                let name = element.name();
-                if name.as_ref().ends_with(b"par") {
-                    text_href = None;
-                } else if name.as_ref().ends_with(b"text") {
-                    text_href = read_xml_attr(element.attributes(), b"src").map(|href| resolve_toc_href(smil_path, &href));
-                } else if name.as_ref().ends_with(b"audio") {
-                    let audio_href = read_xml_attr(element.attributes(), b"src").map(|href| resolve_toc_href(smil_path, &href));
-                    let begin = read_xml_attr(element.attributes(), b"clipBegin").or_else(|| read_xml_attr(element.attributes(), b"clip-begin")).as_deref().and_then(parse_clock_seconds).unwrap_or(0.0);
-                    let end = read_xml_attr(element.attributes(), b"clipEnd").or_else(|| read_xml_attr(element.attributes(), b"clip-end")).as_deref().and_then(parse_clock_seconds);
-                    if let (Some(text_href), Some(audio_href)) = (text_href.clone(), audio_href) {
-                        cues.push(MediaOverlayCue { text_href, audio_href, clip_begin_seconds: begin, clip_end_seconds: end });
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-    cues
 }
 
 fn infer_identifier_scheme(value: &str) -> IdentifierScheme {
@@ -1245,6 +1242,14 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
                 identifier.scheme = scheme;
             }
         }
+        // A checksum-valid whole value outranks the producer's scheme,
+        // including EPUB 3 identifier-type refinements.
+        if let Some(isbn) = publication_model::metadata_isbn(&identifier.value) {
+            identifier.value = isbn;
+            identifier.scheme = IdentifierScheme::ISBN;
+        } else if matches!(identifier.scheme, IdentifierScheme::ISBN) {
+            identifier.scheme = IdentifierScheme::Unspecified;
+        }
         metadata.identifiers.push(identifier);
     }
 
@@ -1279,7 +1284,16 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
     let property_subjects = metadata.properties.iter().flat_map(subjects_from_property).collect::<Vec<_>>();
     metadata.subjects.extend(property_subjects);
 
+    add_metadata_isbns(&mut metadata, metadata_block_values(opf_xml, "metadata"));
     metadata
+}
+
+fn add_metadata_isbns(metadata: &mut EpubMetadata, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        let Some(isbn) = publication_model::metadata_isbn(&value) else { continue };
+        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && publication_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) { continue; }
+        metadata.identifiers.push(EpubIdentifier { value: isbn, scheme: IdentifierScheme::ISBN, identifier_types: Vec::new() });
+    }
 }
 
 fn looks_like_bisac_code(value: &str) -> bool {
@@ -1551,15 +1565,6 @@ mod tests {
     }
 
     #[test]
-    fn smil_media_overlay_cues_resolve_paths_and_clock_values() {
-        let cues = parse_smil_cues(
-            r#"<smil xmlns="http://www.w3.org/ns/SMIL"><body><seq><par><text src="chapter.xhtml#p1"/><audio src="../audio/ch1.mp3" clipBegin="00:01.5" clipEnd="3.25s"/></par></seq></body></smil>"#,
-            "OPS/overlays/chapter.smil",
-        );
-        assert_eq!(cues, vec![MediaOverlayCue { text_href: "OPS/overlays/chapter.xhtml#p1".to_owned(), audio_href: "OPS/audio/ch1.mp3".to_owned(), clip_begin_seconds: 1.5, clip_end_seconds: Some(3.25) }]);
-    }
-
-    #[test]
     fn opf_metadata_preserves_every_publication_identifier_and_its_type_evidence() {
         let metadata = parse_opf_metadata(
             r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
@@ -1662,6 +1667,27 @@ mod tests {
     }
 
     #[test]
+    fn opf_metadata_preserves_embedded_lcc_values_and_refined_terms() {
+        let metadata = parse_opf_metadata(
+            r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf"><metadata>
+            <dc:subject>QA76.73.R87</dc:subject>
+            <dc:subject opf:scheme="LCC">HD69.C6 R38 1999</dc:subject>
+            <dc:subject id="topic">Business consultants</dc:subject>
+            <meta refines="#topic" property="authority">LCC</meta>
+            <meta refines="#topic" property="term">HD69.C6</meta>
+        </metadata></package>"##,
+        );
+        assert_eq!(metadata.subjects.len(), 3);
+        assert_eq!(metadata.subjects[0].value, "QA76.73.R87");
+        assert_eq!(metadata.subjects[0].source, "dc:subject");
+        assert!(metadata.subjects[0].authority.is_none());
+        assert_eq!(metadata.subjects[1].authority.as_deref(), Some("LCC"));
+        assert_eq!(metadata.subjects[1].value, "HD69.C6 R38 1999");
+        assert_eq!(metadata.subjects[2].authority.as_deref(), Some("LCC"));
+        assert_eq!(metadata.subjects[2].code.as_deref(), Some("HD69.C6"));
+    }
+
+    #[test]
     fn opf_metadata_promotes_explicit_subject_genre_and_calibre_properties() {
         let metadata = parse_opf_metadata(
             r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -1732,5 +1758,76 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Keep element text intact across XML text events so a valid substring in a
+/// larger value cannot masquerade as a complete ISBN.
+fn metadata_block_values(xml: &str, block: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.expand_empty_elements(true);
+    let mut inside = false;
+    let mut stack: Vec<String> = Vec::new();
+    let mut values = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                if !inside {
+                    if e.local_name().as_ref() == block.as_bytes() { inside = true; }
+                    continue;
+                }
+                stack.push(String::new());
+                for attribute in e.attributes().flatten() {
+                    if let Ok(value) = attribute.unescape_value() { values.push(value.into_owned()); }
+                }
+            }
+            Ok(Event::Text(e)) if inside => {
+                if let Ok(text) = e.unescape() { for value in &mut stack { value.push_str(&text); } }
+            }
+            Ok(Event::CData(e)) if inside => {
+                for value in &mut stack { value.push_str(&String::from_utf8_lossy(&e)); }
+            }
+            Ok(Event::End(e)) if inside => {
+                if stack.is_empty() && e.local_name().as_ref() == block.as_bytes() { break; }
+                if let Some(value) = stack.pop() { values.push(value); }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        if values.len() >= 4096 || stack.len() > 64 { break; }
+    }
+    values
+}
+
+#[cfg(test)]
+mod bibliographic_property_tests {
+    use super::metadata_block_values;
+    #[test]
+    fn scans_values_not_digit_fragments_and_stops_at_head_end() {
+        let values = metadata_block_values(r#"<ncx><head><meta name="dtb:uid" content="978-1-934356-55-5"/><meta name="other">prefix<![CDATA[9781934356555]]>suffix</meta></head><navMap><meta content="9780191507052"/></navMap></ncx>"#, "head");
+        assert!(values.iter().any(|v| v == "978-1-934356-55-5"));
+        assert!(values.iter().any(|v| v == "prefix9781934356555suffix"));
+        assert!(!values.iter().any(|v| v == "9781934356555" || v == "9780191507052"));
+    }
+}
+
+#[cfg(test)]
+mod mislabeled_isbn_tests {
+    use super::*;
+    #[test]
+    fn whole_values_override_schemes_and_include_arbitrary_properties() {
+        let metadata = parse_opf_metadata(r#"<package><metadata>
+          <identifier scheme="ASIN">978-1-934356-55-5</identifier>
+          <identifier scheme="ASIN">B005E835K0</identifier>
+          <meta name="unknown" content="9780191507052"/>
+          <source>9780191085048</source>
+          <meta name="uuid" content="7872d3e9-8394-4530-8a39-773505e19c9b"/>
+          <meta name="cover" content="9780199588503.jpg"/>
+          <identifier scheme="ISBN">0000000000</identifier>
+        </metadata></package>"#);
+        let isbns: Vec<_> = metadata.identifiers.iter().filter(|id| matches!(id.scheme, IdentifierScheme::ISBN)).map(|id| id.value.as_str()).collect();
+        assert_eq!(isbns, ["9781934356555", "9780191507052", "9780191085048"]);
+        assert!(metadata.identifiers.iter().any(|id| id.value == "B005E835K0" && matches!(id.scheme, IdentifierScheme::ASIN)));
     }
 }

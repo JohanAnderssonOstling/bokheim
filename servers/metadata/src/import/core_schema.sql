@@ -67,6 +67,24 @@ CREATE TABLE snapshot(
                 notation TEXT NOT NULL,
                 PRIMARY KEY(edition_id,scheme,notation)
              ) WITHOUT ROWID;
+             CREATE TABLE isbn_classification(
+                isbn13 INTEGER NOT NULL,
+                scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),
+                notation TEXT NOT NULL,
+                PRIMARY KEY(isbn13,scheme,notation)
+             ) WITHOUT ROWID;
+             CREATE INDEX isbn_classification_by_code ON isbn_classification(scheme,notation,isbn13);
+             CREATE TABLE title_author_classification(
+                normalized_title TEXT NOT NULL,
+                normalized_subtitle TEXT NOT NULL,
+                normalized_author TEXT NOT NULL,
+                publication_year INTEGER NOT NULL,
+                normalized_publisher TEXT NOT NULL,
+                scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),
+                notation TEXT NOT NULL,
+                PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher,scheme,notation)
+             ) WITHOUT ROWID;
+             CREATE INDEX title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher);
              CREATE TABLE edition_work_classification(
                 work_id INTEGER NOT NULL,
                 scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),
@@ -199,3 +217,9 @@ CREATE TABLE snapshot(
              CREATE TABLE wikidata_instance_stage(wikidata_id INTEGER NOT NULL, class_id INTEGER NOT NULL);
              CREATE TABLE wikidata_subclass_stage(child_id INTEGER NOT NULL, parent_id INTEGER NOT NULL);
              INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',9);
+
+-- Optional subtitle indexes preserve compatibility with older query snapshots.
+CREATE TABLE IF NOT EXISTS edition_subtitle(edition_id INTEGER PRIMARY KEY, subtitle TEXT NOT NULL, normalized_title TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS edition_subtitle_by_title ON edition_subtitle(normalized_title,edition_id);
+CREATE TABLE IF NOT EXISTS work_subtitle(work_id INTEGER PRIMARY KEY, subtitle TEXT NOT NULL, normalized_title TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS work_subtitle_by_title ON work_subtitle(normalized_title,work_id);

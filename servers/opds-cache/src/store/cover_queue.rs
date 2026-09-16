@@ -1,16 +1,16 @@
 use super::{
-    active_generation_in, advance_catalog_transport_revision, decode_cached, params, sql_decode_error, storage_i64, stored_u64, unix_timestamp, upsert_active_publication, CatalogCache, CatalogCacheError, CatalogCoverDownloadInventory,
-    CatalogCoverDownloadJob, CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, HashSet, OptionalExtension, Transaction, TransactionBehavior,
+    active_generation_in, advance_catalog_transport_revision, decode_cached, params, sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, CatalogCoverDownloadJob, CatalogPublication, CatalogPublicationIdentity,
+    CatalogSourceId, CatalogStore, CatalogStoreError, HashSet, OptionalExtension, Transaction, TransactionBehavior,
 };
 
 const MAX_COVER_ERROR_BYTES: usize = 2_048;
 
-impl CatalogCache {
+impl CatalogStore {
     /// Reconciles the durable cover queue with active publications in bounded
     /// transactions. The URL and both publication identity components are
     /// retained together, so a cached image always has an auditable owner.
-    pub fn reconcile_active_cover_downloads_batch(&self, batch_size: usize) -> Result<bool, CatalogCacheError> {
-        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogCacheError::new("cover reconciliation batch size overflow"))?;
+    pub fn reconcile_active_cover_downloads_batch(&self, batch_size: usize) -> Result<bool, CatalogStoreError> {
+        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogStoreError::new("cover reconciliation batch size overflow"))?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = {
@@ -51,7 +51,7 @@ impl CatalogCache {
         Ok(more)
     }
 
-    pub fn claim_next_cover_download(&self) -> Result<Option<CatalogCoverDownloadJob>, CatalogCacheError> {
+    pub fn claim_next_cover_download(&self) -> Result<Option<CatalogCoverDownloadJob>, CatalogStoreError> {
         let connection = self.connection()?;
         connection
             .query_row(
@@ -80,7 +80,7 @@ impl CatalogCache {
             .map_err(Into::into)
     }
 
-    pub fn finish_cover_download(&self, job: &CatalogCoverDownloadJob, result: Result<(), &str>) -> Result<(), CatalogCacheError> {
+    pub fn finish_cover_download(&self, job: &CatalogCoverDownloadJob, result: Result<(), &str>) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let work_id = job.publication.work_id.as_deref().unwrap_or("");
@@ -141,32 +141,20 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn retry_failed_cover_downloads(&self) -> Result<u64, CatalogCacheError> {
+    pub fn retry_failed_cover_downloads(&self) -> Result<u64, CatalogStoreError> {
         let connection = self.connection()?;
         let changed = connection.execute("UPDATE catalog_cover_download SET status='pending',last_error=NULL WHERE status='failed'", [])?;
-        u64::try_from(changed).map_err(|_| CatalogCacheError::new("cover retry count overflow"))
-    }
-
-    pub fn cover_download_inventory(&self) -> Result<CatalogCoverDownloadInventory, CatalogCacheError> {
-        let connection = self.connection()?;
-        Ok(CatalogCoverDownloadInventory {
-            pending: count_status(&connection, "pending")?,
-            running: count_status(&connection, "running")?,
-            succeeded: count_status(&connection, "succeeded")?,
-            failed: count_status(&connection, "failed")?,
-            attempts: connection.query_row("SELECT COALESCE(SUM(attempts),0) FROM catalog_cover_download", [], |row| stored_u64(row.get(0)?, "cover download attempt count"))?,
-            last_error: connection.query_row("SELECT last_error FROM catalog_cover_download WHERE last_error IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1", [], |row| row.get(0)).optional()?,
-        })
+        u64::try_from(changed).map_err(|_| CatalogStoreError::new("cover retry count overflow"))
     }
 }
 
-pub(crate) fn queue_publication_cover(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication) -> Result<(), CatalogCacheError> {
+pub(crate) fn queue_publication_cover(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication) -> Result<(), CatalogStoreError> {
     let work_id = publication.identity.work_id.as_deref().unwrap_or("");
     let urls = publication_cover_urls(publication);
     queue_cover_identity(transaction, source_id.as_str(), storage_i64(generation, "generation")?, &publication.identity.edition_id, work_id, &urls)
 }
 
-fn queue_cover_identity(transaction: &Transaction<'_>, source_id: &str, generation: i64, edition_id: &str, work_id: &str, image_urls: &[String]) -> Result<(), CatalogCacheError> {
+fn queue_cover_identity(transaction: &Transaction<'_>, source_id: &str, generation: i64, edition_id: &str, work_id: &str, image_urls: &[String]) -> Result<(), CatalogStoreError> {
     let expected = image_urls.iter().map(String::as_str).collect::<HashSet<_>>();
     let existing = {
         let mut statement = transaction.prepare("SELECT image_url FROM catalog_cover_download WHERE source_id=?1 AND edition_id=?2 AND work_id=?3")?;
@@ -181,7 +169,7 @@ fn queue_cover_identity(transaction: &Transaction<'_>, source_id: &str, generati
             "INSERT INTO catalog_cover_download(source_id,edition_id,work_id,image_url,priority,catalog_generation,status)
              VALUES(?1,?2,?3,?4,?5,?6,'pending')
              ON CONFLICT(source_id,edition_id,work_id,image_url) DO UPDATE SET priority=excluded.priority,catalog_generation=excluded.catalog_generation",
-            params![source_id, edition_id, work_id, image_url, i64::try_from(priority).map_err(|_| CatalogCacheError::new("cover priority overflow"))?, generation],
+            params![source_id, edition_id, work_id, image_url, i64::try_from(priority).map_err(|_| CatalogStoreError::new("cover priority overflow"))?, generation],
         )?;
     }
     Ok(())
@@ -190,10 +178,6 @@ fn queue_cover_identity(transaction: &Transaction<'_>, source_id: &str, generati
 fn publication_cover_urls(publication: &CatalogPublication) -> Vec<String> {
     let mut seen = HashSet::new();
     publication.image_url.iter().chain(publication.metadata.images.iter().map(|image| &image.url)).filter(|url| url.starts_with("http://") || url.starts_with("https://")).filter(|url| seen.insert((*url).clone())).cloned().collect()
-}
-
-fn count_status(connection: &rusqlite::Connection, status: &str) -> Result<u64, CatalogCacheError> {
-    connection.query_row("SELECT COUNT(*) FROM catalog_cover_download WHERE status=?1", [status], |row| stored_u64(row.get(0)?, "cover download count")).map_err(Into::into)
 }
 
 fn bounded_cover_error(error: &str) -> String {

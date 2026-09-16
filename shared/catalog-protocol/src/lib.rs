@@ -1,7 +1,7 @@
 //! Wire DTOs for page and search exchange between the catalog client and
 //! cache server.
 
-use catalog_model::{CatalogFacet, CatalogFreshness, CatalogGroup, CatalogLink, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationIdentity, CatalogSearch, CatalogSource, CatalogSourceId};
+use catalog_model::{CatalogFacet, CatalogFreshness, CatalogGroup, CatalogLink, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationIdentity, CatalogSource, CatalogSourceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +55,6 @@ pub struct CatalogPageLayout {
     pub groups: Vec<CatalogGroupLayout>,
     pub facets: Vec<CatalogFacet>,
     pub pagination: CatalogPagination,
-    pub search: Option<CatalogSearch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,13 +74,18 @@ pub struct CatalogSearchRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogSearchResponse {
-    pub source_id: CatalogSourceId,
     pub epoch: String,
+    pub search: CatalogSearchLayout,
+    pub payloads: Vec<CatalogPublicationPayload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSearchLayout {
+    pub source_id: CatalogSourceId,
     pub query: String,
     pub title_matches: Vec<CatalogPublicationReference>,
     pub author_matches: Vec<CatalogPublicationReference>,
     pub toc_matches: Vec<CatalogPublicationReference>,
-    pub payloads: Vec<CatalogPublicationPayload>,
 }
 
 pub fn page_layout(page: &CatalogPage, mut reference: impl FnMut(&CatalogPublication) -> CatalogPublicationReference) -> CatalogPageLayout {
@@ -104,7 +108,6 @@ pub fn page_layout(page: &CatalogPage, mut reference: impl FnMut(&CatalogPublica
             .collect(),
         facets: page.facets.clone(),
         pagination: page.pagination.clone(),
-        search: page.search.clone(),
     }
 }
 
@@ -133,6 +136,5 @@ pub fn materialize_page(layout: CatalogPageLayout, mut publication: impl FnMut(&
         groups,
         facets: layout.facets,
         pagination: layout.pagination,
-        search: layout.search,
     })
 }

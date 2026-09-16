@@ -18,25 +18,9 @@ pub(crate) enum BookUploadAdmission {
     Reserved(BookUploadReservation),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ThumbnailUploadReservation {
-    pub(crate) id: String,
-    pub(crate) user_id: String,
-    pub(crate) library_id: LibraryId,
-    pub(crate) hash: ContentHash,
-    pub(crate) expected_size_bytes: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ThumbnailUploadAdmission {
-    AlreadyOwned,
-    Reserved(ThumbnailUploadReservation),
-}
-
 // Five minutes of grace keeps an active upload from racing reservation expiry
 // at its HTTP deadline.
 const UPLOAD_RESERVATION_TTL_SECONDS: f64 = (server_asset_store::MAX_BOOK_UPLOAD_DURATION.as_secs() + 5 * 60) as f64;
-const THUMBNAIL_UPLOAD_RESERVATION_TTL_SECONDS: f64 = (server_asset_store::MAX_THUMBNAIL_UPLOAD_DURATION.as_secs() + 5 * 60) as f64;
 
 #[derive(Clone, Copy)]
 struct AccountSnapshot {
@@ -81,9 +65,16 @@ async fn require_library_owner(transaction: &mut Transaction<'_, Postgres>, user
     }
 }
 
+async fn require_cloud_storage(transaction: &mut Transaction<'_, Postgres>, user: &str, library: &LibraryId) -> Result<(), AssetError> {
+    let enabled: Option<bool> = sqlx::query_scalar(include_str!("sql/cloud_storage/require_enabled.sql")).bind(library.to_string()).bind(user).fetch_optional(&mut **transaction).await.map_err(storage)?;
+    if enabled == Some(true) { Ok(()) } else { Err(AssetError::Forbidden) }
+}
+
 async fn account_snapshot(transaction: &mut Transaction<'_, Postgres>, user_id: &str) -> Result<AccountSnapshot, AssetError> {
+    let phase_started = std::time::Instant::now();
     sqlx::query_file!("src/sql/account/ensure_exists.sql", user_id).execute(&mut **transaction).await.map_err(storage)?;
     let row = sqlx::query(include_str!("sql/account/select.sql")).bind(user_id).fetch_one(&mut **transaction).await.map_err(storage)?;
+    tracing::debug!(target: "sync_performance", phase = "account_ensure_snapshot", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
     Ok(AccountSnapshot { limit: row.try_get("quota_bytes").map_err(storage)?, used: row.try_get("used_bytes").map_err(storage)?, reserved: row.try_get("reserved_bytes").map_err(storage)? })
 }
 
@@ -96,8 +87,12 @@ async fn expire_reservations(transaction: &mut Transaction<'_, Postgres>, user_i
 }
 
 async fn begin_authorized_transaction<'a>(pool: &'a PgPool, user_id: &str, library_id: &LibraryId) -> Result<Transaction<'a, Postgres>, AssetError> {
+    let phase_started = std::time::Instant::now();
     let mut transaction = pool.begin().await.map_err(storage)?;
+    tracing::debug!(target: "sync_performance", phase = "asset_pool_acquire_and_begin", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+    let phase_started = std::time::Instant::now();
     require_library_owner(&mut transaction, user_id, library_id).await?;
+    tracing::debug!(target: "sync_performance", phase = "asset_library_authorize", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
     Ok(transaction)
 }
 
@@ -142,11 +137,18 @@ async fn insert_blob_object(transaction: &mut Transaction<'_, Postgres>, hash: &
     }
 }
 
-pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError> {
+/// `verified` contains checksums whose stored permanent identity was checked by
+/// the application before acquiring this transaction's account writer lock.
+pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry], verified: &std::collections::HashSet<ContentHash>) -> Result<BlobManifestResponse, AssetError> {
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
+    require_cloud_storage(&mut transaction, user_id, library_id).await?;
     let mut seen = std::collections::HashSet::with_capacity(blobs.len());
     if blobs.iter().any(|blob| !seen.insert(blob.content_hash.clone())) {
         return Err(AssetError::InvalidInput("book manifest contains a duplicate content hash".to_string()));
+    }
+    let identities: std::collections::HashMap<_, _> = blobs.iter().map(|blob| (blob.checksum, blob.content_hash)).collect();
+    if identities.len() != blobs.len() {
+        return Err(AssetError::InvalidInput("book manifest contains a duplicate checksum".into()));
     }
 
     let mut response = BlobManifestResponse::default();
@@ -157,7 +159,7 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
             response.rejected.push(RejectedBlobManifestEntry { content_hash: blob.content_hash.clone(), reason: BlobManifestRejectionReason::InvalidSize });
             continue;
         }
-        hashes.push(blob.content_hash.as_str().to_string());
+        hashes.push(blob.checksum.as_str().to_string());
         sizes.push(size_i64(blob.size_bytes)?);
     }
     if hashes.is_empty() {
@@ -176,18 +178,23 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
         let requested_size: i64 = row.try_get("size_bytes").map_err(storage)?;
         let stored_size: Option<i64> = row.try_get("stored_size_bytes").map_err(storage)?;
         let owned: bool = row.try_get("owned").map_err(storage)?;
-        let referenced: bool = row.try_get("referenced").map_err(storage)?;
         let reservation_id: Option<String> = row.try_get("reservation_id").map_err(storage)?;
-        let hash = ContentHash::new(&raw_hash.as_str());
+        let checksum = ContentHash::new(&raw_hash);
+        let hash = identities[&checksum];
+        if stored_size.is_some_and(|size| size != requested_size) {
+            response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
+            continue;
+        }
         if owned {
-            response.owned.push(hash);
+            if verified.contains(&checksum) { response.owned.push(hash); }
+            else { response.upload.push(hash); }
             continue;
         }
         if reservation_id.is_some() {
             response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::UploadInProgress });
             continue;
         }
-        if let Some(stored_size) = stored_size.filter(|_| referenced) {
+        if let Some(stored_size) = stored_size.filter(|_| verified.contains(&checksum)) {
             if stored_size != requested_size {
                 response.rejected.push(RejectedBlobManifestEntry { content_hash: hash, reason: BlobManifestRejectionReason::SizeMismatch });
             } else if requested_size > available {
@@ -217,6 +224,11 @@ pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &L
             return Err(account.quota_exceeded(claimed_sizes.iter().sum::<i64>().max(0) as u64));
         }
     }
+    for identity in response.owned.iter().chain(&response.claimed) {
+        let blob = blobs.iter().find(|blob| blob.content_hash == *identity).expect("response derives from manifest");
+        record_library_claim(&mut transaction, user_id, library_id, identity, &blob.checksum).await?;
+        bind_book_revision(&mut transaction, user_id, identity, &blob.checksum).await?;
+    }
     transaction.commit().await.map_err(storage)?;
     Ok(response)
 }
@@ -231,6 +243,7 @@ pub(super) async fn claim_existing_book(pool: &PgPool, user_id: &str, library_id
         transaction.commit().await.map_err(storage)?;
         return Ok(());
     }
+    require_cloud_storage(&mut transaction, user_id, library_id).await?;
     let referenced: bool = sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM user_blob_reference
@@ -265,6 +278,7 @@ pub(super) async fn claim_existing_book(pool: &PgPool, user_id: &str, library_id
 pub(super) async fn reserve_book_upload(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<BookUploadAdmission, AssetError> {
     let size_i64 = size_i64(size_bytes)?;
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
+    require_cloud_storage(&mut transaction, user_id, library_id).await?;
     let _ = prepare_account(&mut transaction, user_id).await?;
     let hash_str = hash.as_str();
     if sqlx::query_file_scalar!("src/sql/assets/charge_exists.sql", user_id, hash_str).fetch_one(&mut *transaction).await.map_err(storage)?.unwrap_or(false) {
@@ -302,6 +316,7 @@ pub(super) async fn finish_book_upload(pool: &PgPool, reservation: &BookUploadRe
         abort_book_upload(pool, reservation).await?;
         return Err(error);
     }
+    require_cloud_storage(&mut transaction, &reservation.user_id, &reservation.library_id).await?;
     let _ = account_snapshot(&mut transaction, &reservation.user_id).await?;
     let reservation_hash = reservation.hash.as_str();
     let stored_size: Option<i64> =
@@ -309,7 +324,8 @@ pub(super) async fn finish_book_upload(pool: &PgPool, reservation: &BookUploadRe
     let Some(stored_size) = stored_size else {
         let already_charged = sqlx::query_file_scalar!("src/sql/assets/charge_exists.sql", reservation.user_id, reservation_hash).fetch_one(&mut *transaction).await.map_err(storage)?.unwrap_or(false);
         if already_charged {
-            transaction.commit().await.map_err(storage)?;
+            record_library_claim(&mut transaction, &reservation.user_id, &reservation.library_id, &reservation.hash, &reservation.hash).await?;
+    transaction.commit().await.map_err(storage)?;
             return Ok(());
         }
         return Err(AssetError::Storage("book upload reservation no longer exists".to_string()));
@@ -321,6 +337,7 @@ pub(super) async fn finish_book_upload(pool: &PgPool, reservation: &BookUploadRe
     let inserted = sqlx::query_file!("src/sql/assets/insert_charge_idempotent.sql", reservation.user_id, reservation_hash).execute(&mut *transaction).await.map_err(storage)?.rows_affected();
     let charged = inserted == 1;
     sqlx::query_file!("src/sql/assets/finish_upload_update_account.sql", reservation.user_id, stored_size, charged).execute(&mut *transaction).await.map_err(storage)?;
+    record_library_claim(&mut transaction, &reservation.user_id, &reservation.library_id, &reservation.hash, &reservation.hash).await?;
     transaction.commit().await.map_err(storage)
 }
 
@@ -334,128 +351,38 @@ pub(super) async fn abort_book_upload(pool: &PgPool, reservation: &BookUploadRes
     transaction.commit().await.map_err(storage)
 }
 
-pub(super) async fn reserve_thumbnail_upload(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<ThumbnailUploadAdmission, AssetError> {
-    let size_i64 = size_i64(size_bytes)?;
-    let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
-    let _ = prepare_account(&mut transaction, user_id).await?;
-    let hash_str = hash.as_str();
-    let already_owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_thumbnail_charge WHERE user_id=$1 AND content_hash=$2)").bind(user_id).bind(hash_str).fetch_one(&mut *transaction).await.map_err(storage)?;
-    if already_owned {
-        transaction.commit().await.map_err(storage)?;
-        return Ok(ThumbnailUploadAdmission::AlreadyOwned);
+// Thumbnails are keyed by the publication identity, not by their own bytes.
+// A synced lifecycle entry is enough: the book file may still be uploading.
+async fn require_thumbnail_book(transaction: &mut Transaction<'_, Postgres>, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
+    if size_bytes > sync_common::MAX_THUMBNAIL_BYTES {
+        return Err(AssetError::TooLarge { limit: sync_common::MAX_THUMBNAIL_BYTES });
     }
-    let upload_in_progress: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thumbnail_upload_reservation WHERE user_id=$1 AND content_hash=$2)").bind(user_id).bind(hash_str).fetch_one(&mut *transaction).await.map_err(storage)?;
-    if upload_in_progress {
-        return Err(AssetError::UploadInProgress);
-    }
-    let reserved = sqlx::query(include_str!("sql/assets/reserve_capacity.sql")).bind(user_id).bind(size_i64).fetch_optional(&mut *transaction).await.map_err(storage)?;
-    if reserved.is_none() {
-        return Err(account_snapshot(&mut transaction, user_id).await?.quota_exceeded(size_bytes));
-    }
-    let reservation = ThumbnailUploadReservation { id: uuid::Uuid::new_v4().to_string(), user_id: user_id.to_string(), library_id: library_id.clone(), hash: hash.clone(), expected_size_bytes: size_bytes };
-    let inserted = sqlx::query(
-        "INSERT INTO thumbnail_upload_reservation(id, user_id, library_id, content_hash, size_bytes, expires_at)
-         VALUES ($1, $2, $3, $4, $5, now()+make_interval(secs => $6))",
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sync_state WHERE library_id=$1
+         AND kind='book_lifecycle' AND present AND content_hash=$2 FOR SHARE)",
     )
-    .bind(&reservation.id)
-    .bind(user_id)
     .bind(library_id.to_string())
-    .bind(hash_str)
-    .bind(size_i64)
-    .bind(THUMBNAIL_UPLOAD_RESERVATION_TTL_SECONDS)
-    .execute(&mut *transaction)
-    .await;
-    if let Err(error) = inserted {
-        if error.as_database_error().and_then(|database| database.code()).as_deref() == Some("23505") {
-            return Err(AssetError::UploadInProgress);
-        }
-        return Err(storage(error));
-    }
-    transaction.commit().await.map_err(storage)?;
-    Ok(ThumbnailUploadAdmission::Reserved(reservation))
-}
-
-pub(super) async fn finish_thumbnail_upload(pool: &PgPool, reservation: &ThumbnailUploadReservation, actual_size_bytes: u64) -> Result<(), AssetError> {
-    if actual_size_bytes != reservation.expected_size_bytes {
-        return Err(AssetError::LengthMismatch { expected: reservation.expected_size_bytes, actual: actual_size_bytes });
-    }
-    let actual_size_i64 = size_i64(actual_size_bytes)?;
-    let mut transaction = pool.begin().await.map_err(storage)?;
-    if let Err(error) = require_library_owner(&mut transaction, &reservation.user_id, &reservation.library_id).await {
-        drop(transaction);
-        abort_thumbnail_upload(pool, reservation).await?;
-        return Err(error);
-    }
-    let _ = account_snapshot(&mut transaction, &reservation.user_id).await?;
-    let stored_size: Option<i64> =
-        sqlx::query_scalar("DELETE FROM thumbnail_upload_reservation WHERE id=$1 AND user_id=$2 RETURNING size_bytes").bind(&reservation.id).bind(&reservation.user_id).fetch_optional(&mut *transaction).await.map_err(storage)?;
-    let Some(stored_size) = stored_size else {
-        let already_charged: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_thumbnail_charge WHERE user_id=$1 AND content_hash=$2)").bind(&reservation.user_id).bind(reservation.hash.as_str()).fetch_one(&mut *transaction).await.map_err(storage)?;
-        if already_charged {
-            transaction.commit().await.map_err(storage)?;
-            return Ok(());
-        }
-        return Err(AssetError::Storage("thumbnail upload reservation no longer exists".to_string()));
-    };
-    if stored_size != actual_size_i64 {
-        return Err(AssetError::LengthMismatch { expected: stored_size.max(0) as u64, actual: actual_size_bytes });
-    }
-    let charged = sqlx::query(
-        "INSERT INTO user_thumbnail_charge(user_id, library_id, content_hash, size_bytes)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (user_id, content_hash) DO NOTHING",
-    )
-    .bind(&reservation.user_id)
-    .bind(reservation.library_id.to_string())
-    .bind(reservation.hash.as_str())
-    .bind(actual_size_i64)
-    .execute(&mut *transaction)
+    .bind(hash.as_str())
+    .fetch_one(&mut **transaction)
     .await
-    .map_err(storage)?
-    .rows_affected()
-        == 1;
-    sqlx::query_file!("src/sql/assets/finish_upload_update_account.sql", reservation.user_id, stored_size, charged).execute(&mut *transaction).await.map_err(storage)?;
-    transaction.commit().await.map_err(storage)
-}
-
-pub(super) async fn abort_thumbnail_upload(pool: &PgPool, reservation: &ThumbnailUploadReservation) -> Result<(), AssetError> {
-    let mut transaction = pool.begin().await.map_err(storage)?;
-    let _ = account_snapshot(&mut transaction, &reservation.user_id).await?;
-    let released: Option<i64> =
-        sqlx::query_scalar("DELETE FROM thumbnail_upload_reservation WHERE id=$1 AND user_id=$2 RETURNING size_bytes").bind(&reservation.id).bind(&reservation.user_id).fetch_optional(&mut *transaction).await.map_err(storage)?;
-    if let Some(released) = released {
-        sqlx::query_file!("src/sql/assets/adjust_reserved.sql", reservation.user_id, -released).execute(&mut *transaction).await.map_err(storage)?;
+    .map_err(storage)?;
+    if !present {
+        return Err(AssetError::Forbidden);
     }
-    transaction.commit().await.map_err(storage)
+    Ok(())
 }
 
-pub(super) async fn claim_existing_thumbnail(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
-    let size_i64 = size_i64(size_bytes)?;
+/// Checks thumbnail access without reserving or charging user storage.
+pub(super) async fn validate_thumbnail(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
-    let _ = prepare_account(&mut transaction, user_id).await?;
-    let hash_str = hash.as_str();
-    let already_charged: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_thumbnail_charge WHERE user_id=$1 AND content_hash=$2)").bind(user_id).bind(hash_str).fetch_one(&mut *transaction).await.map_err(storage)?;
-    if already_charged {
-        transaction.commit().await.map_err(storage)?;
-        return Ok(());
-    }
-    let upload_in_progress: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thumbnail_upload_reservation WHERE user_id=$1 AND content_hash=$2)").bind(user_id).bind(hash_str).fetch_one(&mut *transaction).await.map_err(storage)?;
-    if upload_in_progress {
-        return Err(AssetError::UploadInProgress);
-    }
-    let claimed = sqlx::query(include_str!("sql/assets/claim_used_capacity.sql")).bind(user_id).bind(size_i64).fetch_optional(&mut *transaction).await.map_err(storage)?;
-    if claimed.is_none() {
-        return Err(account_snapshot(&mut transaction, user_id).await?.quota_exceeded(size_bytes));
-    }
-    sqlx::query("INSERT INTO user_thumbnail_charge(user_id, library_id, content_hash, size_bytes) VALUES ($1, $2, $3, $4)")
-        .bind(user_id)
-        .bind(library_id.to_string())
-        .bind(hash_str)
-        .bind(size_i64)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage)?;
+    require_thumbnail_book(&mut transaction, library_id, hash, size_bytes).await?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(super) async fn validate_thumbnail_upload(pool: &PgPool, user_id: &str, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
+    let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
+    require_cloud_storage(&mut transaction, user_id, library_id).await?;
+    require_thumbnail_book(&mut transaction, library_id, hash, size_bytes).await?;
     transaction.commit().await.map_err(storage)
 }
 
@@ -473,10 +400,18 @@ pub(super) async fn apply_lifecycle_reference_deltas(transaction: &mut Transacti
     if hashes.is_empty() {
         return Ok(());
     }
+    // Serialize revision replacement and reference removal for this account.
+    sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user_id).fetch_optional(&mut **transaction).await?;
     let row = sqlx::query(include_str!("sql/assets/apply_blob_reference_deltas.sql")).bind(user_id).bind(&hashes).bind(&values).fetch_one(&mut **transaction).await?;
     let valid: bool = row.try_get("valid")?;
     if !valid {
         return Err(sqlx::Error::Protocol("lifecycle blob reference underflow".to_owned()));
+    }
+    let obsolete: Vec<String> = sqlx::query_scalar(include_str!("sql/cloud_storage/delete_unreferenced_revisions.sql"))
+        .bind(user_id).bind(&hashes).fetch_all(&mut **transaction).await?;
+    if !obsolete.is_empty() {
+        sqlx::query(include_str!("sql/cloud_storage/release_obsolete_revision_charges.sql"))
+            .bind(user_id).bind(obsolete).execute(&mut **transaction).await?;
     }
     Ok(())
 }
@@ -484,6 +419,11 @@ pub(super) async fn apply_lifecycle_reference_deltas(transaction: &mut Transacti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Database fixtures model objects already verified by the application.
+    async fn negotiate_books(pool: &PgPool, user: &str, library: &LibraryId, blobs: &[BlobManifestEntry]) -> Result<BlobManifestResponse, AssetError> {
+        super::negotiate_books(pool, user, library, blobs, &blobs.iter().map(|blob| blob.checksum).collect()).await
+    }
 
     fn hash() -> ContentHash {
         let raw = uuid::Uuid::new_v4().simple().to_string().repeat(2);
@@ -495,7 +435,7 @@ mod tests {
         let email = format!("quota-{}@example.com", uuid::Uuid::new_v4().simple());
         let library_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users(id, email) VALUES ($1, $2)").bind(&user_id).bind(email).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO libraries(id, user_id) VALUES ($1, $2)").bind(library_id.to_string()).bind(&user_id).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO libraries(id, user_id, name) VALUES ($1, $2, 'Books')").bind(library_id.to_string()).bind(&user_id).execute(pool).await.unwrap();
         sqlx::query("INSERT INTO user_storage_account(user_id, quota_bytes) VALUES ($1, $2)").bind(&user_id).bind(quota).execute(pool).await.unwrap();
         (user_id, library_id)
     }
@@ -538,7 +478,7 @@ mod tests {
         claim_existing_book(&pool, &first_user, &first_library, &shared, 60).await.unwrap();
         claim_existing_book(&pool, &first_user, &first_library, &shared, 60).await.unwrap();
         assert!(matches!(claim_existing_book(&pool, &second_user, &first_library, &shared, 60).await, Err(AssetError::Forbidden)));
-        let invalid_manifest = [BlobManifestEntry { content_hash: hash(), size_bytes: 0 }];
+        let invalid_manifest = [BlobManifestEntry { content_hash: hash(), checksum: hash(), size_bytes: 0 }];
         assert!(matches!(negotiate_books(&pool, &second_user, &first_library, &invalid_manifest).await, Err(AssetError::Forbidden)));
         assert!(matches!(claim_existing_book(&pool, &second_user, &second_library, &shared, 60).await, Err(AssetError::Forbidden)));
         grant_blob_reference(&pool, &second_user, &shared).await;
@@ -566,7 +506,7 @@ mod tests {
         };
         let reserved_after_expiry: i64 = sqlx::query_scalar("SELECT reserved_bytes FROM user_storage_account WHERE user_id=$1").bind(&first_user).fetch_one(&pool).await.unwrap();
         assert_eq!(reserved_after_expiry, 15);
-        let active_manifest = negotiate_books(&pool, &first_user, &first_library, &[BlobManifestEntry { content_hash: replacement_hash, size_bytes: 15 }]).await.unwrap();
+        let active_manifest = negotiate_books(&pool, &first_user, &first_library, &[BlobManifestEntry { content_hash: replacement_hash, checksum: replacement_hash, size_bytes: 15 }]).await.unwrap();
         assert_eq!(active_manifest.rejected.len(), 1);
         assert_eq!(active_manifest.rejected[0].reason, BlobManifestRejectionReason::UploadInProgress);
         abort_book_upload(&pool, &replacement).await.unwrap();
@@ -604,6 +544,7 @@ mod tests {
         .await
         .unwrap();
         let mut reconciliation = pool.begin().await.unwrap();
+        sqlx::query(include_str!("sql/cloud_storage/delete_claim.sql")).bind(concurrent_library.to_string()).bind(reservation.hash.as_str()).execute(&mut *reconciliation).await.unwrap();
         apply_lifecycle_reference_deltas(&mut reconciliation, &concurrent_user, [(reservation.hash.clone(), -1)]).await.unwrap();
         reconciliation.commit().await.unwrap();
         let used_after_removal: i64 = sqlx::query_scalar("SELECT used_bytes FROM user_storage_account WHERE user_id=$1").bind(&concurrent_user).fetch_one(&pool).await.unwrap();
@@ -623,44 +564,22 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn thumbnails_share_the_account_quota_and_release_failed_reservations() {
-        let Some(pool) = crate::test_support::isolated_pool("thumbnail_quota", 4).await else { return };
-        let (user_id, library_id) = seed_user(&pool, 100).await;
-        let first = hash();
-        let reservation = match reserve_thumbnail_upload(&pool, &user_id, &library_id, &first, 60).await.unwrap() {
-            ThumbnailUploadAdmission::Reserved(reservation) => reservation,
-            ThumbnailUploadAdmission::AlreadyOwned => panic!("a new thumbnail must not already be charged"),
-        };
-        assert_eq!(storage_usage(&pool, &user_id).await.unwrap(), crate::StorageUsage { used_bytes: 0, reserved_bytes: 60, quota_bytes: 100 });
-        finish_thumbnail_upload(&pool, &reservation, 60).await.unwrap();
-        assert_eq!(storage_usage(&pool, &user_id).await.unwrap(), crate::StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
-        assert!(matches!(reserve_thumbnail_upload(&pool, &user_id, &library_id, &first, 60).await.unwrap(), ThumbnailUploadAdmission::AlreadyOwned));
-
-        let over_quota = hash();
-        assert!(matches!(reserve_thumbnail_upload(&pool, &user_id, &library_id, &over_quota, 41).await, Err(AssetError::QuotaExceeded { .. })));
-
-        let aborted = hash();
-        let reservation = match reserve_thumbnail_upload(&pool, &user_id, &library_id, &aborted, 40).await.unwrap() {
-            ThumbnailUploadAdmission::Reserved(reservation) => reservation,
-            ThumbnailUploadAdmission::AlreadyOwned => panic!("a new thumbnail must not already be charged"),
-        };
-        abort_thumbnail_upload(&pool, &reservation).await.unwrap();
-        assert_eq!(storage_usage(&pool, &user_id).await.unwrap(), crate::StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
-
-        let expiring = hash();
-        let reservation = match reserve_thumbnail_upload(&pool, &user_id, &library_id, &expiring, 40).await.unwrap() {
-            ThumbnailUploadAdmission::Reserved(reservation) => reservation,
-            ThumbnailUploadAdmission::AlreadyOwned => panic!("a new thumbnail must not already be charged"),
-        };
-        sqlx::query("UPDATE thumbnail_upload_reservation SET expires_at=now()-interval '1 second' WHERE id=$1").bind(reservation.id).execute(&pool).await.unwrap();
-        assert_eq!(storage_usage(&pool, &user_id).await.unwrap(), crate::StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
-
-        let legacy = hash();
-        claim_existing_thumbnail(&pool, &user_id, &library_id, &legacy, 40).await.unwrap();
-        claim_existing_thumbnail(&pool, &user_id, &library_id, &legacy, 40).await.unwrap();
-        assert_eq!(storage_usage(&pool, &user_id).await.unwrap(), crate::StorageUsage { used_bytes: 100, reserved_bytes: 0, quota_bytes: 100 });
-        assert!(matches!(claim_existing_thumbnail(&pool, &user_id, &library_id, &hash(), 1).await, Err(AssetError::QuotaExceeded { .. })));
-        sqlx::query("DELETE FROM users WHERE id=$1").bind(user_id).execute(&pool).await.unwrap();
+    async fn thumbnails_are_free_but_require_a_live_book_and_bounded_size() {
+        let Some(pool) = crate::test_support::isolated_pool("free_thumbnails", 4).await else { return };
+        let (user, library) = seed_user(&pool, 0).await;
+        let book = hash();
+        assert!(matches!(validate_thumbnail(&pool, &user, &library, &book, 60).await, Err(AssetError::Forbidden)));
+        reference(&pool, &user, &library, &book, 1).await;
+        validate_thumbnail(&pool, &user, &library, &book, sync_common::MAX_THUMBNAIL_BYTES).await.unwrap();
+        assert!(matches!(validate_thumbnail(&pool, &user, &library, &book, sync_common::MAX_THUMBNAIL_BYTES + 1).await, Err(AssetError::TooLarge { .. })));
+        let (other_user, other_library) = seed_user(&pool, 0).await;
+        assert!(matches!(validate_thumbnail(&pool, &other_user, &other_library, &book, 60).await, Err(AssetError::Forbidden)));
+        assert!(matches!(validate_thumbnail(&pool, &other_user, &library, &book, 60).await, Err(AssetError::Forbidden)));
+        sqlx::query("UPDATE sync_state SET present=FALSE, changed_at=changed_at+1 WHERE library_id=$1").bind(library.to_string()).execute(&pool).await.unwrap();
+        assert!(matches!(validate_thumbnail(&pool, &user, &library, &book, 60).await, Err(AssetError::Forbidden)));
+        assert_eq!(storage_usage(&pool, &user).await.unwrap(), crate::StorageUsage { used_bytes: 0, reserved_bytes: 0, quota_bytes: 0 });
+        assert!(library_storage_usage(&pool, &user).await.unwrap().is_empty());
+        sqlx::query("DELETE FROM users WHERE id=ANY($1)").bind(vec![user, other_user]).execute(&pool).await.unwrap();
     }
 
     #[tokio::test]
@@ -686,11 +605,11 @@ mod tests {
             &user_id,
             &library_id,
             &[
-                BlobManifestEntry { content_hash: owned.clone(), size_bytes: 10 },
-                BlobManifestEntry { content_hash: claimable.clone(), size_bytes: 20 },
-                BlobManifestEntry { content_hash: missing.clone(), size_bytes: 30 },
-                BlobManifestEntry { content_hash: mismatch.clone(), size_bytes: 6 },
-                BlobManifestEntry { content_hash: over_quota.clone(), size_bytes: 80 },
+                BlobManifestEntry { content_hash: owned.clone(), checksum: owned.clone(), size_bytes: 10 },
+                BlobManifestEntry { content_hash: claimable.clone(), checksum: claimable.clone(), size_bytes: 20 },
+                BlobManifestEntry { content_hash: missing.clone(), checksum: missing.clone(), size_bytes: 30 },
+                BlobManifestEntry { content_hash: mismatch.clone(), checksum: mismatch.clone(), size_bytes: 6 },
+                BlobManifestEntry { content_hash: over_quota.clone(), checksum: over_quota.clone(), size_bytes: 80 },
             ],
         )
         .await
@@ -709,9 +628,76 @@ mod tests {
         let charges: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_blob_charge WHERE user_id=$1").bind(&user_id).fetch_one(&pool).await.unwrap();
         assert_eq!(account, (30, 0));
         assert_eq!(charges, 2);
+        // A missing physical file can be repaired without charging the same
+        // account twice, even when it has no remaining quota.
+        sqlx::query("UPDATE user_storage_account SET quota_bytes=used_bytes WHERE user_id=$1").bind(&user_id).execute(&pool).await.unwrap();
+        let repair = super::negotiate_books(&pool, &user_id, &library_id,
+            &[BlobManifestEntry { content_hash: owned, checksum: owned, size_bytes: 10 }], &std::collections::HashSet::new()).await.unwrap();
+        assert_eq!(repair.upload, vec![owned]);
+        assert!(repair.rejected.is_empty());
 
-        let duplicate = BlobManifestEntry { content_hash: hash(), size_bytes: 1 };
+        let duplicate = BlobManifestEntry { content_hash: hash(), checksum: hash(), size_bytes: 1 };
         assert!(matches!(negotiate_books(&pool, &user_id, &library_id, &[duplicate.clone(), duplicate]).await, Err(AssetError::InvalidInput(_))));
         sqlx::query("DELETE FROM users WHERE id=$1").bind(user_id).execute(&pool).await.unwrap();
     }
+}
+
+/// Resolve only this account's revision; other accounts retain their own bytes.
+pub(super) async fn book_revision(pool: &PgPool, user: &str, identity: &ContentHash) -> Result<ContentHash, AssetError> {
+    let value: Option<String> = sqlx::query_scalar("SELECT blob_hash FROM user_book_revision WHERE user_id=$1 AND content_hash=$2")
+        .bind(user).bind(identity.as_str()).fetch_optional(pool).await.map_err(storage)?;
+    value.map(|value| value.parse().map_err(storage)).transpose().map(|value| value.unwrap_or(*identity))
+}
+
+async fn record_library_claim(tx: &mut Transaction<'_, Postgres>, user: &str, library: &LibraryId, identity: &ContentHash, blob: &ContentHash) -> Result<(), AssetError> {
+    sqlx::query(include_str!("sql/cloud_storage/claim.sql")).bind(library.to_string()).bind(user).bind(identity.as_str()).bind(blob.as_str()).execute(&mut **tx).await.map_err(storage)?;
+    Ok(())
+}
+
+async fn bind_book_revision(transaction: &mut Transaction<'_, Postgres>, user: &str, identity: &ContentHash, checksum: &ContentHash) -> Result<(), AssetError> {
+    let charged: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_blob_charge WHERE user_id=$1 AND content_hash=$2)")
+        .bind(user).bind(checksum.as_str()).fetch_one(&mut **transaction).await.map_err(storage)?;
+    if !charged { return Err(AssetError::Forbidden); }
+    let previous: Option<String> = sqlx::query_scalar("SELECT blob_hash FROM user_book_revision WHERE user_id=$1 AND content_hash=$2")
+        .bind(user).bind(identity.as_str()).fetch_optional(&mut **transaction).await.map_err(storage)?;
+    sqlx::query("INSERT INTO user_book_revision(user_id, content_hash, blob_hash) VALUES ($1,$2,$3) ON CONFLICT(user_id,content_hash) DO UPDATE SET blob_hash=EXCLUDED.blob_hash")
+        .bind(user).bind(identity.as_str()).bind(checksum.as_str()).execute(&mut **transaction).await.map_err(storage)?;
+    let previous = previous.unwrap_or_else(|| identity.to_string());
+    if previous != checksum.as_str() {
+        sqlx::query(include_str!("sql/cloud_storage/replace_claim_revision.sql")).bind(user).bind(identity.as_str()).bind(checksum.as_str()).execute(&mut **transaction).await.map_err(storage)?;
+        // Keep a charge while another publication still uses the same blob.
+        let released: Option<i64> = sqlx::query_scalar(include_str!("sql/cloud_storage/release_replaced_blob_charge.sql"))
+            .bind(user).bind(previous).fetch_optional(&mut **transaction).await.map_err(storage)?;
+        if let Some(size) = released {
+            sqlx::query("UPDATE user_storage_account SET used_bytes=used_bytes-$2 WHERE user_id=$1").bind(user).bind(size).execute(&mut **transaction).await.map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+/// Charge the verified blob and publish its identity mapping in one transaction.
+pub(super) async fn finish_book_revision_upload(pool: &PgPool, user: &str, library: &LibraryId, identity: &ContentHash, checksum: &ContentHash, admission: &BookUploadAdmission, actual: u64) -> Result<(), AssetError> {
+    let mut transaction = begin_authorized_transaction(pool, user, library).await?;
+    require_cloud_storage(&mut transaction, user, library).await?;
+    // A library deletion cannot pass between authorization and publication.
+    let live = sqlx::query("SELECT id FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR SHARE")
+        .bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?.is_some();
+    if !live { return Err(AssetError::Forbidden); }
+    let _ = account_snapshot(&mut transaction, user).await?;
+    let phase_started = std::time::Instant::now();
+    sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user).fetch_one(&mut *transaction).await.map_err(storage)?;
+    tracing::debug!(target: "sync_performance", phase = "upload_account_lock", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+    if let BookUploadAdmission::Reserved(reservation) = admission {
+        if actual != reservation.expected_size_bytes { return Err(AssetError::LengthMismatch { expected: reservation.expected_size_bytes, actual }); }
+        let released: Option<i64> = sqlx::query_scalar(include_str!("sql/assets/delete_reservation_by_id_and_user_returning_size.sql"))
+            .bind(&reservation.id).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?;
+        let Some(released) = released else { return Err(AssetError::Storage("publication upload reservation expired".into())); };
+        if released != size_i64(actual)? { return Err(AssetError::LengthMismatch { expected: released.max(0) as u64, actual }); }
+        insert_blob_object(&mut transaction, checksum, released).await?;
+        let charged = sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user).bind(checksum.as_str()).execute(&mut *transaction).await.map_err(storage)?.rows_affected() == 1;
+        sqlx::query(include_str!("sql/assets/finish_upload_update_account.sql")).bind(user).bind(released).bind(charged).execute(&mut *transaction).await.map_err(storage)?;
+    }
+    record_library_claim(&mut transaction, user, library, identity, checksum).await?;
+    bind_book_revision(&mut transaction, user, identity, checksum).await?;
+    transaction.commit().await.map_err(storage)
 }

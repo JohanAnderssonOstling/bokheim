@@ -14,7 +14,8 @@ fi
 sync_binary=${source_root}/deploy-target/release/sync-server
 catalog_binary=${source_root}/deploy-target/release/catalog-server
 catalog_file=${source_root}/servers/opds-cache/opds.json
-for required in "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/servers/sync/deploy/bokheim-sync.service" "${source_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${source_root}/servers/sync/deploy/Caddyfile"; do
+pdfium_directory=${source_root}/deploy-target/release/pdfium
+for required in "${pdfium_directory}/libpdfium.so" "${pdfium_directory}/LICENSE" "${sync_binary}" "${catalog_binary}" "${catalog_file}" "${source_root}/servers/sync/deploy/bokheim-sync.service" "${source_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${source_root}/servers/sync/deploy/Caddyfile"; do
     if [[ ! -f ${required} ]]; then
         echo "missing staged deployment file: ${required}" >&2
         exit 1
@@ -148,6 +149,9 @@ unset database_url
 
 install -o root -g root -m 0755 "${sync_binary}" /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${catalog_binary}" /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+install -o root -g root -m 0644 "${pdfium_directory}/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
+install -o root -g root -m 0644 "${pdfium_directory}/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${catalog_file}" /usr/local/share/catalog-providers/opds.json
 

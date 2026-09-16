@@ -1,12 +1,12 @@
 use super::{
-    active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, catalog_subject_evidence,
-    merge_catalog_subject_evidence, normalize_search_text, params, prepare_catalog_subject_assignments, publication_extraction, publication_key, replace_publication_subjects_prepared, replace_publication_toc, sequenced_publication_in,
-    sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, BTreeSet, CatalogCache, CatalogCacheError, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogMetadataIndex, CatalogPublication, CatalogPublicationIdentity,
-    CatalogPublicationPopularity, CatalogSourceId, CatalogSubjectAssignment, HashSet, OptionalExtension, Transaction, TransactionBehavior, CATALOG_EPUB_ENRICHMENT_VERSION,
+    active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, normalize_search_text, params, publication_extraction,
+    publication_key, replace_publication_subjects_prepared, replace_publication_toc, sequenced_publication_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, BTreeSet, CatalogEpubExtractionJob,
+    CatalogEpubMetadata, CatalogMetadataIndex, CatalogPublication, CatalogPublicationIdentity, CatalogPublicationPopularity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, OptionalExtension, Transaction,
+    TransactionBehavior, CATALOG_EPUB_ENRICHMENT_VERSION, CATALOG_METADATA_BACKFILL_VERSION,
 };
 use publication_model::PublicationSubject;
 
-pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication, force: bool) -> Result<(), CatalogCacheError> {
+pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication, force: bool) -> Result<(), CatalogStoreError> {
     let generation = storage_i64(generation, "generation")?;
     let work_id = publication.identity.work_id.as_deref().unwrap_or("");
     let extraction = publication_extraction(publication);
@@ -60,12 +60,12 @@ pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source
     Ok(())
 }
 
-pub(crate) fn merge_extracted_publication_authors(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, metadata: &CatalogEpubMetadata) -> Result<(), CatalogCacheError> {
+pub(crate) fn merge_extracted_publication_authors(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, metadata: &CatalogEpubMetadata) -> Result<(), CatalogStoreError> {
     let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect::<Vec<_>>();
     merge_extracted_author_names(transaction, source_id, generation, publication, &authors)
 }
 
-pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, authors: &[String]) -> Result<(), CatalogCacheError> {
+pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, authors: &[String]) -> Result<(), CatalogStoreError> {
     let generation = storage_i64(generation, "generation")?;
     let work_id = publication.work_id.as_deref().unwrap_or("");
     for (position, author) in authors.iter().enumerate() {
@@ -75,7 +75,7 @@ pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source
         }
         transaction.execute(
             "INSERT OR IGNORE INTO catalog_publication_author(source_id,generation,edition_id,work_id,position,normalized_name) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![source_id.as_str(), generation, publication.edition_id, work_id, 1_000_000_i64 + i64::try_from(position).map_err(|_| CatalogCacheError::new("extracted author position overflow"))?, normalized_name],
+            params![source_id.as_str(), generation, publication.edition_id, work_id, 1_000_000_i64 + i64::try_from(position).map_err(|_| CatalogStoreError::new("extracted author position overflow"))?, normalized_name],
         )?;
     }
     Ok(())
@@ -100,8 +100,8 @@ pub(crate) fn metadata_index_from_metadata(metadata: &CatalogEpubMetadata) -> Ca
     }
 }
 
-impl CatalogCache {
-    pub fn queue_crawls(&self, source_ids: &[CatalogSourceId]) -> Result<(), CatalogCacheError> {
+impl CatalogStore {
+    pub fn queue_crawls(&self, source_ids: &[CatalogSourceId]) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for source_id in source_ids {
@@ -111,7 +111,7 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn queue_epub_extractions(&self, source_id: &CatalogSourceId, acquisition_urls: &[String], force: bool) -> Result<(), CatalogCacheError> {
+    pub fn queue_epub_extractions(&self, source_id: &CatalogSourceId, acquisition_urls: &[String], force: bool) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for acquisition_url in acquisition_urls {
@@ -128,7 +128,7 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn retry_failed_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<(), CatalogCacheError> {
+    pub fn retry_failed_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<(), CatalogStoreError> {
         let connection = self.connection()?;
         connection.execute(
             "UPDATE catalog_epub_extraction AS extraction SET status='pending',phase=NULL
@@ -146,15 +146,31 @@ impl CatalogCache {
     /// Atomically claims one bounded job. Rows created by older binaries do
     /// not contain job metadata and are ignored until queue reconciliation
     /// backfills them from the active publication table.
-    pub fn claim_next_epub_extraction(&self, source_id: &CatalogSourceId) -> Result<Option<CatalogEpubExtractionJob>, CatalogCacheError> {
+    pub fn claim_next_epub_download(&self, source_id: &CatalogSourceId) -> Result<Option<CatalogEpubExtractionJob>, CatalogStoreError> {
+        self.claim_next_epub_job(source_id, false)
+    }
+
+    pub fn claim_next_epub_extraction(&self, source_id: &CatalogSourceId) -> Result<Option<CatalogEpubExtractionJob>, CatalogStoreError> {
+        // Kept as the original low-level claim API for callers that enqueue
+        // and execute a job synchronously (including store tests/importers).
+        self.claim_next_epub_job(source_id, false)
+    }
+
+    pub fn claim_next_staged_epub_extraction(&self, source_id: &CatalogSourceId) -> Result<Option<CatalogEpubExtractionJob>, CatalogStoreError> {
+        self.claim_next_epub_job(source_id, true)
+    }
+
+    fn claim_next_epub_job(&self, source_id: &CatalogSourceId, staged: bool) -> Result<Option<CatalogEpubExtractionJob>, CatalogStoreError> {
         let connection = self.connection()?;
+        let (selector, update) = if staged { ("status='running' AND phase='staged'", "status='running', phase='extracting'") } else { ("status='pending'", "status='running', phase='downloading', attempts=attempts+1") };
         let claimed = connection
             .query_row(
-                "UPDATE catalog_epub_extraction
-                 SET status='running', phase='downloading', attempts=attempts+1, last_attempt_at=?2, last_error=NULL
+                &format!(
+                    "UPDATE catalog_epub_extraction
+                 SET {update}, last_attempt_at=CASE WHEN NOT ?3 THEN ?2 ELSE last_attempt_at END, last_error=NULL
                  WHERE (source_id, acquisition_url)=(
                      SELECT source_id, acquisition_url FROM catalog_epub_extraction
-                     WHERE source_id=?1 AND status='pending'
+                     WHERE source_id=?1 AND {selector}
                        AND edition_id IS NOT NULL AND book_format IS NOT NULL
                        AND EXISTS(
                            SELECT 1 FROM catalog_publication publication
@@ -163,9 +179,10 @@ impl CatalogCache {
                              AND publication.acquisition_url=catalog_epub_extraction.acquisition_url
                        )
                      ORDER BY attempts, acquisition_url LIMIT 1
-                 ) AND status='pending'
-                 RETURNING source_id, edition_id, work_id, acquisition_url, book_format, cover_key",
-                params![source_id.as_str(), unix_timestamp()?],
+                 ) AND {selector}
+                 RETURNING source_id, edition_id, work_id, acquisition_url, book_format, cover_key, attempts, staged_path, staged_metadata_only"
+                ),
+                params![source_id.as_str(), unix_timestamp()?, staged],
                 |row| {
                     let source_id = CatalogSourceId::parse(&row.get::<_, String>(0)?).map_err(|error| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?;
                     let edition_id = row.get(1)?;
@@ -173,41 +190,78 @@ impl CatalogCache {
                     let acquisition_url = row.get(3)?;
                     let format = row.get::<_, String>(4)?;
                     let book_format = catalog_book_format_from_storage(&format).ok_or_else(|| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported extraction book format {format}"))))?;
-                    Ok(CatalogEpubExtractionJob { source_id, publication: CatalogPublicationIdentity { edition_id, work_id }, acquisition_url, book_format, cover_key: row.get(5)? })
+                    Ok(CatalogEpubExtractionJob {
+                        source_id,
+                        publication: CatalogPublicationIdentity { edition_id, work_id },
+                        acquisition_url,
+                        book_format,
+                        cover_key: row.get(5)?,
+                        attempt: super::stored_u64(row.get(6)?, "EPUB extraction attempt")?,
+                        staged_path: row.get(7)?,
+                        staged_metadata_only: row.get::<_, i64>(8)? != 0,
+                    })
                 },
             )
             .optional()?;
         Ok(claimed)
     }
 
-    pub fn begin_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str) -> Result<bool, CatalogCacheError> {
+    pub fn stage_epub_download(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, staged_path: &str, metadata_only: bool, downloaded_bytes: u64) -> Result<bool, CatalogStoreError> {
         let connection = self.connection()?;
         let changed = connection.execute(
-            "UPDATE catalog_epub_extraction SET status='running', phase='downloading', attempts=attempts+1, last_attempt_at=?3, last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status IN ('pending','failed')",
-            params![source_id.as_str(), acquisition_url, unix_timestamp()?],
+            "UPDATE catalog_epub_extraction
+                SET phase='staged', staged_path=?3, staged_metadata_only=?4, downloaded_bytes=?5
+              WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND phase='downloading' AND attempts=?6",
+            params![source_id.as_str(), acquisition_url, staged_path, metadata_only, storage_i64(downloaded_bytes, "EPUB extraction downloaded bytes")?, storage_i64(attempt, "EPUB extraction attempt")?],
         )?;
         Ok(changed == 1)
     }
 
-    pub fn epub_extraction_status(&self, source_id: &CatalogSourceId, acquisition_url: &str) -> Result<Option<String>, CatalogCacheError> {
+    pub fn begin_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str) -> Result<Option<u64>, CatalogStoreError> {
+        let connection = self.connection()?;
+        let attempt = connection.query_row(
+            "UPDATE catalog_epub_extraction SET status='running', phase='downloading', attempts=attempts+1, last_attempt_at=?3, last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status IN ('pending','failed') RETURNING attempts",
+            params![source_id.as_str(), acquisition_url, unix_timestamp()?],
+            |row| row.get::<_, i64>(0),
+        ).optional()?;
+        Ok(attempt.map(|attempt| super::stored_u64(attempt, "EPUB extraction attempt")).transpose()?)
+    }
+
+    pub fn epub_extraction_status(&self, source_id: &CatalogSourceId, acquisition_url: &str) -> Result<Option<String>, CatalogStoreError> {
         let connection = self.connection()?;
         connection.query_row("SELECT status FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url], |row| row.get(0)).optional().map_err(Into::into)
     }
 
-    pub fn set_epub_extraction_phase(&self, source_id: &CatalogSourceId, acquisition_url: &str, phase: &str) -> Result<(), CatalogCacheError> {
-        if !matches!(phase, "downloading" | "extracting" | "enriching") {
-            return Err(CatalogCacheError::new("invalid EPUB extraction phase"));
-        }
+    pub fn epub_extraction_downloaded_bytes(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64) -> Result<Option<u64>, CatalogStoreError> {
         let connection = self.connection()?;
-        connection.execute("UPDATE catalog_epub_extraction SET phase=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![source_id.as_str(), acquisition_url, phase])?;
-        Ok(())
+        connection
+            .query_row(
+                "SELECT downloaded_bytes FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?3",
+                params![source_id.as_str(), acquisition_url, storage_i64(attempt, "EPUB extraction attempt")?],
+                |row| super::optional_stored_u64(row.get(0)?, "EPUB extraction downloaded bytes"),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(Into::into)
     }
 
-    pub fn finish_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, downloaded_bytes: u64, publication: &CatalogPublication, metadata: Option<&CatalogEpubMetadata>) -> Result<(), CatalogCacheError> {
+    pub fn set_epub_extraction_phase(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, phase: &str) -> Result<bool, CatalogStoreError> {
+        if !matches!(phase, "downloading" | "staged" | "extracting" | "enriching") {
+            return Err(CatalogStoreError::new("invalid EPUB extraction phase"));
+        }
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE catalog_epub_extraction SET phase=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?4",
+            params![source_id.as_str(), acquisition_url, phase, storage_i64(attempt, "EPUB extraction attempt")?],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn finish_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, downloaded_bytes: u64, publication: &CatalogPublication, metadata: Option<&CatalogEpubMetadata>) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
-            "UPDATE catalog_epub_extraction SET status='succeeded', phase=NULL, downloaded_bytes=?3, last_succeeded_at=?4, last_error=NULL, result_payload=?5, metadata_payload=?6, enrichment_version=?7 WHERE source_id=?1 AND acquisition_url=?2",
+            "UPDATE catalog_epub_extraction SET status='succeeded', phase=NULL, staged_path=NULL, staged_metadata_only=0, downloaded_bytes=?3, last_succeeded_at=?4, last_error=NULL, result_payload=?5, metadata_payload=?6, enrichment_version=?7 WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?8",
             params![
                 source_id.as_str(),
                 acquisition_url,
@@ -215,8 +269,21 @@ impl CatalogCache {
                 unix_timestamp()?,
                 wire::encode(publication)?,
                 metadata.map(wire::encode).transpose()?,
-                CATALOG_EPUB_ENRICHMENT_VERSION
+                CATALOG_EPUB_ENRICHMENT_VERSION,
+                storage_i64(attempt, "EPUB extraction attempt")?
             ],
+        )?;
+        if transaction.changes() != 1 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE catalog_metadata_backfill
+                SET status='pending',version=?3,last_error=NULL,
+                    ocr_status=CASE WHEN (SELECT book_format FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2) IN ('epub','pdf') THEN 'pending' ELSE 'not_needed' END,
+                    ocr_attempts=0,ocr_last_attempt_at=NULL,ocr_last_error=NULL
+              WHERE source_id=?1 AND acquisition_url=?2",
+            params![source_id.as_str(), acquisition_url, CATALOG_METADATA_BACKFILL_VERSION],
         )?;
         transaction.execute("DELETE FROM catalog_epub_failure WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url])?;
         if let Some(metadata) = metadata {
@@ -225,31 +292,31 @@ impl CatalogCache {
             }
         }
         transaction.commit()?;
-        Ok(())
+        Ok(true)
     }
 
-    pub fn active_publication(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity) -> Result<Option<CatalogPublication>, CatalogCacheError> {
+    pub fn active_publication(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity) -> Result<Option<CatalogPublication>, CatalogStoreError> {
         let connection = self.connection()?;
         let Some(generation) = active_generation_optional(&connection, source_id)? else { return Ok(None) };
         sequenced_publication_in(&connection, source_id, generation, identity).map(|publication| publication.map(|publication| publication.publication))
     }
 
-    pub fn enrich_active_publication(
-        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[PublicationSubject], toc: &[publication_model::PublicationTocEntry], popularity: Option<&CatalogPublicationPopularity>,
-    ) -> Result<bool, CatalogCacheError> {
-        let mut publication = publication.clone();
-        merge_catalog_subject_evidence(&mut publication, subjects);
-        let combined_subjects = catalog_subject_evidence(&publication)?;
-        let assignments = prepare_catalog_subject_assignments(&combined_subjects);
-        self.enrich_active_publication_prepared(source_id, &publication, &combined_subjects, &assignments, toc, popularity)
-    }
-
     pub fn enrich_active_publication_prepared(
         &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[PublicationSubject], assignments: &[CatalogSubjectAssignment], toc: &[publication_model::PublicationTocEntry],
-        popularity: Option<&CatalogPublicationPopularity>,
-    ) -> Result<bool, CatalogCacheError> {
+        popularity: Option<&CatalogPublicationPopularity>, extraction_claim: Option<(&str, u64)>,
+    ) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((acquisition_url, attempt)) = extraction_claim {
+            let claimed = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?3)",
+                params![source_id.as_str(), acquisition_url, storage_i64(attempt, "EPUB extraction attempt")?],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !claimed {
+                return Ok(false);
+            }
+        }
         let generation = active_generation_in(&transaction, source_id)?;
         let (edition_id, work_id) = publication_key(publication);
         let exists = transaction.query_row(
@@ -299,7 +366,7 @@ impl CatalogCache {
     /// evidence produced by an earlier successful EPUB extraction. The saved
     /// extraction payload is updated too, so a later crawl cannot restore the
     /// rejected URL while overlaying persistent metadata.
-    pub fn clear_active_publication_cover(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity, acquisition_url: &str, expected_image_url: &str) -> Result<bool, CatalogCacheError> {
+    pub fn clear_active_publication_cover(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity, acquisition_url: &str, expected_image_url: &str) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = active_generation_in(&transaction, source_id)?;
@@ -321,14 +388,24 @@ impl CatalogCache {
         Ok(true)
     }
 
-    pub fn fail_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, error: &str, category: &str, retryable: bool) -> Result<(), CatalogCacheError> {
+    pub fn fail_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, error: &str, category: &str, retryable: bool) -> Result<bool, CatalogStoreError> {
         if category.is_empty() || category.len() > 64 || !category.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_') {
-            return Err(CatalogCacheError::new("invalid EPUB failure category"));
+            return Err(CatalogStoreError::new("invalid EPUB failure category"));
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = unix_timestamp()?;
-        let attempts = transaction.query_row("SELECT attempts FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url], |row| row.get::<_, i64>(0))?;
+        let attempts = transaction
+            .query_row(
+                "SELECT attempts FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?3",
+                params![source_id.as_str(), acquisition_url, storage_i64(attempt, "EPUB extraction attempt")?],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(attempts) = attempts else {
+            transaction.commit()?;
+            return Ok(false);
+        };
         let retry_delay = match attempts {
             i64::MIN..=1 => 15 * 60,
             2 => 60 * 60,
@@ -336,7 +413,10 @@ impl CatalogCache {
             _ => 24 * 60 * 60,
         };
         let next_retry_at = retryable.then(|| now.saturating_add(retry_delay));
-        transaction.execute("UPDATE catalog_epub_extraction SET status='failed', phase=NULL, last_error=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, bounded_crawl_error(error)])?;
+        transaction.execute(
+            "UPDATE catalog_epub_extraction SET status='failed', phase=NULL, staged_path=NULL, staged_metadata_only=0, last_error=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?4",
+            params![source_id.as_str(), acquisition_url, bounded_crawl_error(error), storage_i64(attempt, "EPUB extraction attempt")?],
+        )?;
         transaction.execute(
             "INSERT INTO catalog_epub_failure(source_id,acquisition_url,category,retryable,first_failed_at,last_failed_at,next_retry_at)
              VALUES(?1,?2,?3,?4,?5,?5,?6)
@@ -345,23 +425,6 @@ impl CatalogCache {
             params![source_id.as_str(), acquisition_url, category, retryable, now, next_retry_at],
         )?;
         transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn retain_epub_extractions(&self, source_id: &CatalogSourceId, retained_urls: &HashSet<String>) -> Result<(), CatalogCacheError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = {
-            let mut statement = transaction.prepare("SELECT acquisition_url FROM catalog_epub_extraction WHERE source_id=?1")?;
-            let rows = statement.query_map([source_id.as_str()], |row| row.get(0))?;
-            rows.collect::<Result<Vec<String>, _>>()?
-        };
-        for acquisition_url in existing {
-            if !retained_urls.contains(&acquisition_url) {
-                transaction.execute("DELETE FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url])?;
-            }
-        }
-        transaction.commit()?;
-        Ok(())
+        Ok(true)
     }
 }

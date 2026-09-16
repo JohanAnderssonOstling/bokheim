@@ -212,7 +212,7 @@ updates such as reading positions do not touch placement or blob references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=17` representation. The wire body
+`application/vnd.bokheim+protobuf; version=18` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
@@ -370,3 +370,15 @@ by `BOKHEIM_STRESS_BLOB_BYTES`. All values are bounded, and the workload binary
 refuses non-loopback URLs so it cannot accidentally load-test the public service.
 
 `BOKHEIM_STRESS_MODE=ingest` uses the production protobuf sync transport.
+
+`BOKHEIM_STRESS_MODE=inventory` measures complete library state-inventory
+reconciliation through the production HTTP and PostgreSQL path. It profiles
+all-present, one-missing, and one-percent-missing inventories, validates every
+returned cell, and reports cycle/request latency plus wire volume. Configure it
+with `BOKHEIM_INVENTORY_CELLS` (default 10,000) and
+`BOKHEIM_INVENTORY_REPETITIONS` (default 5):
+
+```sh
+BOKHEIM_STRESS_MODE=inventory BOKHEIM_INVENTORY_CELLS=100000 \
+    servers/sync/tests/run_server_stress.sh
+```

@@ -9,6 +9,8 @@ TOOLCHAIN="$KOBO_BUILD/toolchain/armv7l-linux-musleabihf-cross"
 FBINK_RELEASE="$KOBO_BUILD/fbink-build/FBInk-v1.25.0/Release"
 GPUI_PACKAGE="$KOBO_BUILD/package/.adds/gpui-kobo"
 OUTPUT="$REPO_ROOT/target/desktop-gpui-kobo"
+BUILD_TARGET=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
+case "$BUILD_TARGET" in /*) ;; *) BUILD_TARGET="$REPO_ROOT/$BUILD_TARGET" ;; esac
 
 # The attached Kobo Libra 2 (N418) uses an NXP i.MX 6SLL: one Cortex-A9
 # core with the NEON media engine. Keep the tuning at the Kobo packaging
@@ -53,7 +55,7 @@ CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
 CARGO_PROFILE_RELEASE_DEBUG=0 \
-cargo build --locked --release --target armv7-unknown-linux-musleabihf \
+cargo build --locked --release --target-dir "$BUILD_TARGET" --target armv7-unknown-linux-musleabihf \
     -p desktop-gpui --no-default-features --features kobo --bin desktop-gpui-kobo
 
 mkdir -p "$OUTPUT"
@@ -61,17 +63,20 @@ STAGE=$(mktemp -d "$OUTPUT/stage.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 APP="$STAGE/.adds/bokheim"
 mkdir -p "$APP/third-party-source" "$STAGE/.adds/nm" "$STAGE/Bokheim/Libraries"
-cp "$REPO_ROOT/target/armv7-unknown-linux-musleabihf/release/desktop-gpui-kobo" "$APP/desktop-gpui-kobo"
+cp "$BUILD_TARGET/armv7-unknown-linux-musleabihf/release/desktop-gpui-kobo" "$APP/desktop-gpui-kobo"
 cp "$GPUI_PACKAGE/fbink" "$APP/fbink"
 cp "$GPUI_PACKAGE/LICENSE-APACHE" "$APP/LICENSE-APACHE"
 cp "$GPUI_PACKAGE/LICENSE-FBINK-GPLv3" "$APP/LICENSE-FBINK-GPLv3"
 cp "$GPUI_PACKAGE/LICENSE-LILEX-OFL.txt" "$APP/LICENSE-LILEX-OFL.txt"
+cp "$REPO_ROOT/vendor/wpa-ctrl/LICENSE" "$APP/LICENSE-WPA-CTRL-BSL-1.0"
 cp "$GPUI_PACKAGE/third-party-source/FBInk-v1.25.0.tar.xz" "$APP/third-party-source/"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/run.sh" "$APP/run.sh"
+cp "$REPO_ROOT/apps/desktop-gpui/kobo/wifi-power.sh" "$APP/wifi-power.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/run-monitored.sh" "$APP/run-monitored.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/monitor-nickel.sh" "$APP/monitor-nickel.sh"
+cp "$REPO_ROOT/apps/desktop-gpui/kobo/probe-kobo-audio.sh" "$APP/probe-kobo-audio.sh"
 cp "$REPO_ROOT/apps/desktop-gpui/kobo/nickelmenu" "$STAGE/.adds/nm/desktop-gpui-kobo"
-chmod +x "$APP/desktop-gpui-kobo" "$APP/fbink" "$APP/run.sh" "$APP/run-monitored.sh" "$APP/monitor-nickel.sh"
+chmod +x "$APP/desktop-gpui-kobo" "$APP/fbink" "$APP/run.sh" "$APP/run-monitored.sh" "$APP/monitor-nickel.sh" "$APP/probe-kobo-audio.sh"
 printf 'Bokheim shared GPUI UI for Kobo\nBuilt: %s\nTarget: armv7-unknown-linux-musleabihf\nCPU profile: %s\nRust flags: %s\nC flags: %s\nLTO: thin\nCodegen units: 1\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$KOBO_CPU_PROFILE" "$KOBO_RUSTFLAGS" "$KOBO_CFLAGS" >"$APP/BUILD-INFO.txt"
 

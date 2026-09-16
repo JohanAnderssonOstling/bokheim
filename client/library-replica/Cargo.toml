@@ -9,6 +9,8 @@ default = ["random-ids"]
 random-ids = ["library-model/random-ids", "sync-common/random-ids"]
 
 [dependencies]
+serde_json = "1"
+pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
 catalog-model = { path = "../../shared/catalog-model" }
 library-model = { path = "../library-model", default-features = false }
 serde = { version = "1", features = ["derive"] }

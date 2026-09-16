@@ -1,6 +1,6 @@
 use super::{
     canonical_isbn13, error, open_library_id, AuthorIdentifier, AuthorMetadata, AuthorSource, BTreeMap, BTreeSet, Classification, ClassificationScheme, ClassificationSource, Connection, EntityReference, EntitySource,
-    IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataError, PersonEntity, PlaceEntity, RichIsbnMetadataResult, RichWorkMetadataMatch, WorkClassificationMatch, WorkMetadataMatch, DDC_SCHEME, LCC_SCHEME, OL_PERSON_KIND,
+    IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataError, PersonEntity, PlaceEntity, RichIsbnMetadataResult, RichWorkMetadataMatch, WorkClassificationMatch, LCC_SCHEME, OL_PERSON_KIND,
     OL_PLACE_KIND,
 };
 use crate::import::wikidata::wikidata_id;
@@ -27,24 +27,62 @@ pub(crate) fn lookup_one(connection: &Connection, requested_isbn: String) -> Res
             collect_classifications(connection, "edition_classification", "edition_id", *edition_id, ClassificationSource::ExactEdition, &mut classifications)?;
         }
         if let Some(work_id) = work_id {
+            let exact_schemes = classifications.keys().map(|(scheme, _)| *scheme).collect::<BTreeSet<_>>();
             let mut imported_work_classifications = BTreeMap::new();
             collect_classifications(connection, "work_classification", "work_id", work_id, ClassificationSource::Work, &mut imported_work_classifications)?;
             // Open Library's work record is the authority signal that makes
             // its edition-level union useful. Without it, require independent
             // sibling consensus so one noisy edition cannot classify a work.
             if !imported_work_classifications.is_empty() && imported_work_classifications.len() <= MAX_DIRECT_WORK_CLASSIFICATIONS_WITHOUT_CONSENSUS {
-                collect_classifications(connection, "edition_work_classification", "work_id", work_id, ClassificationSource::Work, &mut imported_work_classifications)?;
+                let work_schemes = imported_work_classifications.keys().map(|(scheme, _)| *scheme).collect::<BTreeSet<_>>();
                 for (classification, source) in imported_work_classifications {
-                    classifications.entry(classification).or_insert(source);
+                    if !exact_schemes.contains(&classification.0) {
+                        classifications.entry(classification).or_insert(source);
+                    }
+                }
+                let mut sibling_classifications = BTreeMap::new();
+                collect_classifications(connection, "edition_work_classification", "work_id", work_id, ClassificationSource::Work, &mut sibling_classifications)?;
+                for (classification, source) in sibling_classifications {
+                    if !exact_schemes.contains(&classification.0) && !work_schemes.contains(&classification.0) {
+                        classifications.entry(classification).or_insert(source);
+                    }
                 }
             }
             for classification in collect_sibling_edition_consensus(connection, work_id)? {
-                classifications.entry((classification.scheme, classification.notation)).or_insert(ClassificationSource::Work);
+                if !exact_schemes.contains(&classification.scheme) && !classifications.keys().any(|(scheme, _)| *scheme == classification.scheme) {
+                    classifications.entry((classification.scheme, classification.notation)).or_insert(ClassificationSource::Work);
+                }
             }
         }
-        let classifications = metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { scheme, notation, source }), classification_similarity_keys);
-        matches.push(WorkClassificationMatch { open_library_work_id: work_id.map(|work_id| format!("OL{work_id}W")), exact_edition_ids: edition_ids.into_iter().map(|edition_id| format!("OL{edition_id}M")).collect(), classifications });
+        let classifications = metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
+        matches.push(WorkClassificationMatch { open_library_work_id: work_id.map(|work_id| format!("OL{work_id}W")), exact_edition_ids: edition_ids.into_iter().map(|edition_id| crate::openlibrary::catalog_edition_key(edition_id)).collect(), classifications });
     }
+    // Source ingestion writes the canonical ISBN classification table. Older
+    // snapshots may predate it; existing edition/work evidence remains valid.
+    let has_isbn_codes:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='isbn_classification')",[],|r|r.get(0)).map_err(error)?;
+    if has_isbn_codes {
+        let mut direct = BTreeMap::<(ClassificationScheme, String), ClassificationSource>::new();
+        let mut statement = connection.prepare_cached("SELECT scheme,notation FROM isbn_classification WHERE isbn13=?1 ORDER BY scheme,notation").map_err(error)?;
+        let rows = statement.query_map([isbn13], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).map_err(error)?;
+        for row in rows {
+            let (scheme, notation) = row.map_err(error)?;
+            let scheme = match scheme { 1 => ClassificationScheme::DeweyDecimal, LCC_SCHEME => ClassificationScheme::LibraryOfCongress, _ => continue };
+            direct.insert((scheme, notation), ClassificationSource::ExactEdition);
+        }
+        if !direct.is_empty() {
+            if matches.is_empty() {
+                let classifications = direct.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }).collect();
+                matches.push(WorkClassificationMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications });
+            } else {
+                for matched in &mut matches {
+                    let mut merged = matched.classifications.iter().map(|c| ((c.scheme, c.notation.clone()), c.source)).collect::<BTreeMap<_, _>>();
+                    for (classification, source) in &direct { merged.entry(classification.clone()).or_insert(*source); }
+                    matched.classifications = metadata_contract::filter_classification_outliers(merged.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
+                }
+            }
+        }
+    }
+    crate::loc_dump::merge_lcc(&mut matches, crate::loc_dump::lookup_lcc(connection, isbn13)?);
     let status = match matches.len() {
         0 => LookupStatus::NoMatch,
         1 => LookupStatus::Matched,
@@ -53,22 +91,19 @@ pub(crate) fn lookup_one(connection: &Connection, requested_isbn: String) -> Res
     Ok(IsbnClassificationResult { requested_isbn, canonical_isbn13: Some(format!("{isbn13:013}")), status, matches })
 }
 
-pub(crate) fn lookup_metadata_one(connection: &Connection, requested_isbn: String) -> Result<IsbnMetadataResult, MetadataError> {
-    let classification = lookup_one(connection, requested_isbn)?;
-    let matches = classification
-        .matches
-        .into_iter()
-        .map(|matched| WorkMetadataMatch { open_library_work_id: matched.open_library_work_id, exact_edition_ids: matched.exact_edition_ids, classifications: matched.classifications, authors: Vec::new() })
-        .collect();
-    Ok(IsbnMetadataResult { requested_isbn: classification.requested_isbn, canonical_isbn13: classification.canonical_isbn13, status: classification.status, matches })
-}
-
 pub(crate) fn attach_rich_fields(connection: &Connection, metadata: Vec<IsbnMetadataResult>, descriptions: &BTreeMap<i64, String>, bisac: &BTreeMap<i64, Vec<Classification>>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
-    let edition_ids = metadata.iter().flat_map(|result| &result.matches).flat_map(|matched| &matched.exact_edition_ids).filter_map(|value| open_library_id(value, 'M')).collect::<BTreeSet<_>>();
+    let edition_ids = metadata.iter().flat_map(|result| &result.matches).flat_map(|matched| &matched.exact_edition_ids).filter_map(|value| crate::openlibrary::catalog_edition_id(value)).collect::<BTreeSet<_>>();
     let work_ids = metadata.iter().flat_map(|result| &result.matches).filter_map(|matched| matched.open_library_work_id.as_deref().and_then(|value| open_library_id(value, 'W'))).collect::<BTreeSet<_>>();
     let edition_evidence = load_entity_evidence(connection, "edition_entity_evidence", "edition_id", &edition_ids)?;
     let work_evidence = load_entity_evidence(connection, "work_entity_evidence", "work_id", &work_ids)?;
     let popularity = load_work_popularities(connection, &work_ids)?;
+    let mut edition_descriptions=BTreeMap::<i64,String>::new();
+    let has:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='edition_description')",[],|r|r.get(0)).map_err(error)?;
+    if has {for ids in edition_ids.iter().copied().collect::<Vec<_>>().chunks(400){
+        let sql=format!("SELECT edition_id,description FROM edition_description WHERE edition_id IN ({}) AND description IS NOT NULL AND trim(description)!=''",sql_placeholders(ids.len()));
+        let mut q=connection.prepare(&sql).map_err(error)?;
+        for row in q.query_map(rusqlite::params_from_iter(ids),|r|Ok((r.get(0)?,r.get(1)?))).map_err(error)?{let (id,d)=row.map_err(error)?;edition_descriptions.insert(id,d);}
+    }}
 
     metadata
         .into_iter()
@@ -79,7 +114,7 @@ pub(crate) fn attach_rich_fields(connection: &Connection, metadata: Vec<IsbnMeta
                 .map(|matched| {
                     let mut places = BTreeMap::<(String, Option<i64>), EntitySource>::new();
                     let mut people = BTreeMap::<(String, Option<i64>), EntitySource>::new();
-                    for edition_id in matched.exact_edition_ids.iter().filter_map(|value| open_library_id(value, 'M')) {
+                    for edition_id in matched.exact_edition_ids.iter().filter_map(|value| crate::openlibrary::catalog_edition_id(value)) {
                         merge_entity_evidence(edition_evidence.get(&edition_id), EntitySource::ExactEdition, &mut places, &mut people);
                     }
                     let work_id = matched.open_library_work_id.as_deref().and_then(|value| open_library_id(value, 'W'));
@@ -90,6 +125,10 @@ pub(crate) fn attach_rich_fields(connection: &Connection, metadata: Vec<IsbnMeta
                         |evidence: BTreeMap<(String, Option<i64>), EntitySource>| evidence.into_iter().map(|((name, wikidata_id), source)| EntityReference { wikidata_id: wikidata_id.map(|id| format!("Q{id}")), name, source }).collect();
                     let mut classifications = matched.classifications;
                     classifications.extend(work_id.and_then(|work_id| bisac.get(&work_id)).into_iter().flatten().cloned());
+                    let description=work_id.and_then(|id| descriptions.get(&id).cloned()).or_else(||{
+                        let values=matched.exact_edition_ids.iter().filter_map(|id|crate::openlibrary::catalog_edition_id(id)).filter_map(|id|edition_descriptions.get(&id)).collect::<BTreeSet<_>>();
+                        (values.len()==1).then(||(*values.iter().next().unwrap()).clone())
+                    });
                     RichWorkMetadataMatch {
                         open_library_work_id: matched.open_library_work_id,
                         exact_edition_ids: matched.exact_edition_ids,
@@ -98,12 +137,12 @@ pub(crate) fn attach_rich_fields(connection: &Connection, metadata: Vec<IsbnMeta
                         places: references(places),
                         people: references(people),
                         popularity: work_id.and_then(|work_id| popularity.get(&work_id).cloned()),
-                        description: work_id.and_then(|work_id| descriptions.get(&work_id).cloned()),
+                        description,
                         subjects: Vec::new(),
                     }
                 })
                 .collect();
-            Ok(RichIsbnMetadataResult { requested_isbn: result.requested_isbn, canonical_isbn13: result.canonical_isbn13, status: result.status, matches })
+            Ok(RichIsbnMetadataResult { wikidata_books: Vec::new(), requested_isbn: result.requested_isbn, canonical_isbn13: result.canonical_isbn13, status: result.status, matches })
         })
         .collect()
 }
@@ -138,7 +177,7 @@ pub(crate) fn load_work_bisac_classifications(connection: &Connection, ids: &BTr
         let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).map_err(error)?;
         for row in rows {
             let (work_id, notation) = row.map_err(error)?;
-            classifications.entry(work_id).or_default().push(Classification { scheme: ClassificationScheme::Bisac, notation, source: ClassificationSource::Work });
+            classifications.entry(work_id).or_default().push(Classification { evidence: Vec::new(), scheme: ClassificationScheme::Bisac, notation, source: ClassificationSource::Work });
         }
     }
     Ok(classifications)
@@ -304,7 +343,7 @@ pub(crate) fn merge_entity_evidence(evidence: Option<&Vec<(i64, String, Option<i
 }
 
 pub(crate) fn attach_authors(connection: &Connection, results: &mut [IsbnMetadataResult]) -> Result<(), MetadataError> {
-    let edition_ids = results.iter().flat_map(|result| &result.matches).flat_map(|matched| &matched.exact_edition_ids).filter_map(|value| open_library_id(value, 'M')).collect::<BTreeSet<_>>();
+    let edition_ids = results.iter().flat_map(|result| &result.matches).flat_map(|matched| &matched.exact_edition_ids).filter_map(|value| crate::openlibrary::catalog_edition_id(value)).collect::<BTreeSet<_>>();
     let work_ids = results.iter().flat_map(|result| &result.matches).filter_map(|matched| matched.open_library_work_id.as_deref().and_then(|value| open_library_id(value, 'W'))).collect::<BTreeSet<_>>();
     let edition_authors = load_author_relations(connection, "edition_author", "edition_id", &edition_ids)?;
     let work_authors = load_author_relations(connection, "work_author", "work_id", &work_ids)?;
@@ -314,7 +353,7 @@ pub(crate) fn attach_authors(connection: &Connection, results: &mut [IsbnMetadat
 
     for matched in results.iter_mut().flat_map(|result| &mut result.matches) {
         let mut authors = BTreeMap::<i64, (AuthorSource, u32)>::new();
-        for edition_id in matched.exact_edition_ids.iter().filter_map(|value| open_library_id(value, 'M')) {
+        for edition_id in matched.exact_edition_ids.iter().filter_map(|value| crate::openlibrary::catalog_edition_id(value)) {
             merge_author_relations(&mut authors, edition_authors.get(&edition_id), AuthorSource::ExactEdition);
         }
         if let Some(work_id) = matched.open_library_work_id.as_deref().and_then(|value| open_library_id(value, 'W')) {
@@ -323,7 +362,7 @@ pub(crate) fn attach_authors(connection: &Connection, results: &mut [IsbnMetadat
         matched.authors = authors
             .into_iter()
             .map(|(author_id, (source, position))| AuthorMetadata {
-                open_library_author_id: format!("OL{author_id}A"),
+                open_library_author_id: if author_id>0 {format!("OL{author_id}A")} else {String::new()},
                 name: names.get(&author_id).cloned().flatten(),
                 biography: None,
                 identifiers: identifiers.get(&author_id).cloned().unwrap_or_default(),
@@ -363,7 +402,7 @@ pub(crate) fn merge_author_relations(authors: &mut BTreeMap<i64, (AuthorSource, 
     }
 }
 
-fn load_author_names(connection: &Connection, ids: &BTreeSet<i64>) -> Result<BTreeMap<i64, Option<String>>, MetadataError> {
+pub(crate) fn load_author_names(connection: &Connection, ids: &BTreeSet<i64>) -> Result<BTreeMap<i64, Option<String>>, MetadataError> {
     let mut names = BTreeMap::new();
     for chunk in ids.iter().copied().collect::<Vec<_>>().chunks(500) {
         let sql = format!("SELECT author_id,name FROM author WHERE author_id IN ({})", sql_placeholders(chunk.len()));
@@ -391,7 +430,7 @@ pub(crate) fn load_author_biographies(connection: &Connection, ids: &BTreeSet<i6
     Ok(biographies)
 }
 
-fn load_author_identifiers(connection: &Connection, ids: &BTreeSet<i64>) -> Result<BTreeMap<i64, Vec<AuthorIdentifier>>, MetadataError> {
+pub(crate) fn load_author_identifiers(connection: &Connection, ids: &BTreeSet<i64>) -> Result<BTreeMap<i64, Vec<AuthorIdentifier>>, MetadataError> {
     let mut identifiers = BTreeMap::<i64, Vec<AuthorIdentifier>>::new();
     for chunk in ids.iter().copied().collect::<Vec<_>>().chunks(500) {
         let sql = format!("SELECT author_id,authority,external_id FROM author_identifier WHERE author_id IN ({}) ORDER BY author_id,authority,external_id", sql_placeholders(chunk.len()));
@@ -412,7 +451,6 @@ fn collect_classifications(connection: &Connection, table: &str, id_column: &str
     for row in rows {
         let (scheme, notation) = row.map_err(error)?;
         let scheme = match scheme {
-            DDC_SCHEME => ClassificationScheme::DeweyDecimal,
             LCC_SCHEME => ClassificationScheme::LibraryOfCongress,
             _ => continue,
         };
@@ -433,23 +471,24 @@ fn collect_sibling_edition_consensus(connection: &Connection, work_id: i64) -> R
         .map_err(error)?;
     let rows = statement.query_map([work_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))).map_err(error)?;
     let mut support = BTreeMap::<(ClassificationScheme, String), BTreeSet<i64>>::new();
+    let mut classified_editions = BTreeSet::new();
     for row in rows {
         let (edition_id, scheme, notation) = row.map_err(error)?;
         let scheme = match scheme {
-            DDC_SCHEME => ClassificationScheme::DeweyDecimal,
             LCC_SCHEME => ClassificationScheme::LibraryOfCongress,
             _ => continue,
         };
         let Some(notation) = metadata_contract::classification_consensus_notation(scheme, &notation) else { continue };
+        classified_editions.insert(edition_id);
         support.entry((scheme, notation)).or_default().insert(edition_id);
     }
-    Ok(support.into_iter().filter_map(|((scheme, notation), editions)| (editions.len() >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect())
+    Ok(support.into_iter().filter_map(|((scheme, notation), editions)| (classified_editions.len() == 1 || editions.len() >= 2).then_some(Classification { evidence: Vec::new(), scheme, notation, source: ClassificationSource::Work })).collect())
 }
 
 pub(crate) fn classification_similarity_keys(scheme: ClassificationScheme, notation: &str) -> Vec<String> {
     let system_id = match scheme {
         ClassificationScheme::LibraryOfCongress => subject_projection::LCC_SYSTEM_ID,
-        ClassificationScheme::DeweyDecimal => subject_projection::DDC_SYSTEM_ID,
+        ClassificationScheme::DeweyDecimal => return Vec::new(),
         ClassificationScheme::Bisac => subject_projection::BISAC_SYSTEM_ID,
     };
     subject_projection::unified_subject_similarity_keys(system_id, notation)

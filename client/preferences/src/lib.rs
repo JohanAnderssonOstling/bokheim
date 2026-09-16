@@ -15,69 +15,45 @@ pub const PDF_PAGE_COUNT_MIN: u8 = 1;
 pub const PDF_PAGE_COUNT_MAX: u8 = 6;
 pub const COLUMN_COUNT_MIN: u8 = 1;
 pub const COLUMN_COUNT_MAX: u8 = 4;
+/// The slowest and fastest narration the time-stretcher is asked for. Beyond
+/// this range speech stops being speech.
+pub const AUDIOBOOK_SPEED_MIN: f64 = 0.5;
+pub const AUDIOBOOK_SPEED_MAX: f64 = 3.0;
 pub const UI_FONT_SIZE_MIN: u8 = 12;
 pub const UI_FONT_SIZE_MAX: u8 = 32;
 pub const UI_FONT_SIZE_DEFAULT: u8 = 16;
-fn default_catalog_languages() -> Vec<String> {
-    vec!["en".to_owned()]
-}
 
+/// Two themes, and the only thing that separates them is the tint.
+///
+/// They were three — `GrecoFuturistic`, `LibrarySerif` and `ClassicWhite`,
+/// labelled Sage, Sepia and Paper — and the names described neither what they
+/// were nor what distinguished them: Sage was documented as "cool" while its
+/// own neutrals sat at hue 87, a cream. What actually varies between them is
+/// the hue of the neutral surfaces and of the accent. So the names say that,
+/// and nothing else.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationTheme {
+    /// Cream surfaces, green accent.
     #[default]
-    GrecoFuturistic,
-    LibrarySerif,
-    /// Neutral greys and true-white cards. The two other themes are tinted
-    /// paper; this one is the absence of a tint, for people who want the
-    /// application to disappear behind the covers.
-    ClassicWhite,
+    Warm,
+    /// Neutral greys and true-white cards, navy accent. Not a tinted paper —
+    /// the absence of a tint, for people who want the application to disappear
+    /// behind the covers.
+    Cool,
 }
 
-/// Which of a theme's two palettes to draw.
+/// Which of a theme's two palettes to draw. Always the platform's own answer.
 ///
-/// Separate from [`ApplicationTheme`] rather than doubling its variants: the
-/// theme is a taste choice and the appearance usually is not one at all —
-/// most people want it to follow the system, and reading happens at night.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplicationAppearance {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-impl ApplicationAppearance {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::System => "Follow system",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::System => "Match the desktop or phone setting.",
-            Self::Light => "Always light.",
-            Self::Dark => "Always dark.",
-        }
-    }
-
-    /// Resolves `System` against what the platform reports. Platforms that
-    /// cannot report an appearance — the Kobo build — pass `false` and get the
-    /// light palette, which is correct for e-ink.
-    pub const fn resolve(self, system_prefers_dark: bool) -> ResolvedAppearance {
-        match self {
-            Self::Light => ResolvedAppearance::Light,
-            Self::Dark => ResolvedAppearance::Dark,
-            Self::System if system_prefers_dark => ResolvedAppearance::Dark,
-            Self::System => ResolvedAppearance::Light,
-        }
-    }
-}
-
+/// There used to be an `ApplicationAppearance` preference in front of this —
+/// System, Light or Dark — and it is gone. Light and dark are not a taste
+/// choice the way the tint is: an application that stays light while the
+/// desktop goes dark at sunset is wrong, and the setting existed mostly to let
+/// someone correct it. Following the system is the answer that is right by
+/// default, so it is now the only answer.
+///
+/// Platforms that cannot report an appearance — the Kobo build — report light,
+/// which is the right answer for e-ink.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedAppearance {
@@ -86,206 +62,44 @@ pub enum ResolvedAppearance {
     Dark,
 }
 
-/// One theme at one appearance.
-///
-/// `card_bg` and `white_surface` used to be two tokens 1.027:1 apart — the same
-/// cream twice — and are now a single `raised_bg`. `hover_overlay` carries
-/// alpha (`0xRRGGBBAA`) so that one value reads correctly over the page, a
-/// panel and a raised card alike; a solid colour would need one token per
-/// surface, times four palettes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApplicationPalette {
-    pub surface_bg: u32,
-    pub raised_bg: u32,
-    pub ink_text: u32,
-    pub subtle_text: u32,
-    pub accent: u32,
-    pub border: u32,
-    pub hover_overlay: u32,
-    pub active_highlight: u32,
-    pub danger_text: u32,
-    pub danger_bg: u32,
-    /// State that needs a decision but is not a failure: a library holding
-    /// unsynced changes, bytes reserved by an upload in flight. Separate from
-    /// `accent` so "fine" and "look at this" never render the same, and from
-    /// `danger_*` so a pending transfer does not read as an error.
-    pub warning_text: u32,
-    pub warning_bg: u32,
-}
-
 impl ApplicationTheme {
+    /// Every theme, in the order they are offered.
+    pub const ALL: [Self; 2] = [Self::Warm, Self::Cool];
+
     pub const fn next(self) -> Self {
         match self {
-            Self::GrecoFuturistic => Self::LibrarySerif,
-            Self::LibrarySerif => Self::ClassicWhite,
-            Self::ClassicWhite => Self::GrecoFuturistic,
+            Self::Warm => Self::Cool,
+            Self::Cool => Self::Warm,
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::GrecoFuturistic => "Sage",
-            Self::LibrarySerif => "Sepia",
-            Self::ClassicWhite => "Paper",
+            Self::Warm => "Warm",
+            Self::Cool => "Cool",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::GrecoFuturistic => "Cool, restrained surfaces with muted green accents.",
-            Self::LibrarySerif => "Warm, bookish surfaces with brown accents.",
-            Self::ClassicWhite => "Neutral greys and white cards with a slate blue accent.",
-        }
-    }
-
-    /// Palettes are derived, not hand-picked: every one holds body text at
-    /// ~13.5:1, muted text at ~4.9:1, the accent at ~5.5:1, and — the fix for
-    /// borders that used to sit at 1.3:1 — a boundary at >=3.2:1 against
-    /// whichever adjacent surface it contrasts with least. Hue and saturation
-    /// carry each theme's character; only lightness moves.
-    pub const fn palette(self, appearance: ResolvedAppearance) -> ApplicationPalette {
-        match (self, appearance) {
-            (Self::GrecoFuturistic, ResolvedAppearance::Light) => ApplicationPalette {
-                surface_bg: 0xf5f1e8,
-                raised_bg: 0xfffcf6,
-                ink_text: 0x1f2220,
-                subtle_text: 0x65675d,
-                accent: 0x486754,
-                border: 0x8b7e5b,
-                hover_overlay: 0x0000000d,
-                active_highlight: 0xe1e6d8,
-                danger_text: 0x9b312a,
-                danger_bg: 0xfbe4da,
-                warning_text: 0x8a6000,
-                warning_bg: 0xf7e9c6,
-            },
-            (Self::GrecoFuturistic, ResolvedAppearance::Dark) => ApplicationPalette {
-                surface_bg: 0x24231e,
-                raised_bg: 0x32302a,
-                ink_text: 0xe9ebe9,
-                subtle_text: 0x979a8f,
-                accent: 0x79a289,
-                border: 0x9a8c65,
-                hover_overlay: 0xffffff12,
-                active_highlight: 0x3c442c,
-                danger_text: 0xdd8983,
-                danger_bg: 0x401411,
-                warning_text: 0xd8a83f,
-                warning_bg: 0x3a2f10,
-            },
-            (Self::LibrarySerif, ResolvedAppearance::Light) => ApplicationPalette {
-                surface_bg: 0xf6efe1,
-                raised_bg: 0xfffaf2,
-                ink_text: 0x231d16,
-                subtle_text: 0x70614e,
-                accent: 0x7b4f2e,
-                border: 0x957a4d,
-                hover_overlay: 0x0000000d,
-                active_highlight: 0xe8d6b7,
-                danger_text: 0x892b25,
-                danger_bg: 0xf9e2d7,
-                warning_text: 0x866300,
-                warning_bg: 0xf9ebcb,
-            },
-            (Self::ClassicWhite, ResolvedAppearance::Light) => ApplicationPalette {
-                surface_bg: 0xf1f3f5,
-                raised_bg: 0xffffff,
-                ink_text: 0x2d3237,
-                subtle_text: 0x656e77,
-                accent: 0x2c6ba5,
-                border: 0x7f8a96,
-                hover_overlay: 0x0000000d,
-                active_highlight: 0xdfe8f2,
-                danger_text: 0xb32218,
-                danger_bg: 0xfdeae7,
-                warning_text: 0x8a5900,
-                warning_bg: 0xfdf3d8,
-            },
-            (Self::ClassicWhite, ResolvedAppearance::Dark) => ApplicationPalette {
-                surface_bg: 0x17181a,
-                raised_bg: 0x232528,
-                ink_text: 0xe2e3e5,
-                subtle_text: 0x90979d,
-                accent: 0x74a0ca,
-                border: 0x69727b,
-                hover_overlay: 0xffffff12,
-                active_highlight: 0x2b3a49,
-                danger_text: 0xe08a84,
-                danger_bg: 0x3f1512,
-                warning_text: 0xd0a049,
-                warning_bg: 0x332a10,
-            },
-            (Self::LibrarySerif, ResolvedAppearance::Dark) => ApplicationPalette {
-                surface_bg: 0x24221e,
-                raised_bg: 0x322f29,
-                ink_text: 0xede9e3,
-                subtle_text: 0xa79580,
-                accent: 0xc48c61,
-                border: 0xa88a57,
-                hover_overlay: 0xffffff12,
-                active_highlight: 0x493d27,
-                danger_text: 0xde8983,
-                danger_bg: 0x401411,
-                warning_text: 0xe0b23f,
-                warning_bg: 0x3d3011,
-            },
+            Self::Warm => "Cream surfaces with a muted green accent.",
+            Self::Cool => "Neutral greys and white cards with a navy accent.",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UiFontFamily {
-    #[serde(alias = "ibm_plex_sans", alias = "liberation_sans")]
-    SansSerif,
-    #[serde(alias = "source_serif_4", alias = "liberation_serif")]
-    Serif,
-}
-
-impl UiFontFamily {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::SansSerif => "Sans Serif",
-            Self::Serif => "Serif",
-        }
-    }
-
-    pub const fn font_name(self) -> &'static str {
-        match self {
-            Self::SansSerif => "Noto Sans",
-            Self::Serif => "Libertinus Serif",
-        }
-    }
-
-    pub const fn generic_family(self) -> &'static str {
-        match self {
-            Self::SansSerif => "sans-serif",
-            Self::Serif => "serif",
-        }
-    }
-
-    pub const fn next(self) -> Self {
-        match self {
-            Self::SansSerif => Self::Serif,
-            Self::Serif => Self::SansSerif,
-        }
-    }
-}
+/// The interface is set in one family, and it is a serif.
+///
+/// The app is a library: hierarchy is carried by size, colour and space rather
+/// than by weight, and the type scale in `ui-components` is calibrated to this
+/// face's x-height.
+pub const INTERFACE_FONT_FAMILY: &str = "Libertinus Serif";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct BrowsingPreferences {
     theme: ApplicationTheme,
-    #[serde(default)]
-    appearance: ApplicationAppearance,
-    interface_font: UiFontFamily,
     ui_font_size_px: UiFontSize,
     library_view: LibraryView,
-    /// Empty means that catalogue searches include every language. New and
-    /// pre-language-filter profiles start with English and can explicitly
-    /// choose All languages from the catalogue dropdown.
-    #[serde(default = "default_catalog_languages")]
-    included_catalog_languages: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,14 +128,7 @@ impl LibraryView {
 
 impl Default for BrowsingPreferences {
     fn default() -> Self {
-        Self {
-            theme: ApplicationTheme::default(),
-            appearance: ApplicationAppearance::default(),
-            interface_font: UiFontFamily::SansSerif,
-            ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT),
-            library_view: LibraryView::Covers,
-            included_catalog_languages: default_catalog_languages(),
-        }
+        Self { theme: ApplicationTheme::default(), ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), library_view: LibraryView::Covers }
     }
 }
 
@@ -330,23 +137,11 @@ impl BrowsingPreferences {
         self.theme
     }
 
-    pub fn appearance(&self) -> ApplicationAppearance {
-        self.appearance
-    }
-
-    pub fn interface_font(&self) -> UiFontFamily {
-        self.interface_font
-    }
-
     pub fn ui_font_size_px(&self) -> u8 {
         self.ui_font_size_px.get()
     }
     pub fn library_view(&self) -> LibraryView {
         self.library_view
-    }
-
-    pub fn included_catalog_languages(&self) -> &[String] {
-        &self.included_catalog_languages
     }
 }
 
@@ -354,49 +149,20 @@ impl BrowsingPreferences {
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
     Theme(ApplicationTheme),
-    InterfaceFont(UiFontFamily),
     UiFontSizePx(u8),
-    Appearance(ApplicationAppearance),
     LibraryView(LibraryView),
-    IncludedCatalogLanguages(Vec<String>),
 }
 
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
             Self::Theme(value) => preferences.theme = value,
-            Self::InterfaceFont(value) => preferences.interface_font = value,
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
-            Self::Appearance(value) => preferences.appearance = value,
             Self::LibraryView(value) => preferences.library_view = value,
-            Self::IncludedCatalogLanguages(mut value) => {
-                value.retain(|language| CATALOG_LANGUAGE_OPTIONS.iter().any(|option| option.0 == language));
-                value.sort();
-                value.dedup();
-                preferences.included_catalog_languages = value;
-            }
         }
         Ok(())
     }
 }
-
-pub const CATALOG_LANGUAGE_OPTIONS: [(&str, &str); 15] = [
-    ("be", "Belarusian"),
-    ("bg", "Bulgarian"),
-    ("de", "German"),
-    ("en", "English"),
-    ("es", "Spanish"),
-    ("fr", "French"),
-    ("hu", "Hungarian"),
-    ("it", "Italian"),
-    ("ja", "Japanese"),
-    ("la", "Latin"),
-    ("no", "Norwegian"),
-    ("pl", "Polish"),
-    ("sv", "Swedish"),
-    ("smi", "Sámi languages"),
-    ("uk", "Ukrainian"),
-];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -430,7 +196,6 @@ pub enum ReaderFontFamily {
     #[default]
     Publisher,
     Serif,
-    SansSerif,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,7 +211,6 @@ pub enum ReaderTextAlignment {
 /// are synchronized separately; layout-sensitive fields remain in a local
 /// device or web form-factor profile. Neither belongs in the library event log.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ReaderPreferences {
     font_size_px: FontSize,
     max_line_width_px: LineWidth,
@@ -465,6 +229,14 @@ pub struct ReaderPreferences {
     pdf_zoom: PdfZoom,
     /// Automatically removes uniform outer margins from rendered PDF pages.
     pdf_trim_margins: bool,
+    /// How fast narration is played back. Defaulted rather than required, so a
+    /// preferences file written before audiobooks still loads.
+    #[serde(default = "default_audiobook_speed")]
+    audiobook_speed: AudiobookSpeed,
+}
+
+const fn default_audiobook_speed() -> AudiobookSpeed {
+    AudiobookSpeed(1.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,6 +307,7 @@ bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
 bounded_float!(PdfZoom, f32, "PDF zoom", PDF_ZOOM_MIN, PDF_ZOOM_MAX);
+bounded_float!(AudiobookSpeed, f64, "audiobook speed", AUDIOBOOK_SPEED_MIN, AUDIOBOOK_SPEED_MAX);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -602,6 +375,7 @@ impl Default for ReaderPreferences {
             pdf_page_count: PdfPageCount(1),
             pdf_zoom: PdfZoom(1.0),
             pdf_trim_margins: true,
+            audiobook_speed: default_audiobook_speed(),
         }
     }
 }
@@ -642,6 +416,9 @@ impl ReaderPreferences {
     }
     pub fn pdf_zoom(self) -> f32 {
         self.pdf_zoom.get()
+    }
+    pub fn audiobook_speed(self) -> f64 {
+        self.audiobook_speed.get()
     }
     pub fn pdf_trim_margins(self) -> bool {
         self.pdf_trim_margins
@@ -693,6 +470,10 @@ impl ReaderPreferences {
     pub fn set_pdf_trim_margins(&mut self, value: bool) {
         self.pdf_trim_margins = value;
     }
+    pub fn set_audiobook_speed(&mut self, value: f64) -> Result<(), PreferenceValueError> {
+        self.audiobook_speed = AudiobookSpeed::new(value)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -711,6 +492,7 @@ pub enum ReaderPreferencePatch {
     PdfPageCount(u8),
     PdfZoom(f32),
     PdfTrimMargins(bool),
+    AudiobookSpeed(f64),
 }
 
 impl ReaderPreferencePatch {
@@ -747,113 +529,7 @@ impl ReaderPreferencePatch {
                 preferences.set_pdf_trim_margins(value);
                 Ok(())
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod palette_tests {
-    use super::*;
-
-    fn channel(value: f64) -> f64 {
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    fn luminance(colour: u32) -> f64 {
-        let component = |shift: u32| channel(f64::from((colour >> shift) & 0xff) / 255.0);
-        0.2126 * component(16) + 0.7152 * component(8) + 0.0722 * component(0)
-    }
-
-    fn contrast(a: u32, b: u32) -> f64 {
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
-    fn palettes() -> Vec<(String, ApplicationPalette)> {
-        let mut out = Vec::new();
-        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite] {
-            for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-                out.push((format!("{theme:?}/{appearance:?}"), theme.palette(appearance)));
-            }
-        }
-        out
-    }
-
-    /// WCAG 1.4.11 sets 3:1 for a boundary that carries meaning. Card and panel
-    /// definition rests entirely on these 1px borders, and they used to sit at
-    /// 1.3:1 — visible only if you already knew where to look.
-    #[test]
-    fn borders_separate_from_every_surface_they_touch() {
-        for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
-                let ratio = contrast(palette.border, surface);
-                assert!(ratio >= 3.0, "{name}: border against {label} is {ratio:.2}:1, under the 3:1 floor for UI boundaries");
-            }
-        }
-    }
-
-    #[test]
-    fn body_text_and_muted_text_pass_wcag_aa() {
-        for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
-                let ink = contrast(palette.ink_text, surface);
-                assert!(ink >= 7.0, "{name}: body text on {label} is {ink:.2}:1");
-                let muted = contrast(palette.subtle_text, surface);
-                assert!(muted >= 4.5, "{name}: muted text on {label} is {muted:.2}:1");
-                let accent = contrast(palette.accent, surface);
-                assert!(accent >= 4.5, "{name}: accent on {label} is {accent:.2}:1");
-                // Warning text is set directly on a surface as often as it is on
-                // its own tint — the verdict stripe and the state pills.
-                let warning = contrast(palette.warning_text, surface);
-                assert!(warning >= 4.5, "{name}: warning on {label} is {warning:.2}:1");
-            }
-            let danger = contrast(palette.danger_text, palette.danger_bg);
-            assert!(danger >= 4.5, "{name}: danger text is {danger:.2}:1");
-            let warning = contrast(palette.warning_text, palette.warning_bg);
-            assert!(warning >= 4.5, "{name}: warning text is {warning:.2}:1");
-        }
-    }
-
-    /// The two surfaces must remain visibly distinct: one continuous canvas
-    /// and one raised card/popover tone.
-    #[test]
-    fn the_two_surfaces_are_distinguishable_from_one_another() {
-        for (name, palette) in palettes() {
-            let ratio = contrast(palette.surface_bg, palette.raised_bg);
-            assert!(ratio >= 1.08, "{name}: surface/raised differ by only {ratio:.3}:1");
-        }
-    }
-
-    /// Hover is an overlay rather than a solid so one value works on every
-    /// surface. A fully opaque value would mean it had been written as a solid
-    /// colour by mistake, which reads as a colour change rather than a hover.
-    #[test]
-    fn the_hover_overlay_is_translucent() {
-        for (name, palette) in palettes() {
-            let alpha = palette.hover_overlay & 0xff;
-            assert!(alpha > 0 && alpha < 0x40, "{name}: hover alpha {alpha:#04x} is not a subtle overlay");
-        }
-    }
-
-    #[test]
-    fn a_platform_that_cannot_report_an_appearance_gets_the_light_palette() {
-        assert_eq!(ApplicationAppearance::System.resolve(false), ResolvedAppearance::Light);
-        assert_eq!(ApplicationAppearance::System.resolve(true), ResolvedAppearance::Dark);
-        assert_eq!(ApplicationAppearance::Dark.resolve(false), ResolvedAppearance::Dark, "an explicit choice must ignore the system");
-        assert_eq!(ApplicationAppearance::Light.resolve(true), ResolvedAppearance::Light);
-    }
-
-    #[test]
-    fn light_and_dark_are_actually_light_and_dark() {
-        for theme in [ApplicationTheme::GrecoFuturistic, ApplicationTheme::LibrarySerif, ApplicationTheme::ClassicWhite] {
-            let light = theme.palette(ResolvedAppearance::Light);
-            let dark = theme.palette(ResolvedAppearance::Dark);
-            assert!(luminance(light.surface_bg) > 0.5, "{theme:?} light background is not light");
-            assert!(luminance(dark.surface_bg) < 0.1, "{theme:?} dark background is not dark");
+            Self::AudiobookSpeed(value) => preferences.set_audiobook_speed(value),
         }
     }
 }
@@ -867,9 +543,6 @@ mod tests {
         let browsing = BrowsingPreferencePatch::LibraryView(LibraryView::Detailed);
         assert_eq!(serde_json::to_value(browsing).unwrap(), serde_json::json!({ "preference": "library_view", "value": "detailed" }));
 
-        let languages = BrowsingPreferencePatch::IncludedCatalogLanguages(vec!["sv".to_owned(), "en".to_owned()]);
-        assert_eq!(serde_json::to_value(languages).unwrap(), serde_json::json!({ "preference": "included_catalog_languages", "value": ["sv", "en"] }));
-
         let reader = ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight);
         assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_zoom_mode", "value": "fit_height" }));
 
@@ -878,18 +551,8 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_languages_are_normalized_to_supported_unique_values() {
-        let mut preferences = BrowsingPreferences::default();
-        assert_eq!(preferences.included_catalog_languages(), ["en"]);
-        BrowsingPreferencePatch::IncludedCatalogLanguages(vec!["sv".to_owned(), "unknown".to_owned(), "en".to_owned(), "sv".to_owned()]).apply(&mut preferences).unwrap();
-        assert_eq!(preferences.included_catalog_languages(), ["en", "sv"]);
-        BrowsingPreferencePatch::IncludedCatalogLanguages(Vec::new()).apply(&mut preferences).unwrap();
-        assert!(preferences.included_catalog_languages().is_empty());
-    }
-
-    #[test]
-    fn older_profiles_receive_the_english_catalogue_default() {
-        let preferences: BrowsingPreferences = serde_json::from_str("{}").unwrap();
-        assert_eq!(preferences.included_catalog_languages(), ["en"]);
+    fn incomplete_profiles_are_rejected() {
+        assert!(serde_json::from_str::<BrowsingPreferences>("{}").is_err());
+        assert!(serde_json::from_str::<ReaderPreferences>("{}").is_err());
     }
 }

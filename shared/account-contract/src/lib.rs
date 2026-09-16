@@ -88,9 +88,14 @@ pub struct LibraryStorageUsage {
     pub used_bytes: u64,
 }
 
+/// Everything an account settings screen needs in one server response.
+/// Device-local storage remains a client concern.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LibraryStorageUsageResponse {
-    pub libraries: Vec<LibraryStorageUsage>,
+pub struct AccountSnapshotResponse {
+    pub libraries: Vec<sync_common::api::libraries::LibrarySummary>,
+    pub deleted_library_ids: Vec<sync_common::LibraryId>,
+    pub storage: StorageUsageResponse,
+    pub library_storage: Vec<LibraryStorageUsage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,5 +143,18 @@ mod tests {
         let usage = StorageUsageResponse { used_bytes: 1_000_000_000_000, reserved_bytes: 42, quota_bytes: 2_000_000_000_000 };
         let encoded = wire::encode(&usage).unwrap();
         assert_eq!(wire::decode::<StorageUsageResponse>(&encoded, 1024).unwrap(), usage);
+    }
+
+    #[test]
+    fn account_snapshot_round_trips_all_remote_settings_state() {
+        let library_id = sync_common::LibraryId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let snapshot = AccountSnapshotResponse {
+            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned() }],
+            deleted_library_ids: Vec::new(),
+            storage: StorageUsageResponse { used_bytes: 50, reserved_bytes: 5, quota_bytes: 100 },
+            library_storage: vec![LibraryStorageUsage { library_id: library_id.to_string(), used_bytes: 50 }],
+        };
+        let encoded = wire::encode(&snapshot).unwrap();
+        assert_eq!(wire::decode::<AccountSnapshotResponse>(&encoded, 4096).unwrap(), snapshot);
     }
 }

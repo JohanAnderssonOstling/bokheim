@@ -16,6 +16,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let bearer = parts.headers.get(axum::http::header::AUTHORIZATION).and_then(|value| value.to_str().ok()).and_then(|header| header.strip_prefix("Bearer ")).filter(|token| !token.is_empty());
+        let bearer = bearer.or(crate::notifications::websocket_bearer(parts.uri.path(), &parts.headers)?);
         let (token, cookie_authenticated) = match bearer {
             Some(token) => (token, false),
             None => {
@@ -24,7 +25,7 @@ impl FromRequestParts<AppState> for AuthUser {
             }
         };
         let session = state.account.resolve_token(token).await.map_err(server_account::auth_error)?;
-        if parts.uri.path().starts_with("/api/sync/") || parts.uri.path().starts_with("/api/libraries") {
+        if parts.uri.path().starts_with("/api/sync/") || parts.uri.path().starts_with("/api/libraries") || parts.uri.path() == "/api/account/snapshot" {
             state.account.record_sync_activity(&session.user_id);
         }
         Ok(Self { user_id: session.user_id, credential: Arc::from(token), cookie_authenticated })

@@ -60,6 +60,7 @@ impl ThumbnailUploadGate {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) playback: Arc<crate::playback::Grants>,
     pub(crate) database: PostgresDatabase,
     pub(crate) account: Arc<PostgresAccountService>,
     pub(crate) sync: Arc<PostgresSyncRepository>,
@@ -79,6 +80,7 @@ impl AppState {
     ) -> Self {
         Self {
             database,
+            playback: Arc::new(crate::playback::Grants::default()),
             account,
             sync,
             assets,

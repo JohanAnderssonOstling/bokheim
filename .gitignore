@@ -120,3 +120,7 @@ venv/
 # Keep pre-migration external WPT checkouts ignored in place. Set
 # HTML_WPT_ROOT to use them without moving local data automatically.
 /HtmlRenderer/testdata/wpt/
+
+# Verified PDFium dependency cache and prepared platform inputs
+/.pdfium-cache/
+/.pdfium/

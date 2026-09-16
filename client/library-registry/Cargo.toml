@@ -5,8 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+device-sqlite = { path = "../device-sqlite" }
 sync-common = { path = "../../shared/sync-common" }
-rusqlite = { version = "0.40.0", features = ["functions"] }
+rusqlite = "0.40.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

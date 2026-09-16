@@ -77,7 +77,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">1</span><div><h3>EPUB media-overlay audio had an incomplete lifetime</h3></div><span class="severity resolved">Removed</span></div>
           <p>This finding is retained as the reason for the change. The EPUB audio state, toolbar affordance, backend API, polling tasks, <code>kira</code> dependency, and feature wiring have now been removed. The separate audiobook player is unchanged.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/windows.rs">windows.rs:65</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:616–692</a>
+          <a class="source" href="../apps/reader/src/windows.rs">windows.rs:65</a> · <a class="source" href="../apps/reader/src/epub/state.rs">epub/state.rs:616–692</a>
           <div class="diagram">
             <div class="diagram-title">Current lifetime leak and recommended state machine</div>
             <svg viewBox="0 0 800 265" role="img" aria-label="Current audio lifecycle compared with an owned cancellable state machine">
@@ -106,7 +106,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">2</span><div><h3>Persist-then-apply can lose rapid annotation edits</h3></div><span class="severity high">High</span></div>
           <p>Each save clones the current stored annotation, writes it on the persistence worker, and updates local state only after success. Two quick edits therefore start from the same stale snapshot. A colour click followed by a style click can cause the later write to restore the old colour. Creation and deletion have the same delayed-interaction shape.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:210–345</a>
+          <a class="source" href="../apps/reader/src/epub/state.rs">epub/state.rs:210–345</a>
           <div class="flow" aria-label="Lost annotation update sequence">
             <div class="flow-box"><b>Click Blue</b><span>captures Yellow + Highlight</span></div><div class="arrow">→</div>
             <div class="flow-box"><b>Click Underline</b><span>captures Yellow + Underline</span></div><div class="arrow">→</div>
@@ -118,7 +118,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">3</span><div><h3>The toolbar's progress projection is not refreshed</h3></div><span class="severity medium">Medium</span></div>
           <p><code>ReadingProgress</code> updates <code>self.progress</code> and records persistence, then returns <code>false</code>. The toolbar owns a copied <code>ToolbarModel</code>, so its percentage remains stale until an unrelated toolbar event pushes a new model.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:410–420</a>
+          <a class="source" href="../apps/reader/src/epub/state.rs">epub/state.rs:410–420</a>
           <div class="diff"><div class="diff-head"><span>epub/state.rs</span><span>illustrative change</span></div><pre><span class="ctx">if let Some(cfi) = self.current_cfi.clone() {</span>
 <span class="ctx">    self.reading_positions.record((cfi, *fraction), "reading-position");</span>
 <span class="ctx">}</span>
@@ -134,14 +134,14 @@
         <article class="finding">
           <div class="finding-head"><span class="number">4</span><div><h3>TOC fallback selects an arbitrary entry</h3></div><span class="severity medium">Medium</span></div>
           <p><code>TocState::link_at</code> performs its fallback by taking the first entry for a document from a <code>HashMap</code>. That order is deliberately unspecified. Because the reader does not install the publication's TOC anchors into the renderer's anchor filter, the reported anchor can also be an ordinary markup ID rather than a TOC anchor. When no entry matches, <code>active_link</code> becomes empty but the tree's selected item is not cleared.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/toc.rs">epub/toc.rs:46–51</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:368–381</a>
+          <a class="source" href="../apps/reader/src/epub/toc.rs">epub/toc.rs:46–51</a> · <a class="source" href="../apps/reader/src/epub/state.rs">epub/state.rs:368–381</a>
           <div class="callout amber">Keep resolved TOC entries in publication order, install their anchor strings in <code>HtmlViewCore</code>, choose the nearest preceding entry, and explicitly set the tree selection to <code>None</code> when there is no active entry.</div>
         </article>
 
         <article class="finding">
           <div class="finding-head"><span class="number">5</span><div><h3>A missing document title leaves the previous title stuck</h3></div><span class="severity medium">Medium</span></div>
           <p>The event handler matches only <code>TitleChanged(Some(title))</code>. Moving from a titled spine item to an untitled one emits <code>TitleChanged(None)</code>, which falls through and preserves the previous chapter title.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/state.rs">epub/state.rs:359–367</a>
+          <a class="source" href="../apps/reader/src/epub/state.rs">epub/state.rs:359–367</a>
           <div class="diff"><div class="diff-head"><span>epub/state.rs</span><span>illustrative change</span></div><pre><span class="del">RendererEvent::TitleChanged(Some(title)) =&gt; {</span>
 <span class="add">RendererEvent::TitleChanged(title) =&gt; {</span>
 <span class="add">    let title = title.clone().unwrap_or_else(|| self.book_title.clone());</span>
@@ -160,13 +160,13 @@
         <article class="finding">
           <div class="finding-head"><span class="number">6</span><div><h3><code>Render</code> changes the native window title</h3></div><span class="severity low">Low</span></div>
           <p><code>window.set_window_title</code> runs on every reader render. It is idempotent, but still a platform mutation inside a method that should describe current UI. Set it during activation or when the title actually changes. The debug render counter is also a mutation, but is a reasonable instrumentation exception.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:217–222</a>
+          <a class="source" href="../apps/reader/src/epub/render.rs">epub/render.rs:217–222</a>
         </article>
 
         <article class="finding">
           <div class="finding-head"><span class="number">7</span><div><h3>The toolbar entity is an ownership boundary, not complete render isolation</h3></div><span class="severity low">Low</span></div>
           <p>In GPUI-Fork, notifying a rendered child marks its ancestor view path dirty. The reader shell therefore renders when the toolbar changes. Both the toolbar and renderer are embedded as ordinary, uncached entities. <code>HtmlView::render</code> is small and its painter has internal caches, so this is primarily an inaccurate architectural claim—not a catastrophic cost.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/toolbar.rs">epub/toolbar.rs:1–9</a> · <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:223–235</a>
+          <a class="source" href="../apps/reader/src/epub/toolbar.rs">epub/toolbar.rs:1–9</a> · <a class="source" href="../apps/reader/src/epub/render.rs">epub/render.rs:223–235</a>
           <table class="matrix">
             <thead><tr><th>Boundary</th><th>What it currently gives</th><th>What it does not guarantee</th></tr></thead>
             <tbody><tr><td>ReaderToolbar entity</td><td>Independent state, typed events, model equality guard.</td><td>That the ancestor reader shell will not render.</td></tr><tr><td>HtmlView entity</td><td>Renderer ownership and its own invalidation source.</td><td>Subtree reuse when embedded uncached during shell invalidation.</td></tr><tr><td>cached(style)</td><td>Reuse until entity, bounds, mask, or text style changes.</td><td>Content-derived measurement; it requires a definite size.</td></tr></tbody>
@@ -176,7 +176,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">8</span><div><h3>Annotation placement duplicates renderer layout policy</h3></div><span class="severity low">Low</span></div>
           <p>The shell recomputes fitted column count using its own gap, scaling, width, and rounding assumptions. A future renderer change can silently place the editor over the wrong column. The renderer should expose its actual laid-out column geometry as observable state.</p>
-          <a class="source" href="../apps/ui/gpui/reader/src/epub/render.rs">epub/render.rs:25–39</a>
+          <a class="source" href="../apps/reader/src/epub/render.rs">epub/render.rs:25–39</a>
         </article>
       </section>
 

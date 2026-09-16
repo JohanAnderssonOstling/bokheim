@@ -170,7 +170,7 @@ before more handlers accumulate.
 
 ## Working notes
 
-- Files in `apps/ui/gpui/reader/src/` were being edited **concurrently** by
+- Files in `apps/reader/src/` were being edited **concurrently** by
   another session during this work (`reader_state_panel.rs` appeared mid-stream
   and did not compile — missing `Entity`/`Sizable` imports and an `FnMut` bound
   where `TabBar::on_click` needs `Fn`; fixed). Re-read before assuming.

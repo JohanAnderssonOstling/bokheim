@@ -24,10 +24,12 @@ DESKTOP_FILE="$REPOSITORY_ROOT/apps/desktop-gpui/linux/se.bokheim.Bokheim.deskto
 ICON_DIRECTORY="$REPOSITORY_ROOT/apps/ui/design-tokens/assets/icon"
 
 install -Dm644 "$ICON_DIRECTORY/bokheim-512.png" "$STAGED_ICON"
+python3 "$REPOSITORY_ROOT/shared/pdfium/prepare.py" --target x86_64-unknown-linux-gnu --dest "$APPDIR/usr/bin/pdfium"
 
 "$LINUXDEPLOY" \
   --appdir "$APPDIR" \
   --executable "$DESKTOP_BINARY" \
+  --library "$APPDIR/usr/bin/pdfium/libpdfium.so" \
   --desktop-file "$DESKTOP_FILE" \
   --icon-file "$STAGED_ICON" \
   --custom-apprun "$SCRIPT_DIR/AppRun"

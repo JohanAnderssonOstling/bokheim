@@ -51,6 +51,19 @@ install -o root -g root -m 0644 "${incoming}/unified-taxonomy-v2.sqlite3" "${can
 install -o root -g root -m 0644 "${incoming}/bokheim-taxonomy.service" "${candidate}/bokheim-taxonomy.service"
 install -o root -g root -m 0644 "${incoming}/Caddyfile" "${candidate}/Caddyfile"
 
+# A release is created at publication time, not at build time. Allocation is
+# protected by the deployment flock above, so two publishers cannot receive
+# the same number. The source snapshot carries release 1 for a fresh install.
+previous_release=0
+installed_database=/usr/local/share/bokheim-taxonomy/unified-taxonomy-v2.sqlite3
+if [[ -f ${installed_database} ]]; then
+    previous_release=$(sqlite3 "${installed_database}" "SELECT value FROM taxonomy_meta WHERE key='release_id';")
+    [[ ${previous_release} =~ ^[1-9][0-9]*$ ]] || { echo "installed taxonomy has an invalid release identifier" >&2; exit 1; }
+fi
+next_release=$((previous_release + 1))
+sqlite3 "${candidate}/unified-taxonomy-v2.sqlite3" \
+    "INSERT INTO taxonomy_meta(key,value) VALUES('release_id','${next_release}') ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+
 /usr/bin/caddy validate --config "${candidate}/Caddyfile" --envfile /etc/bokheim/caddy.env
 sqlite3 "${candidate}/unified-taxonomy-v2.sqlite3" "PRAGMA quick_check; PRAGMA foreign_key_check;" | grep -Fqx ok
 

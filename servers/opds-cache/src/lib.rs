@@ -4,24 +4,24 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use catalog_core::{prepare_catalog_subject_assignments, CatalogCacheError, CatalogCoverCache, CatalogLanguageFilter};
+use catalog_core::CatalogCoverCache;
 use catalog_model::{
-    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogImportRequest, CatalogLinkTarget, CatalogPage, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity, CatalogSource, CatalogSourceId,
-    CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
+    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLanguageFilter, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction,
+    CatalogPublicationIdentity, CatalogSource, CatalogSourceId, CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest,
+    CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
 };
 use catalog_protocol::{materialize_page, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, LookupStatus, MetadataEnrichmentRequest, RichWorkMetadataMatch};
 use opds::{
     endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsError, OpdsHttpValidators,
-    OpdsSearch,
 };
-use publication_model::{canonical_isbn, Identifier, PublicationSubject, Scheme, Scope};
+use publication_model::{canonical_isbn, Identifier, PublicationSubject, Scheme};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
@@ -33,14 +33,14 @@ mod opds_adapter;
 mod store;
 use opds_adapter::{canonicalize_gutenberg_page, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import};
 use store::{
-    CatalogCache, CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory, CatalogMetadataBackfillIndexedJob,
-    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity,
+    prepare_catalog_subject_assignments, CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory,
+    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogOcrBackfillJob, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity, CatalogStore,
+    CatalogStoreError,
 };
 
 const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_MAX_CRAWL_PAGES: usize = 50_000;
 const HARD_MAX_CRAWL_PAGES: usize = 250_000;
-const MAX_RECENT_BROWSER_COVERS: usize = 4_096;
 // SQLite still has one explicitly serialized writer while network-bound source
 // crawls overlap. Distinct origins run together; sources sharing an origin run
 // sequentially so their request windows cannot stack.
@@ -72,10 +72,17 @@ const COVER_RECONCILIATION_BATCH: usize = 256;
 const INACTIVE_GENERATION_CLEANUP_BATCH: usize = 256;
 const PRIORITY_CRAWL_SOURCE: &str = "litteraturbanken";
 const CRAWL_PAUSE_SENTINEL: &str = "/var/lib/bokheim-deploy/catalog-crawls-disabled";
-const BACKGROUND_DOWNLOAD_LIMIT: usize = 1;
+// Network acquisition is independent from the CPU-heavy extraction worker.
+// Keep enough asynchronous work in flight to hide slow origins, while the
+// scheduler below admits candidates in source-round-robin order so one source
+// cannot fill the entire window before other sources get a chance.
+const BACKGROUND_DOWNLOAD_LIMIT: usize = 16;
 const MAX_INTERACTIVE_DOWNLOADS: usize = 2;
 const MAX_QUEUED_DOWNLOADS: usize = 4;
-const MAX_CONCURRENT_EXTRACTIONS: usize = 1;
+// Downloads and EPUB inspection use different resources. Keep several
+// extraction workers active so a slow download does not leave the CPU idle,
+// while still bounding child-process memory and thumbnail CPU use.
+const MAX_CONCURRENT_EXTRACTIONS: usize = 4;
 #[cfg(not(test))]
 const EXTRACTION_WORKER_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 #[cfg(not(test))]
@@ -97,7 +104,11 @@ const EPUB_EXTRACTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // tree. Keep only a small set live so one run cannot establish a large heap
 // high-water mark while the backlog is drained.
 const METADATA_BACKFILL_BATCH_SIZE: usize = 32;
+const METADATA_BACKFILL_MAX_JOBS_PER_PASS: usize = 256;
+const DESCRIPTION_BACKFILL_MAX_JOBS_PER_PASS: usize = 256;
 const METADATA_BACKFILL_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
+const OCR_BACKFILL_BATCH_SIZE: usize = 1;
+const OCR_BACKFILL_MAX_JOBS_PER_PASS: usize = 4;
 const REGISTRY_CACHE_CONTROL: &str = "public, max-age=300";
 const DATA_CACHE_CONTROL: &str = "public, max-age=60";
 const COVER_CACHE_CONTROL: &str = "public, max-age=31536000, immutable, no-transform";
@@ -114,17 +125,17 @@ struct CatalogServiceState {
     snapshot: RwLock<RegistrySnapshot>,
     endpoints: RwLock<Vec<OpdsEndpoint>>,
     opds: OpdsClient,
-    cache: CatalogCache,
+    store: CatalogStore,
     covers: CatalogCoverCache,
+    cover_cache_directory: PathBuf,
     // SQLite permits only one writer. Queue writes before entering the
     // blocking pool so in-process jobs never spend the busy timeout fighting
     // one another (or turn ordinary contention into extraction failures).
-    cache_write_lock: Mutex<()>,
+    store_write_lock: Mutex<()>,
     crawl_locks: Mutex<HashMap<CatalogSourceId, Arc<Mutex<()>>>>,
     crawl_progress: Mutex<HashMap<CatalogSourceId, CrawlProgress>>,
     origin_throttles: Mutex<HashMap<String, Arc<AdaptiveOriginThrottle>>>,
     source_update_locks: Mutex<HashMap<CatalogSourceId, Arc<Mutex<()>>>>,
-    recent_browser_covers: Mutex<RecentBrowserCovers>,
     epub_range_origins: Mutex<HashMap<String, bool>>,
     background_download_slots: Semaphore,
     interactive_download_slots: Semaphore,
@@ -137,6 +148,7 @@ struct CatalogServiceState {
     metadata_client: reqwest::Client,
     metadata_backfill_metrics: MetadataBackfillRuntimeMetrics,
     description_backfill_metrics: MetadataBackfillRuntimeMetrics,
+    extraction_metrics: CatalogExtractionRuntimeMetrics,
     description_backfill_available: AtomicBool,
     writer_metrics: StdMutex<BTreeMap<String, WriterRuntimeMetric>>,
     max_crawl_pages: usize,
@@ -196,6 +208,31 @@ struct MetadataBackfillRuntimeMetrics {
     index_ms: AtomicU64,
     status_ms: AtomicU64,
     total_ms: AtomicU64,
+}
+
+#[derive(Default)]
+struct CatalogExtractionRuntimeMetrics {
+    jobs: AtomicU64,
+    container_ms: AtomicU64,
+    evidence_ms: AtomicU64,
+    toc_ms: AtomicU64,
+    thumbnail_ms: AtomicU64,
+    worker_ms: AtomicU64,
+}
+
+#[derive(Serialize)]
+struct CatalogExtractionRuntimeMetricsResponse {
+    jobs: u64,
+    container_ms: u64,
+    evidence_ms: u64,
+    toc_ms: u64,
+    thumbnail_ms: u64,
+    worker_ms: u64,
+    average_container_ms: f64,
+    average_evidence_ms: f64,
+    average_toc_ms: f64,
+    average_thumbnail_ms: f64,
+    average_worker_ms: f64,
 }
 
 #[derive(Default)]
@@ -298,12 +335,6 @@ impl AdaptiveCrawlWriteBatch {
     }
 }
 
-#[derive(Clone)]
-struct RecentCoverReference {
-    identity: CatalogPublicationIdentity,
-    acquisition: Option<OpdsDirectAcquisition>,
-}
-
 #[derive(Clone, Default)]
 struct CatalogMetadataMatch {
     subjects: Vec<PublicationSubject>,
@@ -311,30 +342,23 @@ struct CatalogMetadataMatch {
     description: Option<String>,
 }
 
-#[derive(Default)]
-struct RecentBrowserCovers {
-    entries: HashMap<String, RecentCoverReference>,
-    order: VecDeque<String>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CatalogProcess {
     CatalogueCrawling,
     CoverDownloads,
-    EpubEnrichment,
-    CatalogueEnrichment,
+    #[serde(alias = "epub_enrichment", alias = "catalogue_enrichment")]
+    Enrichment,
 }
 
 impl CatalogProcess {
-    const ALL: [Self; 4] = [Self::CatalogueCrawling, Self::CoverDownloads, Self::EpubEnrichment, Self::CatalogueEnrichment];
+    const ALL: [Self; 3] = [Self::CatalogueCrawling, Self::CoverDownloads, Self::Enrichment];
 
     fn storage_key(self) -> &'static str {
         match self {
             Self::CatalogueCrawling => "catalogue_crawling",
             Self::CoverDownloads => "cover_downloads",
-            Self::EpubEnrichment => "epub_enrichment",
-            Self::CatalogueEnrichment => "catalogue_enrichment",
+            Self::Enrichment => "enrichment",
         }
     }
 }
@@ -346,12 +370,9 @@ struct CatalogProcessRuntime {
     cover_downloads_enabled: AtomicBool,
     cover_downloads_running: AtomicBool,
     cover_downloads_notify: Notify,
-    epub_enrichment_enabled: AtomicBool,
-    epub_enrichment_running: AtomicBool,
-    epub_enrichment_notify: Notify,
-    catalogue_enrichment_enabled: AtomicBool,
-    catalogue_enrichment_running: AtomicBool,
-    catalogue_enrichment_notify: Notify,
+    enrichment_enabled: AtomicBool,
+    enrichment_running: AtomicUsize,
+    enrichment_notify: Notify,
 }
 
 impl CatalogProcessRuntime {
@@ -363,12 +384,9 @@ impl CatalogProcessRuntime {
             cover_downloads_enabled: AtomicBool::new(settings.cover_downloads),
             cover_downloads_running: AtomicBool::new(false),
             cover_downloads_notify: Notify::new(),
-            epub_enrichment_enabled: AtomicBool::new(settings.epub_enrichment),
-            epub_enrichment_running: AtomicBool::new(false),
-            epub_enrichment_notify: Notify::new(),
-            catalogue_enrichment_enabled: AtomicBool::new(settings.catalogue_enrichment),
-            catalogue_enrichment_running: AtomicBool::new(false),
-            catalogue_enrichment_notify: Notify::new(),
+            enrichment_enabled: AtomicBool::new(settings.enrichment),
+            enrichment_running: AtomicUsize::new(0),
+            enrichment_notify: Notify::new(),
         }
     }
 }
@@ -469,41 +487,6 @@ impl DiskCrawlFrontier {
     }
 }
 
-impl RecentBrowserCovers {
-    fn remember(&mut self, source_id: &CatalogSourceId, publication: &CatalogPublication) {
-        let mut urls = publication.image_url.iter().chain(publication.metadata.images.iter().map(|image| &image.url)).collect::<Vec<_>>();
-        urls.sort();
-        urls.dedup();
-        for image_url in urls {
-            let key = format!("{}\n{image_url}", source_id.as_str());
-            let reference = RecentCoverReference { identity: publication.identity.clone(), acquisition: publication_metadata_acquisition(publication) };
-            self.entries.insert(key.clone(), reference);
-            self.touch(&key);
-        }
-        while self.entries.len() > MAX_RECENT_BROWSER_COVERS {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
-    }
-
-    fn get(&mut self, source_id: &CatalogSourceId, image_url: &str) -> Option<RecentCoverReference> {
-        let key = format!("{}\n{image_url}", source_id.as_str());
-        let value = self.entries.get(&key).cloned();
-        if value.is_some() {
-            self.touch(&key);
-        }
-        value
-    }
-
-    fn touch(&mut self, key: &str) {
-        if let Some(index) = self.order.iter().position(|candidate| candidate == key) {
-            self.order.remove(index);
-        }
-        self.order.push_back(key.to_owned());
-    }
-}
-
 #[derive(Deserialize)]
 struct CoverQuery {
     image_url: String,
@@ -526,6 +509,7 @@ struct CatalogInventoryResponse {
     description_backfill_available: bool,
     metadata_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
     description_backfill_metrics: MetadataBackfillRuntimeMetricsResponse,
+    extraction_metrics: CatalogExtractionRuntimeMetricsResponse,
     processes: Vec<CatalogProcessStatus>,
     writer_metrics: BTreeMap<String, WriterRuntimeMetricResponse>,
     identity_reviews: store::CatalogIdentityReviewInventory,
@@ -653,24 +637,26 @@ pub struct CatalogServiceError(String);
 mod backfill;
 mod covers;
 mod crawl;
+mod enrichment_pipeline;
 mod extraction;
 mod http;
 mod metadata;
 mod metrics;
 mod processes;
 mod registry;
+mod source_cleanup;
 mod service;
 
-pub(crate) use crawl::{canonicalize_page_layout_locators, classify_catalog_failure, reconcile_cached_sources};
+pub(crate) use crawl::{canonicalize_page_layout_locators, classify_catalog_failure, reconcile_stored_sources};
 pub use extraction::run_catalog_extraction_worker;
 pub use http::{app, operations_app};
 pub(crate) use metadata::{
-    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_epub_metadata, merge_catalog_popularity, metadata_publication_byte_limit, publication_cover_fallback,
-    publication_has_acquisition_url, publication_metadata_acquisition,
+    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_epub_metadata, metadata_publication_byte_limit, publication_cover_fallback, publication_has_acquisition_url,
+    publication_metadata_acquisition,
 };
 pub(crate) use metrics::{duration_millis, writer_metrics_snapshot, BackfillBatchMetrics};
 pub(crate) use registry::catalog_crawls_disabled;
-pub(crate) use service::{cache_error, default_cache_path, default_cover_cache_directory};
+pub(crate) use service::{default_cache_path, default_cover_cache_directory, store_error};
 
 #[cfg(test)]
 mod tests;

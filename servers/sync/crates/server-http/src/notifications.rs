@@ -138,8 +138,12 @@ pub(crate) async fn connect(State(state): State<AppState>, user: AuthUser, heade
     let subscription = state.notifications.subscribe(&user.user_id).ok_or(StatusCode::TOO_MANY_REQUESTS)?;
     let config = state.notifications.config;
     let account = state.account.clone();
-    Ok(upgrade.max_message_size(MAX_CONTROL_MESSAGE_BYTES).max_frame_size(MAX_CONTROL_MESSAGE_BYTES).on_upgrade(move |socket| serve(socket, subscription, account, user.user_id, user.credential, config)))
+    Ok(upgrade.protocols(["bokheim.notifications.v1"]).max_message_size(MAX_CONTROL_MESSAGE_BYTES).max_frame_size(MAX_CONTROL_MESSAGE_BYTES).on_upgrade(move |socket| serve(socket, subscription, account, user.user_id, user.credential, config)))
 }
+
+#[path = "notification_auth.rs"]
+mod auth;
+pub(crate) use auth::websocket_bearer;
 
 fn require_websocket_origin(cookie_authenticated: bool, headers: &HeaderMap) -> Result<(), StatusCode> {
     if !cookie_authenticated {
@@ -232,7 +236,7 @@ async fn serve(socket: WebSocket, mut notifications: NotificationSubscription, a
                 if last_client_activity.elapsed() >= config.timeout {
                     SocketAction::Stop
                 } else {
-                    SocketAction::Send(Message::Ping(Vec::new()))
+                    SocketAction::Send(Message::Binary(Vec::new()))
                 }
             },
             _ = auth_revalidation.tick() => SocketAction::Revalidate,

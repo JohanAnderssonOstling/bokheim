@@ -61,7 +61,6 @@ pub enum CatalogCapability {
     Search,
     Facets,
     Import,
-    ExternalFulfillment,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,49 +127,6 @@ pub struct CatalogLink {
     pub active: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogSearchField {
-    Query,
-    Title,
-    Author,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CatalogSearchDefinition {
-    OpdsUriTemplate { base_url: String, template: String },
-    OpdsOpenSearchDescription { url: String },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogSearchDefinition", tag = "kind", rename_all = "snake_case")]
-enum CatalogSearchDefinitionHuman {
-    OpdsUriTemplate { base_url: String, template: String },
-    OpdsOpenSearchDescription { url: String },
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogSearchDefinition")]
-enum CatalogSearchDefinitionBinary {
-    OpdsUriTemplate { base_url: String, template: String },
-    OpdsOpenSearchDescription { url: String },
-}
-
-dual_serde!(CatalogSearchDefinition, CatalogSearchDefinitionHuman, CatalogSearchDefinitionBinary);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogSearch {
-    pub definition: CatalogSearchDefinition,
-    pub fields: Vec<CatalogSearchField>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogSearchQuery {
-    pub query: String,
-    pub title: Option<String>,
-    pub author: Option<String>,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogPagination {
     pub first: Option<String>,
@@ -209,7 +165,7 @@ impl Default for CatalogResultRange {
 pub struct CatalogResultRangeResponse {
     pub offset: u32,
     pub returned_items: u32,
-    pub total_items: u32,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -280,12 +236,6 @@ impl CatalogSubjectSort {
             Self::Title => "Title",
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogPrice {
-    pub currency: String,
-    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -409,34 +359,21 @@ impl CatalogImportRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CatalogExternalActionKind {
-    Open,
-    Preview,
-    Buy,
-    Borrow,
-    Subscribe,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogPublicationAction {
     Import { request: CatalogImportRequest },
-    External { purpose: CatalogExternalActionKind, url: String, price: Option<CatalogPrice>, available_formats: Vec<CatalogBookFormat> },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "CatalogPublicationAction", tag = "kind", rename_all = "snake_case")]
 enum CatalogPublicationActionHuman {
     Import { request: CatalogImportRequest },
-    External { purpose: CatalogExternalActionKind, url: String, price: Option<CatalogPrice>, available_formats: Vec<CatalogBookFormat> },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "CatalogPublicationAction")]
 enum CatalogPublicationActionBinary {
     Import { request: CatalogImportRequest },
-    External { purpose: CatalogExternalActionKind, url: String, price: Option<CatalogPrice>, available_formats: Vec<CatalogBookFormat> },
 }
 
 dual_serde!(CatalogPublicationAction, CatalogPublicationActionHuman, CatalogPublicationActionBinary);
@@ -573,7 +510,6 @@ pub struct CatalogPage {
     pub groups: Vec<CatalogGroup>,
     pub facets: Vec<CatalogFacet>,
     pub pagination: CatalogPagination,
-    pub search: Option<CatalogSearch>,
 }
 
 #[cfg(test)]
@@ -619,7 +555,7 @@ mod tests {
             "range": {
                 "offset": 0,
                 "returned_items": 0,
-                "total_items": 0
+                "has_more": false
             }
         }))
         .unwrap();

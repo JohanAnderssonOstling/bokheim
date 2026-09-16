@@ -4,6 +4,14 @@ pub struct MarcRelatorCode(pub [u8; 3]);
 
 pub const AUTHOR_MARC_RELATOR_CODE: MarcRelatorCode = MarcRelatorCode(*b"aut");
 pub const CONTRIBUTOR_MARC_RELATOR_CODE: MarcRelatorCode = MarcRelatorCode(*b"ctb");
+pub const NARRATOR_MARC_RELATOR_CODE: MarcRelatorCode = MarcRelatorCode(*b"nrt");
+pub const TRANSLATOR_MARC_RELATOR_CODE: MarcRelatorCode = MarcRelatorCode(*b"trl");
+
+impl MarcRelatorCode {
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or("ctb")
+    }
+}
 
 fn parse_three_letter_code(value: &str) -> Option<MarcRelatorCode> {
     let bytes = value.as_bytes();

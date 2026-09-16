@@ -10,6 +10,41 @@ pub mod assets {
     use std::collections::HashSet;
     use std::fmt;
 
+    pub const MAX_PUBLICATION_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct PublicationRanges {
+        pub checksum: ContentHash,
+        pub ranges: Vec<(u64, usize)>,
+    }
+    impl PublicationRanges {
+        pub fn byte_count(&self, length: u64) -> Option<usize> {
+            if self.ranges.is_empty() || self.ranges.len() > 128 { return None; }
+            let mut end = 0;
+            let mut total = 0usize;
+            for &(offset, count) in &self.ranges {
+                if count == 0 || offset < end { return None; }
+                end = offset.checked_add(count as u64)?;
+                total = total.checked_add(count)?;
+                if end > length || total > MAX_PUBLICATION_BUNDLE_BYTES { return None; }
+            }
+            Some(total)
+        }
+    }
+
+    /// Ephemeral read capability, never part of saved playback state.
+    #[derive(Clone, Serialize, Deserialize)]
+    pub struct PlaybackGrant {
+        pub path: String,
+        pub expires_in_seconds: u32,
+        pub checksum: ContentHash,
+        pub length: u64,
+    }
+    impl fmt::Debug for PlaybackGrant {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("PlaybackGrant").field("expires_in_seconds", &self.expires_in_seconds).field("checksum", &self.checksum).finish_non_exhaustive()
+        }
+    }
+
     pub const MAX_BLOB_MANIFEST_ENTRIES: usize = 4096;
     pub const MAX_THUMBNAIL_BATCH_ENTRIES: usize = 16;
     pub const MAX_THUMBNAIL_BATCH_BYTES: usize = MAX_THUMBNAIL_BATCH_ENTRIES * crate::MAX_THUMBNAIL_BYTES as usize;
@@ -17,6 +52,8 @@ pub mod assets {
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestEntry {
         pub content_hash: ContentHash,
+        /// Checksum of immutable bytes; may differ from permanent book identity.
+        pub checksum: ContentHash,
         pub size_bytes: u64,
     }
 
@@ -30,6 +67,7 @@ pub mod assets {
     pub enum BlobManifestRejectionReason {
         InvalidSize,
         SizeMismatch,
+        IdentityMismatch,
         QuotaExceeded,
         UploadInProgress,
     }
@@ -124,19 +162,26 @@ pub mod libraries {
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct UpsertLibraryRequest {
+    pub struct LibraryNameRequest {
         pub library_id: LibraryId,
         pub library_name: String,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct DeleteLibraryResponse {
-        pub library_id: LibraryId,
+    pub struct CloudStorageChange {
+        pub change_id: uuid::Uuid,
+        pub enabled: bool,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct DeletedLibrariesResponse {
-        pub library_ids: Vec<LibraryId>,
+    pub struct LibraryCloudStorage {
+        pub library_id: LibraryId,
+        pub enabled: bool,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct DeleteLibraryResponse {
+        pub library_id: LibraryId,
     }
 }
 
@@ -146,6 +191,7 @@ pub mod notifications {
 
     /// Best-effort wakeups carried by the authenticated WebSocket. Durable
     /// state and cursors remain in the ordinary synchronization protocol.
+    /// Empty binary frames are heartbeats; clients echo them without reconciling.
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
     pub enum NotificationMessage {
@@ -180,9 +226,9 @@ mod tests {
         let rejected = hash('c');
         let request = assets::BlobManifestRequest {
             blobs: vec![
-                assets::BlobManifestEntry { content_hash: owned.clone(), size_bytes: 41 },
-                assets::BlobManifestEntry { content_hash: upload.clone(), size_bytes: 42 },
-                assets::BlobManifestEntry { content_hash: rejected.clone(), size_bytes: 43 },
+                assets::BlobManifestEntry { content_hash: owned.clone(), checksum: owned.clone(), size_bytes: 41 },
+                assets::BlobManifestEntry { content_hash: upload.clone(), checksum: upload.clone(), size_bytes: 42 },
+                assets::BlobManifestEntry { content_hash: rejected.clone(), checksum: rejected.clone(), size_bytes: 43 },
             ],
         };
         assert_eq!(round_trip(&request), request);
@@ -212,7 +258,7 @@ mod tests {
 
     #[test]
     fn library_catalogue_contract_preserves_stable_ids_and_names() {
-        let request = libraries::UpsertLibraryRequest { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap(), library_name: "History".to_string() };
+        let request = libraries::LibraryNameRequest { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap(), library_name: "History".to_string() };
         let summary = libraries::LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() };
         assert_eq!(round_trip(&request), request);
         assert_eq!(round_trip(&summary), summary);

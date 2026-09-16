@@ -1,7 +1,7 @@
 use super::super::{
-    fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogLanguageFilter, CatalogPage, CatalogPageRequest, CatalogSearchRequest, CatalogService, CatalogServiceError,
-    CatalogSource, CatalogSourceId, CatalogSubjectBrowseRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, Method, Path, Query, Response, Router, State, StatusCode,
-    COVER_CACHE_CONTROL, DATA_CACHE_CONTROL, MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
+    fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogPageRequest, CatalogSearchRequest, CatalogService, CatalogServiceError, CatalogSourceId,
+    CatalogSubjectBrowseRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, Method, Path, Query, Response, Router, State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL,
+    MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
 };
 use super::operations::catalog_operations;
 
@@ -157,17 +157,6 @@ async fn catalog_acquisition_response(service: &CatalogService, source_id: &str,
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
     response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     Ok(response)
-}
-
-pub(crate) fn filter_browser_page(mut page: CatalogPage, source: &CatalogSource, supported_languages: &[String]) -> CatalogPage {
-    let filter = CatalogLanguageFilter::new(supported_languages);
-    if filter.source_is_multilingual(source) {
-        page.publications.retain(|publication| filter.publication_supported(publication));
-        for group in &mut page.groups {
-            group.publications.retain(|publication| filter.publication_supported(publication));
-        }
-    }
-    page
 }
 
 pub(crate) fn book_media_type(format: CatalogBookFormat) -> &'static str {

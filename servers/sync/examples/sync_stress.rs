@@ -12,9 +12,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
-use sync_common::api::libraries::UpsertLibraryRequest;
+use sync_common::api::libraries::LibraryNameRequest;
 use sync_common::fixture_content_hash;
-use sync_common::{ContentHash, DeclaredBlobReference, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS};
+use sync_common::{
+    ContentHash, DeclaredBlobReference, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, StateCell, StateInventoryRequest, StateInventoryResponse, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS,
+    MAX_STATE_INVENTORY_CELLS,
+};
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -220,7 +223,7 @@ async fn verify_email(client: &Client, base: &Url) -> Result<Identity, AnyError>
 }
 
 async fn create_library(client: &Client, base: &Url, identity: &Identity, library_id: &LibraryId) -> Result<(), AnyError> {
-    let request = UpsertLibraryRequest { library_id: *library_id, library_name: format!("Stress {library_id}") };
+    let request = LibraryNameRequest { library_id: *library_id, library_name: format!("Stress {library_id}") };
     let _: (sync_common::api::libraries::LibrarySummary, _, _) = post_api(client, endpoint(base, "api/libraries")?, identity, &request).await?;
     Ok(())
 }
@@ -420,6 +423,84 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
         pulled as f64 / pull_wall.as_secs_f64(),
         pull_wall.as_secs_f64(),
     );
+    Ok(())
+}
+
+fn inventory_cells(count: usize, key_offset: usize) -> Vec<StateCell> {
+    (0..count).map(|index| StateCell { kind: "metadata".to_owned(), entity_key: format!("inventory-cell-{}", key_offset + index), entity_subkey: String::new() }).collect()
+}
+
+async fn run_inventory_case(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, label: &str, cells: &[StateCell], expected_missing: &[StateCell], repetitions: usize) -> Result<(), AnyError> {
+    let expected: std::collections::HashSet<_> = expected_missing.iter().cloned().collect();
+    let phase_started = Instant::now();
+    let mut cycle_samples = Vec::with_capacity(repetitions);
+    let mut request_samples = Vec::new();
+    let mut request_bytes = 0_usize;
+    let mut response_bytes = 0_usize;
+    for _ in 0..repetitions {
+        let cycle_started = Instant::now();
+        let mut observed = std::collections::HashSet::new();
+        for page in cells.chunks(MAX_STATE_INVENTORY_CELLS) {
+            let request = StateInventoryRequest { library_id, cells: page.to_vec() };
+            let request_started = Instant::now();
+            let (response, sent, received): (StateInventoryResponse, _, _) = post_api(client, endpoint(base, "api/sync/inventory")?, identity, &request).await?;
+            request_samples.push(request_started.elapsed());
+            request_bytes += sent;
+            response_bytes += received;
+            for cell in response.missing {
+                if !page.contains(&cell) || !observed.insert(cell) {
+                    return Err(io::Error::other(format!("{label} inventory returned an unrequested or duplicate cell")).into());
+                }
+            }
+        }
+        if observed != expected {
+            return Err(io::Error::other(format!("{label} inventory returned {} missing cells; expected {}", observed.len(), expected.len())).into());
+        }
+        cycle_samples.push(cycle_started.elapsed());
+    }
+    let wall = phase_started.elapsed();
+    report_latencies(&format!("inventory {label} cycle"), &cycle_samples, wall);
+    report_latencies(&format!("inventory {label} request"), &request_samples, wall);
+    println!(
+        "inventory {label}: cells={} missing={} repetitions={repetitions} pages/cycle={} request={:.2}MiB response={:.2}MiB",
+        cells.len(),
+        expected.len(),
+        cells.len().div_ceil(MAX_STATE_INVENTORY_CELLS),
+        request_bytes as f64 / (1024.0 * 1024.0),
+        response_bytes as f64 / (1024.0 * 1024.0),
+    );
+    Ok(())
+}
+
+async fn run_inventory_profile(client: &Client, base: &Url, identity: &Identity, cell_count: usize, repetitions: usize) -> Result<(), AnyError> {
+    let library_id = Uuid::new_v4();
+    create_library(client, base, identity, &library_id).await?;
+    let replica_id = Uuid::new_v4();
+    let cells = inventory_cells(cell_count, 0);
+    let clock = now_ms();
+    let seed_started = Instant::now();
+    for (page_index, page) in cells.chunks(MAX_PUSH_MUTATIONS).enumerate() {
+        let mutations =
+            page.iter().enumerate().map(|(index, cell)| wire_mutation(&cell.kind, cell.entity_key.clone(), cell.entity_subkey.clone(), (page_index * MAX_PUSH_MUTATIONS + index + 1) as u64, clock)).collect::<Result<Vec<_>, _>>()?;
+        let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor: sync_common::SyncCursor::default() };
+        let (response, _, _): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
+        if !response.push.rejected.is_empty() || response.push.accepted.len() != page.len() {
+            return Err(io::Error::other("inventory profile could not seed every server cell").into());
+        }
+    }
+    println!("inventory seed: cells={cell_count} wall={:.3}s", seed_started.elapsed().as_secs_f64());
+
+    run_inventory_case(client, base, identity, library_id, "all-present", &cells, &[], repetitions).await?;
+
+    let mut one_missing = cells.clone();
+    one_missing[cell_count - 1] = inventory_cells(1, cell_count)[0].clone();
+    run_inventory_case(client, base, identity, library_id, "one-missing", &one_missing, &one_missing[cell_count - 1..], repetitions).await?;
+
+    let missing_count = cell_count.div_ceil(100);
+    let mut percent_missing = cells;
+    let replacements = inventory_cells(missing_count, cell_count + 1);
+    percent_missing[cell_count - missing_count..].clone_from_slice(&replacements);
+    run_inventory_case(client, base, identity, library_id, "one-percent-missing", &percent_missing, &replacements, repetitions).await?;
     Ok(())
 }
 
@@ -812,7 +893,7 @@ async fn run_blob_manifest_profile(client: &Client, base: &Url, identity: &Ident
     }
     println!("asset profile seed: blobs={book_count} wall={:.3}s", seed_started.elapsed().as_secs_f64());
 
-    let manifest: Vec<_> = fixtures.iter().map(|(hash, bytes)| BlobManifestEntry { content_hash: hash.clone(), size_bytes: bytes.len() as u64 }).collect();
+    let manifest: Vec<_> = fixtures.iter().map(|(hash, bytes)| BlobManifestEntry { content_hash: hash.clone(), checksum: hash.clone(), size_bytes: bytes.len() as u64 }).collect();
     let mut batch_samples = Vec::with_capacity(repetitions);
     let batch_cpu_before = profiled_process_ticks();
     let batch_wall = Instant::now();
@@ -925,8 +1006,8 @@ async fn run_upload_pipeline_profile(client: &Client, base: &Url, identity: &Ide
 async fn main() -> Result<(), AnyError> {
     let base = loopback_url()?;
     let mode = std::env::var("BOKHEIM_STRESS_MODE").unwrap_or_else(|_| "full".to_owned());
-    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "assets" | "uploads" | "register" | "verify" | "token") {
-        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, assets, uploads, register, verify, or token").into());
+    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "inventory" | "assets" | "uploads" | "register" | "verify" | "token") {
+        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, inventory, assets, uploads, register, verify, or token").into());
     }
     let workload = Workload {
         workers: bounded_env("BOKHEIM_STRESS_WORKERS", 16, 128)?,
@@ -956,6 +1037,13 @@ async fn main() -> Result<(), AnyError> {
         let directory_count = bounded_env("BOKHEIM_INGEST_DIRECTORIES", 153, 100_000)?;
         run_library_ingest(&client, &base, &identity, book_count, directory_count).await?;
         println!("stress correctness checks passed for mode=ingest");
+        return Ok(());
+    }
+    if mode == "inventory" {
+        let cell_count = bounded_env("BOKHEIM_INVENTORY_CELLS", 10_000, 1_000_000)?;
+        let repetitions = bounded_env("BOKHEIM_INVENTORY_REPETITIONS", 5, 100)?;
+        run_inventory_profile(&client, &base, &identity, cell_count, repetitions).await?;
+        println!("stress correctness checks passed for mode=inventory");
         return Ok(());
     }
     if mode == "assets" {

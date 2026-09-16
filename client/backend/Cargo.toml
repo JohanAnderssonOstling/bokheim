@@ -14,79 +14,91 @@ autotests = false
 name = "bokheim_backend"
 crate-type = ["rlib"]
 
-[[test]]
-name = "scan"
-path = "tests/scan.rs"
-
-[[test]]
-name = "blake3_hash_benchmark"
-path = "tests/blake3_hash_benchmark.rs"
-
 [features]
+storage-contract-tests = ["client-platform-web/storage-contract-tests"]
+web-runtime-tests = ["client-platform-web/web-runtime-tests", "publication-access/web-runtime-tests", "client-platform-runtime/web-runtime-tests"]
 default = ["desktop"]
-desktop = ["watcher", "pdf"]
-scanner = ["library-sqlite/scanner"]
-watcher = ["scanner", "dep:notify"]
-pdf = ["dep:pdf-reader-core", "thumbnail/pdf"]
+desktop = ["watcher", ]
+scanner = ["library-files/scanner"]
+watcher = ["scanner", "library-files/watcher"]
+kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-book-metadata = { path = "../book-metadata", default-features = false, features = ["native-formats", "external-metadata"] }
+client-platform-desktop = { path = "../platforms/desktop" }
+library-files = { path = "../library-files" }
+client-platform-runtime = { path = "../platforms/runtime" }
+publication-access = { path = "../publication-access", features = ["pdf"] }
+pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
+publication-enrichment = { path = "../../shared/publication-enrichment" }
+publication-inspection = { path = "../../shared/publication-inspection" }
+publication-identity = { path = "../../shared/publication-identity" }
+book-metadata = { path = "../book-metadata", default-features = false, features = ["native-formats"] }
+device-sqlite = { path = "../device-sqlite" }
 account-contract = { path = "../../shared/account-contract" }
+asset-transfer = { path = "../sync/asset-transfer" }
 library-registry = { path = "../library-registry" }
 app-preferences = { path = "../preferences" }
-catalog-client = { path = "../catalog-client" }
-catalog-model = { path = "../../shared/catalog-model" }
 metadata-client = { path = "../metadata-client" }
-taxonomy-client = { path = "../taxonomy-client" }
 library-model = { path = "../library-model" }
-library-sqlite = { path = "../library-sqlite", default-features = false, features = ["audiobook-metadata"] }
+client-library = { path = "../library", default-features = false, features = ["audiobook-metadata"] }
+library-runtime = { path = "../library-runtime" }
 metadata-contract = { path = "../../shared/metadata-contract" }
-taxonomy-contract = { path = "../../shared/taxonomy-contract" }
 subject-projection = { path = "../../shared/subject-projection" }
 library-replica = { path = "../library-replica" }
-sync-client = { path = "../sync-client" }
+account-client = { path = "../account-client" }
+sync-engine = { path = "../sync/engine" }
+sync-transport = { path = "../sync/transport" }
 thumbnail = { path = "../thumbnail" }
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40.0", features = ["bundled", "functions"] }
-walkdir = "2.5.0"
+rusqlite = { version = "0.40.0", features = ["bundled", "functions", "hooks"] }
 web-time = "1"
 uuid = { version = "1.0", features = ["v4"] }
 tokio = { version = "1.0", features = ["macros", "rt", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["io"] }
-notify = { version = "6.1", optional = true }
-futures-util = "0.3"
-futures-executor = "0.3"
+futures-util = { version = "0.3", features = ["io"] }
 epub_provider = { path = "../../shared/epub" }
-crossbeam-channel = "0.5"
 async-channel = "2"
 sync-common = { path = "../../shared/sync-common" }
 blake3 = "1"
-pdf-reader-core = { path = "../../apps/renderers/pdf/core", optional = true }
-dirs = "6"
+rmp-serde = "1.3"
+serde_bytes = "0.11"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+client-platform-web = { path = "../platforms/web" }
 futures-channel = "0.3"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
 wasm-bindgen-futures = "0.4"
-sqlite-wasm-vfs = "0.2.0"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "SharedWorker", "Worker", "WorkerOptions", "WorkerType"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+client-platform-native = { path = "../platforms/native", features = ["websocket"] }
+client-platform-kobo = { path = "../platforms/kobo" }
+publication-identity = { path = "../../shared/publication-identity", features = ["native-write"] }
+tempfile = "3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+client-platform-android = { path = "../platforms/android" }
+
 [dev-dependencies]
-test-support = { path = "../test-support" }
+test-support = { path = "../test-support", features = ["pdf-fixtures"] }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 lopdf = { version = "0.44", default-features = false }
 tempfile = "3"
 zip.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+libc = "0.2"
+tokio = { version = "1.0", features = ["test-util"] }
 axum = "0.7"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+

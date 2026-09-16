@@ -1,40 +1,7 @@
 use super::*;
 
-impl CatalogCache {
-    pub fn set_provider_epoch(&self, source_id: &CatalogSourceId, source_url: &str, provider_epoch: &str) -> Result<bool, CatalogCacheError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure_source_in(&transaction, source_id, source_url)?;
-        let previous = transaction.query_row("SELECT provider_epoch FROM catalog_source WHERE source_id=?1", [source_id.as_str()], |row| row.get::<_, Option<String>>(0))?;
-        let changed = previous.as_deref().is_some_and(|previous| previous != provider_epoch);
-        if changed {
-            clear_source_rows(&transaction, source_id)?;
-            transaction.execute("DELETE FROM catalog_epub_extraction WHERE source_id=?1", [source_id.as_str()])?;
-            transaction.execute("DELETE FROM catalog_cover_download WHERE source_id=?1", [source_id.as_str()])?;
-        }
-        transaction.execute("UPDATE catalog_source SET provider_epoch=?2 WHERE source_id=?1", params![source_id.as_str(), provider_epoch])?;
-        transaction.commit()?;
-        Ok(changed)
-    }
-
-    pub fn put_page(&self, source_id: &CatalogSourceId, source_url: &str, page: &CatalogPage, etag: Option<&str>, last_modified: Option<&str>) -> Result<(), CatalogCacheError> {
-        let prepared = Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned), provider_paginated: false }])?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure_source_in(&transaction, source_id, source_url)?;
-        let generation = active_generation_in(&transaction, source_id)?;
-        put_prepared_page_rows(&transaction, source_id, generation, &prepared)?;
-        refresh_active_counts(&transaction, source_id, generation)?;
-        advance_catalog_transport_revision(&transaction)?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub(crate) fn put_pages(&self, source_id: &CatalogSourceId, source_url: &str, pages: &[CatalogPageWrite]) -> Result<(), CatalogCacheError> {
-        self.put_prepared_pages(source_id, source_url, &Self::prepare_page_writes(pages.to_vec())?)
-    }
-
-    pub(crate) fn put_prepared_pages(&self, source_id: &CatalogSourceId, source_url: &str, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogCacheError> {
+impl CatalogStore {
+    pub(crate) fn put_prepared_pages(&self, source_id: &CatalogSourceId, source_url: &str, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogStoreError> {
         if pages.is_empty() {
             return Ok(());
         }
@@ -49,7 +16,7 @@ impl CatalogCache {
     }
 }
 
-fn put_prepared_page_rows(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogCacheError> {
+fn put_prepared_page_rows(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogStoreError> {
     for prepared_page in pages {
         let write = &prepared_page.write;
         put_page_row(transaction, source_id, generation, &write.page, &prepared_page.payload, write.etag.as_deref(), write.last_modified.as_deref(), write.provider_paginated)?;
@@ -61,12 +28,12 @@ fn put_prepared_page_rows(transaction: &Transaction<'_>, source_id: &CatalogSour
     Ok(())
 }
 
-pub(crate) fn upsert_active_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication) -> Result<(), CatalogCacheError> {
+pub(crate) fn upsert_active_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication) -> Result<(), CatalogStoreError> {
     let prepared = PreparedCatalogPublication::new(publication.clone())?;
     upsert_active_prepared_publication(transaction, source_id, generation, &prepared)
 }
 
-pub(crate) fn upsert_active_prepared_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogCacheError> {
+pub(crate) fn upsert_active_prepared_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogStoreError> {
     let publication = &prepared.publication;
     let extraction = publication_extraction(publication);
     let (edition_id, work_id) = publication_key(publication);
@@ -114,7 +81,7 @@ pub(crate) fn upsert_active_prepared_publication(transaction: &Transaction<'_>, 
     queue_publication_cover(transaction, source_id, generation, &prepared.publication)
 }
 
-pub(crate) fn insert_staged_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogCacheError> {
+pub(crate) fn insert_staged_publication(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogStoreError> {
     let publication = &prepared.publication;
     let extraction = publication_extraction(publication);
     let (edition_id, work_id) = publication_key(publication);
@@ -147,7 +114,7 @@ pub(crate) fn insert_staged_publication(transaction: &Transaction<'_>, source_id
 }
 
 impl PreparedCatalogPageWrite {
-    pub(super) fn new(write: CatalogPageWrite) -> Result<Self, CatalogCacheError> {
+    pub(super) fn new(write: CatalogPageWrite) -> Result<Self, CatalogStoreError> {
         let payload = wire::encode(&write.page)?;
         let publications = unique_page_publications(&write.page).into_iter().cloned().map(PreparedCatalogPublication::new).collect::<Result<Vec<_>, _>>()?;
         Ok(Self { write, payload, publications })
@@ -155,7 +122,7 @@ impl PreparedCatalogPageWrite {
 }
 
 impl PreparedCatalogPublication {
-    fn new(publication: CatalogPublication) -> Result<Self, CatalogCacheError> {
+    fn new(publication: CatalogPublication) -> Result<Self, CatalogStoreError> {
         let payload = wire::encode(&publication)?;
         let payload_hash = blake3::hash(&payload).to_hex().to_string();
         let normalized_title = normalize_search_text(&publication.title);
@@ -165,9 +132,8 @@ impl PreparedCatalogPublication {
         let formats = publication
             .actions
             .iter()
-            .filter_map(|action| match action {
-                CatalogPublicationAction::Import { request } => Some(book_format_storage(request.book_format)),
-                CatalogPublicationAction::External { .. } => None,
+            .map(|action| match action {
+                CatalogPublicationAction::Import { request } => book_format_storage(request.book_format),
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -198,14 +164,14 @@ fn unique_page_publications(page: &CatalogPage) -> Vec<&CatalogPublication> {
     page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).filter(|publication| seen.insert((publication.identity.edition_id.as_str(), publication.identity.work_id.as_deref()))).collect()
 }
 
-fn replace_prepared_publication_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogCacheError> {
+fn replace_prepared_publication_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, prepared: &PreparedCatalogPublication) -> Result<(), CatalogStoreError> {
     let (edition_id, work_id) = publication_key(&prepared.publication);
     let generation = storage_i64(generation, "generation")?;
     transaction.execute("DELETE FROM catalog_publication_author WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4", params![source_id.as_str(), generation, edition_id, work_id])?;
     for (position, normalized_name) in prepared.normalized_authors.iter().enumerate() {
         transaction.execute(
             "INSERT INTO catalog_publication_author(source_id, generation, edition_id, work_id, position, normalized_name) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![source_id.as_str(), generation, edition_id, work_id, i64::try_from(position).map_err(|_| CatalogCacheError::new("author position overflow"))?, normalized_name],
+            params![source_id.as_str(), generation, edition_id, work_id, i64::try_from(position).map_err(|_| CatalogStoreError::new("author position overflow"))?, normalized_name],
         )?;
     }
     transaction.execute("DELETE FROM catalog_publication_language WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4", params![source_id.as_str(), generation, edition_id, work_id])?;

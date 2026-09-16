@@ -14,7 +14,7 @@ Group=bokheim
 WorkingDirectory=/var/lib/bokheim
 ExecStart=/usr/local/bin/sync-server
 Environment=SYNC_SERVER_SOCKET=/run/bokheim/sync.sock
-Environment=RUST_LOG=info
+Environment=RUST_LOG=info,sync_performance=debug
 Environment="BOKHEIM_EMAIL_FROM=Bokheim <accounts@mail.bokheim.se>"
 Environment=BOKHEIM_TEST_USER_EMAIL=test@bokheim.se
 Environment=BOKHEIM_ADMIN_EMAIL=admin@bokheim.se

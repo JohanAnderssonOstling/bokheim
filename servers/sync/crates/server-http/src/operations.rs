@@ -1,4 +1,4 @@
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{redirect::Policy, Client, Url};
 use serde::Serialize;
 use serde_json::Value;
 use std::net::IpAddr;
@@ -75,7 +75,7 @@ impl OperationalServices {
     }
 
     pub(crate) async fn catalog_process_action(&self, process: &str, action: &Value) -> Result<Value, String> {
-        if !matches!(process, "catalogue_crawling" | "cover_downloads" | "epub_enrichment" | "catalogue_enrichment") {
+        if process != "catalogue_crawling" && process != "cover_downloads" && process != "enrichment" {
             return Err("unknown catalogue process".to_owned());
         }
         let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;

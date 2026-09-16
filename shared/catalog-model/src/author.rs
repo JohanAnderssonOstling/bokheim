@@ -1,5 +1,5 @@
-use serde::Serialize;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -41,6 +41,15 @@ impl AuthorName {
     }
 }
 
+/// Through `parse`, so a name that crossed a process boundary carries the same
+/// guarantee as one built locally rather than arriving as an unchecked string.
+impl<'de> Deserialize<'de> for AuthorName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl AuthorNameMatchKey {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -54,46 +63,19 @@ fn normalized_author_match_key(value: &str) -> String {
     normalized_author_match_key_without_reordering(reordered)
 }
 
+/// Reordering lives in publication-model so that identity matching and
+/// ingestion answer this the same way: a name matched as one person must not
+/// then be displayed backwards.
 fn comma_reordered_name(value: &str) -> Option<String> {
-    if looks_like_organization(value) {
-        return None;
-    }
-    let parts = value.split(',').map(str::trim).collect::<Vec<_>>();
-    match parts.as_slice() {
-        [family, given] if !family.is_empty() && !given.is_empty() => Some(format!("{given} {family}")),
-        [family, given, suffix] if !family.is_empty() && !given.is_empty() && recognized_suffix(suffix) => Some(format!("{given} {family} {suffix}")),
-        _ => None,
-    }
+    publication_model::given_name_first(value)
 }
 
-fn recognized_suffix(value: &str) -> bool {
-    matches!(normalized_author_match_key_without_reordering(value).as_str(), "jr" | "sr" | "ii" | "iii" | "iv")
-}
-
+/// The same key publication-model uses, so a name compared here and a name
+/// compared there cannot disagree.
 fn normalized_author_match_key_without_reordering(value: &str) -> String {
-    let mut key = String::new();
-    let mut separator_pending = false;
-    for character in value.nfkc() {
-        if character.is_alphanumeric() || is_combining_mark(character) {
-            if separator_pending && !key.is_empty() {
-                key.push(' ');
-            }
-            separator_pending = false;
-            key.extend(character.to_lowercase());
-        } else {
-            separator_pending = true;
-        }
-    }
-    key
+    publication_model::comparison_key(value)
 }
 
-fn looks_like_organization(value: &str) -> bool {
-    if value.contains('&') {
-        return true;
-    }
-    let key = normalized_author_match_key_without_reordering(value);
-    key.split_whitespace().any(|word| matches!(word, "association" | "committee" | "company" | "corporation" | "institute" | "press" | "society" | "university" | "inc" | "llc" | "ltd"))
-}
 
 #[cfg(test)]
 mod tests {

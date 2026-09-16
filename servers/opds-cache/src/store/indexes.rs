@@ -1,7 +1,7 @@
 use super::*;
 use publication_model::PublicationSubject;
 
-pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Result<(), CatalogCacheError> {
+pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Result<(), CatalogStoreError> {
     const BATCH_SIZE: i64 = 256;
     let stored_version = connection.query_row("SELECT unified_matcher_version FROM catalog_subject_projection_metadata WHERE singleton=1", [], |row| row.get::<_, i64>(0)).optional()?;
     if stored_version == Some(subject_projection::UNIFIED_MATCHER_VERSION) {
@@ -21,16 +21,32 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
         let keys = {
             let (sql, parameters): (&str, Vec<rusqlite::types::Value>) = match &cursor {
                 Some((source_id, generation, edition_id, work_id)) => (
-                    "SELECT DISTINCT source_id,generation,edition_id,work_id
-                       FROM catalog_publication_subject
-                      WHERE (source_id,generation,edition_id,work_id) > (?1,?2,?3,?4)
-                      ORDER BY source_id,generation,edition_id,work_id LIMIT ?5",
+                    "SELECT DISTINCT subject.source_id,subject.generation,subject.edition_id,subject.work_id
+                       FROM catalog_publication_subject subject
+                       JOIN catalog_source active_source USING(source_id)
+                       JOIN catalog_publication active_publication
+                         ON active_publication.source_id=subject.source_id
+                        AND active_publication.generation=subject.generation
+                        AND active_publication.edition_id=subject.edition_id
+                        AND active_publication.work_id=subject.work_id
+                        AND active_publication.importable=1
+                      WHERE active_source.active_generation=subject.generation
+                        AND (subject.source_id,subject.generation,subject.edition_id,subject.work_id) > (?1,?2,?3,?4)
+                      ORDER BY subject.source_id,subject.generation,subject.edition_id,subject.work_id LIMIT ?5",
                     vec![source_id.clone().into(), (*generation).into(), edition_id.clone().into(), work_id.clone().into(), BATCH_SIZE.into()],
                 ),
                 None => (
-                    "SELECT DISTINCT source_id,generation,edition_id,work_id
-                       FROM catalog_publication_subject
-                      ORDER BY source_id,generation,edition_id,work_id LIMIT ?1",
+                    "SELECT DISTINCT subject.source_id,subject.generation,subject.edition_id,subject.work_id
+                       FROM catalog_publication_subject subject
+                       JOIN catalog_source active_source USING(source_id)
+                       JOIN catalog_publication active_publication
+                         ON active_publication.source_id=subject.source_id
+                        AND active_publication.generation=subject.generation
+                        AND active_publication.edition_id=subject.edition_id
+                        AND active_publication.work_id=subject.work_id
+                        AND active_publication.importable=1
+                      WHERE active_source.active_generation=subject.generation
+                      ORDER BY subject.source_id,subject.generation,subject.edition_id,subject.work_id LIMIT ?1",
                     vec![BATCH_SIZE.into()],
                 ),
             };
@@ -53,7 +69,7 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
                 let mut subjects = Vec::new();
                 for row in rows {
                     let (name, source, authority, code) = row?;
-                    subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogCacheError::new(error.to_string()))?);
+                    subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
                 }
                 subjects
             };
@@ -71,176 +87,50 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
     Ok(())
 }
 
-impl CatalogCache {
+
+impl CatalogStore {
     /// Builds the external-content FTS indexes once, after the HTTP listener is
     /// available. Their database triggers keep them current across later
     /// crawls, enrichment, and rollback to an older server binary.
-    pub fn refresh_search_index(&self) -> Result<bool, CatalogCacheError> {
+    pub fn refresh_search_index(&self) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let current = connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get::<_, bool>(0))?;
         if current {
             return Ok(false);
         }
+        {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute("UPDATE catalog_search_index_metadata SET index_version=?1,ready=0 WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION])?;
+            transaction.commit()?;
+        }
+        for statement in [
+            "INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts) VALUES('rebuild')",
+            "INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts) VALUES('rebuild')",
+            "INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts) VALUES('rebuild')",
+        ] {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(statement, [])?;
+            transaction.commit()?;
+        }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("UPDATE catalog_search_index_metadata SET index_version=?1,ready=0 WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION])?;
-        transaction.execute("INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts) VALUES('rebuild')", [])?;
-        transaction.execute("INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts) VALUES('rebuild')", [])?;
-        transaction.execute("INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts) VALUES('rebuild')", [])?;
         transaction.execute("UPDATE catalog_search_index_metadata SET ready=1 WHERE singleton=1", [])?;
         transaction.commit()?;
         Ok(true)
     }
 
-    pub fn search_index_ready(&self) -> Result<bool, CatalogCacheError> {
-        let connection = self.connection()?;
-        connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get(0)).map_err(Into::into)
-    }
-
-    /// Rebuilds the Store's read-optimized projection from the authoritative
-    /// ingestion tables. Readers keep using the previous complete snapshot
-    /// until this transaction commits; the stored revision only decides
-    /// whether another rebuild is required.
-    pub fn refresh_browse_serving_index(&self) -> Result<bool, CatalogCacheError> {
-        self.refresh_subject_browse_index()?;
-        let mut connection = self.connection()?;
-        let revision = connection.query_row("SELECT revision FROM catalog_transport_state WHERE singleton=1", [], |row| row.get::<_, i64>(0))?;
-        let current = connection.query_row(
-            "SELECT index_version=?1 AND revision=?2 AND ready=1
-               FROM catalog_browse_serving_metadata WHERE singleton=1",
-            params![CATALOG_BROWSE_SERVING_INDEX_VERSION, revision],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if current {
-            return Ok(false);
-        }
-
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("UPDATE catalog_browse_serving_metadata SET index_version=?1,revision=?2,ready=0 WHERE singleton=1", params![CATALOG_BROWSE_SERVING_INDEX_VERSION, revision])?;
-        transaction.execute("DELETE FROM catalog_browse_subject", [])?;
-        transaction.execute("DELETE FROM catalog_browse_language", [])?;
-        transaction.execute("DELETE FROM catalog_browse_format", [])?;
-        transaction.execute("DELETE FROM catalog_browse_search_document", [])?;
-        transaction.execute("DELETE FROM catalog_browse_publication", [])?;
-
-        transaction.execute(
-            "INSERT INTO catalog_browse_publication(
-                 entry_id,source_id,generation,edition_id,work_id,normalized_title,
-                 provider_popularity,sequence,reading_log_count,rating_count,has_language)
-             SELECT p.entry_id,p.source_id,p.generation,p.edition_id,p.work_id,p.normalized_title,
-                    p.provider_popularity,p.sequence,
-                    COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),
-                    EXISTS(SELECT 1 FROM catalog_publication_language language
-                            WHERE language.source_id=p.source_id AND language.generation=p.generation
-                              AND language.edition_id=p.edition_id AND language.work_id=p.work_id)
-               FROM catalog_publication p
-               JOIN catalog_source active
-                 ON active.source_id=p.source_id AND active.active_generation=p.generation
-               LEFT JOIN catalog_publication_popularity pop
-                 ON pop.source_id=p.source_id AND pop.generation=p.generation
-                AND pop.edition_id=p.edition_id AND pop.work_id=p.work_id
-              WHERE p.importable=1
-                AND (p.source_id!='opds-project-gutenberg'
-                     OR p.work_id NOT LIKE 'urn:gutenberg:%'
-                     OR NOT EXISTS(
-                         SELECT 1 FROM catalog_publication preferred
-                          WHERE preferred.source_id=p.source_id AND preferred.generation=p.generation
-                            AND preferred.work_id=p.work_id AND preferred.importable=1
-                            AND (
-                                CASE WHEN instr(lower(COALESCE(preferred.acquisition_url,'')),'.images')>0
-                                           AND instr(lower(COALESCE(preferred.acquisition_url,'')),'.noimages')=0
-                                     THEN 1 ELSE 0 END
-                                > CASE WHEN instr(lower(COALESCE(p.acquisition_url,'')),'.images')>0
-                                            AND instr(lower(COALESCE(p.acquisition_url,'')),'.noimages')=0
-                                       THEN 1 ELSE 0 END
-                                OR (
-                                    CASE WHEN instr(lower(COALESCE(preferred.acquisition_url,'')),'.images')>0
-                                               AND instr(lower(COALESCE(preferred.acquisition_url,'')),'.noimages')=0
-                                         THEN 1 ELSE 0 END
-                                    = CASE WHEN instr(lower(COALESCE(p.acquisition_url,'')),'.images')>0
-                                                AND instr(lower(COALESCE(p.acquisition_url,'')),'.noimages')=0
-                                           THEN 1 ELSE 0 END
-                                    AND preferred.edition_id<p.edition_id
-                                )
-                            )))",
-            [],
-        )?;
-        transaction.execute(
-            "INSERT INTO catalog_browse_search_document(entry_id,search_text)
-             SELECT browse.entry_id,
-                    trim(publication.normalized_title || ' ' ||
-                         COALESCE((SELECT group_concat(author.normalized_name,' ')
-                                     FROM catalog_publication_author author
-                                    WHERE author.source_id=browse.source_id AND author.generation=browse.generation
-                                      AND author.edition_id=browse.edition_id AND author.work_id=browse.work_id),'') || ' ' ||
-                         COALESCE((SELECT group_concat(toc.normalized_title,' ')
-                                     FROM catalog_publication_toc toc
-                                    WHERE toc.source_id=browse.source_id AND toc.generation=browse.generation
-                                      AND toc.edition_id=browse.edition_id AND toc.work_id=browse.work_id),''))
-               FROM catalog_browse_publication browse
-               JOIN catalog_publication publication
-                 ON publication.source_id=browse.source_id AND publication.generation=browse.generation
-                AND publication.edition_id=browse.edition_id AND publication.work_id=browse.work_id",
-            [],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO catalog_browse_language(entry_id,language)
-             SELECT browse.entry_id,
-                    lower(substr(language.language,1,instr(language.language || '-', '-')-1))
-               FROM catalog_browse_publication browse
-               JOIN catalog_publication_language language
-                 ON language.source_id=browse.source_id AND language.generation=browse.generation
-                AND language.edition_id=browse.edition_id AND language.work_id=browse.work_id
-              WHERE language.language!=''",
-            [],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO catalog_browse_format(entry_id,book_format)
-             SELECT browse.entry_id,format.book_format
-               FROM catalog_browse_publication browse
-               JOIN catalog_publication_format format
-                 ON format.source_id=browse.source_id AND format.generation=browse.generation
-                AND format.edition_id=browse.edition_id AND format.work_id=browse.work_id",
-            [],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO catalog_browse_subject(entry_id,system_id,node_path)
-             SELECT browse.entry_id,subject.system_id,subject.node_path
-               FROM catalog_browse_publication browse
-               JOIN catalog_publication_subject_node subject
-                 ON subject.source_id=browse.source_id AND subject.generation=browse.generation
-                AND subject.edition_id=browse.edition_id AND subject.work_id=browse.work_id",
-            [],
-        )?;
-        transaction.execute("INSERT INTO catalog_browse_search_fts(catalog_browse_search_fts) VALUES('rebuild')", [])?;
-        transaction.execute("UPDATE catalog_browse_serving_metadata SET index_version=?1,revision=?2,ready=1 WHERE singleton=1", params![CATALOG_BROWSE_SERVING_INDEX_VERSION, revision])?;
-        transaction.commit()?;
-        Ok(true)
-    }
-
-    pub fn browse_serving_index_ready(&self) -> Result<bool, CatalogCacheError> {
-        let connection = self.connection()?;
-        connection
-            .query_row(
-                "SELECT index_version=?1 AND ready=1
-                   FROM catalog_browse_serving_metadata WHERE singleton=1",
-                [CATALOG_BROWSE_SERVING_INDEX_VERSION],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
 
     /// Rebuilds persisted unified taxonomy assignments in bounded batches.
     /// Servers should run this away from their health-critical startup path.
-    pub fn refresh_unified_subject_assignments(&self) -> Result<(), CatalogCacheError> {
+    pub fn refresh_unified_subject_assignments(&self) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         refresh_unified_subject_assignments(&mut connection)
     }
 
     /// Materializes every browsable assignment as one deduplicated membership
-    /// per ancestor node. Existing populated caches are rebuilt in a single
-    /// transaction so readers see either the legacy index or the complete new
-    /// hierarchy, never a partially populated tree.
-    pub fn refresh_subject_browse_index(&self) -> Result<bool, CatalogCacheError> {
+    /// per ancestor node. The rebuild publishes an explicit not-ready state
+    /// and commits bounded batches so readers fall back to authoritative
+    /// assignments instead of observing a partially populated tree.
+    pub fn refresh_subject_browse_index(&self) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let current = connection.query_row("SELECT index_version=?1 FROM catalog_subject_browse_index_metadata WHERE singleton=1", [CATALOG_SUBJECT_BROWSE_INDEX_VERSION], |row| row.get::<_, bool>(0)).optional()?.unwrap_or(false);
         if current {
@@ -248,16 +138,34 @@ impl CatalogCache {
         }
 
         const BATCH_SIZE: i64 = 512;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("DELETE FROM catalog_publication_subject_node", [])?;
-        transaction.execute("DELETE FROM catalog_subject_node", [])?;
+        // Publish an explicit not-ready state before clearing the old
+        // materialization. Readers then use the authoritative assignment
+        // tables while the rebuild proceeds, instead of observing a partial
+        // browse index.
+        {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute("UPDATE catalog_subject_browse_index_metadata SET index_version=0 WHERE singleton=1", [])?;
+            transaction.execute("DELETE FROM catalog_publication_subject_node", [])?;
+            transaction.execute("DELETE FROM catalog_subject_node", [])?;
+            transaction.commit()?;
+        }
         let mut rowid = 0_i64;
         loop {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let assignments = {
                 let mut statement = transaction.prepare(
-                    "SELECT rowid,source_id,generation,edition_id,work_id,system_id,subject_path
-                       FROM catalog_publication_subject_assignment
-                      WHERE rowid>?1 AND system_id=?2 ORDER BY rowid LIMIT ?3",
+                    "SELECT assignment.rowid,assignment.source_id,assignment.generation,assignment.edition_id,assignment.work_id,assignment.system_id,assignment.subject_path
+                       FROM catalog_publication_subject_assignment assignment
+                       JOIN catalog_source active_source ON active_source.source_id=assignment.source_id
+                       JOIN catalog_publication active_publication
+                         ON active_publication.source_id=assignment.source_id
+                        AND active_publication.generation=assignment.generation
+                        AND active_publication.edition_id=assignment.edition_id
+                        AND active_publication.work_id=assignment.work_id
+                        AND active_publication.importable=1
+                      WHERE assignment.rowid>?1 AND assignment.system_id=?2
+                        AND active_source.active_generation=assignment.generation
+                      ORDER BY assignment.rowid LIMIT ?3",
                 )?;
                 let rows = statement
                     .query_map(params![rowid, subject_projection::UNIFIED_SYSTEM_ID, BATCH_SIZE], |row| {
@@ -267,13 +175,16 @@ impl CatalogCache {
                 rows
             };
             if assignments.is_empty() {
+                transaction.rollback()?;
                 break;
             }
             rowid = assignments.last().expect("non-empty assignment batch").0;
             for (_, source_id, generation, edition_id, work_id, system_id, subject_path) in assignments {
                 insert_subject_browse_memberships(&transaction, &source_id, generation, &edition_id, &work_id, &system_id, &subject_path)?;
             }
+            transaction.commit()?;
         }
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO catalog_subject_browse_index_metadata(singleton,index_version) VALUES(1,?1)
              ON CONFLICT(singleton) DO UPDATE SET index_version=excluded.index_version",
@@ -285,7 +196,7 @@ impl CatalogCache {
 
     /// Audits only whether Dublin Core subject headings resolve to coded BISAC
     /// positions. Unified output never determines BISAC validity.
-    pub fn subject_projection_audit(&self) -> Result<CatalogSubjectProjectionAudit, CatalogCacheError> {
+    pub fn subject_projection_audit(&self) -> Result<CatalogSubjectProjectionAudit, CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT subject.source_id,subject.edition_id,subject.work_id,
@@ -349,7 +260,7 @@ impl CatalogCache {
                 subjects.clear();
             }
             current_book = Some(key);
-            subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogCacheError::new(error.to_string()))?);
+            subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
         }
         audit_book(&subjects);
         drop(audit_book);

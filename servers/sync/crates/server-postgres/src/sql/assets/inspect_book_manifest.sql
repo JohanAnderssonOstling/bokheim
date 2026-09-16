@@ -7,7 +7,6 @@ SELECT input.content_hash AS content_hash,
        input.size_bytes AS size_bytes,
        object.size_bytes AS stored_size_bytes,
        (charge.content_hash IS NOT NULL) AS owned,
-       (reference.content_hash IS NOT NULL) AS referenced,
        reservation.id AS reservation_id,
        reservation.library_id AS reservation_library_id,
        reservation.size_bytes AS reservation_size_bytes
@@ -17,10 +16,6 @@ LEFT JOIN blob_object AS object
 LEFT JOIN user_blob_charge AS charge
   ON charge.user_id=$3
  AND charge.content_hash=input.content_hash
-LEFT JOIN user_blob_reference AS reference
-  ON reference.user_id=$3
- AND reference.content_hash=input.content_hash
- AND reference.reference_count > 0
 LEFT JOIN book_upload_reservation AS reservation
   ON reservation.user_id=$3
  AND reservation.content_hash=input.content_hash

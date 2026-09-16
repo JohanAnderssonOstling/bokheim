@@ -21,6 +21,8 @@ import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from lcc_reference_updates import apply_updates
+
 
 SOURCE_URL = "https://www.loc.gov/cds/downloads/MDSConnect/Class.2016.part01.xml.gz"
 SOURCE_SHA256 = "0df1429947b6e12dd975c8065106dbbd8cce1d61527e95aa4ad9f062a289009f"
@@ -90,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"),
+        default=Path("shared/subject-projection/data/lcc-mdsconnect-2016-baseline.sqlite3"),
         help="generated SQLite path (default: %(default)s)",
     )
     return parser.parse_args()
@@ -264,6 +266,9 @@ def build_database(archive: Path, output: Path) -> tuple[int, int]:
             PRAGMA wal_checkpoint(TRUNCATE);
             """
         )
+        connection.commit()
+        updates = apply_updates(connection)
+        print(f"Applied reviewed LCC reference supplements: {updates}", file=sys.stderr)
         connection.commit()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":

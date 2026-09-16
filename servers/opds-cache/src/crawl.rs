@@ -1,8 +1,8 @@
 use super::{
-    cache_error, canonicalize_opds_catalog_locator, catalog_crawls_disabled, duration_millis, opds_catalog_source_id, opds_page, prepare_catalog_subject_assignments, validate_opds_catalog_locator, AdaptiveCrawlWriteBatch,
-    AdaptiveOriginThrottle, AdaptiveOriginThrottleState, Arc, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogLinkTarget, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPage,
-    CatalogPageWrite, CatalogProcess, CatalogPublication, CatalogService, CatalogServiceError, CatalogSourceId, CrawlLocator, DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint, OpdsError,
-    OpdsHttpValidators, OriginThrottleFeedback, OriginThrottleSnapshot, PopularityRank, Url, CRAWL_ACTIVATION_BATCH, CRAWL_CYCLE, CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_INITIAL_SPACING, CRAWL_ORIGIN_MAX_ATTEMPTS,
+    canonicalize_gutenberg_page, canonicalize_opds_catalog_locator, catalog_crawls_disabled, duration_millis, opds_catalog_source_id, opds_page, prepare_catalog_subject_assignments, store_error, validate_opds_catalog_locator,
+    AdaptiveCrawlWriteBatch, AdaptiveOriginThrottle, AdaptiveOriginThrottleState, Arc, CatalogCrawlGeneration, CatalogLinkTarget, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPage, CatalogPageWrite,
+    CatalogProcess, CatalogPublication, CatalogService, CatalogServiceError, CatalogSourceId, CatalogStore, CatalogStoreError, CrawlLocator, DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint,
+    OpdsError, OpdsHttpValidators, OriginThrottleFeedback, OriginThrottleSnapshot, PopularityRank, Url, CRAWL_ACTIVATION_BATCH, CRAWL_CYCLE, CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_INITIAL_SPACING, CRAWL_ORIGIN_MAX_ATTEMPTS,
     CRAWL_ORIGIN_MAX_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_MAX_SPACING, CRAWL_ORIGIN_MIN_SPACING, CRAWL_ORIGIN_SUCCESS_WINDOW, CRAWL_ORIGIN_TRANSIENT_BACKOFF, CRAWL_PAGE_CONCURRENCY, CRAWL_PAGE_CONCURRENCY_MAX, CRAWL_PAUSE_SENTINEL,
     EPUB_EXTRACTION_SWEEP_INTERVAL, EXTRACTION_RECONCILIATION_BATCH, INACTIVE_GENERATION_CLEANUP_BATCH, METADATA_BACKFILL_BATCH_SIZE, PRIORITY_CRAWL_SOURCE, REGISTRY_REFRESH_INTERVAL,
 };
@@ -211,34 +211,34 @@ impl CatalogService {
         locks.entry(source_id.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
-    pub(crate) async fn cache_call<T, F>(&self, operation: F) -> Result<T, CatalogServiceError>
+    pub(crate) async fn store_call<T, F>(&self, operation: F) -> Result<T, CatalogServiceError>
     where
         T: Send + 'static,
-        F: FnOnce(&CatalogCache) -> Result<T, CatalogCacheError> + Send + 'static,
+        F: FnOnce(&CatalogStore) -> Result<T, CatalogStoreError> + Send + 'static,
     {
-        let cache = self.state.cache.clone();
-        tokio::task::spawn_blocking(move || operation(&cache)).await.map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))?.map_err(cache_error)
+        let store = self.state.store.clone();
+        tokio::task::spawn_blocking(move || operation(&store)).await.map_err(|error| CatalogServiceError(format!("catalog store worker failed: {error}")))?.map_err(store_error)
     }
 
-    pub(crate) async fn cache_write_call<T, F>(&self, operation: F) -> Result<T, CatalogServiceError>
+    pub(crate) async fn store_write_call<T, F>(&self, operation: F) -> Result<T, CatalogServiceError>
     where
         T: Send + 'static,
-        F: FnOnce(&CatalogCache) -> Result<T, CatalogCacheError> + Send + 'static,
+        F: FnOnce(&CatalogStore) -> Result<T, CatalogStoreError> + Send + 'static,
     {
-        self.cache_write_call_named("other", operation).await
+        self.store_write_call_named("other", operation).await
     }
 
-    pub(crate) async fn cache_write_call_named<T, F>(&self, name: &'static str, operation: F) -> Result<T, CatalogServiceError>
+    pub(crate) async fn store_write_call_named<T, F>(&self, name: &'static str, operation: F) -> Result<T, CatalogServiceError>
     where
         T: Send + 'static,
-        F: FnOnce(&CatalogCache) -> Result<T, CatalogCacheError> + Send + 'static,
+        F: FnOnce(&CatalogStore) -> Result<T, CatalogStoreError> + Send + 'static,
     {
         let wait_started = Instant::now();
-        let _writer = self.state.cache_write_lock.lock().await;
+        let _writer = self.state.store_write_lock.lock().await;
         let wait_ms = duration_millis(wait_started.elapsed());
         let hold_started = Instant::now();
-        let cache = self.state.cache.clone();
-        let result = tokio::task::spawn_blocking(move || operation(&cache)).await.map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}"))).and_then(|result| result.map_err(cache_error));
+        let store = self.state.store.clone();
+        let result = tokio::task::spawn_blocking(move || operation(&store)).await.map_err(|error| CatalogServiceError(format!("catalog store worker failed: {error}"))).and_then(|result| result.map_err(store_error));
         let hold_ms = duration_millis(hold_started.elapsed());
         let failures = u64::from(result.is_err());
         if let Ok(mut metrics) = self.state.writer_metrics.lock() {
@@ -254,14 +254,14 @@ impl CatalogService {
     pub(crate) async fn finish_metadata_backfill_indexed_batch_timed(&self, updates: Vec<CatalogMetadataBackfillIndexedUpdate>) -> Result<(u64, CatalogMetadataBackfillWriteTimings), CatalogServiceError> {
         let prepared_assignments = updates.iter().map(|update| prepare_catalog_subject_assignments(&update.subjects)).collect::<Vec<_>>();
         let wait_started = Instant::now();
-        let _writer = self.state.cache_write_lock.lock().await;
+        let _writer = self.state.store_write_lock.lock().await;
         let writer_wait_ms = duration_millis(wait_started.elapsed());
         let hold_started = Instant::now();
-        let cache = self.state.cache.clone();
-        let result = tokio::task::spawn_blocking(move || cache.finish_metadata_backfill_indexed_batch_timed(&updates, &prepared_assignments))
+        let store = self.state.store.clone();
+        let result = tokio::task::spawn_blocking(move || store.finish_metadata_backfill_indexed_batch_timed(&updates, &prepared_assignments))
             .await
-            .map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))
-            .and_then(|result| result.map_err(cache_error));
+            .map_err(|error| CatalogServiceError(format!("catalog store worker failed: {error}")))
+            .and_then(|result| result.map_err(store_error));
         let hold_ms = duration_millis(hold_started.elapsed());
         if let Ok(mut metrics) = self.state.writer_metrics.lock() {
             let metric = metrics.entry("backfill_finish".to_owned()).or_default();
@@ -280,10 +280,10 @@ impl CatalogService {
         }
         let pages = batch.take_pages();
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
-        let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
+        let prepared = self.store_call(move |_| CatalogStore::prepare_page_writes(pages)).await?;
         let cache_crawl = crawl.clone();
         let started = Instant::now();
-        self.cache_write_call_named("crawl_page_write", move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
+        self.store_write_call_named("crawl_page_write", move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
         batch.record_commit(started.elapsed());
         for publications in publication_counts {
             self.record_crawl_page(source_id, publications).await;
@@ -306,7 +306,7 @@ impl CatalogService {
             let cache_source = source_id.clone();
             let mut page = write.page;
             page = self
-                .cache_call(move |cache| {
+                .store_call(move |cache| {
                     cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
                     Ok(page)
                 })
@@ -317,11 +317,11 @@ impl CatalogService {
         }
         let pages = enriched_pages;
         let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
-        let prepared = self.cache_call(move |_| CatalogCache::prepare_page_writes(pages)).await?;
+        let prepared = self.store_call(move |_| CatalogStore::prepare_page_writes(pages)).await?;
         let cache_source = source_id.clone();
         let cache_root = source_url.to_owned();
         let started = Instant::now();
-        self.cache_write_call_named("crawl_page_write", move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
+        self.store_write_call_named("crawl_page_write", move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
         batch.record_commit(started.elapsed());
         drop(_update);
         for publications in publication_counts {
@@ -335,7 +335,7 @@ impl CatalogService {
     pub(crate) async fn cleanup_inactive_generations(&self, source_id: CatalogSourceId) {
         loop {
             let cache_source = source_id.clone();
-            match self.cache_write_call_named("cleanup", move |cache| cache.cleanup_inactive_generation_batch(&cache_source, INACTIVE_GENERATION_CLEANUP_BATCH)).await {
+            match self.store_write_call_named("cleanup", move |cache| cache.cleanup_inactive_generation_batch(&cache_source, INACTIVE_GENERATION_CLEANUP_BATCH)).await {
                 Ok(true) => tokio::time::sleep(Duration::from_millis(10)).await,
                 Ok(false) => return,
                 Err(error) => {
@@ -349,7 +349,7 @@ impl CatalogService {
     pub(crate) async fn reconcile_active_epub_extractions(&self, source_id: CatalogSourceId) -> Result<(), CatalogServiceError> {
         loop {
             let cache_source = source_id.clone();
-            let more = self.cache_write_call_named("epub_reconcile", move |cache| cache.reconcile_active_epub_extractions_batch(&cache_source, EXTRACTION_RECONCILIATION_BATCH)).await?;
+            let more = self.store_write_call_named("epub_reconcile", move |cache| cache.reconcile_active_epub_extractions_batch(&cache_source, EXTRACTION_RECONCILIATION_BATCH)).await?;
             if !more {
                 self.state.extraction_notify.notify_one();
                 return Ok(());
@@ -361,10 +361,10 @@ impl CatalogService {
     pub(crate) async fn blocking_call<T, F>(&self, operation: F) -> Result<T, CatalogServiceError>
     where
         T: Send + 'static,
-        F: FnOnce(CatalogCache) -> Result<T, CatalogServiceError> + Send + 'static,
+        F: FnOnce(CatalogStore) -> Result<T, CatalogServiceError> + Send + 'static,
     {
-        let cache = self.state.cache.clone();
-        tokio::task::spawn_blocking(move || operation(cache)).await.map_err(|error| CatalogServiceError(format!("catalog cache worker failed: {error}")))?
+        let store = self.state.store.clone();
+        tokio::task::spawn_blocking(move || operation(store)).await.map_err(|error| CatalogServiceError(format!("catalog store worker failed: {error}")))?
     }
 
     pub(crate) async fn crawl_endpoint(&self, endpoint: OpdsEndpoint) -> Result<(), CatalogServiceError> {
@@ -372,12 +372,12 @@ impl CatalogService {
         let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        self.cache_write_call_named("crawl_setup", move |cache| cache.ensure_source(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not reconcile crawl source: {error}")))?;
+        self.store_write_call_named("crawl_setup", move |cache| cache.ensure_source(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not reconcile crawl source: {error}")))?;
         let cache_source = source_id.clone();
-        let has_pages = self.cache_call(move |cache| cache.has_pages(&cache_source)).await.map_err(|error| CatalogServiceError(format!("could not inspect cached crawl pages: {error}")))?;
+        let has_pages = self.store_call(move |cache| cache.has_pages(&cache_source)).await.map_err(|error| CatalogServiceError(format!("could not inspect cached crawl pages: {error}")))?;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        let has_frontier = self.cache_call(move |cache| cache.has_missing_page_frontier(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not inspect crawl frontier: {error}")))?;
+        let has_frontier = self.store_call(move |cache| cache.has_missing_page_frontier(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not inspect crawl frontier: {error}")))?;
         if !has_pages || has_frontier {
             return self.crawl_endpoint_incrementally(endpoint).await;
         }
@@ -388,7 +388,7 @@ impl CatalogService {
         let _update = update_lock.lock().await;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        let crawl = self.cache_write_call_named("crawl_begin", move |cache| cache.begin_crawl(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not start replacement crawl: {error}")))?;
+        let crawl = self.store_write_call_named("crawl_begin", move |cache| cache.begin_crawl(&cache_source, &cache_root)).await.map_err(|error| CatalogServiceError(format!("could not start replacement crawl: {error}")))?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
         let mut write_batch = AdaptiveCrawlWriteBatch::default();
@@ -413,14 +413,14 @@ impl CatalogService {
             self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
             loop {
                 let cache_crawl = crawl.clone();
-                let more = self.cache_write_call_named("crawl_activation", move |cache| cache.prepare_crawl_activation_batch(&cache_crawl, CRAWL_ACTIVATION_BATCH)).await?;
+                let more = self.store_write_call_named("crawl_activation", move |cache| cache.prepare_crawl_activation_batch(&cache_crawl, CRAWL_ACTIVATION_BATCH)).await?;
                 if !more {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
             let cache_crawl = crawl.clone();
-            self.cache_write_call_named("crawl_finalize", move |cache| cache.finalize_crawl_activation(&cache_crawl)).await?;
+            self.store_write_call_named("crawl_finalize", move |cache| cache.finalize_crawl_activation(&cache_crawl)).await?;
             self.reconcile_active_cover_downloads().await?;
             self.reconcile_active_epub_extractions(source_id.clone()).await?;
             self.cleanup_inactive_generations(source_id.clone()).await;
@@ -430,7 +430,7 @@ impl CatalogService {
         if let Err(error) = &result {
             let message = error.to_string();
             let cache_crawl = crawl.clone();
-            let _ = self.cache_write_call_named("crawl_abandon", move |cache| cache.abandon_crawl_with_error(&cache_crawl, Some(&message))).await;
+            let _ = self.store_write_call_named("crawl_abandon", move |cache| cache.abandon_crawl_with_error(&cache_crawl, Some(&message))).await;
             self.cleanup_inactive_generations(source_id.clone()).await;
         }
         result
@@ -441,11 +441,15 @@ impl CatalogService {
         let root_url = Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_root = endpoint.url.clone();
-        self.cache_write_call_named("crawl_begin_incremental", move |cache| cache.begin_incremental_crawl(&cache_source, &cache_root)).await?;
+        self.store_write_call_named("crawl_begin_incremental", move |cache| cache.begin_incremental_crawl(&cache_source, &cache_root)).await?;
         self.begin_crawl_progress(&source_id).await;
         let mut frontier = DiskCrawlFrontier::new(&endpoint.url, self.state.max_crawl_pages)?;
         let fetch_slots = Arc::new(tokio::sync::Semaphore::new(self.state.max_crawl_pages));
         let mut write_batch = AdaptiveCrawlWriteBatch::default();
+        // The root is the first user-visible snapshot of an incremental crawl.
+        // Publish it before fetching descendants so a slow child cannot make
+        // the entire catalogue appear unavailable.
+        let mut root_published = false;
         let result = async {
             loop {
                 let batch = frontier.claim_batch()?;
@@ -473,6 +477,10 @@ impl CatalogService {
                     self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
                     return Ok(false);
                 }
+                if !root_published {
+                    self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
+                    root_published = true;
+                }
             }
             self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
             Ok::<_, CatalogServiceError>(true)
@@ -480,7 +488,7 @@ impl CatalogService {
         .await;
         let complete = result.as_ref().copied().unwrap_or(false);
         let cache_source = source_id.clone();
-        self.cache_write_call_named("crawl_finish_incremental", move |cache| cache.finish_incremental_crawl(&cache_source, complete)).await?;
+        self.store_write_call_named("crawl_finish_incremental", move |cache| cache.finish_incremental_crawl(&cache_source, complete)).await?;
         self.reconcile_active_cover_downloads().await?;
         self.state.extraction_notify.notify_one();
         result.map(|_| ())
@@ -492,7 +500,7 @@ impl CatalogService {
         validate_opds_catalog_locator(endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_locator = locator.clone();
-        let cached = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await?;
+        let cached = self.store_call(move |cache| cache.page(&cache_source, &cache_locator)).await?;
         // Cached leaves are immutable catalogue records and never contact the
         // upstream server during replacement crawls.
         if let Some(cached_page) = cached.as_ref().filter(|page| !page.provider_paginated) {
@@ -500,7 +508,7 @@ impl CatalogService {
                 let cache_source = source_id.clone();
                 let mut page = cached_page.page.clone();
                 page = self
-                    .cache_call(move |cache| {
+                    .store_call(move |cache| {
                         cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
                         Ok(page)
                     })
@@ -530,7 +538,7 @@ impl CatalogService {
         };
         let cache_source = source_id.clone();
         page = self
-            .cache_call(move |cache| {
+            .store_call(move |cache| {
                 cache.enrich_page_from_epub_extractions(&cache_source, &mut page)?;
                 Ok(page)
             })
@@ -549,7 +557,7 @@ impl CatalogService {
         validate_opds_catalog_locator(endpoint, &locator).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_source = source_id.clone();
         let cache_locator = locator.clone();
-        if let Some(mut cached) = self.cache_call(move |cache| cache.page(&cache_source, &cache_locator)).await? {
+        if let Some(mut cached) = self.store_call(move |cache| cache.page(&cache_source, &cache_locator)).await? {
             let links = internal_page_links(root_url, &cached.page, popular_listing)?;
             if popular_listing && !page_has_popular_rank(&cached.page) {
                 annotate_popular_listing(&mut cached.page, true);
@@ -634,18 +642,43 @@ impl CatalogService {
     /// `running` rows are changed back to `pending` when the cache opens.
     pub async fn run_epub_extraction_loop(self) {
         loop {
-            if !self.process_enabled(CatalogProcess::EpubEnrichment) {
-                self.set_process_running(CatalogProcess::EpubEnrichment, false);
-                self.wait_for_process_wake(CatalogProcess::EpubEnrichment).await;
+            if !self.process_enabled(CatalogProcess::Enrichment) {
+                self.set_process_running(CatalogProcess::Enrichment, false);
+                self.wait_for_process_wake(CatalogProcess::Enrichment).await;
                 continue;
             }
-            self.set_process_running(CatalogProcess::EpubEnrichment, true);
-            self.resume_pending_epub_extractions().await;
-            self.set_process_running(CatalogProcess::EpubEnrichment, false);
+            self.set_process_running(CatalogProcess::Enrichment, true);
+            self.resume_pending_epub_extractions_staged().await;
+            self.set_process_running(CatalogProcess::Enrichment, false);
             tokio::select! {
                 _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
                 _ = self.state.extraction_notify.notified() => {}
-                _ = self.wait_for_process_wake(CatalogProcess::EpubEnrichment) => {}
+                _ = self.wait_for_process_wake(CatalogProcess::Enrichment) => {}
+            }
+        }
+    }
+
+    pub async fn run_epub_download_loop(self) {
+        let mut reconciliation_pending = true;
+        loop {
+            if !self.process_enabled(CatalogProcess::Enrichment) {
+                self.wait_for_process_wake(CatalogProcess::Enrichment).await;
+                continue;
+            }
+            if reconciliation_pending {
+                let source_ids = self.state.endpoints.read().await.iter().map(|endpoint| opds_catalog_source_id(&endpoint.id)).collect::<Vec<_>>();
+                for source_id in source_ids {
+                    if let Err(error) = self.reconcile_active_epub_extractions(source_id.clone()).await {
+                        tracing::warn!(source = source_id.as_str(), %error, "could not reconcile EPUB extraction queue before downloads");
+                    }
+                }
+                reconciliation_pending = false;
+            }
+            self.resume_pending_epub_downloads().await;
+            tokio::select! {
+                _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
+                _ = self.state.extraction_notify.notified() => {}
+                _ = self.wait_for_process_wake(CatalogProcess::Enrichment) => {}
             }
         }
     }
@@ -653,37 +686,28 @@ impl CatalogService {
     pub async fn run_catalogue_enrichment_loop(self) {
         let mut startup_repairs_pending = true;
         loop {
-            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
-                self.set_process_running(CatalogProcess::CatalogueEnrichment, false);
-                self.wait_for_process_wake(CatalogProcess::CatalogueEnrichment).await;
+            if !self.process_enabled(CatalogProcess::Enrichment) {
+                self.set_process_running(CatalogProcess::Enrichment, false);
+                self.wait_for_process_wake(CatalogProcess::Enrichment).await;
                 continue;
             }
-            self.set_process_running(CatalogProcess::CatalogueEnrichment, true);
-            if startup_repairs_pending {
-                self.refresh_search_index().await;
-                self.refresh_unified_subject_assignments().await;
-                self.refresh_subject_browse_index().await;
-                self.refresh_browse_serving_index().await;
-                startup_repairs_pending = false;
-            }
-            self.resume_metadata_index().await;
-            self.resume_metadata_backfill().await;
-            self.resume_description_backfill().await;
-            self.refresh_browse_serving_index().await;
-            self.set_process_running(CatalogProcess::CatalogueEnrichment, false);
+            self.set_process_running(CatalogProcess::Enrichment, true);
+            self.run_catalogue_enrichment_pass(startup_repairs_pending).await;
+            startup_repairs_pending = false;
+            self.set_process_running(CatalogProcess::Enrichment, false);
             tokio::select! {
                 _ = tokio::time::sleep(EPUB_EXTRACTION_SWEEP_INTERVAL) => {}
-                _ = self.wait_for_process_wake(CatalogProcess::CatalogueEnrichment) => {}
+                _ = self.wait_for_process_wake(CatalogProcess::Enrichment) => {}
             }
         }
     }
 
     pub(crate) async fn resume_metadata_index(&self) {
         loop {
-            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+            if !self.process_enabled(CatalogProcess::Enrichment) {
                 return;
             }
-            match self.cache_call(|cache| cache.migrate_metadata_index_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
+            match self.store_write_call_named("metadata_index_migrate", |cache| cache.migrate_metadata_index_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(count) if count == METADATA_BACKFILL_BATCH_SIZE => tokio::task::yield_now().await,
                 Ok(_) => return,
                 Err(error) => {
@@ -695,7 +719,7 @@ impl CatalogService {
     }
 
     pub async fn refresh_search_index(&self) {
-        match self.cache_write_call_named("search_index_refresh", |cache| cache.refresh_search_index()).await {
+        match self.store_write_call_named("search_index_refresh", |cache| cache.refresh_search_index()).await {
             Ok(true) => tracing::info!("catalogue full-text search index is ready"),
             Ok(false) => {}
             Err(error) => tracing::error!(%error, "failed to refresh catalogue full-text search index"),
@@ -703,13 +727,13 @@ impl CatalogService {
     }
 
     pub async fn refresh_unified_subject_assignments(&self) {
-        if let Err(error) = self.cache_write_call_named("subject_refresh", |cache| cache.refresh_unified_subject_assignments()).await {
+        if let Err(error) = self.store_write_call_named("subject_refresh", |cache| cache.refresh_unified_subject_assignments()).await {
             tracing::error!(%error, "failed to refresh unified catalogue subject assignments");
         }
     }
 
     pub async fn refresh_subject_browse_index(&self) {
-        match self.cache_write_call_named("subject_browse_index_refresh", |cache| cache.refresh_subject_browse_index()).await {
+        match self.store_write_call_named("subject_browse_index_refresh", |cache| cache.refresh_subject_browse_index()).await {
             Ok(true) => tracing::info!("catalogue subject browse index is ready"),
             Ok(false) => {}
             Err(error) => tracing::error!(%error, "failed to refresh catalogue subject browse index"),
@@ -717,17 +741,31 @@ impl CatalogService {
     }
 
     pub async fn refresh_browse_serving_index(&self) {
-        match self.cache_write_call_named("browse_serving_index_refresh", |cache| cache.refresh_browse_serving_index()).await {
-            Ok(true) => tracing::info!("catalogue browse serving index is ready"),
-            Ok(false) => {}
-            Err(error) => tracing::error!(%error, "failed to refresh catalogue browse serving index"),
+        let mut changed = false;
+        loop {
+            match self.store_call(|cache| cache.refresh_browse_serving_index_batch()).await {
+                Ok(true) => {
+                    changed = true;
+                    tokio::task::yield_now().await;
+                }
+                Ok(false) => {
+                    if changed {
+                        tracing::info!("catalogue browse serving index is ready");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to refresh catalogue browse serving index");
+                    return;
+                }
+            }
         }
     }
     pub(crate) async fn refresh_all_sources(&self) {
         let mut endpoints = self.state.endpoints.read().await.clone();
         prioritize_startup_crawls(&mut endpoints);
         let source_ids = endpoints.iter().map(|endpoint| opds_catalog_source_id(&endpoint.id)).collect::<Vec<_>>();
-        if let Err(error) = self.cache_write_call(move |cache| cache.queue_crawls(&source_ids)).await {
+        if let Err(error) = self.store_write_call(move |cache| cache.queue_crawls(&source_ids)).await {
             tracing::warn!(%error, "could not persist the startup crawl queue");
         }
         let mut origin_crawls = tokio::task::JoinSet::new();
@@ -751,7 +789,6 @@ impl CatalogService {
                 tracing::error!(%error, "catalogue origin crawl task stopped unexpectedly");
             }
         }
-        self.refresh_browse_serving_index().await;
     }
 }
 
@@ -821,15 +858,19 @@ pub(crate) fn prioritize_startup_crawls(endpoints: &mut [OpdsEndpoint]) {
     endpoints.sort_by_key(|endpoint| endpoint.id.as_str() != PRIORITY_CRAWL_SOURCE);
 }
 
-pub(crate) fn reconcile_cached_sources(cache: &CatalogCache, endpoints: &[OpdsEndpoint]) -> Result<Vec<CatalogSourceId>, CatalogServiceError> {
+pub(crate) fn reconcile_stored_sources(store: &CatalogStore, endpoints: &[OpdsEndpoint], cache_directories: Option<(&std::path::Path,&std::path::Path)>) -> Result<Vec<CatalogSourceId>, CatalogServiceError> {
     let retained = endpoints.iter().map(|endpoint| opds_catalog_source_id(&endpoint.id)).collect::<HashSet<_>>();
     for endpoint in endpoints {
-        cache.ensure_source(&opds_catalog_source_id(&endpoint.id), &endpoint.url).map_err(cache_error)?;
+        store.ensure_source(&opds_catalog_source_id(&endpoint.id), &endpoint.url).map_err(store_error)?;
     }
     let mut removed = Vec::new();
-    for source in cache.inventory().map_err(cache_error)?.sources {
+    for source in store.inventory().map_err(store_error)?.sources {
         if !retained.contains(&source.source_id) {
-            cache.remove_source(&source.source_id).map_err(cache_error)?;
+            if let Some((acquisitions,covers))=cache_directories {
+                crate::source_cleanup::purge_files(store,&source.source_id,acquisitions,covers)?;
+            }
+            store.remove_source(&source.source_id).map_err(store_error)?;
+            tracing::info!(source=source.source_id.as_str(),publications=source.active_publication_count,"purged removed catalogue source");
             removed.push(source.source_id);
         }
     }
@@ -887,9 +928,6 @@ fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
             } else {
                 compacted.facets.push(facet);
             }
-        }
-        if compacted.search.is_none() {
-            compacted.search = page.search;
         }
     }
 

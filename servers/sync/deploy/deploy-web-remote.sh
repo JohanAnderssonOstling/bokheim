@@ -33,7 +33,7 @@ fi
 
 "${repository_root}/apps/web-gpui/scripts/build.sh"
 tar -czf "${stage}/web-dist.tar.gz" -C "${repository_root}/apps/web-gpui/dist" .
-tar -czf "${stage}/admin-dist.tar.gz" -C "${repository_root}/apps/admin-web" .
+tar -czf "${stage}/admin-dist.tar.gz" -C "${repository_root}/servers/admin-web" .
 install -m 0755 "${script_directory}/install-web-staged.sh" "${stage}/install-web-staged.sh"
 
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '/tmp/bokheim-web-deploy.XXXXXX'")

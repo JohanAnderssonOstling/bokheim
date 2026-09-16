@@ -2,19 +2,41 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
+        <base href="/" />
         <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0" />
         <title>Bokheim</title>
         <script type="module">
-            import initialize from "./pkg/web_gpui.js";
+            globalThis.__BOKHEIM_ASSET_BASE__ = "./pkg";
+            import {checkCompatibility, compatibilityMessage} from "./compatibility.mjs";
+
+            function showStartupMessage(title, issues) {
+                const panel = document.getElementById('startup-status');
+                panel.replaceChildren();
+                const heading = document.createElement('h1');
+                heading.textContent = title;
+                const list = document.createElement('ul');
+                for (const issue of issues) {
+                    const item = document.createElement('li');
+                    item.textContent = issue;
+                    list.append(item);
+                }
+                panel.append(heading, list);
+            }
 
             try {
-                await initialize();
+                const issues = await checkCompatibility();
+                if (issues.length) {
+                    console.error('Bokheim compatibility check failed', issues);
+                    showStartupMessage('Browser not supported', [compatibilityMessage(navigator.userAgent)]);
+                } else {
+                    document.getElementById('startup-status').textContent = 'Opening Bokheim…';
+                    const {default: initialize} = await import("./pkg/web_gpui.js");
+                    await initialize();
+                    document.getElementById('startup-status')?.remove();
+                }
             } catch (error) {
                 console.error("Failed to start Bokheim", error);
-                const message = document.createElement("pre");
-                message.id = "startup-error";
-                message.textContent = `Failed to start Bokheim\n\n${error?.stack ?? error}`;
-                document.body.append(message);
+                showStartupMessage('Bokheim could not start', ['Reload the page to try again. If the problem continues, contact the site administrator.']);
             }
         </script>
         <style>
@@ -38,7 +60,21 @@
                 outline: none;
                 user-select: none;
             }
+
+            #startup-status {
+                position: fixed;
+                inset: 0;
+                overflow: auto;
+                padding: max(24px, 6vw);
+                background: #f5f1e7;
+                color: #243c30;
+                font: 18px/1.6 system-ui, sans-serif;
+                z-index: 1000;
+            }
+
+            #startup-status h1 { font-size: 26px; }
+            #startup-status li { margin-block: 12px; max-width: 65ch; }
         </style>
     </head>
-    <body></body>
+    <body><main id="startup-status" role="status" aria-live="polite">Checking browser compatibility…</main></body>
 </html>

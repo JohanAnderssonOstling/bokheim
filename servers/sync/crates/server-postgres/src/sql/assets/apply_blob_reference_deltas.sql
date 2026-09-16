@@ -42,6 +42,8 @@ released AS MATERIALIZED (
     WHERE charge.user_id=$1
       AND charge.content_hash=removed.content_hash
       AND object.content_hash=charge.content_hash
+      AND NOT EXISTS(SELECT 1 FROM library_blob_claim WHERE user_id=$1 AND blob_hash=charge.content_hash)
+      AND NOT EXISTS(SELECT 1 FROM user_book_revision AS revision WHERE revision.user_id=$1 AND revision.blob_hash=charge.content_hash)
     RETURNING object.size_bytes
 ),
 account AS (

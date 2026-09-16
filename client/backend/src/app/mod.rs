@@ -1,23 +1,43 @@
 //! Device-global application services and library lifecycle management.
 
-mod account_models;
-mod backend;
-mod browser_session;
+mod account;
+mod core;
 pub(crate) mod data;
-pub mod executor;
-mod librarything;
-pub mod name;
+mod libraries;
+mod notifications;
 pub mod preferences;
-mod server_url;
 
-pub use account_models::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-pub(crate) use backend::AppState;
-pub use backend::{AccountSessionSummary, AppBackend, AppEvent, BackendError, CatalogPageView, CatalogPublicationKey, CatalogSubjectBrowseView, LibraryListState};
-pub use browser_session::{BrowserSession, LibraryPlace, NavigationCrumb};
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use data::read_library_manifest;
-#[cfg(not(target_arch = "wasm32"))]
-pub use data::LIBRARY_MANIFEST_FILENAME;
-pub use data::{AppDataLocation, BackendContext, LibraryEntry};
-pub use name::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_HIDDEN_THUMBNAILS_PATH, APP_NAME, APP_NAME_LOWER};
-pub use server_url::{api_server_url, catalog_server_url, metadata_server_url, taxonomy_server_url, ServerUrl, ServerUrlError, API_SERVER_ORIGIN, CATALOG_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, TAXONOMY_SERVER_ORIGIN};
+pub use account_client::{ServerUrl, ServerUrlError};
+
+pub const APP_NAME: &str = "Bokheim";
+pub const APP_NAME_LOWER: &str = "bokheim";
+pub use library_files::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH};
+
+pub const API_SERVER_ORIGIN: &str = "https://api.bokheim.se";
+pub const METADATA_SERVER_ORIGIN: &str = "https://meta.bokheim.se";
+
+pub use crate::BackendError;
+pub use crate::api::{AppClient, LibraryClient};
+pub use crate::library::{LibrarySyncState, LibrarySyncStatus};
+pub use crate::runtime::{
+    AccountSnapshot, AppStartupState, AppWorkerClientMessage, AppWorkerRequest, AppWorkerStartupMessage, ResolvedBookData, ThumbnailResolution, WorkerCommand, WorkerDispatchResult, WorkerPayload, WorkerSubscription, decode_worker_message,
+    encode_worker_message,
+};
+pub use account::{AccountStatus, AccountStorageUsage, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
+pub(crate) use core::AppBackend;
+pub use core::LibraryListState;
+pub(crate) use data::BackendContext;
+pub use data::{AppDataLocation, LibraryEntry};
+
+pub fn api_server_url() -> ServerUrl {
+    ServerUrl::parse(API_SERVER_ORIGIN).expect("Bokheim API origin is a valid HTTPS origin")
+}
+
+pub fn metadata_server_url() -> ServerUrl {
+    ServerUrl::parse(METADATA_SERVER_ORIGIN).expect("Bokheim metadata origin is a valid HTTPS origin")
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web-runtime-tests"))]
+pub async fn notification_socket_contract(url: &str, token: &str) -> Result<u32, String> {
+    notifications::socket_contract(url, token).await
+}

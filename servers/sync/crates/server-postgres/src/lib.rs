@@ -3,6 +3,7 @@
 
 mod applications;
 mod assets;
+mod cloud_storage;
 mod database;
 mod sync;
 mod sync_store;
@@ -15,3 +16,6 @@ pub async fn configure_user_storage_quota(database: &PostgresDatabase, user_id: 
 }
 pub use database::{check_ready, connect, connect_configured, migrate, upgrade_existing, DatabasePoolConfig, PostgresDatabase};
 pub use sync::{PostgresSyncRepository, SyncError};
+mod publication_admission;
+#[cfg(test)]
+mod publication_admission_tests;

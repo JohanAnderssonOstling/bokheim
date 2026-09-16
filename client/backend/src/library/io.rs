@@ -1,12 +1,4 @@
-use std::future::Future;
-use std::io::{Read, Seek};
-use std::pin::Pin;
-
-/// Seekable publication content opened by a library backend.
-pub trait BookReader: Read + Seek + Send + Sync {}
-impl<T: Read + Seek + Send + Sync> BookReader for T {}
-
-pub type BoxedBookReader = Box<dyn BookReader>;
+pub use publication_access::{BookReader, BoxedBookReader};
 
 /// A selected directory tree whose files can be opened one at a time while
 /// the backend imports them.
@@ -16,9 +8,17 @@ pub struct DirectoryImport {
     pub files: Vec<DirectoryImportFile>,
 }
 
-pub type DirectoryImportReaderFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Read + Send>, String>> + 'static>>;
+pub use crate::platform::{DirectoryImportReader, DirectoryImportReaderFuture, ImportSource};
 
+/// A source capability and its path within the selected tree.
 pub struct DirectoryImportFile {
     pub path: Vec<String>,
-    pub open: Box<dyn FnOnce() -> DirectoryImportReaderFuture + Send>,
+    pub source: ImportSource,
+}
+
+/// The small directory manifest returned before any selected file is opened.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PreparedDirectoryImport {
+    pub directories: Vec<(Vec<String>, crate::DirId)>,
+    pub failures: Vec<crate::ImportFailure>,
 }

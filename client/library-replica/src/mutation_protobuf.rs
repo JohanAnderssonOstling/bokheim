@@ -7,7 +7,7 @@
 use super::{catalog_publication_state_subkey, MutationBody};
 use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
 use library_model::{
-    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookMetadataState, Collection, CollectionKind, Contributor, DirectoryLifecycleState, Identifier, LanguageTag, LocalizedText, MarcRelatorCode,
+    AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, SyncBookMetadata, Collection, CollectionKind, Contributor, DirectoryLifecycleState, Identifier, LanguageTag, LocalizedText, MarcRelatorCode,
     PdfAnnotationAnchor, PdfAnnotationRect, PublicationDate, PublicationMetadata, PublicationProperty, PublicationSubject, PublicationTitle, PublisherCredit, ReadingPosition, ReadingPositionState, Scheme, Scope,
 };
 use sync_common::transport::{self, protobuf as pb};
@@ -35,6 +35,11 @@ pub(super) fn encode(body: &MutationBody) -> Result<Vec<u8>, transport::WireErro
             Kind::CatalogPublication(pb::CatalogPublication { edition_id: publication.edition_id.clone(), work_id: publication.work_id.clone(), content_hash: content_hash.to_string() })
         }
         MutationBody::Metadata { value, .. } => Kind::Metadata(encode_book_metadata(value)),
+        MutationBody::PdfReaderMetadata { value, .. } => {
+            if !value.valid_for(&value.checksum) { return Err(decode_error("invalid PDF reader metadata")); }
+            Kind::PdfReaderMetadata(serde_json::to_vec(value).map_err(|e| decode_error(e.to_string()))?)
+        }
+        MutationBody::Description { value, .. } => Kind::Description(value.clone()),
     };
     transport::encode_mutation_value(&pb::MutationValue { kind: Some(kind) })
 }
@@ -63,6 +68,12 @@ pub(super) fn decode(wire: &WireMutation) -> Result<MutationBody, transport::Wir
             }
             Ok(MutationBody::CatalogPublication { source_id, publication, content_hash: ContentHash::new(&value.content_hash) })
         }
+        (sync_common::mutation_kind::PDF_READER_METADATA, Kind::PdfReaderMetadata(bytes)) => {
+            let value: pdf_view_common::PdfReaderMetadata = serde_json::from_slice(&bytes).map_err(|e| decode_error(e.to_string()))?;
+            if !value.valid_for(&wire.entity_subkey) { return Err(decode_error("PDF metadata revision mismatch")); }
+            Ok(MutationBody::PdfReaderMetadata { content_hash: ContentHash::new(key), value })
+        }
+        (sync_common::mutation_kind::DESCRIPTION, Kind::Description(value)) => Ok(MutationBody::Description { content_hash: ContentHash::new(key), value }),
         (sync_common::mutation_kind::METADATA, Kind::Metadata(value)) => Ok(MutationBody::Metadata { content_hash: ContentHash::new(key), value: decode_book_metadata(value)? }),
         _ => Err(decode_error("mutation kind does not match its protobuf value")),
     }
@@ -113,10 +124,6 @@ fn encode_book_format(value: BookFormat) -> pb::BookFormat {
         BookFormat::Epub => pb::BookFormat::Epub,
         BookFormat::Pdf => pb::BookFormat::Pdf,
         BookFormat::Mobi => pb::BookFormat::Mobi,
-        BookFormat::Fb2 => pb::BookFormat::Fb2,
-        BookFormat::Cbz => pb::BookFormat::Cbz,
-        BookFormat::Html => pb::BookFormat::Html,
-        BookFormat::WebPub => pb::BookFormat::Webpub,
         BookFormat::M4b => pb::BookFormat::M4b,
     }
 }
@@ -126,12 +133,8 @@ fn decode_book_format(value: i32) -> Result<BookFormat, transport::WireError> {
         pb::BookFormat::Epub => Ok(BookFormat::Epub),
         pb::BookFormat::Pdf => Ok(BookFormat::Pdf),
         pb::BookFormat::Mobi => Ok(BookFormat::Mobi),
-        pb::BookFormat::Fb2 => Ok(BookFormat::Fb2),
-        pb::BookFormat::Cbz => Ok(BookFormat::Cbz),
-        pb::BookFormat::Html => Ok(BookFormat::Html),
-        pb::BookFormat::Webpub => Ok(BookFormat::WebPub),
         pb::BookFormat::M4b => Ok(BookFormat::M4b),
-        pb::BookFormat::Unspecified => Err(decode_error("unspecified book format")),
+        pb::BookFormat::Fb2 | pb::BookFormat::Cbz | pb::BookFormat::Html | pb::BookFormat::Webpub | pb::BookFormat::Unspecified => Err(decode_error("unsupported book format")),
     }
 }
 
@@ -224,15 +227,14 @@ fn decode_annotation_style(value: i32) -> Result<AnnotationStyle, transport::Wir
     }
 }
 
-fn encode_book_metadata(value: &BookMetadataState) -> pb::BookMetadata {
-    pb::BookMetadata { title: value.title.clone(), contributors: value.contributors.iter().map(encode_contributor).collect(), description: value.description.clone(), publication: Some(encode_publication_metadata(&value.publication)) }
+fn encode_book_metadata(value: &SyncBookMetadata) -> pb::BookMetadata {
+    pb::BookMetadata { title: value.title.clone(), contributors: value.contributors.iter().map(encode_contributor).collect(), publication: Some(encode_publication_metadata(&value.publication)) }
 }
 
-fn decode_book_metadata(value: pb::BookMetadata) -> Result<BookMetadataState, transport::WireError> {
-    Ok(BookMetadataState {
+fn decode_book_metadata(value: pb::BookMetadata) -> Result<SyncBookMetadata, transport::WireError> {
+    Ok(SyncBookMetadata {
         title: value.title,
         contributors: value.contributors.into_iter().map(decode_contributor).collect::<Result<_, _>>()?,
-        description: value.description,
         publication: value.publication.map(decode_publication_metadata).transpose()?.unwrap_or_default(),
     })
 }
@@ -259,7 +261,7 @@ fn decode_collection(value: pb::PublicationCollection) -> Result<Collection, tra
     let kind = value.collection_type.map(CollectionKind::from_label).transpose().map_err(|error| decode_error(error.to_string()))?;
     let name_localizations = value.name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?;
     let sort_name_localizations = value.sort_name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?;
-    Collection::with_details(value.name, name_localizations, value.sort_name, sort_name_localizations, value.identifiers, kind, value.position, value.source.unwrap_or_else(|| "legacy:protobuf-collection".to_owned()))
+    Collection::with_details(value.name, name_localizations, value.sort_name, sort_name_localizations, value.identifiers, kind, value.position, value.source.ok_or_else(|| decode_error("missing collection source"))?)
         .map_err(|error| decode_error(error.to_string()))
 }
 
@@ -345,7 +347,7 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
         dates: value
             .dates
             .into_iter()
-            .map(|date| PublicationDate::new(date.id, date.value, date.event, date.source.unwrap_or_else(|| "legacy:protobuf-date".to_owned())).map_err(|error| decode_error(error.to_string())))
+            .map(|date| PublicationDate::new(date.id, date.value, date.event, date.source.ok_or_else(|| decode_error("missing date source"))?).map_err(|error| decode_error(error.to_string())))
             .collect::<Result<_, _>>()?,
         subjects: value
             .subjects
@@ -357,7 +359,7 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
                     subject.name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?,
                     subject.sort_name,
                     subject.sort_name_localizations.into_iter().map(decode_localized_text).collect::<Result<_, _>>()?,
-                    subject.source.unwrap_or_else(|| "dc:subject".to_owned()),
+                    subject.source.ok_or_else(|| decode_error("missing subject source"))?,
                     subject.authority,
                     subject.code,
                 )
@@ -368,7 +370,7 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
         alternate_titles: value
             .alternate_titles
             .into_iter()
-            .map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as, title.source.unwrap_or_else(|| "legacy:protobuf-title".to_owned())).map_err(|error| decode_error(error.to_string())))
+            .map(|title| PublicationTitle::new(title.id, title.value, title.title_type, title.sort_as, title.source.ok_or_else(|| decode_error("missing title source"))?).map_err(|error| decode_error(error.to_string())))
             .collect::<Result<_, _>>()?,
         rights: value.rights,
         sources: value.sources,
@@ -380,7 +382,7 @@ fn decode_publication_metadata(value: pb::PublicationMetadata) -> Result<Publica
             .properties
             .into_iter()
             .map(|property| {
-                PublicationProperty::new(property.id, property.property, property.value, property.refines, property.scheme, property.language, property.source.unwrap_or_else(|| "legacy:protobuf-property".to_owned()))
+                PublicationProperty::new(property.id, property.property, property.value, property.refines, property.scheme, property.language, property.source.ok_or_else(|| decode_error("missing property source"))?)
                     .map_err(|error| decode_error(error.to_string()))
             })
             .collect::<Result<_, _>>()?,
@@ -404,14 +406,12 @@ fn encode_publication_identifier(value: &Identifier) -> pb::PublicationIdentifie
         Scheme::Other(value) => (pb::IdentifierScheme::Other, Some(value.clone())),
     };
     let mut identifier_types = vec![pb::PublicationIdentifierType { value: value.source().to_owned(), scheme: Some("bokheim:source".to_owned()) }];
-    if value.scope() != Scope::Publication {
-        let scope = match value.scope() {
-            Scope::Publication => "publication",
-            Scope::Edition => "edition",
-            Scope::Work => "work",
-        };
-        identifier_types.push(pb::PublicationIdentifierType { value: scope.to_owned(), scheme: Some("bokheim:scope".to_owned()) });
-    }
+    let scope = match value.scope() {
+        Scope::Publication => "publication",
+        Scope::Edition => "edition",
+        Scope::Work => "work",
+    };
+    identifier_types.push(pb::PublicationIdentifierType { value: scope.to_owned(), scheme: Some("bokheim:scope".to_owned()) });
     pb::PublicationIdentifier { value: value.value().to_owned(), scheme: scheme as i32, other_scheme, identifier_types }
 }
 
@@ -435,9 +435,8 @@ fn decode_publication_identifier(value: pb::PublicationIdentifier) -> Result<Ide
         .identifier_types
         .iter()
         .find(|value| value.scheme.as_deref() == Some("bokheim:source"))
-        .or_else(|| value.identifier_types.iter().find(|value| value.scheme.as_deref() == Some("bokheim:provenance")))
         .map(|value| value.value.clone())
-        .unwrap_or_else(|| "legacy:identifier".to_owned());
+        .ok_or_else(|| decode_error("missing identifier source"))?;
     let scope = value
         .identifier_types
         .iter()
@@ -448,7 +447,7 @@ fn decode_publication_identifier(value: pb::PublicationIdentifier) -> Result<Ide
             "publication" => Some(Scope::Publication),
             _ => None,
         })
-        .unwrap_or(Scope::Publication);
+        .ok_or_else(|| decode_error("missing or invalid identifier scope"))?;
     Identifier::new(value.value, scheme, scope, source).map_err(|error| decode_error(error.to_string()))
 }
 
@@ -457,7 +456,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_protobuf_publication_values_receive_explicit_provenance() {
+    fn identifiers_round_trip_all_scopes_and_reject_missing_evidence() {
+        for scope in [Scope::Publication, Scope::Edition, Scope::Work] {
+            let identifier = Identifier::new("9780306406157", Scheme::Isbn, scope, "epub:identifier").unwrap();
+            let encoded = encode_publication_identifier(&identifier);
+            assert_eq!(decode_publication_identifier(encoded.clone()).unwrap(), identifier);
+            for missing in ["bokheim:source", "bokheim:scope"] {
+                let mut incomplete = encoded.clone();
+                incomplete.identifier_types.retain(|item| item.scheme.as_deref() != Some(missing));
+                assert!(decode_publication_identifier(incomplete).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn publication_values_require_provenance() {
         let encoded = pb::PublicationMetadata {
             dates: vec![pb::PublicationDate { id: None, value: "1965".to_owned(), event: Some("publication".to_owned()), source: None }],
             alternate_titles: vec![pb::PublicationTitle { id: None, value: "Dune World".to_owned(), title_type: Some("alternative".to_owned()), sort_as: None, source: None }],
@@ -465,11 +478,6 @@ mod tests {
             ..Default::default()
         };
 
-        let decoded = decode_publication_metadata(encoded).unwrap();
-        assert_eq!(decoded.dates[0].value(), "1965");
-        assert_eq!(decoded.dates[0].event(), Some("publication"));
-        assert_eq!(decoded.dates[0].source(), "legacy:protobuf-date");
-        assert_eq!(decoded.alternate_titles[0].source(), "legacy:protobuf-title");
-        assert_eq!(decoded.properties[0].source(), "legacy:protobuf-property");
+        assert!(decode_publication_metadata(encoded).is_err());
     }
 }

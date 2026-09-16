@@ -10,24 +10,20 @@ workspace = true
 [dependencies]
 catalog-model = { path = "../../shared/catalog-model" }
 catalog-core = { path = "../../shared/catalog-core" }
-catalog-protocol = { path = "../../shared/catalog-protocol" }
-storage-wire = { package = "wire", path = "../../shared/wire" }
+device-sqlite = { path = "../device-sqlite" }
 wire = { package = "protobuf-wire", path = "../../shared/protobuf-wire" }
 futures-util = "0.3"
-log = "0.4"
-reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
+reqwest = { version = "0.11", default-features = false, features = ["stream"] }
 rusqlite = "0.40.0"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
+serde = "1"
+tokio = { version = "1", features = ["time"] }
 url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.11", default-features = false, features = ["brotli", "gzip", "rustls-tls", "stream"] }
-rusqlite = { version = "0.40.0", features = ["bundled"] }
-tokio = { version = "1", features = ["net"] }
+reqwest = { version = "0.11", default-features = false, features = ["brotli", "gzip", "rustls-tls"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "net"] }
 axum = "0.7"
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"

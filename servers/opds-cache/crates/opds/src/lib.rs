@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use uri_template::{HashValues, UriTemplate};
 
 mod litteraturbanken;
 mod registry;
@@ -28,7 +27,6 @@ pub use registry::{CatalogRegistry, CatalogSource, CATALOG_REGISTRY_SCHEMA_VERSI
 
 const MAX_CATALOG_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_REGISTRY_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_SEARCH_DESCRIPTION_BYTES: u64 = 1024 * 1024;
 // Bounds untrusted third-party catalog downloads before they enter a library;
 // synchronized storage itself is governed by the user's account quota.
 const MAX_OPDS_DOWNLOAD_BYTES: u64 = 1_000_000_000;
@@ -47,7 +45,6 @@ const PDF_MEDIA_TYPE: &str = "application/pdf";
 const MOBI_MEDIA_TYPE: &str = "application/x-mobipocket-ebook";
 const M4B_MEDIA_TYPE: &str = "audio/mp4";
 const OPDS_2_MEDIA_TYPE: &str = "application/opds+json";
-const OPENSEARCH_MEDIA_TYPE: &str = "application/opensearchdescription+xml";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -86,7 +83,6 @@ pub fn built_in_opds_endpoints() -> Vec<OpdsEndpoint> {
     vec![
         open_endpoint("project-gutenberg", "Project Gutenberg", "A large multilingual collection of free ebooks, with browsing and catalog search.", &["Multilingual"], "https://www.gutenberg.org/ebooks/search.opds/"),
         open_endpoint("unglue-it", "Unglue.it", "Open and Creative Commons ebooks collected by the Free Ebook Foundation.", &["Multilingual"], "https://unglue.it/api/opds/"),
-        open_endpoint("office-of-the-historian", "Office of the Historian", "The official Foreign Relations of the United States ebook collection.", &["English"], "https://history.state.gov/api/v1/catalog"),
         open_endpoint("gallica", "Gallica", "Public-domain publications from the Bibliothèque nationale de France.", &["French"], "https://gallica.bnf.fr/opds"),
         open_endpoint(
             "litteraturbanken",
@@ -249,20 +245,6 @@ pub struct OpdsCatalogLink {
     pub relations: Vec<String>,
     pub number_of_items: Option<u32>,
     pub active: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OpdsSearch {
-    UriTemplate { base_url: String, template: String },
-    OpenSearchDescription { url: String },
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpdsSearchQuery {
-    pub query: String,
-    pub title: Option<String>,
-    pub author: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,7 +524,6 @@ pub struct OpdsCatalog {
     pub groups: Vec<OpdsGroup>,
     pub facets: Vec<OpdsFacet>,
     pub pagination: OpdsPagination,
-    pub search: Option<OpdsSearch>,
 }
 
 #[derive(Debug)]
@@ -557,8 +538,6 @@ pub enum OpdsError {
     UnsupportedCatalogFormat,
     InvalidCatalog(String),
     NonFreeAcquisition,
-    SearchUnavailable,
-    InvalidSearchTemplate(String),
     UnsupportedBookResponse(Option<String>),
     Io(std::io::Error),
 }
@@ -582,8 +561,6 @@ impl fmt::Display for OpdsError {
             Self::UnsupportedCatalogFormat => formatter.write_str("response is neither an OPDS 1.2 Atom feed nor an OPDS 2.0 JSON feed"),
             Self::InvalidCatalog(error) => write!(formatter, "invalid OPDS catalog: {error}"),
             Self::NonFreeAcquisition => formatter.write_str("only unpriced direct open-access or generic EPUB/PDF acquisitions can be imported"),
-            Self::SearchUnavailable => formatter.write_str("this OPDS catalog does not advertise search"),
-            Self::InvalidSearchTemplate(error) => write!(formatter, "invalid OPDS search template: {error}"),
             Self::UnsupportedBookResponse(media_type) => write!(formatter, "OPDS acquisition returned unsupported content type {}", media_type.as_deref().unwrap_or("unknown")),
             Self::Io(error) => write!(formatter, "OPDS file operation failed: {error}"),
         }
@@ -703,28 +680,6 @@ impl OpdsClient {
         let (result, mut profile) = self.fetch_catalog_url_profiled(parsed_url, MAX_CATALOG_BYTES).await;
         profile.total = started.elapsed();
         (result, profile)
-    }
-
-    pub async fn search(&self, catalog: &OpdsCatalog, query: &str) -> Result<OpdsCatalog, OpdsError> {
-        let search = catalog.search.as_ref().ok_or(OpdsError::SearchUnavailable)?;
-        self.search_definition(search, &OpdsSearchQuery { query: query.to_owned(), title: None, author: None }).await
-    }
-
-    pub async fn search_definition(&self, search: &OpdsSearch, query: &OpdsSearchQuery) -> Result<OpdsCatalog, OpdsError> {
-        validate_search_query(query)?;
-        let (base_url, template) = match search {
-            OpdsSearch::UriTemplate { base_url, template } => (parse_http_url(base_url)?, template.clone()),
-            OpdsSearch::OpenSearchDescription { url } => {
-                let description_url = parse_http_url(url)?;
-                let response = self.send(description_url.clone(), reqwest::header::HeaderMap::new()).await?;
-                let final_url = validated_response_url(&response)?;
-                let bytes = read_bounded(response, MAX_SEARCH_DESCRIPTION_BYTES).await?;
-                (final_url, parse_open_search_template(&bytes)?)
-            }
-        };
-        let expanded = expand_search_template(&template, query)?;
-        let url = resolve_url(&base_url, &expanded)?;
-        self.fetch_catalog_url(url, MAX_CATALOG_BYTES).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1115,14 +1070,12 @@ fn opds_error_kind(error: &OpdsError) -> &'static str {
         OpdsError::UnsupportedCatalogFormat => "unsupported_catalog_format",
         OpdsError::InvalidCatalog(_) => "invalid_catalog",
         OpdsError::NonFreeAcquisition => "non_free_acquisition",
-        OpdsError::SearchUnavailable => "search_unavailable",
-        OpdsError::InvalidSearchTemplate(_) => "invalid_search_template",
         OpdsError::UnsupportedBookResponse(_) => "unsupported_book_response",
         OpdsError::Io(_) => "io_error",
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn profile_log_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else { return "invalid-url".to_owned() };
     url.set_query(None);
@@ -1501,7 +1454,6 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
         publications.push(OpdsPublication { work_id, id, title, authors, languages, description, image_url, metadata, preferred_download, acquisitions });
     }
     let facets = parse_opds_1_facets(&base_url, bytes)?;
-    let search = feed.links.iter().find(|link| link.rel == "search").and_then(|link| search_from_atom(&base_url, link));
     Ok(OpdsCatalog {
         version: OpdsVersion::V1_2,
         freshness: OpdsCatalogFreshness::Current,
@@ -1520,7 +1472,6 @@ fn parse_opds_1(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
             last: relation_url_atom(&base_url, &feed.links, "last"),
             ..OpdsPagination::default()
         },
-        search,
     })
 }
 
@@ -1680,7 +1631,6 @@ fn parse_opds_2(source_url: Url, bytes: &[u8]) -> Result<OpdsCatalog, OpdsError>
             items_per_page: metadata.get("itemsPerPage").and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()),
             current_page: metadata.get("currentPage").and_then(Value::as_u64).and_then(|value| u32::try_from(value).ok()),
         },
-        search: links.iter().find(|link| json_link_has_relation(link, "search")).and_then(|link| search_from_json(&source_url, link)),
     })
 }
 
@@ -2672,92 +2622,6 @@ fn json_link_has_relation(value: &Value, relation: &str) -> bool {
     json_relations(value).any(|candidate| candidate == relation)
 }
 
-fn search_from_atom(base: &Url, link: &AtomLink) -> Option<OpdsSearch> {
-    if link.mime_type.as_deref().map(normalized_media_type).as_deref() == Some(OPENSEARCH_MEDIA_TYPE) {
-        let url = resolve_url(base, &link.href).ok()?;
-        Some(OpdsSearch::OpenSearchDescription { url: url.to_string() })
-    } else if link.href.contains('{') {
-        Some(OpdsSearch::UriTemplate { base_url: base.to_string(), template: link.href.clone() })
-    } else {
-        None
-    }
-}
-
-fn search_from_json(base: &Url, value: &Value) -> Option<OpdsSearch> {
-    let object = value.as_object()?;
-    let template = object.get("href")?.as_str()?;
-    if !object.get("templated").and_then(Value::as_bool).unwrap_or(template.contains('{')) {
-        return None;
-    }
-    Some(OpdsSearch::UriTemplate { base_url: base.to_string(), template: template.to_owned() })
-}
-
-fn parse_open_search_template(bytes: &[u8]) -> Result<String, OpdsError> {
-    let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(element)) | Ok(Event::Empty(element)) if element.local_name().as_ref() == b"Url" => {
-                let mut media_type = None;
-                let mut template = None;
-                for attribute in element.attributes().with_checks(false) {
-                    let attribute = attribute.map_err(|error| OpdsError::InvalidCatalog(error.to_string()))?;
-                    let value = attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder()).map_err(|error| OpdsError::InvalidCatalog(error.to_string()))?.into_owned();
-                    match attribute.key.local_name().as_ref() {
-                        b"type" => media_type = Some(value),
-                        b"template" => template = Some(value),
-                        _ => {}
-                    }
-                }
-                if media_type.as_deref().is_some_and(is_catalog_media_type) {
-                    if let Some(template) = template {
-                        return Ok(template);
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(error) => return Err(OpdsError::InvalidCatalog(error.to_string())),
-        }
-    }
-    Err(OpdsError::InvalidCatalog("OpenSearch description has no OPDS URL template".to_owned()))
-}
-
-fn validate_search_query(query: &OpdsSearchQuery) -> Result<(), OpdsError> {
-    for (name, value) in [("query", Some(query.query.as_str())), ("title", query.title.as_deref()), ("author", query.author.as_deref())] {
-        if value.is_some_and(|value| value.len() > 500 || value.chars().any(char::is_control)) {
-            return Err(OpdsError::InvalidSearchTemplate(format!("{name} search value must be at most 500 characters without control characters")));
-        }
-    }
-    if query.query.trim().is_empty() && query.title.as_deref().is_none_or(|value| value.trim().is_empty()) && query.author.as_deref().is_none_or(|value| value.trim().is_empty()) {
-        return Err(OpdsError::InvalidSearchTemplate("at least one search value is required".to_owned()));
-    }
-    Ok(())
-}
-
-fn expand_search_template(template: &str, query: &OpdsSearchQuery) -> Result<String, OpdsError> {
-    let normalized = remove_optional_open_search_parameters(template);
-    let template = UriTemplate::new(normalized).map_err(|error| OpdsError::InvalidSearchTemplate(error.to_string()))?;
-    let mut values = HashValues::new();
-    values.insert("query", query.query.as_str());
-    values.insert("searchTerms", query.query.as_str());
-    if let Some(title) = query.title.as_deref().filter(|value| !value.trim().is_empty()) {
-        values.insert("title", title);
-    }
-    if let Some(author) = query.author.as_deref().filter(|value| !value.trim().is_empty()) {
-        values.insert("author", author);
-    }
-    template.expand(&values).map_err(|error| OpdsError::InvalidSearchTemplate(error.to_string()))
-}
-
-fn remove_optional_open_search_parameters(template: &str) -> String {
-    let mut result = template.to_owned();
-    for parameter in ["count", "startIndex", "startPage", "language", "inputEncoding", "outputEncoding"] {
-        result = result.replace(&format!("{{{parameter}?}}"), "");
-    }
-    result
-}
-
 fn parse_http_url(value: &str) -> Result<Url, OpdsError> {
     let url = Url::parse(value).map_err(|error| OpdsError::InvalidUrl(error.to_string()))?;
     validate_http_url(url)
@@ -3001,11 +2865,11 @@ mod tests {
     #[test]
     fn built_in_endpoints_are_complete_and_safe() {
         let endpoints = built_in_opds_endpoints();
-        assert_eq!(endpoints.len(), 5);
+        assert_eq!(endpoints.len(), 4);
         assert_eq!(endpoints.iter().map(|endpoint| endpoint.id.as_str()).collect::<HashSet<_>>().len(), endpoints.len());
         assert!(endpoints.iter().all(|endpoint| !endpoint.title.trim().is_empty() && !endpoint.description.trim().is_empty() && !endpoint.languages.is_empty()));
         assert!(endpoints.iter().all(|endpoint| endpoint.id.as_str() != "open-library"));
-        assert!(endpoints.iter().all(|endpoint| !matches!(endpoint.id.as_str(), "chitanka" | "ebooks-gratuits")));
+        assert!(endpoints.iter().all(|endpoint| !matches!(endpoint.id.as_str(), "chitanka" | "ebooks-gratuits" | "office-of-the-historian")));
         assert!(endpoints.iter().all(|endpoint| endpoint.languages.iter().any(|language| matches!(language.as_str(), "Multilingual" | "English" | "Swedish" | "French"))));
         assert!(endpoints.iter().all(|endpoint| parse_http_url(&endpoint.url).is_ok()));
     }
@@ -3066,7 +2930,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires the live Open Library OPDS service"]
-    async fn open_library_browse_search_and_acquisitions_are_live_and_parseable() {
+    async fn open_library_browse_and_acquisitions_are_live_and_parseable() {
         let client = OpdsClient::new().unwrap();
         let root = client.fetch_catalog("https://openlibrary.org/opds/").await.unwrap();
         assert_eq!(root.version, OpdsVersion::V2_0);
@@ -3075,9 +2939,6 @@ mod tests {
         assert!(root.groups.iter().flat_map(|group| &group.publications).any(|publication| publication.id.starts_with("https://openlibrary.org/opds/books/") && !publication.acquisitions.is_empty()));
         let navigation = client.fetch_catalog(&root.navigation[0].url).await.unwrap();
         assert!(!navigation.publications.is_empty() || !navigation.groups.is_empty());
-        let search = root.search.as_ref().unwrap();
-        let results = client.search_definition(search, &OpdsSearchQuery { query: "Pride and Prejudice".to_owned(), title: None, author: None }).await.unwrap();
-        assert!(!results.publications.is_empty() || !results.groups.is_empty());
     }
 
     #[test]
@@ -3216,7 +3077,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_opds_2_groups_navigation_pagination_and_search() {
+    fn parses_opds_2_groups_navigation_and_pagination() {
         let catalog = parse_catalog(Url::parse("https://example.com/catalog/v2/").unwrap(), Some(OPDS_2_MEDIA_TYPE), OPDS_2.as_bytes()).unwrap();
         assert_eq!(catalog.version, OpdsVersion::V2_0);
         assert_eq!(catalog.pagination.number_of_items, Some(1));
@@ -3229,8 +3090,6 @@ mod tests {
         let OpdsAcquisition::Direct(acquisition) = &catalog.publications[0].acquisitions[0] else { panic!("expected direct EPUB") };
         assert_eq!(acquisition.url, "https://example.com/catalog/book.epub");
         assert_eq!(catalog.publications[0].preferred_download.as_ref(), Some(acquisition));
-        let OpdsSearch::UriTemplate { template, .. } = catalog.search.unwrap() else { panic!("expected URI template") };
-        assert_eq!(expand_search_template(&template, &OpdsSearchQuery { query: "a & b".to_owned(), title: None, author: None }).unwrap(), "search?query=a%20%26%20b");
     }
 
     #[test]
@@ -3390,13 +3249,6 @@ mod tests {
     }
 
     #[test]
-    fn advanced_search_expands_only_supported_template_variables() {
-        let query = OpdsSearchQuery { query: "history".to_owned(), title: Some("A title".to_owned()), author: Some("An author".to_owned()) };
-        assert_eq!(expand_search_template("search{?query,title,author}", &query).unwrap(), "search?query=history&title=A%20title&author=An%20author");
-        assert!(validate_search_query(&OpdsSearchQuery::default()).is_err());
-    }
-
-    #[test]
     fn registry_validation_and_atomic_cache_reject_invalid_dynamic_data() {
         let source = CatalogSource { id: "example".to_owned(), title: "Example".to_owned(), description: "Books".to_owned(), languages: vec!["English".to_owned()], url: "https://example.com/opds".to_owned() };
         let registry = CatalogRegistry { schema_version: CATALOG_REGISTRY_SCHEMA_VERSION, revision: 3, catalogs: vec![source.clone()] };
@@ -3518,9 +3370,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_opensearch_description_and_sanitizes_file_names() {
-        let description = br#"<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/"><Url type="application/atom+xml;profile=opds-catalog" template="/search?q={searchTerms}"/></OpenSearchDescription>"#;
-        assert_eq!(parse_open_search_template(description).unwrap(), "/search?q={searchTerms}");
+    fn sanitizes_file_names() {
         assert_eq!(safe_book_file_name("Bad: / title", &Url::parse("https://example.com/download?id=1").unwrap(), OpdsBookFormat::Epub), "Bad_ _ title.epub");
     }
 

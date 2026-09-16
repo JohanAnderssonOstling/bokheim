@@ -3,8 +3,10 @@
 
 mod author;
 mod catalog;
+mod language;
 mod search;
 
 pub use author::{AuthorName, AuthorNameError, AuthorNameMatchKey};
 pub use catalog::*;
+pub use language::CatalogLanguageFilter;
 pub use search::{normalize_search_text, normalized_substring_match};

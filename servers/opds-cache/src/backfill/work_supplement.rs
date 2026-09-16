@@ -1,10 +1,10 @@
 use super::super::{
-    catalog_metadata_match, BackfillBatchMetrics, CatalogCache, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogProcess, CatalogService, CatalogServiceError, HashSet, Instant, Ordering, StatusCode,
-    METADATA_BACKFILL_BATCH_SIZE,
+    catalog_metadata_match, BackfillBatchMetrics, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogProcess, CatalogService, CatalogServiceError, CatalogStore, HashSet, Instant, Ordering, StatusCode,
+    DESCRIPTION_BACKFILL_MAX_JOBS_PER_PASS, METADATA_BACKFILL_BATCH_SIZE,
 };
 impl CatalogService {
     pub(crate) async fn resume_description_backfill(&self) {
-        if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+        if !self.process_enabled(CatalogProcess::Enrichment) {
             return;
         }
         match self.metadata_descriptions_available().await {
@@ -20,15 +20,16 @@ impl CatalogService {
                 return;
             }
         }
-        if !self.schedule_backfill("description_backfill_schedule", "could not schedule catalogue description backfill", CatalogCache::schedule_description_backfill).await {
+        if !self.schedule_backfill("description_backfill_schedule", "could not schedule catalogue description backfill", CatalogStore::schedule_description_backfill).await {
             return;
         }
+        let mut processed = 0;
         loop {
-            if !self.process_enabled(CatalogProcess::CatalogueEnrichment) {
+            if !self.process_enabled(CatalogProcess::Enrichment) {
                 return;
             }
             let claim_started = Instant::now();
-            let jobs = match self.cache_write_call_named("description_backfill_claim", |cache| cache.claim_description_backfill_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
+            let jobs = match self.store_write_call_named("description_backfill_claim", |cache| cache.claim_description_backfill_batch(METADATA_BACKFILL_BATCH_SIZE)).await {
                 Ok(jobs) if jobs.is_empty() => return,
                 Ok(jobs) => jobs,
                 Err(error) => {
@@ -37,16 +38,17 @@ impl CatalogService {
                 }
             };
             let batch_metrics = BackfillBatchMetrics::begin(&self.state.description_backfill_metrics, jobs.len(), claim_started.elapsed());
+            processed += jobs.len();
             let enrich_started = Instant::now();
             match self.enrich_description_batch(&jobs).await {
                 Ok(updates) => {
                     batch_metrics.record_enrichment(enrich_started.elapsed());
-                    if let Err(error) = self.cache_write_call_named("description_backfill_finish", move |cache| cache.finish_description_backfill_batch(&updates)).await {
+                    if let Err(error) = self.store_write_call_named("description_backfill_finish", move |cache| cache.finish_description_backfill_batch(&updates)).await {
                         batch_metrics.record_failure();
                         tracing::warn!(%error, "could not commit catalogue description backfill batch");
                         let release = jobs.clone();
                         let message = error.to_string();
-                        let _ = self.cache_write_call(move |cache| cache.release_description_backfill_batch(&release, &message)).await;
+                        let _ = self.store_write_call(move |cache| cache.release_description_backfill_batch(&release, &message)).await;
                         return;
                     }
                 }
@@ -56,11 +58,14 @@ impl CatalogService {
                     tracing::warn!(%error, "catalogue description backfill lookup failed; recording and continuing");
                     let release = jobs.clone();
                     let message = error.to_string();
-                    if let Err(release_error) = self.cache_write_call(move |cache| cache.release_description_backfill_batch(&release, &message)).await {
+                    if let Err(release_error) = self.store_write_call(move |cache| cache.release_description_backfill_batch(&release, &message)).await {
                         tracing::warn!(%release_error, "could not record catalogue description backfill failure");
                         return;
                     }
                 }
+            }
+            if processed >= DESCRIPTION_BACKFILL_MAX_JOBS_PER_PASS {
+                return;
             }
         }
     }
@@ -95,6 +100,7 @@ impl CatalogService {
                     description: matched.description,
                     subjects: matched.subjects,
                     open_library_description_missing,
+                    attempt: job.attempt,
                 }
             })
             .collect())

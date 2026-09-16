@@ -5,8 +5,7 @@ impl CatalogService {
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_enabled.load(Ordering::Relaxed),
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_enabled.load(Ordering::Relaxed),
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_enabled.load(Ordering::Relaxed),
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_enabled.load(Ordering::Relaxed),
+            CatalogProcess::Enrichment => self.state.processes.enrichment_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -14,8 +13,13 @@ impl CatalogService {
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_running.store(running, Ordering::Relaxed),
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_running.store(running, Ordering::Relaxed),
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_running.store(running, Ordering::Relaxed),
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_running.store(running, Ordering::Relaxed),
+            CatalogProcess::Enrichment => {
+                if running {
+                    self.state.processes.enrichment_running.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ = self.state.processes.enrichment_running.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| Some(count.saturating_sub(1)));
+                }
+            }
         }
     }
 
@@ -23,8 +27,7 @@ impl CatalogService {
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_running.load(Ordering::Relaxed),
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_running.load(Ordering::Relaxed),
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_running.load(Ordering::Relaxed),
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_running.load(Ordering::Relaxed),
+            CatalogProcess::Enrichment => self.state.processes.enrichment_running.load(Ordering::Relaxed) != 0,
         }
     }
 
@@ -32,8 +35,7 @@ impl CatalogService {
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_notify.notified().await,
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_notify.notified().await,
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_notify.notified().await,
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_notify.notified().await,
+            CatalogProcess::Enrichment => self.state.processes.enrichment_notify.notified().await,
         }
     }
 
@@ -41,8 +43,7 @@ impl CatalogService {
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_notify.notify_one(),
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_notify.notify_one(),
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_notify.notify_one(),
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_notify.notify_one(),
+            CatalogProcess::Enrichment => self.state.processes.enrichment_notify.notify_waiters(),
         }
     }
 
@@ -65,7 +66,15 @@ impl CatalogService {
                     return Err(CatalogServiceError("resume the catalogue process before requesting a run".to_owned()));
                 }
                 if process == CatalogProcess::CoverDownloads {
-                    self.cache_write_call_named("cover_retry", |cache| cache.retry_failed_cover_downloads()).await?;
+                    // Retrying failed rows is maintenance work. Do not make
+                    // the administrator wait behind a long crawl/index write
+                    // just to wake an already-enabled worker.
+                    let service = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = service.store_write_call_named("cover_retry", |cache| cache.retry_failed_cover_downloads()).await {
+                            tracing::warn!(%error, "could not schedule failed cover retries");
+                        }
+                    });
                 }
                 self.wake_process(process);
             }
@@ -75,14 +84,29 @@ impl CatalogService {
 
     async fn set_process_enabled(&self, process: CatalogProcess, enabled: bool) -> Result<(), CatalogServiceError> {
         let key = process.storage_key();
-        self.cache_write_call_named("process_control", move |cache| cache.set_process_enabled(key, enabled)).await?;
+        // Apply the volatile control state first. Persisting the preference
+        // is deliberately asynchronous: an admin pause/resume must not wait
+        // behind a long-running catalogue writer transaction.
         match process {
             CatalogProcess::CatalogueCrawling => self.state.processes.catalogue_crawling_enabled.store(enabled, Ordering::Relaxed),
             CatalogProcess::CoverDownloads => self.state.processes.cover_downloads_enabled.store(enabled, Ordering::Relaxed),
-            CatalogProcess::EpubEnrichment => self.state.processes.epub_enrichment_enabled.store(enabled, Ordering::Relaxed),
-            CatalogProcess::CatalogueEnrichment => self.state.processes.catalogue_enrichment_enabled.store(enabled, Ordering::Relaxed),
+            CatalogProcess::Enrichment => self.state.processes.enrichment_enabled.store(enabled, Ordering::Relaxed),
         }
         self.wake_process(process);
+        let service = self.clone();
+        let persist = async move { service.store_write_call_named("process_control", move |cache| cache.set_process_enabled(key, enabled)).await };
+        match tokio::time::timeout(std::time::Duration::from_millis(250), persist).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                let service = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = service.store_write_call_named("process_control", move |cache| cache.set_process_enabled(key, enabled)).await {
+                        tracing::warn!(process = key, %error, "could not persist catalogue process control state");
+                    }
+                });
+            }
+        }
         Ok(())
     }
 }

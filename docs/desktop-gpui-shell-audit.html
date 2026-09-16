@@ -167,7 +167,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">3</span><div><h3>Quit flushes only one persistence producer</h3></div><span class="severity medium">Medium</span></div>
           <p>The app-quit callback synchronously flushes <code>SessionSaveScheduler</code>. Reader positions deliberately wait 250 ms before dispatching, annotation mutations have their own channel, and audiobook positions have another debounced channel. Those producers expose no drain contract to the application shell.</p>
-          <a class="source" href="../apps/desktop-gpui/src/lib.rs">lib.rs:472–477</a> · <a class="source" href="../apps/ui/gpui/reader/src/shell/persistence.rs">reader persistence</a>
+          <a class="source" href="../apps/desktop-gpui/src/lib.rs">lib.rs:472–477</a> · <a class="source" href="../apps/reader/src/shell/persistence.rs">reader persistence</a>
           <div class="ownership" aria-label="Shutdown persistence diagram">
             <div class="node"><code>UiSession</code><small>Deadline cleared; newest snapshot dispatched and awaited.</small></div>
             <div class="arrow">✓</div>
@@ -187,7 +187,7 @@
         <article class="finding">
           <div class="finding-head"><span class="number">4</span><div><h3>Automatic update state lives outside GPUI’s graph</h3></div><span class="severity medium">Medium</span></div>
           <p><code>DesktopUpdater</code> stores <code>available_update</code> in an <code>Rc&lt;RefCell&lt;_&gt;&gt;</code>. The startup task mutates that cell without notifying an entity. <code>SettingsPage</code> only copies it when constructed, so an already-open page cannot observe the automatic result.</p>
-          <a class="source" href="../apps/desktop-gpui/src/update_notice.rs">update_notice.rs:11–36</a> · <a class="source" href="../apps/ui/gpui/browser/src/services/app.rs">services/app.rs:26–62</a>
+          <a class="source" href="../apps/desktop-gpui/src/update_notice.rs">update_notice.rs:11–36</a> · <a class="source" href="../apps/browser/src/services/app.rs">services/app.rs:26–62</a>
           <h4 class="replacement-label">Replace with</h4>
           <table class="matrix">
             <thead><tr><th>Concern</th><th>Best representation</th><th>Reason</th></tr></thead>

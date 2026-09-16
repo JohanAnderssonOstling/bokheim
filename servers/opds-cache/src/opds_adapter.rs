@@ -1,4 +1,4 @@
-use catalog_core::CatalogProviderError;
+use crate::CatalogServiceError;
 use catalog_model::*;
 use opds::*;
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ pub fn opds_source(endpoint: &OpdsEndpoint) -> catalog_model::CatalogSource {
         description: endpoint.description.clone(),
         languages: endpoint.languages.clone(),
         authentication: CatalogAuthentication::None,
-        capabilities: vec![CatalogCapability::Browse, CatalogCapability::Search, CatalogCapability::Facets, CatalogCapability::Import, CatalogCapability::ExternalFulfillment],
+        capabilities: vec![CatalogCapability::Browse, CatalogCapability::Search, CatalogCapability::Facets, CatalogCapability::Import],
     }
 }
 
@@ -20,32 +20,26 @@ pub fn opds_catalog_source_id(endpoint_id: &OpdsEndpointId) -> CatalogSourceId {
     CatalogSourceId::parse(&format!("{OPDS_SOURCE_PREFIX}{}", endpoint_id.as_str())).expect("namespaced OPDS endpoint id is a catalog source id")
 }
 
-#[doc(hidden)]
-pub fn opds_endpoint_id(source_id: &CatalogSourceId) -> Result<OpdsEndpointId, CatalogProviderError> {
-    let value = source_id.as_str().strip_prefix(OPDS_SOURCE_PREFIX).ok_or_else(|| CatalogProviderError::new("catalog source does not belong to the OPDS provider"))?;
-    OpdsEndpointId::parse(value).map_err(|error| CatalogProviderError::new(error.to_string()))
-}
-
-pub fn canonicalize_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<String, CatalogProviderError> {
-    let expected = url::Url::parse(&endpoint.url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-    let mut actual = url::Url::parse(locator).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+pub fn canonicalize_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<String, CatalogServiceError> {
+    let expected = url::Url::parse(&endpoint.url).map_err(|error| CatalogServiceError(error.to_string()))?;
+    let mut actual = url::Url::parse(locator).map_err(|error| CatalogServiceError(error.to_string()))?;
     if !matches!(actual.scheme(), "http" | "https") || !actual.username().is_empty() || actual.password().is_some() {
-        return Err(CatalogProviderError::new("catalog page locator must be an HTTP URL without embedded credentials"));
+        return Err(CatalogServiceError("catalog page locator must be an HTTP URL without embedded credentials".to_owned()));
     }
     // OpenEdition is served over HTTPS but currently publishes absolute HTTP
     // links back to its own OPDS host. Preserve the origin boundary while
     // refusing to follow that downgrade.
     if expected.scheme() == "https" && actual.scheme() == "http" && expected.host_str() == actual.host_str() && expected.port_or_known_default() == Some(443) && actual.port_or_known_default() == Some(80) {
-        actual.set_scheme("https").map_err(|()| CatalogProviderError::new("could not upgrade the OPDS catalog locator to HTTPS"))?;
-        actual.set_port(expected.port()).map_err(|()| CatalogProviderError::new("could not restore the registered OPDS HTTPS port"))?;
+        actual.set_scheme("https").map_err(|()| CatalogServiceError("could not upgrade the OPDS catalog locator to HTTPS".to_owned()))?;
+        actual.set_port(expected.port()).map_err(|()| CatalogServiceError("could not restore the registered OPDS HTTPS port".to_owned()))?;
     }
     if actual.origin() != expected.origin() {
-        return Err(CatalogProviderError::new("catalog page locator does not belong to the registered OPDS origin"));
+        return Err(CatalogServiceError("catalog page locator does not belong to the registered OPDS origin".to_owned()));
     }
     Ok(actual.into())
 }
 
-pub fn validate_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<(), CatalogProviderError> {
+pub fn validate_opds_catalog_locator(endpoint: &OpdsEndpoint, locator: &str) -> Result<(), CatalogServiceError> {
     canonicalize_opds_catalog_locator(endpoint, locator).map(|_| ())
 }
 
@@ -73,7 +67,6 @@ pub fn opds_page(source_id: CatalogSourceId, catalog: OpdsCatalog) -> CatalogPag
             items_per_page: catalog.pagination.items_per_page,
             current_page: catalog.pagination.current_page,
         },
-        search: catalog.search.map(opds_search),
     };
     if project_gutenberg {
         canonicalize_gutenberg_page(&mut page);
@@ -113,7 +106,7 @@ fn prefer_illustrated_gutenberg_editions(publications: &mut Vec<CatalogPublicati
 
 fn gutenberg_edition_has_images(publication: &CatalogPublication) -> bool {
     publication.actions.iter().any(|action| {
-        let CatalogPublicationAction::Import { request } = action else { return false };
+        let CatalogPublicationAction::Import { request } = action;
         let download_url = request.download_url.to_ascii_lowercase();
         download_url.contains(".images") && !download_url.contains(".noimages")
     })
@@ -142,32 +135,21 @@ fn project_gutenberg_download_count(publication: &CatalogPublication) -> Option<
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
-pub fn opds_search_definition(search: &CatalogSearch) -> Result<OpdsSearch, CatalogProviderError> {
-    match &search.definition {
-        CatalogSearchDefinition::OpdsUriTemplate { base_url, template } => Ok(OpdsSearch::UriTemplate { base_url: base_url.clone(), template: template.clone() }),
-        CatalogSearchDefinition::OpdsOpenSearchDescription { url } => Ok(OpdsSearch::OpenSearchDescription { url: url.clone() }),
-    }
-}
-
-pub fn opds_search_query(query: CatalogSearchQuery) -> OpdsSearchQuery {
-    OpdsSearchQuery { query: query.query, title: query.title, author: query.author }
-}
-
 /// Revalidates a client-selected catalogue acquisition against a freshly
 /// fetched OPDS page. Callers must separately validate that `catalog` belongs
 /// to the registered endpoint before invoking this helper.
-pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsPublicationIdentity, OpdsDirectAcquisition), CatalogProviderError> {
+pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsPublicationIdentity, OpdsDirectAcquisition), CatalogServiceError> {
     let requested_identity = OpdsPublicationIdentity { publication_id: request.publication.edition_id.clone(), work_id: request.publication.work_id.clone() };
-    requested_identity.validate().map_err(|error| CatalogProviderError::new(error.to_string()))?;
+    requested_identity.validate().map_err(|error| CatalogServiceError(error.to_string()))?;
     if catalog.source_url != request.catalog_locator {
-        return Err(CatalogProviderError::new("catalog import does not belong to the verified catalog page"));
+        return Err(CatalogServiceError("catalog import does not belong to the verified catalog page".to_owned()));
     }
     let publication = catalog
         .publications
         .iter()
         .chain(catalog.groups.iter().flat_map(|group| group.publications.iter()))
         .find(|publication| publication.id == requested_identity.publication_id && publication.work_id == requested_identity.work_id)
-        .ok_or_else(|| CatalogProviderError::new("catalog publication is not present on the verified catalog page"))?;
+        .ok_or_else(|| CatalogServiceError("catalog publication is not present on the verified catalog page".to_owned()))?;
     let requested_format = opds_book_format(request.book_format);
     let acquisition = publication
         .acquisitions
@@ -180,7 +162,7 @@ pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatal
             }
             _ => None,
         })
-        .ok_or_else(|| CatalogProviderError::new("catalog acquisition is not an importable link on the verified catalog page"))?;
+        .ok_or_else(|| CatalogServiceError("catalog acquisition is not an importable link on the verified catalog page".to_owned()))?;
     Ok((requested_identity, acquisition))
 }
 
@@ -191,19 +173,6 @@ fn opds_book_format(format: CatalogBookFormat) -> OpdsBookFormat {
         CatalogBookFormat::Mobi => OpdsBookFormat::Mobi,
         CatalogBookFormat::M4b => OpdsBookFormat::M4b,
     }
-}
-
-#[doc(hidden)]
-pub fn search_terms(query: &CatalogSearchQuery) -> Result<String, CatalogProviderError> {
-    let terms = [Some(query.query.trim()).filter(|value| !value.is_empty()), query.title.as_deref().map(str::trim).filter(|value| !value.is_empty()), query.author.as_deref().map(str::trim).filter(|value| !value.is_empty())]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if terms.is_empty() || terms.len() > 500 || terms.chars().any(char::is_control) {
-        return Err(CatalogProviderError::new("catalog search must contain between 1 and 500 characters without control characters"));
-    }
-    Ok(terms)
 }
 
 fn catalog_link(link: OpdsCatalogLink) -> CatalogLink {
@@ -264,7 +233,6 @@ pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publ
                 import_formats.push(request.book_format);
                 true
             }
-            CatalogPublicationAction::External { .. } => true,
         })
         .collect();
     let description = publication.description.map(|description| match description {
@@ -377,44 +345,8 @@ fn opds_action(source_id: &CatalogSourceId, catalog_locator: &str, identity: &Ca
         OpdsAcquisition::Direct(acquisition) if acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) => Some(CatalogPublicationAction::Import {
             request: CatalogImportRequest { source_id: source_id.clone(), catalog_locator: catalog_locator.to_owned(), publication: identity.clone(), download_url: acquisition.url, book_format: book_format(acquisition.book_format) },
         }),
-        OpdsAcquisition::Direct(acquisition) => {
-            Some(CatalogPublicationAction::External { purpose: external_purpose(acquisition.kind), url: acquisition.url, price: acquisition.price.map(price), available_formats: vec![book_format(acquisition.book_format)] })
-        }
-        OpdsAcquisition::Indirect(acquisition) => Some(CatalogPublicationAction::External {
-            purpose: external_purpose(acquisition.kind),
-            url: acquisition.url,
-            price: acquisition.price.map(price),
-            available_formats: acquisition.available_formats.into_iter().map(book_format).collect(),
-        }),
-        OpdsAcquisition::Unsupported(acquisition) => Some(CatalogPublicationAction::External { purpose: external_purpose(acquisition.kind), url: acquisition.url, price: acquisition.price.map(price), available_formats: Vec::new() }),
+        OpdsAcquisition::Direct(_) | OpdsAcquisition::Indirect(_) | OpdsAcquisition::Unsupported(_) => None,
     }
-}
-
-#[doc(hidden)]
-pub fn opds_search(search: OpdsSearch) -> CatalogSearch {
-    let mut fields = vec![CatalogSearchField::Query];
-    if let OpdsSearch::UriTemplate { template, .. } = &search {
-        if template_has_variable(template, "title") {
-            fields.push(CatalogSearchField::Title);
-        }
-        if template_has_variable(template, "author") {
-            fields.push(CatalogSearchField::Author);
-        }
-    }
-    let definition = match search {
-        OpdsSearch::UriTemplate { base_url, template } => CatalogSearchDefinition::OpdsUriTemplate { base_url, template },
-        OpdsSearch::OpenSearchDescription { url } => CatalogSearchDefinition::OpdsOpenSearchDescription { url },
-    };
-    CatalogSearch { definition, fields }
-}
-
-fn template_has_variable(template: &str, expected: &str) -> bool {
-    template
-        .split('{')
-        .skip(1)
-        .filter_map(|suffix| suffix.split_once('}').map(|(expression, _)| expression))
-        .flat_map(|expression| expression.trim_start_matches(['+', '#', '.', '/', ';', '?', '&']).split(','))
-        .any(|variable| variable.trim_end_matches(['?', '*']).split(':').next() == Some(expected))
 }
 
 fn book_format(format: OpdsBookFormat) -> CatalogBookFormat {
@@ -423,20 +355,6 @@ fn book_format(format: OpdsBookFormat) -> CatalogBookFormat {
         OpdsBookFormat::Pdf => CatalogBookFormat::Pdf,
         OpdsBookFormat::Mobi => CatalogBookFormat::Mobi,
         OpdsBookFormat::M4b => CatalogBookFormat::M4b,
-    }
-}
-
-fn price(value: OpdsPrice) -> CatalogPrice {
-    CatalogPrice { currency: value.currency, value: value.value }
-}
-
-fn external_purpose(kind: OpdsAcquisitionKind) -> CatalogExternalActionKind {
-    match kind {
-        OpdsAcquisitionKind::Preview => CatalogExternalActionKind::Preview,
-        OpdsAcquisitionKind::Buy => CatalogExternalActionKind::Buy,
-        OpdsAcquisitionKind::Borrow => CatalogExternalActionKind::Borrow,
-        OpdsAcquisitionKind::Subscribe => CatalogExternalActionKind::Subscribe,
-        OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic => CatalogExternalActionKind::Open,
     }
 }
 
@@ -450,20 +368,10 @@ mod tests {
 
     #[test]
     fn provider_routing_stays_inside_the_registered_origin() {
-        assert_eq!(opds_endpoint_id(&CatalogSourceId::parse("opds-example").unwrap()).unwrap().as_str(), "example");
-        assert!(opds_endpoint_id(&CatalogSourceId::parse("unknown").unwrap()).is_err());
         assert_eq!(canonicalize_opds_catalog_locator(&endpoint(), "http://catalog.example/page").unwrap(), "https://catalog.example/page");
         assert!(validate_opds_catalog_locator(&endpoint(), "https://attacker.example/page").is_err());
         assert!(validate_opds_catalog_locator(&endpoint(), "http://catalog.example:8080/page").is_err());
         assert!(validate_opds_catalog_locator(&endpoint(), "https://user:secret@catalog.example/page").is_err());
-    }
-
-    #[test]
-    fn search_exposes_only_template_supported_fields() {
-        let simple = opds_search(OpdsSearch::UriTemplate { base_url: "https://example.com".to_owned(), template: "search{?searchTerms}".to_owned() });
-        assert_eq!(simple.fields, vec![CatalogSearchField::Query]);
-        let advanced = opds_search(OpdsSearch::UriTemplate { base_url: "https://example.com".to_owned(), template: "search{?query,title,author}".to_owned() });
-        assert_eq!(advanced.fields, vec![CatalogSearchField::Query, CatalogSearchField::Title, CatalogSearchField::Author]);
     }
 
     #[test]

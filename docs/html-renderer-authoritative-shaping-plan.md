@@ -213,13 +213,13 @@ Desktop correctness has priority over these thresholds. A performance improvemen
 
 ## Expected file areas
 
-- `apps/renderers/html/crates/html-layout/src/shaping.rs`
-- `apps/renderers/html/crates/html-layout/src/stages.rs`
-- `apps/renderers/html/crates/html-layout/src/layout/`
-- `apps/renderers/html/crates/html-view-core/src/renderer/interaction.rs`
-- `apps/renderers/html/crates/html-view-core/src/session.rs`
-- `apps/renderers/html/crates/html-view-gpui/src/text.rs`
-- `apps/renderers/html/crates/html-view-gpui/src/paint.rs`
+- `apps/reader/crates/html/crates/html-layout/src/shaping.rs`
+- `apps/reader/crates/html/crates/html-layout/src/stages.rs`
+- `apps/reader/crates/html/crates/html-layout/src/layout/`
+- `apps/reader/crates/html/crates/html-view-core/src/renderer/interaction.rs`
+- `apps/reader/crates/html/crates/html-view-core/src/session.rs`
+- `apps/reader/crates/html/crates/html-view-gpui/src/text.rs`
+- `apps/reader/crates/html/crates/html-view-gpui/src/paint.rs`
 - Renderer typography and integration tests
 
 ## Risks
@@ -234,4 +234,3 @@ Desktop correctness has priority over these thresholds. A performance improvemen
 ## Rollout strategy
 
 Keep the current refinement path temporarily as a comparison oracle, not as the final fallback. During development, compute both paths for the corpus and report geometry differences. Switch production rendering only after the authoritative path matches. Remove the oracle and convergence code when the completion gates are met.
-

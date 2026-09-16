@@ -1,20 +1,61 @@
 use super::{
     CatalogBookFormat, CatalogDescription, CatalogEpubMetadata, CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataMatch, CatalogPublication, CatalogPublicationAction, CatalogPublicationPopularity,
-    CatalogService, CatalogServiceError, CatalogSourceId, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, HashMap, HashSet, Identifier, LookupStatus,
-    MetadataEnrichmentRequest, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, PublicationSubject, RichWorkMetadataMatch, Scheme, Scope, EPUB_COVER_KEY_PREFIX, MAX_EPUB_METADATA_PUBLICATION_BYTES,
-    MAX_MOBI_METADATA_PUBLICATION_BYTES, MAX_PDF_METADATA_PUBLICATION_BYTES,
+    CatalogService, CatalogServiceError, CatalogSourceId, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, HashMap, HashSet, LookupStatus,
+    MetadataEnrichmentRequest, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, PublicationSubject, RichWorkMetadataMatch, EPUB_COVER_KEY_PREFIX, MAX_EPUB_METADATA_PUBLICATION_BYTES, MAX_MOBI_METADATA_PUBLICATION_BYTES,
+    MAX_PDF_METADATA_PUBLICATION_BYTES,
 };
 use crate::extraction::ExtractedCatalogMetadata;
 use catalog_model::{AgeRange, Audience, CatalogContributorCredit, CatalogPublisherCredit};
 impl CatalogService {
     pub(crate) async fn enrich_saved_metadata_batch(&self, jobs: &[CatalogMetadataBackfillIndexedJob]) -> Result<Vec<CatalogMetadataBackfillIndexedUpdate>, CatalogServiceError> {
-        let isbn_groups = jobs.iter().map(|job| job.index.isbns.clone()).collect::<Vec<_>>();
+        let mut isbn_groups = jobs.iter().map(|job| job.index.isbns.clone()).collect::<Vec<_>>();
         let mut identity_results = vec![None; jobs.len()];
+
+        // Identity lookup is deliberately a batch phase after the cheap
+        // extraction barrier. This prevents one book without an ISBN from
+        // starting a remote request while other books are still being parsed.
+        if self.state.metadata_endpoint.is_some() {
+            let queries = jobs
+                .iter()
+                .enumerate()
+                .filter(|(index, job)| isbn_groups[*index].is_empty() && !job.index.title.trim().is_empty())
+                .map(|(index, job)| {
+                    let evidence = metadata_contract::identity_evidence::edition_identity_evidence(&job.index.title);
+                    (
+                        index,
+                        EditionIdentityQuery {
+                            query_id: format!("catalogue-backfill-{index}"),
+                            title: evidence.title,
+                            authors: job.index.authors.clone(),
+                            publishers: job.index.publishers.clone(),
+                            publication_year: job.index.publication_year.or(evidence.publication_year),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            for batch in queries.chunks(8) {
+                let response = self.resolve_edition_identities(EditionIdentityRequest { queries: batch.iter().map(|(_, query)| query.clone()).collect() }).await?;
+                for (index, query) in batch {
+                    if let Some(result) = response.results.iter().find(|result| result.query_id == query.query_id) {
+                        identity_results[*index] = Some(result.clone());
+                        if let Some(isbn) = result.matched.as_ref().map(|matched| matched.canonical_isbn13.clone()) {
+                            isbn_groups[*index].push(isbn);
+                        }
+                    }
+                }
+            }
+        }
 
         for index in 0..jobs.len() {
             if isbn_groups[index].is_empty() && identity_results[index].is_none() {
-                identity_results[index] =
-                    Some(metadata_contract::EditionIdentityResult { query_id: index.to_string(), status: EditionIdentityStatus::InsufficientMetadata, matched: None, candidates: Vec::new(), candidates_truncated: false });
+                identity_results[index] = Some(metadata_contract::EditionIdentityResult {
+                    catalog_subjects: None,
+                    query_id: index.to_string(),
+                    status: EditionIdentityStatus::InsufficientMetadata,
+                    matched: None,
+                    candidates: Vec::new(),
+                    candidates_truncated: false,
+                });
             }
         }
 
@@ -41,6 +82,7 @@ impl CatalogService {
                 popularity: matched.popularity,
                 index,
                 identity_result,
+                attempt: job.attempt,
             });
         }
         Ok(updates)
@@ -90,6 +132,29 @@ impl CatalogService {
         Ok((snapshot_date.unwrap_or_else(|| "unknown".to_owned()), by_isbn))
     }
 
+    #[cfg(test)]
+    pub(crate) async fn inspected_print_subjects(&self, book: &publication_model::BookMetadataState) -> Result<Vec<PublicationSubject>, CatalogServiceError> {
+        use publication_enrichment::related_isbn;
+        let printed = related_isbn::candidates(&book.publication.properties);
+        if printed.is_empty() || self.state.metadata_endpoint.is_none() {
+            return Ok(Vec::new());
+        }
+        let query = EditionIdentityQuery { query_id: "local-print-evidence".into(), title: book.title.clone(), authors: book.authors().map(|a| a.name().to_owned()).collect(), publishers: Vec::new(), publication_year: None };
+        let identity = self.resolve_edition_identities(EditionIdentityRequest { queries: vec![query.clone()] }).await?;
+        let Some(result) = identity.results.iter().find(|r| r.query_id == query.query_id) else { return Ok(Vec::new()) };
+        let verified = related_isbn::verified_isbns(&query, &printed, result);
+        if verified.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (snapshot, records) = self.metadata_matches_by_isbn(&verified).await?;
+        if snapshot != identity.snapshot.dump_date {
+            return Err(CatalogServiceError("metadata snapshot changed during print ISBN verification".into()));
+        }
+        let codes = related_isbn::classifications(&verified, |isbn| records.get(isbn).cloned().unwrap_or_default());
+        Ok(codes.iter().filter_map(related_isbn::subject).collect())
+    }
+
+    #[cfg(test)]
     pub(crate) async fn infer_catalog_epub_isbn(&self, metadata: &mut CatalogEpubMetadata) -> Result<Option<String>, CatalogServiceError> {
         let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect::<Vec<_>>();
         let publishers = metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect::<Vec<_>>();
@@ -97,9 +162,26 @@ impl CatalogService {
         if metadata.book.title.trim().is_empty() {
             return Ok(None);
         }
-        let response =
-            self.resolve_edition_identities(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "catalogue-epub".to_owned(), title: metadata.book.title.clone(), authors, publishers, publication_year }] }).await?;
+        let prepared = metadata_contract::identity_evidence::edition_identity_evidence(&metadata.book.title);
+        let query = EditionIdentityQuery { query_id: "catalogue-epub".to_owned(), title: prepared.title, authors, publishers, publication_year };
+        let response = self.resolve_edition_identities(EditionIdentityRequest { queries: vec![query.clone()] }).await?;
         let Some(result) = response.results.into_iter().find(|result| result.query_id == "catalogue-epub") else { return Ok(None) };
+        let codes = metadata_contract::subject_consensus::classifications(&query, &result);
+        if !codes.is_empty() {
+            let value = serde_json::to_string(&result).map_err(|e| CatalogServiceError(e.to_string()))?;
+            if let Ok(property) = publication_model::PublicationProperty::new(None, "enrichment:edition-subject-consensus", value, None, None, None, "metadata:shared-edition-classification") {
+                if !metadata.book.publication.properties.contains(&property) {
+                    metadata.book.publication.properties.push(property);
+                }
+            }
+        }
+        for code in codes {
+            if let Ok(subject) = PublicationSubject::new(None, &code.notation, "metadata:shared-edition-classification", Some("lcc".into()), Some(code.notation.clone())) {
+                if !metadata.book.publication.subjects.contains(&subject) {
+                    metadata.book.publication.subjects.push(subject);
+                }
+            }
+        }
         if result.status != EditionIdentityStatus::Matched {
             return Ok(None);
         }
@@ -108,6 +190,7 @@ impl CatalogService {
         Ok(Some(matched.canonical_isbn13))
     }
 
+    #[cfg(test)]
     pub(crate) async fn metadata_matches(&self, isbns: &[String]) -> Result<HashMap<String, CatalogMetadataMatch>, CatalogServiceError> {
         let Some(endpoint) = &self.state.metadata_endpoint else { return Ok(HashMap::new()) };
         let mut matched_records = Vec::new();
@@ -342,13 +425,6 @@ pub(crate) fn apply_catalog_description_if_missing(publication: &mut CatalogPubl
     }
 }
 
-pub(crate) fn merge_catalog_popularity(current: &mut Option<CatalogPublicationPopularity>, candidate: &CatalogPublicationPopularity) {
-    let candidate_key = (candidate.reading_log_count(), candidate.rating_count);
-    if current.as_ref().is_none_or(|current| candidate_key > (current.reading_log_count(), current.rating_count)) {
-        *current = Some(candidate.clone());
-    }
-}
-
 pub(crate) fn catalog_metadata_match(records: Vec<&RichWorkMetadataMatch>, snapshot_date: &str) -> CatalogMetadataMatch {
     // The metadata service already applies the library client's unified
     // classification-consensus policy before serializing every match. Treat
@@ -362,7 +438,7 @@ pub(crate) fn catalog_metadata_match(records: Vec<&RichWorkMetadataMatch>, snaps
         .filter_map(|classification| {
             let authority = match classification.scheme {
                 ClassificationScheme::LibraryOfCongress => "lcc",
-                ClassificationScheme::DeweyDecimal => "ddc",
+                ClassificationScheme::DeweyDecimal => return None,
                 ClassificationScheme::Bisac => "bisac",
             };
             let provenance = match classification.source {
@@ -383,9 +459,10 @@ pub(crate) fn catalog_metadata_match(records: Vec<&RichWorkMetadataMatch>, snaps
     CatalogMetadataMatch { subjects, popularity, description: merged.description }
 }
 
+#[cfg(test)]
 pub(crate) fn add_catalog_identity_isbn(metadata: &mut CatalogEpubMetadata, canonical_isbn13: &str) -> Result<(), CatalogServiceError> {
-    let identifier = Identifier::new(canonical_isbn13, Scheme::Isbn, Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogServiceError(error.to_string()))?;
-    metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &Scheme::Isbn);
+    let identifier = publication_model::Identifier::new(canonical_isbn13, publication_model::Scheme::Isbn, publication_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogServiceError(error.to_string()))?;
+    metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &publication_model::Scheme::Isbn);
     metadata.book.publication.identifiers.push(identifier);
     Ok(())
 }

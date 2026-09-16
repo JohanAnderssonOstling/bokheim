@@ -8,7 +8,7 @@ use std::time::Instant;
 impl CatalogStore {
     /// Browses the unified server taxonomy. The locator remains opaque so
     /// taxonomy storage and hierarchy rules never leak into clients.
-    pub fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogCacheError> {
+    pub fn browse_subjects(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseResponse, CatalogStoreError> {
         let page = self.browse_subject_page(request, true)?;
         Ok(CatalogSubjectBrowseResponse {
             epoch: page.epoch,
@@ -19,53 +19,60 @@ impl CatalogStore {
         })
     }
 
-    pub fn browse_subject_index(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseIndexResponse, CatalogCacheError> {
+    pub fn browse_subject_index(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseIndexResponse, CatalogStoreError> {
         let page = self.browse_subject_page(request, false)?;
         let entry_ids = page.publications.iter().map(|item| item.entry_id).collect();
         Ok(CatalogSubjectBrowseIndexResponse { epoch: page.epoch, navigation: page.navigation, entry_ids, range: page.range, capabilities: page.capabilities })
     }
 
-    pub fn subject_publication_payloads(&self, request: &CatalogSubjectPublicationPayloadRequest) -> Result<CatalogSubjectPublicationPayloadResponse, CatalogCacheError> {
+    pub fn subject_publication_payloads(&self, request: &CatalogSubjectPublicationPayloadRequest) -> Result<CatalogSubjectPublicationPayloadResponse, CatalogStoreError> {
         const MAX_ENTRY_IDS: usize = 256;
         if request.entry_ids.len() > MAX_ENTRY_IDS {
-            return Err(CatalogCacheError::new("too many catalogue publication entry IDs"));
+            return Err(CatalogStoreError::new("too many catalogue publication entry IDs"));
         }
-        let connection = self.connection()?;
-        let epoch = connection.query_row("SELECT epoch FROM catalog_transport_state WHERE singleton=1", [], |row| row.get::<_, String>(0))?;
+        let projected = request.epoch.contains(":serving-v3-");
+        let mut connection = if projected { self.serving.connection()? } else { self.connection()? };
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let epoch = if projected { super::serving_projection::epoch(&transaction)? } else { catalog_transport_state(&transaction)?.0 };
         if request.epoch != epoch {
-            return Err(CatalogCacheError::new("catalogue publication epoch is stale"));
+            return Err(CatalogStoreError::new("catalogue publication epoch is stale"));
         }
         let entry_ids = serde_json::to_string(&request.entry_ids)?;
         let started = Instant::now();
-        let mut statement = connection.prepare(
+        let mut statement = transaction.prepare(if projected {
+            "SELECT p.entry_id,p.source_id,p.payload FROM json_each(?1) requested
+             JOIN catalog_publication p ON p.entry_id=requested.value ORDER BY requested.key"
+        } else {
             "SELECT p.entry_id,p.source_id,p.payload
                FROM json_each(?1) requested
                JOIN catalog_publication p ON p.entry_id=requested.value
                JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
               WHERE p.importable=1
-              ORDER BY requested.key",
-        )?;
+              ORDER BY requested.key"
+        })?;
         let rows = statement.query_map([entry_ids], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)))?;
         let mut payloads = Vec::with_capacity(request.entry_ids.len());
         for row in rows {
             let (entry_id, source_id, payload) = row?;
             payloads.push(CatalogSubjectBrowseEntryPayload {
                 entry_id: stored_u64(entry_id, "subject publication entry ID")?,
-                publication: CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source_id).map_err(CatalogCacheError::new)?, publication: decode_cached(&payload)? },
+                publication: CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source_id).map_err(CatalogStoreError::new)?, publication: decode_cached(&payload)? },
             });
         }
         tracing::info!(requested = request.entry_ids.len(), returned = payloads.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject payloads loaded");
         Ok(CatalogSubjectPublicationPayloadResponse { epoch, payloads })
     }
 
-    fn browse_subject_page(&self, request: &CatalogSubjectBrowseRequest, include_payloads: bool) -> Result<SubjectBrowsePage, CatalogCacheError> {
+    fn browse_subject_page(&self, request: &CatalogSubjectBrowseRequest, include_payloads: bool) -> Result<SubjectBrowsePage, CatalogStoreError> {
         let prepared = PreparedSubjectBrowse::new(request)?;
-        let mut connection = self.connection()?;
+        let serving = self.serving.connection()?;
+        let projected = super::serving_projection::ready(&serving)?;
+        let mut connection = if projected { serving } else { drop(serving); self.connection()? };
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let (epoch, _revision) = catalog_transport_state(&transaction)?;
+        let epoch = if projected { super::serving_projection::epoch(&transaction)? } else { catalog_transport_state(&transaction)?.0 };
         let system_id = prepared.location.system_id.as_deref().expect("subject system checked above");
         if !browse_subject_system(system_id) {
-            return Err(CatalogCacheError::new("unsupported catalogue subject system"));
+            return Err(CatalogStoreError::new("unsupported catalogue subject system"));
         }
         let query = prepared.query();
         let started = Instant::now();
@@ -75,7 +82,7 @@ impl CatalogStore {
         let navigation = load_subject_navigation(&transaction, &query)?;
         tracing::info!(elapsed_ms = started.elapsed().as_millis(), "catalogue subject navigation loaded");
         let results = load_subject_publications(&transaction, &query, include_payloads)?;
-        let range = subject_range(prepared.offset, results.publications.len(), results.total);
+        let range = subject_range(prepared.offset, results.publications.len(), results.has_more);
         transaction.commit()?;
         Ok(SubjectBrowsePage { epoch, navigation, publications: results.publications, range, capabilities })
     }
@@ -137,7 +144,7 @@ const SUBJECT_FORMAT_FILTER: &str = "(json_array_length(?6)=0 OR EXISTS(
 
 pub(super) struct CatalogSubjectPublicationPage {
     pub publications: Vec<CatalogSequencedSubjectPublication>,
-    pub total: usize,
+    pub has_more: bool,
 }
 
 pub(super) struct CatalogSequencedSubjectPublication {
@@ -169,20 +176,20 @@ struct PreparedSubjectBrowse {
 }
 
 impl PreparedSubjectBrowse {
-    fn new(request: &CatalogSubjectBrowseRequest) -> Result<Self, CatalogCacheError> {
+    fn new(request: &CatalogSubjectBrowseRequest) -> Result<Self, CatalogStoreError> {
         const MAX_RESULTS: usize = 100;
         const MAX_SOURCE_FILTERS: usize = 256;
         const MAX_FORMAT_FILTERS: usize = 7;
         if request.source_ids.len() > MAX_SOURCE_FILTERS {
-            return Err(CatalogCacheError::new("too many catalogue source filters"));
+            return Err(CatalogStoreError::new("too many catalogue source filters"));
         }
         if request.book_formats.len() > MAX_FORMAT_FILTERS {
-            return Err(CatalogCacheError::new("too many catalogue format filters"));
+            return Err(CatalogStoreError::new("too many catalogue format filters"));
         }
         let location = request.locator.as_deref().map(parse_subject_locator).transpose()?.unwrap_or_else(|| SubjectBrowseLocation { system_id: Some(subject_projection::UNIFIED_SYSTEM_ID.to_owned()), subject_path: None });
         let system_id = location.system_id.as_deref().expect("subject system checked above");
         if !browse_subject_system(system_id) {
-            return Err(CatalogCacheError::new("unsupported catalogue subject system"));
+            return Err(CatalogStoreError::new("unsupported catalogue subject system"));
         }
         let mut book_formats = request.book_formats.iter().copied().map(book_format_storage).collect::<Vec<_>>();
         book_formats.sort_unstable();
@@ -214,20 +221,32 @@ impl PreparedSubjectBrowse {
     }
 }
 
-fn catalog_transport_state(connection: &Connection) -> Result<(String, u64), CatalogCacheError> {
+fn catalog_transport_state(connection: &Connection) -> Result<(String, u64), CatalogStoreError> {
     connection.query_row("SELECT epoch,revision FROM catalog_transport_state WHERE singleton=1", [], |row| Ok((row.get(0)?, stored_u64(row.get(1)?, "catalog transport revision")?))).map_err(Into::into)
 }
 
-fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>) -> Result<Vec<CatalogLink>, CatalogCacheError> {
+fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>) -> Result<Vec<CatalogLink>, CatalogStoreError> {
     let source_filter = SUBJECT_SOURCE_FILTER;
     let language_filter = SUBJECT_LANGUAGE_FILTER;
     let format_filter = SUBJECT_FORMAT_FILTER;
     let mut navigation = Vec::new();
     if query.normalized_query.is_empty() {
+        if let Some(rows) = super::serving_queries::load_navigation_if_ready(connection, query)? {
+            return Ok(rows
+                .into_iter()
+                .map(|(title, child_path)| CatalogLink {
+                    title,
+                    target: CatalogLinkTarget::Page { locator: subject_locator(&SubjectBrowseLocation { system_id: Some(query.system_id.to_owned()), subject_path: Some(child_path) }) },
+                    relations: Vec::new(),
+                    number_of_items: None,
+                    active: false,
+                })
+                .collect());
+        }
         let materialized = subject_browse_index_ready(connection)?;
         let sql = if materialized {
             format!(
-                "SELECT node.title,node.node_path,COUNT(*)
+                "SELECT DISTINCT node.title,node.node_path
                    FROM catalog_subject_node node
                    JOIN catalog_publication_subject_node membership
                      ON membership.system_id=node.system_id AND membership.node_path=node.node_path
@@ -237,14 +256,12 @@ fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowse
                   WHERE node.system_id=?1 AND node.parent_path=?2 AND p.importable=1
                     AND {SUBJECT_CANONICAL_EDITION_FILTER}
                     AND {source_filter} AND {language_filter} AND {format_filter}
-                  GROUP BY node.system_id,node.node_path,node.title
                   ORDER BY node.title"
             )
         } else {
             format!(
                 "WITH scoped AS (
-                    SELECT CASE WHEN ?2='' THEN assignment.subject_path ELSE substr(assignment.subject_path,length(?2)+4) END AS remainder,
-                           p.source_id || char(31) || p.edition_id || char(31) || p.work_id AS publication_key
+                    SELECT CASE WHEN ?2='' THEN assignment.subject_path ELSE substr(assignment.subject_path,length(?2)+4) END AS remainder
                       FROM catalog_publication_subject_assignment assignment
                       JOIN catalog_source s ON s.source_id=assignment.source_id AND s.active_generation=assignment.generation
                       JOIN catalog_publication p ON p.source_id=assignment.source_id AND p.generation=assignment.generation
@@ -254,24 +271,22 @@ fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowse
                        AND {SUBJECT_CANONICAL_EDITION_FILTER}
                        AND {source_filter} AND {language_filter} AND {format_filter}
                  ), children AS (
-                    SELECT CASE WHEN instr(remainder,' / ')>0 THEN substr(remainder,1,instr(remainder,' / ')-1) ELSE remainder END AS title,
-                           publication_key FROM scoped WHERE remainder!=''
+                    SELECT CASE WHEN instr(remainder,' / ')>0 THEN substr(remainder,1,instr(remainder,' / ')-1) ELSE remainder END AS title FROM scoped WHERE remainder!=''
                  )
-                 SELECT title,CASE WHEN ?2='' THEN title ELSE ?2 || ' / ' || title END,COUNT(DISTINCT publication_key)
-                   FROM children WHERE title!='' GROUP BY title ORDER BY title"
+                 SELECT DISTINCT title,CASE WHEN ?2='' THEN title ELSE ?2 || ' / ' || title END
+                   FROM children WHERE title!='' ORDER BY title"
             )
         };
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params![query.system_id, query.subject_path, query.normalized_query, query.source_ids, query.supported_languages, query.book_formats], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
-        })?;
+        let rows =
+            statement.query_map(params![query.system_id, query.subject_path, query.normalized_query, query.source_ids, query.supported_languages, query.book_formats], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
         for row in rows {
-            let (title, child_path, count) = row?;
+            let (title, child_path) = row?;
             navigation.push(CatalogLink {
                 title,
                 target: CatalogLinkTarget::Page { locator: subject_locator(&SubjectBrowseLocation { system_id: Some(query.system_id.to_owned()), subject_path: Some(child_path) }) },
                 relations: Vec::new(),
-                number_of_items: Some(u32::try_from(stored_u64(count, "subject publication count")?).unwrap_or(u32::MAX)),
+                number_of_items: None,
                 active: false,
             });
         }
@@ -280,16 +295,11 @@ fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowse
     Ok(navigation)
 }
 
-fn subject_browse_index_ready(connection: &Connection) -> Result<bool, CatalogCacheError> {
+fn subject_browse_index_ready(connection: &Connection) -> Result<bool, CatalogStoreError> {
     connection.query_row("SELECT EXISTS(SELECT 1 FROM catalog_subject_browse_index_metadata WHERE singleton=1 AND index_version=?1)", [CATALOG_SUBJECT_BROWSE_INDEX_VERSION], |row| row.get(0)).map_err(Into::into)
 }
 
 struct SubjectPublicationQuery {
-    sql: String,
-    search_parameter: String,
-}
-
-struct SubjectPublicationCountQuery {
     sql: String,
     search_parameter: String,
 }
@@ -301,15 +311,15 @@ struct SubjectScopeQuery {
     search_parameter: String,
 }
 
-fn build_subject_scope_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<SubjectScopeQuery, CatalogCacheError> {
+fn build_subject_scope_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<SubjectScopeQuery, CatalogStoreError> {
     let source_filter = SUBJECT_SOURCE_FILTER;
     let query_length = normalized_query.chars().count();
     let search_index_ready = connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get::<_, bool>(0))?;
     if query_length >= 3 && !search_index_ready {
-        return Err(CatalogCacheError::new("catalogue search index is warming"));
+        return Err(CatalogStoreError::new("catalogue search index is warming"));
     }
     if !normalized_query.is_empty() && query_length < 3 {
-        return Err(CatalogCacheError::new("catalogue search requires at least three characters"));
+        return Err(CatalogStoreError::new("catalogue search requires at least three characters"));
     }
     let use_search_index = query_length >= 3 && search_index_ready;
     // Quoting makes the normalized text a literal FTS phrase instead of
@@ -421,11 +431,9 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
     Ok(SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter })
 }
 
-fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogCacheError> {
-    if !query.normalized_query.is_empty() {
-        if let Some(capabilities) = super::serving_queries::load_capabilities_if_ready(connection, query, selected_formats, selected_languages)? {
-            return Ok(capabilities);
-        }
+fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogStoreError> {
+    if let Some(capabilities) = super::serving_queries::load_capabilities_if_ready(connection, query, selected_formats, selected_languages)? {
+        return Ok(capabilities);
     }
     let (format_sql, search_parameter) = build_subject_format_capability_query(connection, query.normalized_query, query.subject_path)?;
     let mut statement = connection.prepare(&format_sql)?;
@@ -456,7 +464,7 @@ fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrow
             let (value, count) = row?;
             Ok(CatalogLanguageFacetValue { value, number_of_items: u32::try_from(stored_u64(count, "catalogue language facet count")?).unwrap_or(u32::MAX) })
         })
-        .collect::<Result<Vec<_>, CatalogCacheError>>()?;
+        .collect::<Result<Vec<_>, CatalogStoreError>>()?;
     for selected in selected_languages {
         let value = selected.split('-').next().unwrap_or(selected).to_ascii_lowercase();
         if !value.is_empty() && !languages.iter().any(|language| language.value == value) {
@@ -468,7 +476,7 @@ fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrow
     Ok(CatalogSubjectBrowseCapabilities { sorts: CatalogSubjectSort::ALL.to_vec(), book_formats, languages })
 }
 
-fn build_subject_format_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogCacheError> {
+fn build_subject_format_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogStoreError> {
     let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let sql = format!(
         "{matching_publications}
@@ -485,7 +493,7 @@ fn build_subject_format_capability_query(connection: &Connection, normalized_que
     Ok((sql, search_parameter))
 }
 
-fn build_subject_language_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogCacheError> {
+fn build_subject_language_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogStoreError> {
     let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let sql = format!(
         "{matching_publications}
@@ -503,7 +511,7 @@ fn build_subject_language_capability_query(connection: &Connection, normalized_q
     Ok((sql, search_parameter))
 }
 
-fn build_subject_publication_query(connection: &Connection, normalized_query: &str, subject_path: &str, sort: CatalogSubjectSort, include_payloads: bool) -> Result<SubjectPublicationQuery, CatalogCacheError> {
+fn build_subject_publication_query(connection: &Connection, normalized_query: &str, subject_path: &str, sort: CatalogSubjectSort, include_payloads: bool) -> Result<SubjectPublicationQuery, CatalogStoreError> {
     let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let ordering = match sort {
         CatalogSubjectSort::Popularity => {
@@ -530,32 +538,12 @@ fn build_subject_publication_query(connection: &Connection, normalized_query: &s
     Ok(SubjectPublicationQuery { sql, search_parameter })
 }
 
-fn build_subject_publication_count_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<SubjectPublicationCountQuery, CatalogCacheError> {
-    let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
-    let sql = format!(
-        "{matching_publications}
-         SELECT COUNT(*)
-           {from_clause}
-           JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
-          WHERE p.importable=1 AND {SUBJECT_CANONICAL_EDITION_FILTER} AND {SUBJECT_SOURCE_FILTER} AND {SUBJECT_LANGUAGE_FILTER} AND {SUBJECT_FORMAT_FILTER}
-            AND {subject_filter}"
-    );
-    Ok(SubjectPublicationCountQuery { sql, search_parameter })
-}
-
-fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogCacheError> {
+fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogStoreError> {
     let mut publications = Vec::new();
     if !browse.normalized_query.is_empty() || !browse.subject_path.is_empty() {
-        if !browse.normalized_query.is_empty() {
-            if let Some(page) = super::serving_queries::load_publications_if_ready(connection, browse, include_payloads)? {
-                return Ok(page);
-            }
+        if let Some(page) = super::serving_queries::load_publications_if_ready(connection, browse, include_payloads)? {
+            return Ok(page);
         }
-        let count = build_subject_publication_count_query(connection, browse.normalized_query, browse.subject_path)?;
-        let count_started = Instant::now();
-        let total = connection.query_row(&count.sql, params![browse.system_id, browse.subject_path, count.search_parameter, browse.source_ids, browse.supported_languages, browse.book_formats], |row| row.get::<_, i64>(0))?;
-        let total = usize::try_from(stored_u64(total, "subject result count")?).unwrap_or(usize::MAX);
-        tracing::info!(total, elapsed_ms = count_started.elapsed().as_millis(), "catalogue subject result count loaded");
         let query = build_subject_publication_query(connection, browse.normalized_query, browse.subject_path, browse.sort, include_payloads)?;
         let page_started = Instant::now();
         let mut statement = connection.prepare(&query.sql)?;
@@ -566,7 +554,7 @@ fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBro
             browse.source_ids,
             browse.supported_languages,
             browse.book_formats,
-            storage_i64(browse.limit as u64, "subject result limit")?,
+            storage_i64(browse.limit.saturating_add(1) as u64, "subject result limit")?,
             storage_i64(browse.offset as u64, "subject result offset")?
         ];
         if include_payloads {
@@ -575,7 +563,7 @@ fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBro
                 let (source, payload, entry_id) = row?;
                 let publication = decode_cached(&payload)?;
                 publications.push(CatalogSequencedSubjectPublication {
-                    item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogCacheError::new)?, publication }),
+                    item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, publication }),
                     entry_id: stored_u64(entry_id, "subject publication entry ID")?,
                 });
             }
@@ -585,14 +573,16 @@ fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBro
                 publications.push(CatalogSequencedSubjectPublication { item: None, entry_id: stored_u64(row?, "subject publication entry ID")? });
             }
         }
-        tracing::info!(include_payloads, returned = publications.len(), elapsed_ms = page_started.elapsed().as_millis(), "catalogue subject result page loaded");
-        return Ok(CatalogSubjectPublicationPage { publications, total });
+        let has_more = publications.len() > browse.limit;
+        publications.truncate(browse.limit);
+        tracing::info!(include_payloads, has_more, returned = publications.len(), elapsed_ms = page_started.elapsed().as_millis(), "catalogue subject result page loaded");
+        return Ok(CatalogSubjectPublicationPage { publications, has_more });
     }
-    Ok(CatalogSubjectPublicationPage { publications, total: 0 })
+    Ok(CatalogSubjectPublicationPage { publications, has_more: false })
 }
 
-fn subject_range(offset: usize, returned_items: usize, total_items: usize) -> CatalogResultRangeResponse {
-    CatalogResultRangeResponse { offset: u32::try_from(offset).unwrap_or(u32::MAX), returned_items: u32::try_from(returned_items).unwrap_or(u32::MAX), total_items: u32::try_from(total_items).unwrap_or(u32::MAX) }
+fn subject_range(offset: usize, returned_items: usize, has_more: bool) -> CatalogResultRangeResponse {
+    CatalogResultRangeResponse { offset: u32::try_from(offset).unwrap_or(u32::MAX), returned_items: u32::try_from(returned_items).unwrap_or(u32::MAX), has_more }
 }
 
 pub(crate) fn valid_subject_key(system_id: &str, subject_path: &str) -> bool {
@@ -628,25 +618,25 @@ pub(crate) fn subject_locator(location: &SubjectBrowseLocation) -> String {
     locator.into()
 }
 
-pub(crate) fn parse_subject_locator(locator: &str) -> Result<SubjectBrowseLocation, CatalogCacheError> {
+pub(crate) fn parse_subject_locator(locator: &str) -> Result<SubjectBrowseLocation, CatalogStoreError> {
     if locator.len() > 2_048 {
-        return Err(CatalogCacheError::new("catalogue subject locator is too long"));
+        return Err(CatalogStoreError::new("catalogue subject locator is too long"));
     }
-    let parsed = url::Url::parse(locator).map_err(|_| CatalogCacheError::new("invalid catalogue subject locator"))?;
+    let parsed = url::Url::parse(locator).map_err(|_| CatalogStoreError::new("invalid catalogue subject locator"))?;
     if parsed.scheme() != "bokheim" || parsed.path() != "subjects" || parsed.fragment().is_some() {
-        return Err(CatalogCacheError::new("invalid catalogue subject locator"));
+        return Err(CatalogStoreError::new("invalid catalogue subject locator"));
     }
     let mut location = SubjectBrowseLocation::default();
     for (key, value) in parsed.query_pairs() {
         match key.as_ref() {
             "system" if location.system_id.is_none() => location.system_id = Some(value.into_owned().to_ascii_lowercase()),
             "path" if location.subject_path.is_none() => location.subject_path = Some(value.into_owned()),
-            _ => return Err(CatalogCacheError::new("invalid catalogue subject locator")),
+            _ => return Err(CatalogStoreError::new("invalid catalogue subject locator")),
         }
     }
-    let Some(system_id) = location.system_id.as_deref() else { return Err(CatalogCacheError::new("catalogue subject locator is missing its system")) };
+    let Some(system_id) = location.system_id.as_deref() else { return Err(CatalogStoreError::new("catalogue subject locator is missing its system")) };
     if !browse_subject_system(system_id) || location.subject_path.as_deref().is_some_and(|path| !valid_subject_key(system_id, path)) {
-        return Err(CatalogCacheError::new("invalid catalogue subject locator"));
+        return Err(CatalogStoreError::new("invalid catalogue subject locator"));
     }
     Ok(location)
 }

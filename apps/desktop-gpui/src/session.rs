@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -7,7 +8,8 @@ use std::time::{Duration, Instant};
 use gpui::{App, Bounds, Pixels, point, px, size};
 use reader_ui::ReaderPreferences;
 use serde::{Deserialize, Serialize};
-use ui_runtime::BlockingWorker;
+
+use crate::blocking_worker::BlockingWorker;
 
 const SESSION_VERSION: u32 = 1;
 
@@ -80,7 +82,7 @@ impl UiSession {
         }
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
-                if let Err(error) = fs::write(path, bytes) {
+                if let Err(error) = atomic_session_write(path, |file| file.write_all(&bytes)) {
                     log::error!("failed to save GPUI session: {error}");
                 }
             }
@@ -89,6 +91,19 @@ impl UiSession {
             }
         }
     }
+}
+
+// Keep the previous session intact until all new bytes are durably written.
+// The temporary file must be adjacent so replacement stays on one filesystem.
+fn atomic_session_write(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::Builder::new().prefix(".gpui-session-").tempfile_in(parent)?;
+    write(staged.as_file_mut())?;
+    staged.as_file().sync_all()?;
+    staged.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 pub fn session_path(app_data: &Path) -> PathBuf {
@@ -183,6 +198,32 @@ impl SessionSaveScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_session_write_preserves_previous_bytes_and_cleans_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.json");
+        UiSession::default().save(&path);
+        let previous = fs::read(&path).unwrap();
+        let result = atomic_session_write(&path, |file| {
+            file.write_all(b"partial JSON")?;
+            Err(io::Error::other("simulated disk-full write failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn session_save_atomically_replaces_an_existing_session() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.json");
+        UiSession::default().save(&path);
+        let geometry = WindowGeometry { x: 1.0, y: 2.0, width: 900.0, height: 700.0 };
+        UiSession { window: Some(geometry), ..UiSession::default() }.save(&path);
+        assert_eq!(UiSession::load(&path).window, Some(geometry));
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn legacy_reader_window_geometry_migrates_to_application_window() {

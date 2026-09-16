@@ -1,3 +1,11 @@
+pub mod wikidata;
+pub use wikidata::*;
+pub mod catalog_subjects;
+pub mod matching;
+pub mod identity_evidence;
+pub mod year_consensus;
+pub mod subject_consensus;
+pub mod audible;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,7 +39,8 @@ pub struct MetadataEnrichmentRequest {
     pub isbns: Vec<String>,
 }
 
-/// Bibliographic evidence used only when a publication has no embedded ISBN.
+/// Bibliographic evidence for missing ISBNs or classification recovery after
+/// an embedded ISBN returns no catalog match.
 /// The opaque query id lets callers correlate batched results without sending
 /// a local book identifier to the metadata service.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -54,6 +63,18 @@ pub struct EditionIdentityResponse {
     pub results: Vec<EditionIdentityResult>,
 }
 
+/// A classification-only catalog match does not assert an ISBN or OL identity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CatalogSubjectMatch {
+    #[serde(default)]
+    pub main_title: String,
+    pub provider_id: String,
+    pub record_ids: Vec<String>,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub classifications: Vec<Classification>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EditionIdentityResult {
     pub query_id: String,
@@ -66,6 +87,8 @@ pub struct EditionIdentityResult {
     /// True when a common title produced too many candidates to return safely.
     #[serde(default)]
     pub candidates_truncated: bool,
+    #[serde(default)]
+    pub catalog_subjects: Option<CatalogSubjectMatch>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -91,6 +114,18 @@ pub struct EditionIdentityMatch {
     pub matched_publisher: bool,
     pub matched_publication_year: bool,
     pub classifications: Vec<Classification>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+
+}
+
+impl EditionIdentityMatch {
+    pub fn full_title(&self) -> String {
+        match self.subtitle.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(subtitle) if !matching::bibliographic_match_key(&self.title).ends_with(&matching::bibliographic_match_key(subtitle)) => format!("{}: {}", self.title, subtitle),
+            _ => self.title.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,6 +157,8 @@ pub struct RichMetadataEnrichmentResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RichIsbnMetadataResult {
+    #[serde(default)]
+    pub wikidata_books: Vec<WikidataBookEvidence>,
     pub requested_isbn: String,
     pub canonical_isbn13: Option<String>,
     pub status: LookupStatus,
@@ -180,7 +217,7 @@ impl WorkPopularity {
 pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWorkMetadataMatch>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> RichWorkMetadataMatch {
     let mut work_ids = BTreeSet::new();
     let mut edition_ids = BTreeSet::new();
-    let mut classifications = BTreeMap::<(ClassificationScheme, String), ClassificationSource>::new();
+    let mut classifications = Vec::new();
     let mut authors = BTreeMap::<(u32, String), AuthorMetadata>::new();
     let mut places = BTreeMap::<(Option<String>, String), EntitySource>::new();
     let mut people = BTreeMap::<(Option<String>, String), EntitySource>::new();
@@ -190,12 +227,10 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
     for matched in matches {
         work_ids.extend(matched.open_library_work_id.iter().cloned());
         edition_ids.extend(matched.exact_edition_ids.iter().cloned());
-        for classification in &matched.classifications {
-            classifications.entry((classification.scheme, classification.notation.clone())).and_modify(|source| *source = (*source).min(classification.source)).or_insert(classification.source);
-        }
+        classifications.extend(matched.classifications.iter().cloned());
         for author in &matched.authors {
             authors
-                .entry((author.position, author.open_library_author_id.clone()))
+                .entry((author.position, author.identity_key()))
                 .and_modify(|existing| {
                     if existing.name.is_none() {
                         existing.name = author.name.clone();
@@ -225,7 +260,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         descriptions.extend(matched.description.iter().cloned());
         subjects.extend(matched.subjects.iter().cloned());
     }
-    let classifications = filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { scheme, notation, source }), similarity_keys);
+    let classifications = filter_classification_outliers(classifications, similarity_keys);
     RichWorkMetadataMatch {
         open_library_work_id: work_ids.into_iter().next(),
         exact_edition_ids: edition_ids.into_iter().collect(),
@@ -344,6 +379,14 @@ pub struct AuthorIdentifier {
     pub value: String,
 }
 
+impl AuthorMetadata {
+    /// Wikidata-only authors have no Open Library identifier.
+    pub fn identity_key(&self) -> String {
+        if !self.open_library_author_id.is_empty() { return format!("openlibrary:{}",self.open_library_author_id); }
+        self.identifiers.iter().find(|id| id.authority=="wikidata").map(|id| format!("wikidata:{}",id.value)).unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorSource {
@@ -353,15 +396,28 @@ pub enum AuthorSource {
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Classification {
+    // Persisted with bincode: even empty fields must retain their position.
+    #[serde(default)]
+    pub evidence: Vec<ClassificationEvidence>,
     pub scheme: ClassificationScheme,
     pub notation: String,
     pub source: ClassificationSource,
+}
+
+/// Provenance for a classification recovered across duplicate work records.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ClassificationEvidence {
+    pub method: String,
+    pub isbn13: String,
+    pub open_library_work_id: String,
+    pub open_library_edition_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassificationScheme {
     LibraryOfCongress,
+    /// Dewey Decimal classification.
     DeweyDecimal,
     Bisac,
 }
@@ -374,19 +430,17 @@ pub enum ClassificationSource {
 }
 
 /// Normalizes a bibliographic call number to the stable class notation used
-/// for cross-edition consensus. LCC cutters, item years, and DDC punctuation
-/// variants must not create separate votes.
+/// for cross-edition consensus. LCC cutters and item years must not create
+/// separate votes. Dewey segmentation marks are normalized.
 pub fn classification_consensus_notation(scheme: ClassificationScheme, notation: &str) -> Option<String> {
     match scheme {
         ClassificationScheme::DeweyDecimal => {
-            let compact = notation.chars().filter(|character| !character.is_whitespace() && *character != '/').collect::<String>();
-            let valid = if compact.len() == 3 {
-                compact.bytes().all(|byte| byte.is_ascii_digit())
-            } else {
-                compact.split_once('.').is_some_and(|(whole, decimal)| whole.len() == 3 && whole.bytes().all(|byte| byte.is_ascii_digit()) && !decimal.is_empty() && decimal.bytes().all(|byte| byte.is_ascii_digit()))
-            };
-            valid.then_some(compact)
-        }
+            let value = notation.trim().replace('/', "");
+            let bytes = value.as_bytes();
+            let valid = bytes.len() >= 3 && bytes[..3].iter().all(u8::is_ascii_digit)
+                && (bytes.len() == 3 || (bytes[3] == b'.' && bytes.len() > 4 && bytes[4..].iter().all(u8::is_ascii_digit)));
+            valid.then_some(value)
+        },
         ClassificationScheme::LibraryOfCongress => {
             let value = notation.trim();
             let bytes = value.as_bytes();
@@ -422,7 +476,7 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
         }
         ClassificationScheme::Bisac => {
             let value = notation.trim().to_ascii_uppercase();
-            (value.len() == 9 && value[..3].bytes().all(|byte| byte.is_ascii_alphabetic()) && value[3..].bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
+            (value.len() == 9 && value.as_bytes()[..3].iter().all(u8::is_ascii_alphabetic) && value.as_bytes()[3..].iter().all(u8::is_ascii_digit)).then_some(value)
         }
     }
 }
@@ -474,7 +528,7 @@ impl EditionClassificationConsensus {
     /// Returns normalized classifications supported by at least two distinct
     /// edition groups.
     pub fn classifications(self) -> Vec<Classification> {
-        self.support.into_iter().filter_map(|((scheme, notation), edition_groups)| (edition_groups.len() >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect()
+        self.support.into_iter().filter_map(|((scheme, notation), edition_groups)| (edition_groups.len() >= 2).then_some(Classification { evidence: Vec::new(), scheme, notation, source: ClassificationSource::Work })).collect()
     }
 }
 
@@ -492,7 +546,7 @@ where
             *support.entry(classification).or_default() += 1;
         }
     }
-    support.into_iter().filter_map(|((scheme, notation), votes)| (votes >= 2).then_some(Classification { scheme, notation, source: ClassificationSource::Work })).collect()
+    support.into_iter().filter_map(|((scheme, notation), votes)| (votes >= 2).then_some(Classification { evidence: Vec::new(), scheme, notation, source: ClassificationSource::Work })).collect()
 }
 
 /// Keeps classification consensus across editions while removing small,
@@ -500,8 +554,10 @@ where
 /// Exact-edition classifications are always retained. Unmapped values are
 /// retained conservatively.
 pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = Classification>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> Vec<Classification> {
+    let mut evidence = BTreeMap::<(ClassificationScheme, String), BTreeSet<ClassificationEvidence>>::new();
     let mut unique = BTreeMap::<(ClassificationScheme, String), ClassificationSource>::new();
     for classification in classifications {
+        evidence.entry((classification.scheme, classification.notation.clone())).or_default().extend(classification.evidence);
         unique.entry((classification.scheme, classification.notation)).and_modify(|source| *source = (*source).min(classification.source)).or_insert(classification.source);
     }
 
@@ -531,7 +587,7 @@ pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = 
                 let keys = classification_keys.get(&(scheme, notation.clone())).map(Vec::as_slice).unwrap_or_default();
                 keys.is_empty() || mapped_total < 6 || strongest < 2 || keys.iter().any(|key| family_counts.get(key).copied().unwrap_or_default() >= minimum_support)
             };
-            keep.then_some(Classification { scheme, notation, source })
+            keep.then(|| Classification { evidence: evidence.remove(&(scheme, notation.clone())).unwrap_or_default().into_iter().collect(), scheme, notation, source })
         })
         .collect()
 }
@@ -618,6 +674,10 @@ fn protobuf_edition_identity_result(value: &EditionIdentityResult) -> protobuf_v
         },
         matched: value.matched.as_ref().map(protobuf_edition_identity_match),
         candidates: value.candidates.iter().map(protobuf_edition_identity_match).collect(),
+        catalog_subjects: value.catalog_subjects.as_ref().map(|m| protobuf_v2::CatalogSubjectMatch {
+            main_title: m.main_title.clone(), provider_id: m.provider_id.clone(), record_ids: m.record_ids.clone(), title: m.title.clone(), authors: m.authors.clone(),
+            classifications: m.classifications.iter().map(protobuf_classification).collect(),
+        }),
         candidates_truncated: value.candidates_truncated,
     }
 }
@@ -629,6 +689,7 @@ fn protobuf_edition_identity_match(value: &EditionIdentityMatch) -> protobuf_v2:
         open_library_work_id: value.open_library_work_id.clone(),
         title: value.title.clone(),
         work_title: value.work_title.clone(),
+        subtitle: value.subtitle.clone(),
         title_match: match value.title_match {
             EditionTitleMatch::Edition => 1,
             EditionTitleMatch::Work => 2,
@@ -644,7 +705,7 @@ fn protobuf_edition_identity_match(value: &EditionIdentityMatch) -> protobuf_v2:
 }
 
 fn protobuf_classification(value: &Classification) -> protobuf_v2::Classification {
-    protobuf_v2::Classification {
+    protobuf_v2::Classification { evidence: value.evidence.iter().map(protobuf_evidence).collect(),
         scheme: match value.scheme {
             ClassificationScheme::LibraryOfCongress => 1,
             ClassificationScheme::DeweyDecimal => 2,
@@ -659,7 +720,7 @@ fn protobuf_classification(value: &Classification) -> protobuf_v2::Classificatio
 }
 
 fn domain_classification(value: protobuf_v2::Classification) -> Result<Classification, WireError> {
-    Ok(Classification {
+    Ok(Classification { evidence: value.evidence.into_iter().map(domain_evidence).collect(),
         scheme: match value.scheme {
             1 => ClassificationScheme::LibraryOfCongress,
             2 => ClassificationScheme::DeweyDecimal,
@@ -687,6 +748,10 @@ fn domain_edition_identity_result(value: protobuf_v2::EditionIdentityResult) -> 
         },
         matched: value.matched.map(domain_edition_identity_match).transpose()?,
         candidates: value.candidates.into_iter().map(domain_edition_identity_match).collect::<Result<_, _>>()?,
+        catalog_subjects: value.catalog_subjects.map(|m| -> Result<CatalogSubjectMatch, WireError> { Ok(CatalogSubjectMatch {
+            main_title: m.main_title, provider_id: m.provider_id, record_ids: m.record_ids, title: m.title, authors: m.authors,
+            classifications: m.classifications.into_iter().map(domain_classification).collect::<Result<_, _>>()?,
+        }) }).transpose()?,
         candidates_truncated: value.candidates_truncated,
     })
 }
@@ -698,6 +763,7 @@ fn domain_edition_identity_match(value: protobuf_v2::EditionIdentityMatch) -> Re
         open_library_work_id: value.open_library_work_id,
         title: value.title,
         work_title: value.work_title,
+        subtitle: value.subtitle,
         title_match: match value.title_match {
             1 => EditionTitleMatch::Edition,
             2 => EditionTitleMatch::Work,
@@ -747,7 +813,7 @@ impl From<&RichMetadataEnrichmentResponse> for protobuf_v2::EnrichmentResponse {
 }
 
 fn protobuf_result(value: &RichIsbnMetadataResult) -> protobuf_v2::IsbnResult {
-    protobuf_v2::IsbnResult { requested_isbn: value.requested_isbn.clone(), canonical_isbn13: value.canonical_isbn13.clone(), status: lookup_status_number(value.status), matches: value.matches.iter().map(protobuf_match).collect() }
+    protobuf_v2::IsbnResult { wikidata_books: value.wikidata_books.clone(), requested_isbn: value.requested_isbn.clone(), canonical_isbn13: value.canonical_isbn13.clone(), status: lookup_status_number(value.status), matches: value.matches.iter().map(protobuf_match).collect() }
 }
 
 fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
@@ -757,7 +823,7 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
         classifications: value
             .classifications
             .iter()
-            .map(|classification| protobuf_v2::Classification {
+            .map(|classification| protobuf_v2::Classification { evidence: classification.evidence.iter().map(protobuf_evidence).collect(),
                 scheme: match classification.scheme {
                     ClassificationScheme::LibraryOfCongress => 1,
                     ClassificationScheme::DeweyDecimal => 2,
@@ -870,7 +936,7 @@ impl TryFrom<protobuf_v2::EnrichmentResponse> for RichMetadataEnrichmentResponse
 }
 
 fn domain_result(value: protobuf_v2::IsbnResult) -> Result<RichIsbnMetadataResult, WireError> {
-    Ok(RichIsbnMetadataResult { requested_isbn: value.requested_isbn, canonical_isbn13: value.canonical_isbn13, status: domain_lookup_status(value.status)?, matches: value.matches.into_iter().map(domain_match).collect::<Result<_, _>>()? })
+    Ok(RichIsbnMetadataResult { wikidata_books: value.wikidata_books, requested_isbn: value.requested_isbn, canonical_isbn13: value.canonical_isbn13, status: domain_lookup_status(value.status)?, matches: value.matches.into_iter().map(domain_match).collect::<Result<_, _>>()? })
 }
 
 fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, WireError> {
@@ -881,7 +947,7 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
             .classifications
             .into_iter()
             .map(|classification| {
-                Ok(Classification {
+                Ok(Classification { evidence: classification.evidence.into_iter().map(domain_evidence).collect(),
                     scheme: match classification.scheme {
                         1 => ClassificationScheme::LibraryOfCongress,
                         2 => ClassificationScheme::DeweyDecimal,
@@ -960,12 +1026,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classifications_round_trip_through_binary_storage() {
+        for scheme in [ClassificationScheme::LibraryOfCongress, ClassificationScheme::DeweyDecimal, ClassificationScheme::Bisac] {
+            for evidence in [Vec::new(), vec![ClassificationEvidence {
+                method: "exact".to_owned(), isbn13: "9780306406157".to_owned(),
+                open_library_work_id: "OL10W".to_owned(), open_library_edition_id: "OL1M".to_owned(),
+            }]] {
+                let value = Classification { evidence, scheme, notation: "QA76.73".to_owned(), source: ClassificationSource::Work };
+                let bytes = wire::encode(&value).unwrap();
+                assert_eq!(wire::decode::<Classification>(&bytes, MAX_RESPONSE_BYTES).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
     fn classification_consensus_drops_small_distant_families_but_keeps_exact_evidence() {
-        let mut classifications = (1..=8).map(|number| Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: format!("PA40{number}"), source: ClassificationSource::Work }).collect::<Vec<_>>();
+        let mut classifications = (1..=8).map(|number| Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: format!("PA40{number}"), source: ClassificationSource::Work }).collect::<Vec<_>>();
         classifications.extend([
-            Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "B580".to_owned(), source: ClassificationSource::ExactEdition },
-            Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "PQ3434".to_owned(), source: ClassificationSource::Work },
-            Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "HQ75.6".to_owned(), source: ClassificationSource::Work },
+            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "B580".to_owned(), source: ClassificationSource::ExactEdition },
+            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PQ3434".to_owned(), source: ClassificationSource::Work },
+            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "HQ75.6".to_owned(), source: ClassificationSource::Work },
         ]);
 
         let filtered = filter_classification_outliers(classifications, |_, notation| {
@@ -1018,7 +1098,7 @@ mod tests {
         let matched = |work: &str, edition: &str, notation: &str| RichWorkMetadataMatch {
             open_library_work_id: Some(work.to_owned()),
             exact_edition_ids: vec![edition.to_owned()],
-            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: notation.to_owned(), source: ClassificationSource::ExactEdition }],
+            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: notation.to_owned(), source: ClassificationSource::ExactEdition }],
             authors: vec![AuthorMetadata { open_library_author_id: "OL1A".to_owned(), name: None, biography: None, identifiers: Vec::new(), source: AuthorSource::ExactEdition, position: 0 }],
             places: vec![EntityReference { wikidata_id: None, name: "Paris".to_owned(), source: EntitySource::ExactEdition }],
             people: Vec::new(),
@@ -1037,7 +1117,7 @@ mod tests {
         assert!(first[0].classifications.is_empty());
         assert_eq!(first[0].authors[0].source, AuthorSource::Work);
         assert_eq!(first[0].places[0].source, EntitySource::Work);
-        assert_eq!(consensus.classifications(), vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "PR4034".to_owned(), source: ClassificationSource::Work }]);
+        assert_eq!(consensus.classifications(), vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PR4034".to_owned(), source: ClassificationSource::Work }]);
     }
 
     #[test]
@@ -1045,7 +1125,7 @@ mod tests {
         let first = RichWorkMetadataMatch {
             open_library_work_id: Some("OL1W".to_owned()),
             exact_edition_ids: vec!["OL1M".to_owned()],
-            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "GN496".to_owned(), source: ClassificationSource::ExactEdition }],
+            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "GN496".to_owned(), source: ClassificationSource::ExactEdition }],
             authors: Vec::new(),
             places: Vec::new(),
             people: Vec::new(),
@@ -1056,7 +1136,7 @@ mod tests {
         let second = RichWorkMetadataMatch {
             open_library_work_id: Some("OL2W".to_owned()),
             exact_edition_ids: vec!["OL2M".to_owned()],
-            classifications: vec![Classification { scheme: ClassificationScheme::DeweyDecimal, notation: "306".to_owned(), source: ClassificationSource::Work }],
+            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::DeweyDecimal, notation: "306".to_owned(), source: ClassificationSource::Work }],
             authors: Vec::new(),
             places: vec![EntityReference { wikidata_id: None, name: "Developing countries".to_owned(), source: EntitySource::Work }],
             people: Vec::new(),
@@ -1068,6 +1148,7 @@ mod tests {
         let merged = merge_rich_work_matches([&first, &second], |_, _| Vec::new());
         assert_eq!(merged.exact_edition_ids, ["OL1M", "OL2M"]);
         assert_eq!(merged.classifications.len(), 2);
+        assert!(merged.classifications.iter().any(|c| c.scheme == ClassificationScheme::DeweyDecimal));
         assert_eq!(merged.places.len(), 1);
     }
 
@@ -1075,7 +1156,7 @@ mod tests {
     fn protobuf_v2_round_trip_preserves_rich_entities() {
         let value = RichMetadataEnrichmentResponse {
             snapshot: SnapshotDescription { dump_date: "2026-08-01".to_owned(), imported_at_ms: 42 },
-            results: vec![RichIsbnMetadataResult {
+            results: vec![RichIsbnMetadataResult { wikidata_books: Vec::new(),
                 requested_isbn: "9780306406157".to_owned(),
                 canonical_isbn13: Some("9780306406157".to_owned()),
                 status: LookupStatus::Matched,
@@ -1083,8 +1164,8 @@ mod tests {
                     open_library_work_id: Some("OL10W".to_owned()),
                     exact_edition_ids: vec!["OL1M".to_owned()],
                     classifications: vec![
-                        Classification { scheme: ClassificationScheme::DeweyDecimal, notation: "883".to_owned(), source: ClassificationSource::Work },
-                        Classification { scheme: ClassificationScheme::Bisac, notation: "HIS015000".to_owned(), source: ClassificationSource::Work },
+                        Classification { evidence: Vec::new(), scheme: ClassificationScheme::DeweyDecimal, notation: "883".to_owned(), source: ClassificationSource::Work },
+                        Classification { evidence: Vec::new(), scheme: ClassificationScheme::Bisac, notation: "HIS015000".to_owned(), source: ClassificationSource::Work },
                     ],
                     authors: vec![AuthorMetadata {
                         open_library_author_id: "OL20A".to_owned(),
@@ -1130,7 +1211,7 @@ mod tests {
 
     #[test]
     fn protobuf_v2_round_trip_preserves_edition_review_candidates() {
-        let candidate = EditionIdentityMatch {
+        let candidate = EditionIdentityMatch { subtitle: None,
             canonical_isbn13: "9780306406157".to_owned(),
             open_library_edition_id: "OL1M".to_owned(),
             open_library_work_id: Some("OL10W".to_owned()),
@@ -1142,11 +1223,11 @@ mod tests {
             publication_year: Some(2004),
             matched_publisher: true,
             matched_publication_year: false,
-            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.6".to_owned(), source: ClassificationSource::Work }],
+            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.6".to_owned(), source: ClassificationSource::Work }],
         };
         let value = EditionIdentityResponse {
             snapshot: SnapshotDescription { dump_date: "2026-08-01".to_owned(), imported_at_ms: 42 },
-            results: vec![EditionIdentityResult { query_id: "book-1".to_owned(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates: vec![candidate.clone()], candidates_truncated: true }],
+            results: vec![EditionIdentityResult { catalog_subjects: None, query_id: "book-1".to_owned(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates: vec![candidate.clone()], candidates_truncated: true }],
         };
         let decoded = decode_v2_edition_identity_response(&encode_v2_edition_identity_response(&value).unwrap(), MAX_RESPONSE_BYTES).unwrap();
         assert_eq!(decoded.results[0].status, EditionIdentityStatus::Ambiguous);
@@ -1160,4 +1241,11 @@ mod tests {
         let decoded = decode_v2_edition_identity_request(&encode_v2_edition_identity_request(&request).unwrap(), MAX_REQUEST_BYTES).unwrap();
         assert_eq!(decoded.queries[0].title, "Work title");
     }
+}
+
+fn protobuf_evidence(value: &ClassificationEvidence) -> protobuf_v2::ClassificationEvidence {
+    protobuf_v2::ClassificationEvidence { method: value.method.clone(), isbn13: value.isbn13.clone(), open_library_work_id: value.open_library_work_id.clone(), open_library_edition_id: value.open_library_edition_id.clone() }
+}
+fn domain_evidence(value: protobuf_v2::ClassificationEvidence) -> ClassificationEvidence {
+    ClassificationEvidence { method: value.method, isbn13: value.isbn13, open_library_work_id: value.open_library_work_id, open_library_edition_id: value.open_library_edition_id }
 }

@@ -1,4 +1,4 @@
-use crate::{BookMetadataState, ReadingPosition, UnixMillis};
+use crate::{BookMetadataState, Contributor, PublicationMetadata, ReadingPosition, UnixMillis};
 use serde::{Deserialize, Serialize};
 
 use crate::BookFormat;
@@ -11,11 +11,30 @@ pub fn portable_name_key(value: &str) -> String {
     value.nfkc().flat_map(char::to_lowercase).collect()
 }
 
+/// The metadata sync register. Descriptions belong to a different register,
+/// so this type cannot represent a description update or accidental clear.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncBookMetadata {
+    pub title: String,
+    pub contributors: Vec<Contributor>,
+    pub publication: PublicationMetadata,
+}
+
+impl SyncBookMetadata {
+    pub fn subtitle(&self) -> Option<&str> { self.publication.subtitle() }
+}
+
+impl From<BookMetadataState> for SyncBookMetadata {
+    fn from(value: BookMetadataState) -> Self {
+        Self { title: value.title, contributors: value.contributors, publication: value.publication }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BookLifecycleState {
     Present {
-        metadata: BookMetadataState,
+        metadata: SyncBookMetadata,
         added_at: UnixMillis,
         format: BookFormat,
     },

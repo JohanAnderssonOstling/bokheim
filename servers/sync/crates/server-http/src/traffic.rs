@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 const EVENT_CHANNEL_CAPACITY: usize = 8_192;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -133,7 +134,14 @@ pub(crate) async fn record_traffic(State(recorder): State<TrafficRecorder>, requ
     let request_bytes = content_length(request.headers());
     let remote = request.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
     let client_ip = server_account::http::client_address(recorder.client_address_source, request.headers(), remote).ok().map(|address| address.to_string());
-    let response = next.run(request).await;
+    let trace_id = request.headers().get("x-bokheim-trace-id").and_then(|value| value.to_str().ok()).and_then(|value| uuid::Uuid::parse_str(value).ok()).unwrap_or_else(uuid::Uuid::new_v4);
+    let span = tracing::debug_span!(target: "sync_performance", "server_request", %trace_id, route_group, method, request_bytes);
+    let response = async {
+        tracing::debug!(target: "sync_performance", event = "start", "request started");
+        let response = next.run(request).await;
+        tracing::debug!(target: "sync_performance", event = "complete", status = response.status().as_u16(), response_bytes = content_length(response.headers()), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "request headers ready");
+        response
+    }.instrument(span).await;
     let occurred_at = Utc::now();
     let event = TrafficEvent {
         occurred_at,
@@ -183,7 +191,7 @@ fn route_group(path: &str) -> &'static str {
         "/api/sync"
     } else if path.contains("/thumbnail") {
         "/api/thumbnails"
-    } else if path.contains("/blobs/") {
+    } else if path.contains("/blobs/") || path.ends_with("/book-batch") {
         "/api/blobs"
     } else if path.starts_with("/api/libraries") {
         "/api/libraries"
@@ -338,6 +346,7 @@ mod tests {
     #[test]
     fn routes_are_reduced_to_bounded_non_sensitive_categories() {
         assert_eq!(route_group("/api/libraries/private-library/blobs/private-hash"), "/api/blobs");
+        assert_eq!(route_group("/api/libraries/private-library/book-batch"), "/api/blobs");
         assert_eq!(route_group("/api/libraries/private-library/thumbnails/private-hash"), "/api/thumbnails");
         assert_eq!(route_group("/api/auth/login"), "/api/auth");
         assert_eq!(route_group("/unexpected/private-value"), "/other");

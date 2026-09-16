@@ -1,11 +1,13 @@
 package se.bokheim.reader.gpui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
@@ -27,6 +29,7 @@ import com.google.androidgamesdk.GameActivity;
 import org.json.JSONArray;
 
 import java.io.IOException;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -36,6 +39,48 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends GameActivity {
+    private static volatile java.lang.ref.WeakReference<MainActivity> accountActivity = new java.lang.ref.WeakReference<>(null);
+    private AccountDialog accountDialog;
+    private native void nativeAuthenticationRequest(long id, String message);
+
+    // JNI calls from the GPUI thread; all Android views stay on the main thread.
+    public static void authenticationCommand(String encoded) {
+        MainActivity activity = accountActivity.get();
+        if (activity == null) return;
+        activity.runOnUiThread(() -> activity.applyAuthenticationCommand(encoded));
+    }
+    private void applyAuthenticationCommand(String encoded) {
+        if (isFinishing() || isDestroyed()) return;
+        try {
+            org.json.JSONObject message = new org.json.JSONObject(encoded);
+            long id = message.getLong("id");
+            switch (message.getString("command")) {
+                case "open":
+                    if (accountDialog != null) accountDialog.dismiss();
+                    org.json.JSONArray palette = message.getJSONArray("colors");
+                    int[] colors = new int[5];
+                    for (int i = 0; i < colors.length; i++) colors[i] = (int) palette.getLong(i);
+                    accountDialog = new AccountDialog(this, id, message.getInt("minimum"), colors, (session, request) -> {
+                        nativeAuthenticationRequest(session, request);
+                        try {
+                            if (new org.json.JSONObject(request).getString("action").equals("closed") && accountDialog != null && accountDialog.sessionId == session) accountDialog = null;
+                        } catch (org.json.JSONException ignored) { }
+                    });
+                    accountDialog.show();
+                    break;
+                case "result":
+                    if (accountDialog != null && accountDialog.sessionId == id) accountDialog.complete(message.isNull("error") ? null : message.getString("error"));
+                    break;
+                case "close":
+                    if (accountDialog != null && accountDialog.sessionId == id) accountDialog.dismiss();
+                    break;
+            }
+        } catch (org.json.JSONException malformed) {
+            // Do not log the payload: account messages may contain credentials.
+            android.util.Log.e(LOG_TAG, "Invalid authentication command");
+        }
+    }
+
     private static final String LOG_TAG = "Bokheim";
     private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
     private static final String[] PUBLICATION_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
@@ -48,6 +93,8 @@ public final class MainActivity extends GameActivity {
     private boolean keepScreenAwake;
     private Insets lastSafeAreaInsets;
     private Insets lastImeInsets;
+    private AlertDialog storagePermissionPrompt;
+    private Boolean publishedStorageAccess;
 
     private static final class PathPrompt {
         final long id;
@@ -79,8 +126,10 @@ public final class MainActivity extends GameActivity {
     private native void nativeFilePromptResult(long requestId, String error, boolean cancelled);
     private native void nativeSelectedDirectoryRoot(long requestId, String name);
     private native void nativeSelectedDirectoryPath(long requestId, String pathJson);
-    private native void nativeSelectedDirectoryFile(long requestId, String pathJson, String uri);
+    private native void nativeSelectedDirectoryFile(long requestId, String pathJson, String uri, long sizeBytes);
     private native void nativeDirectoryPromptResult(long requestId, String error, boolean cancelled);
+    private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
+    private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenPublication(String name, int fileDescriptor);
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
@@ -97,6 +146,7 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        accountActivity = new java.lang.ref.WeakReference<>(this);
         pathPromptLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> handlePathPromptResult(result.getResultCode(), result.getData())
@@ -104,6 +154,9 @@ public final class MainActivity extends GameActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         installWindowInsetsReporting();
         applySystemBarsVisibility();
+        // Opening a shared book should go straight to the reader. Offer the
+        // optional storage permission on an ordinary app launch instead.
+        promptForStorageAccess(getIntent());
         handleIncomingPublicationIntent(getIntent());
     }
 
@@ -111,7 +164,30 @@ public final class MainActivity extends GameActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        promptForStorageAccess(intent);
         handleIncomingPublicationIntent(intent);
+    }
+
+    private void promptForStorageAccess(Intent intent) {
+        if (storagePermissionPrompt == null || !storagePermissionPrompt.isShowing()) {
+            storagePermissionPrompt = AllFilesAccess.promptForLaunch(this, intent);
+        }
+    }
+
+    public void requestAllFilesAccess() {
+        AllFilesAccess.openSettings(this);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyKeepScreenAwake();
+        boolean granted = AllFilesAccess.isGranted();
+        if (publishedStorageAccess == null || publishedStorageAccess != granted) {
+            publishedStorageAccess = granted;
+            File documentsRoot = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Bokheim");
+            nativeStorageAccessChanged(granted, documentsRoot.getAbsolutePath());
+        }
     }
 
     private void handleIncomingPublicationIntent(Intent intent) {
@@ -181,6 +257,10 @@ public final class MainActivity extends GameActivity {
         }
     }
 
+    public static void audiobookCommand(android.content.Context context, String command) {
+        AudiobookService.dispatch(context, command);
+    }
+
     public void setVolumeButtonCapture(boolean enabled) {
         captureVolumeButtons = enabled;
     }
@@ -192,12 +272,6 @@ public final class MainActivity extends GameActivity {
 
     public void setKeepScreenAwake(boolean awake) {
         keepScreenAwake = awake;
-        applyKeepScreenAwake();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
         applyKeepScreenAwake();
     }
 
@@ -265,6 +339,8 @@ public final class MainActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
+        if (accountDialog != null) accountDialog.dismiss();
+        if (accountActivity.get() == this) accountActivity.clear();
         fileExecutor.shutdownNow();
         super.onDestroy();
     }
@@ -355,6 +431,12 @@ public final class MainActivity extends GameActivity {
         Uri rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId);
         DocumentInfo root = queryDocument(rootUri);
         nativeSelectedDirectoryRoot(prompt.id, root.name);
+        File localRoot = AndroidLibraryStorage.localDirectory(this, treeUri);
+        if (localRoot != null) {
+            nativeSelectedDirectoryLocalRoot(prompt.id, localRoot.getAbsolutePath());
+            nativeDirectoryPromptResult(prompt.id, null, false);
+            return;
+        }
         collectDirectoryTree(prompt, treeUri, root.id, new ArrayList<>(), new LinkedHashSet<>());
         nativeDirectoryPromptResult(prompt.id, null, false);
     }
@@ -367,7 +449,8 @@ public final class MainActivity extends GameActivity {
         String[] projection = {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_MIME_TYPE
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE
         };
         try (Cursor cursor = getContentResolver().query(childrenUri, projection, null, null, null)) {
             if (cursor == null) {
@@ -383,7 +466,9 @@ public final class MainActivity extends GameActivity {
                     collectDirectoryTree(prompt, treeUri, child.id, path, visitedDirectories);
                 } else if (matchesExtension(child.name, prompt.extensions)) {
                     Uri childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.id);
-                    nativeSelectedDirectoryFile(prompt.id, pathJson.toString(), childUri.toString());
+                    int sizeColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE);
+                    long sizeBytes = sizeColumn >= 0 && !cursor.isNull(sizeColumn) ? cursor.getLong(sizeColumn) : -1;
+                    nativeSelectedDirectoryFile(prompt.id, pathJson.toString(), childUri.toString(), sizeBytes);
                 }
             }
         }

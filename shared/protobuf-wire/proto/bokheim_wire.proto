@@ -55,6 +55,8 @@ message MutationValue {
     Annotation annotation = 7;
     CatalogPublication catalog_publication = 10;
     BookMetadata metadata = 11;
+    string description = 12;
+    bytes pdf_reader_metadata = 13; // Versioned JSON geometry/navigation, keyed by exact checksum.
   }
 }
 
@@ -157,7 +159,8 @@ message CatalogPublication {
 message BookMetadata {
   string title = 1;
   repeated Contributor contributors = 2;
-  string description = 3;
+  reserved 3;
+  reserved "description"; // Description is an independent sync register.
   PublicationMetadata publication = 4;
 }
 message Contributor {

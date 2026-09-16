@@ -1,9 +1,9 @@
 # gpui desktop design findings
 
-Design audit of the gpui desktop UI — `apps/ui/gpui/{components,browser,reader}`, the theme
+Design audit of the gpui desktop UI — `apps/{components,browser,reader}`, the theme
 bridge in `browser/src/stores/preferences.rs`, the preferences in
 `client/preferences/src/lib.rs`, and the layout tokens in
-`apps/ui/gpui/components/src/tokens.rs`.
+`apps/components/src/tokens.rs`.
 
 Read at the code level, not by rendering the app. Nothing here was measured from a
 screenshot; the contrast figures are computed from the palette constants and the
@@ -17,7 +17,7 @@ Part 2 covers layout flow and information architecture, and matters considerably
 
 ## What already works
 
-- **A real component layer.** `apps/ui/gpui/components/` owns styling; pages compose.
+- **A real component layer.** `apps/components/` owns styling; pages compose.
   Almost nothing under `browser/src/**/pages` sets its own colors or paddings, so most
   findings below are fixable in a handful of files.
 - **Semantic theme indirection.** `BrowserTheme` (`components/src/tokens.rs:5`) exposes 12

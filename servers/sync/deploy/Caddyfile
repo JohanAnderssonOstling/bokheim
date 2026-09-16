@@ -33,12 +33,23 @@
 	# Compress the GPUI JavaScript and WebAssembly bundle in transit.
 	encode zstd gzip
 
-	# wasm-bindgen emits stable file names. Revalidate them with the shell so a
-	# deploy cannot mix JavaScript glue and WebAssembly from different builds.
+	# The HTML shell always revalidates, while each build's versioned bundle is
+	# immutable. A new deployment changes the bundle URL, so cached JavaScript
+	# can never be paired with WebAssembly from another build.
+	@immutable path /pkg/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
 	@revalidate not {
-		path /api/* /admin/*
+		path /api/* /admin/* /pkg/*
 	}
 	header @revalidate Cache-Control "no-cache"
+
+	# Credential associations must be JSON, never the SPA fallback or a redirect.
+	handle /.well-known/assetlinks.json {
+		root * /usr/local/share/bokheim-web/current
+		header Content-Type application/json
+		file_server
+	}
 
 	handle /api/* {
 		reverse_proxy unix//run/bokheim/sync.sock

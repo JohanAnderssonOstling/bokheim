@@ -1,11 +1,19 @@
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android;
+mod blocking_worker;
 mod session;
 #[cfg(feature = "desktop")]
-mod update_notice;
+mod single_instance;
+// The three modules below are parked: nothing presents updates today, so
+// nothing calls check/install/restart. See `updates.rs` for re-wiring.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
+#[allow(dead_code)]
 mod updater;
+#[cfg(feature = "desktop")]
+#[allow(dead_code)]
+mod updates;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
+#[allow(dead_code)]
 mod windows_updater;
 
 use std::borrow::Cow;
@@ -13,21 +21,22 @@ use std::cell::RefCell;
 use std::rc::Rc;
 #[cfg(feature = "desktop")]
 use std::sync::{Arc, LazyLock};
-#[cfg(feature = "audiobooks")]
-use std::time::Duration;
 
-use bokheim_backend::app::{AppBackend, BackendContext};
+use application_shell::ApplicationRoot;
+use bokheim_backend::{AppClient, AppStartupState, host::BackendLaunch};
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
-use browser_ui::{AppServices, ApplicationRoot, BrowserRoot, OpenReader, OpenedBook};
+use browser_ui::{AppServices, AppStartup};
 use gpui::{App, AppContext, Bounds, Entity, SharedString, WeakEntity, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 #[cfg(feature = "kobo")]
 use gpui_kobo::KoboKeyboardRoot;
 use reader_ui::{ReaderPreferences, SaveReaderSettings};
-use ui_runtime::BlockingWorker;
 
+use blocking_worker::BlockingWorker;
 use session::{SessionSaveScheduler, UiSession, WindowGeometry, session_path};
+#[cfg(feature = "desktop")]
+pub use single_instance::DesktopInstance;
 
 #[cfg(feature = "desktop")]
 const DESKTOP_APP_ID: &str = "se.bokheim.Bokheim";
@@ -61,17 +70,60 @@ fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, cx: &mut App)
     cx.new(|_| KoboKeyboardRoot::new(content))
 }
 
-#[cfg(any(feature = "desktop", feature = "mobile"))]
+#[cfg(all(any(feature = "desktop", feature = "mobile"), not(feature = "kobo")))]
 fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, _: &mut App) -> Entity<V> {
     content
 }
 
 /// Install and open the existing Bokheim browser/reader UI in the selected GPUI platform.
-pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<gpui::SelectedFile>>, cx: &mut App) {
+pub struct IncomingPublication {
+    pub name: String,
+    pub path: std::path::PathBuf,
+}
+pub type IncomingPublicationResult = Result<IncomingPublication, String>;
+
+#[cfg(any(target_os = "android", test))]
+fn stage_incoming_publication(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    const RESERVED_BYTES: u64 = 128 * 1024 * 1024;
+    let mut destination = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
+    let directory = path.parent().ok_or_else(|| std::io::Error::other("incoming file has no parent directory"))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_until_check = 0_u64;
+    loop {
+        if bytes_until_check == 0 {
+            if fs2::available_space(directory)? <= RESERVED_BYTES {
+                return Err(std::io::Error::other("not enough free storage to stage publication"));
+            }
+            bytes_until_check = 8 * 1024 * 1024;
+        }
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+        bytes_until_check = bytes_until_check.saturating_sub(read as u64);
+    }
+    destination.flush()?;
+    destination.sync_all()
+}
+
+#[cfg(test)]
+mod incoming_tests {
+    #[test]
+    fn stages_an_incoming_reader_without_buffering_the_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("incoming.part");
+        super::stage_incoming_publication(std::io::Cursor::new(b"incoming publication"), &path).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"incoming publication");
+    }
+}
+
+pub fn open_ui(
+    backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingPublicationResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<()>>, cx: &mut App,
+) -> Option<WeakEntity<ApplicationRoot>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(error) = cx.text_system().add_fonts(vec![
-        Cow::Borrowed(include_bytes!("../assets/fonts/NotoSans-Regular.ttf")),
-        Cow::Borrowed(include_bytes!("../assets/fonts/NotoSans-Bold.ttf")),
         Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Regular.otf")),
         Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Bold.otf")),
         #[cfg(feature = "kobo")]
@@ -82,6 +134,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         log::warn!("failed to install application fonts: {error}");
     }
     let session_path = session_path(backend_context.app_data_dir());
+    let playback_restore_path = Some(backend_context.app_data_dir().join("active-audiobook.json"));
     let saved_session = Rc::new(RefCell::new(UiSession::load(&session_path)));
 
     gpui_component::init(cx);
@@ -90,19 +143,7 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
     #[cfg(feature = "mobile")]
     cx.bind_keys([gpui::KeyBinding::new("back", browser_ui::DismissSettings, Some("Application"))]);
     reader_ui::bind_keys(cx);
-    #[cfg(any(feature = "desktop", feature = "audiobooks"))]
-    let blocking_worker = BlockingWorker::new(cx.background_executor(), 2);
     let persistence_worker = BlockingWorker::new(cx.background_executor(), 1);
-    #[cfg(all(feature = "desktop", target_os = "linux"))]
-    let desktop_updater = updater::direct_appimage_updater(blocking_worker.clone());
-    #[cfg(all(feature = "desktop", target_os = "windows"))]
-    let desktop_updater = windows_updater::windows_installer_updater(blocking_worker.clone());
-    #[cfg(all(feature = "desktop", not(any(target_os = "linux", target_os = "windows"))))]
-    let desktop_updater: Option<browser_ui::DesktopUpdater> = None;
-    #[cfg(feature = "mobile")]
-    let desktop_updater: Option<browser_ui::DesktopUpdater> = None;
-    #[cfg(feature = "desktop")]
-    let desktop_updater_for_check = desktop_updater.clone();
     let session_saves = SessionSaveScheduler::new(saved_session.clone(), session_path, persistence_worker.clone());
     #[cfg(feature = "kobo")]
     let kobo_auto_rotate = {
@@ -118,28 +159,18 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         value
     };
 
-    let backend = AppBackend::new_deferred_scanning(backend_context.clone()).expect("failed to initialize shared application backend");
-    backend.ensure_default_library().expect("failed to initialize a default library");
-    let catalog_registry_refresh = backend.spawn(|backend| async move { backend.refresh_catalog_sources().await });
-    cx.spawn(async move |_| match catalog_registry_refresh.await {
-        Ok(Ok(sources)) => log::debug!("refreshed {} catalogue sources from the catalogue server", sources.len()),
-        Ok(Err(error)) => log::warn!("continuing with the cached catalogue registry after refresh failed: {error}"),
-        Err(error) => log::warn!("catalogue registry refresh task failed: {error}"),
-    })
-    .detach();
-    let book_removals = backend.book_removals();
-
-    match backend.reader_preferences() {
-        Ok(preferences) => {
-            saved_session.borrow_mut().reader_preferences.apply_synchronized(&preferences);
-        }
-        Err(error) => log::warn!("failed to load shared reader preferences: {error}"),
-    }
+    #[cfg(all(target_os = "android", feature = "android"))]
+    let android_private_library_root = backend_context.app_data_dir().join("libraries");
+    let (backend_worker, backend_startup) = AppClient::start_native(backend_context).expect("failed to initialize application backend");
+    #[cfg(all(target_os = "android", feature = "android"))]
+    android::watch_storage_access(backend_worker.clone(), android_private_library_root, cx);
+    let AppStartupState { libraries, browsing_preferences, account_status, reader_preferences: shared_reader_preferences } = backend_startup;
+    let startup = AppStartup { libraries, browsing_preferences, account_status };
+    saved_session.borrow_mut().reader_preferences.apply_synchronized(&shared_reader_preferences);
 
     let reader_settings = saved_session.clone();
     let reader_session_saves = session_saves.clone();
-    let reader_preferences_core = backend.clone();
-    let reader_preferences_worker = persistence_worker.clone();
+    let reader_preferences_backend = backend_worker.clone();
     let save_reader_settings: SaveReaderSettings = Rc::new(move |preferences: ReaderPreferences, cx: &mut App| {
         let mut session = reader_settings.borrow_mut();
         let previous = session.reader_preferences.clone();
@@ -148,14 +179,13 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         drop(session);
         reader_session_saves.schedule(cx);
         if !patches.is_empty() {
-            let core = reader_preferences_core.clone();
-            reader_preferences_worker.dispatch(move || {
-                for patch in patches {
-                    if let Err(error) = core.update_reader_preference(patch) {
-                        log::warn!("failed to persist reader preference: {error}");
-                    }
+            let backend = reader_preferences_backend.clone();
+            cx.spawn(async move |_| {
+                if let Err(error) = backend.update_reader_preferences(patches).await {
+                    log::warn!("failed to persist reader preference: {error}");
                 }
-            });
+            })
+            .detach();
         }
     });
 
@@ -178,130 +208,21 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
     };
     reader_ui::configure(saved_session.borrow().reader_preferences.clone(), save_reader_settings, cx);
 
-    let reader_backend = backend.clone();
     let application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>> = Rc::new(RefCell::new(None));
-    let application_root_for_open = application_root.clone();
-    let application_root_for_removals = application_root.clone();
     let application_root_for_incoming = application_root.clone();
-    #[cfg(feature = "audiobooks")]
-    let audiobook_worker = blocking_worker.clone();
-    let open_reader: OpenReader = Rc::new(move |locator, title, initial_target, window, cx| {
-        let Some(root) = application_root_for_open.borrow().clone() else {
-            log::error!("cannot open book {}: application window is unavailable", locator.content_hash());
-            return;
-        };
-        let request = match root.update(cx, |root, _| root.begin_open(locator.clone())) {
-            Ok(request) => request,
-            Err(_) => {
-                log::error!("cannot open book {}: application window was closed", locator.content_hash());
-                return;
+    let application_root_for_host = application_root.clone();
+    let application_backend = backend_worker.clone();
+    let playback_restore_path_for_root = playback_restore_path.clone();
+
+    #[cfg(feature = "desktop")]
+    if let Some(activations) = instance_activations {
+        cx.spawn(async move |cx| {
+            while activations.recv().await.is_ok() {
+                let _ = cx.update(|cx| cx.activate(true));
             }
-        };
-        let library = match reader_backend.library(locator.library_id()) {
-            Ok(library) => library,
-            Err(error) => {
-                let message = format!("Could not open book: library {} is unavailable: {error}", locator.library_id());
-                log::error!("cannot open book {}: {message}", locator.content_hash());
-                let _ = root.update_in(cx, move |root, window, cx| root.fail_open(request, message, window, cx));
-                return;
-            }
-        };
-        let is_audiobook = match library.is_audiobook(locator.content_hash()) {
-            Ok(is_audiobook) => is_audiobook,
-            Err(error) => {
-                let message = format!("Could not determine the book format: {error}");
-                log::error!("cannot open book {}: {message}", locator.content_hash());
-                let _ = root.update_in(cx, move |root, window, cx| root.fail_open(request, message, window, cx));
-                return;
-            }
-        };
-        #[cfg(not(feature = "audiobooks"))]
-        if is_audiobook {
-            let message = "Could not open audiobook: audiobook support is disabled in this build";
-            log::error!("cannot open audiobook {}: audiobook support is disabled in this build", locator.content_hash());
-            let _ = root.update_in(cx, move |root, window, cx| root.fail_open(request, message, window, cx));
-            return;
-        }
-        #[cfg(feature = "audiobooks")]
-        if is_audiobook {
-            let requested_position = initial_target.as_deref().and_then(library_model::audiobook_toc_position).map(Duration::from_millis);
-            let content_hash = locator.content_hash();
-            let prepare_library = library.clone();
-            let persistence_library = library;
-            let persistence_worker = audiobook_worker.clone();
-            let prepare_content_hash = content_hash.clone();
-            let prepare = audiobook_worker.dispatch(move || {
-                let source = prepare_library.resolve_book_for_reader(prepare_content_hash.clone()).map_err(|error| error.to_string())?;
-                let saved_position = prepare_library.audiobook_reading_position(prepare_content_hash).map_err(|error| error.to_string())?.unwrap_or(0);
-                let source = audiobook_player::AudiobookSource::new(source.reader, source.path);
-                Ok::<_, String>((source, requested_position.unwrap_or_else(|| Duration::from_millis(saved_position))))
-            });
-            let audiobook_locator = locator.clone();
-            if root
-                .update(cx, move |root, cx| {
-                    let prepare = cx.spawn(async move |_, _| prepare.recv().await.map_err(|error| format!("book preparation worker stopped: {error}"))?);
-                    root.open_book(
-                        request,
-                        prepare,
-                        move |(source, initial_position), _, browser, _, cx| {
-                            let persistence_content_hash = content_hash.clone();
-                            let save_content_hash = content_hash.clone();
-                            let (position_tx, position_rx) = async_channel::unbounded::<(Duration, f32)>();
-                            let debounce_timer = cx.background_executor().clone();
-                            cx.background_executor()
-                                .spawn(async move {
-                                    while let Ok((mut position, mut progress)) = position_rx.recv().await {
-                                        debounce_timer.timer(Duration::from_millis(250)).await;
-                                        while let Ok((newer_position, newer_progress)) = position_rx.try_recv() {
-                                            position = newer_position;
-                                            progress = newer_progress;
-                                        }
-                                        let library = persistence_library.clone();
-                                        let update_content_hash = persistence_content_hash.clone();
-                                        let result = persistence_worker
-                                            .dispatch(move || {
-                                                let serialized = library_model::audiobook_reading_position(position.as_millis() as u64);
-                                                library.update_reading_position(update_content_hash, &serialized, Some(progress)).map_err(|error| error.to_string())
-                                            })
-                                            .recv()
-                                            .await;
-                                        match result {
-                                            Ok(Ok(())) => {}
-                                            Ok(Err(error)) => log::warn!("failed to persist audiobook position for book {persistence_content_hash}: {error}"),
-                                            Err(_) => break,
-                                        }
-                                    }
-                                })
-                                .detach();
-                            let save_position: audiobook_player::SavePlaybackPosition = Rc::new(move |position, progress| {
-                                if position_tx.try_send((position, progress)).is_err() {
-                                    log::warn!("audiobook position worker stopped for book {save_content_hash}");
-                                }
-                            });
-                            browser.update(cx, |browser, cx| browser.show_audiobook(audiobook_locator, source, initial_position, save_position, cx));
-                            OpenedBook::Library
-                        },
-                        cx,
-                    );
-                })
-                .is_err()
-            {
-                log::error!("cannot open audiobook: application window was closed");
-            }
-            return;
-        }
-        let library = Rc::new(library);
-        if root
-            .update(cx, move |root, cx| {
-                let return_to_library = root.return_to_library_callback(cx);
-                let reader = cx.new(|cx| reader_ui::ReaderView::new(locator, title, initial_target, library, return_to_library, window, cx));
-                root.show_reader(request, reader.into(), cx);
-            })
-            .is_err()
-        {
-            log::error!("cannot open book: application window was closed");
-        }
-    });
+        })
+        .detach();
+    }
 
     let browser_bounds = if options.persist_window_geometry {
         let bounds = saved_session.borrow().window.map(WindowGeometry::bounds).unwrap_or_else(|| Bounds::centered(None, size(px(1240.0), px(820.0)), cx));
@@ -326,13 +247,28 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
             },
             move |window, cx| {
                 #[cfg(feature = "kobo")]
-                let services = AppServices::new(backend, open_reader, None, save_kobo_auto_rotate.clone());
-                #[cfg(any(feature = "desktop", feature = "mobile"))]
-                let services = AppServices::new(backend, open_reader, desktop_updater);
-                #[cfg(feature = "kobo")]
-                let browser = cx.new(|cx| BrowserRoot::new(services, kobo_auto_rotate, window, cx));
-                #[cfg(any(feature = "desktop", feature = "mobile"))]
-                let browser = cx.new(|cx| BrowserRoot::new(services, window, cx));
+                let services = AppServices::new(backend_worker, startup, save_kobo_auto_rotate.clone());
+                #[cfg(all(any(feature = "desktop", feature = "mobile"), not(feature = "kobo")))]
+                let services = AppServices::new(backend_worker, startup);
+                #[cfg(all(feature = "desktop", not(feature = "mobile")))]
+                {
+                    let services = services.clone();
+                    let backend = application_backend.clone();
+                    let playback_restore_path_for_windows = playback_restore_path_for_root.clone();
+                    cx.on_action(move |request: &browser_ui::OpenInNewWindow, cx| {
+                        let services = services.clone();
+                        let backend = backend.clone();
+                        let playback_restore_path = playback_restore_path_for_windows.clone();
+                        let target = request.0.clone();
+                        cx.spawn(async move |cx| match services.for_new_window().await {
+                            Ok(services) => {
+                                let _ = cx.update(|cx| open_extra_window(services, backend, playback_restore_path, target, cx));
+                            }
+                            Err(error) => log::error!("could not prepare a new library window: {error}"),
+                        })
+                        .detach();
+                    });
+                }
                 let application = cx.new(|cx| {
                     if let Some((session, saves)) = window_persistence {
                         cx.observe_window_bounds(window, move |_, window, cx| {
@@ -347,7 +283,10 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
                         })
                         .detach();
                     }
-                    ApplicationRoot::new(browser, bokheim_backend::APP_NAME)
+                    #[cfg(feature = "kobo")]
+                    return ApplicationRoot::new(services, application_backend, bokheim_backend::APP_NAME, playback_restore_path_for_root, kobo_auto_rotate, window, cx);
+                    #[cfg(not(feature = "kobo"))]
+                    ApplicationRoot::new(services, application_backend, bokheim_backend::APP_NAME, playback_restore_path_for_root, window, cx)
                 });
                 *application_root.borrow_mut() = Some(application.downgrade());
                 let content = platform_content(application, cx);
@@ -357,10 +296,8 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
         .expect("failed to open browsing window");
 
     #[cfg(feature = "desktop")]
-    update_notice::check_for_update(desktop_updater_for_check, browser_window.into(), cx);
     #[cfg(any(feature = "kobo", feature = "mobile"))]
     let _ = browser_window;
-    forward_book_removals(book_removals, application_root_for_removals, cx);
     if let Some(incoming_files) = incoming_files {
         forward_incoming_files(incoming_files, application_root_for_incoming, cx);
     }
@@ -372,23 +309,51 @@ pub fn open_ui(backend_context: BackendContext, options: UiLaunchOptions, incomi
     })
     .detach();
     cx.activate(true);
+    let root = application_root_for_host.borrow().clone();
+    root
 }
 
-fn forward_incoming_files(files: async_channel::Receiver<gpui::SelectedFile>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
-    cx.spawn(async move |cx| {
-        while let Ok(file) = files.recv().await {
-            let Some(root) = application_root.borrow().clone() else { continue };
-            let _ = root.update_in(cx, |root, window, cx| root.import_and_open_file(file, window, cx));
-        }
-    })
-    .detach();
+#[cfg(all(feature = "desktop", not(feature = "mobile")))]
+fn open_extra_window(services: AppServices, backend: AppClient, playback_restore_path: Option<std::path::PathBuf>, target: browser_ui::NewWindowTarget, cx: &mut App) {
+    let (app_id, icon) = desktop_window_identity();
+    let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
+    let result = cx.open_window(
+        WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(bokheim_backend::APP_NAME.into()), ..Default::default() }), focus: true, app_id, icon, ..Default::default() },
+        move |window, cx| {
+            let application = cx.new(|cx| ApplicationRoot::new(services, backend, bokheim_backend::APP_NAME, playback_restore_path, window, cx));
+            let target_application = application.downgrade();
+            window.defer(cx, move |window, cx| {
+                let _ = target_application.update(cx, |application, cx| application.open_window_target(target, window, cx));
+            });
+            let content = platform_content(application, cx);
+            cx.new(|cx| Root::new(content, window, cx))
+        },
+    );
+    if let Err(error) = result {
+        log::error!("could not open a new library window: {error}");
+    }
 }
 
-fn forward_book_removals(removals: async_channel::Receiver<(bokheim_backend::LibraryId, bokheim_backend::ContentHash)>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
+fn forward_incoming_files(files: async_channel::Receiver<IncomingPublicationResult>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
     cx.spawn(async move |cx| {
-        while let Ok((library_id, content_hash)) = removals.recv().await {
-            let Some(root) = application_root.borrow().clone() else { continue };
-            let _ = root.update_in(cx, |root, window, cx| root.handle_book_removed(&library_id, content_hash, window, cx));
+        while let Ok(result) = files.recv().await {
+            let Some(root) = application_root.borrow().clone() else {
+                if let Ok(file) = result {
+                    let _ = std::fs::remove_file(file.path);
+                }
+                continue;
+            };
+            let file = match result {
+                Ok(file) => file,
+                Err(error) => {
+                    let _ = root.update_in(cx, |root, window, cx| root.incoming_import_failed(error, window, cx));
+                    continue;
+                }
+            };
+            let fallback_path = file.path.clone();
+            if root.update_in(cx, |root, window, cx| root.import_and_open_path(file.name, file.path, window, cx)).is_err() {
+                let _ = std::fs::remove_file(fallback_path);
+            }
         }
     })
     .detach();

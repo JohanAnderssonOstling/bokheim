@@ -10,7 +10,7 @@ exec 9>/run/lock/bokheim-server-deploy.lock
 flock -n 9 || { echo "another Bokheim server deployment is running" >&2; exit 1; }
 
 incoming=/var/lib/bokheim-deploy/incoming
-for file in sync-server catalog-server metadata-server opds.json bokheim-sync.service bokheim-catalogs.service bokheim-metadata.service; do
+for file in pdfium/libpdfium.so pdfium/LICENSE sync-server catalog-server metadata-server opds.json bokheim-sync.service bokheim-catalogs.service bokheim-metadata.service; do
     if [[ ! -f ${incoming}/${file} || -L ${incoming}/${file} ]]; then
         echo "missing or unsafe staged artifact: ${file}" >&2
         exit 1
@@ -51,6 +51,7 @@ cleanup() {
     trap - EXIT
     if [[ ${activation_started} == true && ${deployment_succeeded} != true ]]; then
         echo "restoring the previous server executables" >&2
+        if [[ -d ${backup}/pdfium ]]; then install -o root -g root -m 0644 "${backup}/pdfium/libpdfium.so" "${backup}/pdfium/LICENSE" /usr/local/bin/pdfium/; fi
         [[ -f ${backup}/sync-server ]] && install -o root -g root -m 0755 "${backup}/sync-server" /usr/local/bin/sync-server
         [[ -f ${backup}/catalog-server ]] && install -o root -g root -m 0755 "${backup}/catalog-server" /usr/local/bin/catalog-server
         [[ -f ${backup}/metadata-server ]] && install -o root -g root -m 0755 "${backup}/metadata-server" /usr/local/bin/metadata-server
@@ -75,6 +76,9 @@ cleanup() {
 trap cleanup EXIT
 install -o root -g root -m 0755 "${incoming}/sync-server" "${candidate}/sync-server"
 install -o root -g root -m 0755 "${incoming}/catalog-server" "${candidate}/catalog-server"
+install -d -o root -g root -m 0755 "${candidate}/pdfium"
+install -o root -g root -m 0644 "${incoming}/pdfium/libpdfium.so" "${candidate}/pdfium/libpdfium.so"
+install -o root -g root -m 0644 "${incoming}/pdfium/LICENSE" "${candidate}/pdfium/LICENSE"
 install -o root -g root -m 0755 "${incoming}/metadata-server" "${candidate}/metadata-server"
 install -o root -g root -m 0644 "${incoming}/opds.json" "${candidate}/opds.json"
 install -o root -g root -m 0644 "${incoming}/bokheim-sync.service" "${candidate}/bokheim-sync.service"
@@ -86,10 +90,15 @@ for installed in /usr/local/bin/sync-server /usr/local/bin/catalog-server /usr/l
     if [[ -f ${installed} ]]; then cp -a -- "${installed}" "${backup}/"; fi
 done
 
+if [[ -d /usr/local/bin/pdfium ]]; then cp -a /usr/local/bin/pdfium "${backup}/pdfium"; fi
+
 activation_started=true
 systemctl stop bokheim-sync.service bokheim-catalogs.service bokheim-metadata.service 2>/dev/null || true
 install -o root -g root -m 0755 "${candidate}/sync-server" /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${candidate}/catalog-server" /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+install -o root -g root -m 0644 "${candidate}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
+install -o root -g root -m 0644 "${candidate}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -o root -g root -m 0755 "${candidate}/metadata-server" /usr/local/bin/metadata-server
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${candidate}/opds.json" /usr/local/share/catalog-providers/opds.json

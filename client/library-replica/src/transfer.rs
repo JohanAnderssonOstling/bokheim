@@ -131,55 +131,90 @@ impl TransferOrigin {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkTransport {
-    Offline,
-    Wifi,
-    Cellular,
-    Ethernet,
-    Vpn,
-    Other,
-    #[default]
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NetworkStatus {
-    pub transport: NetworkTransport,
-    pub connected: bool,
-    pub validated: Option<bool>,
-}
-
-impl Default for NetworkStatus {
-    fn default() -> Self {
-        Self { transport: NetworkTransport::Unknown, connected: true, validated: None }
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransferStatus {
     pub id: String,
     pub kind: TransferJobKind,
     pub content_hash: ContentHash,
-    pub book_content_hash: Option<ContentHash>,
-    pub path: Option<String>,
     pub state: TransferState,
     pub origin: TransferOrigin,
     pub attempts: u32,
     pub completed_items: u32,
     pub total_items: u32,
     pub last_error: Option<String>,
+    /// The failed item, distinct from the batch representative in old history.
+    #[serde(default)]
+    pub failed_content_hash: Option<ContentHash>,
+    /// Display name resolved from library metadata, never from diagnostic text.
+    #[serde(default)]
+    pub file_name: Option<String>,
     pub next_retry_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
+/// Progress through supported books in selected folders.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScanProgress {
+    pub total: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+}
+
+/// A user-level workflow; individual transfer jobs retain their own retries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LibraryOperationKind { Import, Sync }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LibraryOperationState { Running, Waiting, Completed }
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LibraryOperation {
+    pub id: String,
+    pub kind: LibraryOperationKind,
+    pub state: LibraryOperationState,
+    pub scanning: bool,
+    pub books: u64,
+    pub uploaded_books: u64,
+    pub pending_uploads: u64,
+    pub pending_changes: u64,
+    pub pending_thumbnails: u64,
+    pub failures: u64,
+    pub needs_attention: bool,
+    pub waiting_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LibraryTransfers {
+    /// Some pending books were refused because account storage is full.
+    #[serde(default)]
+    pub storage_quota_blocked: bool,
+    #[serde(default)]
+    pub operation: Option<LibraryOperation>,
     pub library_id: LibraryId,
     pub library_name: String,
     pub scanner_running: bool,
+    #[serde(default)]
+    pub thumbnail_work_running: bool,
+    #[serde(default)]
+    pub thumbnail_progress: Option<ScanProgress>,
+    #[serde(default)]
+    pub thumbnail_waiting: bool,
+    #[serde(default)]
+    pub metadata_sync_running: bool,
+    #[serde(default)]
+    pub preparing_transfers: bool,
+    #[serde(default)]
+    pub total_books: u64,
+    #[serde(default)]
+    pub uploaded_books: u64,
+    #[serde(default)]
+    pub scan_progress: Option<ScanProgress>,
+    #[serde(default)]
+    pub file_work_pending: bool,
+    #[serde(default)]
+    pub file_work_error: Option<String>,
     pub transfers: Vec<TransferStatus>,
     pub history: Vec<TransferStatus>,
 }

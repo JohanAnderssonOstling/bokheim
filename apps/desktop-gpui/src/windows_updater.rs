@@ -8,12 +8,13 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use browser_ui::{DesktopUpdate, DesktopUpdater};
+use crate::updates::{DesktopUpdate, DesktopUpdater};
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use ui_runtime::BlockingWorker;
+
+use crate::blocking_worker::BlockingWorker;
 
 const RELEASE_API: &str = "https://api.github.com/repos/JohanAnderssonOstling/bokheim/releases/latest";
 const INSTALLER_ASSET: &str = "Bokheim-Windows-x86_64-Setup.exe";

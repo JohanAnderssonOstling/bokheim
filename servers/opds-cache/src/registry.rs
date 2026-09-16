@@ -1,8 +1,8 @@
 use super::{
-    cache_error, default_cache_path, default_cover_cache_directory, endpoints_from_registry, opds_catalog_source_id, opds_source, reconcile_cached_sources, validate_curated_registry, Arc, AtomicBool, BTreeMap, CatalogCache,
-    CatalogCoverCache, CatalogProcessRuntime, CatalogRegistry, CatalogService, CatalogServiceError, CatalogServiceState, CatalogSourceId, CatalogSourceRegistration, CatalogSourceRegistry, Duration, HashMap, Instant,
-    MetadataBackfillRuntimeMetrics, Mutex, Notify, OpdsClient, OpdsEndpoint, Path, PathBuf, RecentBrowserCovers, RegistrySnapshot, RegistrySource, RwLock, Semaphore, StdMutex, Url, BACKGROUND_DOWNLOAD_LIMIT, BUNDLED_REGISTRY,
-    CRAWL_PAUSE_SENTINEL, DEFAULT_MAX_CRAWL_PAGES, HARD_MAX_CRAWL_PAGES, MAX_CONCURRENT_EXTRACTIONS, MAX_INTERACTIVE_DOWNLOADS, MAX_QUEUED_DOWNLOADS, MAX_REGISTRY_BYTES,
+    default_cache_path, default_cover_cache_directory, endpoints_from_registry, opds_catalog_source_id, opds_source, reconcile_stored_sources, store_error, validate_curated_registry, Arc, AtomicBool, BTreeMap, CatalogCoverCache,
+    CatalogProcessRuntime, CatalogRegistry, CatalogService, CatalogServiceError, CatalogServiceState, CatalogSourceId, CatalogSourceRegistration, CatalogSourceRegistry, CatalogStore, Duration, HashMap, Instant,
+    CatalogExtractionRuntimeMetrics, MetadataBackfillRuntimeMetrics, Mutex, Notify, OpdsClient, OpdsEndpoint, Path, PathBuf, RegistrySnapshot, RegistrySource, RwLock, Semaphore, StdMutex, Url, BACKGROUND_DOWNLOAD_LIMIT, BUNDLED_REGISTRY, CRAWL_PAUSE_SENTINEL,
+    DEFAULT_MAX_CRAWL_PAGES, HARD_MAX_CRAWL_PAGES, MAX_CONCURRENT_EXTRACTIONS, MAX_INTERACTIVE_DOWNLOADS, MAX_QUEUED_DOWNLOADS, MAX_REGISTRY_BYTES,
 };
 use crate::http::public::read_registry_file;
 
@@ -91,18 +91,21 @@ impl CatalogService {
 
     pub(crate) async fn reconcile_sources(&self, endpoints: &[OpdsEndpoint]) -> Result<(), CatalogServiceError> {
         let endpoints = endpoints.to_vec();
-        self.blocking_call(move |cache| reconcile_cached_sources(&cache, &endpoints).map(|_| ())).await
+        let acquisitions = self.state.acquisition_directory.clone();
+        let covers = self.state.cover_cache_directory.clone();
+        self.blocking_call(move |store| reconcile_stored_sources(&store, &endpoints, Some((&acquisitions,&covers))).map(|_| ())).await
     }
 
     pub(crate) fn from_bytes(source: RegistrySource, bytes: Vec<u8>, cache_path: Option<PathBuf>, cover_cache_directory: PathBuf) -> Result<Self, CatalogServiceError> {
         let registry = parse_registry(bytes.clone())?;
         let endpoints = endpoints_from_registry(registry.clone()).map_err(|error| CatalogServiceError(error.to_string()))?;
         let cache_path = cache_path.unwrap_or_else(default_cache_path);
-        let cache = CatalogCache::open(cache_path).map_err(cache_error)?;
-        cache.pause_all_processes().map_err(cache_error)?;
-        let process_settings = cache.process_settings().map_err(cache_error)?;
-        reconcile_cached_sources(&cache, &endpoints)?;
-        let covers = CatalogCoverCache::new_public_only(cover_cache_directory).map_err(|error| CatalogServiceError(error.to_string()))?;
+        let acquisition_directory = cache_path.parent().map(|parent| parent.join("acquisitions")).unwrap_or_else(|| std::env::temp_dir().join("bokheim-catalog-acquisitions"));
+        let store = CatalogStore::open(cache_path).map_err(store_error)?;
+        store.pause_all_processes().map_err(store_error)?;
+        let process_settings = store.process_settings().map_err(store_error)?;
+        reconcile_stored_sources(&store, &endpoints, Some((&acquisition_directory,&cover_cache_directory)))?;
+        let covers = CatalogCoverCache::new_public_only(cover_cache_directory.clone()).map_err(|error| CatalogServiceError(error.to_string()))?;
         Ok(Self {
             state: Arc::new(CatalogServiceState {
                 started_at: Instant::now(),
@@ -110,14 +113,14 @@ impl CatalogService {
                 snapshot: RwLock::new(RegistrySnapshot { observed_bytes: bytes, registry }),
                 endpoints: RwLock::new(endpoints),
                 opds: OpdsClient::new_public_only().map_err(|error| CatalogServiceError(error.to_string()))?,
-                cache,
+                store,
                 covers,
-                cache_write_lock: Mutex::new(()),
+                cover_cache_directory,
+                store_write_lock: Mutex::new(()),
                 crawl_locks: Mutex::new(HashMap::new()),
                 crawl_progress: Mutex::new(HashMap::new()),
                 origin_throttles: Mutex::new(HashMap::new()),
                 source_update_locks: Mutex::new(HashMap::new()),
-                recent_browser_covers: Mutex::new(RecentBrowserCovers::default()),
                 epub_range_origins: Mutex::new(HashMap::new()),
                 background_download_slots: Semaphore::new(BACKGROUND_DOWNLOAD_LIMIT),
                 interactive_download_slots: Semaphore::new(MAX_INTERACTIVE_DOWNLOADS),
@@ -125,11 +128,16 @@ impl CatalogService {
                 extraction_slots: Semaphore::new(MAX_CONCURRENT_EXTRACTIONS),
                 extraction_notify: Notify::new(),
                 processes: CatalogProcessRuntime::new(process_settings),
-                acquisition_directory: std::env::temp_dir().join("bokheim-catalog-acquisitions"),
+                // EPUBs are a durable hand-off between the download and
+                // extraction pools. Keep the spool beside the catalog cache
+                // so staged acquisitions survive service restarts and are
+                // not hidden inside systemd's private /tmp namespace.
+                acquisition_directory,
                 metadata_endpoint: configured_metadata_endpoint()?,
                 metadata_client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(15)).build().map_err(|error| CatalogServiceError(error.to_string()))?,
                 metadata_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
                 description_backfill_metrics: MetadataBackfillRuntimeMetrics::default(),
+                extraction_metrics: CatalogExtractionRuntimeMetrics::default(),
                 description_backfill_available: AtomicBool::new(false),
                 writer_metrics: StdMutex::new(BTreeMap::new()),
                 max_crawl_pages: configured_max_crawl_pages()?,

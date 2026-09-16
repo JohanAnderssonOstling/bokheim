@@ -1,10 +1,10 @@
-use crate::sync::LibraryUpsertOutcome;
+use crate::sync::LibraryNameOutcome;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sync_common::api::libraries::{LibrarySummary, UpsertLibraryRequest};
+use sync_common::api::libraries::{LibrarySummary, LibraryNameRequest};
 use sync_common::StateCell;
-use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, SyncCursor, UnixMillis, WireMutation, MAX_PULL_CHANGES};
+use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, SyncCursor, UnixMillis, VersionKey, WireMutation, MAX_PULL_CHANGES};
 
 const FETCH_PAGE_SQL: &str = include_str!("sql/sync/fetch_page.sql");
 const FETCH_READING_POSITION_PAGE_SQL: &str = include_str!("sql/sync/fetch_reading_position_page.sql");
@@ -14,19 +14,16 @@ pub(super) async fn list_libraries(pool: &PgPool, user_id: &str) -> Result<Vec<L
     rows.into_iter().map(|(id, name)| Ok(LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name })).collect()
 }
 
-pub(super) async fn upsert_library(pool: &PgPool, user_id: &str, request: &UpsertLibraryRequest) -> Result<Option<LibraryUpsertOutcome>, sqlx::Error> {
+pub(super) async fn create_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
     let library_id = request.library_id.to_string();
-    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/upsert_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
-    row.map(|(id, name, changed)| Ok(LibraryUpsertOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
+    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/create_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
+    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
 }
 
-pub(super) async fn ensure_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
-    let library_id = library_id.to_string();
-    if let Some(owner) = sqlx::query_scalar::<_, String>(include_str!("sql/sync/get_library_owner.sql")).bind(&library_id).fetch_optional(pool).await? {
-        return Ok(owner == user_id);
-    }
-    let owner = sqlx::query_scalar::<_, String>(include_str!("sql/sync/ensure_library.sql")).bind(&library_id).bind(user_id).fetch_optional(pool).await?;
-    Ok(owner.as_deref() == Some(user_id))
+pub(super) async fn rename_library(pool: &PgPool, user_id: &str, request: &LibraryNameRequest) -> Result<Option<LibraryNameOutcome>, sqlx::Error> {
+    let library_id = request.library_id.to_string();
+    let row = sqlx::query_as::<_, (String, String, bool)>(include_str!("sql/sync/rename_library.sql")).bind(library_id).bind(user_id).bind(&request.library_name).fetch_optional(pool).await?;
+    row.map(|(id, name, changed)| Ok(LibraryNameOutcome { library: LibrarySummary { library_id: LibraryId::parse_str(&id).map_err(decode_err)?, library_name: name }, changed })).transpose()
 }
 
 pub(super) async fn owns_library(pool: &PgPool, user_id: &str, library_id: &LibraryId) -> Result<bool, sqlx::Error> {
@@ -123,16 +120,26 @@ fn decode_lifecycle_reference(row: PgRow) -> Result<StoredLifecycleReference, sq
     })
 }
 
-fn lifecycle_batch_order(change: &WireMutation) -> (UnixMillis, u8, u64, MutationId) {
-    (change.changed_at, change.conflict_rank, change.replica_seq.get(), change.mutation_id)
-}
-
 /// Stores opaque wire rows. The only routing knowledge is that reading state
 /// belongs to the hot table; cold kinds need no server-side enum arm.
 pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
     let now = server_now_ms();
     let (accepted, rejected): (Vec<_>, Vec<_>) = changes.iter().partition(|change| storage_rejection(change, now).is_none());
-    let rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
+    let mut rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
+    let dependencies = accepted.iter().map(|change| crate::publication_admission::dependency(change)).collect::<Vec<_>>();
+    let hashes = dependencies.iter().filter_map(|d| d.as_ref().ok().and_then(|h| h.as_ref()).map(ToString::to_string)).collect::<Vec<_>>();
+    let available = crate::publication_admission::available(tx, user_id, library_id, &hashes).await?;
+    let accepted = accepted.into_iter().zip(dependencies).filter_map(|(change, dependency)| {
+        let reason = match dependency {
+            Err(reason) => Some(reason),
+            Ok(Some(hash)) if !available.contains(hash.as_str()) => Some(MutationRejectionReason::MissingDependency),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            rejected.push(MutationRejection { mutation_id: change.mutation_id, reason });
+            None
+        } else { Some(change) }
+    }).collect::<Vec<_>>();
 
     // The server reads only declared lifecycle facts. It never decodes the
     // opaque value to maintain quota references.
@@ -143,13 +150,12 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         lifecycle_winners
             .entry(cell)
             .and_modify(|winner| {
-                if lifecycle_batch_order(change) > lifecycle_batch_order(winner) {
+                if VersionKey::from_wire(change, *replica_id) > VersionKey::from_wire(winner, *replica_id) {
                     *winner = change;
                 }
             })
             .or_insert(change);
     }
-    let incoming_replica_id = replica_id.to_string();
     for change in lifecycle_winners.into_values() {
         let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql"))
             .bind(library_id.to_string())
@@ -159,20 +165,33 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
             .await?
             .map(decode_lifecycle_reference)
             .transpose()?;
-        let incoming_event_id = change.mutation_id.to_string();
-        let incoming = (i64::try_from(change.changed_at).map_err(decode_err)?, change.conflict_rank as i16, incoming_replica_id.as_str(), change.replica_seq.get() as i64, incoming_event_id.as_str());
-        let wins = existing.as_ref().is_none_or(|stored| incoming > (stored.changed_at, stored.version_rank, stored.replica_id.as_str(), stored.replica_seq, stored.event_id.as_str()));
+        let incoming = VersionKey::from_wire(change, *replica_id);
+        let wins = match existing.as_ref() {
+            None => true,
+            Some(stored) => {
+                let stored_replica = ReplicaId::parse_str(&stored.replica_id).map_err(decode_err)?;
+                let stored_mutation = MutationId::parse(&stored.event_id).map_err(decode_err)?;
+                let stored_changed_at = u64::try_from(stored.changed_at).map_err(decode_err)?;
+                let stored_rank = u8::try_from(stored.version_rank).map_err(decode_err)?;
+                let stored_seq = u64::try_from(stored.replica_seq).map_err(decode_err)?;
+                incoming > VersionKey::new(stored_changed_at, stored_rank, stored_replica, stored_seq, stored_mutation)
+            }
+        };
         if !wins {
             continue;
         }
         if let Some(hash) = existing.as_ref().filter(|stored| stored.present == Some(true)).and_then(|stored| stored.content_hash.as_ref()) {
             lifecycle_deltas.push((ContentHash::new(hash), -1));
+            if !change.blob_reference.as_ref().is_some_and(|reference| reference.present && reference.content_hash.as_ref().is_some_and(|next| next.as_str() == hash)) {
+                sqlx::query(include_str!("sql/cloud_storage/delete_claim.sql")).bind(library_id.to_string()).bind(hash).execute(&mut **tx).await?;
+            }
         }
         if let Some(hash) = change.blob_reference.as_ref().filter(|reference| reference.present).and_then(|reference| reference.content_hash.clone()) {
             lifecycle_deltas.push((hash, 1));
         }
     }
-    crate::assets::apply_lifecycle_reference_deltas(tx, user_id, lifecycle_deltas).await?;
+    let cloud_enabled: bool = sqlx::query_scalar(include_str!("sql/cloud_storage/enabled.sql")).bind(library_id.to_string()).fetch_one(&mut **tx).await?;
+    if cloud_enabled { crate::assets::apply_lifecycle_reference_deltas(tx, user_id, lifecycle_deltas).await?; }
 
     for (table, rows) in [
         ("sync_state", accepted.iter().copied().filter(|change| change.kind != sync_common::mutation_kind::READING_POSITION).collect::<Vec<_>>()),
@@ -518,9 +537,10 @@ mod tests {
     const LWW_MIGRATION_SQL: &str = include_str!("../schema/migrations/15_lww_loser_republish.sql");
 
     #[test]
-    fn postgres_winner_order_begins_with_wall_clock_time() {
+    fn postgres_winner_order_matches_the_shared_version_key() {
         let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
-        assert!(comparison.trim_start().starts_with("NEW.changed_at,"));
+        let comparison = comparison.split(')').next().expect("LWW tuple").split_whitespace().collect::<String>();
+        assert_eq!(comparison, "NEW.changed_at,NEW.version_rank,NEW.replica_idCOLLATE\"C\",NEW.replica_seq,NEW.event_idCOLLATE\"C\"");
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
     }
 

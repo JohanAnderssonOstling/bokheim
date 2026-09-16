@@ -35,7 +35,7 @@ fn components_match_routes(runtime: &UnifiedTaxonomyRuntime, components: &[Strin
             continue;
         }
         let component = &components[component_index];
-        let matches = normalize_source_label(route.label()) == *component || runtime.source_labels.get(component).is_some_and(|ids| ids.contains(route.concept_id()));
+        let matches = normalize_source_label(route.label()) == *component || runtime.source_labels.get(component).is_some_and(|ids| ids.contains(&route.concept_id()));
         if !matches {
             continue;
         }

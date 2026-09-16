@@ -3,6 +3,7 @@
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import argparse
 
 
 class CrossOriginIsolatedHandler(SimpleHTTPRequestHandler):
@@ -13,6 +14,10 @@ class CrossOriginIsolatedHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
 
-dist = Path(__file__).resolve().parent.parent / "dist"
+parser = argparse.ArgumentParser()
+parser.add_argument("--directory", type=Path, default=Path(__file__).resolve().parent.parent / "dist")
+parser.add_argument("--port", type=int, default=4173)
+args = parser.parse_args()
+dist = args.directory.resolve()
 handler = partial(CrossOriginIsolatedHandler, directory=dist)
-ThreadingHTTPServer(("127.0.0.1", 4173), handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", args.port), handler).serve_forever()

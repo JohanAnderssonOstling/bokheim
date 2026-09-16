@@ -13,7 +13,7 @@ Build the release binary and package it with versioned releases of
 `linuxdeploy` and `appimagetool` available on `PATH`:
 
 ```sh
-cargo build --locked --release -p desktop-gpui --bin desktop-gpui
+python3 apps/desktop-gpui/scripts/build.py
 apps/desktop-gpui/linux/appimage/build-appimage.sh
 ```
 
@@ -45,19 +45,20 @@ executable and loads the application-private library installed at
 `/app/lib/libpdfium.so`.
 
 The Flatpak manifest must fetch the pinned PDFium archive declared in
-`../../renderers/pdf/core/build.rs`, verify its SHA-256 checksum, and make the
+`shared/pdfium/artifacts.toml`, verify its SHA-256 checksum, and make the
 archive available to Cargo without network access:
 
 ```sh
-PDFIUM_ARCHIVE_PATH=/run/build/bokheim/pdfium-linux-x64.tgz \
-  cargo build --locked --release -p desktop-gpui --features flatpak
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
+  --archive /run/build/bokheim/pdfium-linux-x64.tgz --offline
+cargo build --locked --release -p desktop-gpui --features flatpak
 ```
 
 Install the artifacts into the Flatpak application prefix:
 
 ```text
 /app/bin/desktop-gpui
-/app/lib/libpdfium.so
+/app/lib/libpdfium.so  # from .pdfium/x86_64-unknown-linux-gnu/
 /app/share/applications/se.bokheim.Bokheim.desktop
 ```
 

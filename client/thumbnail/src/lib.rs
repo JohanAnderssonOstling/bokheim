@@ -2,7 +2,7 @@
 
 #[cfg(feature = "publication-memory")]
 use epub_provider::EpubProvider;
-use fast_image_resize::images::Image;
+use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
 use image::io::Reader as ImageReader;
@@ -12,7 +12,6 @@ use mobi::headers::ExthRecord;
 #[cfg(feature = "publication-extractors")]
 use std::fs::File;
 use std::io::{BufWriter, Cursor};
-#[cfg(feature = "publication-extractors")]
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(feature = "publication-extractors")]
 use std::path::Path;
@@ -22,10 +21,10 @@ use std::path::Path;
 /// is 600 real pixels. Anything smaller is upscaled on HiDPI displays and on
 /// phones.
 ///
-/// Raising this does not touch thumbnails that already exist — publishing is
-/// skipped whenever the file is present — so libraries scanned before the
-/// change keep their old resolution until those books are rescanned.
-const THUMBNAIL_WIDTH: u32 = 600;
+/// The 600px asset remains the synchronized source of truth. Smaller display
+/// buckets are device-local derivatives and can be rebuilt from it.
+pub const BROWSE_THUMBNAIL_WIDTH: u32 = 300;
+pub const THUMBNAIL_WIDTH: u32 = 600;
 const MAX_COVER_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_COVER_IMAGE_PIXELS: u64 = 24_000_000;
 const MAX_COVER_IMAGE_DIMENSION: u32 = 20_000;
@@ -35,6 +34,19 @@ const EPUB_FALLBACK_MIN_ASPECT_RATIO: f64 = 0.45;
 const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
 
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// The synchronized high-density thumbnail and its smaller device-local browse
+/// derivative. Both are produced from the same decoded cover.
+pub struct ThumbnailVersions {
+    pub browse: Vec<u8>,
+    pub high_density: Vec<u8>,
+}
+
+impl ThumbnailVersions {
+    fn from_image(image: &RgbImage) -> ThumbnailResult<Self> {
+        Ok(Self { browse: encode_thumbnail_at_width(image, BROWSE_THUMBNAIL_WIDTH)?, high_density: encode_thumbnail_at_width(image, THUMBNAIL_WIDTH)? })
+    }
+}
 
 /// Publication formats whose embedded covers can be extracted without a
 /// filesystem path. This is the shared entry point for sandboxed frontends.
@@ -49,15 +61,40 @@ pub enum InMemoryPublicationFormat {
 /// no usable embedded cover, and formats without an extractor, return `None`.
 #[cfg(feature = "publication-extractors")]
 pub fn generate_thumbnail(book_path: &Path) -> ThumbnailResult<Option<Vec<u8>>> {
+    publication_cover(book_path)?.as_ref().map(encode_thumbnail).transpose()
+}
+
+/// Extracts a publication cover once and produces both display-size buckets.
+#[cfg(feature = "publication-extractors")]
+pub fn generate_thumbnail_versions(book_path: &Path) -> ThumbnailResult<Option<ThumbnailVersions>> {
+    publication_cover(book_path)?.as_ref().map(ThumbnailVersions::from_image).transpose()
+}
+
+#[cfg(feature = "publication-extractors")]
+fn publication_cover(book_path: &Path) -> ThumbnailResult<Option<RgbImage>> {
     let extension = book_path.extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let image = match extension.as_str() {
-        "epub" => epub_cover(book_path)?,
-        "m4b" => m4b_cover(book_path)?,
-        "mobi" | "azw" | "azw3" => mobi_cover(book_path)?,
-        "pdf" => pdf_cover(book_path)?,
-        _ => None,
-    };
-    image.map(encode_thumbnail).transpose()
+    publication_cover_from_reader(&extension, File::open(book_path)?)
+}
+
+/// Uses the same bounded cover extraction for files and browser storage readers.
+#[cfg(feature = "publication-extractors")]
+pub fn generate_thumbnail_versions_from_reader(extension: &str, reader: impl Read + Seek + Send + Sync + 'static) -> ThumbnailResult<Option<ThumbnailVersions>> {
+    publication_cover_from_reader(extension, reader)?.as_ref().map(ThumbnailVersions::from_image).transpose()
+}
+
+#[cfg(feature = "publication-extractors")]
+fn publication_cover_from_reader(extension: &str, mut reader: impl Read + Seek + Send + Sync + 'static) -> ThumbnailResult<Option<RgbImage>> {
+    match extension {
+        "epub" => epub_cover_from_provider(&EpubProvider::try_from_reader(reader)?),
+        "mobi" | "azw" | "azw3" => mobi_cover_from_reader(reader),
+        "m4b" => {
+            let tag = mp4ameta::Tag::read_from(&mut reader)?;
+            let Some(artwork) = tag.artwork() else { return Ok(None) };
+            Ok(Some(decode_cover_image(artwork.data, image::guess_format(artwork.data)?)?))
+        }
+        "pdf" => pdf_cover_from_reader(reader),
+        _ => Ok(None),
+    }
 }
 
 /// Normalizes an already-extracted cover image to the same resized JPEG used
@@ -65,7 +102,23 @@ pub fn generate_thumbnail(book_path: &Path) -> ThumbnailResult<Option<Vec<u8>>> 
 /// thumbnail contract without requiring a temporary filesystem path.
 pub fn generate_thumbnail_from_image_bytes(bytes: &[u8]) -> ThumbnailResult<Vec<u8>> {
     let format = image::guess_format(bytes)?;
-    encode_thumbnail(decode_cover_image(bytes, format)?)
+    encode_thumbnail(&decode_cover_image(bytes, format)?)
+}
+
+/// Decode a downloaded cover once and produce both display buckets.
+pub fn generate_thumbnail_versions_from_image_bytes(bytes: &[u8]) -> ThumbnailResult<ThumbnailVersions> {
+    ThumbnailVersions::from_image(&decode_cover_image(bytes, image::guess_format(bytes)?)?)
+}
+
+/// Read image geometry without decoding its pixels.
+pub fn cover_image_dimensions(bytes: &[u8]) -> ThumbnailResult<(u32, u32)> {
+    Ok(ImageReader::with_format(Cursor::new(bytes), image::guess_format(bytes)?).into_dimensions()?)
+}
+
+/// Produces one current display bucket from normalized image bytes.
+pub fn generate_thumbnail_at_width_from_image_bytes(bytes: &[u8], width: u32) -> ThumbnailResult<Vec<u8>> {
+    let format = image::guess_format(bytes)?;
+    encode_thumbnail_at_width(&decode_cover_image(bytes, format)?, width)
 }
 
 /// Extracts and normalizes a publication cover directly from its bytes.
@@ -73,31 +126,36 @@ pub fn generate_thumbnail_from_image_bytes(bytes: &[u8]) -> ThumbnailResult<Vec<
 /// fallback, safety, and JPEG encoding contract.
 #[cfg(feature = "publication-memory")]
 pub fn generate_thumbnail_from_publication_bytes(format: InMemoryPublicationFormat, bytes: &[u8]) -> ThumbnailResult<Option<Vec<u8>>> {
-    let image = match format {
+    publication_cover_from_bytes(format, bytes)?.as_ref().map(encode_thumbnail).transpose()
+}
+
+/// Extracts an in-memory publication cover once and produces both display-size
+/// buckets.
+#[cfg(feature = "publication-memory")]
+pub fn generate_thumbnail_versions_from_publication_bytes(format: InMemoryPublicationFormat, bytes: &[u8]) -> ThumbnailResult<Option<ThumbnailVersions>> {
+    publication_cover_from_bytes(format, bytes)?.as_ref().map(ThumbnailVersions::from_image).transpose()
+}
+
+#[cfg(feature = "publication-memory")]
+fn publication_cover_from_bytes(format: InMemoryPublicationFormat, bytes: &[u8]) -> ThumbnailResult<Option<RgbImage>> {
+    Ok(match format {
         InMemoryPublicationFormat::Epub => epub_cover_from_bytes(bytes)?,
         InMemoryPublicationFormat::Mobi => mobi_cover_from_bytes(bytes)?,
-    };
-    image.map(encode_thumbnail).transpose()
+    })
 }
 
 /// Extracts a thumbnail from an EPUB archive that the caller has already
 /// opened for metadata or reading. No publication-sized byte copy is made.
 #[cfg(feature = "publication-memory")]
 pub fn generate_thumbnail_from_epub_provider(epub: &EpubProvider) -> ThumbnailResult<Option<Vec<u8>>> {
-    epub_cover_from_provider(epub)?.map(encode_thumbnail).transpose()
+    epub_cover_from_provider(epub)?.as_ref().map(encode_thumbnail).transpose()
 }
 
 /// Extracts a thumbnail from a MOBI that the caller has already parsed. This
 /// avoids constructing a second full in-memory MOBI during import.
 #[cfg(feature = "publication-memory")]
 pub fn generate_thumbnail_from_mobi(book: &mobi::Mobi) -> ThumbnailResult<Option<Vec<u8>>> {
-    mobi_cover_from_book(book)?.map(encode_thumbnail).transpose()
-}
-
-#[cfg(feature = "publication-extractors")]
-fn epub_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
-    let epub = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
-    epub_cover_from_provider(&epub)
+    mobi_cover_from_book(book)?.as_ref().map(encode_thumbnail).transpose()
 }
 
 #[cfg(feature = "publication-memory")]
@@ -181,21 +239,13 @@ pub fn reasonable_cover_dimensions(width: u32, height: u32) -> bool {
 }
 
 #[cfg(feature = "publication-extractors")]
-fn m4b_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
-    let tag = mp4ameta::Tag::read_from_path(path)?;
-    let Some(artwork) = tag.artwork() else { return Ok(None) };
-    Ok(Some(decode_cover_image(artwork.data, image::guess_format(artwork.data)?)?))
-}
-
-#[cfg(feature = "publication-extractors")]
-fn mobi_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
+fn mobi_cover_from_reader(mut file: impl Read + Seek) -> ThumbnailResult<Option<RgbImage>> {
     // Parsing only MobiMetadata avoids reading and decoding the book's text.
     // CoverOffset and ThumbOffset are relative to first_image_index.
-    let metadata = mobi::MobiMetadata::from_path(path)?;
-    let file_len = std::fs::metadata(path)?.len();
+    let metadata = mobi::MobiMetadata::from_read(&mut file)?;
+    let file_len = file.seek(SeekFrom::End(0))?;
     let records = &metadata.records.records;
     let first_image_index = metadata.mobi.first_image_index as usize;
-    let mut file = File::open(path)?;
     let mut attempted = Vec::with_capacity(2);
 
     // The embedded thumbnail is normally already close to display size and is
@@ -274,7 +324,7 @@ fn mobi_image_offset(metadata: &mobi::MobiMetadata, record: ExthRecord) -> Optio
 }
 
 #[cfg(feature = "publication-extractors")]
-fn decode_mobi_image_record(file: &mut File, records: &[mobi::record::PdbRecord], record_index: usize, file_len: u64) -> ThumbnailResult<Option<RgbImage>> {
+fn decode_mobi_image_record(file: &mut (impl Read + Seek), records: &[mobi::record::PdbRecord], record_index: usize, file_len: u64) -> ThumbnailResult<Option<RgbImage>> {
     let Some((start, len)) = mobi_record_bounds(records, record_index, file_len) else { return Ok(None) };
     if len > MAX_COVER_IMAGE_BYTES as u64 {
         return Ok(None);
@@ -299,38 +349,47 @@ fn mobi_record_bounds(records: &[mobi::record::PdbRecord], record_index: usize, 
     (start < end && end <= file_len).then(|| (start, end - start))
 }
 
-#[cfg(all(feature = "publication-extractors", feature = "pdf"))]
-fn pdf_cover(path: &Path) -> ThumbnailResult<Option<RgbImage>> {
-    let rendered = pdf_reader_core::render_first_page_image(path, 300)?;
+#[cfg(feature = "publication-extractors")]
+fn pdf_cover_from_reader(mut reader: impl Read + Seek + 'static) -> ThumbnailResult<Option<RgbImage>> {
+    if let Some(image) = pdf_cover::extract(&mut reader) { return Ok(Some(image)); }
+    reader.seek(std::io::SeekFrom::Start(0))?;
+    let rendered = pdf_reader_core::render_first_page_image_from_reader(reader, THUMBNAIL_WIDTH as u16)?;
     let (rgba, pixel_width, pixel_height) = rendered.into_parts();
     let rgb = rgba.chunks_exact(4).flat_map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect::<Vec<_>>();
     Ok(Some(RgbImage::from_raw(pixel_width, pixel_height, rgb).ok_or("PDF renderer returned invalid image dimensions")?))
 }
 
-#[cfg(all(feature = "publication-extractors", not(feature = "pdf")))]
-fn pdf_cover(_: &Path) -> ThumbnailResult<Option<RgbImage>> {
-    Ok(None)
+
+fn encode_thumbnail(decoded: &RgbImage) -> ThumbnailResult<Vec<u8>> {
+    encode_thumbnail_at_width(decoded, THUMBNAIL_WIDTH)
 }
 
-fn encode_thumbnail(decoded: RgbImage) -> ThumbnailResult<Vec<u8>> {
+fn encode_thumbnail_at_width(decoded: &RgbImage, width: u32) -> ThumbnailResult<Vec<u8>> {
     let (source_width, source_height) = decoded.dimensions();
-    if source_width == 0 || source_height == 0 {
+    if source_width == 0 || source_height == 0 || width == 0 {
         return Err("cover image has zero dimensions".into());
     }
-    let destination_height = ((source_height as f64 * f64::from(THUMBNAIL_WIDTH) / source_width as f64).round() as u32).max(1);
-    if source_width == THUMBNAIL_WIDTH {
+    let destination_height = ((source_height as f64 * f64::from(width) / source_width as f64).round() as u32).max(1);
+    validate_cover_image_dimensions(width, destination_height)?;
+    if source_width == width {
         return encode_jpeg(decoded.as_raw(), source_width, source_height);
     }
-    let source = Image::from_vec_u8(source_width, source_height, decoded.into_raw(), PixelType::U8x3)?;
-    let mut destination = Image::new(THUMBNAIL_WIDTH, destination_height, PixelType::U8x3);
+    let source = ImageRef::new(source_width, source_height, decoded.as_raw(), PixelType::U8x3)?;
+    let mut destination = Image::new(width, destination_height, PixelType::U8x3);
     Resizer::new().resize(&source, &mut destination, Some(&ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Hamming))))?;
 
-    encode_jpeg(destination.buffer(), THUMBNAIL_WIDTH, destination_height)
+    encode_jpeg(destination.buffer(), width, destination_height)
 }
 
 #[cfg(test)]
 mod core_tests {
     use super::*;
+
+    #[test]
+    fn extreme_aspect_ratio_is_rejected_before_thumbnail_allocation() {
+        let image = RgbImage::new(1, MAX_COVER_IMAGE_DIMENSION);
+        assert!(encode_thumbnail(&image).is_err());
+    }
 
     #[test]
     fn embedded_bmp_cover_is_normalized_to_jpeg() {
@@ -365,9 +424,18 @@ fn decode_cover_image(bytes: &[u8], format: ImageFormat) -> ThumbnailResult<RgbI
             let requested_height = ((u64::from(source_height) * u64::from(THUMBNAIL_WIDTH)).div_ceil(u64::from(source_width))).clamp(1, u64::from(u16::MAX)) as u16;
             decoder.scale(THUMBNAIL_WIDTH as u16, requested_height)?;
         }
-        return Ok(DynamicImage::from_decoder(decoder)?.to_rgb8());
+        return Ok(DynamicImage::from_decoder(decoder)?.into_rgb8());
     }
-    Ok(ImageReader::with_format(Cursor::new(bytes), format).decode()?.to_rgb8())
+    let decoded = ImageReader::with_format(Cursor::new(bytes), format).decode()?;
+    // Reduce RGBA/16-bit images before RGB conversion: converting the full
+    // source would retain a second publication-sized pixel buffer.
+    let reduced = if width > THUMBNAIL_WIDTH {
+        let height = (u64::from(height) * u64::from(THUMBNAIL_WIDTH)).div_ceil(u64::from(width)).max(1) as u32;
+        decoded.thumbnail_exact(THUMBNAIL_WIDTH, height)
+    } else {
+        decoded
+    };
+    Ok(reduced.into_rgb8())
 }
 
 fn validate_cover_image_dimensions(width: u32, height: u32) -> ThumbnailResult<()> {
@@ -431,6 +499,25 @@ mod publication_extractor_tests {
     }
 
     #[test]
+    fn reduces_large_png_before_rgb_conversion_and_preserves_both_cover_sizes() {
+        for source in [
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1200, 1800, image::Rgb([180, 40, 20]))),
+            DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1200, 1800, image::Rgba([180, 40, 20, 255]))),
+            DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(1200, 1800, image::Rgba([46260_u16, 10280, 5140, 65535]))),
+        ] {
+            let mut png = Cursor::new(Vec::new());
+            source.write_to(&mut png, image::ImageOutputFormat::Png).unwrap();
+            let cover = decode_cover_image(png.get_ref(), ImageFormat::Png).unwrap();
+            assert_eq!(cover.dimensions(), (600, 900));
+            assert_eq!(cover.get_pixel(300, 450).0, [180, 40, 20]);
+            let versions = ThumbnailVersions::from_image(&cover).unwrap();
+            assert_eq!(image::load_from_memory(&versions.browse).unwrap().width(), 300);
+            let high = image::load_from_memory(&versions.high_density).unwrap();
+            assert_eq!((high.width(), high.height()), (600, 900));
+        }
+    }
+
+    #[test]
     fn rasterizes_svg_cover_to_thumbnail_width() {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="#c02010"/></svg>"##;
         let rendered = rasterize_svg_cover(svg).unwrap();
@@ -480,4 +567,25 @@ mod publication_extractor_tests {
         let center = rendered.get_pixel(THUMBNAIL_WIDTH / 2, 450);
         assert!(center[0] > 170 && center[1] < 55 && center[2] < 45, "unexpected fallback pixel: {center:?}");
     }
+}
+
+mod pdf_cover;
+#[cfg(not(target_arch = "wasm32"))]
+mod pdf_process;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pdf_process::{PdfCoverProcess, configure_pdf_cover_process, run_pdf_cover_process};
+
+/// The renderer is invoked only when the embedded-image shortcut cannot prove
+/// that it has the complete cover. Resizing/encoding happens after it returns.
+#[cfg(feature = "publication-extractors")]
+pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Sync + 'static>(
+    extension: &str, mut reader: R,
+    render: impl FnOnce(R) -> ThumbnailResult<RgbImage>,
+) -> ThumbnailResult<Option<ThumbnailVersions>> {
+    if extension != "pdf" { return generate_thumbnail_versions_from_reader(extension, reader); }
+    let cover = match pdf_cover::extract(&mut reader) {
+        Some(image) => image,
+        None => { reader.seek(std::io::SeekFrom::Start(0))?; render(reader)? },
+    };
+    Ok(Some(ThumbnailVersions::from_image(&cover)?))
 }

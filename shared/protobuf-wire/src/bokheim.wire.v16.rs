@@ -76,7 +76,7 @@ pub struct MapEntry {
 /// them. Additive fields must remain optional or have a safe zero default.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MutationValue {
-    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11")]
+    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13")]
     pub kind: ::core::option::Option<mutation_value::Kind>,
 }
 /// Nested message and enum types in `MutationValue`.
@@ -101,6 +101,10 @@ pub mod mutation_value {
         CatalogPublication(super::CatalogPublication),
         #[prost(message, tag = "11")]
         Metadata(super::BookMetadata),
+        #[prost(string, tag = "12")]
+        Description(::prost::alloc::string::String),
+        #[prost(bytes, tag = "13")]
+        PdfReaderMetadata(::prost::alloc::vec::Vec<u8>),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -235,8 +239,6 @@ pub struct BookMetadata {
     pub title: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "2")]
     pub contributors: ::prost::alloc::vec::Vec<Contributor>,
-    #[prost(string, tag = "3")]
-    pub description: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "4")]
     pub publication: ::core::option::Option<PublicationMetadata>,
 }

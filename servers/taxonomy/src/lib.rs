@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path as FilePath, PathBuf};
 use std::sync::Arc;
-use subject_projection::{read_unified_taxonomy_sqlite, UnifiedConceptDefinition, UnifiedTaxonomy, BISAC_SYSTEM_ID, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
+use subject_projection::{lcc_subject_sort_orders, published_taxonomy_release_id, read_unified_taxonomy_sqlite, UnifiedConceptDefinition, UnifiedTaxonomy, BISAC_SYSTEM_ID, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
 use taxonomy_contract::{
     TaxonomyBatchRequest, TaxonomyBatchResponse, TaxonomyCodeResolution, TaxonomyConcept, TaxonomyDescription, TaxonomyParent, TaxonomyResolution, TaxonomySlice, TaxonomySystem, API_VERSION, MAX_CODES_PER_REQUEST, MAX_CODE_BYTES,
     MAX_REQUEST_BYTES, SNAPSHOT_MEDIA_TYPE,
@@ -28,9 +28,9 @@ pub struct TaxonomyService {
 struct ServiceState {
     matcher: UnifiedTaxonomy,
     description: TaxonomyDescription,
-    concepts: BTreeMap<String, TaxonomyConcept>,
-    children_by_parent: BTreeMap<String, Vec<String>>,
-    roots: Vec<String>,
+    concepts: BTreeMap<i64, TaxonomyConcept>,
+    children_by_parent: BTreeMap<i64, Vec<i64>>,
+    roots: Vec<i64>,
     snapshot: Bytes,
     etag: HeaderValue,
 }
@@ -55,36 +55,37 @@ struct ResolveQuery {
 impl TaxonomyService {
     pub fn open(database: impl Into<PathBuf>) -> Result<Self, TaxonomyError> {
         let database = database.into();
+        let release_id = published_taxonomy_release_id(&database).map_err(TaxonomyError)?;
         let definitions = read_unified_taxonomy_sqlite(&database).map_err(TaxonomyError)?;
         let snapshot = Bytes::from(fs::read(&database).map_err(|error| TaxonomyError(format!("failed to read taxonomy snapshot {}: {error}", database.display())))?);
-        Self::from_parts(definitions, snapshot)
+        Self::from_parts(release_id, definitions, snapshot)
     }
 
-    fn from_parts(definitions: Vec<UnifiedConceptDefinition>, snapshot: Bytes) -> Result<Self, TaxonomyError> {
+    fn from_parts(release_id: u64, definitions: Vec<UnifiedConceptDefinition>, snapshot: Bytes) -> Result<Self, TaxonomyError> {
         let matcher = UnifiedTaxonomy::from_concepts(definitions.clone()).map_err(TaxonomyError)?;
-        let release_id = matcher.release_id().to_owned();
         let etag = HeaderValue::from_str(&format!("\"{release_id}\"")).map_err(|error| TaxonomyError(format!("invalid taxonomy release identifier: {error}")))?;
         let concepts = definitions.iter().map(contract_concept).map(|concept| (concept.concept_id.clone(), concept)).collect::<BTreeMap<_, _>>();
-        let mut children = BTreeMap::<String, Vec<(i64, String)>>::new();
+        let sort_orders = lcc_subject_sort_orders(&definitions);
+        let mut children = BTreeMap::<i64, Vec<(i64, i64)>>::new();
         for concept in concepts.values() {
             for parent in &concept.parents {
-                children.entry(parent.concept_id.clone()).or_default().push((parent.display_order, concept.concept_id.clone()));
+                children.entry(parent.concept_id.clone()).or_default().push((sort_orders[&concept.concept_id], concept.concept_id.clone()));
             }
         }
         let mut children_by_parent = BTreeMap::new();
         for (parent, mut values) in children {
-            values.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| concepts[&left.1].preferred_label.cmp(&concepts[&right.1].preferred_label)).then_with(|| left.1.cmp(&right.1)));
+            values.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| concepts[&left.1].preferred_label.to_lowercase().cmp(&concepts[&right.1].preferred_label.to_lowercase())).then_with(|| left.1.cmp(&right.1)));
             children_by_parent.insert(parent, values.into_iter().map(|(_, concept_id)| concept_id).collect());
         }
         let mut roots = concepts.values().filter(|concept| concept.parents.is_empty()).map(|concept| concept.concept_id.clone()).collect::<Vec<_>>();
-        roots.sort_by(|left, right| concepts[left].preferred_label.cmp(&concepts[right].preferred_label).then_with(|| left.cmp(right)));
+        roots.sort_by(|left, right| sort_orders[left].cmp(&sort_orders[right]).then_with(|| concepts[left].preferred_label.to_lowercase().cmp(&concepts[right].preferred_label.to_lowercase())).then_with(|| left.cmp(right)));
         let edge_count = concepts.values().map(|concept| concept.parents.len() as u64).sum();
         let selector_count = concepts.values().flat_map(|concept| concept.source_selectors.values()).map(|selectors| selectors.len() as u64).sum();
         let source_label_count = concepts.values().map(|concept| concept.source_labels.len() as u64).sum();
         let description = TaxonomyDescription {
             api_version: API_VERSION.to_owned(),
             release_id,
-            format_version: 2,
+            format_version: 6,
             taxonomy_name: "Bokheim Unified Subjects".to_owned(),
             concept_count: concepts.len() as u64,
             edge_count,
@@ -96,7 +97,7 @@ impl TaxonomyService {
         Ok(Self { state: Arc::new(ServiceState { matcher, description, concepts, children_by_parent, roots, snapshot, etag }) })
     }
 
-    fn slice(&self, requested: impl IntoIterator<Item = String>) -> Result<TaxonomySlice, TaxonomyError> {
+    fn slice(&self, requested: impl IntoIterator<Item = i64>) -> Result<TaxonomySlice, TaxonomyError> {
         let requested = requested.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
         for concept_id in &requested {
             if !self.state.concepts.contains_key(concept_id) {
@@ -111,7 +112,7 @@ impl TaxonomyService {
         Ok(TaxonomySlice { release_id: self.state.description.release_id.clone(), requested_concept_ids: requested, concepts: ordered.into_iter().map(|concept_id| self.state.concepts[&concept_id].clone()).collect() })
     }
 
-    fn add_with_ancestors(&self, concept_id: &str, included: &mut BTreeSet<String>, ordered: &mut Vec<String>) {
+    fn add_with_ancestors(&self, concept_id: &i64, included: &mut BTreeSet<i64>, ordered: &mut Vec<i64>) {
         if included.contains(concept_id) {
             return;
         }
@@ -125,7 +126,7 @@ impl TaxonomyService {
 }
 
 fn contract_concept(definition: &UnifiedConceptDefinition) -> TaxonomyConcept {
-    let parents = definition.parent_ids().iter().zip(definition.parent_sort_orders()).map(|(concept_id, display_order)| TaxonomyParent { concept_id: concept_id.clone(), display_order: *display_order }).collect();
+    let parents = definition.parent_ids().iter().map(|concept_id| TaxonomyParent { concept_id: *concept_id }).collect();
     let source_selectors = [BISAC_SYSTEM_ID, DDC_SYSTEM_ID, LCC_SYSTEM_ID]
         .into_iter()
         .filter_map(|system| {
@@ -211,14 +212,14 @@ async fn resolve_batch(State(service): State<TaxonomyService>, Json(request): Js
     }
 }
 
-async fn concept(State(service): State<TaxonomyService>, Path(concept_id): Path<String>) -> Response {
+async fn concept(State(service): State<TaxonomyService>, Path(concept_id): Path<i64>) -> Response {
     match service.slice([concept_id]) {
         Ok(slice) => cached_json(&service, &slice),
         Err(error) => api_error(StatusCode::NOT_FOUND, &error.to_string()),
     }
 }
 
-async fn children(State(service): State<TaxonomyService>, Path(concept_id): Path<String>) -> Response {
+async fn children(State(service): State<TaxonomyService>, Path(concept_id): Path<i64>) -> Response {
     if !service.state.concepts.contains_key(&concept_id) {
         return api_error(StatusCode::NOT_FOUND, &format!("unknown taxonomy concept {concept_id}"));
     }
@@ -297,7 +298,7 @@ mod tests {
         let request = TaxonomyBatchRequest {
             codes: vec![
                 taxonomy_contract::TaxonomyCode { system: TaxonomySystem::Lcc, code: "HF5601".to_owned() },
-                taxonomy_contract::TaxonomyCode { system: TaxonomySystem::Ddc, code: "515".to_owned() },
+                taxonomy_contract::TaxonomyCode { system: TaxonomySystem::Bisac, code: "MAT000000".to_owned() },
                 taxonomy_contract::TaxonomyCode { system: TaxonomySystem::Lcc, code: " HF5601 ".to_owned() },
             ],
         };
@@ -308,10 +309,10 @@ mod tests {
         assert!(response.results.iter().all(|result| !result.matched_concept_ids.is_empty()));
         let unique = response.concepts.iter().map(|concept| &concept.concept_id).collect::<BTreeSet<_>>();
         assert_eq!(unique.len(), response.concepts.len(), "the shared concept slice is deduplicated");
-        let positions = response.concepts.iter().enumerate().map(|(position, concept)| (concept.concept_id.as_str(), position)).collect::<BTreeMap<_, _>>();
+        let positions = response.concepts.iter().enumerate().map(|(position, concept)| (concept.concept_id, position)).collect::<BTreeMap<_, _>>();
         for (position, concept) in response.concepts.iter().enumerate() {
             for parent in &concept.parents {
-                assert!(positions[&parent.concept_id.as_str()] < position);
+                assert!(positions[&parent.concept_id] < position);
             }
         }
     }
@@ -323,10 +324,10 @@ mod tests {
         let resolution: TaxonomyResolution = json(response).await;
         assert!(!resolution.matched_concept_ids.is_empty());
         assert!(resolution.concepts.iter().any(|concept| concept.preferred_label == "Accounting"));
-        let positions = resolution.concepts.iter().enumerate().map(|(position, concept)| (concept.concept_id.as_str(), position)).collect::<BTreeMap<_, _>>();
+        let positions = resolution.concepts.iter().enumerate().map(|(position, concept)| (concept.concept_id, position)).collect::<BTreeMap<_, _>>();
         for (position, concept) in resolution.concepts.iter().enumerate() {
             for parent in &concept.parents {
-                assert!(positions[&parent.concept_id.as_str()] < position, "parent must precede child");
+                assert!(positions[&parent.concept_id] < position, "parent must precede child");
             }
         }
     }
@@ -336,7 +337,7 @@ mod tests {
         let roots_response = app(service()).oneshot(Request::builder().uri("/v1/roots").body(Body::empty()).unwrap()).await.unwrap();
         let roots: TaxonomySlice = json(roots_response).await;
         let root = roots.concepts.iter().find(|concept| concept.preferred_label == "Humanities").expect("Humanities root");
-        let uri = format!("/v1/concepts/{}/children", root.concept_id.replace(':', "%3A"));
+        let uri = format!("/v1/concepts/{}/children", root.concept_id);
         let response = app(service()).oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let slice: TaxonomySlice = json(response).await;
@@ -346,7 +347,9 @@ mod tests {
 
     #[tokio::test]
     async fn release_description_supports_bodyless_conditional_checks() {
-        let router = app(service());
+        let service = service();
+        assert_eq!(service.state.description.release_id, 1);
+        let router = app(service);
         let response = router.clone().oneshot(Request::builder().method(Method::HEAD).uri("/v1/taxonomy").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let etag = response.headers()[header::ETAG].clone();

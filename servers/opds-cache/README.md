@@ -25,7 +25,7 @@ Public unauthenticated endpoints:
 - `POST /api/web/sources/{source-id}/acquire`
 
 Structured requests and responses use
-`application/vnd.bokheim+protobuf; version=17` with identity encoding. OPDS
+`application/vnd.bokheim+protobuf; version=18` with identity encoding. OPDS
 upstreams remain XML or JSON, and covers are canonical JPEG thumbnails. The
 `/api/web` façade uses the provider-neutral contract's JSON representation so
 ordinary browsers do not need a second implementation of the protobuf codec.
@@ -49,10 +49,10 @@ links. Paginated logical pages are fully re-fetched on replacement crawls
 because an HTTP validator for the first provider page cannot validate the
 whole compacted collection.
 
-The cache database combines `catalog-core`'s provider-neutral base schema with
-a separately versioned server schema for crawl state, queues, operational
-inventory, and serving indexes. An incompatible base cache is replaced and
-repopulated by the crawler at startup.
+The server store owns its complete SQLite pool and single version-4 schema, including canonical
+catalogue rows, crawl state, queues, operational inventory, and serving
+indexes. An incompatible cache is replaced and repopulated by the crawler at
+startup; no client or shared crate initializes this database.
 `GET /api/web/stats` reports process uptime, registry revision, metadata-service
 configuration, active page/publication/importable EPUB counts, crawl state,
 extraction queues, normalized failure categories, retry state, and at most
@@ -62,12 +62,15 @@ listener on `127.0.0.1:8092` at `GET /internal/operations`. Raw errors and
 acquisition URLs never leave the protected catalogue cache.
 
 Search matches normalized contiguous substrings in title, author, and table of
-contents, returning each as a distinct ordered section. Requests include the
+contents, returning each as a distinct ordered section. It is always evaluated
+against the active server snapshot; upstream OPDS search templates are neither
+stored nor routed. Requests include the
 client's supported languages. The response protocol identifies publications by
 sequence so it sends payloads only for publications the client does not already
 have at the current epoch. The authoritative page/search queries and native
-delta assembly live in this server's `store` module; client-side materialization
-and offline querying are not part of the shared storage crate.
+delta assembly live in this server's `store` module. Clients persist exact
+language-keyed layouts for offline display; no shared crate owns either SQLite
+schema.
 
 Subject browsing treats every crawled provider page as part of one logical
 collection. The server is authoritative for subject search, source/language/
@@ -88,7 +91,7 @@ is remembered per origin so an incompatible host is not probed for every book. R
 subject evidence is stored separately from deterministic
 canonical assignments, using the shared `subject-projection` rules as local
 libraries. When a supported publication has an ISBN but no embedded subjects,
-`BOKHEIM_METADATA_URL` enables batched LCC/DDC enrichment from the standalone
+`BOKHEIM_METADATA_URL` enables batched LCC enrichment from the standalone
 Open Library snapshot service. Subject browsing reads that canonical projection
 without sending titles or other library contents to this public service.
 
@@ -156,7 +159,7 @@ service.
 
 ```sh
 cargo run -p catalog-server
-curl --header 'Accept: application/vnd.bokheim+protobuf; version=17' \
+curl --header 'Accept: application/vnd.bokheim+protobuf; version=18' \
   --output /dev/null http://127.0.0.1:8090/api/opds/catalogs
 ```
 

@@ -70,25 +70,25 @@ Once published, bump the git rev in `Cargo.toml:51`.
 
 ## Downstream change (this repository)
 
-1. **`apps/ui/gpui/reader/src/epub/progress.rs`** — add `doc_fraction: f32` to
+1. **`apps/reader/src/epub/progress.rs`** — add `doc_fraction: f32` to
    `ProgressState`, extend `update()` to take and compare it. The existing
    tests assert that an identical report does not repaint or persist; extend
    them so a change in the chapter ratio alone still counts as movement.
 
-2. **`apps/ui/gpui/reader/src/epub/state.rs:399`** — the
+2. **`apps/reader/src/epub/state.rs:399`** — the
    `RendererEvent::ReadingProgress` match arm destructures the event; take the
    new field and pass it through.
 
-3. **`apps/ui/gpui/components/src/reader.rs`** — add `reader_footer(theme)` and
+3. **`apps/components/src/reader.rs`** — add `reader_footer(theme)` and
    a small muted text child. Mirror `reader_toolbar`: `flex_none`, full width,
    `bg(theme.surface)`, but `border_t_1` instead of `border_b_1`. Type at
    roughly `11/16 rem` in `theme.text_muted`.
 
-4. **`apps/ui/gpui/reader/src/epub/render.rs`** — render the footer as the last
+4. **`apps/reader/src/epub/render.rs`** — render the footer as the last
    child of the reader page, below the split, so it spans the sidebar as the
    toolbar does.
 
-5. **`apps/ui/gpui/reader/src/invalidation.rs`** — add a `ReaderFooter`
+5. **`apps/reader/src/invalidation.rs`** — add a `ReaderFooter`
    component.
 
 ## Invalidation

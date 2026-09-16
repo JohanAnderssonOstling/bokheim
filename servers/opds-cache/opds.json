@@ -1,10 +1,9 @@
 {
   "schema_version": 2,
-  "revision": 10,
+  "revision": 11,
   "catalogs": [
     { "id": "project-gutenberg", "title": "Project Gutenberg", "description": "A large multilingual collection of free ebooks, with browsing and catalog search.", "languages": ["Multilingual"], "url": "https://www.gutenberg.org/ebooks/search.opds/" },
     { "id": "unglue-it", "title": "Unglue.it", "description": "Open and Creative Commons ebooks collected by the Free Ebook Foundation.", "languages": ["Multilingual"], "url": "https://unglue.it/api/opds/" },
-    { "id": "office-of-the-historian", "title": "Office of the Historian", "description": "The official Foreign Relations of the United States ebook collection.", "languages": ["English"], "url": "https://history.state.gov/api/v1/catalog" },
     { "id": "gallica", "title": "Gallica", "description": "Public-domain publications from the Bibliothèque nationale de France.", "languages": ["French"], "url": "https://gallica.bnf.fr/opds" },
     { "id": "litteraturbanken", "title": "Litteraturbanken", "description": "Swedish literature from Litteraturbanken, available as free EPUB downloads.", "languages": ["Swedish", "English", "German", "French", "Latin", "Sámi languages"], "url": "https://litteraturbanken.se/epub?visa=epub&sort=popularitet" },
     { "id": "openedition", "title": "OpenEdition", "description": "Academic books and journals from OpenEdition publishers.", "languages": ["Multilingual"], "url": "https://opds.openedition.org/" },

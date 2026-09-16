@@ -85,18 +85,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let search_index_service = service.clone();
     tokio::spawn(async move {
         search_index_service.refresh_search_index().await;
-        search_index_service.refresh_browse_serving_index().await;
+        search_index_service.refresh_unified_subject_assignments().await;
+        loop {
+            search_index_service.refresh_browse_serving_index().await;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     });
     let refresh_service = service.clone();
     tokio::spawn(async move { refresh_service.run_refresh_loop().await });
     let registry_service = service.clone();
     tokio::spawn(async move { registry_service.run_registry_refresh_loop().await });
-    let epub_enrichment_service = service.clone();
-    tokio::spawn(async move { epub_enrichment_service.run_epub_extraction_loop().await });
+    let extraction_service = service.clone();
+    tokio::spawn(async move { extraction_service.run_epub_extraction_loop().await });
+    let download_service = service.clone();
+    tokio::spawn(async move { download_service.run_epub_download_loop().await });
     let cover_download_service = service.clone();
     tokio::spawn(async move { cover_download_service.run_cover_download_loop().await });
-    let catalogue_enrichment_service = service.clone();
-    tokio::spawn(async move { catalogue_enrichment_service.run_catalogue_enrichment_loop().await });
+    let pipeline_service = service.clone();
+    tokio::spawn(async move { pipeline_service.run_catalogue_enrichment_loop().await });
     tracing::info!(address = %listener.local_addr()?, "public unauthenticated catalog server listening");
     tracing::info!(address = %operations_listener.local_addr()?, "loopback catalogue operations server listening");
     let public_server = axum::serve(listener, app(service.clone()));

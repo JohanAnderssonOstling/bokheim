@@ -1,22 +1,22 @@
 use super::{
-    decode_cached, params, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogCache, CatalogCacheError, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewInventory, CatalogPublicationIdentity, CatalogSourceId,
+    decode_cached, params, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewInventory, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError,
     Connection, OptionalExtension, Transaction, TransactionBehavior, CATALOG_METADATA_BACKFILL_VERSION,
 };
 
-impl CatalogCache {
-    pub fn identity_review_inventory(&self) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+impl CatalogStore {
+    pub fn identity_review_inventory(&self) -> Result<CatalogIdentityReviewInventory, CatalogStoreError> {
         let connection = self.connection()?;
         identity_review_inventory_in(&connection, None)
     }
 
-    pub fn identity_review_inventory_for_source(&self, source_id: &CatalogSourceId) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+    pub fn identity_review_inventory_for_source(&self, source_id: &CatalogSourceId) -> Result<CatalogIdentityReviewInventory, CatalogStoreError> {
         let connection = self.connection()?;
         identity_review_inventory_in(&connection, Some(source_id))
     }
 
-    pub fn identity_reviews(&self, source_id: Option<&CatalogSourceId>, status: Option<&str>, limit: usize) -> Result<Vec<CatalogIdentityReview>, CatalogCacheError> {
+    pub fn identity_reviews(&self, source_id: Option<&CatalogSourceId>, status: Option<&str>, limit: usize) -> Result<Vec<CatalogIdentityReview>, CatalogStoreError> {
         if status.is_some_and(|value| !matches!(value, "ambiguous" | "no_match" | "insufficient_metadata" | "failed" | "resolved" | "rejected")) {
-            return Err(CatalogCacheError::new("invalid catalogue identity review status"));
+            return Err(CatalogStoreError::new("invalid catalogue identity review status"));
         }
         let limit = storage_i64(limit.clamp(1, 200) as u64, "identity review limit")?;
         let connection = self.connection()?;
@@ -63,15 +63,15 @@ impl CatalogCache {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn identity_review_candidate_isbn(&self, review_id: &str, edition_id: &str, isbn13: &str) -> Result<Option<String>, CatalogCacheError> {
+    pub fn identity_review_candidate_isbn(&self, review_id: &str, edition_id: &str, isbn13: &str) -> Result<Option<String>, CatalogStoreError> {
         let connection = self.connection()?;
         let payload = connection.query_row("SELECT result_payload FROM catalog_identity_review WHERE review_id=?1 AND status='ambiguous'", [review_id], |row| row.get::<_, Option<Vec<u8>>>(0)).optional()?.flatten();
         let Some(payload) = payload else { return Ok(None) };
-        let result: metadata_contract::EditionIdentityResult = serde_json::from_slice(&payload).map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        let result: metadata_contract::EditionIdentityResult = serde_json::from_slice(&payload).map_err(|error| CatalogStoreError::new(error.to_string()))?;
         Ok(result.candidates.into_iter().find(|candidate| candidate.open_library_edition_id == edition_id && candidate.canonical_isbn13 == isbn13).map(|candidate| candidate.canonical_isbn13))
     }
 
-    pub fn resolve_identity_review_with_isbn(&self, review_id: &str, canonical_isbn13: &str) -> Result<bool, CatalogCacheError> {
+    pub fn resolve_identity_review_with_isbn(&self, review_id: &str, canonical_isbn13: &str) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row = transaction
@@ -86,7 +86,7 @@ impl CatalogCache {
             .optional()?;
         let Some((source_id, acquisition_url, payload)) = row else { return Ok(false) };
         let mut metadata: CatalogEpubMetadata = decode_cached(&payload)?;
-        let identifier = publication_model::Identifier::new(canonical_isbn13, publication_model::Scheme::Isbn, publication_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogCacheError::new(error.to_string()))?;
+        let identifier = publication_model::Identifier::new(canonical_isbn13, publication_model::Scheme::Isbn, publication_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogStoreError::new(error.to_string()))?;
         metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &publication_model::Scheme::Isbn);
         metadata.book.publication.identifiers.push(identifier);
         transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id, acquisition_url, wire::encode(&metadata)?])?;
@@ -101,13 +101,13 @@ impl CatalogCache {
         Ok(true)
     }
 
-    pub fn reject_identity_review(&self, review_id: &str) -> Result<bool, CatalogCacheError> {
+    pub fn reject_identity_review(&self, review_id: &str) -> Result<bool, CatalogStoreError> {
         let connection = self.connection()?;
         let now = unix_timestamp()?;
         Ok(connection.execute("UPDATE catalog_identity_review SET status='rejected',resolved_at=?2,updated_at=?2 WHERE review_id=?1 AND status IN ('ambiguous','no_match','insufficient_metadata','failed')", params![review_id, now])? == 1)
     }
 
-    pub fn retry_identity_review(&self, review_id: &str) -> Result<bool, CatalogCacheError> {
+    pub fn retry_identity_review(&self, review_id: &str) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row = transaction
@@ -126,7 +126,7 @@ impl CatalogCache {
         Ok(true)
     }
 
-    pub fn retry_ambiguous_identity_reviews(&self) -> Result<usize, CatalogCacheError> {
+    pub fn retry_ambiguous_identity_reviews(&self) -> Result<usize, CatalogStoreError> {
         let connection = self.connection()?;
         connection
             .execute(
@@ -144,7 +144,7 @@ impl CatalogCache {
     }
 }
 
-pub(crate) fn identity_review_inventory_in(connection: &Connection, source_id: Option<&CatalogSourceId>) -> Result<CatalogIdentityReviewInventory, CatalogCacheError> {
+pub(crate) fn identity_review_inventory_in(connection: &Connection, source_id: Option<&CatalogSourceId>) -> Result<CatalogIdentityReviewInventory, CatalogStoreError> {
     let mut inventory = CatalogIdentityReviewInventory::default();
     let mut statement = connection.prepare("SELECT status,COUNT(*) FROM catalog_identity_review WHERE (?1 IS NULL OR source_id=?1) GROUP BY status")?;
     let rows = statement.query_map([source_id.map(CatalogSourceId::as_str)], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
@@ -158,13 +158,13 @@ pub(crate) fn identity_review_inventory_in(connection: &Connection, source_id: O
             "failed" => inventory.failed = count,
             "resolved" => inventory.resolved = count,
             "rejected" => inventory.rejected = count,
-            _ => return Err(CatalogCacheError::new("invalid stored identity review status")),
+            _ => return Err(CatalogStoreError::new("invalid stored identity review status")),
         }
     }
     Ok(inventory)
 }
 
-pub(crate) fn record_identity_review(transaction: &Transaction<'_>, source_id: &str, acquisition_url: &str, result: Option<&metadata_contract::EditionIdentityResult>) -> Result<(), CatalogCacheError> {
+pub(crate) fn record_identity_review(transaction: &Transaction<'_>, source_id: &str, acquisition_url: &str, result: Option<&metadata_contract::EditionIdentityResult>) -> Result<(), CatalogStoreError> {
     match result {
         Some(result) if result.status != metadata_contract::EditionIdentityStatus::Matched => {
             let status = match result.status {
@@ -189,7 +189,7 @@ pub(crate) fn record_identity_review(transaction: &Transaction<'_>, source_id: &
     Ok(())
 }
 
-pub(crate) fn record_identity_review_failure(transaction: &Transaction<'_>, source_id: &str, acquisition_url: &str, error: &str) -> Result<(), CatalogCacheError> {
+pub(crate) fn record_identity_review_failure(transaction: &Transaction<'_>, source_id: &str, acquisition_url: &str, error: &str) -> Result<(), CatalogStoreError> {
     let review_id = blake3::hash(format!("{source_id}\n{acquisition_url}").as_bytes()).to_hex().to_string();
     let now = unix_timestamp()?;
     transaction

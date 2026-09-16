@@ -1,7 +1,7 @@
 use super::*;
 
-impl CatalogCache {
-    pub fn inventory(&self) -> Result<CatalogInventory, CatalogCacheError> {
+impl CatalogStore {
+    pub fn inventory(&self) -> Result<CatalogInventory, CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT source_id, crawl_status, last_crawl_started_at, last_crawl_succeeded_at, last_crawl_error,
@@ -56,6 +56,9 @@ impl CatalogCache {
             pending: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE status='pending'", [], |row| stored_u64(row.get(0)?, "pending metadata backfill count"))?,
             running: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE status='running'", [], |row| stored_u64(row.get(0)?, "running metadata backfill count"))?,
             succeeded: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE status='succeeded'", [], |row| stored_u64(row.get(0)?, "succeeded metadata backfill count"))?,
+            ocr_pending: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE ocr_status='pending'", [], |row| stored_u64(row.get(0)?, "pending OCR backfill count"))?,
+            ocr_running: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE ocr_status='running'", [], |row| stored_u64(row.get(0)?, "running OCR backfill count"))?,
+            ocr_succeeded: connection.query_row("SELECT COUNT(*) FROM catalog_metadata_backfill WHERE ocr_status='succeeded'", [], |row| stored_u64(row.get(0)?, "succeeded OCR backfill count"))?,
             last_error: connection.query_row("SELECT last_error FROM catalog_metadata_backfill WHERE last_error IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1", [], |row| row.get(0)).optional()?,
         };
         let description_backfill = CatalogDescriptionBackfillInventory {
@@ -109,7 +112,7 @@ impl CatalogCache {
 
     /// Returns bounded, normalized diagnostics only. Raw acquisition URLs and
     /// raw upstream errors deliberately remain inside the protected cache.
-    pub fn epub_failure_diagnostics(&self) -> Result<Vec<CatalogEpubFailureDiagnostic>, CatalogCacheError> {
+    pub fn epub_failure_diagnostics(&self) -> Result<Vec<CatalogEpubFailureDiagnostic>, CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT failure.category,failure.retryable,failure.first_failed_at,failure.last_failed_at,failure.next_retry_at,
@@ -148,7 +151,7 @@ impl CatalogCache {
                 entry.next_retry_at = Some(entry.next_retry_at.map_or(next_retry_at, |current| current.min(next_retry_at)));
             }
             if entry.examples.len() < 3 {
-                let source_id = CatalogSourceId::parse(&source_id).map_err(CatalogCacheError::new)?;
+                let source_id = CatalogSourceId::parse(&source_id).map_err(CatalogStoreError::new)?;
                 let acquisition_host = url::Url::parse(&acquisition_url).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_else(|| "invalid-host".to_owned());
                 entry.examples.push(CatalogEpubFailureExample { source_id, acquisition_host, publication_id, attempts: stored_u64(attempts, "extraction attempt count")?, last_failed_at });
             }
@@ -159,7 +162,7 @@ impl CatalogCache {
     }
 
     #[cfg(test)]
-    pub fn successful_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<HashSet<String>, CatalogCacheError> {
+    pub fn successful_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<HashSet<String>, CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare("SELECT acquisition_url FROM catalog_epub_extraction WHERE source_id=?1 AND status='succeeded' AND result_payload IS NOT NULL AND enrichment_version=?2")?;
         let rows = statement.query_map(params![source_id.as_str(), CATALOG_EPUB_ENRICHMENT_VERSION], |row| row.get(0))?;
@@ -167,19 +170,10 @@ impl CatalogCache {
     }
 
     #[cfg(test)]
-    pub fn pending_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<HashSet<String>, CatalogCacheError> {
+    pub fn pending_epub_extractions(&self, source_id: &CatalogSourceId) -> Result<HashSet<String>, CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare("SELECT acquisition_url FROM catalog_epub_extraction WHERE source_id=?1 AND status='pending'")?;
         let rows = statement.query_map([source_id.as_str()], |row| row.get(0))?;
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn epub_metadata(&self, source_id: &CatalogSourceId, acquisition_url: &str) -> Result<Option<CatalogEpubMetadata>, CatalogCacheError> {
-        let connection = self.connection()?;
-        let payload = connection
-            .query_row("SELECT metadata_payload FROM catalog_epub_extraction WHERE source_id=?1 AND acquisition_url=?2 AND status='succeeded'", params![source_id.as_str(), acquisition_url], |row| row.get::<_, Option<Vec<u8>>>(0))
-            .optional()?
-            .flatten();
-        payload.map(|payload| decode_cached(&payload)).transpose().map_err(Into::into)
     }
 }

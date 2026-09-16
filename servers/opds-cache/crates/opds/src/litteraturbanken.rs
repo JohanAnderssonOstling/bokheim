@@ -2,7 +2,7 @@ use crate::OutboundNetworkPolicy;
 use crate::{
     CollectionKind, OpdsAcquisition, OpdsAcquisitionKind, OpdsAgentCredit, OpdsAuthorCredit, OpdsAuthorLink, OpdsBookFormat, OpdsCatalog, OpdsCatalogFreshness, OpdsCatalogLink, OpdsContributorCredit, OpdsDirectAcquisition, OpdsError,
     OpdsFacet, OpdsIdentifierScope, OpdsInteractionStatistic, OpdsLinkTarget, OpdsPagination, OpdsPublication, OpdsPublicationCollection, OpdsPublicationDate, OpdsPublicationIdentifier, OpdsPublicationMetadata, OpdsPublicationProperty,
-    OpdsPublicationSubject, OpdsPublicationTitle, OpdsSearch, OpdsVersion,
+    OpdsPublicationSubject, OpdsPublicationTitle, OpdsVersion,
 };
 use reqwest::Url;
 use std::time::Duration;
@@ -50,7 +50,6 @@ pub(crate) async fn fetch_catalog(policy: OutboundNetworkPolicy, source_url: Url
             })
             .collect(),
         pagination,
-        search: Some(OpdsSearch::UriTemplate { base_url: catalog.source_url.to_string(), template: catalog.search_template }),
     })
 }
 
@@ -314,13 +313,12 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires the live Litteraturbanken API"]
-    async fn live_catalogue_search_and_download_are_available() {
+    async fn live_catalogue_and_download_are_available() {
         let client = crate::OpdsClient::new().unwrap();
         let root = client.fetch_catalog(::litteraturbanken::CATALOG_URL).await.unwrap();
         assert_eq!(root.publications.len(), ::litteraturbanken::PAGE_SIZE as usize);
         assert!(root.pagination.next.is_some());
-        let search = client.search(&root, "Doktor Glas").await.unwrap();
-        let publication = search.publications.iter().find(|publication| publication.title == "Doktor Glas").unwrap();
+        let publication = &root.publications[0];
         let bytes = client.download_book_bytes(publication.preferred_download.as_ref().unwrap()).await.unwrap();
         assert!(bytes.starts_with(b"PK"));
     }

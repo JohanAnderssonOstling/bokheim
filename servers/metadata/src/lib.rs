@@ -35,7 +35,7 @@ use unicode_normalization::UnicodeNormalization;
 const SCHEMA_VERSION: i64 = 8;
 const WIKIDATA_SCHEMA_VERSION: i64 = 9;
 const LEGACY_QUERY_SCHEMA_VERSION: i64 = 7;
-const BUILDER_SCHEMA_VERSION: i64 = 9;
+const BUILDER_SCHEMA_VERSION: i64 = 11;
 const DESCRIPTION_SCHEMA_VERSION: i64 = 2;
 const DESCRIPTION_BUILDER_VERSION: i64 = 2;
 const AUTHOR_PROFILE_SCHEMA_VERSION: i64 = 1;
@@ -49,7 +49,7 @@ const MAX_EDITION_IDENTITY_REVIEW_CANDIDATES: usize = 256;
 const MAX_TITLE_SUBSTRINGS_PER_QUERY: usize = 64;
 const OL_PLACE_KIND: i64 = 1;
 const OL_PERSON_KIND: i64 = 2;
-const DDC_SCHEME: i64 = 1;
+// Scheme 1 is reserved for legacy Dewey rows; readers ignore it.
 const LCC_SCHEME: i64 = 2;
 const MAX_NOTATION_BYTES: usize = 256;
 const MAX_DESCRIPTION_BYTES: usize = 16 * 1024;
@@ -74,11 +74,15 @@ const BULK_EVIDENCE_IDS_PER_QUERY: usize = 30_000;
 pub struct MetadataService {
     state: Arc<ServiceState>,
     library_of_congress: Option<library_of_congress::LibraryOfCongressClient>,
+    librarything: Option<librarything::LibraryThingClient>,
 }
 
 struct ServiceState {
     database: PathBuf,
-    pool: Pool<SqliteConnectionManager>,
+    pool: Option<Pool<SqliteConnectionManager>>,
+    rich_pool: Pool<SqliteConnectionManager>,
+    identity_pool: Pool<SqliteConnectionManager>,
+    subject_index: Option<Arc<subject_index::SubjectIndex>>,
     description_pool: Option<Pool<SqliteConnectionManager>>,
     author_profile_pool: Option<Pool<SqliteConnectionManager>>,
     query_slots: Arc<Semaphore>,
@@ -156,6 +160,8 @@ struct EditionRecord {
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     title: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
+    subtitle: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     publish_date: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     publishers: Vec<String>,
@@ -167,8 +173,6 @@ struct EditionRecord {
     isbn_10: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     isbn_13: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    dewey_decimal_class: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     lc_classifications: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
@@ -182,12 +186,12 @@ struct WorkRecord {
     key: String,
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    subtitle: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_description")]
     description: Option<String>,
     #[serde(default, deserialize_with = "deserialize_work_author_references")]
     authors: Vec<KeyReference>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    dewey_number: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     lc_classifications: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
@@ -286,18 +290,27 @@ struct KeyReference {
     key: String,
 }
 
+mod duplicate_work;
+mod wikidata_books;
 mod enrichment;
 mod http;
+mod audible;
 mod identity;
 mod import;
 mod library_of_congress;
+mod loc_background;
+mod librarything;
+mod librarything_background;
+mod loc_dump;
 mod openlibrary;
 mod query;
 mod service;
+mod split;
+mod subject_index;
 
 pub(crate) use enrichment::{
     attach_authors, attach_rich_fields, classification_similarity_keys, collect_response_entities, load_author_biographies, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table,
-    load_work_popularities, lookup_metadata_one, lookup_one, sql_placeholders,
+    load_work_popularities, lookup_one, sql_placeholders,
 };
 pub use http::app;
 pub(crate) use identity::resolve_edition_batch;
@@ -307,6 +320,27 @@ pub(crate) use openlibrary::{
     open_library_id, open_read_pool, valid_dump_date, valid_open_library_author_biography, valid_open_library_description,
 };
 pub(crate) use query::query_connection;
+pub use split::split_snapshot;
+pub use subject_index::{build_subject_index, build_subject_index_limited};
 
 #[cfg(test)]
 mod tests;
+
+/// Explicit provider audit, including ISBNs whose Open Library identity is ambiguous.
+/// Uses the same permanent cache, parser, and persistent API quota as HTTP enrichment.
+pub async fn refresh_librarything_schemes(key_file: &std::path::Path, cache_file: &std::path::Path, isbn: &str) -> Result<serde_json::Value, MetadataError> {
+    let client = librarything::LibraryThingClient::open(key_file, cache_file)?;
+    serde_json::to_value(client.refresh_schemes(isbn).await?).map_err(error)
+}
+
+pub async fn lookup_librarything_isbn(key_file: &std::path::Path, cache_file: &std::path::Path, isbn: &str) -> Result<serde_json::Value, MetadataError> {
+    let client = librarything::LibraryThingClient::open(key_file, cache_file)?;
+    let result = client.lookup_isbn(isbn).await?;
+    serde_json::to_value(result).map_err(error)
+}
+
+mod rebuild_titles;
+pub use rebuild_titles::rebuild_titles;
+
+mod catalog_ingestion;
+pub use catalog_ingestion::ingest_wikidata_catalog;

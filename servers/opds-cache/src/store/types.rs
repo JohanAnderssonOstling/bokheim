@@ -1,5 +1,32 @@
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedCatalogPage {
+    pub page: CatalogPage,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub provider_paginated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogSourceState {
+    pub epoch: String,
+    pub active_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SequencedCatalogPublication {
+    pub publication: CatalogPublication,
+    pub sequence: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CatalogSearchMatches {
+    pub title_matches: Vec<SequencedCatalogPublication>,
+    pub author_matches: Vec<SequencedCatalogPublication>,
+    pub toc_matches: Vec<SequencedCatalogPublication>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogPublicationPopularity {
     pub want_to_read_count: u64,
@@ -74,6 +101,9 @@ pub struct CatalogMetadataBackfillInventory {
     pub pending: u64,
     pub running: u64,
     pub succeeded: u64,
+    pub ocr_pending: u64,
+    pub ocr_running: u64,
+    pub ocr_succeeded: u64,
     pub last_error: Option<String>,
 }
 
@@ -118,6 +148,7 @@ pub struct CatalogIdentityReviewCandidate {
     pub edition_id: String,
     pub work_id: Option<String>,
     pub title: String,
+    pub subtitle: Option<String>,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
     pub publication_year: Option<i32>,
@@ -133,7 +164,7 @@ impl From<metadata_contract::EditionIdentityMatch> for CatalogIdentityReviewCand
             .iter()
             .flat_map(|classification| match classification.scheme {
                 metadata_contract::ClassificationScheme::LibraryOfCongress => subject_projection::unified_lcc_subject_paths(&classification.notation),
-                metadata_contract::ClassificationScheme::DeweyDecimal => subject_projection::unified_ddc_subject_paths(&classification.notation),
+                metadata_contract::ClassificationScheme::DeweyDecimal => Vec::new(),
                 metadata_contract::ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
             })
             .collect::<std::collections::BTreeSet<_>>()
@@ -144,6 +175,7 @@ impl From<metadata_contract::EditionIdentityMatch> for CatalogIdentityReviewCand
             edition_id: candidate.open_library_edition_id,
             work_id: candidate.open_library_work_id,
             title: candidate.title,
+            subtitle: candidate.subtitle,
             authors: candidate.authors,
             publishers: candidate.publishers,
             publication_year: candidate.publication_year,
@@ -174,14 +206,13 @@ pub struct CatalogEpubExtractionJob {
     pub acquisition_url: String,
     pub book_format: CatalogBookFormat,
     pub cover_key: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CatalogMetadataBackfillJob {
-    pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
-    pub acquisition_url: String,
-    pub metadata: CatalogEpubMetadata,
+    /// Local acquisition staged by the download worker and consumed by an
+    /// extraction worker. This is durable so a restart does not force the
+    /// network and CPU stages to be coupled again.
+    pub staged_path: Option<String>,
+    pub staged_metadata_only: bool,
+    /// Monotonic claim token. Every durable write from a worker must match it.
+    pub attempt: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +230,7 @@ pub struct CatalogMetadataBackfillIndexedJob {
     pub publication: CatalogPublicationIdentity,
     pub acquisition_url: String,
     pub index: CatalogMetadataIndex,
+    pub attempt: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +242,16 @@ pub struct CatalogMetadataBackfillIndexedUpdate {
     pub popularity: Option<CatalogPublicationPopularity>,
     pub index: CatalogMetadataIndex,
     pub identity_result: Option<metadata_contract::EditionIdentityResult>,
+    pub attempt: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogOcrBackfillJob {
+    pub source_id: CatalogSourceId,
+    pub publication: CatalogPublicationIdentity,
+    pub acquisition_url: String,
+    pub book_format: CatalogBookFormat,
+    pub attempt: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -218,6 +260,7 @@ pub struct CatalogDescriptionBackfillJob {
     pub publication: CatalogPublicationIdentity,
     pub acquisition_url: String,
     pub isbns: Vec<String>,
+    pub attempt: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +271,7 @@ pub struct CatalogDescriptionBackfillUpdate {
     pub description: Option<String>,
     pub subjects: Vec<PublicationSubject>,
     pub open_library_description_missing: bool,
+    pub attempt: u64,
 }
 
 pub struct CatalogMetadataBackfillWriteTimings {
@@ -238,17 +282,6 @@ pub struct CatalogMetadataBackfillWriteTimings {
     pub status_ms: u64,
     pub transaction_ms: u64,
     pub commit_ms: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct CatalogMetadataBackfillUpdate {
-    pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
-    pub acquisition_url: String,
-    pub subjects: Vec<PublicationSubject>,
-    pub popularity: Option<CatalogPublicationPopularity>,
-    pub metadata: CatalogEpubMetadata,
-    pub identity_result: Option<metadata_contract::EditionIdentityResult>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

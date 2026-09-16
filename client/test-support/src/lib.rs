@@ -26,3 +26,8 @@ pub fn fixture_library_id(value: &str) -> LibraryId {
 pub fn fixture_replica_id(value: &str) -> ReplicaId {
     fixture_uuid(value)
 }
+
+#[cfg(feature = "pdf-fixtures")]
+mod pdf;
+#[cfg(feature = "pdf-fixtures")]
+pub use pdf::write_annotated_pdf;

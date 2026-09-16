@@ -3,20 +3,22 @@
 mod account;
 mod admin;
 mod assets;
+mod book_batch;
 mod bandwidth;
 mod extract;
 mod notifications;
 mod operations;
+mod playback;
 mod state;
 mod sync;
 mod traffic;
 
 use axum::{
-    Router,
     extract::{DefaultBodyLimit, State},
-    http::StatusCode,
+    http::{header, Method, StatusCode},
     middleware,
     routing::{delete, get, head, post},
+    Router,
 };
 use server_account::PostgresAccountService;
 use server_asset_store::FsAssetStore;
@@ -26,7 +28,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::timeout::{RequestBodyTimeoutLayer, TimeoutLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
+};
 
 pub use bandwidth::TransferLimits;
 pub use notifications::NotificationConfig;
@@ -134,15 +139,19 @@ pub fn router_with_operational_limits(
         .route("/api/ready", get(ready))
         .route("/api/health", get(ready))
         .route("/api/notifications", get(notifications::connect))
-        .route("/api/account/storage", get(account::get_storage_usage))
-        .route("/api/account/storage/libraries", get(account::get_library_storage_usage))
+        .route("/api/account/snapshot", get(account::get_snapshot))
         .route("/api/sync/exchange", post(sync::exchange_events))
         .route("/api/sync/inventory", post(sync::compare_state_inventory))
-        .route("/api/libraries", get(sync::list_libraries).post(sync::upsert_library))
-        .route("/api/libraries/deleted", get(sync::list_deleted_libraries))
+        .route("/api/cloud-storage", axum::routing::get(sync::cloud_storage))
+        .route("/api/libraries/:library_id/cloud-storage", axum::routing::put(sync::set_cloud_storage))
+        .route("/api/libraries", post(sync::create_library).put(sync::rename_library))
         .route("/api/libraries/:library_id", delete(sync::delete_library))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
+        .route("/api/libraries/:library_id/blobs/:hash/ranges", post(assets::get_blob_ranges))
+        .route("/api/libraries/:library_id/blobs/:hash/playback", post(playback::issue))
+        .route("/api/playback/:ticket", get(playback::read).head(playback::read).delete(playback::revoke))
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
+        .route("/api/libraries/:library_id/book-batch", axum::routing::put(book_batch::upload))
         .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail))
         .route("/api/libraries/:library_id/thumbnail-batch", post(assets::post_thumbnail_batch).put(assets::put_thumbnail_batch).layer(DefaultBodyLimit::max(sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)))
         .route("/api/admin/overview", get(admin::overview))
@@ -157,7 +166,18 @@ pub fn router_with_operational_limits(
         .route("/api/admin/login", post(admin::login).layer(DefaultBodyLimit::max(16 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);
-    request_limits.apply(account_routes.merge(routes)).layer(middleware::from_fn_with_state(traffic, traffic::record_traffic))
+    request_limits.apply(account_routes.merge(routes)).layer(middleware::from_fn_with_state(traffic, traffic::record_traffic)).layer(browser_cors_layer())
+}
+
+/// Browser transport policy for the same bearer-token API used by native
+/// clients. This deliberately does not enable credentialed cross-origin
+/// requests; the cookie-authenticated web endpoints remain same-origin only.
+fn browser_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::HeaderName::from_static("x-bokheim-trace-id"), header::HeaderName::from_static("x-bokheim-content-checksum"), header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE, header::IF_RANGE, header::RANGE])
+        .expose_headers([header::HeaderName::from_static("x-bokheim-content-checksum"), header::ACCEPT_RANGES, header::CONTENT_LENGTH, header::CONTENT_RANGE, header::CONTENT_TYPE, header::ETAG])
 }
 
 async fn live() -> (StatusCode, &'static str) {
@@ -175,5 +195,39 @@ fn readiness_response(result: Result<(), String>) -> (StatusCode, &'static str) 
             tracing::error!(%reason, "readiness probe failed");
             (StatusCode::SERVICE_UNAVAILABLE, "not ready")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn bearer_api_accepts_browser_preflight() {
+        let app = Router::new().route("/api/auth/login", post(|| async { StatusCode::OK })).layer(browser_cors_layer());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/auth/login")
+                    .header(header::ORIGIN, "http://localhost:4173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "accept,content-type,x-bokheim-content-checksum,x-bokheim-trace-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
+        assert!(response.headers().get(header::ACCESS_CONTROL_ALLOW_METHODS).unwrap().to_str().unwrap().contains("POST"));
+        let allowed_headers = response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS).unwrap().to_str().unwrap();
+        assert!(allowed_headers.contains("accept"));
+        assert!(allowed_headers.contains("content-type"));
+        assert!(allowed_headers.contains("x-bokheim-content-checksum"));
+        assert!(allowed_headers.contains("x-bokheim-trace-id"));
     }
 }

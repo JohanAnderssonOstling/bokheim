@@ -1,6 +1,6 @@
 use super::{
-    BTreeMap, CatalogCache, CatalogCacheError, CatalogMetadataBackfillWriteTimings, CatalogService, Duration, Instant, MetadataBackfillRuntimeMetrics, MetadataBackfillRuntimeMetricsResponse, Ordering, StdMutex, WriterRuntimeMetric,
-    WriterRuntimeMetricResponse,
+    BTreeMap, CatalogExtractionRuntimeMetrics, CatalogExtractionRuntimeMetricsResponse, CatalogMetadataBackfillWriteTimings, CatalogService, CatalogStore, CatalogStoreError, Duration, Instant, MetadataBackfillRuntimeMetrics, MetadataBackfillRuntimeMetricsResponse, Ordering,
+    StdMutex, WriterRuntimeMetric, WriterRuntimeMetricResponse,
 };
 pub(crate) struct BackfillBatchMetrics<'a> {
     metrics: &'a MetadataBackfillRuntimeMetrics,
@@ -46,10 +46,10 @@ impl Drop for BackfillBatchMetrics<'_> {
 impl CatalogService {
     pub(crate) async fn schedule_backfill<F>(&self, operation_name: &'static str, failure_message: &'static str, schedule: F) -> bool
     where
-        F: Fn(&CatalogCache) -> Result<usize, CatalogCacheError> + Copy + Send + Sync + 'static,
+        F: Fn(&CatalogStore) -> Result<usize, CatalogStoreError> + Copy + Send + Sync + 'static,
     {
         loop {
-            match self.cache_write_call_named(operation_name, schedule).await {
+            match self.store_write_call_named(operation_name, schedule).await {
                 Ok(1000) => tokio::task::yield_now().await,
                 Ok(_) => return true,
                 Err(error) => {
@@ -93,6 +93,39 @@ impl MetadataBackfillRuntimeMetrics {
             status_ms,
             total_ms,
             jobs_per_second: if total_ms == 0 { 0.0 } else { jobs as f64 * 1_000.0 / total_ms as f64 },
+        }
+    }
+}
+
+impl CatalogExtractionRuntimeMetrics {
+    pub(crate) fn record(&self, timings: &crate::extraction::CatalogExtractionTimings) {
+        self.jobs.fetch_add(1, Ordering::Relaxed);
+        self.container_ms.fetch_add(timings.container_ms, Ordering::Relaxed);
+        self.evidence_ms.fetch_add(timings.evidence_ms, Ordering::Relaxed);
+        self.toc_ms.fetch_add(timings.toc_ms, Ordering::Relaxed);
+        self.thumbnail_ms.fetch_add(timings.thumbnail_ms, Ordering::Relaxed);
+        self.worker_ms.fetch_add(timings.worker_ms, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> CatalogExtractionRuntimeMetricsResponse {
+        let jobs = self.jobs.load(Ordering::Relaxed);
+        let container_ms = self.container_ms.load(Ordering::Relaxed);
+        let evidence_ms = self.evidence_ms.load(Ordering::Relaxed);
+        let toc_ms = self.toc_ms.load(Ordering::Relaxed);
+        let thumbnail_ms = self.thumbnail_ms.load(Ordering::Relaxed);
+        let worker_ms = self.worker_ms.load(Ordering::Relaxed);
+        CatalogExtractionRuntimeMetricsResponse {
+            jobs,
+            container_ms,
+            evidence_ms,
+            toc_ms,
+            thumbnail_ms,
+            worker_ms,
+            average_container_ms: if jobs == 0 { 0.0 } else { container_ms as f64 / jobs as f64 },
+            average_evidence_ms: if jobs == 0 { 0.0 } else { evidence_ms as f64 / jobs as f64 },
+            average_toc_ms: if jobs == 0 { 0.0 } else { toc_ms as f64 / jobs as f64 },
+            average_thumbnail_ms: if jobs == 0 { 0.0 } else { thumbnail_ms as f64 / jobs as f64 },
+            average_worker_ms: if jobs == 0 { 0.0 } else { worker_ms as f64 / jobs as f64 },
         }
     }
 }

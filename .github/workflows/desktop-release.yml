@@ -28,10 +28,6 @@ env:
   HTML_VIEW_CORE_REF: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
-  PDFIUM_LINUX_X64_URL: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-linux-x64.tgz
-  PDFIUM_LINUX_X64_SHA256: 019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2
-  PDFIUM_WINDOWS_X64_URL: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-win-x64.tgz
-  PDFIUM_WINDOWS_X64_SHA256: 88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4
 
 jobs:
   build-appimage:
@@ -40,6 +36,11 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Set up PDFium preparation tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Check out Bokheim
         uses: actions/checkout@v6
         with:
@@ -116,16 +117,6 @@ jobs:
             "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" \
             "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
 
-      - name: Download pinned PDFium
-        shell: bash
-        run: |
-          PDFIUM_ARCHIVE="$RUNNER_TEMP/pdfium-linux-x64.tgz"
-          curl --fail --location --retry 3 \
-            "$PDFIUM_LINUX_X64_URL" \
-            --output "$PDFIUM_ARCHIVE"
-          printf '%s  %s\n' "$PDFIUM_LINUX_X64_SHA256" "$PDFIUM_ARCHIVE" | sha256sum --check -
-          echo "PDFIUM_ARCHIVE_PATH=$PDFIUM_ARCHIVE" >> "$GITHUB_ENV"
-
       - name: Check tagged version
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: bokheim
@@ -146,7 +137,7 @@ jobs:
 
       - name: Build GPUI desktop release
         working-directory: bokheim
-        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui --no-default-features --features desktop
+        run: python3 apps/desktop-gpui/scripts/build.py
 
       - name: Build updateable AppImage
         working-directory: bokheim
@@ -215,6 +206,11 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Set up PDFium preparation tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Check out Bokheim
         uses: actions/checkout@v6
         with:
@@ -257,17 +253,6 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
 
-      - name: Download pinned PDFium
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP "pdfium-win-x64.tgz"
-          Invoke-WebRequest -Uri $env:PDFIUM_WINDOWS_X64_URL -OutFile $archive
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -ne $env:PDFIUM_WINDOWS_X64_SHA256) {
-            throw "PDFium checksum mismatch: expected $env:PDFIUM_WINDOWS_X64_SHA256, received $actual"
-          }
-          "PDFIUM_ARCHIVE_PATH=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Read and check desktop version
         working-directory: bokheim
         shell: pwsh
@@ -292,7 +277,7 @@ jobs:
       - name: Build GPUI desktop release
         working-directory: bokheim
         shell: pwsh
-        run: cargo build --locked --release -p desktop-gpui --bin desktop-gpui --no-default-features --features desktop
+        run: python apps/desktop-gpui/scripts/build.py
 
       - name: Build Windows installer
         working-directory: bokheim

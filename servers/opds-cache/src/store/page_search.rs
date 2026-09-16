@@ -1,13 +1,12 @@
 use super::*;
-use catalog_core::{CatalogSearchMatches, SequencedCatalogPublication};
-use catalog_protocol::{page_layout, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchResponse};
+use catalog_protocol::{page_layout, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchLayout, CatalogSearchResponse};
 use std::collections::HashMap;
 
 impl CatalogStore {
     /// Builds the native page delta from the server's authoritative snapshot.
-    pub fn page_response(&self, source_id: &CatalogSourceId, locator: &str, request_epoch: Option<&str>, known: &[CatalogPublicationReference]) -> Result<Option<CatalogPageResponse>, CatalogCacheError> {
+    pub fn page_response(&self, source_id: &CatalogSourceId, locator: &str, request_epoch: Option<&str>, known: &[CatalogPublicationReference]) -> Result<Option<CatalogPageResponse>, CatalogStoreError> {
         let connection = self.connection()?;
-        let Some(state) = source_state(&connection, source_id)? else {
+        let Some(state) = source_state_in(&connection, source_id)? else {
             return Ok(None);
         };
         let Some(mut page) = stored_page(&connection, source_id, state.active_generation, locator)? else {
@@ -18,7 +17,7 @@ impl CatalogStore {
         let mut references = HashMap::new();
         let mut popularity = HashMap::new();
         for publication in unique_publications(&page) {
-            let (sequenced, score) = sequenced_publication_with_popularity(&connection, source_id, state.active_generation, &publication.identity)?.ok_or_else(|| CatalogCacheError::new("catalog page references a missing publication"))?;
+            let (sequenced, score) = sequenced_publication_with_popularity(&connection, source_id, state.active_generation, &publication.identity)?.ok_or_else(|| CatalogStoreError::new("catalog page references a missing publication"))?;
             let reference = CatalogPublicationReference { identity: publication.identity.clone(), sequence: sequenced.sequence };
             if known.get(&reference.identity) != Some(&reference.sequence) {
                 payloads.push(CatalogPublicationPayload { publication: sequenced.publication, sequence: reference.sequence });
@@ -32,9 +31,9 @@ impl CatalogStore {
     }
 
     /// Builds the native search delta from the server-owned search query.
-    pub fn search_response(&self, source_id: &CatalogSourceId, query: &str, request_epoch: Option<&str>, known: &[CatalogPublicationReference]) -> Result<Option<CatalogSearchResponse>, CatalogCacheError> {
+    pub fn search_response(&self, source_id: &CatalogSourceId, query: &str, request_epoch: Option<&str>, known: &[CatalogPublicationReference]) -> Result<Option<CatalogSearchResponse>, CatalogStoreError> {
         let connection = self.connection()?;
-        let Some(state) = source_state(&connection, source_id)? else {
+        let Some(state) = source_state_in(&connection, source_id)? else {
             return Ok(None);
         };
         let normalized_query = normalize_search_text(query);
@@ -51,23 +50,11 @@ impl CatalogStore {
             .filter(|publication| known.get(&publication.publication.identity) != Some(&publication.sequence))
             .map(|publication| CatalogPublicationPayload { publication: publication.publication, sequence: publication.sequence })
             .collect();
-        Ok(Some(CatalogSearchResponse { source_id: source_id.clone(), epoch: state.epoch, query: query.to_owned(), title_matches, author_matches, toc_matches, payloads }))
-    }
-
-    pub fn search(&self, source_id: &CatalogSourceId, query: &str) -> Result<CatalogSearchMatches, CatalogCacheError> {
-        let normalized_query = normalize_search_text(query);
-        if normalized_query.is_empty() {
-            return Ok(CatalogSearchMatches::default());
-        }
-        let connection = self.connection()?;
-        let Some(generation) = active_generation_optional(&connection, source_id)? else {
-            return Ok(CatalogSearchMatches::default());
-        };
-        search_snapshot(&connection, source_id, generation, &normalized_query)
+        Ok(Some(CatalogSearchResponse { epoch: state.epoch, search: CatalogSearchLayout { source_id: source_id.clone(), query: query.to_owned(), title_matches, author_matches, toc_matches }, payloads }))
     }
 }
 
-fn search_snapshot(connection: &Connection, source_id: &CatalogSourceId, generation: u64, normalized_query: &str) -> Result<CatalogSearchMatches, CatalogCacheError> {
+pub(super) fn search_snapshot(connection: &Connection, source_id: &CatalogSourceId, generation: u64, normalized_query: &str) -> Result<CatalogSearchMatches, CatalogStoreError> {
     let generation = storage_i64(generation, "generation")?;
     let mut title_matches = Vec::new();
     let mut statement = connection.prepare(
@@ -144,16 +131,7 @@ fn search_snapshot(connection: &Connection, source_id: &CatalogSourceId, generat
     Ok(CatalogSearchMatches { title_matches, author_matches, toc_matches })
 }
 
-fn source_state(connection: &Connection, source_id: &CatalogSourceId) -> Result<Option<CatalogSourceState>, CatalogCacheError> {
-    connection
-        .query_row("SELECT epoch, provider_epoch, active_generation FROM catalog_source WHERE source_id=?1", [source_id.as_str()], |row| {
-            Ok(CatalogSourceState { epoch: row.get(0)?, provider_epoch: row.get(1)?, active_generation: stored_u64(row.get(2)?, "active generation")? })
-        })
-        .optional()
-        .map_err(Into::into)
-}
-
-fn stored_page(connection: &Connection, source_id: &CatalogSourceId, generation: u64, locator: &str) -> Result<Option<CatalogPage>, CatalogCacheError> {
+fn stored_page(connection: &Connection, source_id: &CatalogSourceId, generation: u64, locator: &str) -> Result<Option<CatalogPage>, CatalogStoreError> {
     connection
         .query_row("SELECT payload FROM catalog_page WHERE source_id=?1 AND generation=?2 AND locator=?3", params![source_id.as_str(), storage_i64(generation, "generation")?, locator], |row| {
             let payload: Vec<u8> = row.get(0)?;
@@ -163,7 +141,7 @@ fn stored_page(connection: &Connection, source_id: &CatalogSourceId, generation:
         .map_err(Into::into)
 }
 
-fn sequenced_publication_with_popularity(connection: &Connection, source_id: &CatalogSourceId, generation: u64, identity: &CatalogPublicationIdentity) -> Result<Option<(SequencedCatalogPublication, (u64, u64))>, CatalogCacheError> {
+fn sequenced_publication_with_popularity(connection: &Connection, source_id: &CatalogSourceId, generation: u64, identity: &CatalogPublicationIdentity) -> Result<Option<(SequencedCatalogPublication, (u64, u64))>, CatalogStoreError> {
     connection
         .query_row(
             "SELECT publication.payload, publication.sequence,

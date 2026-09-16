@@ -10,3 +10,11 @@ uuid = "1"
 
 [lints]
 workspace = true
+
+[features]
+pdf-fixtures = ["dep:lopdf"]
+
+[dependencies.lopdf]
+version = "0.44"
+default-features = false
+optional = true

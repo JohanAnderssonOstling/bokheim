@@ -1,6 +1,6 @@
 use super::super::{
-    building_path, canonical_isbn13, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeMap, BTreeSet, BufRead, BufReader, Connection, EditionRecord, File, KeyReference, MetadataError,
-    MultiGzDecoder, OptionalExtension, Path, SystemTime, UnicodeNormalization, WorkRecord, BUILDER_SCHEMA_VERSION, DDC_SCHEME, IMPORT_CACHE_KIB, LCC_SCHEME, LEGACY_QUERY_SCHEMA_VERSION, MAX_NOTATION_BYTES, MAX_TITLE_SUBSTRINGS_PER_QUERY,
+    building_path, canonical_isbn13, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeSet, BufRead, BufReader, Connection, EditionRecord, File, KeyReference, MetadataError,
+    MultiGzDecoder, OptionalExtension, Path, SystemTime, UnicodeNormalization, WorkRecord, BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, LEGACY_QUERY_SCHEMA_VERSION, MAX_NOTATION_BYTES, MAX_TITLE_SUBSTRINGS_PER_QUERY,
     OL_PERSON_KIND, OL_PLACE_KIND, OPEN_LIBRARY_CHECKPOINT_RECORDS, SCHEMA_VERSION, UNIX_EPOCH, WIKIDATA_SCHEMA_VERSION,
 };
 use super::pipeline::read_open_library_resumable;
@@ -236,7 +236,6 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
             isbns.extend(record.isbn_13.iter().filter_map(|isbn| canonical_isbn13(isbn)));
             let work_id = record.works.first().and_then(|work| open_library_id(&work.key, 'W'));
             if let Some(work_id) = work_id {
-                insert_classifications(&mut work_classification_insert, work_id, DDC_SCHEME, &record.dewey_decimal_class)?;
                 insert_classifications(&mut work_classification_insert, work_id, LCC_SCHEME, &record.lc_classifications)?;
             }
             if isbns.is_empty() {
@@ -247,9 +246,13 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
                 isbn_insert.execute(params![isbn, edition_id]).map_err(error)?;
             }
             if let Some(title) = record.title.as_deref().map(compact_text).filter(|title| !title.is_empty() && title.len() <= 4_096) {
-                let normalized_title = bibliographic_match_key(&title);
+                let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
                 if !normalized_title.is_empty() {
                     bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(publication_year)]).map_err(error)?;
+                    if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
+                        transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
+                            params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                    }
                     for (position, publisher) in record.publishers.into_iter().enumerate() {
                         let publisher = compact_text(&publisher);
                         let normalized = bibliographic_match_key(&publisher);
@@ -259,7 +262,6 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
                     }
                 }
             }
-            insert_classifications(&mut classification_insert, edition_id, DDC_SCHEME, &record.dewey_decimal_class)?;
             insert_classifications(&mut classification_insert, edition_id, LCC_SCHEME, &record.lc_classifications)?;
             insert_author_references(&mut author_insert, edition_id, record.authors)?;
             insert_entity_evidence(&mut entity_insert, edition_id, OL_PLACE_KIND, record.subject_places)?;
@@ -287,11 +289,15 @@ fn import_edition_identities(connection: &mut Connection, path: &Path, limit: Op
                 continue;
             }
             let Some(title) = record.title.as_deref().map(compact_text).filter(|title| !title.is_empty() && title.len() <= 4_096) else { continue };
-            let normalized_title = bibliographic_match_key(&title);
+            let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
             if normalized_title.is_empty() {
                 continue;
             }
             bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(publication_year)]).map_err(error)?;
+            if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
+                transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
+                    params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+            }
             for (position, publisher) in record.publishers.into_iter().enumerate() {
                 let publisher = compact_text(&publisher);
                 let normalized = bibliographic_match_key(&publisher);
@@ -319,15 +325,18 @@ fn import_works(connection: &mut Connection, path: &Path, limit: Option<usize>) 
                 continue;
             }
             if let Some(title) = record.title.as_deref().map(compact_text).filter(|title| !title.is_empty() && title.len() <= 4_096) {
-                let normalized_title = bibliographic_match_key(&title);
+                let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
                 if !normalized_title.is_empty() {
                     bibliography_insert.execute(params![work_id, title, normalized_title]).map_err(error)?;
+                    if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
+                        transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)",
+                            params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                    }
                 }
             }
             if let Some(description) = record.description.as_deref().and_then(valid_open_library_description) {
                 description_insert.execute(params![work_id, description]).map_err(error)?;
             }
-            insert_classifications(&mut classification_insert, work_id, DDC_SCHEME, &record.dewey_number)?;
             insert_classifications(&mut classification_insert, work_id, LCC_SCHEME, &record.lc_classifications)?;
             insert_author_references(&mut author_insert, work_id, record.authors)?;
             insert_entity_evidence(&mut entity_insert, work_id, OL_PLACE_KIND, record.subject_places)?;
@@ -354,9 +363,13 @@ fn import_work_titles(connection: &mut Connection, path: &Path, limit: Option<us
                 continue;
             }
             let Some(title) = record.title.as_deref().map(compact_text).filter(|title| !title.is_empty() && title.len() <= 4_096) else { continue };
-            let normalized_title = bibliographic_match_key(&title);
+            let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
             if !normalized_title.is_empty() {
                 insert.execute(params![work_id, title, normalized_title]).map_err(error)?;
+                    if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
+                        transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)",
+                            params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                    }
             }
         }
         Ok(())
@@ -677,55 +690,10 @@ pub(crate) fn compact_text(value: &str) -> String {
 
 /// Locale-independent key for conservative equality matching. Punctuation and
 /// accents are not edition identity; token order is retained.
-pub(crate) fn bibliographic_match_key(value: &str) -> String {
-    use unicode_normalization::char::is_combining_mark;
-    let mut key = String::new();
-    let mut separator = false;
-    for character in value.nfkd().flat_map(char::to_lowercase) {
-        if is_combining_mark(character) {
-            continue;
-        }
-        if character.is_alphanumeric() {
-            if separator && !key.is_empty() {
-                key.push(' ');
-            }
-            key.push(character);
-            separator = false;
-        } else {
-            separator = true;
-        }
-    }
-    key
-}
+pub(crate) use metadata_contract::matching::{bibliographic_match_key, author_match_keys, author_match_tokens};
 
 pub(crate) fn title_substring_keys(value: &str) -> Vec<(String, usize)> {
-    let normalized = bibliographic_match_key(value);
-    let words = normalized.split_whitespace().take(MAX_TITLE_SUBSTRINGS_PER_QUERY).collect::<Vec<_>>();
-    let mut substrings = BTreeMap::<String, usize>::new();
-    for start in 0..words.len() {
-        for end in start + 1..=words.len() {
-            let substring = words[start..end].join(" ");
-            let specificity = substring.chars().count();
-            substrings.entry(substring).or_insert(specificity);
-        }
-    }
-    let mut substrings = substrings.into_iter().collect::<Vec<_>>();
-    substrings.sort_by(|(left_title, left_specificity), (right_title, right_specificity)| right_specificity.cmp(left_specificity).then_with(|| left_title.cmp(right_title)));
-    substrings.truncate(MAX_TITLE_SUBSTRINGS_PER_QUERY);
-    substrings
-}
-
-pub(crate) fn author_match_keys(value: &str) -> BTreeSet<String> {
-    let mut keys = BTreeSet::from([bibliographic_match_key(value)]);
-    if let Some((family, given)) = value.split_once(',') {
-        keys.insert(bibliographic_match_key(&format!("{given} {family}")));
-    }
-    keys.remove("");
-    keys
-}
-
-pub(crate) fn author_match_tokens(value: &str) -> BTreeSet<String> {
-    author_match_keys(value).into_iter().flat_map(|key| key.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).filter(|token| token.len() > 1 && !matches!(token.as_str(), "jr" | "sr" | "ii" | "iii" | "iv" | "v")).collect()
+    metadata_contract::matching::title_substring_keys(value, MAX_TITLE_SUBSTRINGS_PER_QUERY)
 }
 
 pub(crate) fn publication_year(value: &str) -> Option<i32> {

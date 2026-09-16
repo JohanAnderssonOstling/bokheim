@@ -1,11 +1,11 @@
 use super::{
-    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, merge_catalog_subject_evidence, params, sequence_in, sequenced_publication_in, storage_i64, unix_timestamp, upsert_active_publication, CatalogCache,
-    CatalogCacheError, CatalogDescription, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogPublicationIdentity, CatalogSourceId, TransactionBehavior, CATALOG_DESCRIPTION_BACKFILL_VERSION,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, merge_catalog_subject_evidence, params, sequence_in, sequenced_publication_in, storage_i64, unix_timestamp, upsert_active_publication, CatalogDescription,
+    CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, TransactionBehavior, CATALOG_DESCRIPTION_BACKFILL_VERSION,
     CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
 };
 
-impl CatalogCache {
-    pub fn schedule_description_backfill(&self) -> Result<usize, CatalogCacheError> {
+impl CatalogStore {
+    pub fn schedule_description_backfill(&self) -> Result<usize, CatalogStoreError> {
         let connection = self.connection()?;
         connection
             .execute(
@@ -35,14 +35,14 @@ impl CatalogCache {
             .map_err(Into::into)
     }
 
-    pub fn claim_description_backfill_batch(&self, limit: usize) -> Result<Vec<CatalogDescriptionBackfillJob>, CatalogCacheError> {
+    pub fn claim_description_backfill_batch(&self, limit: usize) -> Result<Vec<CatalogDescriptionBackfillJob>, CatalogStoreError> {
         let limit = limit.clamp(1, 256);
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = {
             let mut statement = transaction.prepare(
                 "SELECT backfill.source_id,backfill.acquisition_url,publication.edition_id,publication.work_id,
-                        metadata_index.isbns_payload
+                        metadata_index.isbns_payload,backfill.attempts+1
                  FROM catalog_description_backfill backfill
                  JOIN catalog_source source ON source.source_id=backfill.source_id
                  JOIN catalog_publication publication
@@ -56,33 +56,39 @@ impl CatalogCache {
             )?;
             let rows = statement
                 .query_map(params![CATALOG_METADATA_INDEX_VERSION, CATALOG_DESCRIPTION_BACKFILL_VERSION, storage_i64(limit as u64, "description backfill batch size")?], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()), row.get::<_, Vec<u8>>(4)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()), row.get::<_, Vec<u8>>(4)?, row.get::<_, i64>(5)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             rows
         };
         let now = unix_timestamp()?;
         let mut jobs = Vec::new();
-        for (source, acquisition_url, edition_id, work_id, isbns_payload) in rows {
+        for (source, acquisition_url, edition_id, work_id, isbns_payload, attempt) in rows {
             // Existing feed descriptions still need a lookup because this
             // isolated pass also applies validated Open Library subjects.
             let isbns: Vec<String> = wire::decode(&isbns_payload, wire::MAX_DECODED_RESPONSE_BYTES)?;
-            let source_id = CatalogSourceId::parse(&source).map_err(|error| CatalogCacheError::new(error.to_string()))?;
+            let source_id = CatalogSourceId::parse(&source).map_err(|error| CatalogStoreError::new(error.to_string()))?;
             transaction.execute(
                 "UPDATE catalog_description_backfill SET status='running',attempts=attempts+1,last_attempt_at=?3,last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status='pending'",
                 params![source, acquisition_url, now],
             )?;
-            jobs.push(CatalogDescriptionBackfillJob { source_id, publication: CatalogPublicationIdentity { edition_id, work_id }, acquisition_url, isbns });
+            jobs.push(CatalogDescriptionBackfillJob { source_id, publication: CatalogPublicationIdentity { edition_id, work_id }, acquisition_url, isbns, attempt: super::stored_u64(attempt, "description backfill attempt")? });
         }
         transaction.commit()?;
         Ok(jobs)
     }
 
-    pub fn finish_description_backfill_batch(&self, updates: &[CatalogDescriptionBackfillUpdate]) -> Result<(), CatalogCacheError> {
+    pub fn finish_description_backfill_batch(&self, updates: &[CatalogDescriptionBackfillUpdate]) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for update in updates {
-            let outcome = update.open_library_description_missing.then_some("no_description");
+            let claimed = transaction.execute(
+                "UPDATE catalog_description_backfill SET status='succeeded',last_error=NULL,outcome=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?4",
+                params![update.source_id.as_str(), update.acquisition_url, update.open_library_description_missing.then_some("no_description"), super::storage_i64(update.attempt, "description backfill attempt")?],
+            )?;
+            if claimed != 1 {
+                continue;
+            }
             let generation = active_generation_in(&transaction, &update.source_id)?;
             if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
                 if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
@@ -96,10 +102,6 @@ impl CatalogCache {
                     transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
                 }
             }
-            transaction.execute(
-                "UPDATE catalog_description_backfill SET status='succeeded',last_error=NULL,outcome=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running'",
-                params![update.source_id.as_str(), update.acquisition_url, outcome],
-            )?;
         }
         if !updates.is_empty() {
             advance_catalog_transport_revision(&transaction)?;
@@ -108,12 +110,15 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn release_description_backfill_batch(&self, jobs: &[CatalogDescriptionBackfillJob], error: &str) -> Result<(), CatalogCacheError> {
+    pub fn release_description_backfill_batch(&self, jobs: &[CatalogDescriptionBackfillJob], error: &str) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let error = bounded_crawl_error(error);
         for job in jobs {
-            transaction.execute("UPDATE catalog_description_backfill SET status='pending',last_error=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running'", params![job.source_id.as_str(), job.acquisition_url, error])?;
+            transaction.execute(
+                "UPDATE catalog_description_backfill SET status='pending',last_error=?3 WHERE source_id=?1 AND acquisition_url=?2 AND status='running' AND attempts=?4",
+                params![job.source_id.as_str(), job.acquisition_url, error, super::storage_i64(job.attempt, "description backfill attempt")?],
+            )?;
         }
         transaction.commit()?;
         Ok(())

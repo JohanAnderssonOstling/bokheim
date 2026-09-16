@@ -10,6 +10,8 @@ repository_root=$(cd -- "${script_directory}/../../.." && pwd)
 host=${BOKHEIM_DEPLOY_HOST:-192.168.1.68}
 user=${BOKHEIM_DEPLOY_USER:-${USER}}
 remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/var/lib/bokheim-deploy/upload}
+cargo_target=${BOKHEIM_DEPLOY_CARGO_TARGET:-x86_64-unknown-linux-musl}
+catalog_target=${BOKHEIM_CATALOG_CARGO_TARGET:-x86_64-unknown-linux-gnu}
 stage_only=false
 ssh_options=()
 if [[ -n ${BOKHEIM_DEPLOY_SSH_OPTS:-} ]]; then
@@ -56,22 +58,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Building sync-server..."
-cargo build --release --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
-echo "Building catalog-server..."
-cargo build --release --manifest-path "${repository_root}/servers/opds-cache/Cargo.toml" -p catalog-server
+echo "Building sync-server for ${cargo_target}..."
+cargo build --release --target "${cargo_target}" --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
+echo "Building catalog-server for ${catalog_target}..."
+python3 "${repository_root}/shared/pdfium/prepare.py" --target "${catalog_target}"
+cargo build --release --target "${catalog_target}" --manifest-path "${repository_root}/servers/opds-cache/Cargo.toml" -p catalog-server
 echo "Building metadata-server..."
-cargo build --release --manifest-path "${repository_root}/Cargo.toml" -p metadata-server
+cargo build --release --target "${cargo_target}" --manifest-path "${repository_root}/Cargo.toml" -p metadata-server
 
-sync_binary=${repository_root}/servers/sync/target/release/sync-server
-catalog_binary=${repository_root}/target/release/catalog-server
-metadata_binary=${repository_root}/target/release/metadata-server
+sync_binary=${repository_root}/servers/sync/target/${cargo_target}/release/sync-server
+catalog_binary=${repository_root}/target/${catalog_target}/release/catalog-server
+metadata_binary=${repository_root}/target/${cargo_target}/release/metadata-server
 for required in "${sync_binary}" "${catalog_binary}" "${metadata_binary}"; do
     if [[ ! -x ${required} ]]; then
         echo "missing executable release artifact: ${required}" >&2
         exit 1
     fi
 done
+# PDFium is a shared library, so the catalogue uses a dynamic GNU build.
+# Reject a build-machine glibc newer than the destination before transferring it.
+required_glibc=$(readelf --version-info "${catalog_binary}" "${repository_root}/.pdfium/${catalog_target}/libpdfium.so" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -n 1)
+remote_glibc=$(ssh "${ssh_options[@]}" "${remote}" 'getconf GNU_LIBC_VERSION' | awk '{print $2}')
+if [[ -z ${required_glibc} || -z ${remote_glibc} || $(printf '%s\n' "${required_glibc}" "${remote_glibc}" | sort -V | tail -n 1) != "${remote_glibc}" ]]; then
+    echo "Catalogue/PDFium requires glibc ${required_glibc:-unknown}; destination has ${remote_glibc:-unknown}. Build in a GNU environment compatible with the destination." >&2
+    exit 1
+fi
 for required in "${repository_root}/servers/opds-cache/opds.json" "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${repository_root}/servers/metadata/deploy/bokheim-metadata.service"; do
     if [[ ! -f ${required} ]]; then
         echo "missing deployment file: ${required}" >&2
@@ -81,6 +92,7 @@ done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
 install -m 0755 "${catalog_binary}" "${stage}/catalog-server"
+python3 "${repository_root}/shared/pdfium/prepare.py" --target "${catalog_target}" --dest "${stage}/pdfium" --offline
 install -m 0755 "${metadata_binary}" "${stage}/metadata-server"
 install -m 0644 "${repository_root}/servers/opds-cache/opds.json" "${stage}/opds.json"
 install -m 0644 "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"

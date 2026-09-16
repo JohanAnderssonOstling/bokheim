@@ -8,8 +8,9 @@ publish = false
 workspace = true
 
 [features]
-default = []
+default = ["authoritative-taxonomy"]
 authoritative-taxonomy = []
+master-taxonomy = ["authoritative-taxonomy"]
 
 [dependencies]
 publication-model = { path = "../publication-model" }

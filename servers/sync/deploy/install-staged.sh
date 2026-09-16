@@ -16,6 +16,8 @@ fi
 required_files=(
     sync-server
     catalog-server
+    pdfium/libpdfium.so
+    pdfium/LICENSE
     opds.json
     bokheim-sync.service
     bokheim-catalogs.service
@@ -65,6 +67,9 @@ install -o root -g root -m 0755 "${source_root}/sync-server" \
     /usr/local/bin/sync-server
 install -o root -g root -m 0755 "${source_root}/catalog-server" \
     /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
+install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${source_root}/opds.json" \

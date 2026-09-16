@@ -60,22 +60,29 @@ development machine. Do not copy host-native release binaries when the build
 machine reports a newer glibc requirement; a binary requiring `GLIBC_2.43`, for
 example, will not start on the host.
 
-The host has the musl toolchain installed. Build portable server artifacts with
-the musl target:
+Sync and metadata can retain their static musl builds. The catalogue loads
+PDFium dynamically and must use a compatible GNU build environment:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p sync-server
-cargo build --release --target x86_64-unknown-linux-musl -p catalog-server
+# Build the catalogue in a GNU environment matching the destination's glibc.
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
+cargo build --release --target x86_64-unknown-linux-gnu -p catalog-server
+python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
+  --dest target/x86_64-unknown-linux-gnu/release/pdfium --offline
 cargo build --release --target x86_64-unknown-linux-musl -p metadata-server
 ```
 
-Artifacts are written below `target/x86_64-unknown-linux-musl/release/`.
+Artifacts are written below `target/<target>/release/`. Stage the catalogue
+with its adjacent `pdfium/` directory. The remote helper uses
+`BOKHEIM_CATALOG_CARGO_TARGET` (default GNU x86-64) independently of the other
+servers and checks the required glibc against the destination before transfer.
 Verify linkage before staging:
 
 ```sh
-file target/x86_64-unknown-linux-musl/release/catalog-server
-ldd target/x86_64-unknown-linux-musl/release/catalog-server || true
+file target/x86_64-unknown-linux-gnu/release/catalog-server
+ldd target/x86_64-unknown-linux-gnu/release/catalog-server || true
 ```
 
 The release helper currently builds host-native artifacts itself. When
@@ -223,7 +230,7 @@ preserves sessions.
 
 The checked-in service configures a separate `admin@bokheim.se` account for
 the read-only dashboard at `https://app.bokheim.se/admin/`. Its static source
-lives in `apps/admin-web` and is not compiled into the mobile/reader app. Install a strong,
+lives in `servers/admin-web` and is not compiled into the mobile/reader app. Install a strong,
 unique password in its own credential before deployment:
 
 ```sh
@@ -275,7 +282,7 @@ sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
 curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=17' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
+curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=18' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production

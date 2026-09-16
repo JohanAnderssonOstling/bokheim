@@ -45,6 +45,13 @@ find "${release}" -type d -exec chmod 0755 {} +
 find "${release}" -type f -exec chmod 0644 {} +
 
 previous_release=$(readlink -f "${web_root}/current" 2>/dev/null || true)
+# Live tabs and coordinators can still request workers from older bundles.
+# Reuse immutable files via hard links so switching releases cannot turn those
+# requests into missing assets. Existing release directories are retained too.
+if [[ -n ${previous_release} && -d ${previous_release}/pkg ]]; then
+    cp -aln -- "${previous_release}/pkg/." "${release}/pkg/"
+fi
+
 next_link=${web_root}/.current.$$
 ln -s "${release}" "${next_link}"
 mv -Tf "${next_link}" "${web_root}/current"

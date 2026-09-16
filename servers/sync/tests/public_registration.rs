@@ -1,5 +1,5 @@
 use account_contract::{
-    AuthResponse, EmailRequest, EmailVerificationRequest, LibraryStorageUsageResponse, LoginRequest, MeResponse, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
+    AccountSnapshotResponse, AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, MeResponse, OtherSessionsRevocationResponse, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest, SessionRevocationResponse,
     SessionSummary, StorageUsageResponse,
 };
 use axum::body::{to_bytes, Body};
@@ -182,14 +182,30 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let database = server_postgres::connect(&database_url).await.unwrap();
     let quota = 1_000_i64 * 1_000 * 1_000 * 1_000;
     assert_eq!(server_postgres::configure_user_storage_quota(&database, &configured.user_id, quota).await.unwrap(), quota);
-    let storage: StorageUsageResponse =
-        response_body(app.clone().oneshot(accepted(Request::get("/api/account/storage")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap()).await;
-    assert_eq!(storage, StorageUsageResponse { used_bytes: 0, reserved_bytes: 0, quota_bytes: quota as u64 });
+    let snapshot: AccountSnapshotResponse =
+        response_body(app.clone().oneshot(accepted(Request::get("/api/account/snapshot")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap()).await;
+    assert_eq!(snapshot.storage, StorageUsageResponse { used_bytes: 0, reserved_bytes: 0, quota_bytes: quota as u64 });
+    assert!(snapshot.libraries.is_empty());
+    assert!(snapshot.deleted_library_ids.is_empty());
     // An account holding nothing reports no library shares at all rather than a
     // row of zeroes: the client knows which libraries exist and fills the rest.
-    let library_storage: LibraryStorageUsageResponse =
-        response_body(app.clone().oneshot(accepted(Request::get("/api/account/storage/libraries")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap()).await;
-    assert_eq!(library_storage, LibraryStorageUsageResponse { libraries: Vec::new() });
+    assert!(snapshot.library_storage.is_empty());
+    for obsolete in ["/api/account/storage", "/api/account/storage/libraries"] {
+        let response = app
+            .clone()
+            .oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "obsolete account endpoint must be removed: {obsolete}");
+    }
+    for obsolete in ["/api/libraries", "/api/libraries/deleted"] {
+        let response = app
+            .clone()
+            .oneshot(accepted(Request::get(obsolete)).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "obsolete library read endpoint must be removed: {obsolete}");
+    }
 
     let ordinary_admin_attempt = app.clone().oneshot(Request::get("/api/admin/overview").header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(ordinary_admin_attempt.status(), StatusCode::FORBIDDEN);
@@ -216,7 +232,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let traffic: serde_json::Value = serde_json::from_slice(&to_bytes(admin_traffic.into_body(), 256 * 1024).await.unwrap()).unwrap();
     assert_eq!(traffic["hours"], 1);
     assert!(traffic["points"].is_array());
-    let sync_activity = app.clone().oneshot(accepted(Request::get("/api/libraries")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap();
+    let sync_activity = app.clone().oneshot(accepted(Request::get("/api/account/snapshot")).header(header::AUTHORIZATION, format!("Bearer {}", configured_session.token)).body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(sync_activity.status(), StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     let configured_activity: i64 = sqlx::query_scalar("SELECT request_count FROM admin_account_activity WHERE user_id=$1").bind(&configured.user_id).fetch_one(database.pool()).await.unwrap();
@@ -241,10 +257,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     assert_eq!(configured_entry["verified"], true);
     assert_eq!(configured_entry["is_admin"], true);
     assert!(configured_entry["last_seen_at_ms"].as_i64().is_some(), "authenticated use must be reflected in the account list");
-    assert_eq!(
-        app.clone().oneshot(Request::get("/api/admin/accounts?limit=0").header(header::COOKIE, &admin_cookies).header("sec-fetch-site", "same-origin").body(Body::empty()).unwrap()).await.unwrap().status(),
-        StatusCode::BAD_REQUEST
-    );
+    assert_eq!(app.clone().oneshot(Request::get("/api/admin/accounts?limit=0").header(header::COOKIE, &admin_cookies).header("sec-fetch-site", "same-origin").body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::BAD_REQUEST);
     let services = app.clone().oneshot(Request::get("/api/admin/services").header(header::COOKIE, &admin_cookies).header("sec-fetch-site", "same-origin").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(services.status(), StatusCode::OK);
     let services: serde_json::Value = serde_json::from_slice(&to_bytes(services.into_body(), 64 * 1024).await.unwrap()).unwrap();

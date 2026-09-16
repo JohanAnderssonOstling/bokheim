@@ -5,35 +5,39 @@ mod bisac;
 mod ddc;
 mod fast;
 mod lcc;
+mod lcc_recovery;
 mod runtime;
+mod selector_format;
+mod pruning;
 mod taxonomy_sqlite;
 
 pub use publication_model::PublicationSubject;
+pub use lcc_recovery::{LccMatchMethod, LccMatchEvidence, LccMatchAssignment, LccMatchReport};
+pub use pruning::redundant_lcc_exact_selectors;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use bisac::{bisac_code_for_path, bisac_subject_system, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment, SubjectNode, SubjectSystem};
-pub use ddc::ddc_subject_path;
-pub use lcc::{canonical_lcc_notation, lcc_subject_path};
+pub use lcc::{canonical_lcc_notation, lcc_subject_path, lcc_subject_paths};
 pub use runtime::{
-    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, loaded_unified_taxonomy_release_id, unified_concept_definitions, unified_concept_id, unified_ddc_subject_paths, unified_has_exact_source_code,
-    unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_release_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy,
-    BUNDLED_UNIFIED_TAXONOMY_RELEASE_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
+    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, loaded_unified_taxonomy_revision_id, unified_concept_definitions, unified_concept_id, unified_has_exact_source_code,
+    lcc_subject_sort_orders, unified_lcc_has_numeric_coverage, unified_lcc_subject_paths, unified_lcc_match_report, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_revision_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy,
+    BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, DEFAULT_UNIFIED_TAXONOMY_SQLITE,
 };
 pub use taxonomy_sqlite::{
     has_unified_taxonomy_overlay, has_unified_taxonomy_overlay_in, is_unified_taxonomy_client_seed, is_unified_taxonomy_client_seed_in, merge_unified_taxonomy_connection, merge_unified_taxonomy_sqlite,
     merge_unified_taxonomy_sqlite_with_resolutions, read_resolved_unified_taxonomy_codes, read_resolved_unified_taxonomy_codes_in, read_unified_taxonomy_connection, read_unified_taxonomy_sqlite, reset_unified_taxonomy_connection,
-    unified_taxonomy_server_release_id, unified_taxonomy_server_release_id_in,
+    published_taxonomy_release_id, unified_taxonomy_server_release_id, unified_taxonomy_server_release_id_in,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnifiedCodeResolution {
     system_id: String,
     code: String,
-    matched_concept_ids: Vec<String>,
+    matched_concept_ids: Vec<i64>,
 }
 
 impl UnifiedCodeResolution {
-    pub fn new(system_id: String, code: String, matched_concept_ids: Vec<String>) -> Self {
+    pub fn new(system_id: String, code: String, matched_concept_ids: Vec<i64>) -> Self {
         Self { system_id, code, matched_concept_ids }
     }
 
@@ -45,7 +49,7 @@ impl UnifiedCodeResolution {
         &self.code
     }
 
-    pub fn matched_concept_ids(&self) -> &[String] {
+    pub fn matched_concept_ids(&self) -> &[i64] {
         &self.matched_concept_ids
     }
 }
@@ -54,16 +58,25 @@ pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
 pub const BISAC_MATCHER_VERSION: i64 = 8;
 pub const DDC_SYSTEM_ID: &str = "ddc";
-pub const DDC_VERSION: &str = "23-summary-en-2024-08-01";
-pub const DDC_MATCHER_VERSION: i64 = 2;
+pub const DDC_MATCHER_VERSION: i64 = 3;
 pub const LCC_SYSTEM_ID: &str = "lcc";
 pub const LCC_VERSION: &str = "2024-outline-r2";
-pub const LCC_MATCHER_VERSION: i64 = 2;
+pub const LCC_MATCHER_VERSION: i64 = 80;
 pub const ROOT_SUBJECT_PATH: &str = "Subject";
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
-pub const UNIFIED_VERSION: &str = "6";
-pub const UNIFIED_MATCHER_VERSION: i64 = 20;
-const GENERIC_HISTORY_CONCEPT_ID: &str = "bokheim:subject:history";
+pub const UNIFIED_VERSION: &str = "9";
+pub const UNIFIED_MATCHER_VERSION: i64 = 130;
+const GENERIC_HISTORY_CONCEPT_ID: i64 = 3319;
+
+/// The original source declaration and the LCC evidence for one unified subject.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedLccEvidence {
+    pub position: usize,
+    pub original: String,
+    pub concept_id: i64,
+    pub evidence: Vec<LccMatchEvidence>,
+    pub unresolved_fragments: Vec<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedSubjectAssignment {
@@ -71,6 +84,7 @@ pub struct ProjectedSubjectAssignment {
     pub subject_path: String,
     pub matcher_version: i64,
     pub evidence_positions: Vec<usize>,
+    pub lcc_evidence: Vec<ProjectedLccEvidence>,
 }
 
 impl ProjectedSubjectAssignment {
@@ -115,8 +129,14 @@ pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubject
     for (position, subject) in subjects.iter().enumerate() {
         let Some((system_id, authority_label)) = external_subject_system(subject.authority()) else { continue };
         let notation = subject.code().unwrap_or_else(|| subject.name());
+        if system_id == LCC_SYSTEM_ID {
+            let paths = lcc_subject_paths(notation);
+            if !paths.is_empty() {
+                for path in paths { projected.entry((system_id.to_owned(), path, LCC_MATCHER_VERSION)).or_default().insert(position); }
+                continue;
+            }
+        }
         let (subject_path, matcher_version) = match system_id {
-            DDC_SYSTEM_ID => (ddc_subject_path(notation).unwrap_or_else(|| format!("DDC / {}", compact_whitespace(notation))), DDC_MATCHER_VERSION),
             LCC_SYSTEM_ID => (lcc_subject_path(notation).unwrap_or_else(|| format!("LCC / Unclassified / {}", compact_whitespace(notation))), LCC_MATCHER_VERSION),
             _ => {
                 let components = subject.name().split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect::<Vec<_>>();
@@ -128,7 +148,7 @@ pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubject
         };
         projected.entry((system_id.to_owned(), subject_path, matcher_version)).or_default().insert(position);
     }
-    projected.into_iter().map(|((system_id, subject_path, matcher_version), evidence)| ProjectedSubjectAssignment { system_id, subject_path, matcher_version, evidence_positions: evidence.into_iter().collect() }).collect()
+    projected.into_iter().map(|((system_id, subject_path, matcher_version), evidence)| ProjectedSubjectAssignment { system_id, subject_path, matcher_version, evidence_positions: evidence.into_iter().collect(), lcc_evidence: Vec::new() }).collect()
 }
 
 pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectCode> {
@@ -137,32 +157,111 @@ pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSu
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
         projected.entry((BISAC_SYSTEM_ID.to_owned(), code.to_owned())).or_default().extend(assignment.evidence_positions());
     }
+    let declared_lcc = subjects.iter().any(|subject| external_subject_system(subject.authority()).is_some_and(|(system, _)| system == LCC_SYSTEM_ID));
+    // DDC is a fallback classification. Once the record has an explicit LCC
+    // or a resolved BISAC classification, projecting DDC as well creates
+    // unrelated catalog branches from secondary metadata (for example a
+    // mathematics DDC code on a history title). Keep the strongest source
+    // only for unified/catalog navigation; raw subjects remain unchanged.
+    let has_bisac = projected.keys().any(|(system, _)| system == BISAC_SYSTEM_ID);
+    let ddc = (!declared_lcc && !has_bisac).then(|| subjects.iter().enumerate().filter_map(|(position, subject)| {
+        (external_subject_system(subject.authority())?.0 == DDC_SYSTEM_ID)
+            .then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name())))
+            .flatten().map(|code| (position, code))
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    let maximum_ddc_specificity = ddc.iter().map(|(_, code)| ddc::specificity(code)).max();
+    for (position, code) in ddc {
+        if Some(ddc::specificity(&code)) == maximum_ddc_specificity {
+            projected.entry((DDC_SYSTEM_ID.to_owned(), code)).or_default().insert(position);
+        }
+    }
     for (position, subject) in subjects.iter().enumerate() {
-        let Some((system_id, _)) = external_subject_system(subject.authority()) else { continue };
-        let raw = subject.code().unwrap_or_else(|| subject.name());
-        let code = match system_id {
-            DDC_SYSTEM_ID => ddc::canonical_ddc_notation(raw),
-            LCC_SYSTEM_ID => canonical_lcc_notation(raw),
-            _ => None,
-        };
-        if let Some(code) = code {
-            projected.entry((system_id.to_owned(), code)).or_default().insert(position);
+        if subject.authority() == Some(UNIFIED_SYSTEM_ID) && subject.source() == "manual:subject" {
+            if let Some(path) = subject.code().filter(|path| unified_concept_id(path).is_some()) {
+                projected.entry((UNIFIED_SYSTEM_ID.to_owned(), path.to_owned())).or_default().insert(position);
+            }
+            continue;
+        }
+        if let Some(code) = subject_lcc_code(subject) {
+            projected.entry((LCC_SYSTEM_ID.to_owned(), code)).or_default().insert(position);
         }
     }
     projected.into_iter().map(|((system_id, code), evidence)| ProjectedSubjectCode { system_id, code, evidence_positions: evidence.into_iter().collect() }).collect()
+}
+
+/// Infer only complete classification values in otherwise uncontrolled embedded
+/// subjects. Keep the original declaration and its evidence position unchanged.
+fn subject_lcc_code(subject: &PublicationSubject) -> Option<String> {
+    if let Some(authority) = subject.authority() {
+        return (external_subject_system(Some(authority))?.0 == LCC_SYSTEM_ID)
+            .then(|| canonical_lcc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten();
+    }
+    if !subject.source().rsplit(':').next()?.eq_ignore_ascii_case("subject") {
+        return None;
+    }
+    let raw = subject.code().unwrap_or_else(|| subject.name()).trim();
+    let raw = raw.split_once(':').filter(|(label, _)| label.trim().eq_ignore_ascii_case("lcc"))
+        .map_or(raw, |(_, code)| code.trim());
+    let canonical = canonical_lcc_notation(raw)?;
+    let call = lcc::parse_lcc_call(&canonical)?;
+    // ISBNs, BISAC identifiers and plain alphabetic keywords are not LCC.
+    if !"ABCDEFGHJKLMNPQRSTUVZ".contains(call.letters.chars().next()?)
+        || (call.letters.len() > 3 && !call.letters.starts_with('K')) {
+        return None;
+    }
+    let numeric = canonical[call.letters.len()..].trim_start_matches([' ', '\'']);
+    if numeric.bytes().take_while(u8::is_ascii_digit).count() > 5 { return None; }
+    Some(canonical)
 }
 
 pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectAssignment> {
     let mut projected = BTreeMap::<String, BTreeSet<usize>>::new();
     let runtime = runtime::current();
     for classification in project_subject_codes(subjects) {
+        if classification.system_id() == LCC_SYSTEM_ID { continue; }
         for concept_id in runtime::matching_concepts(&runtime, classification.system_id(), classification.code()) {
             for path in runtime.paths_by_concept.get(&concept_id).cloned().unwrap_or_default() {
                 projected.entry(path).or_default().extend(classification.evidence_positions());
             }
         }
     }
+    let mut lcc_evidence = BTreeMap::<String, Vec<ProjectedLccEvidence>>::new();
     for (position, subject) in subjects.iter().enumerate() {
+        if subject.authority() == Some(UNIFIED_SYSTEM_ID) && subject.source() == "manual:subject" {
+            if let Some(path) = subject.code().filter(|path| runtime.routes.contains_key(*path)) {
+                projected.entry(path.to_owned()).or_default().insert(position);
+            }
+            continue;
+        }
+        let canonical = subject_lcc_code(subject);
+        let declared = external_subject_system(subject.authority()).is_some_and(|(system, _)| system == LCC_SYSTEM_ID);
+        if declared || canonical.is_some() {
+            let original = subject.code().unwrap_or_else(|| subject.name());
+            // Inference retains the strict boundary for uncontrolled subjects.
+            // Explicitly declared LCC also permits recovery of malformed input.
+            let input = if declared { original } else {
+                original.split_once(':').filter(|(label, _)| label.trim().eq_ignore_ascii_case("lcc"))
+                    .map_or(original, |(_, code)| code.trim())
+            };
+            let mut report = runtime::lcc_match_report(&runtime, input);
+            if input != original {
+                for evidence in report.assignments.iter_mut().flat_map(|a| &mut a.evidence) {
+                    if evidence.method == LccMatchMethod::Exact { evidence.method = LccMatchMethod::Normalized; }
+                }
+            }
+            for assignment in report.assignments {
+                for path in runtime.paths_by_concept.get(&assignment.concept_id).cloned().unwrap_or_default() {
+                    projected.entry(path.clone()).or_default().insert(position);
+                    lcc_evidence.entry(path).or_default().push(ProjectedLccEvidence {
+                        position, original: original.to_owned(), concept_id: assignment.concept_id,
+                        evidence: assignment.evidence.clone(), unresolved_fragments: report.unresolved_fragments.clone(),
+                    });
+                }
+            }
+            // An explicit classification authority is not an uncontrolled
+            // topic label when its code cannot be resolved.
+            continue;
+        }
         let uncontrolled_dc = subject.source().trim().eq_ignore_ascii_case("dc:subject") && subject.authority().is_none() && subject.code().is_none();
         for normalized in normalized_source_labels(subject) {
             // Plain Dublin Core terms are uncontrolled keywords. Common labels
@@ -172,8 +271,8 @@ pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<Projecte
                 continue;
             }
             let Some(concepts) = runtime.source_labels.get(&normalized) else { continue };
-            let dc_generic_history = uncontrolled_dc && normalized == "history" && concepts.contains(GENERIC_HISTORY_CONCEPT_ID);
-            let concepts = concepts.iter().filter(|concept_id| !dc_generic_history || concept_id.as_str() == GENERIC_HISTORY_CONCEPT_ID);
+            let dc_generic_history = uncontrolled_dc && normalized == "history" && concepts.contains(&GENERIC_HISTORY_CONCEPT_ID);
+            let concepts = concepts.iter().filter(|concept_id| !dc_generic_history || **concept_id == GENERIC_HISTORY_CONCEPT_ID);
             for path in concepts.flat_map(|concept_id| runtime.paths_by_concept.get(concept_id).cloned().unwrap_or_default()) {
                 projected.entry(path).or_default().insert(position);
             }
@@ -184,7 +283,7 @@ pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<Projecte
     }
     projected
         .into_iter()
-        .map(|(subject_path, evidence)| ProjectedSubjectAssignment { system_id: UNIFIED_SYSTEM_ID.to_owned(), subject_path, matcher_version: UNIFIED_MATCHER_VERSION, evidence_positions: evidence.into_iter().collect() })
+        .map(|(subject_path, evidence)| ProjectedSubjectAssignment { system_id: UNIFIED_SYSTEM_ID.to_owned(), lcc_evidence: lcc_evidence.remove(&subject_path).unwrap_or_default(), subject_path, matcher_version: UNIFIED_MATCHER_VERSION, evidence_positions: evidence.into_iter().collect() })
         .collect()
 }
 
@@ -252,18 +351,120 @@ fn compact_whitespace(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[test]
+    fn unresolved_declared_lcc_does_not_fall_through_to_topic_labels() {
+        for raw in ["IN PROCESS", "CPB Box no. 7", "WB 18.2", "WY 18.2", "LAW", "History", "Internet"] {
+            let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+            assert!(super::project_unified_subjects(&[subject]).is_empty(), "{raw}");
+        }
+    }
 
     #[test]
-    fn plain_dc_history_maps_only_to_generic_humanities_history() {
-        runtime::install_authoritative_taxonomy_for_tests();
-        let subjects = ["History", "United States", "20th Century"].into_iter().map(|name| PublicationSubject::new(None, name, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
-        let paths = project_unified_subjects(&subjects).into_iter().map(|assignment| assignment.subject_path().to_owned()).collect::<BTreeSet<_>>();
-
-        assert!(paths.contains("Humanities / History"));
-        assert!(paths.contains("Humanities / History / History by Region / Americas / North America / United States / Historical Eras / 20th Century"));
-        assert!(paths.iter().all(|path| path.starts_with("Humanities / History")));
+    fn inferred_lcc_evidence_preserves_source_spelling_and_normalization() {
+        let raw = ["qa76.73.r87", "LCC: QA76.73.R87"];
+        let subjects = raw.iter().map(|s| super::PublicationSubject::new(None, *s, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let assignments = super::project_unified_subjects(&subjects);
+        assert!(!assignments.is_empty());
+        for assignment in assignments {
+            assert_eq!(assignment.evidence_positions, [0, 1]);
+            assert_eq!(assignment.lcc_evidence.len(), 2);
+            for evidence in assignment.lcc_evidence {
+                assert_eq!(evidence.original, raw[evidence.position]);
+                assert!(evidence.evidence.iter().all(|e| e.method == super::LccMatchMethod::Normalized));
+                assert!(evidence.unresolved_fragments.is_empty());
+            }
+        }
     }
+
+    #[test]
+    fn declared_damaged_lcc_reaches_unified_projection_with_original_position() {
+        for raw in ["QA76; UNKNOWN", "QA76.76 .063", "QA76."] {
+            let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+            let expected = super::unified_lcc_subject_paths(raw);
+            assert!(!expected.is_empty(), "{raw}");
+            let actual = super::project_unified_subjects(&[subject.clone()]);
+            assert_eq!(actual.iter().map(|a| a.subject_path.clone()).collect::<std::collections::BTreeSet<_>>(), expected.into_iter().collect());
+            assert!(actual.iter().all(|a| a.evidence_positions == [0]));
+            assert_eq!(subject.code(), Some(raw));
+            let uncontrolled = super::PublicationSubject::new(None, raw, "dc:subject", None, None).unwrap();
+            assert!(super::project_unified_subjects(&[uncontrolled]).is_empty(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn code_lists_preserve_all_paths_and_original_evidence() {
+        let raw = "QA76; QC1";
+        let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+        let codes = super::project_subject_codes(&[subject.clone()]);
+        assert_eq!(codes.len(), 1);
+        assert_eq!(codes[0].code(), raw);
+        assert_eq!(codes[0].evidence_positions(), &[0]);
+        let outline = super::project_subjects(&[subject.clone()]);
+        assert_eq!(outline.len(), 2);
+        assert!(outline.iter().all(|p| p.evidence_positions() == [0]));
+        let actual = super::project_unified_subjects(&[subject]);
+        let expected = ["QA76", "QC1"].into_iter().flat_map(super::unified_lcc_subject_paths).collect::<std::collections::BTreeSet<_>>();
+        assert!(expected.len() > 1);
+        assert_eq!(actual.iter().map(|p| p.subject_path().to_owned()).collect::<std::collections::BTreeSet<_>>(), expected);
+        assert!(actual.iter().all(|p| p.evidence_positions() == [0]));
+    }
+
+    #[test]
+    fn embedded_lcc_values_project_without_changing_raw_metadata() {
+        let values = ["QA76.73.R87", "LCC: HD69.C6 R38 1999", "QA75.5-76.95", "qa76.73.r87"];
+        let subjects = values.iter().map(|value| PublicationSubject::new(None, *value, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == "lcc").collect::<Vec<_>>();
+        assert_eq!(codes.len(), 3);
+        let rust = codes.iter().find(|code| code.code() == "QA76.73.R87").unwrap();
+        assert_eq!(rust.evidence_positions(), &[0, 3]);
+        assert!(codes.iter().any(|code| code.code() == "HD69.C6 R38 1999"));
+        assert!(codes.iter().any(|code| code.code() == "QA75.5-76.95"));
+        for (subject, value) in subjects.iter().zip(values) {
+            assert_eq!(subject.name(), value);
+            assert!(subject.authority().is_none());
+            assert!(subject.code().is_none());
+        }
+    }
+
+    #[test]
+    fn embedded_lcc_detection_rejects_identifiers_prose_and_other_authorities() {
+        for value in ["9780131103627", "ISBN0131103628", "ISBN: 9780131103627", "9780131103627 The C Programming Language", "HIS036060", "COM051010", "QA", "IT", "History", "Rust programming QA76.73.R87", "QA76.73.R87: Rust programming", "CPB123", "MLCS123"] {
+            let subject = PublicationSubject::new(None, value, "dc:subject", None, None).unwrap();
+            assert!(subject_lcc_code(&subject).is_none(), "{value}");
+        }
+        for authority in ["LCSH", "BISAC", "custom"] {
+            let subject = PublicationSubject::new(None, "QA76.73.R87", "dc:subject", Some(authority.into()), None).unwrap();
+            assert!(subject_lcc_code(&subject).is_none(), "{authority}");
+        }
+    }
+
+    #[test]
+    fn apostrophe_calls_keep_cutter_specificity_and_exact_evidence() {
+        let definition = |id: i64, code: &str| UnifiedConceptDefinition::new(id, id.to_string(), vec![], BTreeMap::from([("lcc".into(), vec![code.into()])]), vec![]);
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![definition(1, "HD1..HD999"), definition(2, "HD69.C6"), definition(3, "HD69.C7..HD69.C9")]).unwrap();
+        assert_eq!(taxonomy.matching_concept_ids("lcc", "HD'69'C6'1999"), vec![2]);
+        assert_eq!(taxonomy.matching_concept_ids("lcc", "HD'69'C8'1999"), vec![3]);
+        assert_eq!(taxonomy.matching_concept_ids("lcc", "HD'69'C5'1999"), vec![1]);
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![definition(1, "HD69.C6"), definition(2, "HD'69'C6'1999")]).unwrap();
+        assert_eq!(taxonomy.matching_concept_ids("lcc", "HD'69'C6'1999"), vec![2]);
+    }
+
+    #[test]
+    fn embedded_declared_lcc_terms_use_the_same_single_subject_matcher() {
+        let subjects = vec![
+            PublicationSubject::new(None, "Business consultants", "dc:subject", Some("LCC".into()), Some("HD69.C6 R38 1999".into())).unwrap(),
+            PublicationSubject::new(None, "HD69.C6 R38 1999", "subject", None, None).unwrap(),
+        ];
+        let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == "lcc").collect::<Vec<_>>();
+        assert_eq!(codes.len(), 1);
+        assert_eq!(codes[0].evidence_positions(), &[0, 1]);
+        let definition = |id: i64, code: &str| UnifiedConceptDefinition::new(id, id.to_string(), vec![], BTreeMap::from([("lcc".into(), vec![code.into()])]), vec![]);
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![definition(1, "HD69"), definition(2, "HD69.C6")]).unwrap();
+        assert_eq!(taxonomy.matching_concept_ids("lcc", codes[0].code()), vec![2]);
+    }
+
+    use super::*;
+
 
     #[test]
     fn plain_dc_bisac_headings_resolve_through_codes_before_unified_projection() {
@@ -284,13 +485,23 @@ mod tests {
 
     #[test]
     fn source_system_uris_resolve_codes_and_unknown_systems_fall_back_to_bisac_paths() {
-        let ddc = PublicationSubject::new(None, "Mathematics", "opds2:subject", Some("https://example.org/schemes/dewey-decimal-classification".to_owned()), Some("510".to_owned())).unwrap();
-        let ddc_codes = project_subject_codes(&[ddc]);
-        assert!(ddc_codes.iter().any(|code| code.system_id() == DDC_SYSTEM_ID && code.code() == "510"));
-
         let bisac = PublicationSubject::new(None, "History / United States / 20th Century", "opds2:subject", Some("https://vendor.example/subjects".to_owned()), None).unwrap();
         let bisac_codes = project_subject_codes(&[bisac]);
         assert!(bisac_codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS036060"));
+    }
+
+    #[test]
+    fn ddc_is_fallback_when_bisac_already_resolves_the_catalog_subject() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        let subjects = vec![
+            PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap(),
+            PublicationSubject::new(None, "515.33", "openlibrary", Some("ddc".to_owned()), Some("515.33".to_owned())).unwrap(),
+        ];
+
+        let codes = project_subject_codes(&subjects);
+        assert!(codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID));
+        assert!(codes.iter().all(|code| code.system_id() != DDC_SYSTEM_ID));
+        assert!(project_unified_subjects(&subjects).iter().all(|assignment| assignment.subject_path() != "Science & Nature"));
     }
 
     #[test]
@@ -341,5 +552,65 @@ mod tests {
         assert_eq!(codes.len(), 1);
         assert_eq!(codes[0].system_id(), LCC_SYSTEM_ID);
         assert_eq!(codes[0].code(), "KJCX 12.4 .A2");
+    }
+
+    #[test]
+    fn declared_lcc_suppresses_ddc_for_the_same_publication() {
+        let subjects = vec![
+            PublicationSubject::new(None, "Computer science", "marc", Some("ddc".to_owned()), Some("004".to_owned())).unwrap(),
+            PublicationSubject::new(None, "Computer science", "marc", Some("lcc".to_owned()), Some("QA76".to_owned())).unwrap(),
+        ];
+        let codes = project_subject_codes(&subjects);
+        assert!(codes.iter().any(|code| code.system_id() == LCC_SYSTEM_ID && code.code() == "QA76"));
+        assert!(codes.iter().all(|code| code.system_id() != DDC_SYSTEM_ID));
+    }
+
+    #[test]
+    fn only_the_most_specific_declared_ddc_values_are_projected() {
+        let subjects = [
+            ("500", "Science"),
+            ("512.7", "Algebra"),
+            ("512.73", "Algebra"),
+            ("519.20", "Probability"),
+        ].into_iter().map(|(code, name)|
+            PublicationSubject::new(None, name, "marc", Some("ddc".to_owned()), Some(code.to_owned())).unwrap()
+        ).collect::<Vec<_>>();
+        let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == DDC_SYSTEM_ID).collect::<Vec<_>>();
+        assert_eq!(codes.iter().map(ProjectedSubjectCode::code).collect::<Vec<_>>(), ["512.73", "519.20"]);
+        assert_eq!(codes[0].evidence_positions(), &[2]);
+        assert_eq!(codes[1].evidence_positions(), &[3]);
+    }
+
+
+    #[test]
+    fn frequent_russian_geographic_codes_resolve_to_specific_regions() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        let russia = "Humanities / History / History by Region / European History / East European History / Russian History";
+
+        for (code, region) in [
+            ("DK511.C2", "Northern Caucasus"),
+            ("DK511.T17", "Tatarstan & Kazan Region / Tatarstan"),
+            ("DK511.V65", "Volga Region"),
+            ("DK756.2", "Siberia"),
+            ("DK600", "Moscow"),
+            ("DK565", "Saint Petersburg"),
+        ] {
+            let expected = format!("{russia} / {region}");
+            let paths = unified_lcc_subject_paths(code);
+            assert!(paths.iter().any(|path| path == &expected || path.starts_with(&format!("{expected} / "))), "{code} must resolve to {region}: {paths:?}");
+        }
+    }
+
+    #[test]
+    fn italian_guidebook_codes_resolve_to_travel_instead_of_history() {
+        runtime::install_authoritative_taxonomy_for_tests();
+        let travel = "Geography, Places & Travel / Travel / European Travel / Italian Travel";
+
+        for code in ["DG416", "DG612", "DG672", "DG732", "DG804", "DG862", "DG975.B58"] {
+            let paths = unified_lcc_subject_paths(code);
+            assert_eq!(paths.len(), 1, "{code} must have one travel destination: {paths:?}");
+            assert!(paths[0] == travel || paths[0].starts_with(&format!("{travel} / ")),
+                "{code} must resolve within Italian travel: {paths:?}");
+        }
     }
 }

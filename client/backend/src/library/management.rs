@@ -1,112 +1,102 @@
 //! User-initiated library organization backed by the shared SQLite model.
+use crate::BackendError;
 
-use super::{database as db, filenames, LibraryBackend};
-use crate::{BlobKind, ContentHash, DirId};
+use super::{LibrarySession, filenames};
+use crate::{ContentHash, DirId};
 use library_model::{LibraryFolderDestination, LibraryTrashView};
 
-impl LibraryBackend {
-    pub(super) fn rename_library_directory(&self, directory_id: &DirId, requested_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+impl LibrarySession {
+    fn commit_placement_change<T>(&self, change: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>) -> Result<T, BackendError> {
+        let mut conn = self.db.get()?;
+        // Reserve the main-database writer before reading placement state. A
+        // deferred read snapshot cannot safely upgrade after another writer commits.
+        let transaction = client_library::schema::library_write_transaction(&mut conn)?;
+        let result = change(&transaction)?;
+        transaction.commit()?;
+        drop(conn);
+        self.notify_contents_changed();
+        Ok(result)
+    }
+
+    pub fn rename_directory(&self, directory_id: &DirId, requested_name: &str) -> Result<String, BackendError> {
         self.move_library_directory(directory_id, None, Some(requested_name))
     }
 
-    pub(super) fn move_library_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
-        let requested_name = requested_name.map(filenames::validate_component).transpose()?;
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        let chosen = db::move_directory_record(&transaction, directory_id, requested_parent, requested_name.as_ref().map(|name| name.as_str()))?;
-        transaction.commit()?;
-        Ok(chosen)
+    pub fn move_directory(&self, directory_id: &DirId, parent_id: &DirId) -> Result<String, BackendError> {
+        self.move_library_directory(directory_id, Some(parent_id), None)
     }
 
-    pub(super) fn copy_book_placement(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, Box<dyn std::error::Error>> {
+    /// Duplicates a folder and its contents under another folder. The books it
+    /// holds gain a second placement; their bytes are not duplicated. Returns
+    /// the copy's directory ID, which is what an undo of this acts on.
+    pub fn copy_directory(&self, directory_id: &DirId, destination_parent_id: &DirId) -> Result<DirId, BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::copy_directory_record(transaction, directory_id, destination_parent_id))
+    }
+
+    /// Puts a book back in a folder it was removed from.
+    pub fn restore_book_placement(&self, content_hash: &ContentHash, directory_id: &DirId) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::restore_book_placement_record(transaction, content_hash, directory_id))
+    }
+
+    fn move_library_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, BackendError> {
+        let requested_name = requested_name.map(filenames::validate_component).transpose()?;
+        self.commit_placement_change(|transaction| client_library::placements::move_directory_record(transaction, directory_id, requested_parent, requested_name.as_deref()))
+    }
+
+    pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
         self.transfer_book_placement(content_hash, source_id, destination_id, false)
     }
 
-    pub(super) fn move_book_placement(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn move_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
         self.transfer_book_placement(content_hash, source_id, destination_id, true)
     }
 
-    fn transfer_book_placement(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId, remove_source: bool) -> Result<String, Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        let name = db::transfer_book_placement_record(&transaction, content_hash, source_id, destination_id, remove_source)?;
-        transaction.commit()?;
-        Ok(name)
+    fn transfer_book_placement(&self, hash: &ContentHash, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
+        self.commit_placement_change(|transaction| self.assets.transfer_book_placement(transaction, hash, source, destination, moving))
     }
 
-    pub(super) fn remove_book_placement(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        let orphaned = db::remove_book_placement_record(&transaction, content_hash, source_id)?;
-        transaction.commit()?;
-        Ok(orphaned)
+    /// Removes one placement. Returns `true` when the final placement
+    /// is removed and the book consequently moves to Trash.
+    pub fn remove_book_from_directory(&self, content_hash: &ContentHash, source_id: &DirId) -> Result<bool, BackendError> {
+        self.commit_placement_change(|transaction| self.assets.remove_book_placement(transaction, content_hash, source_id))
     }
 
-    pub(super) fn trash_book_record(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn move_book_to_trash(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::trash_book_record(transaction, content_hash))
+    }
+
+    pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+        self.assets.ensure_restore_available()?;
+        self.commit_placement_change(|transaction| self.assets.restore_book(transaction, content_hash))
+    }
+
+    pub(crate) fn trash(&self) -> Result<LibraryTrashView, BackendError> {
         let conn = self.db.get()?;
-        db::trash_book_record(&conn, content_hash)?;
-        Ok(())
+        Ok(client_library::placements::library_trash(&conn)?)
     }
 
-    pub(super) fn restore_book_record(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, BackendError> {
         let conn = self.db.get()?;
-        db::restore_book_record(&conn, content_hash)?;
-        Ok(())
+        Ok(client_library::placements::folder_destinations(&conn)?)
     }
 
-    pub(super) fn load_trash(&self) -> Result<LibraryTrashView, Box<dyn std::error::Error>> {
-        let conn = self.db.get()?;
-        Ok(db::library_trash(&conn)?)
+    pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::purge_book_record(transaction, content_hash))
     }
 
-    pub(super) fn load_folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, Box<dyn std::error::Error>> {
-        let conn = self.db.get()?;
-        Ok(db::folder_destinations(&conn)?)
+    pub fn purge_directory(&self, directory_id: &DirId) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::purge_directory_record(transaction, directory_id))
     }
 
-    pub(super) fn purge_book_record(&self, content_hash: &ContentHash) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        db::purge_book_record(&transaction, content_hash)?;
-        db::remove_local_blob(&transaction, BlobKind::Book, content_hash)?;
-        db::remove_local_blob(&transaction, BlobKind::Thumbnail, content_hash)?;
-        transaction.commit()?;
-        Ok(())
+    pub fn empty_trash(&self) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::empty_trash_records(transaction))
     }
 
-    pub(super) fn purge_directory_record(&self, directory_id: &DirId) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        db::purge_directory_record(&transaction, directory_id)?;
-        transaction.commit()?;
-        Ok(())
+    pub fn move_directory_to_trash(&self, directory_id: &DirId) -> Result<(), BackendError> {
+        self.commit_placement_change(|transaction| client_library::placements::trash_directory_record(transaction, directory_id))
     }
 
-    pub(super) fn empty_trash_records(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        let purged_books = db::empty_trash_records(&transaction)?;
-        for content_hash in purged_books {
-            db::remove_local_blob(&transaction, BlobKind::Book, &content_hash)?;
-            db::remove_local_blob(&transaction, BlobKind::Thumbnail, &content_hash)?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub(super) fn trash_directory_record(&self, directory_id: &DirId) -> Result<(), Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        db::trash_directory_record(&transaction, directory_id)?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub(super) fn restore_directory_record(&self, directory_id: &DirId, requested_parent: Option<&DirId>) -> Result<String, Box<dyn std::error::Error>> {
-        let mut conn = self.db.get()?;
-        let transaction = conn.transaction()?;
-        let name = db::restore_directory_record(&transaction, directory_id, requested_parent)?;
-        transaction.commit()?;
-        Ok(name)
+    pub fn restore_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>) -> Result<String, BackendError> {
+        self.commit_placement_change(|transaction| self.assets.restore_directory(transaction, directory_id, requested_parent))
     }
 }

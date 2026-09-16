@@ -59,11 +59,11 @@ fi
 
 server_target=${SYNC_E2E_SERVER_TARGET_DIR:-$repo_root/servers/sync/target}
 backend_target=${SYNC_E2E_BACKEND_TARGET_DIR:-$repo_root/target}
-CARGO_TARGET_DIR="$server_target" cargo build --manifest-path "$repo_root/servers/sync/Cargo.toml"
+CARGO_TARGET_DIR="$server_target" cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml"
 
 SYNC_E2E_DATABASE_URL="$database_url" \
 CARGO_TARGET_DIR="$server_target" \
-cargo test \
+cargo test --release \
     --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p server-account \
     -p server-postgres \
@@ -73,7 +73,7 @@ cargo test \
 
 SYNC_E2E_DATABASE_URL="$database_url" \
 CARGO_TARGET_DIR="$server_target" \
-cargo test \
+cargo test --release \
     --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p sync-server \
     --test public_registration \
@@ -94,7 +94,7 @@ BOKHEIM_ACCOUNT_TOKEN_KEY="WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=" \
 BOKHEIM_TEST_USER_EMAIL="admin@bokheim.local" \
 BOKHEIM_TEST_USER_PASSWORD="sync-e2e-admin-password" \
 BOKHEIM_ASSETS_DIR="$assets_root" \
-"$server_target/debug/sync-server" >"$e2e_tmp/server.log" 2>&1 &
+"$server_target/release/sync-server" >"$e2e_tmp/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 100); do
     if curl --fail --silent "http://127.0.0.1:$server_port/api/ready" >/dev/null; then
@@ -107,14 +107,19 @@ curl --fail --silent "http://127.0.0.1:$server_port/api/live" >/dev/null
 curl --fail --silent "http://127.0.0.1:$server_port/api/health" >/dev/null
 
 SYNC_E2E_DATABASE_URL="$database_url" \
-SYNC_E2E_SERVER_BIN="$server_target/debug/sync-server" \
+SYNC_E2E_SERVER_BIN="$server_target/release/sync-server" \
 SYNC_E2E_SERVER_URL="http://127.0.0.1:$server_port" \
 SYNC_E2E_ADMIN_PASSWORD="sync-e2e-admin-password" \
 CARGO_TARGET_DIR="$backend_target" \
-cargo test \
+cargo test --release \
     --manifest-path "$repo_root/client/backend/Cargo.toml" \
     --lib \
-    sync::manager::tests::production_http_postgres_ \
+    production_http_postgres_ \
     -- \
     --ignored \
-    --test-threads=1
+    --test-threads=1 | tee "$e2e_tmp/backend-tests.log"
+
+if ! rg -q '^test result: ok\. [1-9][0-9]* passed;' "$e2e_tmp/backend-tests.log"; then
+    echo "No PostgreSQL client tests ran; check the test filter." >&2
+    exit 1
+fi

@@ -11,7 +11,7 @@ if [[ -z ${source_root} || ${source_root} != /* ]]; then
     exit 2
 fi
 
-for required in catalog-server opds.json bokheim-catalogs.service; do
+for required in pdfium/libpdfium.so pdfium/LICENSE catalog-server opds.json bokheim-catalogs.service; do
     if [[ ! -f ${source_root}/${required} ]]; then
         echo "missing staged deployment file: ${source_root}/${required}" >&2
         exit 1
@@ -34,8 +34,13 @@ cp --preserve=mode,ownership,timestamps /usr/local/bin/catalog-server "${rollbac
 cp --preserve=mode,ownership,timestamps /usr/local/share/catalog-providers/opds.json "${rollback_root}/opds.json"
 cp --preserve=mode,ownership,timestamps /etc/systemd/system/bokheim-catalogs.service "${rollback_root}/bokheim-catalogs.service"
 
+if [[ -d /usr/local/bin/pdfium ]]; then cp -a /usr/local/bin/pdfium "${rollback_root}/pdfium"; fi
+
 systemctl stop bokheim-catalogs.service
 install -o root -g root -m 0755 "${source_root}/catalog-server" /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
+install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${source_root}/opds.json" /usr/local/share/catalog-providers/opds.json
 install -o root -g root -m 0644 "${source_root}/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service
@@ -53,6 +58,7 @@ done
 
 if [[ ${healthy} != true ]]; then
     echo "catalogue deployment did not become healthy; restoring the previous release" >&2
+    if [[ -d ${rollback_root}/pdfium ]]; then install -o root -g root -m 0644 "${rollback_root}/pdfium/libpdfium.so" "${rollback_root}/pdfium/LICENSE" /usr/local/bin/pdfium/; fi
     install -o root -g root -m 0755 "${rollback_root}/catalog-server" /usr/local/bin/catalog-server
     install -o root -g root -m 0644 "${rollback_root}/opds.json" /usr/local/share/catalog-providers/opds.json
     install -o root -g root -m 0644 "${rollback_root}/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service

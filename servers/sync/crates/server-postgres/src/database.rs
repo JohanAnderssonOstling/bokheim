@@ -86,7 +86,13 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
 
 /// Immutable migrations introduced after the v14 baseline. Append entries;
 /// never edit or reorder a migration after release.
-const POST_V14_MIGRATIONS: &[(&str, &str)] = &[("15-lww-loser-republish", include_str!("../schema/migrations/15_lww_loser_republish.sql"))];
+const POST_V14_MIGRATIONS: &[(&str, &str)] = &[
+    ("15-lww-loser-republish", include_str!("../schema/migrations/15_lww_loser_republish.sql")),
+    ("16-explicit-library-names", include_str!("../schema/migrations/16_explicit_library_names.sql")),
+    ("17-user-book-revision", include_str!("../schema/migrations/17_user_book_revision.sql")),
+    ("18-free-thumbnails", include_str!("../schema/migrations/18_free_thumbnails.sql")),
+    ("19-cloud-storage", include_str!("../schema/migrations/19_cloud_storage.sql")),
+];
 
 /// Upgrades an existing v14-or-newer database without recreating or deleting
 /// user data. Pre-v14 databases are deliberately rejected.

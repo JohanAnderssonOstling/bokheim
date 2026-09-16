@@ -5,7 +5,21 @@ on:
   pull_request:
     paths:
       - ".github/workflows/sync-e2e.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "client/backend/**"
+      - "client/library/**"
+      - "client/library-files/**"
+      - "client/sync/**"
+      - "client/test-support/**"
+      - "client/publication-access/**"
+      - "client/account-client/**"
+      - "shared/publication-enrichment/**"
+      - "shared/publication-model/**"
+      - "client/platforms/**"
+      - "scripts/checks/library-sql.py"
+      - "scripts/checks/backend-boundaries.py"
+      - "scripts/checks/tests/**"
       - "servers/sync/**"
       - "shared/account-contract/**"
       - "shared/protocol-test-support/**"
@@ -16,7 +30,21 @@ on:
       - main
     paths:
       - ".github/workflows/sync-e2e.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "client/backend/**"
+      - "client/library/**"
+      - "client/library-files/**"
+      - "client/sync/**"
+      - "client/test-support/**"
+      - "client/publication-access/**"
+      - "client/account-client/**"
+      - "shared/publication-enrichment/**"
+      - "shared/publication-model/**"
+      - "client/platforms/**"
+      - "scripts/checks/library-sql.py"
+      - "scripts/checks/backend-boundaries.py"
+      - "scripts/checks/tests/**"
       - "servers/sync/**"
       - "shared/account-contract/**"
       - "shared/protocol-test-support/**"
@@ -51,10 +79,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test architecture checks
+        run: python3 -m unittest discover -s scripts/checks/tests
+
+      - name: Check feature SQL organization
+        run: python3 scripts/checks/library-sql.py
+
+      - name: Check backend service boundaries
+        run: python3 scripts/checks/backend-boundaries.py
+
       - name: Install Rust
         run: |
           rustup toolchain install 1.95.0 --profile minimal
           rustup default 1.95.0
+
+      - name: Test extracted client services
+        run: cargo test --release -p account-client -p publication-access -p publication-enrichment -p publication-model -p library-files -p asset-transfer -p client-platform-runtime -p sync-engine --all-features --lib
 
       - name: Run synchronization E2E suite
         run: client/backend/tests/run_sync_e2e.sh

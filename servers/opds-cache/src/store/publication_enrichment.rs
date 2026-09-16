@@ -49,12 +49,8 @@ fn append_unique<T: Clone + PartialEq>(target: &mut Vec<T>, candidates: &[T]) {
     }
 }
 
-pub fn catalog_subject_evidence(publication: &CatalogPublication) -> Result<Vec<PublicationSubject>, CatalogCacheError> {
-    Ok(publication.metadata.subjects.clone())
-}
-
-impl CatalogCache {
-    pub fn enrich_page_from_epub_extractions(&self, source_id: &CatalogSourceId, page: &mut CatalogPage) -> Result<(), CatalogCacheError> {
+impl CatalogStore {
+    pub fn enrich_page_from_epub_extractions(&self, source_id: &CatalogSourceId, page: &mut CatalogPage) -> Result<(), CatalogStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT result_payload FROM catalog_epub_extraction
@@ -75,7 +71,7 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn active_publication_for_cover(&self, source_id: &CatalogSourceId, cover_url: &str) -> Result<Option<CatalogPublication>, CatalogCacheError> {
+    pub fn active_publication_for_cover(&self, source_id: &CatalogSourceId, cover_url: &str) -> Result<Option<CatalogPublication>, CatalogStoreError> {
         let connection = self.connection()?;
         let Some(generation) = active_generation_optional(&connection, source_id)? else { return Ok(None) };
         let payload = connection

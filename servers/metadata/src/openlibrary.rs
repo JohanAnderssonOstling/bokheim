@@ -138,3 +138,13 @@ pub(crate) fn valid_dump_date(value: &str) -> bool {
 pub(crate) fn error(error: impl fmt::Display) -> MetadataError {
     MetadataError(error.to_string())
 }
+
+/// Internal catalog keys reserve negatives for Wikidata QIDs; Open Library
+/// identifiers remain positive and are never fabricated for other sources.
+pub(crate) fn catalog_edition_id(value: &str) -> Option<i64> {
+    value.strip_prefix("wikidata:Q").and_then(|q|q.parse::<i64>().ok()).filter(|q|*q>0).map(|q|-q)
+        .or_else(||open_library_id(value,'M'))
+}
+pub(crate) fn catalog_edition_key(id: i64) -> String {
+    if id<0 {format!("wikidata:Q{}",-id)} else {format!("OL{id}M")}
+}

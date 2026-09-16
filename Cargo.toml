@@ -3,14 +3,12 @@ resolver = "3"
 members = [
     "client/backend",
     "client/library-replica",
-    "client/sync-client",
     "client/library-registry",
     "client/book-metadata",
     "client/thumbnail",
     "client/audiobook-library",
     "client/preferences",
     "client/library-model",
-    "client/library-sqlite",
     "client/test-support",
     "shared/content-address",
     "shared/outbound-http",
@@ -26,27 +24,14 @@ members = [
     "shared/catalog-core",
     "client/catalog-client",
     "client/metadata-client",
-    "client/taxonomy-client",
     "shared/wire",
     "shared/protobuf-wire",
     "shared/metadata-contract",
     "shared/taxonomy-contract",
     "shared/sync-common",
-    "apps/renderers/html",
-    "apps/renderers/html/crates/html-publication",
-    "apps/renderers/html/crates/html-view-gpui",
-    "apps/renderers/shared/reader-style",
-    "apps/renderers/pdf/view-common",
-    "apps/renderers/pdf/core",
     "apps/desktop-gpui",
     "apps/web-gpui",
-    "apps/ui/gpui/audiobook-player",
     "apps/kobo-device",
-    "apps/ui/gpui/browser",
-    "apps/ui/gpui/reader",
-    "apps/ui/gpui/pdf-view",
-    "apps/ui/gpui/components",
-    "apps/ui/gpui/runtime",
     "servers/opds-cache",
     "servers/metadata",
     "servers/taxonomy"
@@ -82,6 +67,7 @@ encoding_rs = "0.8"
 
 [patch.crates-io]
 gpui = { path = "../GPUI-Fork/crates/gpui" }
+pdfium-render = { path = "vendor/pdfium-render" }
 
 [patch."https://github.com/zed-industries/zed"]
 gpui = { path = "../GPUI-Fork/crates/gpui" }

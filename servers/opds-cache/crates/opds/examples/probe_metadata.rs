@@ -1,7 +1,7 @@
 //! Inspect raw metadata exposed by the configured OPDS catalogues.
 //!
 //! Example:
-//! cargo run -p opds --example probe_metadata -- --pages 3 --search book
+//! cargo run -p opds --example probe_metadata -- --pages 3
 
 use futures_util::{stream, StreamExt};
 use opds::{endpoints_from_registry, CatalogRegistry, OpdsClient, OpdsEndpoint, OpdsEndpointId, OpdsLinkTarget};
@@ -25,7 +25,6 @@ struct Options {
     registry: PathBuf,
     pages: usize,
     concurrency: usize,
-    search: String,
     field_filter: Option<String>,
     only_id: Option<String>,
     url: Option<String>,
@@ -66,8 +65,7 @@ async fn main() {
     let reports = stream::iter(endpoints)
         .map(|endpoint| {
             let http = http.clone();
-            let search = options.search.clone();
-            async move { inspect_catalog(http, endpoint, options.pages, &search).await }
+            async move { inspect_catalog(http, endpoint, options.pages).await }
         })
         .buffer_unordered(options.concurrency)
         .collect::<Vec<_>>()
@@ -91,18 +89,12 @@ async fn main() {
     }
 }
 
-async fn inspect_catalog(http: Arc<reqwest::Client>, endpoint: OpdsEndpoint, page_limit: usize, search_terms: &str) -> CatalogReport {
+async fn inspect_catalog(http: Arc<reqwest::Client>, endpoint: OpdsEndpoint, page_limit: usize) -> CatalogReport {
     let mut urls = vec![endpoint.url.clone()];
     let mut errors = Vec::new();
     let discovery = OpdsClient::new().expect("OPDS client should initialize");
     match discovery.fetch_catalog(&endpoint.url).await {
         Ok(root) => {
-            if !search_terms.is_empty() && root.search.is_some() {
-                match discovery.search(&root, search_terms).await {
-                    Ok(result) => push_unique(&mut urls, result.source_url),
-                    Err(error) => errors.push(format!("search discovery failed: {}", clean(&error.to_string()))),
-                }
-            }
             for link in &root.navigation {
                 if link.target == OpdsLinkTarget::Catalog {
                     push_unique(&mut urls, link.url.clone());
@@ -336,7 +328,6 @@ fn options() -> Options {
     let mut registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../servers/opds-cache/opds.json");
     let mut pages = DEFAULT_PAGES;
     let mut concurrency = DEFAULT_CONCURRENCY;
-    let mut search = "book".to_owned();
     let mut field_filter = None;
     let mut only_id = None;
     let mut url = None;
@@ -346,14 +337,13 @@ fn options() -> Options {
             "--registry" => registry = PathBuf::from(arguments.next().expect("--registry requires a path")),
             "--pages" => pages = parse_bounded("--pages", arguments.next(), MAX_PAGES),
             "--concurrency" => concurrency = parse_bounded("--concurrency", arguments.next(), MAX_CONCURRENCY),
-            "--search" => search = arguments.next().expect("--search requires text"),
             "--field" => field_filter = Some(arguments.next().expect("--field requires text").to_lowercase()),
             "--id" => only_id = Some(arguments.next().expect("--id requires a catalogue id")),
             "--url" => url = Some(arguments.next().expect("--url requires an HTTP URL")),
             _ => panic!("unknown argument {argument}"),
         }
     }
-    Options { registry, pages, concurrency, search, field_filter, only_id, url }
+    Options { registry, pages, concurrency, field_filter, only_id, url }
 }
 
 fn parse_bounded(name: &str, value: Option<String>, maximum: usize) -> usize {

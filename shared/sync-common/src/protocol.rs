@@ -127,7 +127,7 @@ pub struct ValidatedPushResponse {
 /// A local mutation that still needs attention after an otherwise successful
 /// synchronization exchange. Keeping these cases in one collection prevents
 /// callers from having to keep parallel vectors aligned.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MutationIssue {
     /// The server explicitly asked the client to submit this mutation later.
     Retryable(MutationRejection),

@@ -6,7 +6,7 @@ if [[ ${EUID} -ne 0 || -z ${source_root} || ${source_root} != /* ]]; then
     echo "usage: sudo $0 /absolute/staged-release-directory" >&2
     exit 2
 fi
-for required in metadata-server catalog-server opds.json bokheim-metadata.service bokheim-catalogs.service; do
+for required in pdfium/libpdfium.so pdfium/LICENSE metadata-server catalog-server opds.json bokheim-metadata.service bokheim-catalogs.service; do
     if [[ ! -f ${source_root}/${required} || -L ${source_root}/${required} ]]; then
         echo "missing or unsafe staged artifact: ${source_root}/${required}" >&2
         exit 1
@@ -34,11 +34,13 @@ for installed in /usr/local/bin/catalog-server /usr/local/bin/metadata-server /u
         cp -a -- "${installed}" "${rollback_root}/"
     fi
 done
+if [[ -d /usr/local/bin/pdfium ]]; then cp -a /usr/local/bin/pdfium "${rollback_root}/pdfium"; fi
 cleanup() {
     status=$?
     trap - EXIT
     if [[ ${activation_started} == true && ${deployment_succeeded} != true ]]; then
         echo "activation failed; restoring the previous catalogue release" >&2
+        if [[ -d ${rollback_root}/pdfium ]]; then install -o root -g root -m 0644 "${rollback_root}/pdfium/libpdfium.so" "${rollback_root}/pdfium/LICENSE" /usr/local/bin/pdfium/; fi
         [[ -f ${rollback_root}/catalog-server ]] && install -o root -g root -m 0755 "${rollback_root}/catalog-server" /usr/local/bin/catalog-server
         [[ -f ${rollback_root}/opds.json ]] && install -o root -g root -m 0644 "${rollback_root}/opds.json" /usr/local/share/catalog-providers/opds.json
         [[ -f ${rollback_root}/bokheim-catalogs.service ]] && install -o root -g root -m 0644 "${rollback_root}/bokheim-catalogs.service" /etc/systemd/system/bokheim-catalogs.service
@@ -67,6 +69,9 @@ systemctl stop bokheim-catalogs.service bokheim-metadata.service 2>/dev/null || 
 pkill -u johan -x metadata-server 2>/dev/null || true
 install -o root -g root -m 0755 "${source_root}/metadata-server" /usr/local/bin/metadata-server
 install -o root -g root -m 0755 "${source_root}/catalog-server" /usr/local/bin/catalog-server
+install -d -o root -g root -m 0755 /usr/local/bin/pdfium
+install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
+install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
 install -o root -g root -m 0644 "${source_root}/opds.json" /usr/local/share/catalog-providers/opds.json
 install -o root -g root -m 0644 "${source_root}/bokheim-metadata.service" /etc/systemd/system/bokheim-metadata.service

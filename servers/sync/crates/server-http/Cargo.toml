@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 account-contract = { path = "../../../../shared/account-contract" }
 axum = { version = "0.7", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -25,5 +26,5 @@ sync-common = { path = "../../../../shared/sync-common" }
 tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "util"] }
-tower-http = { version = "0.6", features = ["timeout"] }
+tower-http = { version = "0.6", features = ["cors", "timeout"] }
 tracing = "0.1"

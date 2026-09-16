@@ -10,11 +10,11 @@
 //! Exercise the real HTTP/PostgreSQL boundary as well:
 //! `Backend/tests/run_sync_e2e.sh`
 
-use crate::{db, ContentHash};
+use crate::ContentHash;
 use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookMetadataState, ReadingPositionState};
 use library_model::{Contributor, MarcRelatorCode};
 use library_replica::{MutationBody, StateKey, StateMutation, VersionKey};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 use sync_common::{LibraryRevision, MutationId, ReplicaId, ReplicaSeq, ServerMutation};
 use test_support::{fixture_content_hash, fixture_dir_id, fixture_replica_id};
@@ -128,43 +128,28 @@ struct Device {
 impl Device {
     fn new(replica_id: &str) -> Self {
         let conn = Connection::open_in_memory().expect("open device database");
-        db::init_db(&conn).unwrap();
+        client_library::schema::init_db(&conn).unwrap();
         // Production passes the client id persisted in this same database to
         // every push. Keep the modeled request identity and trigger-stamped
         // local identity identical as well.
         let replica_id = fixture_replica_id(replica_id);
-        db::set_sync_metadata(&conn, "replica_id", &replica_id.to_string()).unwrap();
+        client_library::sync_state::set_sync_metadata(&conn, "replica_id", &replica_id.to_string()).unwrap();
         Self { replica_id, cursor: 0, conn }
     }
 
     fn seed_book(&self, content_hash: ContentHash) {
-        self.remote_sql(
-            "INSERT OR IGNORE INTO book(content_hash, title, added_at, deleted_at)
-             VALUES (?1, 'seed', 1, NULL)",
-            params![content_hash.as_str()],
-        );
+        self.remote_sql(include_str!("sql/convergence/seed_book_insert.sql"), params![content_hash.as_str()]);
     }
 
     fn seed_dir(&self, dir_id: &str, name: &str) {
-        self.remote_sql(
-            "INSERT OR IGNORE INTO dir(id, parent_id, name, deleted_at)
-             VALUES (?1, '00000000-0000-0000-0000-000000000000', ?2, NULL)",
-            params![fixture_dir_id(dir_id).to_string(), name],
-        );
+        self.remote_sql(include_str!("sql/convergence/seed_dir_insert.sql"), params![fixture_dir_id(dir_id).to_string(), name]);
     }
 
     fn seed_placement(&self, content_hash: ContentHash, dir_id: &str, file_name: &str, changed_at: u64) {
         let event_id = "11111111-1111-5111-8111-111111111111";
         // A placement is (book, directory); the file name is local-only and the
         // content identity belongs to the book, not to the placement.
-        self.remote_sql(
-            "INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded, last_scan, deleted_at)
-             VALUES (?1, (SELECT row_id FROM book WHERE content_hash=?2), ?3, 'fingerprint', 1, 1, NULL)
-             ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
-                 file_name=excluded.file_name,
-                 deleted_at=NULL",
-            params![fixture_dir_id(dir_id).to_string(), content_hash.as_str(), file_name],
-        );
+        self.remote_sql(include_str!("sql/convergence/seed_placement_insert.sql"), params![fixture_dir_id(dir_id).to_string(), content_hash.as_str(), file_name]);
         self.force_state_version("placement", content_hash.as_str(), &fixture_dir_id(dir_id).to_string(), changed_at, 0, "0-legacy", 1, event_id);
     }
 
@@ -174,34 +159,24 @@ impl Device {
     #[allow(clippy::too_many_arguments)]
     fn force_state_version(&self, state_kind: &str, state_key: &str, state_subkey: &str, changed_at: u64, conflict_rank: i64, replica_id: &str, replica_seq: i64, mutation_id: &str) {
         self.conn
-            .execute(
-                "INSERT INTO sync_state_version(state_kind, state_key, state_subkey, changed_at, conflict_rank, replica_id, replica_seq, mutation_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
-                     changed_at=excluded.changed_at,
-                     conflict_rank=excluded.conflict_rank,
-                     replica_id=excluded.replica_id,
-                     replica_seq=excluded.replica_seq,
-                     mutation_id=excluded.mutation_id",
-                params![state_kind, state_key, state_subkey, changed_at as i64, conflict_rank, fixture_replica_id(replica_id).to_string(), replica_seq, mutation_id],
-            )
+            .execute(include_str!("sql/convergence/force_state_version_insert.sql"), params![state_kind, state_key, state_subkey, changed_at as i64, conflict_rank, fixture_replica_id(replica_id).to_string(), replica_seq, mutation_id])
             .expect("force deterministic state version");
     }
 
     fn set_reading_position(&self, content_hash: ContentHash, cfi: &str) {
-        self.remote_sql("UPDATE book SET read_pos=?2 WHERE content_hash=?1", params![content_hash.as_str(), cfi]);
+        self.remote_sql(include_str!("sql/convergence/set_reading_position_update.sql"), params![content_hash.as_str(), cfi]);
     }
 
     fn set_book_deleted(&self, content_hash: ContentHash, deleted: bool) {
         let deleted_at = deleted.then_some(1_i64);
-        self.remote_sql("UPDATE book SET deleted_at=?2 WHERE content_hash=?1", params![content_hash.as_str(), deleted_at]);
+        self.remote_sql(include_str!("sql/convergence/set_book_deleted_update.sql"), params![content_hash.as_str(), deleted_at]);
     }
 
     #[allow(dead_code)]
     fn set_placement_deleted(&self, content_hash: ContentHash, dir_id: &str, deleted: bool, changed_at: u64) {
         let deleted_at = deleted.then_some(1_i64);
         let dir_id = fixture_dir_id(dir_id).to_string();
-        self.remote_sql("UPDATE book_dir SET deleted_at=?3 WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", params![dir_id, content_hash.as_str(), deleted_at]);
+        self.remote_sql(include_str!("sql/convergence/set_placement_deleted_update.sql"), params![dir_id, content_hash.as_str(), deleted_at]);
         self.force_state_version("placement", content_hash.as_str(), &dir_id, changed_at, i64::from(deleted), "0-legacy", 1, "11111111-1111-5111-8111-111111111112");
     }
 
@@ -210,11 +185,7 @@ impl Device {
         let state_subkey = outbox_storage_subkey(&change.body);
         self.conn
             .execute(
-                "INSERT INTO sync_outbox(mutation_id, state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
-                    replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
-                    body=excluded.body, changed_at=excluded.changed_at",
+                include_str!("sql/convergence/queue_insert.sql"),
                 params![change.mutation_id.to_string(), state_kind, state_key, state_subkey, sync_common::wire::encode(&change.body).unwrap(), i64::try_from(change.changed_at).unwrap(), change.body.conflict_rank()],
             )
             .expect("queue local mutation");
@@ -226,10 +197,15 @@ impl Device {
     }
 
     fn push(&mut self, server: &mut FakeServer) {
-        let changes = db::get_pending_mutations(&self.conn).expect("decode local outbox");
+        let changes = client_library::sync_state::get_pending_mutations(&self.conn).expect("decode local outbox");
         let acknowledged = changes.iter().map(|change| change.mutation_id).collect::<Vec<_>>();
         server.push(&self.replica_id, changes);
-        db::acknowledge_mutations(&self.conn, &acknowledged).unwrap();
+        client_library::sync_state::acknowledge_mutations(&self.conn, &acknowledged).unwrap();
+    }
+
+    fn push_without_acknowledging(&self, server: &mut FakeServer) {
+        let changes = client_library::sync_state::get_pending_mutations(&self.conn).expect("decode local outbox");
+        server.push(&self.replica_id, changes);
     }
 
     fn pull(&mut self, server: &FakeServer) {
@@ -248,7 +224,7 @@ impl Device {
         for change in &changes {
             // Intentionally ignore filesystem work returned for removals. Tests
             // can model a crash at the production DB/filesystem durability gap.
-            db::apply_remote_change_in_tx(&tx, change)?;
+            client_library::remote_reducer::apply_remote_change_in_tx(&tx, change)?;
         }
         tx.commit()?;
         self.cursor = next_cursor;
@@ -256,15 +232,15 @@ impl Device {
     }
 
     fn has_pending_mutations(&self) -> bool {
-        self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox)", [], |row| row.get(0)).expect("outbox state")
+        self.conn.query_row(include_str!("sql/convergence/has_pending_mutations_select.sql"), [], |row| row.get(0)).expect("outbox state")
     }
 
     fn read_position(&self, content_hash: ContentHash) -> String {
-        self.conn.query_row("SELECT read_pos FROM book WHERE content_hash=?1", params![content_hash.as_str()], |row| row.get(0)).expect("book read position")
+        self.conn.query_row(include_str!("sql/convergence/read_position_select.sql"), params![content_hash.as_str()], |row| row.get(0)).expect("book read position")
     }
 
     fn book_is_live(&self, content_hash: ContentHash) -> bool {
-        self.conn.query_row("SELECT deleted_at IS NULL FROM book WHERE content_hash=?1", params![content_hash.as_str()], |row| row.get(0)).expect("book liveness")
+        self.conn.query_row(include_str!("sql/convergence/book_is_live_select.sql"), params![content_hash.as_str()], |row| row.get(0)).expect("book liveness")
     }
 
     /// Content identity belongs to the book; a placement only records membership
@@ -272,43 +248,29 @@ impl Device {
     /// must distinguish "no placement" from "placement with unknown bytes".
     fn placement_hash(&self, content_hash: ContentHash, dir_id: &str) -> Option<ContentHash> {
         self.conn
-            .query_row(
-                "SELECT book.content_hash FROM book_dir
-                 JOIN book ON book.row_id = book_dir.book_row_id
-                 WHERE book_dir.dir_id=?1 AND book.content_hash=?2
-                   AND book_dir.deleted_at IS NULL",
-                params![fixture_dir_id(dir_id).to_string(), content_hash.as_str()],
-                |row| row.get::<_, String>(0),
-            )
+            .query_row(include_str!("sql/convergence/placement_hash_select.sql"), params![fixture_dir_id(dir_id).to_string(), content_hash.as_str()], |row| row.get::<_, String>(0))
             .optional()
             .expect("placement lookup")
             .map(|hash| ContentHash::new(&hash))
     }
 
     fn live_placements(&self, dir_id: &str) -> Vec<ContentHash> {
-        let mut statement =
-            self.conn.prepare("SELECT book.content_hash FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id WHERE dir_id=?1 AND book_dir.deleted_at IS NULL ORDER BY book.content_hash").expect("prepare placement query");
+        let mut statement = self.conn.prepare(include_str!("sql/convergence/live_placements_select.sql")).expect("prepare placement query");
         let ids = statement.query_map(params![fixture_dir_id(dir_id).to_string()], |row| row.get::<_, String>(0)).expect("query placements").collect::<Result<Vec<_>, _>>().expect("read placements");
         ids.iter().map(|id| ContentHash::new(&id.as_str())).collect()
     }
 
     fn placement_is_live(&self, content_hash: ContentHash, dir_id: &str) -> bool {
-        self.conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id WHERE dir_id=?1 AND book.content_hash=?2 AND book_dir.deleted_at IS NULL)",
-                params![fixture_dir_id(dir_id).to_string(), content_hash.as_str()],
-                |row| row.get(0),
-            )
-            .expect("placement liveness")
+        self.conn.query_row(include_str!("sql/convergence/placement_is_live_select.sql"), params![fixture_dir_id(dir_id).to_string(), content_hash.as_str()], |row| row.get(0)).expect("placement liveness")
     }
 
     fn remote_sql<P>(&self, sql: &str, params: P)
     where
         P: rusqlite::Params,
     {
-        db::set_sync_metadata(&self.conn, "change_origin", "remote").unwrap();
+        client_library::sync_state::set_sync_metadata(&self.conn, "change_origin", "remote").unwrap();
         self.conn.execute(sql, params).expect("seed remote state");
-        db::set_sync_metadata(&self.conn, "change_origin", "local").unwrap();
+        client_library::sync_state::set_sync_metadata(&self.conn, "change_origin", "local").unwrap();
     }
 }
 
@@ -323,11 +285,14 @@ fn outbox_storage_key(body: &MutationBody) -> (&'static str, String) {
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone()),
         MutationBody::CatalogPublication { source_id, .. } => ("catalog_publication", source_id.as_str().to_owned()),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string()),
+        MutationBody::PdfReaderMetadata { content_hash, .. } => ("pdf_reader_metadata", content_hash.to_string()),
+        MutationBody::Description { content_hash, .. } => ("description", content_hash.to_string()),
     }
 }
 
 fn outbox_storage_subkey(body: &MutationBody) -> String {
     match body {
+        MutationBody::PdfReaderMetadata { value, .. } => value.checksum.clone(),
         MutationBody::Placement { dir_id, .. } => dir_id.to_string(),
         MutationBody::CatalogPublication { publication, .. } => library_replica::catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()),
         MutationBody::DirectoryName { .. }
@@ -336,6 +301,7 @@ fn outbox_storage_subkey(body: &MutationBody) -> String {
         | MutationBody::ReadingPosition { .. }
         | MutationBody::Annotation { .. }
         | MutationBody::Metadata { .. }
+        | MutationBody::Description { .. }
         | MutationBody::BookLifecycle { .. } => String::new(),
     }
 }
@@ -362,7 +328,7 @@ fn reading_position(content_hash: ContentHash, location: impl Into<String>, prog
 }
 
 fn book_present(content_hash: ContentHash, title: impl Into<String>, added_at: u64, pt: u64) -> StateMutation {
-    change(MutationBody::BookLifecycle { content_hash, value: BookLifecycleState::Present { metadata: metadata(title, Vec::new(), ""), added_at, format: BookFormat::Epub } }, pt)
+    change(MutationBody::BookLifecycle { content_hash, value: BookLifecycleState::Present { metadata: metadata(title, Vec::new(), "").into(), added_at, format: BookFormat::Epub } }, pt)
 }
 
 fn book_deleted(content_hash: ContentHash, pt: u64) -> StateMutation {
@@ -532,7 +498,7 @@ fn annotation_updates_and_tombstones_converge() {
     a.pull(&server);
     b.pull(&server);
     for device in [&a, &b] {
-        let note: String = device.conn.query_row("SELECT note FROM annotation WHERE id=?1", [&annotation_id], |row| row.get(0)).unwrap();
+        let note: String = device.conn.query_row(include_str!("sql/convergence/annotation_updates_and_tombstones_converge_select.sql"), [&annotation_id], |row| row.get(0)).unwrap();
         assert_eq!(note, "new");
     }
 
@@ -540,7 +506,7 @@ fn annotation_updates_and_tombstones_converge() {
     a.pull(&server);
     b.pull(&server);
     for device in [&a, &b] {
-        let deleted: bool = device.conn.query_row("SELECT deleted_at IS NOT NULL FROM annotation WHERE id=?1", [&annotation_id], |row| row.get(0)).unwrap();
+        let deleted: bool = device.conn.query_row(include_str!("sql/convergence/annotation_updates_and_tombstones_converge_select_2.sql"), [&annotation_id], |row| row.get(0)).unwrap();
         assert!(deleted);
     }
 }
@@ -609,7 +575,7 @@ fn repeated_partition_heal_cycles_converge_in_both_reconnect_orders() {
     }
 
     for device in &devices {
-        assert!(db::get_pending_mutations(&device.conn).unwrap().is_empty(), "healed replica retained acknowledged outbox mutations");
+        assert!(client_library::sync_state::get_pending_mutations(&device.conn).unwrap().is_empty(), "healed replica retained acknowledged outbox mutations");
     }
     assert_eq!(server.state.keys().filter(|key| matches!(key, StateKey::ReadingPosition(_))).count(), 1, "repeated offline histories must collapse to one server register");
 }
@@ -815,11 +781,11 @@ fn directory_cycle_resolution_converges_on_the_origin_replicas() {
 
     let move_a = directory_present("a", "b", "A", 10);
     let move_b = directory_present("b", "a", "B", 11);
-    a.remote_sql("UPDATE dir SET parent_id=?1 WHERE id=?2", params![fixture_dir_id("b").to_string(), fixture_dir_id("a").to_string()]);
+    a.remote_sql(include_str!("sql/convergence/local_directory_api_rejects_cycle_creation_update.sql"), params![fixture_dir_id("b").to_string(), fixture_dir_id("a").to_string()]);
     for change in &move_a {
         a.queue(change);
     }
-    b.remote_sql("UPDATE dir SET parent_id=?1 WHERE id=?2", params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()]);
+    b.remote_sql(include_str!("sql/convergence/local_directory_api_rejects_cycle_creation_update.sql"), params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()]);
     for change in &move_b {
         b.queue(change);
     }
@@ -830,7 +796,7 @@ fn directory_cycle_resolution_converges_on_the_origin_replicas() {
     b.pull(&server);
 
     let state = |device: &Device| -> Vec<(String, String, bool)> {
-        let mut statement = device.conn.prepare("SELECT id, parent_id, deleted_at IS NOT NULL FROM dir WHERE id IN (?1,?2) ORDER BY id").unwrap();
+        let mut statement = device.conn.prepare(include_str!("sql/convergence/breaking_a_directory_cycle_revives_the_suppressed_directory_select.sql")).unwrap();
         statement.query_map(params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().map(Result::unwrap).collect()
     };
     assert_eq!(state(&a), state(&b), "cycle arbitration must not depend on which move was already materialized locally");
@@ -860,7 +826,7 @@ fn breaking_a_directory_cycle_revives_the_suppressed_directory() {
     let mut fresh = Device::new("fresh-observer");
     fresh.pull(&server);
     let state = |device: &Device| -> Vec<(String, String, bool)> {
-        let mut statement = device.conn.prepare("SELECT id, parent_id, deleted_at IS NOT NULL FROM dir WHERE id IN (?1,?2) ORDER BY id").unwrap();
+        let mut statement = device.conn.prepare(include_str!("sql/convergence/breaking_a_directory_cycle_revives_the_suppressed_directory_select.sql")).unwrap();
         statement.query_map(params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().map(Result::unwrap).collect()
     };
     assert_eq!(state(&existing), state(&fresh), "derived cycle suppression must be reversible when the cycle is broken");
@@ -873,11 +839,11 @@ fn same_name_directory_resolution_converges_on_the_origin_replicas() {
     let mut b = Device::new("creator-b");
     let first = directory_present("dir-a", "00000000-0000-0000-0000-000000000000", "Shared", 10);
     let second = directory_present("dir-b", "00000000-0000-0000-0000-000000000000", "Shared", 11);
-    a.remote_sql("INSERT INTO dir(id,parent_id,name) VALUES (?1,'00000000-0000-0000-0000-000000000000','Shared')", [fixture_dir_id("dir-a").to_string()]);
+    a.remote_sql(include_str!("sql/convergence/same_name_directory_resolution_converges_on_the_origin_replicas_insert.sql"), [fixture_dir_id("dir-a").to_string()]);
     for change in &first {
         a.queue(change);
     }
-    b.remote_sql("INSERT INTO dir(id,parent_id,name) VALUES (?1,'00000000-0000-0000-0000-000000000000','Shared')", [fixture_dir_id("dir-b").to_string()]);
+    b.remote_sql(include_str!("sql/convergence/same_name_directory_resolution_converges_on_the_origin_replicas_insert.sql"), [fixture_dir_id("dir-b").to_string()]);
     for change in &second {
         b.queue(change);
     }
@@ -887,7 +853,7 @@ fn same_name_directory_resolution_converges_on_the_origin_replicas() {
     a.pull(&server);
     b.pull(&server);
 
-    let owner = |device: &Device| -> String { device.conn.query_row("SELECT id FROM dir WHERE parent_id='00000000-0000-0000-0000-000000000000' AND name='Shared' AND deleted_at IS NULL", [], |row| row.get(0)).unwrap() };
+    let owner = |device: &Device| -> String { device.conn.query_row(include_str!("sql/convergence/same_name_directory_resolution_converges_on_the_origin_replicas_select.sql"), [], |row| row.get(0)).unwrap() };
     assert_eq!(owner(&a), owner(&b));
 }
 
@@ -908,7 +874,7 @@ fn renaming_a_same_name_winner_revives_the_suppressed_directory() {
     let mut fresh = Device::new("fresh-observer");
     fresh.pull(&server);
     let state = |device: &Device| -> Vec<(String, String, bool)> {
-        let mut statement = device.conn.prepare("SELECT id, name, deleted_at IS NOT NULL FROM dir WHERE id IN (?1,?2) ORDER BY id").unwrap();
+        let mut statement = device.conn.prepare(include_str!("sql/convergence/renaming_a_same_name_winner_revives_the_suppressed_directory_select.sql")).unwrap();
         statement.query_map(params![fixture_dir_id("dir-a").to_string(), fixture_dir_id("dir-b").to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().map(Result::unwrap).collect()
     };
     assert_eq!(state(&existing), state(&fresh), "derived same-name suppression must be reversible after the winner moves away");
@@ -973,8 +939,8 @@ fn concurrent_directory_moves_cannot_form_a_cycle() {
     device.pull(&server);
     let a_id = fixture_dir_id("a").to_string();
     let b_id = fixture_dir_id("b").to_string();
-    let a_parent: String = device.conn.query_row("SELECT parent_id FROM dir WHERE id=?1", [a_id], |row| row.get(0)).unwrap();
-    let b_parent: String = device.conn.query_row("SELECT parent_id FROM dir WHERE id=?1", [b_id.as_str()], |row| row.get(0)).unwrap();
+    let a_parent: String = device.conn.query_row(include_str!("sql/convergence/concurrent_directory_moves_cannot_form_a_cycle_select.sql"), [a_id], |row| row.get(0)).unwrap();
+    let b_parent: String = device.conn.query_row(include_str!("sql/convergence/concurrent_directory_moves_cannot_form_a_cycle_select.sql"), [b_id.as_str()], |row| row.get(0)).unwrap();
     assert!(!(a_parent == b_id && b_parent == fixture_dir_id("a").to_string()), "a committed directory projection must remain acyclic");
 }
 
@@ -987,7 +953,7 @@ fn concurrent_same_name_directories_have_one_physical_owner() {
     }
 
     device.pull(&server);
-    let occupants: i64 = device.conn.query_row("SELECT COUNT(*) FROM dir WHERE parent_id='00000000-0000-0000-0000-000000000000' AND name='Shared' AND deleted_at IS NULL", [], |row| row.get(0)).unwrap();
+    let occupants: i64 = device.conn.query_row(include_str!("sql/convergence/concurrent_same_name_directories_have_one_physical_owner_select.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(occupants, 1, "one filesystem directory path cannot represent two live directory identities");
 }
 
@@ -1019,10 +985,10 @@ fn book_metadata_updates_produce_a_synchronizable_mutation() {
 
     let tx = device.conn.transaction().unwrap();
     let contributors = [Contributor::new("Changed author", None, MarcRelatorCode(*b"aut")).unwrap()];
-    db::update_book_metadata_contributors(&tx, content_hash, "Changed title", &contributors).unwrap();
+    client_library::metadata::update_book_metadata_contributors(&tx, content_hash, "Changed title", &contributors).unwrap();
     tx.commit().unwrap();
 
-    let outbox = db::get_pending_mutations(&device.conn).unwrap();
+    let outbox = client_library::sync_state::get_pending_mutations(&device.conn).unwrap();
     assert!(!outbox.is_empty(), "a metadata change must be represented in the synchronization protocol");
 }
 
@@ -1035,20 +1001,15 @@ fn metadata_register_is_not_overwritten_by_lifecycle_readd() {
 
     server.accept(
         &"metadata-writer".to_owned(),
-        change(MutationBody::Metadata { content_hash, value: metadata("Canonical title", vec![Contributor::new("Canonical author", None, MarcRelatorCode(*b"aut")).unwrap()], "Canonical description") }, 20),
+        change(MutationBody::Metadata { content_hash, value: metadata("Canonical title", vec![Contributor::new("Canonical author", None, MarcRelatorCode(*b"aut")).unwrap()], "Canonical description").into() }, 20),
     );
+    server.accept(&"metadata-writer".to_owned(), change(MutationBody::Description { content_hash, value: "Canonical description".into() }, 21));
     server.accept(&"deleter".to_owned(), book_deleted(content_hash, 30));
     server.accept(&"restorer".to_owned(), book_present(content_hash, "Stale lifecycle title", 40, 40));
     device.pull(&server);
 
-    let metadata: (String, String, String) = device
-        .conn
-        .query_row(
-            "SELECT b.title, COALESCE((SELECT group_concat(credit.name, ', ') FROM (SELECT name FROM book_contributor WHERE book_row_id=b.row_id AND role=X'617574' ORDER BY position) credit), ''), b.description FROM book b WHERE b.content_hash=?1",
-            [content_hash.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
+    let metadata: (String, String, String) =
+        device.conn.query_row(include_str!("sql/convergence/metadata_register_is_not_overwritten_by_lifecycle_readd_select.sql"), [content_hash.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
     assert_eq!(metadata, ("Canonical title".to_string(), "Canonical author".to_string(), "Canonical description".to_string()));
 }
 
@@ -1059,9 +1020,53 @@ fn retry_reads_keep_the_same_persisted_event_identity() {
     device.seed_book(content_hash);
     device.queue(&book_deleted(content_hash, 10));
 
-    let first = db::get_pending_mutations(&device.conn).unwrap();
-    let second = db::get_pending_mutations(&device.conn).unwrap();
+    let first = client_library::sync_state::get_pending_mutations(&device.conn).unwrap();
+    let second = client_library::sync_state::get_pending_mutations(&device.conn).unwrap();
     assert_eq!(first[0].mutation_id, second[0].mutation_id, "network retries must reuse the logical mutation identity");
+}
+
+#[test]
+fn restart_after_server_acceptance_retries_idempotently_and_converges() {
+    let content_hash = fixture_content_hash(1);
+    let database_dir = tempfile::tempdir().unwrap();
+    let database_path = database_dir.path().join("library.sqlite3");
+    let replica_id = fixture_replica_id("crash-writer");
+    let mutation = book_deleted(content_hash, 10);
+    let mutation_id = mutation.mutation_id;
+    let mut server = FakeServer::default();
+
+    // The server commits the mutation, but the process dies before deleting
+    // the acknowledged identity from its durable SQLite outbox.
+    {
+        let conn = Connection::open(&database_path).unwrap();
+        client_library::schema::init_db(&conn).unwrap();
+        client_library::sync_state::set_sync_metadata(&conn, "replica_id", &replica_id.to_string()).unwrap();
+        let writer = Device { replica_id, cursor: 0, conn };
+        writer.seed_book(content_hash);
+        writer.queue(&mutation);
+        writer.push_without_acknowledging(&mut server);
+        assert!(writer.has_pending_mutations(), "lost acknowledgement must leave the mutation durable");
+    }
+
+    // Restarting reopens the same database and therefore resends the same
+    // mutation identity. The server accepts the retry without creating a
+    // second state row, and the delayed acknowledgement drains the outbox.
+    {
+        let conn = Connection::open(&database_path).unwrap();
+        let mut restarted = Device { replica_id, cursor: 0, conn };
+        let pending = client_library::sync_state::get_pending_mutations(&restarted.conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].mutation_id, mutation_id);
+        restarted.push(&mut server);
+        assert!(!restarted.has_pending_mutations(), "successful retry must clear the durable outbox");
+    }
+
+    assert_eq!(server.mutation_ids.len(), 1, "retry must reuse one idempotency identity");
+    assert_eq!(server.all_rows().len(), 1, "retry must not duplicate canonical server state");
+
+    let mut observer = Device::new("crash-observer");
+    observer.pull(&server);
+    assert!(!observer.book_is_live(content_hash), "a second replica must observe the accepted winner");
 }
 
 #[test]
@@ -1069,13 +1074,13 @@ fn local_directory_api_rejects_cycle_creation() {
     let mut device = Device::new("local-device");
     device.seed_dir("a", "A");
     device.seed_dir("b", "B");
-    device.remote_sql("UPDATE dir SET parent_id=?1 WHERE id=?2", params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()]);
+    device.remote_sql(include_str!("sql/convergence/local_directory_api_rejects_cycle_creation_update.sql"), params![fixture_dir_id("a").to_string(), fixture_dir_id("b").to_string()]);
 
     let tx = device.conn.transaction().unwrap();
-    let result = db::upsert_dir(&tx, &fixture_dir_id("a"), &fixture_dir_id("b"), &"A".to_owned());
+    let result = client_library::placements::upsert_dir(&tx, &fixture_dir_id("a"), &fixture_dir_id("b"), &"A".to_owned());
     assert!(result.is_err());
 
-    let root_result = db::upsert_dir(&tx, &sync_common::ROOT_DIR_ID, &fixture_dir_id("a"), &"Root".to_owned());
+    let root_result = client_library::placements::upsert_dir(&tx, &sync_common::ROOT_DIR_ID, &fixture_dir_id("a"), &"Root".to_owned());
     assert!(root_result.is_err(), "the reserved root cannot become an ordinary child");
 }
 

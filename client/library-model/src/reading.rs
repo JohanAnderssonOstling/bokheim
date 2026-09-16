@@ -91,11 +91,7 @@ impl ReadingPosition {
     }
 
     pub fn epub_cfi(value: &str) -> Result<Self, InvalidReadingPosition> {
-        if valid_epub_cfi(value) {
-            Ok(Self::Epub(ReadingEpubCfi(value.to_owned())))
-        } else {
-            Err(InvalidReadingPosition)
-        }
+        if valid_epub_cfi(value) { Ok(Self::Epub(ReadingEpubCfi(value.to_owned()))) } else { Err(InvalidReadingPosition) }
     }
 
     pub const fn pdf_page(page_index: u32) -> Self {
@@ -213,19 +209,17 @@ pub fn pdf_page_position_from_reading_position(value: &str) -> Option<f32> {
 }
 
 fn parse_pdf_page_position(value: &str) -> Option<(u32, Option<f32>)> {
-    let page = value.strip_prefix("pdfpage(")?.strip_suffix(')')?;
+    let value = value.strip_prefix("pdfpage(")?.strip_suffix(')')?;
+    let (page, position) = value.split_once(',').map_or((value, None), |(page, position)| (page, Some(position)));
     if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
         return None;
     }
-    if let Some((page, full_page_position)) = page.split_once(',') {
-        if page.is_empty() || (page.len() > 1 && page.starts_with('0')) {
-            return None;
-        }
-        let page = page.parse::<u32>().ok()?;
-        let full_page_position = parse_full_page_position(full_page_position)?;
-        return Some((page, Some(full_page_position)));
-    }
-    page.parse().ok().map(|page| (page, None))
+    let page = page.parse::<u32>().ok()?;
+    let position = match position {
+        Some(position) => Some(parse_full_page_position(position)?),
+        None => None,
+    };
+    Some((page, position))
 }
 
 fn parse_full_page_position(value: &str) -> Option<f32> {
@@ -279,11 +273,7 @@ impl ReadProgress {
     pub const ZERO: Self = Self(0.0);
 
     pub fn new(value: f32) -> Result<Self, InvalidReadProgress> {
-        if value.is_finite() && (0.0..=100.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(InvalidReadProgress)
-        }
+        if value.is_finite() && (0.0..=100.0).contains(&value) { Ok(Self(value)) } else { Err(InvalidReadProgress) }
     }
 
     pub fn value(self) -> f32 {
@@ -335,7 +325,7 @@ mod tests {
 
     #[test]
     fn canonical_positions_round_trip_for_every_reader_format() {
-        for value in ["epubcfi(/6/4)", "pdfpage(17)", "pdfpage(17,0.25)", "audiopos(1234567)"] {
+        for value in ["epubcfi(/6/4)", "pdfpage(0)", "pdfpage(0,0)", "pdfpage(0,0.25)", "pdfpage(17)", "pdfpage(17,0.25)", "audiopos(1234567)"] {
             let position = ReadingPosition::parse(value).unwrap();
             assert_eq!(position.as_str(), value);
             let encoded = serde_json::to_string(&position).unwrap();
@@ -343,6 +333,7 @@ mod tests {
             assert_eq!(decoded, position);
         }
         assert!(ReadingPosition::parse("pdfpage(01)").is_err());
+        assert!(ReadingPosition::parse("pdfpage(01,0.25)").is_err());
         let negative = ReadingPosition::parse("pdfpage(17,-0.5)").unwrap();
         assert_eq!(negative.as_str(), "pdfpage(17,0)");
         assert_eq!(negative.pdf_page_position(), Some(0.0));

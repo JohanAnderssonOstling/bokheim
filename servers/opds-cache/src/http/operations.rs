@@ -1,6 +1,6 @@
 use super::super::{
-    canonical_isbn, classify_catalog_failure, get, opds_catalog_source_id, post, writer_metrics_snapshot, ApiError, AxumPath, CatalogCache, CatalogInventoryResponse, CatalogOperationsResponse, CatalogProcess, CatalogProcessAction,
-    CatalogService, CatalogSourceId, CoverDownloadInventoryResponse, DescriptionBackfillInventoryResponse, EpubExtractionInventoryResponse, EpubFailureDiagnosticResponse, EpubFailureExampleResponse, HashMap, IdentityReviewAction,
+    canonical_isbn, classify_catalog_failure, get, opds_catalog_source_id, post, writer_metrics_snapshot, ApiError, AxumPath, CatalogInventoryResponse, CatalogOperationsResponse, CatalogProcess, CatalogProcessAction, CatalogService,
+    CatalogSourceId, CatalogStore, CoverDownloadInventoryResponse, DescriptionBackfillInventoryResponse, EpubExtractionInventoryResponse, EpubFailureDiagnosticResponse, EpubFailureExampleResponse, HashMap, IdentityReviewAction,
     IdentityReviewQuery, IdentityReviewResponse, Json, MetadataBackfillInventoryResponse, Ordering, OriginThrottleSnapshot, Query, Response, Router, State, StatusCode, Url,
 };
 use super::public::json_response;
@@ -26,7 +26,7 @@ pub(crate) async fn catalog_process_action(State(service): State<CatalogService>
 
 pub(crate) async fn catalog_operations(State(service): State<CatalogService>) -> Result<Response, ApiError> {
     let inventory = catalog_inventory_response(&service).await?;
-    let failures = service.cache_call(CatalogCache::epub_failure_diagnostics).await.map_err(ApiError::unavailable)?;
+    let failures = service.store_call(CatalogStore::epub_failure_diagnostics).await.map_err(ApiError::unavailable)?;
     let extraction_failures = failures
         .into_iter()
         .map(|failure| EpubFailureDiagnosticResponse {
@@ -53,13 +53,13 @@ pub(crate) async fn catalog_operations(State(service): State<CatalogService>) ->
 }
 
 pub(crate) async fn catalog_retry_ambiguous_identity_reviews(State(service): State<CatalogService>) -> Result<Response, ApiError> {
-    let count = service.cache_write_call_named("identity_review_requeue", |cache| cache.retry_ambiguous_identity_reviews()).await.map_err(ApiError::unavailable)?;
-    service.wake_process(CatalogProcess::CatalogueEnrichment);
+    let count = service.store_write_call_named("identity_review_requeue", |cache| cache.retry_ambiguous_identity_reviews()).await.map_err(ApiError::unavailable)?;
+    service.wake_process(CatalogProcess::Enrichment);
     json_response(&serde_json::json!({ "requeued": count }), "no-store")
 }
 
 pub(crate) async fn catalog_subject_audit(State(service): State<CatalogService>) -> Result<Response, ApiError> {
-    let audit = service.cache_call(CatalogCache::subject_projection_audit).await.map_err(ApiError::unavailable)?;
+    let audit = service.store_call(CatalogStore::subject_projection_audit).await.map_err(ApiError::unavailable)?;
     json_response(&audit, "no-store")
 }
 
@@ -67,9 +67,9 @@ pub(crate) async fn catalog_identity_reviews(State(service): State<CatalogServic
     let source_id = query.source_id.as_deref().map(CatalogSourceId::parse).transpose().map_err(ApiError::bad_request)?;
     let status = query.status.clone();
     let review_source = source_id.clone();
-    let reviews = service.cache_call(move |cache| cache.identity_reviews(review_source.as_ref(), status.as_deref(), query.limit.unwrap_or(100))).await.map_err(ApiError::unavailable)?;
+    let reviews = service.store_call(move |cache| cache.identity_reviews(review_source.as_ref(), status.as_deref(), query.limit.unwrap_or(100))).await.map_err(ApiError::unavailable)?;
     let inventory = service
-        .cache_call(move |cache| match source_id.as_ref() {
+        .store_call(move |cache| match source_id.as_ref() {
             Some(source_id) => cache.identity_review_inventory_for_source(source_id),
             None => cache.identity_review_inventory(),
         })
@@ -88,30 +88,30 @@ pub(crate) async fn catalog_identity_review_action(State(service): State<Catalog
             let canonical = canonical_isbn(&isbn13).ok_or_else(|| ApiError::bad_request("invalid ISBN"))?;
             let cache_review = review_id.clone();
             let cache_edition = edition_id.clone();
-            let candidate = service.cache_call(move |cache| cache.identity_review_candidate_isbn(&cache_review, &cache_edition, &canonical)).await.map_err(ApiError::unavailable)?;
+            let candidate = service.store_call(move |cache| cache.identity_review_candidate_isbn(&cache_review, &cache_edition, &canonical)).await.map_err(ApiError::unavailable)?;
             let Some(candidate) = candidate else { return Err(ApiError::bad_request("candidate does not belong to this review")) };
             let cache_review = review_id.clone();
-            service.cache_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &candidate)).await.map_err(ApiError::unavailable)?
+            service.store_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &candidate)).await.map_err(ApiError::unavailable)?
         }
         IdentityReviewAction::ManualIsbn { isbn } => {
             let canonical = canonical_isbn(&isbn).ok_or_else(|| ApiError::bad_request("invalid ISBN"))?;
             let cache_review = review_id.clone();
-            service.cache_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &canonical)).await.map_err(ApiError::unavailable)?
+            service.store_write_call(move |cache| cache.resolve_identity_review_with_isbn(&cache_review, &canonical)).await.map_err(ApiError::unavailable)?
         }
         IdentityReviewAction::Reject => {
             let cache_review = review_id.clone();
-            service.cache_write_call(move |cache| cache.reject_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
+            service.store_write_call(move |cache| cache.reject_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
         }
         IdentityReviewAction::Retry => {
             let cache_review = review_id.clone();
-            service.cache_write_call(move |cache| cache.retry_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
+            service.store_write_call(move |cache| cache.retry_identity_review(&cache_review)).await.map_err(ApiError::unavailable)?
         }
     };
     if !changed {
         return Err(ApiError { status: StatusCode::NOT_FOUND, message: "identity review is no longer pending".to_owned() });
     }
     if requeue {
-        service.wake_process(CatalogProcess::CatalogueEnrichment);
+        service.wake_process(CatalogProcess::Enrichment);
     }
     json_response(&serde_json::json!({ "status": "accepted", "review_id": review_id }), "no-store")
 }
@@ -163,6 +163,7 @@ pub(crate) async fn catalog_inventory_response(service: &CatalogService) -> Resu
         description_backfill_available: service.state.description_backfill_available.load(Ordering::Relaxed),
         metadata_backfill_metrics: service.state.metadata_backfill_metrics.snapshot(),
         description_backfill_metrics: service.state.description_backfill_metrics.snapshot(),
+        extraction_metrics: service.state.extraction_metrics.snapshot(),
         processes: service.process_statuses(),
         writer_metrics: writer_metrics_snapshot(&service.state.writer_metrics),
         identity_reviews: inventory.identity_reviews,

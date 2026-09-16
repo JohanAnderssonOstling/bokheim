@@ -26,10 +26,14 @@ impl AssetKind {
     }
 }
 
+pub trait StoredAssetReader: AsyncRead + tokio::io::AsyncSeek + Unpin + Send {}
+impl<T: AsyncRead + tokio::io::AsyncSeek + Unpin + Send> StoredAssetReader for T {}
+
 pub struct StoredAsset {
-    pub reader: AssetReader,
+    pub reader: Box<dyn StoredAssetReader>,
     pub total_len: u64,
     pub offset: u64,
+    pub checksum: ContentHash,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -261,7 +265,17 @@ impl FsAssetStore {
             return Err(AssetError::RangeNotSatisfiable { offset, len });
         }
         file.seek(SeekFrom::Start(offset)).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset }))
+        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, checksum: *hash }))
+    }
+
+    /// Read the permanent identity from a previously checksum-verified object.
+    pub async fn book_identity(&self, checksum: &ContentHash) -> Result<ContentHash, AssetError> {
+        let path = self.path("", AssetKind::Book, checksum)?;
+        let checksum = *checksum;
+        tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
+            publication_identity::read(&mut file).map(|identity| identity.unwrap_or(checksum)).map_err(|error| AssetError::InvalidInput(error.to_string()))
+        }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
     pub async fn put(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, mut reader: AssetReader) -> Result<u64, AssetError> {
@@ -273,14 +287,20 @@ impl FsAssetStore {
         // Open synchronously so cancellation cannot race an offloaded create
         // operation and strand a file after the cleanup guard has run.
         let mut file = File::from_std(std::fs::File::create(temp.path()).map_err(|error| AssetError::Storage(error.to_string()))?);
+        let stream_started = std::time::Instant::now();
+        let mut read_time = std::time::Duration::ZERO;
+        let mut write_time = std::time::Duration::ZERO;
+        let measure = tracing::enabled!(target: "sync_performance", tracing::Level::DEBUG);
         let mut total = 0_u64;
         let mut book_hasher = (kind == AssetKind::Book).then(blake3::Hasher::new);
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
+            let read_started = measure.then(std::time::Instant::now);
             let count = match reader.read(&mut buffer).await {
                 Ok(count) => count,
                 Err(error) => return Err(AssetError::InvalidInput(error.to_string())),
             };
+            if let Some(started) = read_started { read_time += started.elapsed(); }
             if count == 0 {
                 break;
             }
@@ -294,7 +314,9 @@ impl FsAssetStore {
             if kind.max_bytes().is_some_and(|limit| total > limit) {
                 return Err(AssetError::TooLarge { limit: kind.max_bytes().unwrap_or(u64::MAX) });
             }
+            let write_started = measure.then(std::time::Instant::now);
             file.write_all(&buffer[..count]).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+            if let Some(started) = write_started { write_time += started.elapsed(); }
         }
         if expected_len.is_some_and(|expected| total != expected) {
             return Err(AssetError::LengthMismatch { expected: expected_len.unwrap_or(0), actual: total });
@@ -304,11 +326,15 @@ impl FsAssetStore {
                 return Err(AssetError::HashMismatch);
             }
         }
+        tracing::debug!(target: "sync_performance", phase = "receive_hash_write", bytes = total, elapsed_ms = stream_started.elapsed().as_secs_f64() * 1000.0, read_ms = read_time.as_secs_f64() * 1000.0, write_ms = write_time.as_secs_f64() * 1000.0);
+        let durable_started = std::time::Instant::now();
         file.flush().await.map_err(|error| AssetError::Storage(error.to_string()))?;
         drop(file);
         let durable_file = tokio::fs::OpenOptions::new().write(true).open(temp.path()).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         durable_file.sync_all().await.map_err(|error| AssetError::Storage(error.to_string()))?;
         drop(durable_file);
+        tracing::debug!(target: "sync_performance", phase = "file_flush_fsync", elapsed_ms = durable_started.elapsed().as_secs_f64() * 1000.0);
+        let publish_started = std::time::Instant::now();
         // Publish immutably: hard-link creation is atomic and fails rather
         // than overwriting an already published content-addressed object.
         match tokio::fs::hard_link(temp.path(), &final_path).await {
@@ -324,6 +350,7 @@ impl FsAssetStore {
         }
         temp.remove().map_err(|error| AssetError::Storage(error.to_string()))?;
         std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(|error| AssetError::Storage(error.to_string()))?;
+        tracing::debug!(target: "sync_performance", phase = "publish_directory_fsync", elapsed_ms = publish_started.elapsed().as_secs_f64() * 1000.0);
         Ok(total)
     }
 }

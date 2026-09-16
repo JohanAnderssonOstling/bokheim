@@ -1,5 +1,13 @@
 //! Kobo hardware operations that are independent of any UI framework.
 
+pub mod brightness;
+pub mod natural_light;
+pub mod battery;
+#[cfg(target_os = "linux")]
+pub mod bluetooth;
+#[cfg(target_os = "linux")]
+pub mod wifi;
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -18,6 +26,10 @@ const TOUCH_DEACTIVATION_DELAY: Duration = Duration::from_secs(2);
 pub fn suspend() -> io::Result<()> {
     let total_started = Instant::now();
     eprintln!("KOBO_SUSPEND phase=requested elapsed_ms=0");
+
+    #[cfg(target_os = "linux")]
+    let _wifi_sleep = wifi::prepare_sleep().map_err(|error| io::Error::other(format!("Cannot power Wi-Fi off before sleep: {error}")))?;
+    eprintln!("KOBO_SUSPEND phase=wifi_off elapsed_ms={}", total_started.elapsed().as_millis());
 
     let wake_sources_started = Instant::now();
     if let Err(error) = enable_page_button_wake_sources() {

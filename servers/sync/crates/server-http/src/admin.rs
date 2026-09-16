@@ -1,10 +1,10 @@
 use crate::state::AppState;
-use axum::Json;
 use axum::async_trait;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
+use axum::http::{header, request::Parts, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -416,7 +416,7 @@ pub(crate) async fn services(State(state): State<AppState>, admin: AdminUser) ->
 }
 
 pub(crate) async fn catalog_process_action(State(state): State<AppState>, admin: AdminUser, Path(process): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
-    if !matches!(process.as_str(), "catalogue_crawling" | "cover_downloads" | "epub_enrichment" | "catalogue_enrichment")
+    if process != "catalogue_crawling" && process != "cover_downloads" && process != "enrichment"
         || !action.get("action").and_then(serde_json::Value::as_str).is_some_and(|action| matches!(action, "pause" | "resume" | "run_now"))
     {
         return Err(StatusCode::BAD_REQUEST);

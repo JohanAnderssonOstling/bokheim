@@ -2,21 +2,20 @@
 
 mod canonical;
 mod credits;
+mod titles;
 mod marc;
+mod names;
 
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid};
 pub use credits::{
     agent_id_from_migration_seed, AgentId, AuthorId, BookMetadataState, Contributor, ContributorId, PublicationMetadata, PublicationMetadataError, PublicationTocEntry, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName,
 };
-pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE};
+pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
+pub use names::{comparison_key, given_name_first, looks_like_organization, recognized_suffix};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const MAX_VALUE_BYTES: usize = 4096;
-const LEGACY_SOURCE_SCHEME: &str = "bokheim:source";
-const LEGACY_SCOPE_SCHEME: &str = "bokheim:scope";
-const LEGACY_PROVENANCE_SCHEME: &str = "bokheim:provenance";
-
 /// Returns a year only when the supplied date evidence contains exactly one
 /// plausible four-digit publication year.
 pub fn unique_publication_year<'a>(values: impl Iterator<Item = &'a str>) -> Option<i32> {
@@ -99,25 +98,6 @@ pub enum Scope {
     Publication,
     Edition,
     Work,
-}
-
-impl Scope {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Publication => "publication",
-            Self::Edition => "edition",
-            Self::Work => "work",
-        }
-    }
-
-    fn from_label(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "publication" => Some(Self::Publication),
-            "edition" => Some(Self::Edition),
-            "work" => Some(Self::Work),
-            _ => None,
-        }
-    }
 }
 
 /// One bibliographic identifier. Catalogue-entry keys are deliberately not
@@ -455,11 +435,8 @@ pub struct PopularityRank {
 pub struct PublicationSubject {
     pub id: Option<String>,
     pub name: String,
-    #[serde(default)]
     pub name_localizations: Vec<LocalizedText>,
-    #[serde(default)]
     pub sort_name: Option<String>,
-    #[serde(default)]
     pub sort_name_localizations: Vec<LocalizedText>,
     pub source: String,
     pub authority: Option<String>,
@@ -472,11 +449,8 @@ impl<'de> Deserialize<'de> for PublicationSubject {
         struct Encoded {
             id: Option<String>,
             name: String,
-            #[serde(default)]
             name_localizations: Vec<LocalizedText>,
-            #[serde(default)]
             sort_name: Option<String>,
-            #[serde(default)]
             sort_name_localizations: Vec<LocalizedText>,
             source: String,
             authority: Option<String>,
@@ -632,29 +606,18 @@ impl<'de> Deserialize<'de> for Collection {
         #[derive(Deserialize)]
         struct Encoded {
             name: String,
-            #[serde(default)]
             name_localizations: Vec<LocalizedText>,
-            #[serde(default)]
             sort_name: Option<String>,
-            #[serde(default)]
             sort_name_localizations: Vec<LocalizedText>,
-            #[serde(default)]
             identifiers: Vec<String>,
-            #[serde(default, alias = "collection_type")]
             kind: Option<CollectionKind>,
-            #[serde(default)]
             position: Option<String>,
-            #[serde(default = "legacy_collection_source")]
             source: String,
         }
 
         let encoded = Encoded::deserialize(deserializer)?;
         Self::with_details(encoded.name, encoded.name_localizations, encoded.sort_name, encoded.sort_name_localizations, encoded.identifiers, encoded.kind, encoded.position, encoded.source).map_err(serde::de::Error::custom)
     }
-}
-
-fn legacy_collection_source() -> String {
-    "legacy:collection".to_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -703,77 +666,33 @@ impl Identifier {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct LegacyAnnotation {
-    value: String,
-    scheme: Option<String>,
-}
-
 #[derive(Serialize)]
-struct HumanIdentifier<'a> {
+struct EncodedIdentifier<'a> {
     value: &'a str,
     scheme: &'a Scheme,
     scope: Scope,
     source: &'a str,
 }
 
-#[derive(Deserialize)]
-struct HumanIdentifierOwned {
-    value: String,
-    scheme: Scheme,
-    #[serde(default)]
-    scope: Scope,
-    #[serde(default = "legacy_source")]
-    source: String,
-    #[serde(default)]
-    identifier_types: Vec<LegacyAnnotation>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct BinaryIdentifier {
-    value: String,
-    scheme: Scheme,
-    identifier_types: Vec<LegacyAnnotation>,
-}
-
 impl Serialize for Identifier {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            return HumanIdentifier { value: &self.value, scheme: &self.scheme, scope: self.scope, source: &self.source }.serialize(serializer);
-        }
-        let mut identifier_types = vec![LegacyAnnotation { value: self.source.clone(), scheme: Some(LEGACY_SOURCE_SCHEME.to_owned()) }];
-        if self.scope != Scope::Publication {
-            identifier_types.push(LegacyAnnotation { value: self.scope.label().to_owned(), scheme: Some(LEGACY_SCOPE_SCHEME.to_owned()) });
-        }
-        BinaryIdentifier { value: self.value.clone(), scheme: self.scheme.clone(), identifier_types }.serialize(serializer)
+        EncodedIdentifier { value: &self.value, scheme: &self.scheme, scope: self.scope, source: &self.source }.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Identifier {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            let encoded = HumanIdentifierOwned::deserialize(deserializer)?;
-            let source = source_from_annotations(&encoded.identifier_types).unwrap_or(encoded.source);
-            let scope = scope_from_annotations(&encoded.identifier_types).unwrap_or(encoded.scope);
-            return Self::new(encoded.value, encoded.scheme, scope, source).map_err(serde::de::Error::custom);
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Encoded {
+            value: String,
+            scheme: Scheme,
+            scope: Scope,
+            source: String,
         }
-        let encoded = BinaryIdentifier::deserialize(deserializer)?;
-        let source = source_from_annotations(&encoded.identifier_types).unwrap_or_else(legacy_source);
-        let scope = scope_from_annotations(&encoded.identifier_types).unwrap_or_default();
-        Self::new(encoded.value, encoded.scheme, scope, source).map_err(serde::de::Error::custom)
+        let encoded = Encoded::deserialize(deserializer)?;
+        Self::new(encoded.value, encoded.scheme, encoded.scope, encoded.source).map_err(serde::de::Error::custom)
     }
-}
-
-fn source_from_annotations(values: &[LegacyAnnotation]) -> Option<String> {
-    values.iter().find(|value| value.scheme.as_deref() == Some(LEGACY_SOURCE_SCHEME)).or_else(|| values.iter().find(|value| value.scheme.as_deref() == Some(LEGACY_PROVENANCE_SCHEME))).map(|value| value.value.clone())
-}
-
-fn scope_from_annotations(values: &[LegacyAnnotation]) -> Option<Scope> {
-    values.iter().find(|value| value.scheme.as_deref() == Some(LEGACY_SCOPE_SCHEME)).and_then(|value| Scope::from_label(&value.value))
-}
-
-fn legacy_source() -> String {
-    "legacy:identifier".to_owned()
 }
 
 fn bounded(value: &str) -> Result<String, IdentifierError> {
@@ -817,26 +736,15 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_human_identifier_evidence() {
-        let identifier: Identifier = serde_json::from_str(r#"{"value":"9781234567897","scheme":"isbn","identifier_types":[{"value":"xmp","scheme":"bokheim:provenance"}]}"#).unwrap();
-        assert_eq!(identifier.source(), "xmp");
-        assert_eq!(identifier.scope(), Scope::Publication);
-    }
-
-    #[test]
-    fn reads_and_writes_the_legacy_binary_shape() {
-        let legacy = BinaryIdentifier { value: "9781234567897".to_owned(), scheme: Scheme::Isbn, identifier_types: vec![LegacyAnnotation { value: "xmp".to_owned(), scheme: Some("bokheim:provenance".to_owned()) }] };
-        let encoded = bincode::serde::encode_to_vec(&legacy, bincode::config::standard()).unwrap();
+    fn identifiers_require_current_fields_and_round_trip_in_both_encodings() {
+        assert!(serde_json::from_str::<Identifier>(r#"{"value":"OL1M","scheme":"isbn","identifier_types":[]}"#).is_err());
+        let identifier = Identifier::new("OL1M", Scheme::Other("openlibrary".to_owned()), Scope::Edition, "openlibrary:identity-match").unwrap();
+        let json = serde_json::to_string(&identifier).unwrap();
+        assert_eq!(serde_json::from_str::<Identifier>(&json).unwrap(), identifier);
+        let encoded = bincode::serde::encode_to_vec(&identifier, bincode::config::standard()).unwrap();
         let (decoded, consumed): (Identifier, usize) = bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(consumed, encoded.len());
-        assert_eq!(decoded.source(), "xmp");
-
-        let shared = Identifier::new("OL1M", Scheme::Other("openlibrary".to_owned()), Scope::Edition, "openlibrary:identity-match").unwrap();
-        let encoded = bincode::serde::encode_to_vec(&shared, bincode::config::standard()).unwrap();
-        let (legacy, consumed): (BinaryIdentifier, usize) = bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(consumed, encoded.len());
-        assert!(legacy.identifier_types.iter().any(|value| value.scheme.as_deref() == Some(LEGACY_SOURCE_SCHEME) && value.value == "openlibrary:identity-match"));
-        assert!(legacy.identifier_types.iter().any(|value| value.scheme.as_deref() == Some(LEGACY_SCOPE_SCHEME) && value.value == "edition"));
+        assert_eq!(decoded, identifier);
     }
 
     #[test]
@@ -906,3 +814,33 @@ mod tests {
         assert_eq!(decoded, subject);
     }
 }
+
+/// Accept a complete ISBN value, optionally wrapped in an explicit ISBN label.
+/// Never carve numbers out of identifiers, URLs, filenames or dates.
+pub fn metadata_isbn(value: &str) -> Option<String> {
+    fn whole(value: &str) -> Option<String> {
+        let compact: String = value.chars().filter(|c| !c.is_whitespace() && !matches!(c, '-' | '\u{00ad}' | '\u{2010}'..='\u{2015}')).collect();
+        if !(compact.len() == 10 || (compact.len() == 13 && (compact.starts_with("978") || compact.starts_with("979")))) || compact.chars().all(|c| c == '0') { return None; }
+        if !compact.chars().enumerate().all(|(i,c)| c.is_ascii_digit() || (compact.len() == 10 && i == 9 && matches!(c,'X'|'x'))) { return None; }
+        canonical_isbn(&compact)
+    }
+    let value = value.trim();
+    if let Some(isbn) = whole(value) { return Some(isbn); }
+    let mut tail = value;
+    // Preserve the previously supported malformed urn:uuid:isbn wrapper, but
+    // require an explicit ISBN label; plain UUIDs are never normalized.
+    for prefix in ["urn", "uuid"] {
+        if tail.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix)) {
+            let rest = &tail[prefix.len()..];
+            let rest = rest.strip_prefix(':').or_else(|| rest.strip_prefix('|'))?;
+            tail = rest.trim_start();
+        }
+    }
+    if !tail.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("isbn")) { return None; }
+    let rest = &tail[4..];
+    if !rest.starts_with(|c: char| c == ':' || c == '|' || c.is_whitespace()) { return None; }
+    whole(rest.trim_start_matches(|c: char| c == ':' || c == '|' || c.is_whitespace()))
+}
+
+mod author_identity;
+pub use author_identity::{AgentAuthority, AgentIdentityError, AuthorAuthority, AuthorIdentityError, ExternalAgentId, ExternalAuthorId, Isni, LibraryOfCongressAuthorityId, OpenLibraryAuthorId, Orcid, ViafId, WikidataItemId};

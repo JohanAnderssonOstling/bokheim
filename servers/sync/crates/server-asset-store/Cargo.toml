@@ -8,6 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
+tracing = "0.1"
+publication-identity = { path = "../../../../shared/publication-identity" }
 blake3 = "1"
 sync-common = { path = "../../../../shared/sync-common" }
 thiserror = "1"

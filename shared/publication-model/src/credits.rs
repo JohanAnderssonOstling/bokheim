@@ -173,43 +173,43 @@ impl<'de> Deserialize<'de> for Contributor {
 /// description carried alongside it in synchronized book state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationMetadata {
-    #[serde(default)]
     pub identifiers: Vec<Identifier>,
-    #[serde(default)]
     pub publishers: Vec<PublisherCredit>,
-    #[serde(default)]
     pub languages: Vec<LanguageTag>,
-    #[serde(default)]
     pub dates: Vec<PublicationDate>,
-    #[serde(default)]
     pub subjects: Vec<PublicationSubject>,
-    #[serde(default)]
     pub collections: Vec<Collection>,
-    #[serde(default)]
     pub alternate_titles: Vec<PublicationTitle>,
-    #[serde(default)]
     pub rights: Vec<String>,
-    #[serde(default)]
     pub sources: Vec<String>,
-    #[serde(default)]
     pub types: Vec<String>,
-    #[serde(default)]
     pub formats: Vec<String>,
-    #[serde(default)]
     pub relations: Vec<String>,
-    #[serde(default)]
     pub coverage: Vec<String>,
-    #[serde(default)]
     pub properties: Vec<PublicationProperty>,
+}
+
+impl PublicationMetadata {
+    /// Promote ISBNs embedded in uncontrolled subject metadata while preserving
+    /// declarations and existing identifier provenance.
+    pub fn infer_embedded_subject_isbns(&mut self) -> Result<(), PublicationMetadataError> {
+        for subject in &self.subjects {
+            if !subject.source().rsplit(':').next().is_some_and(|source| source.eq_ignore_ascii_case("subject"))
+                || subject.authority().is_some_and(|authority| !authority.eq_ignore_ascii_case("isbn")) { continue; }
+            for isbn in crate::canonical::isbns_in_text(subject.name()) {
+                if self.identifiers.iter().any(|identifier| identifier.scheme() == &crate::Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) { continue; }
+                self.identifiers.push(Identifier::new(isbn, crate::Scheme::Isbn, crate::Scope::Publication, "embedded-subject-isbn")?);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookMetadataState {
     pub title: String,
     pub contributors: Vec<Contributor>,
-    #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub publication: PublicationMetadata,
 }
 

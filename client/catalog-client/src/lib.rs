@@ -1,144 +1,127 @@
-use catalog_core::validate_server_cover;
-pub use catalog_core::{CatalogCache, CatalogCoverCache, CatalogLanguageFilter, CatalogProviderError, CatalogSearchMatches};
+pub use catalog_core::CatalogCoverCache;
+use catalog_core::{validate_server_cover, CatalogCoverError};
 pub use catalog_model::{
     CatalogResultRange, CatalogResultRangeResponse, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest,
     CatalogSubjectPublicationPayloadResponse,
 };
-pub use catalog_protocol::{
-    CatalogGroupLayout, CatalogPageLayout, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry,
-};
 
-use catalog_model::{CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogPage, CatalogPagination, CatalogSearch, CatalogSearchQuery, CatalogSource, CatalogSourceId};
+#[cfg(test)]
+use catalog_model::CatalogPublication;
+use catalog_model::{CatalogImportRequest, CatalogSourceId};
+use futures_util::StreamExt;
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 use url::Url;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogClientError(String);
+
+impl CatalogClientError {
+    pub fn new(message: impl std::fmt::Display) -> Self {
+        Self(message.to_string())
+    }
+}
+
+impl std::fmt::Display for CatalogClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CatalogClientError {}
+
+impl From<rusqlite::Error> for CatalogClientError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::new(error)
+    }
+}
+
+impl From<CatalogCoverError> for CatalogClientError {
+    fn from(error: CatalogCoverError) -> Self {
+        Self::new(error)
+    }
+}
 
 const MAX_CATALOG_SERVER_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CATALOG_COVER_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CATALOG_ACQUISITION_BYTES: u64 = 1_000_000_000;
 const CATALOG_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-#[derive(Clone)]
-pub struct CatalogServerClient {
+pub struct CatalogClient {
     http: reqwest::Client,
     base_url: Url,
-}
-
-pub struct CatalogClient {
-    server: CatalogServerClient,
-    cache: CatalogCache,
     store: client_store::ClientCatalogStore,
     covers: CatalogCoverCache,
-    registry: Mutex<registry::ServerRegistryStore>,
-    languages: RwLock<CatalogLanguageFilter>,
-}
-
-pub struct CatalogDownload {
-    bytes: Vec<u8>,
-    file_name: String,
-}
-
-impl CatalogDownload {
-    pub fn open(&self) -> Result<Box<dyn std::io::Read + '_>, CatalogProviderError> {
-        Ok(Box::new(std::io::Cursor::new(self.bytes.as_slice())))
-    }
-
-    pub fn file_name(&self) -> &str {
-        &self.file_name
-    }
 }
 
 impl CatalogClient {
-    pub fn with_persistent_cache(server_base_url: &str, data_directory: &Path) -> Result<Self, CatalogProviderError> {
-        Self::with_supported_languages(server_base_url, data_directory, std::iter::empty::<&str>())
-    }
-
-    pub fn with_supported_languages(server_base_url: &str, data_directory: &Path, languages: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, CatalogProviderError> {
-        let server = CatalogServerClient::new(server_base_url)?;
-        let cache_path = data_directory.join("catalog-cache.db");
-        let cache = CatalogCache::open(&cache_path).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+    pub fn with_persistent_cache(server_base_url: &str, data_directory: &Path) -> Result<Self, CatalogClientError> {
+        let base_url = Url::parse(server_base_url).map_err(CatalogClientError::new)?;
+        if !matches!(base_url.scheme(), "http" | "https") || !base_url.username().is_empty() || base_url.password().is_some() || base_url.query().is_some() || base_url.fragment().is_some() {
+            return Err(CatalogClientError::new("catalog server URL must be an HTTP origin or base path without credentials, query, or fragment"));
+        }
+        let cache_path = client_store::cache_path(data_directory);
         let store = client_store::ClientCatalogStore::open(&cache_path)?;
         let covers = CatalogCoverCache::new(data_directory.join("catalog-covers"))?;
-        let registry = registry::ServerRegistryStore::load(&store)?;
-        Ok(Self { server, cache, store, covers, registry: Mutex::new(registry), languages: RwLock::new(CatalogLanguageFilter::new(languages)) })
-    }
-
-    pub fn set_supported_languages(&self, languages: impl IntoIterator<Item = impl AsRef<str>>) -> Result<(), CatalogProviderError> {
-        *self.languages.write().map_err(|_| CatalogProviderError::new("catalog language preference lock was poisoned"))? = CatalogLanguageFilter::new(languages);
-        Ok(())
-    }
-
-    fn language_filter(&self) -> CatalogLanguageFilter {
-        self.languages.read().map(|languages| languages.clone()).unwrap_or_else(|_| CatalogLanguageFilter::new(std::iter::empty::<&str>()))
-    }
-
-    fn prepare_page(&self, source: &CatalogSource, page: &mut CatalogPage) {
-        self.language_filter().filter_page(source, page);
-    }
-
-    fn catalog_sources(&self) -> Vec<CatalogSource> {
-        self.registry.lock().map(|registry| registry.sources()).unwrap_or_default()
+        Ok(Self { http: reqwest::Client::new(), base_url, store, covers })
     }
 }
 
 mod client_store;
-mod page_search_cache;
-mod registry;
 mod subject_payload_cache;
 
-impl CatalogServerClient {
-    pub fn new(base_url: &str) -> Result<Self, CatalogProviderError> {
-        let base_url = Url::parse(base_url).map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        if !matches!(base_url.scheme(), "http" | "https") || !base_url.username().is_empty() || base_url.password().is_some() || base_url.query().is_some() || base_url.fragment().is_some() {
-            return Err(CatalogProviderError::new("catalog server URL must be an HTTP origin or base path without credentials, query, or fragment"));
-        }
-        let http = reqwest::Client::new();
-        Ok(Self { http, base_url })
+impl CatalogClient {
+    fn endpoint(&self, path: &str) -> Result<Url, CatalogClientError> {
+        self.base_url.join(path).map_err(CatalogClientError::new)
     }
 
-    fn endpoint(&self, path: &str) -> Result<Url, CatalogProviderError> {
-        self.base_url.join(path).map_err(|error| CatalogProviderError::new(error.to_string()))
-    }
-
-    async fn get_wire<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T, CatalogProviderError> {
-        let response = tokio::time::timeout(Duration::from_secs(15), self.http.get(url).header(reqwest::header::ACCEPT, wire::MEDIA_TYPE).send())
-            .await
-            .map_err(|_| CatalogProviderError::new("catalog server request timed out"))?
-            .map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        Self::response_wire(response).await
-    }
-
-    async fn post_wire<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(&self, url: Url, value: &T) -> Result<R, CatalogProviderError> {
-        let bytes = wire::encode(value).map_err(|error| CatalogProviderError::new(error.to_string()))?;
+    async fn post_wire<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(&self, path: &str, value: &T) -> Result<R, CatalogClientError> {
+        let url = self.endpoint(path)?;
+        let bytes = wire::encode(value).map_err(CatalogClientError::new)?;
         let response = tokio::time::timeout(Duration::from_secs(15), self.http.post(url).header(reqwest::header::ACCEPT, wire::MEDIA_TYPE).header(reqwest::header::CONTENT_TYPE, wire::MEDIA_TYPE).body(bytes).send())
             .await
-            .map_err(|_| CatalogProviderError::new("catalog server request timed out"))?
-            .map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        Self::response_wire(response).await
-    }
-
-    async fn response_wire<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T, CatalogProviderError> {
+            .map_err(|_| CatalogClientError::new("catalog server request timed out"))?
+            .map_err(CatalogClientError::new)?;
         if !response.status().is_success() {
             let status = response.status();
-            let detail = if response.content_length().is_some_and(|length| length <= 4096) { response.bytes().await.ok().and_then(|bytes| String::from_utf8(bytes.to_vec()).ok()).filter(|value| !value.trim().is_empty()) } else { None };
-            return Err(CatalogProviderError::new(detail.map_or_else(|| format!("catalog server returned HTTP {status}"), |detail| format!("catalog server returned HTTP {status}: {detail}"))));
+            let detail = if response.content_length().is_some_and(|length| length <= 4096) {
+                read_response_body(response, 4096, "error response").await.ok().and_then(|bytes| String::from_utf8(bytes).ok()).filter(|value| !value.trim().is_empty())
+            } else {
+                None
+            };
+            return Err(CatalogClientError::new(detail.map_or_else(|| format!("catalog server returned HTTP {status}"), |detail| format!("catalog server returned HTTP {status}: {detail}"))));
         }
         let media_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok());
         if !media_type.is_some_and(wire::is_current_media_type) {
-            return Err(CatalogProviderError::new("catalog server returned an unsupported media type"));
+            return Err(CatalogClientError::new("catalog server returned an unsupported media type"));
         }
         if response.headers().get(reqwest::header::CONTENT_ENCODING).and_then(|value| value.to_str().ok()).is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
-            return Err(CatalogProviderError::new("catalog server returned a compressed response"));
+            return Err(CatalogClientError::new("catalog server returned a compressed response"));
         }
-        if response.content_length().is_some_and(|length| length > MAX_CATALOG_SERVER_RESPONSE_BYTES) {
-            return Err(CatalogProviderError::new("catalog server response is too large"));
-        }
-        let bytes = response.bytes().await.map_err(|error| CatalogProviderError::new(error.to_string()))?;
-        wire::decode(&bytes, wire::MAX_DECODED_RESPONSE_BYTES).map_err(|error| CatalogProviderError::new(error.to_string()))
+        let bytes = read_response_body(response, MAX_CATALOG_SERVER_RESPONSE_BYTES, "response").await?;
+        wire::decode(&bytes, wire::MAX_DECODED_RESPONSE_BYTES).map_err(CatalogClientError::new)
     }
+}
+
+async fn read_response_body(response: reqwest::Response, max_bytes: u64, kind: &str) -> Result<Vec<u8>, CatalogClientError> {
+    let too_large = || CatalogClientError::new(format!("catalog server {kind} is too large"));
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+        return Err(too_large());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(CatalogClientError::new)?;
+        if (bytes.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(CatalogClientError::new(format!("catalog server {kind} is empty")));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -148,18 +131,58 @@ mod tests {
     use axum::http::{header, Response, StatusCode};
     use axum::routing::get;
     use axum::Router;
-    use catalog_model::{CatalogPublication, CatalogPublicationIdentity, LanguageTag};
+    use catalog_model::{CatalogPublication, CatalogPublicationIdentity};
     use image::{DynamicImage, ImageOutputFormat};
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[test]
-    fn sources_are_empty_until_the_server_registry_is_cached() {
-        let temporary = tempfile::tempdir().unwrap();
-        let client = CatalogClient::with_supported_languages("http://127.0.0.1:9", temporary.path(), ["en-US"]).unwrap();
+    fn startup_uses_current_cache_without_modifying_legacy_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_path = root.path().join("catalog-cache.db");
+        let legacy = rusqlite::Connection::open(&legacy_path).unwrap();
+        legacy.execute_batch(
+            "CREATE TABLE catalog_client_schema_metadata(singleton INTEGER PRIMARY KEY,schema_version INTEGER NOT NULL);
+             INSERT INTO catalog_client_schema_metadata VALUES(1,3);
+             CREATE TABLE catalog_client_registry(singleton INTEGER PRIMARY KEY,payload BLOB NOT NULL);
+             INSERT INTO catalog_client_registry VALUES(1,x'0304');"
+        ).unwrap();
+        drop(legacy);
+        let original = std::fs::read(&legacy_path).unwrap();
+        let client = CatalogClient::with_persistent_cache("https://example.com/", root.path()).unwrap();
+        client.store.connection.lock().unwrap().execute("INSERT INTO catalog_subject_publication_cache VALUES('current',7,x'0506')", []).unwrap();
+        drop(client);
+        let reopened = CatalogClient::with_persistent_cache("https://example.com/", root.path()).unwrap();
+        let payload: Vec<u8> = reopened.store.connection.lock().unwrap().query_row("SELECT publication_payload FROM catalog_subject_publication_cache WHERE entry_id=7", [], |row| row.get(0)).unwrap();
+        assert_eq!(payload, [5,6]);
+        assert_eq!(std::fs::read(legacy_path).unwrap(), original);
+    }
 
-        assert!(client.sources().is_empty());
+    fn cover_response(source_id: &CatalogSourceId, image_urls: &[&str]) -> CatalogSubjectBrowseResponse {
+        CatalogSubjectBrowseResponse {
+            epoch: "epoch".to_owned(),
+            navigation: Vec::new(),
+            publications: image_urls
+                .iter()
+                .enumerate()
+                .map(|(index, image_url)| catalog_model::CatalogSourcedPublication {
+                    source_id: source_id.clone(),
+                    publication: CatalogPublication {
+                        identity: CatalogPublicationIdentity { edition_id: index.to_string(), work_id: None },
+                        title: "Book".to_owned(),
+                        authors: Vec::new(),
+                        languages: Vec::new(),
+                        description: None,
+                        image_url: Some((*image_url).to_owned()),
+                        metadata: Default::default(),
+                        actions: Vec::new(),
+                    },
+                })
+                .collect(),
+            range: CatalogResultRangeResponse { offset: 0, returned_items: image_urls.len().try_into().unwrap(), has_more: false },
+            capabilities: Default::default(),
+        }
     }
 
     #[tokio::test]
@@ -194,42 +217,10 @@ mod tests {
         let source_id = CatalogSourceId::parse("opds-test").unwrap();
         let image_url = format!("http://{address}/cover.png");
         let broken_url = format!("http://{address}/broken.png");
-        let page = CatalogPage {
-            source_id: source_id.clone(),
-            freshness: CatalogFreshness::Current,
-            title: "Covers".to_owned(),
-            locator: format!("http://{address}/root"),
-            navigation: Vec::new(),
-            publications: vec![
-                CatalogPublication {
-                    identity: CatalogPublicationIdentity { edition_id: "edition".to_owned(), work_id: None },
-                    title: "Book".to_owned(),
-                    authors: Vec::new(),
-                    languages: Vec::new(),
-                    description: None,
-                    image_url: Some(image_url.clone()),
-                    metadata: Default::default(),
-                    actions: Vec::new(),
-                },
-                CatalogPublication {
-                    identity: CatalogPublicationIdentity { edition_id: "broken".to_owned(), work_id: None },
-                    title: "Broken".to_owned(),
-                    authors: Vec::new(),
-                    languages: Vec::new(),
-                    description: None,
-                    image_url: Some(broken_url.clone()),
-                    metadata: Default::default(),
-                    actions: Vec::new(),
-                },
-            ],
-            groups: Vec::new(),
-            facets: Vec::new(),
-            pagination: CatalogPagination::default(),
-            search: None,
-        };
+        let response = cover_response(&source_id, &[&image_url, &broken_url]);
         let cache = CatalogCoverCache::new(temporary.path().join("covers")).unwrap();
         assert!(cache.cover(&source_id, &image_url).await.is_err());
-        cache.remember_page(&page);
+        cache.remember_subject_browse(&response);
         let first = cache.cover(&source_id, &image_url).await.unwrap();
         assert!(first.starts_with(&[0xff, 0xd8]));
         assert_eq!(cache.cover(&source_id, &image_url).await.unwrap(), first);
@@ -243,7 +234,7 @@ mod tests {
         std::fs::remove_file(cached_cover).unwrap();
         let authorized_after_restart = CatalogCoverCache::new(temporary.path().join("covers")).unwrap();
         assert!(authorized_after_restart.cover(&source_id, &image_url).await.is_err());
-        authorized_after_restart.remember_page(&page);
+        authorized_after_restart.remember_subject_browse(&response);
         assert_eq!(authorized_after_restart.cover(&source_id, &image_url).await.unwrap(), first);
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.abort();
@@ -274,41 +265,20 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let source_id = CatalogSourceId::parse("opds-test").unwrap();
         let image_url = IMAGE_URL;
-        let page = CatalogPage {
-            source_id: source_id.clone(),
-            freshness: CatalogFreshness::Current,
-            title: "Covers".to_owned(),
-            locator: "https://catalog.example/root".to_owned(),
-            navigation: Vec::new(),
-            publications: vec![CatalogPublication {
-                identity: CatalogPublicationIdentity { edition_id: "edition".to_owned(), work_id: None },
-                title: "Book".to_owned(),
-                authors: Vec::new(),
-                languages: Vec::new(),
-                description: None,
-                image_url: Some(image_url.to_owned()),
-                metadata: Default::default(),
-                actions: Vec::new(),
-            }],
-            groups: Vec::new(),
-            facets: Vec::new(),
-            pagination: CatalogPagination::default(),
-            search: None,
-        };
-        let server = CatalogServerClient::new(&format!("http://{address}/")).unwrap();
-        let cache_path = temporary.path().join("covers");
-        let cache = CatalogCoverCache::new(cache_path.clone()).unwrap();
-        cache.remember_page(&page);
-        let first = cache.cover_with(&source_id, image_url, server.catalog_cover(&source_id, image_url)).await.unwrap();
+        let response = cover_response(&source_id, &[image_url]);
+        let server_url = format!("http://{address}/");
+        let client = CatalogClient::with_persistent_cache(&server_url, temporary.path()).unwrap();
+        client.covers.remember_subject_browse(&response);
+        let first = client.cover(&source_id, image_url).await.unwrap();
         assert!(first.starts_with(&[0xff, 0xd8]));
-        assert_eq!(cache.cover_with(&source_id, image_url, server.catalog_cover(&source_id, image_url)).await.unwrap(), first);
+        assert_eq!(client.cover(&source_id, image_url).await.unwrap(), first);
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server_task.abort();
-        let restored = CatalogCoverCache::new(cache_path).unwrap();
-        assert_eq!(restored.cover_with(&source_id, image_url, server.catalog_cover(&source_id, image_url)).await.unwrap(), first);
+        drop(client);
+        let restored = CatalogClient::with_persistent_cache(&server_url, temporary.path()).unwrap();
+        assert_eq!(restored.cover(&source_id, image_url).await.unwrap(), first);
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 }
 mod assets;
-mod sources;
 mod subjects;

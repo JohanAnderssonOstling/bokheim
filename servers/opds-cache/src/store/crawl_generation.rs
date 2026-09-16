@@ -1,17 +1,15 @@
 use super::{
     active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, decode_cached, ensure_source_in, insert_staged_publication, next_sequence_in, params, put_page_row, queue_publication_extraction,
-    rebuild_subject_assignments, refresh_active_counts, replace_publication_subjects, source_state_in, storage_i64, unix_timestamp, CatalogCache, CatalogCacheError, CatalogCrawlGeneration, CatalogPage, CatalogPageWrite, CatalogPublication,
-    CatalogPublicationIdentity, CatalogSourceId, CatalogSourceState, OptionalExtension, PreparedCatalogPageWrite, Transaction, TransactionBehavior, ENRICHED_SUBJECT_POSITION_BASE,
+    rebuild_subject_assignments, refresh_active_counts, source_state_in, storage_i64, unix_timestamp, CatalogCrawlGeneration, CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, CatalogSourceState, CatalogStore,
+    CatalogStoreError, OptionalExtension, PreparedCatalogPageWrite, Transaction, TransactionBehavior, ENRICHED_SUBJECT_POSITION_BASE,
 };
-use publication_model::PublicationSubject;
-
-impl CatalogCache {
-    pub fn begin_crawl(&self, source_id: &CatalogSourceId, source_url: &str) -> Result<CatalogCrawlGeneration, CatalogCacheError> {
+impl CatalogStore {
+    pub fn begin_crawl(&self, source_id: &CatalogSourceId, source_url: &str) -> Result<CatalogCrawlGeneration, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_source_in(&transaction, source_id, source_url)?;
         let active = active_generation_in(&transaction, source_id)?;
-        let generation = active.checked_add(1).ok_or_else(|| CatalogCacheError::new("catalog generation overflow"))?;
+        let generation = active.checked_add(1).ok_or_else(|| CatalogStoreError::new("catalog generation overflow"))?;
         transaction.execute("DELETE FROM catalog_page WHERE source_id=?1 AND generation=?2", params![source_id.as_str(), storage_i64(generation, "generation")?])?;
         transaction.execute("DELETE FROM catalog_publication WHERE source_id=?1 AND generation=?2", params![source_id.as_str(), storage_i64(generation, "generation")?])?;
         transaction.execute("UPDATE catalog_source SET last_crawl_started_at=?2, crawl_status='running', last_crawl_error=NULL WHERE source_id=?1", params![source_id.as_str(), unix_timestamp()?])?;
@@ -22,7 +20,7 @@ impl CatalogCache {
     /// Starts or resumes discovery directly in the active generation. This is
     /// used for catalogues whose graph has never completed, so useful pages do
     /// not remain hidden behind an unbounded atomic crawl.
-    pub fn begin_incremental_crawl(&self, source_id: &CatalogSourceId, source_url: &str) -> Result<(), CatalogCacheError> {
+    pub fn begin_incremental_crawl(&self, source_id: &CatalogSourceId, source_url: &str) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_source_in(&transaction, source_id, source_url)?;
@@ -31,7 +29,7 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn finish_incremental_crawl(&self, source_id: &CatalogSourceId, complete: bool) -> Result<(), CatalogCacheError> {
+    pub fn finish_incremental_crawl(&self, source_id: &CatalogSourceId, complete: bool) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = active_generation_in(&transaction, source_id)?;
@@ -45,17 +43,9 @@ impl CatalogCache {
         Ok(())
     }
 
-    pub fn stage_page(&self, crawl: &CatalogCrawlGeneration, page: &CatalogPage, etag: Option<&str>, last_modified: Option<&str>) -> Result<(), CatalogCacheError> {
-        self.stage_prepared_pages(crawl, &Self::prepare_page_writes(vec![CatalogPageWrite { page: page.clone(), etag: etag.map(str::to_owned), last_modified: last_modified.map(str::to_owned), provider_paginated: false }])?)
-    }
-
     /// Stages several replacement-crawl pages in one bounded transaction.
     /// Encoding and publication preparation remain outside BEGIN IMMEDIATE.
-    pub(crate) fn stage_pages(&self, crawl: &CatalogCrawlGeneration, pages: &[CatalogPageWrite]) -> Result<(), CatalogCacheError> {
-        self.stage_prepared_pages(crawl, &Self::prepare_page_writes(pages.to_vec())?)
-    }
-
-    pub(crate) fn stage_prepared_pages(&self, crawl: &CatalogCrawlGeneration, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogCacheError> {
+    pub(crate) fn stage_prepared_pages(&self, crawl: &CatalogCrawlGeneration, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogStoreError> {
         if pages.is_empty() {
             return Ok(());
         }
@@ -76,39 +66,11 @@ impl CatalogCache {
         Ok(())
     }
 
-    /// Replaces raw subject evidence for one staged publication and rebuilds
-    /// its deterministic canonical assignments. This deliberately remains a
-    /// sidecar to the catalogue wire payload: browsing clients do not need the
-    /// potentially large raw metadata in every publication card.
-    pub fn stage_publication_subjects(&self, crawl: &CatalogCrawlGeneration, identity: &CatalogPublicationIdentity, subjects: &[PublicationSubject]) -> Result<(), CatalogCacheError> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let generation = storage_i64(crawl.generation, "generation")?;
-        let work_id = identity.work_id.as_deref().unwrap_or("");
-        let exists = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4)",
-            params![crawl.source_id.as_str(), generation, identity.edition_id, work_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !exists {
-            return Err(CatalogCacheError::new("cannot attach subjects to a publication outside the staged generation"));
-        }
-        replace_publication_subjects(&transaction, &crawl.source_id, crawl.generation, identity, subjects)?;
-        transaction.commit()?;
-        Ok(())
-    }
-    pub fn activate_crawl(&self, crawl: &CatalogCrawlGeneration) -> Result<CatalogSourceState, CatalogCacheError> {
-        while self.prepare_crawl_activation_batch(crawl, 256)? {}
-        let state = self.finalize_crawl_activation(crawl)?;
-        while self.reconcile_active_epub_extractions_batch(&crawl.source_id, 256)? {}
-        Ok(state)
-    }
-
     /// Assigns stable publication sequences to a bounded slice of a hidden
     /// generation. Each call commits independently so a large catalogue never
     /// monopolizes SQLite's single writer.
-    pub fn prepare_crawl_activation_batch(&self, crawl: &CatalogCrawlGeneration, batch_size: usize) -> Result<bool, CatalogCacheError> {
-        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogCacheError::new("crawl activation batch size overflow"))?;
+    pub fn prepare_crawl_activation_batch(&self, crawl: &CatalogCrawlGeneration, batch_size: usize) -> Result<bool, CatalogStoreError> {
+        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogStoreError::new("crawl activation batch size overflow"))?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let active = active_generation_in(&transaction, &crawl.source_id)?;
@@ -136,7 +98,7 @@ impl CatalogCache {
             let sequence = match previous_sequence {
                 Some(sequence) => sequence,
                 None => {
-                    next_sequence = next_sequence.checked_add(1).ok_or_else(|| CatalogCacheError::new("publication sequence overflow"))?;
+                    next_sequence = next_sequence.checked_add(1).ok_or_else(|| CatalogStoreError::new("publication sequence overflow"))?;
                     storage_i64(next_sequence, "publication sequence")?
                 }
             };
@@ -155,13 +117,13 @@ impl CatalogCache {
 
     /// Performs only the small atomic visibility switch after the hidden
     /// generation has been prepared in bounded commits.
-    pub fn finalize_crawl_activation(&self, crawl: &CatalogCrawlGeneration) -> Result<CatalogSourceState, CatalogCacheError> {
+    pub fn finalize_crawl_activation(&self, crawl: &CatalogCrawlGeneration) -> Result<CatalogSourceState, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = storage_i64(crawl.generation, "generation")?;
         let unprepared = transaction.query_row("SELECT EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND sequence=0)", params![crawl.source_id.as_str(), generation], |row| row.get::<_, bool>(0))?;
         if unprepared {
-            return Err(CatalogCacheError::new("crawl generation must be prepared before activation"));
+            return Err(CatalogStoreError::new("crawl generation must be prepared before activation"));
         }
 
         let (page_count, publication_count, epub_count): (i64, i64, i64) = transaction.query_row(
@@ -189,8 +151,8 @@ impl CatalogCache {
     /// Reconciles a bounded slice of the durable extraction queue with the
     /// active generation. Stale jobs are removed only after every retained
     /// publication has been marked with the new generation.
-    pub fn reconcile_active_epub_extractions_batch(&self, source_id: &CatalogSourceId, batch_size: usize) -> Result<bool, CatalogCacheError> {
-        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogCacheError::new("extraction reconciliation batch size overflow"))?;
+    pub fn reconcile_active_epub_extractions_batch(&self, source_id: &CatalogSourceId, batch_size: usize) -> Result<bool, CatalogStoreError> {
+        let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogStoreError::new("extraction reconciliation batch size overflow"))?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = active_generation_in(&transaction, source_id)?;
@@ -245,8 +207,8 @@ impl CatalogCache {
 
     /// Reclaims inactive generations without monopolizing SQLite's writer
     /// lock. Returns true while more rows remain for a later batch.
-    pub fn cleanup_inactive_generation_batch(&self, source_id: &CatalogSourceId, batch_size: usize) -> Result<bool, CatalogCacheError> {
-        let batch_size = i64::try_from(batch_size.max(1)).map_err(|_| CatalogCacheError::new("cleanup batch size overflow"))?;
+    pub fn cleanup_inactive_generation_batch(&self, source_id: &CatalogSourceId, batch_size: usize) -> Result<bool, CatalogStoreError> {
+        let batch_size = i64::try_from(batch_size.max(1)).map_err(|_| CatalogStoreError::new("cleanup batch size overflow"))?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let active = storage_i64(active_generation_in(&transaction, source_id)?, "generation")?;
@@ -272,11 +234,7 @@ impl CatalogCache {
         Ok(remaining)
     }
 
-    pub fn abandon_crawl(&self, crawl: &CatalogCrawlGeneration) -> Result<(), CatalogCacheError> {
-        self.abandon_crawl_with_error(crawl, None)
-    }
-
-    pub fn abandon_crawl_with_error(&self, crawl: &CatalogCrawlGeneration, error: Option<&str>) -> Result<(), CatalogCacheError> {
+    pub fn abandon_crawl_with_error(&self, crawl: &CatalogCrawlGeneration, error: Option<&str>) -> Result<(), CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let error = error.map(bounded_crawl_error);
@@ -286,7 +244,7 @@ impl CatalogCache {
     }
 }
 
-fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogCacheError> {
+fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
@@ -302,7 +260,7 @@ fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourc
     rebuild_subject_assignments(transaction, source_id, to_generation, identity, None)
 }
 
-fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogCacheError> {
+fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
@@ -318,7 +276,7 @@ fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId,
     Ok(())
 }
 
-fn copy_popularity_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogCacheError> {
+fn copy_popularity_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
