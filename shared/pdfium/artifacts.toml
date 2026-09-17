@@ -1,0 +1,35 @@
+# PDFium binaries tested with the pinned pdfium-render bindings.
+# WASM retains 7902 until its JS ABI adapter is validated against a newer build.
+schema = 1
+
+[targets.x86_64-unknown-linux-gnu]
+version = "7961"
+url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-linux-x64.tgz"
+sha256 = "019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2"
+[targets.x86_64-unknown-linux-gnu.files]
+"lib/libpdfium.so" = "libpdfium.so"
+
+[targets.x86_64-pc-windows-msvc]
+version = "7961"
+url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-win-x64.tgz"
+sha256 = "88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4"
+[targets.x86_64-pc-windows-msvc.files]
+"bin/pdfium.dll" = "pdfium.dll"
+
+[targets.aarch64-linux-android]
+version = "7961"
+url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-android-arm64.tgz"
+sha256 = "7ac655431ef5d34f7c0b781df764282d80d68294693981521d80f38f495d643f"
+[targets.aarch64-linux-android.files]
+"lib/libpdfium.so" = "libpdfium.so"
+
+[targets.wasm32-unknown-unknown]
+version = "7902"
+url = "https://github.com/paulocoutinhox/pdfium-lib/releases/download/7902/wasm.tgz"
+sha256 = "153871da7e958a9440c84648eb45ddd9ad603efda9fcd8f021766dba5a9157a2"
+# Upstream WASM archive omits notices. Preserve the existing supplemental
+# notice bundle, with its distinct revision explicit rather than implied matching.
+notices_target = "x86_64-unknown-linux-gnu"
+[targets.wasm32-unknown-unknown.files]
+"release/node/pdfium.esm.js" = "pdfium.esm.js"
+"release/node/pdfium.esm.wasm" = "pdfium.esm.wasm"

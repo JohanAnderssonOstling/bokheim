@@ -1,0 +1,1 @@
+CREATE TEMP TRIGGER forbid_book_rewrite BEFORE UPDATE OF book_metadata ON main.book BEGIN SELECT RAISE(ABORT,'title edit touched book metadata'); END;

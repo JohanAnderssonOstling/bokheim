@@ -1,0 +1,13 @@
+[package]
+name = "book-enrichment"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+catalog-model = { path = "../catalog-model" }
+book-model = { path = "../book-model" }
+metadata-contract = { path = "../metadata-contract" }
+subject-projection = { path = "../subject-projection" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

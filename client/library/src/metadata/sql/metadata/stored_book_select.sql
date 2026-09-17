@@ -1,0 +1,1 @@
+SELECT book_metadata FROM book WHERE content_hash=?1

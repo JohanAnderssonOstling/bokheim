@@ -1,0 +1,99 @@
+name: Client platform boundaries and release checks
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'client/**'
+      - 'apps/**'
+      - 'shared/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'scripts/checks/**'
+      - '.github/workflows/client-platforms.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - 'apps/**'
+      - 'shared/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'scripts/checks/**'
+      - '.github/workflows/client-platforms.yml'
+permissions:
+  contents: read
+concurrency:
+  group: client-platforms-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: Release ${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [native, web, android]
+    defaults:
+      run:
+        working-directory: bokheim
+    env:
+      RUSTUP_TOOLCHAIN: '1.95.0'
+      RUSTC_BOOTSTRAP: '1'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: bokheim
+      # Match the pinned sibling sources used by desktop-release.yml.
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/GPUI-Fork
+          ref: 68b0a5ba82860ac222c18acd9036b3838a43a08b
+          path: GPUI-Fork
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlEngine
+          ref: 30b27e095b038a1a690b3e80c1e1501f3145281e
+          path: HtmlEngine
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlViewCore
+          ref: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
+          path: HtmlViewCore
+      - name: Install Rust and build dependencies
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add wasm32-unknown-unknown aarch64-linux-android
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config libssl-dev
+      - name: Architecture checks
+        run: |
+          python3 -m unittest discover -s scripts/checks/tests
+          python3 scripts/checks/backend-boundaries.py
+          python3 scripts/checks/library-sql.py
+      - name: Native platform tests
+        if: matrix.platform == 'native'
+        run: cargo test --release --locked -p client-platform-native -p client-platform-android -p client-platform-desktop -p client-platform-kobo -p client-platform-runtime --features client-platform-native/websocket
+      - name: Standalone web platform check
+        if: matrix.platform == 'web'
+        run: cargo check --release --locked -p client-platform-web --target wasm32-unknown-unknown --features web-runtime-tests,storage-contract-tests
+      - name: Worker entry-point type checks
+        if: matrix.platform == 'web'
+        run: cargo check --release --locked -p bokheim-backend --no-default-features --features web-runtime-tests --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        if: matrix.platform == 'web'
+        with:
+          node-version: '24'
+      - name: Isolated shared-memory helper tests
+        if: matrix.platform == 'web'
+        run: node --test client/platforms/web/tests/signal.mjs
+      - name: Android platform cross-check
+        if: matrix.platform == 'android'
+        run: cargo check --release --locked -p client-platform-android --target aarch64-linux-android

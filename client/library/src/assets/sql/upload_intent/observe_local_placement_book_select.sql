@@ -1,0 +1,1 @@
+SELECT checksum FROM local_book_current WHERE dir_id=?1 AND content_hash=?2
