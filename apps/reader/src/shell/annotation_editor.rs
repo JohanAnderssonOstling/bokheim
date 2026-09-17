@@ -13,7 +13,7 @@ use gpui::{AnyElement, App, Context, Entity, Pixels, Point, SharedString, Window
 use gpui_component::input::{Input, InputState};
 use ui_components as components;
 
-use library_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle, ReaderAnnotation};
 
 const WIDTH: f32 = 360.0;
 const MAX_HEIGHT: f32 = 420.0;

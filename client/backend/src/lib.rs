@@ -7,52 +7,48 @@ pub mod host;
 mod api;
 mod app;
 use client_platform_runtime::executor;
-mod backend_error;
-mod import_journal;
-mod import_status;
-mod import_workflow;
 pub(crate) use library_runtime::interest as notification_interest;
-mod staged_import;
 #[cfg(target_arch = "wasm32")]
-use publication_access::range_cache;
+use book_access::range_cache;
 #[cfg(target_arch = "wasm32")]
 mod browser_import;
 #[cfg(test)]
 pub(crate) use app::data as home;
 #[cfg(all(feature = "storage-contract-tests", target_arch = "wasm32"))]
 mod contracts;
-mod library;
 mod platform;
 pub(crate) mod runtime;
-mod storage;
-mod sync;
-mod worker_cpu;
-#[cfg(target_arch = "wasm32")]
-mod worker_sync;
 
 #[cfg(test)]
 #[path = "../tests/convergence.rs"]
 mod convergence_tests;
 
 pub use app::{API_SERVER_ORIGIN, METADATA_SERVER_ORIGIN, ServerUrl, ServerUrlError, api_server_url, metadata_server_url};
-pub use app::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH, APP_NAME, APP_NAME_LOWER};
+pub use app::{APP_NAME, APP_NAME_LOWER};
 pub use app::{AccountSnapshot, AppClient, AppStartupState, LibraryClient, ThumbnailResolution};
 pub use app::{AccountStatus, AccountStorageUsage, AppDataLocation, LibraryEntry, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 #[cfg(test)]
 pub(crate) use app::{AppWorkerRequest, WorkerDispatchResult, WorkerPayload, decode_worker_message, encode_worker_message};
-pub use backend_error::BackendError;
-pub(crate) type DeviceAccountSession = library_runtime::account::LibraryAccountSession<app::BackendContext>;
-pub use client_library::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
-pub use library::{
-    BookDownloadStatus, BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, DownloadProgress, DownloadProgressError, DownloadState, ImportSource, LibraryBrowseData,
+pub use library_backend::{
+    BlobKey, BlobKind, BookDownloadStatus, BookPlacement, BookReader, BoxedBookReader,
+    ContentHash, DirId, DirectoryImport, DirectoryImportFile, DirectoryImportReader,
+    DirectoryImportReaderFuture, DownloadProgress, DownloadProgressError, DownloadState,
+    ImportFailure, ImportFailureKind, ImportProgress, ImportSource, ImportState,
+    LibraryBrowseData, LibraryCommand, LibraryHandle, LibraryId, LibrarySession,
     LibrarySyncState, LibrarySyncStatus,
+    LibraryTransfers, BookSource, RelativeBookPath, RelativeBookPathError,
+    RelativeDirPath, RelativeDirPathError, ResolvedBookData, ROOT_DIR_ID, ScanProgress,
+    TransferJobKind, TransferOrigin, TransferState,
+    TransferStatus,
 };
-pub use library_model::{AgentId, AuthorId, FolderDestinationPolicy};
-pub use library_model::{EpubCfi, ReadProgress};
-pub use library_replica::ScanProgress;
-pub use library_replica::{BlobKey, BlobKind, TransferJobKind};
-pub use sync::transfer::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
-pub use sync_common::{ContentHash, DirId, LibraryId, ROOT_DIR_ID};
+/// Compatibility exports for clients that still import library-owned modules
+/// through the application crate. New code should depend on `library-backend`.
+pub(crate) use library_backend::{asset_store, import_journal, import_workflow, library, staged_import, sync, worker_cpu};
+pub use library_runtime::BackendError;
+pub(crate) type DeviceAccountSession = library_runtime::account::LibraryAccountSession<app::BackendContext>;
+pub use library_replica::FolderDestinationPolicy;
+pub use book_model::{AgentId, AuthorId};
+pub use book_model::{EpubCfi, ReadProgress};
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_diagnostic(message: impl AsRef<str>) {
@@ -96,30 +92,27 @@ pub fn init_logging() {
 pub(crate) use api::BackendLaunch;
 #[cfg(test)]
 pub(crate) use app::{AppBackend, BackendContext};
-pub(crate) use library::LibrarySession;
 
-#[cfg(all(test, feature = "scanner", not(target_arch = "wasm32"), not(target_os = "android")))]
+#[cfg(all(test, not(target_arch = "wasm32"), not(target_os = "android")))]
 #[path = "../tests/scan.rs"]
 mod scan_tests;
 
 #[cfg(target_arch = "wasm32")]
-mod browser_adapter;
+mod web;
 
 pub use api::library::EnrichmentStatus;
 
-pub use import_status::{ImportFailure, ImportFailureKind, ImportProgress, ImportState};
 #[cfg(not(target_arch = "wasm32"))]
 pub use library::AudioStreamControl;
 #[cfg(target_arch = "wasm32")]
-pub use library::browser_audiobook::{BrowserAudiobook, PlaybackLease};
-pub use library::{AudiobookBook, DirectPlayback, DocumentBook, PlaybackLocation, PlaybackMetadata, PlaybackSource, ResolvedBook};
+pub use library_backend::library::browser_audiobook::{BrowserAudiobook, PlaybackLease};
+pub use library_backend::library::{AudiobookBook, DirectPlayback, DocumentBook, PlaybackLocation, PlaybackMetadata, PlaybackSource, ResolvedBook};
 #[cfg(any(test, target_arch = "wasm32"))]
-#[path = "browser_adapter/import_progress.rs"]
+#[path = "web/import_progress.rs"]
 mod import_progress_wire;
 #[cfg(all(feature = "kobo", not(target_arch = "wasm32")))]
 pub use api::app::BatteryStatus;
 #[cfg(all(feature = "kobo", target_os = "linux"))]
 pub use api::app::{BluetoothDevice, BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
 pub use library_replica::{LibraryOperation, LibraryOperationKind, LibraryOperationState};

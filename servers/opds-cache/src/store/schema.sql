@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS catalog_source (
     crawl_status TEXT NOT NULL DEFAULT 'never',
     last_crawl_error TEXT,
     active_page_count INTEGER NOT NULL DEFAULT 0,
-    active_publication_count INTEGER NOT NULL DEFAULT 0,
+    active_book_count INTEGER NOT NULL DEFAULT 0,
     active_epub_count INTEGER NOT NULL DEFAULT 0
 );
 
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS catalog_page (
     PRIMARY KEY(source_id, generation, locator)
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_entry (
+CREATE TABLE IF NOT EXISTS catalog_book_entry (
     entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id TEXT NOT NULL REFERENCES catalog_source(source_id) ON DELETE CASCADE,
     edition_id TEXT NOT NULL,
@@ -44,12 +44,12 @@ CREATE TABLE IF NOT EXISTS catalog_publication_entry (
     UNIQUE(source_id, edition_id, work_id, payload_hash)
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication (
+CREATE TABLE IF NOT EXISTS catalog_book (
     source_id TEXT NOT NULL REFERENCES catalog_source(source_id) ON DELETE CASCADE,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
     work_id TEXT NOT NULL,
-    entry_id INTEGER NOT NULL REFERENCES catalog_publication_entry(entry_id),
+    entry_id INTEGER NOT NULL REFERENCES catalog_book_entry(entry_id),
     sequence INTEGER NOT NULL,
     payload_hash TEXT NOT NULL,
     normalized_title TEXT NOT NULL,
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS catalog_publication (
     PRIMARY KEY(source_id, generation, edition_id, work_id)
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_author (
+CREATE TABLE IF NOT EXISTS catalog_book_author (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -74,11 +74,11 @@ CREATE TABLE IF NOT EXISTS catalog_publication_author (
     normalized_name TEXT NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id, position),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_language (
+CREATE TABLE IF NOT EXISTS catalog_book_language (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -86,11 +86,11 @@ CREATE TABLE IF NOT EXISTS catalog_publication_language (
     language TEXT NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id, language),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_format (
+CREATE TABLE IF NOT EXISTS catalog_book_format (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -98,11 +98,11 @@ CREATE TABLE IF NOT EXISTS catalog_publication_format (
     book_format TEXT NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id, book_format),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_subject (
+CREATE TABLE IF NOT EXISTS catalog_book_subject (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -114,11 +114,11 @@ CREATE TABLE IF NOT EXISTS catalog_publication_subject (
     code TEXT,
     PRIMARY KEY(source_id, generation, edition_id, work_id, position),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_subject_assignment (
+CREATE TABLE IF NOT EXISTS catalog_book_subject_assignment (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS catalog_publication_subject_assignment (
     matcher_version INTEGER NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id, system_id, subject_path),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
@@ -148,15 +148,15 @@ CREATE TABLE IF NOT EXISTS catalog_subject_lcc_evidence (
     format_version INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY(source_id,generation,edition_id,work_id,system_id,subject_path,source_position,concept_id),
     FOREIGN KEY(source_id,generation,edition_id,work_id,system_id,subject_path)
-        REFERENCES catalog_publication_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path) ON DELETE CASCADE,
+        REFERENCES catalog_book_subject_assignment(source_id,generation,edition_id,work_id,system_id,subject_path) ON DELETE CASCADE,
     FOREIGN KEY(source_id,generation,edition_id,work_id,source_position)
-        REFERENCES catalog_publication_subject(source_id,generation,edition_id,work_id,position) ON DELETE CASCADE
+        REFERENCES catalog_book_subject(source_id,generation,edition_id,work_id,position) ON DELETE CASCADE
 );
 
 -- Subject browsing uses a materialized hierarchy rather than deriving parent
 -- and child paths from every assignment at request time. A membership row is
--- unique per publication and ancestor node, so navigation counts are exact
--- COUNT(*) aggregates without a temporary DISTINCT publication set.
+-- unique per book and ancestor node, so navigation counts are exact
+-- COUNT(*) aggregates without a temporary DISTINCT book set.
 CREATE TABLE IF NOT EXISTS catalog_subject_node (
     system_id TEXT NOT NULL,
     node_path TEXT NOT NULL,
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS catalog_subject_node (
     PRIMARY KEY(system_id, node_path)
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_subject_node (
+CREATE TABLE IF NOT EXISTS catalog_book_subject_node (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS catalog_publication_subject_node (
     exact_assignment INTEGER NOT NULL CHECK(exact_assignment IN (0, 1)),
     PRIMARY KEY(source_id, generation, edition_id, work_id, system_id, node_path),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE,
     FOREIGN KEY(system_id, node_path)
         REFERENCES catalog_subject_node(system_id, node_path)
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS catalog_subject_browse_index_metadata (
     index_version INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS catalog_publication_toc (
+CREATE TABLE IF NOT EXISTS catalog_book_toc (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -196,28 +196,28 @@ CREATE TABLE IF NOT EXISTS catalog_publication_toc (
     normalized_title TEXT NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id, position),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
 -- These external-content FTS tables index the existing normalized search
--- columns without duplicating publication payloads. Triggers keep the index
+-- columns without duplicating book payloads. Triggers keep the index
 -- correct even if this database is temporarily opened by the rollback binary.
-CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_title_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_book_title_fts USING fts5(
     normalized_title,
-    content='catalog_publication',
+    content='catalog_book',
     content_rowid='rowid',
     tokenize='trigram'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_author_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_book_author_fts USING fts5(
     normalized_name,
-    content='catalog_publication_author',
+    content='catalog_book_author',
     content_rowid='rowid',
     tokenize='trigram'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS catalog_publication_toc_fts USING fts5(
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_book_toc_fts USING fts5(
     normalized_title,
-    content='catalog_publication_toc',
+    content='catalog_book_toc',
     content_rowid='rowid',
     tokenize='trigram'
 );
@@ -228,40 +228,40 @@ CREATE TABLE IF NOT EXISTS catalog_search_index_metadata (
 );
 INSERT OR IGNORE INTO catalog_search_index_metadata(singleton,index_version,ready) VALUES(1,1,0);
 
-CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_insert AFTER INSERT ON catalog_publication BEGIN
-    INSERT INTO catalog_publication_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+CREATE TRIGGER IF NOT EXISTS catalog_book_title_fts_insert AFTER INSERT ON catalog_book BEGIN
+    INSERT INTO catalog_book_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
 END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_delete AFTER DELETE ON catalog_publication BEGIN
-    INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+CREATE TRIGGER IF NOT EXISTS catalog_book_title_fts_delete AFTER DELETE ON catalog_book BEGIN
+    INSERT INTO catalog_book_title_fts(catalog_book_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
 END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_title_fts_update AFTER UPDATE OF normalized_title ON catalog_publication BEGIN
-    INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
-    INSERT INTO catalog_publication_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_insert AFTER INSERT ON catalog_publication_author BEGIN
-    INSERT INTO catalog_publication_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
-END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_delete AFTER DELETE ON catalog_publication_author BEGIN
-    INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
-END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_author_fts_update AFTER UPDATE OF normalized_name ON catalog_publication_author BEGIN
-    INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
-    INSERT INTO catalog_publication_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
+CREATE TRIGGER IF NOT EXISTS catalog_book_title_fts_update AFTER UPDATE OF normalized_title ON catalog_book BEGIN
+    INSERT INTO catalog_book_title_fts(catalog_book_title_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+    INSERT INTO catalog_book_title_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
 END;
 
-CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_insert AFTER INSERT ON catalog_publication_toc BEGIN
-    INSERT INTO catalog_publication_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+CREATE TRIGGER IF NOT EXISTS catalog_book_author_fts_insert AFTER INSERT ON catalog_book_author BEGIN
+    INSERT INTO catalog_book_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
 END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_delete AFTER DELETE ON catalog_publication_toc BEGIN
-    INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+CREATE TRIGGER IF NOT EXISTS catalog_book_author_fts_delete AFTER DELETE ON catalog_book_author BEGIN
+    INSERT INTO catalog_book_author_fts(catalog_book_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
 END;
-CREATE TRIGGER IF NOT EXISTS catalog_publication_toc_fts_update AFTER UPDATE OF normalized_title ON catalog_publication_toc BEGIN
-    INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
-    INSERT INTO catalog_publication_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+CREATE TRIGGER IF NOT EXISTS catalog_book_author_fts_update AFTER UPDATE OF normalized_name ON catalog_book_author BEGIN
+    INSERT INTO catalog_book_author_fts(catalog_book_author_fts,rowid,normalized_name) VALUES('delete',old.rowid,old.normalized_name);
+    INSERT INTO catalog_book_author_fts(rowid,normalized_name) VALUES(new.rowid,new.normalized_name);
 END;
 
-CREATE TABLE IF NOT EXISTS catalog_publication_popularity (
+CREATE TRIGGER IF NOT EXISTS catalog_book_toc_fts_insert AFTER INSERT ON catalog_book_toc BEGIN
+    INSERT INTO catalog_book_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_book_toc_fts_delete AFTER DELETE ON catalog_book_toc BEGIN
+    INSERT INTO catalog_book_toc_fts(catalog_book_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+END;
+CREATE TRIGGER IF NOT EXISTS catalog_book_toc_fts_update AFTER UPDATE OF normalized_title ON catalog_book_toc BEGIN
+    INSERT INTO catalog_book_toc_fts(catalog_book_toc_fts,rowid,normalized_title) VALUES('delete',old.rowid,old.normalized_title);
+    INSERT INTO catalog_book_toc_fts(rowid,normalized_title) VALUES(new.rowid,new.normalized_title);
+END;
+
+CREATE TABLE IF NOT EXISTS catalog_book_popularity (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     edition_id TEXT NOT NULL,
@@ -274,32 +274,32 @@ CREATE TABLE IF NOT EXISTS catalog_publication_popularity (
     rating_sum INTEGER NOT NULL,
     PRIMARY KEY(source_id, generation, edition_id, work_id),
     FOREIGN KEY(source_id, generation, edition_id, work_id)
-        REFERENCES catalog_publication(source_id, generation, edition_id, work_id)
+        REFERENCES catalog_book(source_id, generation, edition_id, work_id)
         ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS catalog_publication_title
-    ON catalog_publication(source_id, generation, normalized_title, edition_id, work_id);
-CREATE INDEX IF NOT EXISTS catalog_publication_entry_lookup
-    ON catalog_publication(entry_id, source_id, generation);
-CREATE INDEX IF NOT EXISTS catalog_publication_author_name
-    ON catalog_publication_author(source_id, generation, normalized_name, edition_id, work_id);
-CREATE INDEX IF NOT EXISTS catalog_publication_language_tag
-    ON catalog_publication_language(source_id, generation, language, edition_id, work_id);
-CREATE INDEX IF NOT EXISTS catalog_publication_format_kind
-    ON catalog_publication_format(book_format, source_id, generation, edition_id, work_id);
-CREATE INDEX IF NOT EXISTS catalog_publication_inventory
-    ON catalog_publication(source_id, generation, book_format, importable);
-CREATE INDEX IF NOT EXISTS catalog_publication_acquisition
-    ON catalog_publication(source_id, generation, acquisition_url);
-CREATE INDEX IF NOT EXISTS catalog_publication_subject_path
-    ON catalog_publication_subject_assignment(system_id, subject_path, source_id, generation, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_title
+    ON catalog_book(source_id, generation, normalized_title, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_entry_lookup
+    ON catalog_book(entry_id, source_id, generation);
+CREATE INDEX IF NOT EXISTS catalog_book_author_name
+    ON catalog_book_author(source_id, generation, normalized_name, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_language_tag
+    ON catalog_book_language(source_id, generation, language, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_format_kind
+    ON catalog_book_format(book_format, source_id, generation, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_inventory
+    ON catalog_book(source_id, generation, book_format, importable);
+CREATE INDEX IF NOT EXISTS catalog_book_acquisition
+    ON catalog_book(source_id, generation, acquisition_url);
+CREATE INDEX IF NOT EXISTS catalog_book_subject_path
+    ON catalog_book_subject_assignment(system_id, subject_path, source_id, generation, edition_id, work_id);
 CREATE INDEX IF NOT EXISTS catalog_subject_node_parent
     ON catalog_subject_node(system_id, parent_path, title, node_path);
-CREATE INDEX IF NOT EXISTS catalog_publication_subject_node_path
-    ON catalog_publication_subject_node(system_id, node_path, exact_assignment, source_id, generation, edition_id, work_id);
-CREATE INDEX IF NOT EXISTS catalog_publication_toc_title
-    ON catalog_publication_toc(source_id, generation, normalized_title, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_subject_node_path
+    ON catalog_book_subject_node(system_id, node_path, exact_assignment, source_id, generation, edition_id, work_id);
+CREATE INDEX IF NOT EXISTS catalog_book_toc_title
+    ON catalog_book_toc(source_id, generation, normalized_title, edition_id, work_id);
 CREATE TABLE IF NOT EXISTS catalog_page_link (
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
@@ -313,7 +313,7 @@ CREATE TABLE IF NOT EXISTS catalog_page_link (
 CREATE INDEX IF NOT EXISTS catalog_page_link_target
     ON catalog_page_link(source_id, generation, to_locator);
 CREATE INDEX IF NOT EXISTS catalog_server_gutenberg_work
-    ON catalog_publication(source_id,generation,work_id,importable,acquisition_url,edition_id);
+    ON catalog_book(source_id,generation,work_id,importable,acquisition_url,edition_id);
 
 CREATE TABLE IF NOT EXISTS catalog_process_control (
     process TEXT PRIMARY KEY CHECK(process IN ('catalogue_crawling','cover_downloads','enrichment')),
@@ -429,7 +429,7 @@ CREATE TABLE IF NOT EXISTS catalog_metadata_index (
     acquisition_url TEXT NOT NULL,
     version INTEGER NOT NULL,
     title TEXT NOT NULL,
-    publication_year INTEGER,
+    book_year INTEGER,
     authors_payload BLOB NOT NULL,
     publishers_payload BLOB NOT NULL,
     isbns_payload BLOB NOT NULL,
@@ -462,7 +462,7 @@ CREATE INDEX IF NOT EXISTS catalog_identity_review_status
     ON catalog_identity_review(status, source_id, updated_at, review_id);
 
 -- Store requests use a disposable, revisioned projection with one integer
--- identity per active canonical publication. The ingestion tables above stay
+-- identity per active canonical book. The ingestion tables above stay
 -- authoritative; this projection can always be rebuilt atomically.
 CREATE TABLE IF NOT EXISTS catalog_browse_serving_metadata (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -473,7 +473,7 @@ CREATE TABLE IF NOT EXISTS catalog_browse_serving_metadata (
 INSERT OR IGNORE INTO catalog_browse_serving_metadata(singleton,index_version,revision,ready)
     VALUES(1,1,0,0);
 
-CREATE TABLE IF NOT EXISTS catalog_browse_publication (
+CREATE TABLE IF NOT EXISTS catalog_browse_book (
     entry_id INTEGER PRIMARY KEY,
     source_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
@@ -486,12 +486,12 @@ CREATE TABLE IF NOT EXISTS catalog_browse_publication (
     rating_count INTEGER NOT NULL,
     has_language INTEGER NOT NULL CHECK(has_language IN (0, 1))
 );
-CREATE INDEX IF NOT EXISTS catalog_browse_publication_source
-    ON catalog_browse_publication(source_id, entry_id);
-CREATE INDEX IF NOT EXISTS catalog_browse_publication_title
-    ON catalog_browse_publication(normalized_title, entry_id);
-CREATE INDEX IF NOT EXISTS catalog_browse_publication_popularity
-    ON catalog_browse_publication(
+CREATE INDEX IF NOT EXISTS catalog_browse_book_source
+    ON catalog_browse_book(source_id, entry_id);
+CREATE INDEX IF NOT EXISTS catalog_browse_book_title
+    ON catalog_browse_book(normalized_title, entry_id);
+CREATE INDEX IF NOT EXISTS catalog_browse_book_popularity
+    ON catalog_browse_book(
         (reading_log_count>0 OR rating_count>0) DESC,
         reading_log_count DESC,
         rating_count DESC,

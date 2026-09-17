@@ -1,14 +1,19 @@
--- Publication navigation, reading entry, and audiobook metadata.
--- The publication's own navigation document, stored so the library can draw a
--- book's contents without opening the file — which may be remote, and which the
--- reader would otherwise re-parse on every visit. One row per book, holding the
--- whole tree: it is always read whole and nothing joins against it, which is
--- why it is JSON rather than a row per entry. 'none' records that the file was
--- inspected and carries no navigation, so it is not parsed again.
+-- Book navigation, reading entry, and audiobook metadata.
+-- The book's own navigation document, whatever the format called it:
+-- a nav document, an outline, or a chapter list. Stored so the library can draw
+-- a book's contents without opening the file — which may be remote, and which
+-- the reader would otherwise re-parse on every visit. One row per book, holding
+-- the whole tree: it is always read whole and nothing joins against its
+-- entries, which is why it is JSON rather than a row per entry. An existing row
+-- with no entries records that the file was inspected and carries no
+-- navigation, so it is not parsed again.
+--
+-- Keyed by the book's identity, not by the bytes it was read from: an identity
+-- survives a revision, and so do the targets, because a PDF's pagination and an
+-- audiobook's offsets are both fixed by what the identity is derived from.
 create table if not exists book_toc(
     content_hash    TEXT primary key not null,
     entry_count     INTEGER not null check(entry_count >= 0),
-    toc_source      TEXT not null check(toc_source in ('embedded_epub', 'pdf_outline', 'none')),
     toc_json        TEXT not null
 );
 
@@ -22,10 +27,10 @@ create table if not exists book_reading_entry(
     target          TEXT not null
 );
 
+-- What an audiobook is, beyond its navigation. The chapters themselves live in
+-- book_toc with every other format's; the duration stays here because it is not
+-- navigation, and because it is what turns a chapter's start into its end.
 create table if not exists audiobook_metadata(
     content_hash    TEXT primary key not null,
-    duration_ms     INTEGER not null check(duration_ms >= 0),
-    chapter_count   INTEGER not null check(chapter_count >= 0),
-    chapter_source  TEXT not null check(chapter_source in ('embedded_m4b', 'audnexus', 'full_audiobook_fallback')),
-    chapters_json   TEXT not null
+    duration_ms     INTEGER not null check(duration_ms >= 0)
 );

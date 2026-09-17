@@ -1,1 +1,0 @@
-UPDATE user_storage_account SET quota_bytes = 0 WHERE user_id = $1

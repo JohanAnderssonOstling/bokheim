@@ -4,7 +4,7 @@ WITH RECURSIVE live_dirs(id) AS (
     ), eligible AS (
         SELECT current.content_hash,current.checksum,version.size_bytes,
             row_number() OVER(PARTITION BY current.content_hash ORDER BY current.id DESC) AS priority
-        FROM local_publication_current current
+        FROM local_book_current current
         JOIN local_book_versions version USING(content_hash,checksum)
         JOIN book b ON b.content_hash=current.content_hash AND b.deleted_at IS NULL
         JOIN book_dir bd ON bd.book_row_id=b.row_id AND bd.dir_id=current.dir_id AND bd.deleted_at IS NULL

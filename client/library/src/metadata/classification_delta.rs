@@ -34,7 +34,7 @@ impl ToSql for Cell {
     }
 }
 
-// Identifiers are static internal schema names, never publication input. Columns
+// Identifiers are static internal schema names, never book input. Columns
 // start with the primary-key suffix (book_row_id is supplied separately).
 fn reconcile(tx: &Transaction, row: i64, table: &str, columns: &[&str], keys: usize, desired: &BTreeMap<Vec<Cell>, Vec<Cell>>) -> rusqlite::Result<()> {
     let (select_sql, delete_sql, insert_sql) = match table {
@@ -101,7 +101,7 @@ impl PreparedRows {
         Self { table, columns, keys, desired: rows.into_iter().map(|v| (v[..keys].to_vec(), v)).collect() }
     }
 }
-pub(super) fn prepare(p: &PreparedPublication) -> Vec<PreparedRows> {
+pub(super) fn prepare(p: &PreparedBook) -> Vec<PreparedRows> {
     let subjects = p.metadata.subjects.iter().enumerate().map(|(i, s)| vec![(i as i64).into(), s.name().into(), s.source().into(), s.authority().into(), s.code().into()]).collect();
     let mut codes = Vec::new();
     for c in &p.subject_codes {
@@ -135,7 +135,7 @@ pub(super) fn prepare(p: &PreparedPublication) -> Vec<PreparedRows> {
         PreparedRows::new("book_unified_concept_evidence", &["concept_id", "subject_position", "source_system_id", "source_code"], 4, unified_evidence),
     ]
 }
-pub(super) fn apply(tx: &Transaction, row: i64, prepared: &PreparedPublication) -> rusqlite::Result<()> {
+pub(super) fn apply(tx: &Transaction, row: i64, prepared: &PreparedBook) -> rusqlite::Result<()> {
     for a in &prepared.assignments {
         if a.system_id() != subject_projection::BISAC_SYSTEM_ID {
             ensure_external_subject_nodes(tx, a.system_id(), a.subject_path(), a.matcher_version())?;

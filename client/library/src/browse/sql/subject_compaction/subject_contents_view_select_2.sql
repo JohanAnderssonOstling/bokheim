@@ -1,1 +1,1 @@
-SELECT value FROM sync_metadata WHERE key='replica_id'
+SELECT replica_id FROM sync_metadata WHERE singleton = 1

@@ -1,1 +1,1 @@
-SELECT bokheim_mutation('metadata',content_hash,COALESCE(title,''),contributors_for_book(row_id),publication_metadata),0 FROM book WHERE content_hash=?1
+SELECT bokheim_mutation('metadata',content_hash,COALESCE(title,''),contributors_for_book(row_id),book_metadata),0 FROM book WHERE content_hash=?1

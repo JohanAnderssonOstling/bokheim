@@ -1,4 +1,4 @@
-use crate::assets::queries::AssetsSql;
+use crate::assets::AssetsSql;
 use library_replica::BlobKind;
 use rusqlite::Connection;
 use std::collections::HashSet;

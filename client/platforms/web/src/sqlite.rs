@@ -1,6 +1,6 @@
 //! Browser SQLite connection mechanisms over the installed OPFS VFS.
 use rusqlite::{Connection, OpenFlags};
-use std::{panic::Location, path::Path};
+use std::path::Path;
 
 /// OPFS must never wait synchronously for another same-worker borrower.
 pub const SINGLE_OWNER: bool = true;
@@ -8,9 +8,6 @@ pub const SINGLE_OWNER: bool = true;
 pub fn initialize(connection: &Connection, initialize: fn(&Connection) -> rusqlite::Result<()>) -> rusqlite::Result<()> {
     initialize(connection)
 }
-
-pub fn set_caller(_connection: &Connection, _caller: &'static Location<'static>) {}
-pub fn command_failed(_connection: &Connection) {}
 
 pub fn open_additional(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open(path)

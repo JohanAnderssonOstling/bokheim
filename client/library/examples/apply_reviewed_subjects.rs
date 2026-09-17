@@ -1,6 +1,7 @@
 //! Apply a human-reviewed, content-hash-bound classification manifest.
 //! Defaults to a transaction rollback; pass --apply after inspecting the result.
-use library_model::{ContentHash, PublicationSubject};
+use book_model::BookSubject;
+use content_address::ContentHash;
 
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
@@ -37,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let conflicts: i64 = tx.query_row(include_str!("sql/apply_reviewed_subjects/main_select_2.sql"), [item.content_hash.as_str()], |r| r.get(0))?;
         if conflicts != 0 { return Err(format!("Existing metadata needs review: {title}").into()); }
         let before = identifiers(&tx, &item.content_hash)?;
-        let subject = PublicationSubject::new(None, &item.lcc, &item.source, Some("lcc".into()), Some(item.lcc.clone()))?;
+        let subject = BookSubject::new(None, &item.lcc, &item.source, Some("lcc".into()), Some(item.lcc.clone()))?;
         let added = client_library::external_metadata::apply_rich_enrichment_in_transaction(&tx, item.content_hash, "reviewed:historia:20260907", "", None, &[], &[], vec![subject], "updated", Some(&item.evidence), false)?;
         if added != 1 || identifiers(&tx, &item.content_hash)? != before { return Err(format!("Verification failed: {title}").into()); }
         let assigned: i64 = tx.query_row(include_str!("sql/apply_reviewed_subjects/main_select_3.sql"), [item.content_hash.as_str()], |r| r.get(0))?;
@@ -45,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{title}: {} -> {} unified assignment(s)", item.lcc, assigned);
     }
     // Use the normal Subjects read path to refresh its lazily rebuilt projections.
-    client_library::browse::subject_facet_counts(&tx, library_model::ROOT_SUBJECT_PATH, "", &[], &[])?;
+    client_library::browse::subject_facet_counts(&tx, subject_projection::ROOT_SUBJECT_PATH, "", &[], &[])?;
     if args.len() == 4 { tx.commit()?; println!("Committed reviewed corrections."); }
     else { tx.rollback()?; println!("Dry run passed; rolled back all corrections."); }
     Ok(())

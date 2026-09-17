@@ -1,2 +1,0 @@
-CREATE TABLE book(row_id INTEGER PRIMARY KEY,content_hash TEXT UNIQUE,deleted_at INTEGER,purged_at INTEGER);
-            CREATE TABLE local_file_work(id INTEGER PRIMARY KEY,operation TEXT,content_hash TEXT,relative_path TEXT);

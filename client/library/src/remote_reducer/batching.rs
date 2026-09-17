@@ -11,7 +11,7 @@ pub(super) struct BookSnapshot {
 
 pub(super) fn independent_additions(changes: &PreparedRemoteChanges<'_>) -> bool {
     let mut seen = HashSet::new();
-    !changes.changes.is_empty() && changes.changes.iter().all(|(_, body, _)| matches!(body, MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Present { .. } } if seen.insert(*content_hash)))
+    !changes.changes.is_empty() && changes.changes.iter().all(|(_, body, _)| matches!(body, MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { .. } } if seen.insert(*content_hash)))
 }
 
 pub(super) fn independent_metadata(changes: &PreparedRemoteChanges<'_>) -> bool {
@@ -87,7 +87,7 @@ pub(super) fn apply<'a>(tx: &'a Transaction<'a>, changes: &PreparedRemoteChanges
             if !sync_state_version_wins(tx, change, identity.0, &identity.1, &identity.2, Some(snapshot))? {
                 continue;
             }
-            let MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Present { metadata, added_at, format } } = body else { unreachable!("independent additions checked by caller") };
+            let MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { metadata, added_at, format } } = body else { unreachable!("independent additions checked by caller") };
             books.push((content_hash.as_str(), metadata.title.as_str(), storage_i64(*added_at, "book addition timestamp")?, format.canonical_extension()));
             versions.push((
                 identity.0,
@@ -133,13 +133,13 @@ mod tests {
                 changed_at: timestamp,
                 body: body.unwrap_or_else(|| MutationBody::BookLifecycle {
                     content_hash: test_support::fixture_content_hash(index),
-                    value: library_model::BookLifecycleState::Present {
-                        metadata: library_model::SyncBookMetadata {
+                    value: library_replica::BookLifecycleState::Present {
+                        metadata: library_replica::SyncBookMetadata {
                             title: format!("Title {timestamp}"),
-                            contributors: vec![library_model::Contributor::new("Shared Author", None, library_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
-                            publication: library_model::PublicationMetadata {
-                                languages: vec![library_model::LanguageTag::parse("sv-SE").unwrap()],
-                                subjects: vec![library_model::PublicationSubject::new(None, "Distributed systems", "dc:subject", None, None).unwrap()],
+                            contributors: vec![book_model::Contributor::new("Shared Author", None, book_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+                            book: book_model::BookMetadata {
+                                languages: vec![book_model::LanguageTag::parse("sv-SE").unwrap()],
+                                subjects: vec![book_model::BookSubject::new(None, "Distributed systems", "dc:subject", None, None).unwrap()],
                                 rights: vec!["Copyright example".into()],
                                 ..Default::default()
                             },
@@ -195,9 +195,9 @@ mod tests {
             change(2, 10, None),
             change(3, 10, None),
             change(4, 10, None),
-            change(3, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(3), value: library_model::BookLifecycleState::Deleted { origin_folder_id: None } })),
-            change(4, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(4), value: library_model::BookLifecycleState::Purged })),
-            change(2, 70, Some(MutationBody::Metadata { content_hash: test_support::fixture_content_hash(2), value: library_model::SyncBookMetadata { title: "Metadata owns this title".into(), ..Default::default() } })),
+            change(3, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(3), value: library_replica::BookLifecycleState::Deleted { origin_folder_id: None } })),
+            change(4, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(4), value: library_replica::BookLifecycleState::Purged })),
+            change(2, 70, Some(MutationBody::Metadata { content_hash: test_support::fixture_content_hash(2), value: library_replica::SyncBookMetadata { title: "Metadata owns this title".into(), ..Default::default() } })),
         ];
         let seed = prepare_remote_changes(&seed).unwrap();
         apply(&mut batched, &seed, true);
@@ -219,10 +219,10 @@ mod tests {
             timestamp,
             Some(MutationBody::Metadata {
                 content_hash: test_support::fixture_content_hash(index),
-                value: library_model::SyncBookMetadata {
+                value: library_replica::SyncBookMetadata {
                     title: format!("Edit {timestamp}"),
-                    contributors: vec![library_model::Contributor::new("Edit Author", None, library_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
-                    publication: library_model::PublicationMetadata { rights: vec!["Updated rights".into()], ..Default::default() },
+                    contributors: vec![book_model::Contributor::new("Edit Author", None, book_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+                    book: book_model::BookMetadata { rights: vec!["Updated rights".into()], ..Default::default() },
                 },
             }),
         )
@@ -236,8 +236,8 @@ mod tests {
             metadata_change(1, 60),
             change(2, 10, None),
             change(3, 10, None),
-            change(2, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(2), value: library_model::BookLifecycleState::Deleted { origin_folder_id: None } })),
-            change(3, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(3), value: library_model::BookLifecycleState::Purged })),
+            change(2, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(2), value: library_replica::BookLifecycleState::Deleted { origin_folder_id: None } })),
+            change(3, 20, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(3), value: library_replica::BookLifecycleState::Purged })),
         ];
         let seed = prepare_remote_changes(&seed).unwrap();
         apply(&mut batched, &seed, true);
@@ -284,13 +284,13 @@ mod tests {
             .changes
             .iter()
             .map(|(_, body, _)| {
-                let MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Present { metadata, .. } } = body else { unreachable!() };
+                let MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { metadata, .. } } = body else { unreachable!() };
                 (*content_hash, metadata.clone())
             })
             .collect::<Vec<_>>();
-        // Exact match, changed credits/publication, and removal of all credits.
-        updates[1].1.contributors.push(library_model::Contributor::new("Narrator", None, library_model::NARRATOR_MARC_RELATOR_CODE).unwrap());
-        updates[1].1.publication.rights = vec!["Updated rights".into()];
+        // Exact match, changed credits/book, and removal of all credits.
+        updates[1].1.contributors.push(book_model::Contributor::new("Narrator", None, book_model::NARRATOR_MARC_RELATOR_CODE).unwrap());
+        updates[1].1.book.rights = vec!["Updated rights".into()];
         updates[2].1.contributors.clear();
         let references = updates.iter().map(|(hash, metadata)| (*hash, metadata)).collect::<Vec<_>>();
         for (conn, batch) in [(&mut batched, true), (&mut ordered, false)] {
@@ -334,7 +334,7 @@ mod tests {
         apply(&mut ordered, &prepared, false);
         assert_eq!(state(&batched), state(&ordered));
         let mixed = vec![
-            change(1, 40, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(1), value: library_model::BookLifecycleState::Deleted { origin_folder_id: None } })),
+            change(1, 40, Some(MutationBody::BookLifecycle { content_hash: test_support::fixture_content_hash(1), value: library_replica::BookLifecycleState::Deleted { origin_folder_id: None } })),
             change(1, 35, None),
             change(2, 50, None),
         ];

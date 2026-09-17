@@ -5,7 +5,7 @@ use library_model::BrowseContents;
 pub fn folder_contents_filtered_sorted(
     conn: &Connection, folder_id: &str, query: &str, file_types: &[LibraryFileTypeFilter], chip_sort: BrowseChipSort, book_sort: BrowseBookSort, languages: &[&str], downloaded_only: bool,
 ) -> rusqlite::Result<BrowseContents> {
-    let normalized_query = library_model::normalize_search_text(query);
+    let normalized_query = catalog_model::normalize_search_text(query);
     folder_contents(conn, folder_id, &normalized_query, file_types, chip_sort, book_sort, languages, downloaded_only)
 }
 
@@ -21,7 +21,7 @@ fn folder_contents(
 pub fn grouped_folder_contents(conn: &Connection, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> rusqlite::Result<(BrowseContents, Vec<library_model::BrowseChipGroup>)> {
     let tx = conn.unchecked_transaction()?;
     let folder_id = DirId::parse_str(&query.location).map_err(|error| super::invalid_text_column(0, error.to_string()))?.to_string();
-    let search = library_model::normalize_search_text(&query.search);
+    let search = catalog_model::normalize_search_text(&query.search);
     let languages = query.languages.iter().map(String::as_str).collect::<Vec<_>>();
     let mut contents = folder_contents(&tx, &folder_id, &search, &query.file_types, query.chip_sort, query.book_sort, &languages, downloaded_only)?;
     let groups = if search.is_empty() { group_folder_children(&tx, &mut contents.children, &query.file_types, &languages, query.chip_sort, downloaded_only)? } else { Vec::new() };

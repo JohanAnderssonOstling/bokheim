@@ -1,13 +1,10 @@
-use crate::assets::queries::AssetsSql;
-use crate::assets::queries::BookAccessSql;
-use crate::books::queries::BooksSql;
-use crate::local_paths::BookPlacement;
-use crate::local_paths::RelativeBookPath;
-use crate::local_paths::RelativeDirPath;
-use crate::placements::queries::PlacementsSql;
+use crate::assets::{AssetsSql, BookAccessSql};
+use crate::books::BooksSql;
+use library_replica::{BookPlacement, RelativeBookPath, RelativeDirPath};
+use crate::placements::PlacementsSql;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::parse_uuid_column;
-use library_model::BookFormat;
+use book_model::BookFormat;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;

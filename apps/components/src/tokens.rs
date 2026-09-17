@@ -414,7 +414,7 @@ pub const NAVIGATION_MODAL_MAX_HEIGHT: f32 = 512.0;
 /// The panel still shrinks with the window through `max_w_full`.
 pub const NAVIGATION_MODAL_WIDTH: f32 = 328.0;
 
-/// Compact hierarchy items used when folders and publications share the same
+/// Compact hierarchy items used when folders and books share the same
 /// paginator. These preserve the flat, borderless treatment of the original
 /// hierarchy chips while keeping their geometry out of feature code.
 ///

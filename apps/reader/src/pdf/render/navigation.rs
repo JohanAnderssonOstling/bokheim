@@ -3,18 +3,16 @@
 use gpui::prelude::*;
 use gpui::{Context, Entity, ScrollStrategy, Window};
 use gpui_component::tree::TreeItem;
-use pdf_reader_core::PdfOutlineEntry;
+use book_model::BookTocEntry;
 use ui_components as components;
 
 use super::PdfReaderView;
-use crate::pdf::toc::{nest_pdf_outline, pdf_toc_tree_items};
+use crate::pdf::toc::pdf_toc_tree_items;
 
 impl PdfReaderView {
-    pub(super) fn set_toc(&mut self, outline: &[PdfOutlineEntry], cx: &mut Context<Self>) {
-        let nodes = nest_pdf_outline(outline);
-        let mut targets = Vec::new();
-        self.toc_tree.update(cx, |tree, cx| tree.set_items(pdf_toc_tree_items(&nodes, &mut targets), cx));
-        self.toc.replace_targets(targets);
+    pub(super) fn set_toc(&mut self, outline: Vec<BookTocEntry>, cx: &mut Context<Self>) {
+        self.toc_tree.update(cx, |tree, cx| tree.set_items(pdf_toc_tree_items(&outline), cx));
+        self.toc.replace_entries(outline);
     }
 
     pub(super) fn update_active_toc(&mut self, page_index: usize, cx: &mut Context<Self>) {

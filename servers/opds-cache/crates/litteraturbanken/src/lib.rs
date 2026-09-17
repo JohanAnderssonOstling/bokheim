@@ -35,7 +35,7 @@ pub struct Catalog {
     pub previous_page: Option<Url>,
     pub next_page: Option<Url>,
     pub last_page: Option<Url>,
-    pub publications: Vec<Publication>,
+    pub books: Vec<Book>,
     pub facets: Vec<Facet>,
     pub search_template: String,
 }
@@ -64,7 +64,7 @@ struct QueryOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Publication {
+pub struct Book {
     pub id: String,
     pub title_id: String,
     pub work_title_id: Option<String>,
@@ -288,7 +288,7 @@ fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<
 }
 
 fn catalog_from_response(source_url: Url, options: QueryOptions, response: ApiResponse) -> Result<Catalog, Error> {
-    let publications = response.data.into_iter().filter_map(|work| publication(&source_url, work).transpose()).collect::<Result<Vec<_>, _>>()?;
+    let books = response.data.into_iter().filter_map(|work| book(&source_url, work).transpose()).collect::<Result<Vec<_>, _>>()?;
     let root_url = root_url(&source_url);
     let title = options.search.as_deref().filter(|query| !query.trim().is_empty()).map_or_else(|| "Litteraturbanken".to_owned(), |query| format!("Search results for {query}"));
     let facets = catalog_facets(&source_url, &options);
@@ -299,16 +299,16 @@ fn catalog_from_response(source_url: Url, options: QueryOptions, response: ApiRe
     let previous_page = (current_page > 1).then(|| page_url(&source_url, current_page - 1));
     let next_page = (current_page < page_count).then(|| page_url(&source_url, current_page + 1));
     let last_page = (current_page < page_count).then(|| page_url(&source_url, page_count));
-    Ok(Catalog { title, source_url, root_url, total_items: response.hits, current_page, first_page, previous_page, next_page, last_page, publications, facets, search_template })
+    Ok(Catalog { title, source_url, root_url, total_items: response.hits, current_page, first_page, previous_page, next_page, last_page, books, facets, search_template })
 }
 
-fn publication(base: &Url, work: ApiWork) -> Result<Option<Publication>, Error> {
+fn book(base: &Url, work: ApiWork) -> Result<Option<Book>, Error> {
     let Some(main_author) = work.authors.iter().find(|author| author.role.is_none()).or_else(|| work.authors.first()) else { return Ok(None) };
     let main_author_id = main_author.authorid.clone();
     let has_untyped_author = work.authors.iter().any(|author| author.role.is_none());
     let title_id = work.work_titleid.as_deref().unwrap_or(&work.titleid);
     let file_name = format!("{}_{}.epub", main_author.authorid, title_id);
-    let provider_url = work.titlepath.as_deref().and_then(|title_path| publication_url(base, &main_author_id, title_path).ok());
+    let provider_url = work.titlepath.as_deref().and_then(|title_path| book_url(base, &main_author_id, title_path).ok());
     let full_title = work.title;
     let title = work.shorttitle.filter(|title| !title.trim().is_empty()).unwrap_or_else(|| full_title.clone());
     let alternate_titles = (title != full_title).then_some(full_title).into_iter().collect();
@@ -339,7 +339,7 @@ fn publication(base: &Url, work: ApiWork) -> Result<Option<Publication>, Error> 
             (None, None) => None,
         })
         .collect();
-    Ok(Some(Publication {
+    Ok(Some(Book {
         id: work.lbworkid,
         title_id: work.titleid,
         work_title_id: work.work_titleid,
@@ -494,9 +494,9 @@ fn author_url(base: &Url, author_id: &str) -> Result<Url, Error> {
     Ok(url)
 }
 
-fn publication_url(base: &Url, author_id: &str, title_path: &str) -> Result<Url, Error> {
+fn book_url(base: &Url, author_id: &str, title_path: &str) -> Result<Url, Error> {
     let mut url = author_url(base, author_id)?;
-    url.path_segments_mut().map_err(|_| Error::InvalidUrl("publication URL cannot be a base".to_owned()))?.push("titlar").push(title_path).push("info");
+    url.path_segments_mut().map_err(|_| Error::InvalidUrl("book URL cannot be a base".to_owned()))?.push("titlar").push(title_path).push("info");
     Ok(url)
 }
 
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_a_work_to_a_downloadable_publication() {
+    fn converts_a_work_to_a_downloadable_book() {
         let work = ApiWork {
             lbworkid: "lb1728740".to_owned(),
             title: "Doktor Glas. Roman".to_owned(),
@@ -562,15 +562,15 @@ mod tests {
             authors: vec![ApiAuthor { authorid: "SöderbergH".to_owned(), full_name: "Hjalmar Söderberg".to_owned(), name_for_index: Some("Söderberg, Hjalmar".to_owned()), role: None }],
             ..ApiWork::default()
         };
-        let publication = publication(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
-        assert_eq!(publication.id, "lb1728740");
-        assert_eq!(publication.title, "Doktor Glas");
-        assert_eq!(publication.alternate_titles, ["Doktor Glas. Roman"]);
-        assert_eq!(publication.language.as_deref(), Some("sv"));
-        assert_eq!(publication.series.as_deref(), Some("Barnbiblioteket Saga 3"));
-        assert_eq!(publication.authors[0].name, "Hjalmar Söderberg");
-        assert_eq!(publication.provider_url.as_ref().map(Url::as_str), Some("https://litteraturbanken.se/f%C3%B6rfattare/S%C3%B6derbergH/titlar/DoktorGlas/info"));
-        assert_eq!(publication.download_url.as_str(), "https://litteraturbanken.se/txt/epub/S%C3%B6derbergH_DoktorGlas.epub");
+        let book = book(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
+        assert_eq!(book.id, "lb1728740");
+        assert_eq!(book.title, "Doktor Glas");
+        assert_eq!(book.alternate_titles, ["Doktor Glas. Roman"]);
+        assert_eq!(book.language.as_deref(), Some("sv"));
+        assert_eq!(book.series.as_deref(), Some("Barnbiblioteket Saga 3"));
+        assert_eq!(book.authors[0].name, "Hjalmar Söderberg");
+        assert_eq!(book.provider_url.as_ref().map(Url::as_str), Some("https://litteraturbanken.se/f%C3%B6rfattare/S%C3%B6derbergH/titlar/DoktorGlas/info"));
+        assert_eq!(book.download_url.as_str(), "https://litteraturbanken.se/txt/epub/S%C3%B6derbergH_DoktorGlas.epub");
     }
 
     #[test]
@@ -614,22 +614,22 @@ mod tests {
         }))
         .unwrap();
 
-        let publication = publication(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
-        assert_eq!(publication.title_id, "DoktorGlas");
-        assert_eq!(publication.work_title_id.as_deref(), Some("DoktorGlasSamlade"));
-        assert_eq!(publication.alternate_titles, ["Doktor Glas. Roman"]);
-        assert_eq!(publication.media_type.as_deref(), Some("etext"));
-        assert_eq!(publication.isbn.as_deref(), Some("978-91-8123-064-2"));
-        assert_eq!(publication.publisher, ["Almqvist &amp; Wiksell förlag", "Stockholm", "SE"]);
-        assert_eq!(publication.epub_updated.as_deref(), Some("2026-05-21"));
-        assert_eq!(publication.keywords, ["Brott", "Dagboksromaner"]);
-        assert_eq!(publication.geographic_keywords, ["Stockholm"]);
-        assert_eq!(publication.description_attribution.as_deref(), Some("HelgesonP"));
-        assert_eq!(publication.contributors[0].role.as_deref(), Some("editor"));
-        assert_eq!(publication.rights, ["cc-0"]);
-        assert_eq!(publication.sources, ["GUB: Litt. Sv."]);
-        assert_eq!(publication.popularity, Some(2_059_021));
-        assert_eq!(publication.epub_popularity, Some(9_705));
+        let book = book(&Url::parse(CATALOG_URL).unwrap(), work).unwrap().unwrap();
+        assert_eq!(book.title_id, "DoktorGlas");
+        assert_eq!(book.work_title_id.as_deref(), Some("DoktorGlasSamlade"));
+        assert_eq!(book.alternate_titles, ["Doktor Glas. Roman"]);
+        assert_eq!(book.media_type.as_deref(), Some("etext"));
+        assert_eq!(book.isbn.as_deref(), Some("978-91-8123-064-2"));
+        assert_eq!(book.publisher, ["Almqvist &amp; Wiksell förlag", "Stockholm", "SE"]);
+        assert_eq!(book.epub_updated.as_deref(), Some("2026-05-21"));
+        assert_eq!(book.keywords, ["Brott", "Dagboksromaner"]);
+        assert_eq!(book.geographic_keywords, ["Stockholm"]);
+        assert_eq!(book.description_attribution.as_deref(), Some("HelgesonP"));
+        assert_eq!(book.contributors[0].role.as_deref(), Some("editor"));
+        assert_eq!(book.rights, ["cc-0"]);
+        assert_eq!(book.sources, ["GUB: Litt. Sv."]);
+        assert_eq!(book.popularity, Some(2_059_021));
+        assert_eq!(book.epub_popularity, Some(9_705));
     }
 
     #[test]
@@ -679,19 +679,19 @@ mod tests {
     async fn live_catalogue_and_search_are_available() {
         let client = Client::builder().build().unwrap();
         let root = fetch_catalog(&client, Url::parse(CATALOG_URL).unwrap(), 24 * 1024 * 1024).await.unwrap();
-        assert_eq!(root.publications.len(), PAGE_SIZE as usize);
+        assert_eq!(root.books.len(), PAGE_SIZE as usize);
         assert!(root.total_items > 1_000);
         assert!(root.next_page.is_some());
         let second = fetch_catalog(&client, root.next_page.clone().unwrap(), 24 * 1024 * 1024).await.unwrap();
         assert_eq!(second.current_page, 2);
-        assert_eq!(second.publications.len(), PAGE_SIZE as usize);
-        assert_ne!(second.publications[0].id, root.publications[0].id);
+        assert_eq!(second.books.len(), PAGE_SIZE as usize);
+        assert_ne!(second.books[0].id, root.books[0].id);
         let search_url = Url::parse("https://litteraturbanken.se/epub?visa=epub&sort=popularitet&bokheim_query=Doktor%20Glas").unwrap();
         let search = fetch_catalog(&client, search_url, 24 * 1024 * 1024).await.unwrap();
-        assert!(search.publications.iter().any(|publication| publication.title == "Doktor Glas"));
+        assert!(search.books.iter().any(|book| book.title == "Doktor Glas"));
         let german_url = Url::parse("https://litteraturbanken.se/epub?visa=epub&bokheim_sort=title&bokheim_language=de").unwrap();
         let german = fetch_catalog(&client, german_url, 24 * 1024 * 1024).await.unwrap();
-        assert!(!german.publications.is_empty());
-        assert!(german.publications.iter().all(|publication| publication.language.as_deref() == Some("de")));
+        assert!(!german.books.is_empty());
+        assert!(german.books.iter().all(|book| book.language.as_deref() == Some("de")));
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use publication_model::PublicationSubject;
+use book_model::BookSubject;
 
 pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Result<(), CatalogStoreError> {
     const BATCH_SIZE: i64 = 256;
@@ -11,8 +11,8 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
     {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute("DELETE FROM catalog_subject_browse_index_metadata", [])?;
-        transaction.execute("DELETE FROM catalog_publication_subject_node WHERE system_id=?1", [subject_projection::UNIFIED_SYSTEM_ID])?;
-        transaction.execute("DELETE FROM catalog_publication_subject_assignment WHERE system_id=?1", [subject_projection::UNIFIED_SYSTEM_ID])?;
+        transaction.execute("DELETE FROM catalog_book_subject_node WHERE system_id=?1", [subject_projection::UNIFIED_SYSTEM_ID])?;
+        transaction.execute("DELETE FROM catalog_book_subject_assignment WHERE system_id=?1", [subject_projection::UNIFIED_SYSTEM_ID])?;
         advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
     }
@@ -22,14 +22,14 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
             let (sql, parameters): (&str, Vec<rusqlite::types::Value>) = match &cursor {
                 Some((source_id, generation, edition_id, work_id)) => (
                     "SELECT DISTINCT subject.source_id,subject.generation,subject.edition_id,subject.work_id
-                       FROM catalog_publication_subject subject
+                       FROM catalog_book_subject subject
                        JOIN catalog_source active_source USING(source_id)
-                       JOIN catalog_publication active_publication
-                         ON active_publication.source_id=subject.source_id
-                        AND active_publication.generation=subject.generation
-                        AND active_publication.edition_id=subject.edition_id
-                        AND active_publication.work_id=subject.work_id
-                        AND active_publication.importable=1
+                       JOIN catalog_book active_book
+                         ON active_book.source_id=subject.source_id
+                        AND active_book.generation=subject.generation
+                        AND active_book.edition_id=subject.edition_id
+                        AND active_book.work_id=subject.work_id
+                        AND active_book.importable=1
                       WHERE active_source.active_generation=subject.generation
                         AND (subject.source_id,subject.generation,subject.edition_id,subject.work_id) > (?1,?2,?3,?4)
                       ORDER BY subject.source_id,subject.generation,subject.edition_id,subject.work_id LIMIT ?5",
@@ -37,14 +37,14 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
                 ),
                 None => (
                     "SELECT DISTINCT subject.source_id,subject.generation,subject.edition_id,subject.work_id
-                       FROM catalog_publication_subject subject
+                       FROM catalog_book_subject subject
                        JOIN catalog_source active_source USING(source_id)
-                       JOIN catalog_publication active_publication
-                         ON active_publication.source_id=subject.source_id
-                        AND active_publication.generation=subject.generation
-                        AND active_publication.edition_id=subject.edition_id
-                        AND active_publication.work_id=subject.work_id
-                        AND active_publication.importable=1
+                       JOIN catalog_book active_book
+                         ON active_book.source_id=subject.source_id
+                        AND active_book.generation=subject.generation
+                        AND active_book.edition_id=subject.edition_id
+                        AND active_book.work_id=subject.work_id
+                        AND active_book.importable=1
                       WHERE active_source.active_generation=subject.generation
                       ORDER BY subject.source_id,subject.generation,subject.edition_id,subject.work_id LIMIT ?1",
                     vec![BATCH_SIZE.into()],
@@ -62,14 +62,14 @@ pub fn refresh_unified_subject_assignments(connection: &mut Connection) -> Resul
         for (source_id, generation, edition_id, work_id) in keys {
             let subjects = {
                 let mut statement = transaction.prepare(
-                    "SELECT name,source,authority,code FROM catalog_publication_subject
+                    "SELECT name,source,authority,code FROM catalog_book_subject
                       WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position",
                 )?;
                 let rows = statement.query_map(params![source_id, generation, edition_id, work_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)))?;
                 let mut subjects = Vec::new();
                 for row in rows {
                     let (name, source, authority, code) = row?;
-                    subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
+                    subjects.push(BookSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
                 }
                 subjects
             };
@@ -104,9 +104,9 @@ impl CatalogStore {
             transaction.commit()?;
         }
         for statement in [
-            "INSERT INTO catalog_publication_title_fts(catalog_publication_title_fts) VALUES('rebuild')",
-            "INSERT INTO catalog_publication_author_fts(catalog_publication_author_fts) VALUES('rebuild')",
-            "INSERT INTO catalog_publication_toc_fts(catalog_publication_toc_fts) VALUES('rebuild')",
+            "INSERT INTO catalog_book_title_fts(catalog_book_title_fts) VALUES('rebuild')",
+            "INSERT INTO catalog_book_author_fts(catalog_book_author_fts) VALUES('rebuild')",
+            "INSERT INTO catalog_book_toc_fts(catalog_book_toc_fts) VALUES('rebuild')",
         ] {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute(statement, [])?;
@@ -145,7 +145,7 @@ impl CatalogStore {
         {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute("UPDATE catalog_subject_browse_index_metadata SET index_version=0 WHERE singleton=1", [])?;
-            transaction.execute("DELETE FROM catalog_publication_subject_node", [])?;
+            transaction.execute("DELETE FROM catalog_book_subject_node", [])?;
             transaction.execute("DELETE FROM catalog_subject_node", [])?;
             transaction.commit()?;
         }
@@ -155,14 +155,14 @@ impl CatalogStore {
             let assignments = {
                 let mut statement = transaction.prepare(
                     "SELECT assignment.rowid,assignment.source_id,assignment.generation,assignment.edition_id,assignment.work_id,assignment.system_id,assignment.subject_path
-                       FROM catalog_publication_subject_assignment assignment
+                       FROM catalog_book_subject_assignment assignment
                        JOIN catalog_source active_source ON active_source.source_id=assignment.source_id
-                       JOIN catalog_publication active_publication
-                         ON active_publication.source_id=assignment.source_id
-                        AND active_publication.generation=assignment.generation
-                        AND active_publication.edition_id=assignment.edition_id
-                        AND active_publication.work_id=assignment.work_id
-                        AND active_publication.importable=1
+                       JOIN catalog_book active_book
+                         ON active_book.source_id=assignment.source_id
+                        AND active_book.generation=assignment.generation
+                        AND active_book.edition_id=assignment.edition_id
+                        AND active_book.work_id=assignment.work_id
+                        AND active_book.importable=1
                       WHERE assignment.rowid>?1 AND assignment.system_id=?2
                         AND active_source.active_generation=assignment.generation
                       ORDER BY assignment.rowid LIMIT ?3",
@@ -201,11 +201,11 @@ impl CatalogStore {
         let mut statement = connection.prepare(
             "SELECT subject.source_id,subject.edition_id,subject.work_id,
                     subject.name,subject.source,subject.authority,subject.code
-               FROM catalog_publication_subject subject
+               FROM catalog_book_subject subject
                JOIN catalog_source source ON source.source_id=subject.source_id AND source.active_generation=subject.generation
-               JOIN catalog_publication publication ON publication.source_id=subject.source_id AND publication.generation=subject.generation
-                 AND publication.edition_id=subject.edition_id AND publication.work_id=subject.work_id
-              WHERE publication.importable=1
+               JOIN catalog_book book ON book.source_id=subject.source_id AND book.generation=subject.generation
+                 AND book.edition_id=subject.edition_id AND book.work_id=subject.work_id
+              WHERE book.importable=1
               ORDER BY subject.source_id,subject.edition_id,subject.work_id,subject.position",
         )?;
         let rows = statement
@@ -219,8 +219,8 @@ impl CatalogStore {
         let mut bisac_books = 0_u64;
         let mut unmatched = BTreeMap::<String, (u64, Vec<Vec<String>>)>::new();
         let mut current_book = None::<(String, String, String)>;
-        let mut subjects = Vec::<PublicationSubject>::new();
-        let mut audit_book = |subjects: &[PublicationSubject]| {
+        let mut subjects = Vec::<BookSubject>::new();
+        let mut audit_book = |subjects: &[BookSubject]| {
             if subjects.is_empty() {
                 return;
             }
@@ -260,7 +260,7 @@ impl CatalogStore {
                 subjects.clear();
             }
             current_book = Some(key);
-            subjects.push(PublicationSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
+            subjects.push(BookSubject::new(None, name, source, authority, code).map_err(|error| CatalogStoreError::new(error.to_string()))?);
         }
         audit_book(&subjects);
         drop(audit_book);

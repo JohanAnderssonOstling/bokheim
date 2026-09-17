@@ -16,7 +16,6 @@ pub struct LibraryOpenConfig {
     pub database_locator: String,
     pub default_sync_server_url: ServerUrl,
     pub metadata_server_url: String,
-    pub hidden_directory: String,
     pub asset_storage_enabled: bool,
     pub reset_cloud_presence: bool,
 }

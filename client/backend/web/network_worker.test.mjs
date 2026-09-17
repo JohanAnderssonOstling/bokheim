@@ -30,7 +30,7 @@ test("network bridge preserves request bytes and status and streams responses on
     };
     const response = await fetch("https://example.test/sync", { method: "POST", headers: { authorization: "Bearer test" }, body: new Uint8Array([1, 2]) });
     assert.equal(response.status, 201);
-    assert.equal(produced, 0, "headers must not eagerly drain a publication body");
+    assert.equal(produced, 0, "headers must not eagerly drain a book body");
     assert.equal(response.headers.get("content-type"), "application/octet-stream");
     const reader = response.body.getReader();
     assert.deepEqual((await reader.read()).value, new Uint8Array([1]));

@@ -1,7 +1,6 @@
-use crate::sync_state::queries::SyncSql;
+use crate::sync_state::SyncSql;
 use library_replica::MutationBody;
 use library_replica::StateMutation;
-use library_replica::catalog_publication_state_subkey;
 use rusqlite::Connection;
 use sync_common::MutationId;
 use sync_common::ReplicaSeq;
@@ -44,6 +43,9 @@ pub(crate) struct OutboxRow {
 pub(crate) fn decode_outbox_row(row: OutboxRow) -> Result<StateMutation, OutboxReadError> {
     let raw_local_seq = row.replica_seq;
     let corrupt = |reason| OutboxReadError::CorruptMutation { replica_seq: raw_local_seq, reason };
+    if row.state_kind == "catalog_book" {
+        return Err(corrupt("catalog-book mutations are no longer supported"));
+    }
     let mutation_id = MutationId::parse(&row.mutation_id).map_err(|_| corrupt("invalid mutation id"))?;
     let body: MutationBody = sync_common::wire::decode(&row.body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|_| corrupt("body is not a canonical mutation"))?;
     let (kind, key, subkey) = canonical_outbox_key(&body);
@@ -64,10 +66,11 @@ fn canonical_outbox_key(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
-        MutationBody::CatalogPublication { source_id, publication, .. } => ("catalog_publication", source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref())),
+        MutationBody::CatalogBook { .. } => unreachable!("catalog mutations are rejected before decoding"),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
         MutationBody::PdfReaderMetadata { content_hash, value } => ("pdf_reader_metadata", content_hash.to_string(), value.checksum.clone()),
         MutationBody::Description { content_hash, .. } => ("description", content_hash.to_string(), String::new()),
+        MutationBody::BookToc { content_hash, .. } => ("book_toc", content_hash.to_string(), String::new()),
     }
 }
 
@@ -94,11 +97,11 @@ pub fn get_pending_mutations(conn: &Connection) -> Result<Vec<StateMutation>, Ou
     Ok(mutations)
 }
 
-/// Pending state stays durable while its exact local publication version is
+/// Pending state stays durable while its exact local book version is
 /// uploading (including rejected/retryable jobs). Only completion releases it.
 pub fn get_publishable_mutations(conn: &Connection) -> Result<Vec<StateMutation>, OutboxReadError> {
     let pending = pending_uploads(conn)?;
-    Ok(get_pending_mutations(conn)?.into_iter().filter(|m| publication_ready(m, &pending)).collect())
+    Ok(get_pending_mutations(conn)?.into_iter().filter(|m| book_ready(m, &pending)).collect())
 }
 
 fn pending_uploads(conn: &Connection) -> Result<std::collections::HashSet<String>, OutboxReadError> {
@@ -110,7 +113,7 @@ fn pending_uploads(conn: &Connection) -> Result<std::collections::HashSet<String
     rows.collect::<rusqlite::Result<_>>().map_err(OutboxReadError::Database)
 }
 
-fn publication_ready(mutation: &StateMutation, pending: &std::collections::HashSet<String>) -> bool {
+fn book_ready(mutation: &StateMutation, pending: &std::collections::HashSet<String>) -> bool {
     mutation.body.upload_dependency().is_none_or(|hash| !pending.contains(hash.as_str()))
 }
 
@@ -151,7 +154,7 @@ pub fn pending_mutations_page(conn: &Connection, after: i64, through: i64) -> Re
         .map_err(OutboxReadError::Database)?;
         let body_bytes = stored.body.len();
         let mutation = decode_outbox_row(stored)?;
-        if !publication_ready(&mutation, &pending) {
+        if !book_ready(&mutation, &pending) {
             continue;
         }
         if !mutations.is_empty() && bytes + body_bytes > BYTE_TARGET {

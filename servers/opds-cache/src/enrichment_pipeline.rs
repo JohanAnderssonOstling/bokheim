@@ -7,7 +7,7 @@
 //! pause or an error leaves unfinished work durable for the next pass.
 
 use crate::{CatalogProcess, CatalogService};
-use publication_enrichment::EnrichmentWave;
+use book_enrichment::EnrichmentWave;
 
 impl CatalogService {
     /// Runs one complete catalogue-enrichment pass.

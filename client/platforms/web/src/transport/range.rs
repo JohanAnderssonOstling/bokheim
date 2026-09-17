@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use super::{field, error_message};
 
 #[wasm_bindgen(inline_js = r#"
-export function servePublication(read, length) {
+export function serveBook(read, length) {
     const channel = new MessageChannel();
     const buffer = new SharedArrayBuffer(8 + 256 * 1024);
     const state = new Int32Array(buffer, 0, 2);
@@ -19,7 +19,7 @@ export function servePublication(read, length) {
         try {
             if (!Number.isSafeInteger(data.offset) || data.offset < 0 ||
                 !Number.isInteger(data.length) || data.length < 0 || data.length > bytes.length)
-                throw new Error('invalid publication range');
+                throw new Error('invalid book range');
             const chunk = await read(data.offset, data.length);
             if (Atomics.load(state, 0) === -2) return;
             bytes.set(chunk);
@@ -29,17 +29,17 @@ export function servePublication(read, length) {
         Atomics.notify(state, 0);
     };
     return {source: {port: channel.port2, length}, close() {
-        channel.port1.postMessage({error: 'publication source closed'});
+        channel.port1.postMessage({error: 'book source closed'});
         channel.port1.close();
         channel.port2.close();
         Atomics.store(state, 0, -2);
         Atomics.notify(state, 0);
     }};
 }
-export function closePublication(server) { server.close(); }
+export function closeBook(server) { server.close(); }
 // The SharedWorker brokers this port, but never receives shared memory.
 // Both dedicated workers belong to the same host tab's agent cluster.
-export function connectPublication(source) {
+export function connectBook(source) {
     return new Promise((resolve, reject) => {
         const finish = error => {
             clearTimeout(timeout);
@@ -47,48 +47,48 @@ export function connectPublication(source) {
             source.port.onmessageerror = null;
             if (error) reject(new Error(error)); else resolve();
         };
-        const timeout = setTimeout(() => finish('publication source connection timed out'), 30000);
+        const timeout = setTimeout(() => finish('book source connection timed out'), 30000);
         source.port.onmessage = ({data}) => {
             if (data.error) { finish(data.error); return; }
             source.buffer = data.buffer;
             finish();
         };
-        source.port.onmessageerror = () => finish('invalid publication source connection');
+        source.port.onmessageerror = () => finish('invalid book source connection');
         source.port.postMessage({connect: true});
     });
 }
-function readPublicationRange(source, offset, length) {
+function readBookRange(source, offset, length) {
     const state = new Int32Array(source.buffer, 0, 2);
-    if (Atomics.load(state, 0) < 0) throw new Error('publication source closed');
+    if (Atomics.load(state, 0) < 0) throw new Error('book source closed');
     Atomics.store(state, 0, 0);
     source.port.postMessage({offset, length});
     const deadline = Date.now() + 30000;
     while (Atomics.load(state, 0) === 0) {
         if (Atomics.wait(state, 0, 0, Math.max(0, deadline - Date.now())) === 'timed-out')
-            throw new Error('publication range read timed out');
+            throw new Error('book range read timed out');
     }
-    if (Atomics.load(state, 0) !== 1) throw new Error('publication range read failed');
+    if (Atomics.load(state, 0) !== 1) throw new Error('book range read failed');
     return new Uint8Array(source.buffer, 8, Atomics.load(state, 1));
 }
-export function checkPublication(source) {
+export function checkBook(source) {
     if (Atomics.load(new Int32Array(source.buffer, 0, 2), 0) < 0)
-        throw new Error('publication source closed');
+        throw new Error('book source closed');
 }
-export function readPublication(source, offset, length) {
-    return readPublicationRange(source, offset, length);
+export function readBook(source, offset, length) {
+    return readBookRange(source, offset, length);
 }
 
 "#)]
 extern "C" {
-    #[wasm_bindgen(js_name = servePublication, catch)]
+    #[wasm_bindgen(js_name = serveBook, catch)]
     fn serve(read: &Function, length: f64) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = connectPublication)]
+    #[wasm_bindgen(js_name = connectBook)]
     fn connect_source(source: &JsValue) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = closePublication)]
+    #[wasm_bindgen(js_name = closeBook)]
     fn close(server: &JsValue);
-    #[wasm_bindgen(js_name = checkPublication, catch)]
+    #[wasm_bindgen(js_name = checkBook, catch)]
     fn check_source(source: &JsValue) -> Result<(), JsValue>;
-    #[wasm_bindgen(js_name = readPublication, catch)]
+    #[wasm_bindgen(js_name = readBook, catch)]
     fn read_range(source: &JsValue, offset: f64, length: u32) -> Result<Uint8Array, JsValue>;
 }
 
@@ -119,7 +119,7 @@ impl Server {
         Self::attach(length, read)
     }
     fn attach<T: ?Sized + wasm_bindgen::closure::WasmClosure + 'static>(length: u64, read: Closure<T>) -> Result<Self, String> {
-        if length > 9_007_199_254_740_991 { return Err("publication exceeds browser offset precision".into()); }
+        if length > 9_007_199_254_740_991 { return Err("book exceeds browser offset precision".into()); }
         let server = serve(read.as_ref().unchecked_ref(), length as f64).map_err(|e| error_message(&e))?;
         Ok(Self { server, _read: Box::new(read) })
     }
@@ -138,7 +138,7 @@ thread_local! {
 pub struct Source { id: u32, length: u64 }
 impl Source {
     pub fn new(source: JsValue) -> Result<Self, String> {
-        let length = field(&source, "length").as_f64().filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= 9_007_199_254_740_991.0).ok_or("invalid publication length")? as u64;
+        let length = field(&source, "length").as_f64().filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= 9_007_199_254_740_991.0).ok_or("invalid book length")? as u64;
         let id = NEXT.with(|next| { let id = next.get().wrapping_add(1); next.set(id); id });
         SOURCES.with(|sources| sources.borrow_mut().insert(id, source));
         Ok(Self { id, length })
@@ -147,7 +147,7 @@ impl Source {
     fn with<T>(&self, operation: impl FnOnce(&JsValue) -> Result<T, JsValue>) -> std::io::Result<T> {
         SOURCES.with(|sources| {
             let sources = sources.borrow();
-            let source = sources.get(&self.id).ok_or_else(|| std::io::Error::other("publication reader unavailable on this worker"))?;
+            let source = sources.get(&self.id).ok_or_else(|| std::io::Error::other("book reader unavailable on this worker"))?;
             operation(source).map_err(|e| std::io::Error::other(error_message(&e)))
         })
     }

@@ -6,7 +6,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Window};
 use gpui_component::list::ListItem;
 use gpui_component::tree::{TreeState, tree};
-use library_model::ReaderAnnotation;
+use book_model::ReaderAnnotation;
 use ui_components as components;
 
 use crate::settings::ReaderSettings;

@@ -1,4 +1,4 @@
-// Regression for local publication capabilities opening without a remote prefix.
+// Regression for local book capabilities opening without a remote prefix.
 // Exercise import and the actual blocking EPUB parser in a release WASM app.
 import assert from 'node:assert/strict';
 import {mkdtemp, rm} from 'node:fs/promises';
@@ -15,7 +15,7 @@ with zipfile.ZipFile(Path(sys.argv[1])/'local-range.epub', 'w') as book:
     book.writestr('META-INF/container.xml', '''<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>''')
     book.writestr('content.opf', '''<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:uuid:55eb002e-0830-43d7-8536-542f57714277</dc:identifier><dc:title>Local range regression</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>''')
     book.writestr('nav.xhtml', '''<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="chapter.xhtml">Local chapter</a></li></ol></nav></body></html>''')
-    book.writestr('chapter.xhtml', '''<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Local chapter</title></head><body><h1>Local EPUB opened</h1><div style="background-color:#00ff00;width:400px;height:200px">Local range reader regression</div><p>This chapter was read through a local publication capability without prefetched bytes.</p></body></html>''')
+    book.writestr('chapter.xhtml', '''<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Local chapter</title></head><body><h1>Local EPUB opened</h1><div style="background-color:#00ff00;width:400px;height:200px">Local range reader regression</div><p>This chapter was read through a local book capability without prefetched bytes.</p></body></html>''')
 `, directory]);
 const browser = await firefox.launch({headless:true, executablePath:process.env.FIREFOX_PATH, firefoxUserPrefs:{'dom.webgpu.enabled':true,'gfx.webrender.all':true}});
 try {

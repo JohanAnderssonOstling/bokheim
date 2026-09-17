@@ -1,15 +1,14 @@
 //! Import storage lifecycle. Browser objects are committed asynchronously before
 //! the metadata transaction; native files are published against its placements.
-use super::{AssetStore, AssetStoreError, StagedBook};
-use crate::{ContentHash, DirId};
-use crate::database::FileDatabase;
+use super::{AssetStore, AssetStoreError, PublishedStagedBook, StagedBook};
+use sync_common::{ContentHash, DirId};
 
 impl AssetStore {
-    pub async fn stage_import<D: FileDatabase>(&self, db: &D, parent: DirId, name: String, source: Box<dyn std::io::Read + Send>) -> Result<StagedBook, AssetStoreError> {
+    pub async fn stage_import(&self, db: &library_database::Database, parent: DirId, name: String, source: Box<dyn std::io::Read + Send>) -> Result<StagedBook, AssetStoreError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let relative = self.prepare_import_path(db, parent, name).await?;
-            self.stage_publication(relative, source).await
+            self.stage_book(relative, source).await
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -20,7 +19,7 @@ impl AssetStore {
 }
 
 /// Verified storage ready to participate in the caller's metadata transaction.
-/// The caller must hold its content lease through preparation and publication.
+/// The caller must hold its content lease through preparation and book.
 pub struct PreparedImport {
     #[cfg(not(target_arch = "wasm32"))]
     staged: StagedBook,
@@ -39,40 +38,20 @@ impl StagedBook {
 }
 
 impl PreparedImport {
-    pub fn prepare_destination(&self, store: &AssetStore, conn: &mut rusqlite::Connection, parent: DirId) -> Result<(), AssetStoreError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        { store.placement().prepare_directory(conn, parent) }
-        #[cfg(target_arch = "wasm32")]
-        { let _ = (store, conn, parent); Ok(()) }
-    }
-
-    /// Returns whether imported bytes became the placement's readable content.
-    pub fn publish(self, store: &AssetStore, conn: &rusqlite::Connection, parent: &DirId) -> Result<bool, AssetStoreError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        { self.staged.publish(store, conn, parent) }
-        #[cfg(target_arch = "wasm32")]
-        { let _ = (store, conn, parent); Ok(true) }
-    }
-}
-
-impl AssetStore {
-    pub fn reconcile_import_placements(&self, conn: &rusqlite::Connection, hash: &ContentHash) -> Result<(), AssetStoreError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        { self.placement().queue_book_placements(conn, hash) }
-        #[cfg(target_arch = "wasm32")]
-        { let _ = (conn, hash); Ok(()) }
+    /// Connection-free filesystem book from caller-resolved snapshots.
+    /// The caller records the returned placement through the database commit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn publish_snapshot(self, store: &AssetStore, relative_path: &str, occupied_names: &[String]) -> Result<PublishedStagedBook, AssetStoreError> {
+        self.staged.publish_snapshot(store, relative_path, occupied_names)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AssetStore {
-    pub async fn prepare_import_path<D: FileDatabase>(&self, db: &D, parent: DirId, name: String) -> Result<String, AssetStoreError> {
-        let store = self.clone();
-        let db = db.clone();
-        crate::executor::run_blocking(move || {
-            let mut conn = db.get().map_err(|error| AssetStoreError(error.to_string()))?;
-            store.placement().prepare_directory(&mut conn, parent)?;
-            client_library::file_work::placement_path(&conn, &parent, &name).map_err(AssetStoreError::from)
-        }).await.map_err(|error| AssetStoreError(error.to_string()))?
+    pub async fn prepare_import_path(&self, db: &library_database::Database, parent: DirId, name: String) -> Result<String, AssetStoreError> {
+        self.placement().prepare_directory_with_database(db, parent).await?;
+        db.native_book_path(parent, &name)
+            .map_err(|error| AssetStoreError(error.to_string()))?
+            .ok_or_else(|| AssetStoreError("prepared directory no longer exists".to_owned()))
     }
 }

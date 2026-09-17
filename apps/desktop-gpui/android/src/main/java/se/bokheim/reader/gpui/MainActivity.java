@@ -83,7 +83,7 @@ public final class MainActivity extends GameActivity {
 
     private static final String LOG_TAG = "Bokheim";
     private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
-    private static final String[] PUBLICATION_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
+    private static final String[] BOOK_EXTENSIONS = {"epub", "pdf", "mobi", "azw", "azw3", "m4b"};
 
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private ActivityResultLauncher<Intent> pathPromptLauncher;
@@ -130,7 +130,7 @@ public final class MainActivity extends GameActivity {
     private native void nativeDirectoryPromptResult(long requestId, String error, boolean cancelled);
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
-    private native void nativeOpenPublication(String name, int fileDescriptor);
+    private native void nativeOpenBook(String name, int fileDescriptor);
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,
@@ -157,7 +157,7 @@ public final class MainActivity extends GameActivity {
         // Opening a shared book should go straight to the reader. Offer the
         // optional storage permission on an ordinary app launch instead.
         promptForStorageAccess(getIntent());
-        handleIncomingPublicationIntent(getIntent());
+        handleIncomingBookIntent(getIntent());
     }
 
     @Override
@@ -165,7 +165,7 @@ public final class MainActivity extends GameActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         promptForStorageAccess(intent);
-        handleIncomingPublicationIntent(intent);
+        handleIncomingBookIntent(intent);
     }
 
     private void promptForStorageAccess(Intent intent) {
@@ -190,7 +190,7 @@ public final class MainActivity extends GameActivity {
         }
     }
 
-    private void handleIncomingPublicationIntent(Intent intent) {
+    private void handleIncomingBookIntent(Intent intent) {
         if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData() == null) {
             return;
         }
@@ -200,18 +200,18 @@ public final class MainActivity extends GameActivity {
         fileExecutor.execute(() -> {
             try {
                 String name = queryDisplayName(uri);
-                if (!matchesExtension(name, PUBLICATION_EXTENSIONS)) {
-                    Log.w(LOG_TAG, "Ignoring unsupported incoming publication " + name);
+                if (!matchesExtension(name, BOOK_EXTENSIONS)) {
+                    Log.w(LOG_TAG, "Ignoring unsupported incoming book " + name);
                     return;
                 }
                 try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
                     if (descriptor == null) {
                         throw new IOException("The document provider could not open " + name);
                     }
-                    nativeOpenPublication(name, descriptor.detachFd());
+                    nativeOpenBook(name, descriptor.detachFd());
                 }
             } catch (Exception error) {
-                Log.e(LOG_TAG, "Could not open incoming publication", error);
+                Log.e(LOG_TAG, "Could not open incoming book", error);
             }
         });
     }

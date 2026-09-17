@@ -1,1 +1,0 @@
-SELECT row_id,publication_metadata,COALESCE(title,''),COALESCE((SELECT description FROM book_description WHERE book_row_id=book.row_id),''),contributors_for_book(row_id) FROM book WHERE content_hash=?1 AND deleted_at IS NULL AND hidden_at IS NULL

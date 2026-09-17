@@ -32,10 +32,10 @@ impl AudiobookDock {
     }
 
     fn snapshot(player: &PlaybackSession) -> (String, Option<String>, Option<String>, bool, Option<String>, bool, Option<u64>) {
-        let title = player.publication.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Opening audiobook…".into());
-        let subtitle = player.publication.as_ref().and_then(|book| book.author.clone().or_else(|| book.narrator.clone()));
-        let chapter = player.publication.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title));
-        (title, subtitle, chapter, player.transport_playing(), player.error.clone(), player.is_buffering(), player.publication.as_ref().and_then(|book| book.cover.as_ref()).map(|cover| cover.id()))
+        let title = player.book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Opening audiobook…".into());
+        let subtitle = player.book.as_ref().and_then(|book| book.author.clone().or_else(|| book.narrator.clone()));
+        let chapter = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title));
+        (title, subtitle, chapter, player.transport_playing(), player.error.clone(), player.is_buffering(), player.book.as_ref().and_then(|book| book.cover.as_ref()).map(|cover| cover.id()))
     }
 }
 
@@ -115,7 +115,7 @@ mod tests {
         let player = cx.new(|_| {
             let mut player = PlaybackSession::new(1.0, sender);
             player.stopped = true;
-            player.publication = Some(Arc::new(AudiobookPublication {
+            player.book = Some(Arc::new(AudiobookBook {
                 title: "A very long audiobook title that must not push the transport buttons outside the screen".into(),
                 author: None,
                 narrator: None,
@@ -166,11 +166,11 @@ mod tests {
         let (sender, _) = async_channel::unbounded();
         let mut player = PlaybackSession::new(1.0, sender);
         player.stopped = true;
-        player.publication = Some(Arc::new(AudiobookPublication { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
+        player.book = Some(Arc::new(AudiobookBook { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
         let initial = AudiobookDock::snapshot(&player);
         player.position = Duration::from_secs(10);
         assert_eq!(initial, AudiobookDock::snapshot(&player));
-        Arc::make_mut(player.publication.as_mut().unwrap()).cover = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, vec![0xff, 0xd8, 0xff])));
+        Arc::make_mut(player.book.as_mut().unwrap()).cover = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, vec![0xff, 0xd8, 0xff])));
         assert_ne!(initial, AudiobookDock::snapshot(&player));
     }
 
@@ -180,7 +180,7 @@ mod tests {
         let player = cx.new(|_| {
             let mut player = PlaybackSession::new(1.0, sender);
             player.stopped = true;
-            player.publication = Some(Arc::new(AudiobookPublication { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
+            player.book = Some(Arc::new(AudiobookBook { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
             player
         });
         let dock = cx.new(|cx| AudiobookDock::new(player.clone(), cx));
@@ -200,7 +200,7 @@ mod tests {
         }
         assert_eq!(notifications.get(), before);
         player.update(cx, |player, cx| {
-            Arc::make_mut(player.publication.as_mut().unwrap()).title = "Updated metadata".into();
+            Arc::make_mut(player.book.as_mut().unwrap()).title = "Updated metadata".into();
             cx.notify();
         });
         cx.run_until_parked();
@@ -212,7 +212,7 @@ impl Render for AudiobookDock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ui_components::browser_theme(cx);
         let player = self.player.read(cx);
-        let cover = player.publication.as_ref().and_then(|book| book.cover.clone());
+        let cover = player.book.as_ref().and_then(|book| book.cover.clone());
         let ready = player.can_play();
         let layout = super::MenuLayout::for_window(window);
         if layout.compact {
@@ -227,7 +227,7 @@ impl Render for AudiobookDock {
                 div().id("audiobook-dock-expand").flex_1().min_w_0().flex().flex_col().justify_center().cursor_pointer().on_click(move |_, _, cx| expand.update(cx, |_, cx| cx.emit(DockAction::Expand))).child(title_line).child(chapter_line);
             let mobile_play_pause =
                 ui_components::base_button("dock-play").label(if self.snapshot.3 { "Pause" } else { "Play" }).ghost().disabled(!ready).on_click(cx.listener(|dock, _, _, cx| dock.player.update(cx, |player, cx| player.request_toggle(cx))));
-            let duration = player.publication.as_ref().map(|book| book.duration).unwrap_or_default();
+            let duration = player.book.as_ref().map(|book| book.duration).unwrap_or_default();
             let position = player.position.min(duration);
             let progress_fraction = if duration.is_zero() { 0.0 } else { (position.as_secs_f64() / duration.as_secs_f64()) as f32 };
             let progress_track = div()
@@ -334,7 +334,7 @@ impl Render for AudiobookDock {
             div().flex_none().flex().items_center().justify_end().gap(px(4.0)).child(sleep).child(speed).child(ui_components::base_button("dock-close").label("Close").ghost().on_click(cx.listener(|_, _, _, cx| cx.emit(DockAction::Close))));
 
         let (chapter_position, chapter_duration) = player
-            .publication
+            .book
             .as_ref()
             .and_then(|book| book.chapters.get(player.active_chapter_index()))
             .map(|chapter| {

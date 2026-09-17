@@ -1,4 +1,4 @@
-use crate::ContentHash;
+use content_address::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

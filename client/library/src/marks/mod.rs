@@ -1,7 +1,7 @@
 //! Persistent reader annotations for a library.
 
 use include_sqlite_sql::include_sql;
-use library_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
+use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
 use rusqlite::{Connection, Row, types::Type};
 use sync_common::ContentHash;
 

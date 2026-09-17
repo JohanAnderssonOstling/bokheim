@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use crate::{EditionIdentityMatch, EditionTitleMatch};
     fn fixture() -> (EditionIdentityQuery, EditionIdentityResult) {
-        let query = EditionIdentityQuery { query_id: "1".into(), title: "Example History: Volume 2".into(), authors: vec!["Ada Author".into()], publishers: vec![], publication_year: None };
+        let query = EditionIdentityQuery { query_id: "1".into(), title: "Example History: Volume 2".into(), authors: vec!["Ada Author".into()], publishers: vec![], book_year: None };
         let candidates = [1999, 2013]
             .into_iter()
             .map(|year| EditionIdentityMatch { subtitle: None,
@@ -87,9 +87,9 @@ mod tests {
                 title_match: EditionTitleMatch::Both,
                 authors: query.authors.clone(),
                 publishers: vec!["Example Press".into()],
-                publication_year: Some(year),
+                book_year: Some(year),
                 matched_publisher: false,
-                matched_publication_year: false,
+                matched_book_year: false,
                 classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: format!("E806 .S89 {year}"), source: ClassificationSource::ExactEdition, evidence: vec![] }],
             })
             .collect();

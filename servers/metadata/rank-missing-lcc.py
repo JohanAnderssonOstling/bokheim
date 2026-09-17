@@ -86,7 +86,7 @@ def rank(database, ratings_path, librarything_cache, limit, since, excluded=None
             title = db.execute('SELECT title FROM work_bibliography WHERE work_id=?', (work,)).fetchone()
             years, edition_titles = [], []
             for edition in editions:
-                biblio = db.execute('SELECT title,publication_year FROM edition_bibliography WHERE edition_id=?', (edition,)).fetchone()
+                biblio = db.execute('SELECT title,book_year FROM edition_bibliography WHERE edition_id=?', (edition,)).fetchone()
                 if biblio:
                     edition_titles.append(biblio[0])
                     if biblio[1] and 1 <= biblio[1] <= current_year:
@@ -105,7 +105,7 @@ def rank(database, ratings_path, librarything_cache, limit, since, excluded=None
         return dict(generated_at=datetime.now(timezone.utc).isoformat(), database=str(Path(database).resolve()),
                     ratings_dump=str(Path(ratings_path).resolve()), librarything_cache=str(librarything_cache) if librarything_cache else None,
                     rated_works=len(ratings), examined_works=checked, recent_since=since,
-                    any_subject_code=any_subject_code, method='Works ranked by rating count descending, then earliest retained edition year descending. Excludes LCC in OL work/edition data across all records sharing any ISBN, LC ISBN supplement, and completed LibraryThing ISBN cache. Unrated works excluded. Earliest recorded year is not verified first publication.',
+                    any_subject_code=any_subject_code, method='Works ranked by rating count descending, then earliest retained edition year descending. Excludes LCC in OL work/edition data across all records sharing any ISBN, LC ISBN supplement, and completed LibraryThing ISBN cache. Unrated works excluded. Earliest recorded year is not verified first book.',
                     popular=sorted(popular, key=key)[:limit], recent=[] if popular_only else sorted(recent, key=key)[:limit], excluded_works=len(excluded), popular_only=popular_only)
     finally:
         db.close()

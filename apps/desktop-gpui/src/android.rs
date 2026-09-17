@@ -8,10 +8,10 @@ use std::fs::File;
 use std::os::fd::FromRawFd as _;
 use std::sync::{Mutex, OnceLock};
 
-use crate::{IncomingPublication, IncomingPublicationResult, UiLaunchOptions, open_ui};
+use crate::{IncomingBook, IncomingBookResult, UiLaunchOptions, open_ui};
 
-static INCOMING_FILE_SENDER: OnceLock<async_channel::Sender<IncomingPublicationResult>> = OnceLock::new();
-static EARLY_INCOMING_FILES: Mutex<Vec<IncomingPublicationResult>> = Mutex::new(Vec::new());
+static INCOMING_FILE_SENDER: OnceLock<async_channel::Sender<IncomingBookResult>> = OnceLock::new();
+static EARLY_INCOMING_FILES: Mutex<Vec<IncomingBookResult>> = Mutex::new(Vec::new());
 static STAGING_QUEUE: OnceLock<std::sync::mpsc::SyncSender<StagingRequest>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -129,17 +129,17 @@ fn android_main(app: AndroidApp) {
 
     let data_dir = app.internal_data_path().expect("Android did not provide a private application data directory");
     let incoming_directory = data_dir.join("incoming");
-    std::fs::create_dir_all(&incoming_directory).expect("failed to create Android incoming publication directory");
+    std::fs::create_dir_all(&incoming_directory).expect("failed to create Android incoming book directory");
     cleanup_abandoned_incoming_files(&incoming_directory);
     let (staging_sender, staging_receiver) = std::sync::mpsc::sync_channel::<StagingRequest>(2);
     STAGING_QUEUE.set(staging_sender).ok();
     std::thread::Builder::new()
-        .name("incoming-publication".to_owned())
+        .name("incoming-book".to_owned())
         .spawn(move || {
             for request in staging_receiver {
                 let path = incoming_directory.join(format!("{}.part", uuid::Uuid::new_v4()));
-                match crate::stage_incoming_publication(request.file, &path) {
-                    Ok(()) => deliver_incoming_file(Ok(IncomingPublication { name: request.name, path })),
+                match crate::stage_incoming_book(request.file, &path) {
+                    Ok(()) => deliver_incoming_file(Ok(IncomingBook { name: request.name, path })),
                     Err(error) => {
                         let _ = std::fs::remove_file(path);
                         deliver_incoming_file(Err(format!("{}: {error}", request.name)));
@@ -147,7 +147,7 @@ fn android_main(app: AndroidApp) {
                 }
             }
         })
-        .expect("failed to start incoming publication worker");
+        .expect("failed to start incoming book worker");
     log::info!("initializing backend in {}", data_dir.display());
     let backend_context = BackendLaunch::initialize(AppDataLocation::native_path(data_dir)).expect("failed to initialize Android app-data directory");
     log::info!("backend context initialized");
@@ -162,7 +162,7 @@ fn android_main(app: AndroidApp) {
     });
 }
 
-fn deliver_incoming_file(file: IncomingPublicationResult) {
+fn deliver_incoming_file(file: IncomingBookResult) {
     if let Some(sender) = INCOMING_FILE_SENDER.get() {
         if let Err(error) = sender.try_send(file) {
             if let Ok(file) = error.into_inner() {
@@ -186,11 +186,11 @@ fn cleanup_abandoned_incoming_files(directory: &std::path::Path) {
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenPublication<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, name: JString<'caller>, file_descriptor: jint) {
+extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenBook<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>, name: JString<'caller>, file_descriptor: jint) {
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
             if file_descriptor < 0 {
-                log::error!("Android returned an invalid incoming publication descriptor");
+                log::error!("Android returned an invalid incoming book descriptor");
                 return Ok(());
             }
             // SAFETY: ParcelFileDescriptor.detachFd transfers ownership of
@@ -204,9 +204,9 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenPublicatio
                     let request = match error {
                         std::sync::mpsc::TrySendError::Full(request) | std::sync::mpsc::TrySendError::Disconnected(request) => request,
                     };
-                    deliver_incoming_file(Err(format!("could not queue {}: incoming publication queue is full or stopped", request.name)));
+                    deliver_incoming_file(Err(format!("could not queue {}: incoming book queue is full or stopped", request.name)));
                 }
-                None => deliver_incoming_file(Err("incoming publication worker is not initialized".to_owned())),
+                None => deliver_incoming_file(Err("incoming book worker is not initialized".to_owned())),
             }
             Ok(())
         })

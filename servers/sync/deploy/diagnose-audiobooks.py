@@ -130,7 +130,7 @@ print(json.dumps(out))
             writer = csv.DictWriter(target, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-        # Inventory only paths and sizes; never read or hash whole publications.
+        # Inventory only paths and sizes; never read or hash whole books.
         inventory_count = 0
         inventory_bytes = 0
         walk_errors = []

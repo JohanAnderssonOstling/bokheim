@@ -53,7 +53,7 @@ impl ToolbarTarget for PdfReaderView {
     /// An annotation the PDF itself carries is not ours to discard, so the
     /// toolbar makes no offer to.
     fn has_selected_annotation(&self) -> bool {
-        self.marks.selected().is_some_and(|annotation| !library_model::ReaderAnnotation::is_external_pdf_annotation(annotation))
+        self.marks.selected().is_some_and(|annotation| !book_model::ReaderAnnotation::is_external_pdf_annotation(annotation))
     }
 
     fn delete_selected_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {

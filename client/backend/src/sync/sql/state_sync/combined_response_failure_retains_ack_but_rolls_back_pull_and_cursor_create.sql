@@ -1,1 +1,0 @@
-CREATE TRIGGER fail_cursor BEFORE INSERT ON sync_metadata WHEN NEW.key='last_pull_state_seq' BEGIN SELECT RAISE(ABORT,'injected cursor failure'); END;

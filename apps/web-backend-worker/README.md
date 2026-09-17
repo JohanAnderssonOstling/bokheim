@@ -15,7 +15,7 @@ It accepts opaque payloads and callbacks and has no dependency on the backend.
 
 `bokheim-backend` owns application commands and workflows. Native and staged
 imports share `import_workflow`; `staged_import` uses typed storage and library
-interfaces for copy ordering, checkpoints, and recovery. `browser_adapter` and
+interfaces for copy ordering, checkpoints, and recovery. `web` and
 `browser_import` translate browser capabilities and messages into backend operations.
 Sync uses the same `sync-engine` on native and browser targets. Request correlation
 and disconnect draining use `client-platform-runtime::pending`.

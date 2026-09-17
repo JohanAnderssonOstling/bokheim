@@ -107,7 +107,7 @@ async fn native_and_wire_handlers_preserve_imports_reads_and_subscriptions() {
         let wire_home: library_model::LibraryHomeView = wire_value(&backend, WorkerCommand::Library { library_id: id, command: LibraryCommand::Home { limit: 10 } }).await;
         assert_eq!(serde_json::to_value(native_home).unwrap(), serde_json::to_value(wire_home).unwrap());
 
-        // Publication opening is a native transport operation, retaining its reader and placement path.
+        // Book opening is a native transport operation, retaining its reader and placement path.
         let mut native_book = library.resolve_book(hash).await.unwrap().into_document().unwrap();
         assert!(!native_book.path.is_empty());
         let mut read = Vec::new();

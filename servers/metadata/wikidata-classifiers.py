@@ -5,15 +5,15 @@ Property definitions from the dump identify additional classification properties
 No classification schedule or topic-to-book equivalence is assumed.
 """
 TOPIC_CLASS = 'Q95388829'
-PUBLICATION_CLASS = 'Q95388859'
-# Publication properties have string datatype; topic classifiers are external IDs.
+BOOK_CLASS = 'Q95388859'
+# Book properties have string datatype; topic classifiers are external IDs.
 KNOWN = {
  'P1036': ('ddc','topic'), 'P1149': ('lcc','topic'),
  'P1190': ('udc','topic'), 'P1150': ('rvk','topic'),
  'P5748': ('basisklassifikation','topic'), 'P8248': ('colon','topic'),
  'P12164': ('bisac','topic'),
- 'P8359': ('ddc','publication'), 'P8360': ('lcc','publication'),
- 'P8361': ('udc','publication'), 'P8362': ('rvk','publication'),
+ 'P8359': ('ddc','book'), 'P8360': ('lcc','book'),
+ 'P8361': ('udc','book'), 'P8362': ('rvk','book'),
 }
 
 def values(statements):
@@ -31,7 +31,7 @@ def definitions(property_records):
         types={s['mainsnak']['datavalue']['value'].get('id')
                for s in values(record.get('claims',{}).get('P31',[]))
                if isinstance(s['mainsnak']['datavalue']['value'],dict)}
-        scope='publication' if PUBLICATION_CLASS in types else 'topic' if TOPIC_CLASS in types else None
+        scope='book' if BOOK_CLASS in types else 'topic' if TOPIC_CLASS in types else None
         if scope:
             prop=record['id'];result[prop]=(result.get(prop,(prop,None))[0],scope)
     return result
@@ -52,7 +52,7 @@ def assigned(record, registry=None):
     return result
 
 
-def for_publication(book, topics, registry=None):
+def for_book(book, topics, registry=None):
     """Return direct and inferred evidence separately, using only explicit P921 links.
 
     `topics` is an ID -> record mapping from this same dump. Its identifiers and
@@ -69,5 +69,5 @@ def for_publication(book, topics, registry=None):
         for evidence in assigned(topic,registry):
             if evidence['property_scope']!='topic':continue
             inferred.append(dict(evidence,method='wikidata:topic:P921',inferred=True,
-                                 publication_entity=book['id'],topic_link=link))
+                                 book_entity=book['id'],topic_link=link))
     return dict(direct=direct,inferred=inferred)

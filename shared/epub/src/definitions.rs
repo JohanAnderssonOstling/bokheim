@@ -15,7 +15,7 @@ pub enum IdentifierScheme {
     Other(String),
 }
 
-/// Role evidence extracted from a publication format.
+/// Role evidence extracted from a book format.
 ///
 /// This layer deliberately does not interpret roles. The application import
 /// boundary converts this evidence once into a canonical MARC relator code.

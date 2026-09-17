@@ -16,6 +16,6 @@ pub async fn configure_user_storage_quota(database: &PostgresDatabase, user_id: 
 }
 pub use database::{check_ready, connect, connect_configured, migrate, upgrade_existing, DatabasePoolConfig, PostgresDatabase};
 pub use sync::{PostgresSyncRepository, SyncError};
-mod publication_admission;
+mod book_admission;
 #[cfg(test)]
-mod publication_admission_tests;
+mod book_admission_tests;

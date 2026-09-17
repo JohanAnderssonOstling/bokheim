@@ -1,1 +1,0 @@
-SELECT count(*) FROM book WHERE title='Must not import'

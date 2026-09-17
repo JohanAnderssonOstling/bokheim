@@ -8,7 +8,7 @@ autobins = false
 [dependencies]
 scraper.workspace = true
 lightningcss.workspace = true
-html-publication = { path = "crates/html-publication" }
+html-book = { path = "crates/html-book" }
 html.workspace = true
 
 [[bin]]

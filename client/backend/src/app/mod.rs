@@ -11,7 +11,6 @@ pub use account_client::{ServerUrl, ServerUrlError};
 
 pub const APP_NAME: &str = "Bokheim";
 pub const APP_NAME_LOWER: &str = "bokheim";
-pub use library_files::{APP_HIDDEN_DIR, APP_HIDDEN_LIBRARY_DB_PATH};
 
 pub const API_SERVER_ORIGIN: &str = "https://api.bokheim.se";
 pub const METADATA_SERVER_ORIGIN: &str = "https://meta.bokheim.se";

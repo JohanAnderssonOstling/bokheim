@@ -4,7 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = rusqlite::Connection::open(path)?;
     client_library::schema::init_db(&conn)?;
     let query = library_model::LibraryBrowseQuery {
-        location: library_model::ROOT_SUBJECT_PATH.into(),
+        location: subject_projection::ROOT_SUBJECT_PATH.into(),
         search: String::new(),
         file_types: vec![library_model::LibraryFileTypeFilter::All],
         chip_sort: library_model::BrowseChipSort::Alphabetical,

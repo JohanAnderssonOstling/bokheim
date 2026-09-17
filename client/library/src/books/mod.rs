@@ -1,8 +1,9 @@
 //! Typed book-card queries used by library browsing.
 
-use crate::browse::queries::BrowsingSql;
+use crate::browse::BrowsingSql;
 use crate::storage_values::invalid_integer_column;
-use library_model::AuthorId;
+use include_sqlite_sql::include_sql;
+use book_model::AuthorId;
 use library_model::BookCardRow;
 use rusqlite::Connection;
 use sync_common::ContentHash;
@@ -77,7 +78,7 @@ pub fn get_book_cards_by_author_scoped(conn: &Connection, author_id: AuthorId, d
     Ok(cards)
 }
 
-pub(crate) mod queries;
+include_sql!("src/books/sql/books.sql");
 
 /// Reuse the lifecycle UPSERT and its compiled trigger programs across a page.
 pub(crate) fn apply_remote_book_added(conn: &Connection, hash: &ContentHash, title: &str, added_at: i64, format: &str) -> rusqlite::Result<()> {

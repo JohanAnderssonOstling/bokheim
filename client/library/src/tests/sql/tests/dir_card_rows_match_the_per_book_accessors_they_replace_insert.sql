@@ -10,4 +10,5 @@ INSERT INTO book(content_hash, title, read_progress, format) VALUES
                  ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',2)), 'two.epub', 'h2', 0),
                  ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',3)), 'three.M4B', 'h3', 1),
                  ('00000000-0000-0000-0000-000000000000', (SELECT row_id FROM book WHERE content_hash=printf('%064x',4)), 'four.epub', 'h4', 1);
-             INSERT INTO audiobook_metadata(content_hash, duration_ms, chapter_count, chapter_source, chapters_json) VALUES (printf('%064x',3), 3600000, 12, 'embedded_m4b', '[]');
+             INSERT INTO audiobook_metadata(content_hash, duration_ms) VALUES (printf('%064x',3), 3600000);
+             INSERT INTO book_toc(content_hash, entry_count, toc_json) VALUES (printf('%064x',3), 12, '[]');

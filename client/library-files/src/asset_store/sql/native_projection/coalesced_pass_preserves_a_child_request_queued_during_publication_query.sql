@@ -1,1 +1,0 @@
-CREATE TEMP TRIGGER queue_new_child_request BEFORE INSERT ON local_directory_projection WHEN NEW.dir_id=(SELECT parent_id FROM test_projection_scope) BEGIN INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES((SELECT child_id FROM test_projection_scope)); END;

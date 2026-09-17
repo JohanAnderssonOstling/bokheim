@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["io-util"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-publication-identity = { path = "../../../../shared/publication-identity", features = ["native-write"] }
+book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
 blake3 = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

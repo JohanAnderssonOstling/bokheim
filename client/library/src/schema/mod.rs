@@ -1,11 +1,11 @@
-use crate::LIBRARY_SCHEMA_VERSION;
 use crate::metadata::seed_subject_systems;
 use crate::metadata_batch;
 use crate::storage_values::parse_uuid_column;
 use crate::sync_state::get_or_create_replica_id;
-use crate::sync_state::queries::SyncSql;
+use crate::sync_state::set_sync_metadata;
 use crate::sync_state::register_sync_functions;
-use rusqlite::{Connection, Transaction, params};
+use crate::LIBRARY_SCHEMA_VERSION;
+use rusqlite::{params, Connection, Transaction};
 use std::time::Duration;
 use sync_common::ReplicaId;
 
@@ -16,13 +16,12 @@ include_sql!("src/schema/sql/schema_operations.sql");
 /// Every object a new library contains, in dependency order: tables before the
 /// views and triggers that read them. A database is either built by this list
 /// or already current, so nothing here is conditional and nothing is upgraded.
-const SCHEMA: [&str; 18] = [
+const SCHEMA: [&str; 17] = [
     include_str!("sql/authors.sql"),
     include_str!("sql/books.sql"),
     include_str!("sql/descriptions.sql"),
     include_str!("sql/jobs.sql"),
     include_str!("sql/external_metadata.sql"),
-    include_str!("sql/catalog.sql"),
     include_str!("sql/placements.sql"),
     include_str!("sql/browse.sql"),
     include_str!("sql/sync.sql"),
@@ -76,7 +75,7 @@ pub fn init_db(conn: &Connection) -> Result<ReplicaId, rusqlite::Error> {
     let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
     if version == LIBRARY_SCHEMA_VERSION {
         configure_connection(conn)?;
-        let id: String = conn.query_row("SELECT value FROM sync_metadata WHERE key=?1", ["replica_id"], |row| row.get(0))?;
+        let id: String = conn.query_row("SELECT replica_id FROM sync_metadata WHERE singleton = 1", [], |row| row.get(0))?;
         return parse_uuid_column(id, 0);
     }
     if version != 0 {
@@ -113,7 +112,7 @@ fn create_fresh_schema(conn: &Transaction<'_>) -> rusqlite::Result<ReplicaId> {
     }
     // Seed data defined in Rust rather than in the schema itself.
     seed_subject_systems(conn)?;
-    conn.set_sync_metadata("change_origin", "local")?;
+    set_sync_metadata(conn, "change_origin", "local")?;
     conn.pragma_update(None, "user_version", LIBRARY_SCHEMA_VERSION)?;
     get_or_create_replica_id(conn)
 }

@@ -1,7 +1,7 @@
 //! Android owns playback in a foreground service. This module owns the seekable
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
-use crate::{AudiobookPublication, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
+use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -119,7 +119,7 @@ pub(crate) struct AudioEngine {
 }
 impl AudioEngine {
     pub(crate) fn open(
-        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<bokheim_backend::AudioStreamControl>, publication: &AudiobookPublication, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
+        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<bokheim_backend::AudioStreamControl>, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
     ) -> Result<Self, String> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -131,7 +131,7 @@ impl AudioEngine {
         let path: Option<PathBuf> = None;
         let length = if path.is_none() { reader.seek(std::io::SeekFrom::End(0)).map_err(|e| e.to_string())? } else { 0 };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":publication.title, "author":publication.author, "position":initial.min(publication.duration).as_millis() as u64, "chapterEnds":publication.chapters.iter().map(|chapter| chapter.end.as_millis() as u64).collect::<Vec<_>>()});
+        let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(book.duration).as_millis() as u64, "chapterEnds":book.chapters.iter().map(|chapter| chapter.end.as_millis() as u64).collect::<Vec<_>>()});
         let session = Arc::new(Session {
             read_generation: AtomicU64::new(0),
             control,
@@ -139,9 +139,9 @@ impl AudioEngine {
             stop_error: Mutex::new(None),
             reader: Mutex::new(path.is_none().then_some(reader)),
             _file: file,
-            duration: publication.duration,
+            duration: book.duration,
             updates,
-            status: Arc::new(Mutex::new(Status { position: initial.min(publication.duration), ..Status::default() })),
+            status: Arc::new(Mutex::new(Status { position: initial.min(book.duration), ..Status::default() })),
         });
         Ok(Self { id, session, load, started: AtomicBool::new(false) })
     }
@@ -520,7 +520,7 @@ mod tests {
             recorded.lock().unwrap().push(serde_json::from_str(command).unwrap());
             Ok(())
         });
-        let publication = AudiobookPublication { title: "Example".into(), author: Some("Author".into()), narrator: None, duration: Duration::from_secs(60), chapters: Vec::new(), cover: None };
+        let book = AudiobookBook { title: "Example".into(), author: Some("Author".into()), narrator: None, duration: Duration::from_secs(60), chapters: Vec::new(), cover: None };
         let (updates, _) = async_channel::unbounded();
         struct TrackedReader {
             cursor: std::io::Cursor<&'static [u8]>,
@@ -539,7 +539,7 @@ mod tests {
         }
         let reads = Arc::new(AtomicU64::new(0));
         let reader = TrackedReader { cursor: std::io::Cursor::new(b"seekable M4B bytes"), reads: reads.clone() };
-        let mut audio = AudioEngine::open(Box::new(reader), None, None, &publication, Duration::from_secs(90), updates).unwrap();
+        let mut audio = AudioEngine::open(Box::new(reader), None, None, &book, Duration::from_secs(90), updates).unwrap();
         assert_eq!(reads.load(Ordering::Relaxed), 0, "opening must not copy the stream");
         assert!(audio.load["path"].is_null());
         assert_eq!(audio.load["length"], 18);
@@ -567,7 +567,7 @@ mod tests {
             let file = std::fs::File::open(&original).unwrap();
             let (updates, _) = async_channel::unbounded();
             // An empty reader proves playback did not copy its bytes.
-            let audio = AudioEngine::open(Box::new(std::io::Cursor::new(Vec::<u8>::new())), Some(file), None, &publication, Duration::ZERO, updates).unwrap();
+            let audio = AudioEngine::open(Box::new(std::io::Cursor::new(Vec::<u8>::new())), Some(file), None, &book, Duration::ZERO, updates).unwrap();
             assert!(audio.session.reader.lock().unwrap().is_none());
             let descriptor_path = PathBuf::from(audio.load["path"].as_str().unwrap());
             audio.play();

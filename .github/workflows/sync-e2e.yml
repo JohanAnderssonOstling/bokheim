@@ -12,10 +12,10 @@ on:
       - "client/library-files/**"
       - "client/sync/**"
       - "client/test-support/**"
-      - "client/publication-access/**"
+      - "client/book-access/**"
       - "client/account-client/**"
-      - "shared/publication-enrichment/**"
-      - "shared/publication-model/**"
+      - "shared/book-enrichment/**"
+      - "shared/book-model/**"
       - "client/platforms/**"
       - "scripts/checks/library-sql.py"
       - "scripts/checks/backend-boundaries.py"
@@ -37,10 +37,10 @@ on:
       - "client/library-files/**"
       - "client/sync/**"
       - "client/test-support/**"
-      - "client/publication-access/**"
+      - "client/book-access/**"
       - "client/account-client/**"
-      - "shared/publication-enrichment/**"
-      - "shared/publication-model/**"
+      - "shared/book-enrichment/**"
+      - "shared/book-model/**"
       - "client/platforms/**"
       - "scripts/checks/library-sql.py"
       - "scripts/checks/backend-boundaries.py"
@@ -94,7 +94,7 @@ jobs:
           rustup default 1.95.0
 
       - name: Test extracted client services
-        run: cargo test --release -p account-client -p publication-access -p publication-enrichment -p publication-model -p library-files -p asset-transfer -p client-platform-runtime -p sync-engine --all-features --lib
+        run: cargo test --release -p account-client -p book-access -p book-enrichment -p book-model -p library-files -p asset-transfer -p client-platform-runtime -p sync-engine --all-features --lib
 
       - name: Run synchronization E2E suite
         run: client/backend/tests/run_sync_e2e.sh

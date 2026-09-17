@@ -1,6 +1,6 @@
 //! Book blurbs, which arrive as HTML and have to be drawn as text.
 //!
-//! Descriptions are stored exactly as the publication wrote them, and
+//! Descriptions are stored exactly as the book wrote them, and
 //! publishers write them in markup: `<p class="description">`, `<h3>Product
 //! Description</h3>`, `<em>` around titles. Set as a raw string those tags are
 //! what the reader sees.

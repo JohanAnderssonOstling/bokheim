@@ -15,6 +15,7 @@ pdf-range-reader = { path = "../../../../../shared/pdf-range-reader" }
 blake3 = "1"
 image = { version = "0.25", default-features = false }
 pdf-view-common = { path = "../view-common" }
+book-model = { path = "../../../../../shared/book-model", default-features = false }
 pdfium-render = { workspace = true, features = ["pdfium_latest", "thread_safe"] }
 reader-style = { path = "../../shared/reader-style" }
 

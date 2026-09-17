@@ -16,32 +16,32 @@ pub(crate) fn next_sequence_in(transaction: &Transaction<'_>, source_id: &Catalo
 }
 
 pub(crate) fn allocate_sequence(transaction: &Transaction<'_>, source_id: &CatalogSourceId) -> Result<i64, CatalogStoreError> {
-    let next = next_sequence_in(transaction, source_id)?.checked_add(1).ok_or_else(|| CatalogStoreError::new("publication sequence overflow"))?;
-    transaction.execute("UPDATE catalog_source SET next_sequence=?2 WHERE source_id=?1", params![source_id.as_str(), storage_i64(next, "publication sequence")?])?;
-    storage_i64(next, "publication sequence")
+    let next = next_sequence_in(transaction, source_id)?.checked_add(1).ok_or_else(|| CatalogStoreError::new("book sequence overflow"))?;
+    transaction.execute("UPDATE catalog_source SET next_sequence=?2 WHERE source_id=?1", params![source_id.as_str(), storage_i64(next, "book sequence")?])?;
+    storage_i64(next, "book sequence")
 }
 
-pub(crate) fn sequence_in(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, identity: &CatalogPublicationIdentity) -> Result<Option<u64>, CatalogStoreError> {
+pub(crate) fn sequence_in(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, identity: &CatalogBookIdentity) -> Result<Option<u64>, CatalogStoreError> {
     transaction
         .query_row(
-            "SELECT sequence FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            "SELECT sequence FROM catalog_book WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
             params![source_id.as_str(), storage_i64(generation, "generation")?, identity.edition_id, identity.work_id.as_deref().unwrap_or("")],
-            |row| stored_u64(row.get(0)?, "publication sequence"),
+            |row| stored_u64(row.get(0)?, "book sequence"),
         )
         .optional()
         .map_err(Into::into)
 }
 
-pub(crate) fn sequenced_publication_in(connection: &Connection, source_id: &CatalogSourceId, generation: u64, identity: &CatalogPublicationIdentity) -> Result<Option<SequencedCatalogPublication>, CatalogStoreError> {
+pub(crate) fn sequenced_book_in(connection: &Connection, source_id: &CatalogSourceId, generation: u64, identity: &CatalogBookIdentity) -> Result<Option<SequencedCatalogBook>, CatalogStoreError> {
     connection
         .query_row(
-            "SELECT payload,sequence FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            "SELECT payload,sequence FROM catalog_book WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
             params![source_id.as_str(), storage_i64(generation, "generation")?, identity.edition_id, identity.work_id.as_deref().unwrap_or("")],
             |row| {
                 let payload: Vec<u8> = row.get(0)?;
-                let publication = decode_cached(&payload).map_err(sql_decode_error)?;
-                let sequence = stored_u64(row.get(1)?, "publication sequence")?;
-                Ok(SequencedCatalogPublication { publication, sequence })
+                let book = decode_cached(&payload).map_err(sql_decode_error)?;
+                let sequence = stored_u64(row.get(1)?, "book sequence")?;
+                Ok(SequencedCatalogBook { book, sequence })
             },
         )
         .optional()

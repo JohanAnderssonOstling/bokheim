@@ -10,7 +10,7 @@ create table if not exists external_metadata_attempt(
 );
 create index if not exists idx_external_metadata_attempt_status on external_metadata_attempt(provider_id, status, book_row_id);
 -- Local cache of resolved metadata-server entities. Book references are also
--- projected into synchronized PublicationMetadata; labels and graph edges can
+-- projected into synchronized BookMetadata; labels and graph edges can
 -- be rebuilt independently on every client from the same snapshot service.
 create table if not exists external_entity(
     wikidata_id    TEXT primary key,
@@ -51,7 +51,7 @@ create table if not exists book_collection(
     group_position  TEXT,
     primary key(book_row_id, position)
 );
-create table if not exists book_publication_date(
+create table if not exists book_date(
     book_row_id         INTEGER not null references book(row_id) on delete cascade,
     position        INTEGER not null check(position >= 0),
     value           TEXT not null,
@@ -61,7 +61,7 @@ create table if not exists book_publication_date(
     event           TEXT,
     primary key(book_row_id, position)
 );
-create table if not exists book_publication_value(
+create table if not exists book_value(
     book_row_id         INTEGER not null references book(row_id) on delete cascade,
     kind            TEXT not null,
     position        INTEGER not null check(position >= 0),
@@ -70,8 +70,8 @@ create table if not exists book_publication_value(
     secondary_value TEXT,
     primary key(book_row_id, kind, position)
 );
-create index if not exists idx_book_publication_value_lookup on book_publication_value(kind, value, book_row_id);
+create index if not exists idx_book_value_lookup on book_value(kind, value, book_row_id);
 
--- A library-owned relation from stable catalogue publication identities to
+-- A library-owned relation from stable catalogue book identities to
 -- content-addressed books. Catalogue configuration, URLs, and cached metadata
 -- remain application-wide and are deliberately absent here.

@@ -300,7 +300,7 @@ node apps/web-gpui/scripts/epub-local.browser-test.mjs
 ```
 
 This imports a generated EPUB through the directory chooser, verifies that its
-chapter renders through a local publication capability without a prefetched
+chapter renders through a local book capability without a prefetched
 remote prefix, then closes and reopens it. It uses Firefox and Python Pillow;
 `PLAYWRIGHT_MODULE`, `FIREFOX_PATH`, and `BOKHEIM_TEST_URL` select the tooling and
 local server. `EPUB_TEST_SCREENSHOT` optionally records the rendered reader.

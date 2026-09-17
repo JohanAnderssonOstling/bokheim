@@ -18,19 +18,19 @@ pub fn subscribe_web_diagnostics() -> async_channel::Receiver<String> {
 /// Browser worker startup, ports, and transport integration.
 #[cfg(target_arch = "wasm32")]
 pub mod web {
-    pub use crate::browser_adapter::*;
+    pub use crate::web::*;
 }
 
 /// CPU worker requests and execution.
 pub mod cpu {
-    pub use crate::worker_cpu::{CpuRequest, CpuResponse, PublicationTask, ThumbnailBytes, execute, execute_publication};
+    pub use crate::worker_cpu::{CpuRequest, CpuResponse, BookTask, ThumbnailBytes, execute, execute_book};
     #[cfg(not(target_arch = "wasm32"))]
     pub use thumbnail::{configure_pdf_cover_process, run_pdf_cover_process};
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "web-runtime-tests"))]
 pub mod sync_contract {
-    pub use crate::worker_sync::run;
+    pub use crate::sync::run;
 }
 
 /// Runtime probes and opt-in storage contracts.

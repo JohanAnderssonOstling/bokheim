@@ -95,7 +95,7 @@ impl CatalogService {
                 let matched = catalog_metadata_match(records, &snapshot_date);
                 CatalogDescriptionBackfillUpdate {
                     source_id: job.source_id.clone(),
-                    publication: job.publication.clone(),
+                    book: job.book.clone(),
                     acquisition_url: job.acquisition_url.clone(),
                     description: matched.description,
                     subjects: matched.subjects,

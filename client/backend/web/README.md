@@ -38,8 +38,8 @@ Application worker entry points, coordinator wiring, worker roles, and bundle UR
 live in `apps/web-backend-worker`. Its `connection.rs` is shared by the web UI and
 worker probes so both use the shipping deployment configuration.
 
-Backend `browser_adapter` contains browser-facing adapters for application commands,
-import capabilities, publication readers, and sync services. Application policy stays
+Backend `web` contains browser-facing adapters for application commands,
+import capabilities, book readers, and sync services. Application policy stays
 in platform-independent backend modules and shared client crates. Platform transport
 accepts worker specifications, opaque byte payloads, and callbacks without importing
 backend types.
@@ -109,8 +109,8 @@ generation; actual reader `Read`/`Seek` operations stay synchronous.
 An imported generation is pinned before its handle is opened. Concurrent opens
 share one access handle; its last reader closes it. An opening task owns the pin
 until completion even if the caller cancels, so a late handle cannot leak or
-race deletion. Staging writers also pin their source until publication finishes.
-Browser storage accounting sums immutable lengths recorded in the asset index at publication; it does not open or stat OPFS files. Native accounting resolves current placements and reads file metadata after relevant changes.
+race deletion. Staging writers also pin their source until book finishes.
+Browser storage accounting sums immutable lengths recorded in the asset index at book; it does not open or stat OPFS files. Native accounting resolves current placements and reads file metadata after relevant changes.
 
 Folder-import format selection, destination matching, structured failures, progress
 deltas, sequential batch execution, progress cadence, and finalization are shared
@@ -118,13 +118,13 @@ by native readers and staged imports through `import_workflow`. `staged_import` 
 metadata ordering over typed storage and library interfaces; it compiles on native
 and WASM targets. `import_journal` owns durable outcomes. `browser_import` adapts
 browser files, OPFS, progress callbacks, and typed worker requests to these interfaces.
-`browser_adapter::import_worker` owns the serial browser job queue and request transport.
+`web::import_worker` owns the serial browser job queue and request transport.
 JavaScript supplies file capabilities and invokes the workflow entry point.
 
 Settings snapshots only read cached state. One background task refreshes after
 relevant events; successful work returns to waiting for events. Only failures
 schedule a retry deadline. Cover generation and transfer progress do not request
-settings refreshes. Publication retirement emits a storage-change event so purge
+settings refreshes. Book retirement emits a storage-change event so purge
 completion updates totals even after its metadata command has returned.
 
 The asset index records `byte_length` for every published generation. Existing
@@ -135,7 +135,7 @@ request draining in `client-platform-runtime::pending`. Disconnect callbacks run
 registry is drained, allowing cancellation and new registrations without a
 borrow conflict. Each transport retains its own scheduling and streaming rules.
 
-Each tab connects through `BrowserConnection`, which holds its lifetime Web Lock
+Each tab connects through `WebConnection`, which holds its lifetime Web Lock
 and creates dedicated workers on coordinator request. Chromium does not need a
 Worker constructor inside SharedWorkerGlobalScope. The coordinator communicates
 directly with those workers through transferred MessagePorts.
@@ -218,7 +218,7 @@ buffer and a direct MessagePort connect the CPU parser to the storage owner.
 The SharedWorker brokers the port; the two dedicated workers exchange the
 shared buffer directly within their host tab’s agent cluster;
 only the CPU worker waits synchronously, and reads have a failure timeout. No
-publication-sized input is assembled in the CPU worker. PDF inspection loads
+book-sized input is assembled in the CPU worker. PDF inspection loads
 Info/XMP and the objects needed for the first twenty pages of text, skipping
 image/attachment contents and embedded font programs. Metadata object, graph,
 and decompression limits bound pathological documents independently of file size.
@@ -234,12 +234,12 @@ formats still decode the original image; this is not streaming image decoding.
 Rendering/playing an opened book is a separate path and is not changed here.
 
 `node backend/scripts/test-folder-import-memory.mjs` verifies commit-before-open
-ordering against real SQLite with twelve 4 MiB publications, checks folder
+ordering against real SQLite with twelve 4 MiB books, checks folder
 structure, and reports WASM memory in the tab, coordinator and dedicated workers.
 Run with `BROWSER=chromium` and `BROWSER=firefox`; the usual `WORKER_PROBE_DIR`,
 `WORKER_TEST_DIST`, Playwright and executable overrides apply.
 
-`node backend/scripts/test-publication-range-memory.mjs` compares 4 MiB and
+`node backend/scripts/test-book-range-memory.mjs` compares 4 MiB and
 128 MiB EPUB/PDF imports, checks failed-session cleanup, samples each worker's
 WASM memory, verifies EPUB covers, and counts metadata/cover range reads.
 Its HTTP fixture uses bounded range requests to match the folder picker’s File
@@ -274,28 +274,28 @@ read the selected file to establish its identity.
 import performs zero metadata/cover range reads. The usual browser and
 `WORKER_TEST_DIST` overrides apply.
 
-## Publication range cache
+## Book range cache
 
-The browser CPU worker retains up to four 64 KiB fragments per publication job
-(256 KiB total). Both native remote readers and browser publication readers use
+The browser CPU worker retains up to four 64 KiB fragments per book job
+(256 KiB total). Both native remote readers and browser book readers use
 Rust's `range_cache` for lookup and eviction. Browser reads copy directly into
 the parser's output buffer; JavaScript owns only the bounded transport buffer.
 Reader disposal releases the cache. Reads reject closed or failed sources,
 including cache hits, and preserve short-read and end-of-file behavior.
 
 `COORDINATOR_TEST_OUTPUT=<release bindings directory> node
-backend/scripts/test-publication-source.mjs` exercises the actual Rust reader,
+backend/scripts/test-book-source.mjs` exercises the actual Rust reader,
 including eviction, short reads and source closure. The bindings must contain
 `cpu_worker` built with `web-runtime-tests`.
 
-The old `benchmark-publication-cache.mjs` targets the removed JavaScript cache
+The old `benchmark-book-cache.mjs` targets the removed JavaScript cache
 and needs updating before it can compare the Rust implementation. Its historical
 measurements do not describe the current implementation.
 
 ## Folder imports
 
 The selecting tab transfers browser `File` capabilities to the shared coordinator.
-`browser_adapter::import_queue` retains the selection and broadcasts progress to connected tabs.
+`web::import_queue` retains the selection and broadcasts progress to connected tabs.
 The elected tab hosts a separate import worker, which copies bounded 1 MiB chunks
 straight to `__import_objects/<job UUID>/<file index>` in OPFS and computes BLAKE3
 in its own WASM instance. File bytes never pass through the database worker.
@@ -304,7 +304,7 @@ The manifest records source paths, empty directories, sizes and modification tim
 A flushed journal checkpoints each completed file and each metadata outcome. No
 library-directory or book insertion starts until **every selected book has been
 copied**. The database then adopts immutable file references without another copy,
-inspects publications through the CPU worker, and commits metadata. Folder IDs are
+inspects books through the CPU worker, and commits metadata. Folder IDs are
 deterministic per job/path; book placement upserts make an unacknowledged commit
 safe to retry. Failed copies pause before database insertion; malformed books are
 reported individually in the second phase. Unreferenced copies are cleaned up
@@ -325,11 +325,11 @@ node backend/scripts/test-folder-import-memory.mjs
 
 The browser checks use disposable storage and accept `WORKER_TEST_DIST` and
 `WORKER_PROBE_DIR`. The handover test closes the host in each phase, checks the
-whole-folder barrier, and reopens an imported publication after database restart.
+whole-folder barrier, and reopens an imported book after database restart.
 
 ### Audiobook playback sources
 
-WASM audiobook resolution returns a source descriptor instead of publication
+WASM audiobook resolution returns a source descriptor instead of book
 bytes. A downloaded M4B uses a browser Blob URL backed by its immutable OPFS
 file. The backend subscription pins that generation and revokes the URL when
 playback closes or the tab disconnects. Cancelling source preparation also
@@ -356,7 +356,7 @@ BROWSER=chromium node client/backend/scripts/test-audiobook-local.mjs /path/to/b
 ```
 
 The local test builds an optimized WASM probe and uses the existing optimized
-web bundle. It blocks publication reads on reopening to verify metadata reuse,
+web bundle. It blocks book reads on reopening to verify metadata reuse,
 and checks playback, seeking to 70% of the book, reopening at the backend-persisted
 position, purge pinning and release. The streaming test checks real playback
 with bounded requests, far seeking, reopening and range/cleanup behavior. Both

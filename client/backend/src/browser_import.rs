@@ -1,6 +1,6 @@
 //! Browser file and worker adapters for the platform-independent staged workflow.
 use crate::{
-    browser_adapter::import_worker::Client,
+    web::import_worker::Client,
     import_journal::{self, Progress},
     runtime::library_requests,
     staged_import::{self, Error, Manifest},
@@ -39,7 +39,7 @@ impl Reporter {
             staged_import::Phase::Adding => "adding",
             staged_import::Phase::Complete => "complete",
         };
-        let value = crate::browser_adapter::object(&[
+        let value = crate::web::object(&[
             ("id", self.id.as_str().into()),
             ("name", self.name.as_str().into()),
             ("phase", phase.into()),
@@ -73,57 +73,61 @@ pub(crate) fn recover(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValu
     js_sys::JSON::parse(&serde_json::to_string(&manifest).map_err(error)?)
 }
 
-impl staged_import::FileAccess for OpenFile {
+struct BrowserFile(OpenFile);
+struct BrowserIo(ImportIo);
+struct BrowserClient<'a>(&'a Client);
+
+impl staged_import::FileAccess for BrowserFile {
     fn read(&self) -> Result<Vec<u8>, Error> {
-        self.0.read().map(|bytes| bytes.to_vec()).map_err(from_js)
+        self.0.0.read().map(|bytes| bytes.to_vec()).map_err(from_js)
     }
     fn write(&self, bytes: &[u8], offset: u64) -> Result<(), Error> {
-        OpenFile::write(self, bytes, offset).map_err(from_js)
+        OpenFile::write(&self.0, bytes, offset).map_err(from_js)
     }
     fn truncate(&self, offset: u64) -> Result<(), Error> {
-        self.0.truncate(offset as f64).map_err(from_js)
+        self.0.0.truncate(offset as f64).map_err(from_js)
     }
     fn flush(&self) -> Result<(), Error> {
-        self.0.flush().map_err(from_js)
+        self.0.0.flush().map_err(from_js)
     }
 }
-impl staged_import::Storage for ImportIo {
-    type File = OpenFile;
-    async fn open_file(&self, name: &str) -> Result<OpenFile, Error> {
-        ImportIo::open_file(self, name).await.map_err(from_js)
+impl staged_import::Storage for BrowserIo {
+    type File = BrowserFile;
+    async fn open_file(&self, name: &str) -> Result<BrowserFile, Error> {
+        ImportIo::open_file(&self.0, name).await.map(BrowserFile).map_err(from_js)
     }
     fn source_metadata(&self, index: u32) -> Result<(u64, f64), Error> {
-        ImportIo::source_metadata(self, index).map_err(from_js)
+        ImportIo::source_metadata(&self.0, index).map_err(from_js)
     }
     async fn read_source(&self, index: u32, start: u64, end: u64) -> Result<Vec<u8>, Error> {
-        ImportIo::read_source(self, index, start as f64, end as f64).await.map(|value| value.unchecked_into::<js_sys::Uint8Array>().to_vec()).map_err(from_js)
+        ImportIo::read_source(&self.0, index, start as f64, end as f64).await.map(|value| value.unchecked_into::<js_sys::Uint8Array>().to_vec()).map_err(from_js)
     }
 }
-impl staged_import::Library for Client {
+impl staged_import::Library for BrowserClient<'_> {
     async fn prepare(&self, activity: uuid::Uuid, manifest: &Manifest) -> Result<crate::library::PreparedDirectoryImport, Error> {
-        self.request(library_requests::PrepareStagedDirectoryImport { activity, job: manifest.id.clone(), parent_id: manifest.parent, name: manifest.create_root.then(|| manifest.name.clone()), directories: manifest.directories.clone() })
+        self.0.request(library_requests::PrepareStagedDirectoryImport { activity, job: manifest.id.clone(), parent_id: manifest.parent, name: manifest.create_root.then(|| manifest.name.clone()), directories: manifest.directories.clone() })
             .await
             .map_err(from_js)
     }
     async fn import(&self, book: staged_import::StagedBook) -> Result<(), Error> {
-        self.request(crate::browser_adapter::requests::library_requests::ImportStagedBook { parent_id: book.parent_id, file_name: book.file_name, physical: book.physical, length: book.length, hash: book.hash })
+        self.0.request(crate::web::requests::library_requests::ImportStagedBook { parent_id: book.parent_id, file_name: book.file_name, physical: book.physical, length: book.length, hash: book.hash })
             .await
             .map(|_: crate::ContentHash| ())
             .map_err(from_js)
     }
     async fn advance(&self, command: crate::runtime::LibraryCommand) -> Result<(), Error> {
-        self.request(command).await.map_err(from_js)
+        self.0.request(command).await.map_err(from_js)
     }
     async fn finish(&self, activity: uuid::Uuid) -> Result<(), Error> {
-        self.request(library_requests::FinishDirectoryImport { activity }).await.map_err(from_js)
+        self.0.request(library_requests::FinishDirectoryImport { activity }).await.map_err(from_js)
     }
     async fn cleanup(&self, job: String, files: u32) -> Result<(), Error> {
-        self.request(crate::browser_adapter::requests::library_requests::CleanupStagedImport { job, files }).await.map_err(from_js)
+        self.0.request(crate::web::requests::library_requests::CleanupStagedImport { job, files }).await.map_err(from_js)
     }
 }
 pub(crate) async fn run(job: JsValue, io: ImportIo, client: &Client, progress: ProgressSink) -> Result<Vec<crate::ImportFailure>, JsValue> {
     let manifest: Manifest = serde_json::from_str(&String::from(js_sys::JSON::stringify(&job)?)).map_err(error)?;
-    staged_import::run(manifest, io, client, move |update| {
+    staged_import::run(manifest, BrowserIo(io), &BrowserClient(client), move |update| {
         let reporter = Reporter { progress: progress.clone(), id: update.id, name: update.name };
         reporter.emit(update.phase, update.counts, update.current_file.as_deref(), update.failures.as_deref()).map_err(from_js)
     })

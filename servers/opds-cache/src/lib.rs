@@ -6,16 +6,16 @@ use axum::routing::{get, post};
 use axum::Router;
 use catalog_core::CatalogCoverCache;
 use catalog_model::{
-    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLanguageFilter, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogPublication, CatalogPublicationAction,
-    CatalogPublicationIdentity, CatalogSource, CatalogSourceId, CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest,
-    CatalogSubjectPublicationPayloadResponse, LanguageTag, PopularityRank,
+    CatalogAuthorCredit, CatalogBookFormat, CatalogDescription, CatalogFreshness, CatalogGroup, CatalogImportRequest, CatalogLanguageFilter, CatalogLinkTarget, CatalogPage, CatalogPagination, CatalogBook, CatalogBookAction,
+    CatalogBookIdentity, CatalogSource, CatalogSourceId, CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectBookPayloadRequest,
+    CatalogSubjectBookPayloadResponse, LanguageTag, PopularityRank,
 };
-use catalog_protocol::{materialize_page, CatalogPageRequest, CatalogPageResponse, CatalogPublicationPayload, CatalogPublicationReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry};
+use catalog_protocol::{materialize_page, CatalogPageRequest, CatalogPageResponse, CatalogBookPayload, CatalogBookReference, CatalogSearchRequest, CatalogSearchResponse, CatalogSourceRegistration, CatalogSourceRegistry};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityRequest, EditionIdentityResponse, EditionIdentityStatus, LookupStatus, MetadataEnrichmentRequest, RichWorkMetadataMatch};
 use opds::{
     endpoints_from_registry, validate_curated_registry, CatalogRegistry, DownloadedOpdsBook, OpdsAcquisitionKind, OpdsBookFormat, OpdsClient, OpdsConditionalCatalog, OpdsDirectAcquisition, OpdsEndpoint, OpdsError, OpdsHttpValidators,
 };
-use publication_model::{canonical_isbn, Identifier, PublicationSubject, Scheme};
+use book_model::{canonical_isbn, Identifier, BookSubject, Scheme};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -34,7 +34,7 @@ mod store;
 use opds_adapter::{canonicalize_gutenberg_page, canonicalize_opds_catalog_locator, opds_catalog_source_id, opds_page, opds_source, validate_opds_catalog_locator, validated_opds_import};
 use store::{
     prepare_catalog_subject_assignments, CatalogCoverDownloadJob, CatalogCrawlGeneration, CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogInventory,
-    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogOcrBackfillJob, CatalogPageWrite, CatalogProcessSettings, CatalogPublicationPopularity, CatalogStore,
+    CatalogMetadataBackfillIndexedJob, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogOcrBackfillJob, CatalogPageWrite, CatalogProcessSettings, CatalogBookPopularity, CatalogStore,
     CatalogStoreError,
 };
 
@@ -61,7 +61,7 @@ const CRAWL_ORIGIN_MAX_ATTEMPTS: usize = 3;
 const CRAWL_WRITE_BATCH_INITIAL_PAGES: usize = 32;
 const CRAWL_WRITE_BATCH_MIN_PAGES: usize = 8;
 const CRAWL_WRITE_BATCH_MAX_PAGES: usize = 64;
-const CRAWL_WRITE_BATCH_MAX_PUBLICATIONS: usize = 2_000;
+const CRAWL_WRITE_BATCH_MAX_BOOKS: usize = 2_000;
 const CRAWL_WRITE_BATCH_MAX_BYTES: usize = 16 * 1024 * 1024;
 const CRAWL_WRITE_BATCH_MAX_AGE: Duration = Duration::from_millis(250);
 const CRAWL_WRITE_BATCH_FAST_COMMIT: Duration = Duration::from_millis(75);
@@ -90,9 +90,9 @@ const EXTRACTION_WORKER_CPU_SECONDS: u64 = 60;
 #[cfg(not(test))]
 const EXTRACTION_WORKER_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_EXTRACTION_RESULT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_EPUB_METADATA_PUBLICATION_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_MOBI_METADATA_PUBLICATION_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_PDF_METADATA_PUBLICATION_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_EPUB_METADATA_BOOK_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MOBI_METADATA_BOOK_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PDF_METADATA_BOOK_BYTES: u64 = 32 * 1024 * 1024;
 const CATALOG_METADATA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_EMBEDDED_METADATA_TEXT_BYTES: usize = 4 * 1024;
 const MAX_EMBEDDED_DESCRIPTION_BYTES: usize = 64 * 1024;
@@ -286,12 +286,12 @@ struct RegistrySnapshot {
 struct CrawlProgress {
     started_at: Instant,
     pages_fetched: u64,
-    publications_seen: u64,
+    books_seen: u64,
 }
 
 struct AdaptiveCrawlWriteBatch {
     pages: Vec<CatalogPageWrite>,
-    publications: usize,
+    books: usize,
     bytes: usize,
     started_at: Option<Instant>,
     page_limit: usize,
@@ -299,20 +299,20 @@ struct AdaptiveCrawlWriteBatch {
 
 impl Default for AdaptiveCrawlWriteBatch {
     fn default() -> Self {
-        Self { pages: Vec::new(), publications: 0, bytes: 0, started_at: None, page_limit: CRAWL_WRITE_BATCH_INITIAL_PAGES }
+        Self { pages: Vec::new(), books: 0, bytes: 0, started_at: None, page_limit: CRAWL_WRITE_BATCH_INITIAL_PAGES }
     }
 }
 
 impl AdaptiveCrawlWriteBatch {
-    fn push(&mut self, write: CatalogPageWrite, publications: usize, bytes: usize) {
+    fn push(&mut self, write: CatalogPageWrite, books: usize, bytes: usize) {
         self.started_at.get_or_insert_with(Instant::now);
         self.pages.push(write);
-        self.publications = self.publications.saturating_add(publications);
+        self.books = self.books.saturating_add(books);
         self.bytes = self.bytes.saturating_add(bytes);
     }
 
     fn reached_capacity(&self) -> bool {
-        self.pages.len() >= self.page_limit || self.publications >= CRAWL_WRITE_BATCH_MAX_PUBLICATIONS || self.bytes >= CRAWL_WRITE_BATCH_MAX_BYTES
+        self.pages.len() >= self.page_limit || self.books >= CRAWL_WRITE_BATCH_MAX_BOOKS || self.bytes >= CRAWL_WRITE_BATCH_MAX_BYTES
     }
 
     fn should_flush_incremental(&self) -> bool {
@@ -320,7 +320,7 @@ impl AdaptiveCrawlWriteBatch {
     }
 
     fn take_pages(&mut self) -> Vec<CatalogPageWrite> {
-        self.publications = 0;
+        self.books = 0;
         self.bytes = 0;
         self.started_at = None;
         std::mem::take(&mut self.pages)
@@ -337,8 +337,8 @@ impl AdaptiveCrawlWriteBatch {
 
 #[derive(Clone, Default)]
 struct CatalogMetadataMatch {
-    subjects: Vec<PublicationSubject>,
-    popularity: Option<CatalogPublicationPopularity>,
+    subjects: Vec<BookSubject>,
+    popularity: Option<CatalogBookPopularity>,
     description: Option<String>,
 }
 
@@ -500,7 +500,7 @@ struct CatalogInventoryResponse {
     metadata_enrichment_configured: bool,
     search_index_ready: bool,
     active_page_count: u64,
-    active_publication_count: u64,
+    active_book_count: u64,
     active_epub_count: u64,
     cover_downloads: CoverDownloadInventoryResponse,
     epub_extractions: EpubExtractionInventoryResponse,
@@ -565,7 +565,7 @@ struct EpubFailureDiagnosticResponse {
 struct EpubFailureExampleResponse {
     source_id: String,
     acquisition_host: String,
-    publication_id: String,
+    book_id: String,
     attempts: u64,
     last_failed_at: u64,
 }
@@ -592,14 +592,14 @@ struct CatalogSourceInventoryResponse {
     last_crawl_error_category: Option<&'static str>,
     crawl_frontier_count: u64,
     crawl_pages_fetched: u64,
-    crawl_publications_seen: u64,
+    crawl_books_seen: u64,
     crawl_elapsed_seconds: u64,
     crawl_origin_in_flight: usize,
     crawl_origin_concurrency: usize,
     crawl_origin_spacing_ms: u64,
     crawl_origin_blocked_ms: Option<u64>,
     active_page_count: u64,
-    active_publication_count: u64,
+    active_book_count: u64,
     active_epub_count: u64,
     epub_extractions: EpubExtractionInventoryResponse,
 }
@@ -651,8 +651,8 @@ pub(crate) use crawl::{canonicalize_page_layout_locators, classify_catalog_failu
 pub use extraction::run_catalog_extraction_worker;
 pub use http::{app, operations_app};
 pub(crate) use metadata::{
-    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_epub_metadata, metadata_publication_byte_limit, publication_cover_fallback, publication_has_acquisition_url,
-    publication_metadata_acquisition,
+    apply_catalog_description_if_missing, apply_catalog_metadata, catalog_metadata_match, extraction_book_format, merge_catalog_epub_metadata, metadata_book_byte_limit, book_cover_fallback, book_has_acquisition_url,
+    book_metadata_acquisition,
 };
 pub(crate) use metrics::{duration_millis, writer_metrics_snapshot, BackfillBatchMetrics};
 pub(crate) use registry::catalog_crawls_disabled;

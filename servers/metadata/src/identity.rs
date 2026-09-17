@@ -17,7 +17,7 @@ struct EditionCandidate {
     edition_title: Option<String>,
     subtitle: Option<String>,
     work_title: Option<String>,
-    publication_year: Option<i32>,
+    book_year: Option<i32>,
     title_specificity: usize,
     matched_edition_title: bool,
     matched_work_title: bool,
@@ -166,7 +166,7 @@ pub(crate) fn edition_candidate_query(title_rows: usize) -> String {
              FROM eligible_candidate candidate
              JOIN query_best_specificity best ON best.query_index=candidate.query_index AND best.specificity=candidate.specificity
          )
-         SELECT ranked.query_index,edition.edition_id,edition.work_id,bibliography.title,work_bibliography.title,bibliography.publication_year,ranked.specificity,ranked.edition_match,ranked.work_match
+         SELECT ranked.query_index,edition.edition_id,edition.work_id,bibliography.title,work_bibliography.title,bibliography.book_year,ranked.specificity,ranked.edition_match,ranked.work_match
          FROM ranked
          JOIN edition ON edition.edition_id=ranked.edition_id
          LEFT JOIN edition_bibliography bibliography ON bibliography.edition_id=edition.edition_id
@@ -219,7 +219,7 @@ fn load_edition_candidates(connection: &Connection, title_rows: &[(usize, String
                     edition_title: row.get(3)?,
                     subtitle: row.get(9)?,
                     work_title: row.get(4)?,
-                    publication_year: row.get(5)?,
+                    book_year: row.get(5)?,
                     title_specificity: usize::try_from(row.get::<_, i64>(6)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Integer, Box::new(error)))?,
                     matched_edition_title: row.get(7)?,
                     matched_work_title: row.get(8)?,
@@ -319,7 +319,7 @@ fn resolve_prepared_edition_query(
         }
         let publisher_rows = publishers.get(&candidate.edition_id).cloned().unwrap_or_default();
         let matched_publisher = !prepared.publisher_keys.is_empty() && publisher_rows.iter().any(|(_, key)| prepared.publisher_keys.contains(key));
-        let matched_publication_year = prepared.query.publication_year.is_some() && prepared.query.publication_year == candidate.publication_year;
+        let matched_book_year = prepared.query.book_year.is_some() && prepared.query.book_year == candidate.book_year;
         let title_match = match (candidate.matched_edition_title, candidate.matched_work_title) {
             (true, true) => EditionTitleMatch::Both,
             (true, false) => EditionTitleMatch::Edition,
@@ -360,7 +360,7 @@ fn resolve_prepared_edition_query(
         editions.push((
             candidate.title_specificity,
             matched_author,
-            usize::from(matched_publisher) + usize::from(matched_publication_year),
+            usize::from(matched_publisher) + usize::from(matched_book_year),
             EditionIdentityMatch { subtitle: candidate.subtitle,
                 canonical_isbn13: format!("{isbn:013}"),
                 open_library_edition_id: if candidate.edition_id>0 {format!("OL{}M",candidate.edition_id)}else{String::new()},
@@ -370,9 +370,9 @@ fn resolve_prepared_edition_query(
                 title_match,
                 authors,
                 publishers: publisher_rows.into_iter().map(|(name, _)| name).collect(),
-                publication_year: candidate.publication_year,
+                book_year: candidate.book_year,
                 matched_publisher,
-                matched_publication_year,
+                matched_book_year,
                 classifications,
             },
         ));
@@ -402,7 +402,7 @@ fn resolve_prepared_edition_query(
             matched.classifications.iter().map(|classification| (classification.scheme, classification.notation.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_uppercase).collect::<String>())).collect::<BTreeSet<_>>()
         };
         let first_codes = classification_codes(&editions[0].3);
-        if !first_codes.is_empty() && editions.iter().skip(1).all(|(_, _, _, matched)| matched.canonical_isbn13 == editions[0].3.canonical_isbn13 && matched.publication_year == editions[0].3.publication_year && classification_codes(matched) == first_codes) {
+        if !first_codes.is_empty() && editions.iter().skip(1).all(|(_, _, _, matched)| matched.canonical_isbn13 == editions[0].3.canonical_isbn13 && matched.book_year == editions[0].3.book_year && classification_codes(matched) == first_codes) {
             editions.truncate(1);
         }
     }
@@ -430,7 +430,7 @@ fn load_title_author_classifications(connection: &Connection, prepared: &Prepare
     }
     let author_placeholders = sql_placeholders(prepared.author_keys.len());
     let sql = format!(
-        "SELECT normalized_author,publication_year,normalized_publisher,scheme,notation FROM title_author_classification WHERE normalized_title=?1 AND normalized_subtitle=?2 AND normalized_author IN ({author_placeholders}) ORDER BY scheme,notation"
+        "SELECT normalized_author,book_year,normalized_publisher,scheme,notation FROM title_author_classification WHERE normalized_title=?1 AND normalized_subtitle=?2 AND normalized_author IN ({author_placeholders}) ORDER BY scheme,notation"
     );
     let mut values = Vec::<rusqlite::types::Value>::with_capacity(prepared.author_keys.len() + 2);
     values.push(metadata_contract::matching::bibliographic_title_match_key(candidate.edition_title.as_deref().or(candidate.work_title.as_deref()).unwrap_or_default()).into());
@@ -442,7 +442,7 @@ fn load_title_author_classifications(connection: &Connection, prepared: &Prepare
     for row in rows {
         let (year, publisher, scheme, notation) = row.map_err(error)?;
         let scheme = match scheme { 1 => ClassificationScheme::DeweyDecimal, LCC_SCHEME => ClassificationScheme::LibraryOfCongress, _ => continue };
-        let score = usize::from(prepared.query.publication_year.is_some_and(|value| value == i32::try_from(year).unwrap_or_default() && year != 0))
+        let score = usize::from(prepared.query.book_year.is_some_and(|value| value == i32::try_from(year).unwrap_or_default() && year != 0))
             + usize::from(!publisher.is_empty() && prepared.publisher_keys.contains(&publisher));
         best.entry((scheme, notation)).and_modify(|current| *current = (*current).max(score)).or_insert(score);
     }

@@ -6,7 +6,7 @@ Classification (LCC) and stable author
 identifiers with edition/work provenance.
 
 Snapshot schema v8 retains edition and work titles plus publisher and
-publication year for the same ISBN-bearing editions. `POST
+book year for the same ISBN-bearing editions. `POST
 /v2/edition-identities` can therefore recover an ISBN from bibliographic
 metadata without importing unrelated editions. Edition and work titles are
 both considered, but an ISBN is selected only from an edition whose normalized
@@ -340,7 +340,7 @@ unchanged. LC mappings are merged into unambiguous ISBN results, including
 ISBNs absent from Open Library; existing ambiguous OL matches remain ambiguous.
 No synthetic Open Library identifiers are generated for LC-only records.
 
-The import also retains titles, authors, publishers, publication dates,
+The import also retains titles, authors, publishers, book dates,
 languages, summaries and subject headings in `lc_record`, linked by
 `lc_record_isbn`. Records without ISBNs are retained too, keyed by their MARC
 control number. `lc_record_lcc` stores their classifications and `lc_title`
@@ -424,7 +424,7 @@ part, numbered-book, adaptation and activity-book qualifiers must agree with the
 candidate; shortening a title must not silently select another volume.
 
 The client retries books whose ISBN lookups all explicitly return `no_match`
-using their local title, author, publisher and publication-year evidence. Only a
+using their local title, author, publisher and book-year evidence. Only a
 unique result with agreeing full author names supplies classifications. The
 client retains its original ISBNs and stores the supporting alternate ISBN/work
 as classification evidence in the enrichment attempt. Ambiguous results remain
@@ -485,7 +485,7 @@ subsequent activation and independent live verification succeeded.
 #### Auditing ranked books without LCC
 
 `rank-missing-lcc.py` writes popularity-ranked CSVs for all years and for a minimum
-publication year, excluding LCC already known in OL, the LC ISBN supplement, or the
+book year, excluding LCC already known in OL, the LC ISBN supplement, or the
 LibraryThing cache. Popularity is rating count; year is the earliest retained edition year.
 `audit-librarything-ranked.py` processes the unique works across both lists using
 `metadata-server librarything-lookup ISBN`. This release CLI uses the same parser,
@@ -573,7 +573,7 @@ LibraryThing cache, so both providers start together. Production uses the same f
 ranking without consuming any LibraryThing quota. Without that ranking, it scans
 retained work IDs. The LC queue and results have separate `loc_` tables.
 
-All publication years, including unknown years, are eligible. The earlier 2016 cutoff
+All book years, including unknown years, are eligible. The earlier 2016 cutoff
 has been removed. Existing skipped work is re-evaluated once without expiring API results.
 Local classification checks include shared ISBNs, duplicate-work recovery, and cached
 LibraryThing LCC/DDC/BISAC. LC uses the documented `http://lx2.loc.gov:210/LCDB`
@@ -670,13 +670,13 @@ retain the relational data and completion marker. Refresh cached misses after
 activation. No book files are modified.
 
 The bibliography extension checkpoints two passes over the existing extracted
-bundle: publication fields first, then names for referenced publisher QIDs. It
-retains explicit titles/subtitles and unambiguous publication years. Existing
+bundle: book fields first, then names for referenced publisher QIDs. It
+retains explicit titles/subtitles and unambiguous book years. Existing
 populated catalog fields win. It imports ISBN-less book/literary-work types,
-editions, and directly classified publications; P50 alone does not turn every
+editions, and directly classified books; P50 alone does not turn every
 scientific article into a book.
 
-ISBN-less publications have ordinary edition/bibliography/author/classification
+ISBN-less books have ordinary edition/bibliography/author/classification
 rows but no fabricated ISBN. Exact normalized title plus compatible author
 lookup can return `catalog_subjects` with provider `wikidata`; conflicting codes
 must reach consensus. These are subject matches, not edition identity matches.

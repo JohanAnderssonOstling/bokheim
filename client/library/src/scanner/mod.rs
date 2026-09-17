@@ -1,11 +1,11 @@
-use crate::books::queries::BooksSql;
-use crate::scanner::queries::ScannerSql;
+use crate::books::BooksSql;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::parse_uuid_column;
 use crate::storage_values::unix_millis;
 use crate::sync_state::get_sync_metadata;
 use crate::sync_state::set_sync_metadata;
-use library_model::BookFormat;
+use include_sqlite_sql::include_sql;
+use book_model::BookFormat;
 use rusqlite::Connection;
 use rusqlite::Transaction;
 use std::collections::HashMap;
@@ -120,4 +120,4 @@ pub fn delete_vanished_placements_in_tx(tx: &Transaction, scan_id: i64) -> rusql
     Ok(())
 }
 
-pub(crate) mod queries;
+include_sql!("src/scanner/sql/scanner.sql");

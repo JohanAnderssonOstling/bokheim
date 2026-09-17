@@ -1,4 +1,4 @@
-use super::task::{owned_task, BackendTask};
+use super::task::{owned_local_task, owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
 use std::sync::Arc;
@@ -42,6 +42,83 @@ impl BackendExecutor {
     pub fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
         // Synchronous backend entry points bridge into the backend-owned runtime.
         self.inner.handle.block_on(future)
+    }
+}
+
+/// One dedicated OS thread running a single-threaded Tokio `LocalSet`, owned
+/// for the lifetime of one open library.
+///
+/// A library's database owns exactly one `rusqlite::Connection`, which is
+/// `Send` but not `Sync`. Rather than making it `Sync` — a mutex around a
+/// connection that is, by construction, only ever touched by its one owner —
+/// every task that touches it runs here instead, on the one thread that owns
+/// it. Nothing scheduled through this executor needs `Send`. Each open
+/// library gets its own, so a slow query in one library never blocks another.
+#[derive(Clone)]
+pub struct LibraryExecutor {
+    submit: tokio::sync::mpsc::UnboundedSender<LocalJob>,
+}
+
+type LocalJob = Box<dyn FnOnce() + Send>;
+
+impl LibraryExecutor {
+    pub fn new() -> Result<Self, BackendExecutorError> {
+        let (submit, mut jobs) = tokio::sync::mpsc::unbounded_channel::<LocalJob>();
+        std::thread::Builder::new()
+            .name("bokheim-library".to_owned())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!("library executor thread failed to start: {error}");
+                        return;
+                    }
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&runtime, async move {
+                    while let Some(job) = jobs.recv().await {
+                        job();
+                    }
+                });
+            })
+            .map_err(|error| BackendExecutorError(error.to_string()))?;
+        Ok(Self { submit })
+    }
+
+    /// Runs `job` on this thread. `job` must be `Send` to cross onto it, but
+    /// because it then executes inside this thread's `LocalSet`, it may call
+    /// `tokio::task::spawn_local` (or [`Self::spawn_local`]) from there to
+    /// start non-`Send` background work — including anything touching this
+    /// library's owned database connection.
+    pub fn run(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.submit.send(Box::new(job));
+    }
+
+    /// Runs `job` on this thread and blocks the calling thread for its
+    /// result. For synchronous, non-runtime call sites (library open) that
+    /// need the outcome before continuing.
+    pub fn run_blocking<T: Send + 'static>(&self, job: impl FnOnce() -> T + Send + 'static) -> T {
+        let (reply, result) = std::sync::mpsc::channel();
+        self.run(move || {
+            let _ = reply.send(job());
+        });
+        result.recv().expect("library executor thread is running")
+    }
+
+    /// Spawns a non-`Send` future on this thread and returns a handle with
+    /// the same cancel-on-drop semantics as [`BackendExecutor::spawn`]. Only
+    /// for use by code already running on this thread (inside a job passed
+    /// to [`Self::run`] or [`Self::run_blocking`]) — it does not hop threads.
+    pub fn spawn_local<T: 'static>(future: impl Future<Output = T> + 'static) -> BackendTask<T> {
+        let (task, runner) = owned_local_task(future);
+        tokio::task::spawn_local(runner);
+        task
+    }
+
+    /// Same as [`Self::spawn_local`], but fire-and-forget: dropping the
+    /// caller's side does not cancel it.
+    pub fn spawn_local_detached(future: impl Future<Output = ()> + 'static) {
+        tokio::task::spawn_local(future);
     }
 }
 

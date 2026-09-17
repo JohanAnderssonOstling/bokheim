@@ -1,7 +1,7 @@
 use super::*;
 use catalog_model::{
-    CatalogBookFormatFacetValue, CatalogLanguageFacetValue, CatalogLink, CatalogLinkTarget, CatalogResultRangeResponse, CatalogSourcedPublication, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseEntryPayload,
-    CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectPublicationPayloadRequest, CatalogSubjectPublicationPayloadResponse, CatalogSubjectSort,
+    CatalogBookFormatFacetValue, CatalogLanguageFacetValue, CatalogLink, CatalogLinkTarget, CatalogResultRangeResponse, CatalogSourcedBook, CatalogSubjectBrowseCapabilities, CatalogSubjectBrowseEntryPayload,
+    CatalogSubjectBrowseIndexResponse, CatalogSubjectBrowseRequest, CatalogSubjectBrowseResponse, CatalogSubjectBookPayloadRequest, CatalogSubjectBookPayloadResponse, CatalogSubjectSort,
 };
 use std::time::Instant;
 
@@ -13,7 +13,7 @@ impl CatalogStore {
         Ok(CatalogSubjectBrowseResponse {
             epoch: page.epoch,
             navigation: page.navigation,
-            publications: page.publications.into_iter().filter_map(|publication| publication.item).collect(),
+            books: page.books.into_iter().filter_map(|book| book.item).collect(),
             range: page.range,
             capabilities: page.capabilities,
         })
@@ -21,31 +21,31 @@ impl CatalogStore {
 
     pub fn browse_subject_index(&self, request: &CatalogSubjectBrowseRequest) -> Result<CatalogSubjectBrowseIndexResponse, CatalogStoreError> {
         let page = self.browse_subject_page(request, false)?;
-        let entry_ids = page.publications.iter().map(|item| item.entry_id).collect();
+        let entry_ids = page.books.iter().map(|item| item.entry_id).collect();
         Ok(CatalogSubjectBrowseIndexResponse { epoch: page.epoch, navigation: page.navigation, entry_ids, range: page.range, capabilities: page.capabilities })
     }
 
-    pub fn subject_publication_payloads(&self, request: &CatalogSubjectPublicationPayloadRequest) -> Result<CatalogSubjectPublicationPayloadResponse, CatalogStoreError> {
+    pub fn subject_book_payloads(&self, request: &CatalogSubjectBookPayloadRequest) -> Result<CatalogSubjectBookPayloadResponse, CatalogStoreError> {
         const MAX_ENTRY_IDS: usize = 256;
         if request.entry_ids.len() > MAX_ENTRY_IDS {
-            return Err(CatalogStoreError::new("too many catalogue publication entry IDs"));
+            return Err(CatalogStoreError::new("too many catalogue book entry IDs"));
         }
         let projected = request.epoch.contains(":serving-v3-");
         let mut connection = if projected { self.serving.connection()? } else { self.connection()? };
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let epoch = if projected { super::serving_projection::epoch(&transaction)? } else { catalog_transport_state(&transaction)?.0 };
         if request.epoch != epoch {
-            return Err(CatalogStoreError::new("catalogue publication epoch is stale"));
+            return Err(CatalogStoreError::new("catalogue book epoch is stale"));
         }
         let entry_ids = serde_json::to_string(&request.entry_ids)?;
         let started = Instant::now();
         let mut statement = transaction.prepare(if projected {
             "SELECT p.entry_id,p.source_id,p.payload FROM json_each(?1) requested
-             JOIN catalog_publication p ON p.entry_id=requested.value ORDER BY requested.key"
+             JOIN catalog_book p ON p.entry_id=requested.value ORDER BY requested.key"
         } else {
             "SELECT p.entry_id,p.source_id,p.payload
                FROM json_each(?1) requested
-               JOIN catalog_publication p ON p.entry_id=requested.value
+               JOIN catalog_book p ON p.entry_id=requested.value
                JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
               WHERE p.importable=1
               ORDER BY requested.key"
@@ -55,12 +55,12 @@ impl CatalogStore {
         for row in rows {
             let (entry_id, source_id, payload) = row?;
             payloads.push(CatalogSubjectBrowseEntryPayload {
-                entry_id: stored_u64(entry_id, "subject publication entry ID")?,
-                publication: CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source_id).map_err(CatalogStoreError::new)?, publication: decode_cached(&payload)? },
+                entry_id: stored_u64(entry_id, "subject book entry ID")?,
+                book: CatalogSourcedBook { source_id: CatalogSourceId::parse(&source_id).map_err(CatalogStoreError::new)?, book: decode_cached(&payload)? },
             });
         }
         tracing::info!(requested = request.entry_ids.len(), returned = payloads.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject payloads loaded");
-        Ok(CatalogSubjectPublicationPayloadResponse { epoch, payloads })
+        Ok(CatalogSubjectBookPayloadResponse { epoch, payloads })
     }
 
     fn browse_subject_page(&self, request: &CatalogSubjectBrowseRequest, include_payloads: bool) -> Result<SubjectBrowsePage, CatalogStoreError> {
@@ -81,27 +81,27 @@ impl CatalogStore {
         let started = Instant::now();
         let navigation = load_subject_navigation(&transaction, &query)?;
         tracing::info!(elapsed_ms = started.elapsed().as_millis(), "catalogue subject navigation loaded");
-        let results = load_subject_publications(&transaction, &query, include_payloads)?;
-        let range = subject_range(prepared.offset, results.publications.len(), results.has_more);
+        let results = load_subject_books(&transaction, &query, include_payloads)?;
+        let range = subject_range(prepared.offset, results.books.len(), results.has_more);
         transaction.commit()?;
-        Ok(SubjectBrowsePage { epoch, navigation, publications: results.publications, range, capabilities })
+        Ok(SubjectBrowsePage { epoch, navigation, books: results.books, range, capabilities })
     }
 }
 
 struct SubjectBrowsePage {
     epoch: String,
     navigation: Vec<CatalogLink>,
-    publications: Vec<CatalogSequencedSubjectPublication>,
+    books: Vec<CatalogSequencedSubjectBook>,
     range: CatalogResultRangeResponse,
     capabilities: CatalogSubjectBrowseCapabilities,
 }
 
 const SUBJECT_LANGUAGE_FILTER: &str = "(json_array_length(?5)=0 OR NOT EXISTS(
-    SELECT 1 FROM catalog_publication_language any_language
+    SELECT 1 FROM catalog_book_language any_language
      WHERE any_language.source_id=p.source_id AND any_language.generation=p.generation
        AND any_language.edition_id=p.edition_id AND any_language.work_id=p.work_id
  ) OR EXISTS(
-    SELECT 1 FROM catalog_publication_language language
+    SELECT 1 FROM catalog_book_language language
     JOIN json_each(?5) supported
       ON lower(substr(language.language,1,instr(language.language || '-', '-')-1))=
          lower(substr(supported.value,1,instr(supported.value || '-', '-')-1))
@@ -113,7 +113,7 @@ const SUBJECT_CANONICAL_EDITION_FILTER: &str = "(
     p.source_id!='opds-project-gutenberg'
     OR p.work_id NOT LIKE 'urn:gutenberg:%'
     OR NOT EXISTS(
-        SELECT 1 FROM catalog_publication preferred
+        SELECT 1 FROM catalog_book preferred
          WHERE preferred.source_id=p.source_id AND preferred.generation=p.generation
            AND preferred.work_id=p.work_id AND preferred.importable=1
            AND (
@@ -136,19 +136,19 @@ const SUBJECT_CANONICAL_EDITION_FILTER: &str = "(
     )
 )";
 const SUBJECT_FORMAT_FILTER: &str = "(json_array_length(?6)=0 OR EXISTS(
-    SELECT 1 FROM catalog_publication_format format
+    SELECT 1 FROM catalog_book_format format
     JOIN json_each(?6) selected ON selected.value=format.book_format
    WHERE format.source_id=p.source_id AND format.generation=p.generation
      AND format.edition_id=p.edition_id AND format.work_id=p.work_id
 ))";
 
-pub(super) struct CatalogSubjectPublicationPage {
-    pub publications: Vec<CatalogSequencedSubjectPublication>,
+pub(super) struct CatalogSubjectBookPage {
+    pub books: Vec<CatalogSequencedSubjectBook>,
     pub has_more: bool,
 }
 
-pub(super) struct CatalogSequencedSubjectPublication {
-    pub item: Option<CatalogSourcedPublication>,
+pub(super) struct CatalogSequencedSubjectBook {
+    pub item: Option<CatalogSourcedBook>,
     pub entry_id: u64,
 }
 
@@ -248,10 +248,10 @@ fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowse
             format!(
                 "SELECT DISTINCT node.title,node.node_path
                    FROM catalog_subject_node node
-                   JOIN catalog_publication_subject_node membership
+                   JOIN catalog_book_subject_node membership
                      ON membership.system_id=node.system_id AND membership.node_path=node.node_path
                    JOIN catalog_source s ON s.source_id=membership.source_id AND s.active_generation=membership.generation
-                   JOIN catalog_publication p ON p.source_id=membership.source_id AND p.generation=membership.generation
+                   JOIN catalog_book p ON p.source_id=membership.source_id AND p.generation=membership.generation
                     AND p.edition_id=membership.edition_id AND p.work_id=membership.work_id
                   WHERE node.system_id=?1 AND node.parent_path=?2 AND p.importable=1
                     AND {SUBJECT_CANONICAL_EDITION_FILTER}
@@ -262,9 +262,9 @@ fn load_subject_navigation(connection: &Connection, query: &CatalogSubjectBrowse
             format!(
                 "WITH scoped AS (
                     SELECT CASE WHEN ?2='' THEN assignment.subject_path ELSE substr(assignment.subject_path,length(?2)+4) END AS remainder
-                      FROM catalog_publication_subject_assignment assignment
+                      FROM catalog_book_subject_assignment assignment
                       JOIN catalog_source s ON s.source_id=assignment.source_id AND s.active_generation=assignment.generation
-                      JOIN catalog_publication p ON p.source_id=assignment.source_id AND p.generation=assignment.generation
+                      JOIN catalog_book p ON p.source_id=assignment.source_id AND p.generation=assignment.generation
                        AND p.edition_id=assignment.edition_id AND p.work_id=assignment.work_id
                      WHERE assignment.system_id=?1 AND p.importable=1
                        AND (?2='' OR instr(assignment.subject_path,?2 || ' / ')=1)
@@ -299,13 +299,13 @@ fn subject_browse_index_ready(connection: &Connection) -> Result<bool, CatalogSt
     connection.query_row("SELECT EXISTS(SELECT 1 FROM catalog_subject_browse_index_metadata WHERE singleton=1 AND index_version=?1)", [CATALOG_SUBJECT_BROWSE_INDEX_VERSION], |row| row.get(0)).map_err(Into::into)
 }
 
-struct SubjectPublicationQuery {
+struct SubjectBookQuery {
     sql: String,
     search_parameter: String,
 }
 
 struct SubjectScopeQuery {
-    matching_publications: String,
+    matching_books: String,
     from_clause: String,
     subject_filter: String,
     search_parameter: String,
@@ -327,53 +327,53 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
     // tokenizer preserves the previous substring-search semantics.
     let search_parameter = if use_search_index { format!("\"{}\"", normalized_query.replace('"', "\"\"")) } else { normalized_query.to_owned() };
     let materialized = subject_browse_index_ready(connection)?;
-    let matching_publications = if normalized_query.is_empty() {
+    let matching_books = if normalized_query.is_empty() {
         String::new()
     } else if use_search_index {
         format!(
-            "WITH matching_publications(source_id,generation,edition_id,work_id) AS MATERIALIZED (
+            "WITH matching_books(source_id,generation,edition_id,work_id) AS MATERIALIZED (
                 SELECT p.source_id,p.generation,p.edition_id,p.work_id
-                  FROM catalog_publication_title_fts
-                  JOIN catalog_publication p ON p.rowid=catalog_publication_title_fts.rowid
+                  FROM catalog_book_title_fts
+                  JOIN catalog_book p ON p.rowid=catalog_book_title_fts.rowid
                   JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
-                 WHERE p.importable=1 AND {source_filter} AND catalog_publication_title_fts MATCH ?3
+                 WHERE p.importable=1 AND {source_filter} AND catalog_book_title_fts MATCH ?3
                 UNION
                 SELECT author.source_id,author.generation,author.edition_id,author.work_id
-                  FROM catalog_publication_author_fts
-                  JOIN catalog_publication_author author ON author.rowid=catalog_publication_author_fts.rowid
+                  FROM catalog_book_author_fts
+                  JOIN catalog_book_author author ON author.rowid=catalog_book_author_fts.rowid
                   JOIN catalog_source active ON active.source_id=author.source_id AND active.active_generation=author.generation
-                  JOIN catalog_publication p ON p.source_id=author.source_id AND p.generation=author.generation
+                  JOIN catalog_book p ON p.source_id=author.source_id AND p.generation=author.generation
                    AND p.edition_id=author.edition_id AND p.work_id=author.work_id
-                 WHERE p.importable=1 AND {source_filter} AND catalog_publication_author_fts MATCH ?3
+                 WHERE p.importable=1 AND {source_filter} AND catalog_book_author_fts MATCH ?3
                 UNION
                 SELECT toc.source_id,toc.generation,toc.edition_id,toc.work_id
-                  FROM catalog_publication_toc_fts
-                  JOIN catalog_publication_toc toc ON toc.rowid=catalog_publication_toc_fts.rowid
+                  FROM catalog_book_toc_fts
+                  JOIN catalog_book_toc toc ON toc.rowid=catalog_book_toc_fts.rowid
                   JOIN catalog_source active ON active.source_id=toc.source_id AND active.active_generation=toc.generation
-                  JOIN catalog_publication p ON p.source_id=toc.source_id AND p.generation=toc.generation
+                  JOIN catalog_book p ON p.source_id=toc.source_id AND p.generation=toc.generation
                    AND p.edition_id=toc.edition_id AND p.work_id=toc.work_id
-                 WHERE p.importable=1 AND {source_filter} AND catalog_publication_toc_fts MATCH ?3
+                 WHERE p.importable=1 AND {source_filter} AND catalog_book_toc_fts MATCH ?3
             )"
         )
     } else {
         format!(
-            "WITH matching_publications(source_id,generation,edition_id,work_id) AS MATERIALIZED (
+            "WITH matching_books(source_id,generation,edition_id,work_id) AS MATERIALIZED (
                 SELECT p.source_id,p.generation,p.edition_id,p.work_id
-                  FROM catalog_publication p
+                  FROM catalog_book p
                   JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
                  WHERE p.importable=1 AND {source_filter} AND instr(p.normalized_title,?3)>0
                 UNION
                 SELECT author.source_id,author.generation,author.edition_id,author.work_id
-                  FROM catalog_publication_author author
+                  FROM catalog_book_author author
                   JOIN catalog_source active ON active.source_id=author.source_id AND active.active_generation=author.generation
-                  JOIN catalog_publication p ON p.source_id=author.source_id AND p.generation=author.generation
+                  JOIN catalog_book p ON p.source_id=author.source_id AND p.generation=author.generation
                    AND p.edition_id=author.edition_id AND p.work_id=author.work_id
                  WHERE p.importable=1 AND {source_filter} AND instr(author.normalized_name,?3)>0
                 UNION
                 SELECT toc.source_id,toc.generation,toc.edition_id,toc.work_id
-                  FROM catalog_publication_toc toc
+                  FROM catalog_book_toc toc
                   JOIN catalog_source active ON active.source_id=toc.source_id AND active.active_generation=toc.generation
-                  JOIN catalog_publication p ON p.source_id=toc.source_id AND p.generation=toc.generation
+                  JOIN catalog_book p ON p.source_id=toc.source_id AND p.generation=toc.generation
                    AND p.edition_id=toc.edition_id AND p.work_id=toc.work_id
                  WHERE p.importable=1 AND {source_filter} AND instr(toc.normalized_title,?3)>0
             )"
@@ -381,8 +381,8 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
     };
     let (from_clause, subject_filter) = if materialized && normalized_query.is_empty() {
         (
-            "FROM catalog_publication_subject_node subject
-             JOIN catalog_publication p
+            "FROM catalog_book_subject_node subject
+             JOIN catalog_book p
                ON p.source_id=subject.source_id AND p.generation=subject.generation
               AND p.edition_id=subject.edition_id AND p.work_id=subject.work_id"
                 .to_owned(),
@@ -391,13 +391,13 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
     } else if materialized {
         let node_filter = if subject_path.is_empty() { String::new() } else { " AND subject.node_path=?2".to_owned() };
         (
-            "FROM matching_publications matching
-             JOIN catalog_publication p
+            "FROM matching_books matching
+             JOIN catalog_book p
                ON p.source_id=matching.source_id AND p.generation=matching.generation
               AND p.edition_id=matching.edition_id AND p.work_id=matching.work_id"
                 .to_owned(),
             format!(
-                "EXISTS(SELECT 1 FROM catalog_publication_subject_node subject
+                "EXISTS(SELECT 1 FROM catalog_book_subject_node subject
                          WHERE subject.source_id=p.source_id AND subject.generation=p.generation
                            AND subject.edition_id=p.edition_id AND subject.work_id=p.work_id
                            AND subject.system_id=?1{node_filter})"
@@ -405,8 +405,8 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
         )
     } else if normalized_query.is_empty() {
         (
-            "FROM catalog_publication p".to_owned(),
-            "EXISTS(SELECT 1 FROM catalog_publication_subject_assignment subject
+            "FROM catalog_book p".to_owned(),
+            "EXISTS(SELECT 1 FROM catalog_book_subject_assignment subject
                      WHERE subject.source_id=p.source_id AND subject.generation=p.generation
                        AND subject.edition_id=p.edition_id AND subject.work_id=p.work_id
                        AND subject.system_id=?1 AND subject.subject_path=?2)"
@@ -415,20 +415,20 @@ fn build_subject_scope_query(connection: &Connection, normalized_query: &str, su
     } else {
         let path_filter = if subject_path.is_empty() { String::new() } else { " AND (subject.subject_path=?2 OR instr(subject.subject_path,?2 || ' / ')=1)".to_owned() };
         (
-            "FROM matching_publications matching
-             JOIN catalog_publication p
+            "FROM matching_books matching
+             JOIN catalog_book p
                ON p.source_id=matching.source_id AND p.generation=matching.generation
               AND p.edition_id=matching.edition_id AND p.work_id=matching.work_id"
                 .to_owned(),
             format!(
-                "EXISTS(SELECT 1 FROM catalog_publication_subject_assignment subject
+                "EXISTS(SELECT 1 FROM catalog_book_subject_assignment subject
                          WHERE subject.source_id=p.source_id AND subject.generation=p.generation
                            AND subject.edition_id=p.edition_id AND subject.work_id=p.work_id
                            AND subject.system_id=?1{path_filter})"
             ),
         )
     };
-    Ok(SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter })
+    Ok(SubjectScopeQuery { matching_books, from_clause, subject_filter, search_parameter })
 }
 
 fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogStoreError> {
@@ -477,13 +477,13 @@ fn load_subject_capabilities(connection: &Connection, query: &CatalogSubjectBrow
 }
 
 fn build_subject_format_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogStoreError> {
-    let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
+    let SubjectScopeQuery { matching_books, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let sql = format!(
-        "{matching_publications}
+        "{matching_books}
          SELECT format.book_format,COUNT(*)
            {from_clause}
            JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
-           JOIN catalog_publication_format format
+           JOIN catalog_book_format format
              ON format.source_id=p.source_id AND format.generation=p.generation
             AND format.edition_id=p.edition_id AND format.work_id=p.work_id
           WHERE p.importable=1 AND {SUBJECT_CANONICAL_EDITION_FILTER} AND {SUBJECT_SOURCE_FILTER} AND {SUBJECT_LANGUAGE_FILTER}
@@ -494,14 +494,14 @@ fn build_subject_format_capability_query(connection: &Connection, normalized_que
 }
 
 fn build_subject_language_capability_query(connection: &Connection, normalized_query: &str, subject_path: &str) -> Result<(String, String), CatalogStoreError> {
-    let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
+    let SubjectScopeQuery { matching_books, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let sql = format!(
-        "{matching_publications}
+        "{matching_books}
          SELECT lower(substr(language.language,1,instr(language.language || '-', '-')-1)) AS base_language,
                 COUNT(DISTINCT p.source_id || char(31) || p.edition_id || char(31) || p.work_id)
            {from_clause}
            JOIN catalog_source active ON active.source_id=p.source_id AND active.active_generation=p.generation
-           JOIN catalog_publication_language language
+           JOIN catalog_book_language language
              ON language.source_id=p.source_id AND language.generation=p.generation
             AND language.edition_id=p.edition_id AND language.work_id=p.work_id
           WHERE p.importable=1 AND {SUBJECT_CANONICAL_EDITION_FILTER} AND {SUBJECT_SOURCE_FILTER} AND length(?5)>=0 AND {SUBJECT_FORMAT_FILTER}
@@ -511,8 +511,8 @@ fn build_subject_language_capability_query(connection: &Connection, normalized_q
     Ok((sql, search_parameter))
 }
 
-fn build_subject_publication_query(connection: &Connection, normalized_query: &str, subject_path: &str, sort: CatalogSubjectSort, include_payloads: bool) -> Result<SubjectPublicationQuery, CatalogStoreError> {
-    let SubjectScopeQuery { matching_publications, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
+fn build_subject_book_query(connection: &Connection, normalized_query: &str, subject_path: &str, sort: CatalogSubjectSort, include_payloads: bool) -> Result<SubjectBookQuery, CatalogStoreError> {
+    let SubjectScopeQuery { matching_books, from_clause, subject_filter, search_parameter } = build_subject_scope_query(connection, normalized_query, subject_path)?;
     let ordering = match sort {
         CatalogSubjectSort::Popularity => {
             "(COALESCE(pop.reading_log_count,0)>0 OR COALESCE(pop.rating_count,0)>0) DESC,
@@ -523,11 +523,11 @@ fn build_subject_publication_query(connection: &Connection, normalized_query: &s
     };
     let selection = if include_payloads { "p.source_id,p.payload,p.entry_id" } else { "p.entry_id" };
     let sql = format!(
-        "{matching_publications}
+        "{matching_books}
          SELECT {selection}
            {from_clause}
            JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
-           LEFT JOIN catalog_publication_popularity pop
+           LEFT JOIN catalog_book_popularity pop
              ON pop.source_id=p.source_id AND pop.generation=p.generation
             AND pop.edition_id=p.edition_id AND pop.work_id=p.work_id
           WHERE p.importable=1 AND {SUBJECT_CANONICAL_EDITION_FILTER} AND {SUBJECT_SOURCE_FILTER} AND {SUBJECT_LANGUAGE_FILTER} AND {SUBJECT_FORMAT_FILTER}
@@ -535,16 +535,16 @@ fn build_subject_publication_query(connection: &Connection, normalized_query: &s
           ORDER BY {ordering}
           LIMIT ?7 OFFSET ?8"
     );
-    Ok(SubjectPublicationQuery { sql, search_parameter })
+    Ok(SubjectBookQuery { sql, search_parameter })
 }
 
-fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogStoreError> {
-    let mut publications = Vec::new();
+fn load_subject_books(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectBookPage, CatalogStoreError> {
+    let mut books = Vec::new();
     if !browse.normalized_query.is_empty() || !browse.subject_path.is_empty() {
-        if let Some(page) = super::serving_queries::load_publications_if_ready(connection, browse, include_payloads)? {
+        if let Some(page) = super::serving_queries::load_books_if_ready(connection, browse, include_payloads)? {
             return Ok(page);
         }
-        let query = build_subject_publication_query(connection, browse.normalized_query, browse.subject_path, browse.sort, include_payloads)?;
+        let query = build_subject_book_query(connection, browse.normalized_query, browse.subject_path, browse.sort, include_payloads)?;
         let page_started = Instant::now();
         let mut statement = connection.prepare(&query.sql)?;
         let parameters = params![
@@ -561,24 +561,24 @@ fn load_subject_publications(connection: &Connection, browse: &CatalogSubjectBro
             let rows = statement.query_map(parameters, |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?;
             for row in rows {
                 let (source, payload, entry_id) = row?;
-                let publication = decode_cached(&payload)?;
-                publications.push(CatalogSequencedSubjectPublication {
-                    item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, publication }),
-                    entry_id: stored_u64(entry_id, "subject publication entry ID")?,
+                let book = decode_cached(&payload)?;
+                books.push(CatalogSequencedSubjectBook {
+                    item: Some(CatalogSourcedBook { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, book }),
+                    entry_id: stored_u64(entry_id, "subject book entry ID")?,
                 });
             }
         } else {
             let rows = statement.query_map(parameters, |row| row.get::<_, i64>(0))?;
             for row in rows {
-                publications.push(CatalogSequencedSubjectPublication { item: None, entry_id: stored_u64(row?, "subject publication entry ID")? });
+                books.push(CatalogSequencedSubjectBook { item: None, entry_id: stored_u64(row?, "subject book entry ID")? });
             }
         }
-        let has_more = publications.len() > browse.limit;
-        publications.truncate(browse.limit);
-        tracing::info!(include_payloads, has_more, returned = publications.len(), elapsed_ms = page_started.elapsed().as_millis(), "catalogue subject result page loaded");
-        return Ok(CatalogSubjectPublicationPage { publications, has_more });
+        let has_more = books.len() > browse.limit;
+        books.truncate(browse.limit);
+        tracing::info!(include_payloads, has_more, returned = books.len(), elapsed_ms = page_started.elapsed().as_millis(), "catalogue subject result page loaded");
+        return Ok(CatalogSubjectBookPage { books, has_more });
     }
-    Ok(CatalogSubjectPublicationPage { publications, has_more: false })
+    Ok(CatalogSubjectBookPage { books, has_more: false })
 }
 
 fn subject_range(offset: usize, returned_items: usize, has_more: bool) -> CatalogResultRangeResponse {

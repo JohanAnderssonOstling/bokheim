@@ -1,6 +1,6 @@
 use catalog_model::normalize_search_text;
-use catalog_model::{CatalogBookFormat, CatalogDescription, CatalogLinkTarget, CatalogPage, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity, CatalogSourceId};
-use publication_model::PublicationSubject;
+use catalog_model::{CatalogBookFormat, CatalogDescription, CatalogLinkTarget, CatalogPage, CatalogBook, CatalogBookAction, CatalogBookIdentity, CatalogSourceId};
+use book_model::BookSubject;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -10,7 +10,7 @@ use std::time::Instant;
 
 pub(crate) type CatalogSubjectAssignment = subject_projection::ProjectedSubjectAssignment;
 
-pub(crate) fn prepare_catalog_subject_assignments(subjects: &[PublicationSubject]) -> Vec<CatalogSubjectAssignment> {
+pub(crate) fn prepare_catalog_subject_assignments(subjects: &[BookSubject]) -> Vec<CatalogSubjectAssignment> {
     if subjects.is_empty() {
         return Vec::new();
     }
@@ -52,11 +52,11 @@ pub(crate) struct CatalogPageWrite {
 pub(crate) struct PreparedCatalogPageWrite {
     write: CatalogPageWrite,
     payload: Vec<u8>,
-    publications: Vec<PreparedCatalogPublication>,
+    books: Vec<PreparedCatalogBook>,
 }
 
-pub(crate) struct PreparedCatalogPublication {
-    publication: CatalogPublication,
+pub(crate) struct PreparedCatalogBook {
+    book: CatalogBook,
     payload: Vec<u8>,
     payload_hash: String,
     normalized_title: String,
@@ -64,7 +64,7 @@ pub(crate) struct PreparedCatalogPublication {
     normalized_authors: Vec<String>,
     languages: Vec<String>,
     formats: Vec<&'static str>,
-    subjects: Vec<PublicationSubject>,
+    subjects: Vec<BookSubject>,
     subject_assignments: Vec<CatalogSubjectAssignment>,
     book_format: Option<&'static str>,
     importable: bool,
@@ -114,8 +114,8 @@ mod metadata_backfill;
 mod ocr_backfill;
 mod page_search;
 mod process_control;
-mod publication_enrichment;
-mod publication_storage;
+mod book_enrichment;
+mod book_storage;
 mod schema;
 mod serving_queries;
 mod serving_changes;
@@ -130,18 +130,18 @@ mod work_supplement_backfill;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use authority::{advance_catalog_transport_revision, allocate_sequence, next_sequence_in, sequence_in, sequenced_publication_in, unix_timestamp};
-pub(crate) use cover_queue::queue_publication_cover;
-pub(crate) use extraction_queue::{merge_extracted_author_names, metadata_index_from_metadata, queue_publication_extraction};
+pub(crate) use authority::{advance_catalog_transport_revision, allocate_sequence, next_sequence_in, sequence_in, sequenced_book_in, unix_timestamp};
+pub(crate) use cover_queue::queue_book_cover;
+pub(crate) use extraction_queue::{merge_extracted_author_names, metadata_index_from_metadata, queue_book_extraction};
 pub(crate) use frontier::put_page_row;
 pub(crate) use identity_review::{identity_review_inventory_in, record_identity_review, record_identity_review_failure};
-pub(crate) use ingestion::{insert_staged_publication, upsert_active_publication};
-pub(crate) use publication_enrichment::merge_catalog_subject_evidence;
-pub(crate) use publication_storage::{book_format_storage, catalog_book_format_from_storage, publication_entry_id, publication_extraction, publication_inventory, publication_key};
+pub(crate) use ingestion::{insert_staged_book, upsert_active_book};
+pub(crate) use book_enrichment::merge_catalog_subject_evidence;
+pub(crate) use book_storage::{book_format_storage, catalog_book_format_from_storage, book_entry_id, book_extraction, book_inventory, book_key};
 pub(crate) use schema::bounded_crawl_error;
 pub(crate) use sources::source_state_in;
 pub(crate) use sources::{active_generation_in, active_generation_optional, ensure_source_in, refresh_active_counts};
 pub(crate) use subjects::{
-    insert_prepared_subject_assignments, insert_subject_browse_memberships, rebuild_subject_assignments, replace_feed_publication_subjects_prepared, replace_publication_subjects_prepared, replace_publication_toc,
+    insert_prepared_subject_assignments, insert_subject_browse_memberships, rebuild_subject_assignments, replace_feed_book_subjects_prepared, replace_book_subjects_prepared, replace_book_toc,
     ENRICHED_SUBJECT_POSITION_BASE,
 };

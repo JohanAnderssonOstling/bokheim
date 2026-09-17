@@ -1,1 +1,0 @@
-SELECT state,retry_after FROM local_thumbnail_work WHERE content_hash=?1

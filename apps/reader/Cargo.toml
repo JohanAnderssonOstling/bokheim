@@ -12,6 +12,7 @@ mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+content-address = { path = "../../shared/content-address" }
 app-preferences = { path = "../../client/preferences" }
 bokheim-backend = { path = "../../client/backend", default-features = false }
 async-channel = "2"
@@ -24,8 +25,9 @@ gpui_kobo = { path = "../../../GPUI-Fork/crates/gpui_kobo", optional = true }
 html-view-core.workspace = true
 html-view-gpui = { path = "crates/html/crates/html-view-gpui" }
 html.workspace = true
-html-publication = { path = "crates/html/crates/html-publication" }
+html-book = { path = "crates/html/crates/html-book" }
 library-model = { path = "../../client/library-model" }
+book-model = { path = "../../shared/book-model", default-features = false }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }

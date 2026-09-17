@@ -1,1 +1,0 @@
-INSERT INTO local_file_work VALUES(?1,'restore',?2,'/book.epub')

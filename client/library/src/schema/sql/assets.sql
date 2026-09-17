@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS local_book_versions(
         checksum TEXT NOT NULL,
         size_bytes INTEGER NOT NULL CHECK(size_bytes>0)
     );
-    CREATE TABLE IF NOT EXISTS local_publication_current(
+    CREATE TABLE IF NOT EXISTS local_book_current(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         dir_id TEXT NOT NULL,
         content_hash TEXT NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,

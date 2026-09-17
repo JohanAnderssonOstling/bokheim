@@ -22,6 +22,6 @@ CREATE TEMP TRIGGER audit_book_subject_assignment_DELETE AFTER DELETE ON main.bo
 CREATE TEMP TRIGGER audit_book_unified_concept_INSERT AFTER INSERT ON main.book_unified_concept BEGIN INSERT INTO write_audit VALUES('book_unified_concept','INSERT'); END;
 CREATE TEMP TRIGGER audit_book_unified_concept_UPDATE AFTER UPDATE ON main.book_unified_concept BEGIN INSERT INTO write_audit VALUES('book_unified_concept','UPDATE'); END;
 CREATE TEMP TRIGGER audit_book_unified_concept_DELETE AFTER DELETE ON main.book_unified_concept BEGIN INSERT INTO write_audit VALUES('book_unified_concept','DELETE'); END;
-CREATE TEMP TRIGGER audit_book_publication_value_INSERT AFTER INSERT ON main.book_publication_value BEGIN INSERT INTO write_audit VALUES('book_publication_value','INSERT'); END;
-CREATE TEMP TRIGGER audit_book_publication_value_UPDATE AFTER UPDATE ON main.book_publication_value BEGIN INSERT INTO write_audit VALUES('book_publication_value','UPDATE'); END;
-CREATE TEMP TRIGGER audit_book_publication_value_DELETE AFTER DELETE ON main.book_publication_value BEGIN INSERT INTO write_audit VALUES('book_publication_value','DELETE'); END;
+CREATE TEMP TRIGGER audit_book_value_INSERT AFTER INSERT ON main.book_value BEGIN INSERT INTO write_audit VALUES('book_value','INSERT'); END;
+CREATE TEMP TRIGGER audit_book_value_UPDATE AFTER UPDATE ON main.book_value BEGIN INSERT INTO write_audit VALUES('book_value','UPDATE'); END;
+CREATE TEMP TRIGGER audit_book_value_DELETE AFTER DELETE ON main.book_value BEGIN INSERT INTO write_audit VALUES('book_value','DELETE'); END;

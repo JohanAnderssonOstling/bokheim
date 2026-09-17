@@ -5,9 +5,9 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["publication-extractors"]
-publication-memory = ["dep:epub_provider", "dep:mobi", "dep:resvg"]
-publication-extractors = ["publication-memory", "dep:mp4ameta"]
+default = ["book-extractors"]
+book-memory = ["dep:epub_provider", "dep:mobi", "dep:resvg"]
+book-extractors = ["book-memory", "dep:mp4ameta"]
 
 [dependencies]
 flate2 = { version = "1" }

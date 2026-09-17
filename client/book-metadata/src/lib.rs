@@ -1,7 +1,7 @@
 //! Extracts typed book and audiobook metadata without application or database state.
 
-use library_model::BookFormat;
-use library_model::{BookMetadataState, Contributor, PublicationMetadataError, AUTHOR_MARC_RELATOR_CODE};
+use book_model::BookFormat;
+use book_model::{AUTHOR_MARC_RELATOR_CODE, BookRecord, Contributor, BookMetadataError};
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -66,19 +66,19 @@ pub struct M4bMetadata {
 pub struct InspectedBook {
     #[serde(default)]
     pub pdf: Option<pdf_view_common::PdfReaderMetadata>,
-    pub metadata: BookMetadataState,
+    pub metadata: BookRecord,
     pub audiobook: Option<AudiobookMetadata>,
-    /// The publication's own navigation document, kept rather than discarded:
+    /// The book's own navigation document, kept rather than discarded:
     /// the detail page draws contents for books that have never been
     /// downloaded, and re-reading the file for every visit is not an option
     /// when the file may be remote. Empty where the format carries none — an
-    /// M4B's chapters are audiobook metadata, and a PDF's outline is only
-    /// reachable through the renderer.
+    /// M4B's chapters are audiobook metadata, which the audiobook path files as
+    /// navigation of its own.
     #[serde(default)]
-    pub toc: Vec<library_model::PublicationTocEntry>,
+    pub toc: Vec<book_model::BookTocEntry>,
 }
 
-pub use publication_inspection::{inspect_epub, inspect_epub_reader, inspect_pdf, inspect_pdf_reader, InspectedEpub, InspectedPdf};
+pub use book_inspection::{inspect_epub, inspect_epub_reader, inspect_pdf, inspect_pdf_reader, InspectedEpub, InspectedPdf};
 
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 /// metadata receive a title derived from the file name.
@@ -86,12 +86,14 @@ pub fn inspect_book(path: &Path, format: BookFormat) -> MetadataResult<Inspected
     inspect_book_reader(path, format, std::fs::File::open(path)?)
 }
 
-/// Inspects a seekable publication using the same validation on every platform.
+/// Inspects a seekable book using the same validation on every platform.
 pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl Read + Seek + Send + Sync + 'static) -> MetadataResult<InspectedBook> {
     let mut pdf = None;
+    let mut pdf_toc = Vec::new();
     let reader = if format == BookFormat::Pdf {
-        let (reader, extracted) = pdf_reader_core::inspect_reader_metadata(reader)?;
+        let (reader, extracted, outline) = pdf_reader_core::inspect_reader_metadata(reader)?;
         pdf = extracted.valid_for(&extracted.checksum).then_some(extracted);
+        pdf_toc = outline;
         reader
     } else { reader };
     let mut reader = reader;
@@ -103,15 +105,15 @@ pub fn inspect_book_reader(source_name: &Path, format: BookFormat, reader: impl 
             let inspected = inspect_epub_reader(source_name, reader)?;
             (inspected.metadata, None, inspected.toc)
         }
-        BookFormat::Mobi => (publication_inspection::inspect_mobi_metadata_reader(source_name, reader)?, None, Vec::new()),
-        BookFormat::Pdf => (inspect_pdf_reader(source_name, reader)?.metadata, None, Vec::new()),
+        BookFormat::Mobi => (book_inspection::inspect_mobi_metadata_reader(source_name, reader)?, None, Vec::new()),
+        BookFormat::Pdf => (inspect_pdf_reader(source_name, reader)?.metadata, None, pdf_toc),
         BookFormat::M4b => {
             let audiobook = audiobook_metadata_from(mp4ameta::Tag::read_from(&mut reader)?)?;
-            let metadata = BookMetadataState { title: audiobook.title.clone(), contributors: audiobook.authors.clone(), description: audiobook.description.clone(), publication: recording_publication(&audiobook.recording)? };
+            let metadata = BookRecord { title: audiobook.title.clone(), contributors: audiobook.authors.clone(), description: audiobook.description.clone(), book: recording_book(&audiobook.recording)? };
             (metadata, Some(audiobook), Vec::new())
         }
     };
-    publication_inspection::normalize_with_filename(&mut metadata, &source_name.to_string_lossy())?;
+    book_inspection::normalize_with_filename(&mut metadata, &source_name.to_string_lossy())?;
     Ok(InspectedBook { metadata, audiobook, toc, pdf })
 }
 
@@ -130,14 +132,14 @@ pub fn inspect_book_for_catalogue(path: &Path, format: BookFormat) -> InspectedB
     inspect_book(path, format).unwrap_or_else(|_| InspectedBook { metadata: fallback_metadata(path), audiobook: None, toc: Vec::new(), pdf: None })
 }
 
-fn fallback_metadata(path: &Path) -> BookMetadataState {
+fn fallback_metadata(path: &Path) -> BookRecord {
     let title = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Untitled").to_owned();
-    let mut metadata = BookMetadataState { title, contributors: Vec::new(), description: String::new(), publication: Default::default() };
+    let mut metadata = BookRecord { title, contributors: Vec::new(), description: String::new(), book: Default::default() };
     metadata.normalize_title();
     metadata
 }
 
-fn author_credit(name: String, sort_name: Option<String>) -> Result<Contributor, PublicationMetadataError> {
+fn author_credit(name: String, sort_name: Option<String>) -> Result<Contributor, BookMetadataError> {
     Contributor::new(name, sort_name, AUTHOR_MARC_RELATOR_CODE)
 }
 
@@ -150,7 +152,7 @@ fn m4b_metadata_from_tag(tag: mp4ameta::Tag) -> MetadataResult<M4bMetadata> {
     let description = tag.description().map(str::trim).unwrap_or_default().to_owned();
     let duration = tag.duration();
     if duration.is_zero() {
-        return Err("M4B publication contains no playable audio duration".into());
+        return Err("M4B book contains no playable audio duration".into());
     }
     let (chapters, chapter_origin) = normalize_m4b_chapters(tag.chapters(), duration);
     let recording = recording_evidence(&tag, &authors);
@@ -167,19 +169,19 @@ fn audiobook_metadata_from_m4b(metadata: M4bMetadata) -> MetadataResult<Audioboo
     Ok(AudiobookMetadata { title: metadata.title, authors, description: metadata.description, duration_ms: duration_ms(metadata.duration), chapters, chapter_origin: metadata.chapter_origin, recording: metadata.recording })
 }
 
-fn recording_publication(evidence: &metadata_contract::audible::RecordingEvidence) -> MetadataResult<library_model::PublicationMetadata> {
-    use library_model::{Identifier, Scheme, Scope};
-    let mut publication = library_model::PublicationMetadata::default();
+fn recording_book(evidence: &metadata_contract::audible::RecordingEvidence) -> MetadataResult<book_model::BookMetadata> {
+    use book_model::{Identifier, Scheme, Scope};
+    let mut book = book_model::BookMetadata::default();
     if let Some(subtitle) = evidence.subtitle.as_deref().filter(|value| !value.trim().is_empty()) {
-        publication.set_subtitle(subtitle, "m4b:subtitle")?;
+        book.set_subtitle(subtitle, "m4b:subtitle")?;
     }
-    publication.publishers = evidence.publishers.iter().filter_map(|name| library_model::PublisherCredit::new(name).ok()).collect();
+    book.publishers = evidence.publishers.iter().filter_map(|name| book_model::PublisherCredit::new(name).ok()).collect();
     for (values, scheme) in [(&evidence.isbns, Scheme::Isbn), (&evidence.asins, Scheme::Asin)] {
         for value in values {
-            publication.identifiers.push(Identifier::new(value, scheme.clone(), Scope::Edition, "embedded-m4b")?);
+            book.identifiers.push(Identifier::new(value, scheme.clone(), Scope::Edition, "embedded-m4b")?);
         }
     }
-    Ok(publication)
+    Ok(book)
 }
 
 fn recording_evidence(tag: &mp4ameta::Tag, authors: &[String]) -> metadata_contract::audible::RecordingEvidence {
@@ -198,7 +200,7 @@ fn recording_evidence(tag: &mp4ameta::Tag, authors: &[String]) -> metadata_contr
         .filter(|value| value.len() == 10 && value.bytes().all(|b| b.is_ascii_alphanumeric()))
         .collect();
     let isbns = values(tag, &["ISBN", "isbn", "ISBN13", "ISBN-13", "ISBN10"]).into_iter()
-        .filter_map(|value| library_model::canonical_isbn(&value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        .filter_map(|value| book_model::canonical_isbn(&value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     // Explicit NARRATOR atoms may name more than one person; only when none
     // exist does the composer fallback apply, and it never relabels an author.
     let mut narrators = values(tag, &["NARRATOR", "narrator"]);
@@ -364,11 +366,11 @@ mod recording_evidence_tests {
         assert_eq!(evidence.date.as_deref(), Some("1859"));
         assert_eq!(evidence.recording_release_date, None, "a generic date must not become recording evidence");
         assert_eq!(evidence.subtitle.as_deref(), Some("Subtitle"));
-        let publication = recording_publication(&evidence).unwrap();
-        assert_eq!(publication.subtitle(), Some("Subtitle"));
-        assert_eq!(publication.identifiers.len(), 3);
-        assert!(publication.identifiers.iter().all(|id| id.source() == "embedded-m4b"));
-        assert_eq!(publication.identifiers.iter().filter(|id| id.scheme() == &library_model::Scheme::Isbn).count(), 2);
+        let book = recording_book(&evidence).unwrap();
+        assert_eq!(book.subtitle(), Some("Subtitle"));
+        assert_eq!(book.identifiers.len(), 3);
+        assert!(book.identifiers.iter().all(|id| id.source() == "embedded-m4b"));
+        assert_eq!(book.identifiers.iter().filter(|id| id.scheme() == &book_model::Scheme::Isbn).count(), 2);
     }
 
     #[test]
@@ -436,9 +438,9 @@ mod m4b_credit_tests {
         let mut tag = mp4ameta::Tag::default();
         set(&mut tag, "PUBLISHER", "Historiska media");
 
-        let publication = recording_publication(&recording_evidence(&tag, &[])).unwrap();
+        let book = recording_book(&recording_evidence(&tag, &[])).unwrap();
 
-        assert_eq!(publication.publishers.len(), 1);
-        assert_eq!(publication.publishers[0].name().as_str(), "Historiska media");
+        assert_eq!(book.publishers.len(), 1);
+        assert_eq!(book.publishers[0].name().as_str(), "Historiska media");
     }
 }

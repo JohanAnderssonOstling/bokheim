@@ -1,6 +1,6 @@
 //! Transactional, coalescing invalidation for the independent browse projector.
 //!
-//! A publication stays dirty until the projector acknowledges the exact
+//! A book stays dirty until the projector acknowledges the exact
 //! sequence it read. A concurrent edit therefore cannot be acknowledged away.
 use super::*;
 
@@ -30,9 +30,9 @@ pub(super) fn install(connection: &Connection) -> Result<(), CatalogStoreError> 
         )?;
     }
     // Track all inputs, including edits to normalized child tables that do
-    // not update the serialized publication payload. Keep OLD keys on UPDATE
+    // not update the serialized book payload. Keep OLD keys on UPDATE
     // as well, so identity moves remove the previous serving entry.
-    for table in ["catalog_publication", "catalog_publication_author", "catalog_publication_toc", "catalog_publication_language", "catalog_publication_format", "catalog_publication_popularity", "catalog_publication_subject_assignment"] {
+    for table in ["catalog_book", "catalog_book_author", "catalog_book_toc", "catalog_book_language", "catalog_book_format", "catalog_book_popularity", "catalog_book_subject_assignment"] {
         for (event, references) in [("INSERT", &["NEW"][..]), ("UPDATE", &["OLD", "NEW"][..]), ("DELETE", &["OLD"][..])] {
             // The projector advances this epoch while pinning its read snapshot.
             // Repeated child writes before that fence only dirty a book once.
@@ -56,9 +56,9 @@ pub(super) fn install(connection: &Connection) -> Result<(), CatalogStoreError> 
     }
     // Membership rows are derived from assignments by the projector itself.
     for event in ["INSERT", "UPDATE", "DELETE"] {
-        connection.execute_batch(&format!("DROP TRIGGER IF EXISTS serving_dirty_catalog_publication_subject_node_{event}"))?;
+        connection.execute_batch(&format!("DROP TRIGGER IF EXISTS serving_dirty_catalog_book_subject_node_{event}"))?;
     }
-    // Generation activation changes visibility without changing publication
+    // Generation activation changes visibility without changing book
     // rows. Record a source marker in O(1); the projector expands it outside
     // the authoritative writer, including deletions from its previous view.
     for (event, reference, condition) in [("INSERT", "NEW", ""), ("UPDATE", "NEW", "WHEN OLD.active_generation IS NOT NEW.active_generation"), ("DELETE", "OLD", "")] {
@@ -77,7 +77,7 @@ pub(super) fn install(connection: &Connection) -> Result<(), CatalogStoreError> 
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct PublicationChange {
+pub(super) struct BookChange {
     pub source_id: String,
     pub edition_id: String,
     pub work_id: String,
@@ -91,9 +91,9 @@ pub(super) struct SourceChange {
 }
 
 /// Called within the same read snapshot used to prepare projected rows.
-pub(super) fn publications(connection: &Connection, limit: usize) -> Result<Vec<PublicationChange>, CatalogStoreError> {
+pub(super) fn books(connection: &Connection, limit: usize) -> Result<Vec<BookChange>, CatalogStoreError> {
     let mut statement = connection.prepare("SELECT source_id,edition_id,work_id,sequence FROM catalog_serving_dirty ORDER BY sequence LIMIT ?1")?;
-    let rows = statement.query_map([limit.clamp(1, 512) as i64], |row| Ok(PublicationChange { source_id: row.get(0)?, edition_id: row.get(1)?, work_id: row.get(2)?, sequence: row.get(3)? }))?.collect::<Result<Vec<_>, _>>()?;
+    let rows = statement.query_map([limit.clamp(1, 512) as i64], |row| Ok(BookChange { source_id: row.get(0)?, edition_id: row.get(1)?, work_id: row.get(2)?, sequence: row.get(3)? }))?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -105,8 +105,8 @@ pub(super) fn sources(connection: &Connection) -> Result<Vec<SourceChange>, Cata
 
 /// Only acknowledge after the serving transaction commits. Replaying after a
 /// crash between that commit and this acknowledgement is intentionally safe.
-pub(super) fn acknowledge(connection: &Connection, publications: &[PublicationChange], sources: &[SourceChange]) -> Result<(), CatalogStoreError> {
-    for change in publications {
+pub(super) fn acknowledge(connection: &Connection, books: &[BookChange], sources: &[SourceChange]) -> Result<(), CatalogStoreError> {
+    for change in books {
         connection.execute("DELETE FROM catalog_serving_dirty WHERE source_id=?1 AND edition_id=?2 AND work_id=?3 AND sequence=?4", params![change.source_id, change.edition_id, change.work_id, change.sequence])?;
     }
     for change in sources {
@@ -127,29 +127,29 @@ mod tests {
         writer.pragma_update(None, "foreign_keys", "OFF").unwrap();
         writer.execute("INSERT INTO catalog_source(source_id,source_url,epoch,active_generation,next_sequence) VALUES('source','url','epoch',1,1)", []).unwrap();
         writer.execute_batch("CREATE TABLE test_dirty_writes(n INTEGER); CREATE TRIGGER test_dirty_update AFTER UPDATE ON catalog_serving_dirty BEGIN INSERT INTO test_dirty_writes VALUES(1); END;").unwrap();
-        writer.execute("INSERT INTO catalog_publication_author VALUES('source',1,'edition','',0,'before')", []).unwrap();
+        writer.execute("INSERT INTO catalog_book_author VALUES('source',1,'edition','',0,'before')", []).unwrap();
         for _ in 0..100 {
-            writer.execute("UPDATE catalog_publication_author SET normalized_name='before'", []).unwrap();
+            writer.execute("UPDATE catalog_book_author SET normalized_name='before'", []).unwrap();
         }
         assert_eq!(writer.query_row("SELECT COUNT(*) FROM test_dirty_writes", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         let mut reader = store.connection().unwrap();
         let fence = writer.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         let snapshot = reader.transaction().unwrap();
-        let batch = publications(&snapshot, 256).unwrap();
+        let batch = books(&snapshot, 256).unwrap();
         fence.execute("UPDATE catalog_serving_change_sequence SET sequence=sequence+1", []).unwrap();
         fence.commit().unwrap();
         // Preparation keeps a WAL read snapshot, not a writer reservation.
-        writer.execute("UPDATE catalog_publication_author SET normalized_name='after'", []).unwrap();
-        assert_eq!(snapshot.query_row("SELECT normalized_name FROM catalog_publication_author", [], |r| r.get::<_, String>(0)).unwrap(), "before");
+        writer.execute("UPDATE catalog_book_author SET normalized_name='after'", []).unwrap();
+        assert_eq!(snapshot.query_row("SELECT normalized_name FROM catalog_book_author", [], |r| r.get::<_, String>(0)).unwrap(), "before");
         snapshot.commit().unwrap();
         acknowledge(&writer, &batch, &[]).unwrap();
-        assert_eq!(publications(&writer, 256).unwrap().len(), 1);
+        assert_eq!(books(&writer, 256).unwrap().len(), 1);
         assert_eq!(writer.query_row("SELECT COUNT(*) FROM test_dirty_writes", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        writer.execute("INSERT INTO catalog_publication_author VALUES('source',2,'inactive','',0,'staged')", []).unwrap();
-        assert_eq!(publications(&writer, 256).unwrap().len(), 1, "inactive staging must use the activation marker");
-        acknowledge(&writer, &publications(&writer, 256).unwrap(), &[]).unwrap();
-        writer.execute("UPDATE catalog_publication_author SET generation=2 WHERE edition_id='edition'", []).unwrap();
-        assert_eq!(publications(&writer,256).unwrap().len(),1,"moving out of the active generation must invalidate the old key");
+        writer.execute("INSERT INTO catalog_book_author VALUES('source',2,'inactive','',0,'staged')", []).unwrap();
+        assert_eq!(books(&writer, 256).unwrap().len(), 1, "inactive staging must use the activation marker");
+        acknowledge(&writer, &books(&writer, 256).unwrap(), &[]).unwrap();
+        writer.execute("UPDATE catalog_book_author SET generation=2 WHERE edition_id='edition'", []).unwrap();
+        assert_eq!(books(&writer,256).unwrap().len(),1,"moving out of the active generation must invalidate the old key");
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod tests {
         // trigger itself must behave identically inside a caller transaction.
         connection.pragma_update(None, "foreign_keys", "OFF").unwrap();
         connection.execute("INSERT INTO catalog_source(source_id,source_url,epoch,active_generation,next_sequence) VALUES('source','url','epoch',1,1)", []).unwrap();
-        let insert = "INSERT INTO catalog_publication_author(source_id,generation,edition_id,work_id,position,normalized_name)
+        let insert = "INSERT INTO catalog_book_author(source_id,generation,edition_id,work_id,position,normalized_name)
                       VALUES('source',1,'edition','',0,'first')";
         {
             let transaction = connection.transaction().unwrap();
@@ -170,18 +170,18 @@ mod tests {
         }
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM catalog_serving_dirty", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         connection.execute(insert, []).unwrap();
-        let batch = publications(&connection, 32).unwrap();
+        let batch = books(&connection, 32).unwrap();
         let observed: i64 = connection.query_row("SELECT sequence FROM catalog_serving_dirty", [], |r| r.get(0)).unwrap();
         connection.execute("UPDATE catalog_serving_change_sequence SET sequence=sequence+1", []).unwrap();
-        connection.execute("UPDATE catalog_publication_author SET normalized_name='second'", []).unwrap();
+        connection.execute("UPDATE catalog_book_author SET normalized_name='second'", []).unwrap();
         acknowledge(&connection, &batch, &[]).unwrap();
         assert_eq!(connection.execute("DELETE FROM catalog_serving_dirty WHERE sequence=?1", [observed]).unwrap(), 0);
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM catalog_serving_dirty", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        connection.execute("DELETE FROM catalog_publication_author", []).unwrap();
+        connection.execute("DELETE FROM catalog_book_author", []).unwrap();
         assert!(connection.query_row("SELECT sequence FROM catalog_serving_dirty", [], |r| r.get::<_, i64>(0)).unwrap() > observed);
-        let batch = publications(&connection, 32).unwrap();
+        let batch = books(&connection, 32).unwrap();
         acknowledge(&connection, &batch, &[]).unwrap();
-        assert!(publications(&connection, 32).unwrap().is_empty());
+        assert!(books(&connection, 32).unwrap().is_empty());
     }
 
     #[test]

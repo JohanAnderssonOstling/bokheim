@@ -1,1 +1,0 @@
-UPDATE book SET content_hash=?1

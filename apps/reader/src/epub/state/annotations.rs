@@ -2,7 +2,7 @@
 
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
-use library_model::{AnnotationAnchor, AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationAnchor, AnnotationStyle, ReaderAnnotation};
 
 use crate::epub::{ReaderView, Selection, marks};
 use crate::invalidation::Component;

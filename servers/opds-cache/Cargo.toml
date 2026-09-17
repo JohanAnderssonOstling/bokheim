@@ -8,14 +8,14 @@ publish = false
 workspace = true
 
 [dependencies]
-publication-enrichment = { path = "../../shared/publication-enrichment" }
+book-enrichment = { path = "../../shared/book-enrichment" }
 axum = "0.7"
 blake3 = "1"
 catalog-model = { path = "../../shared/catalog-model" }
 catalog-core = { path = "../../shared/catalog-core" }
 catalog-protocol = { path = "../../shared/catalog-protocol" }
-publication-inspection = { path = "../../shared/publication-inspection", features = ["mobi"] }
-publication-model = { path = "../../shared/publication-model" }
+book-inspection = { path = "../../shared/book-inspection", features = ["mobi"] }
+book-model = { path = "../../shared/book-model" }
 subject-projection = { path = "../../shared/subject-projection", features = ["authoritative-taxonomy"] }
 metadata-contract = { path = "../../shared/metadata-contract" }
 mobi.workspace = true

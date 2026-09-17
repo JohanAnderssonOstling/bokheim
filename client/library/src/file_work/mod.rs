@@ -93,7 +93,7 @@ pub(crate) fn queue_book_work_batch(conn: &Connection, hashes: &[ContentHash]) -
     Ok(())
 }
 
-/// Whether publication eviction still has physical work to finish.
+/// Whether book eviction still has physical work to finish.
 pub fn has_pending_purge_work(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row(include_str!("sql/pending_local_purge_work.sql"), [], |row| row.get(0))
 }
@@ -109,7 +109,7 @@ pub fn write_notifications(action: rusqlite::hooks::Action, table: &str) -> Writ
     use rusqlite::hooks::Action::SQLITE_DELETE;
     let metadata = match table {
         "sync_outbox" => action != SQLITE_DELETE,
-        // Completing an upload releases already queued publication state.
+        // Completing an upload releases already queued book state.
         "local_book_upload" => action == SQLITE_DELETE,
         _ => false,
     };
@@ -122,7 +122,7 @@ pub fn write_notifications(action: rusqlite::hooks::Action, table: &str) -> Writ
     WriteNotifications { metadata, assets }
 }
 
-/// Discard queued restores when publication bytes are deliberately evicted or purged.
+/// Discard queued restores when book bytes are deliberately evicted or purged.
 pub fn cancel_book_restore(conn: &Connection, hash: &ContentHash) -> rusqlite::Result<usize> {
     conn.execute(include_str!("sql/cancel_book_restore.sql"), [hash.as_str()])
 }

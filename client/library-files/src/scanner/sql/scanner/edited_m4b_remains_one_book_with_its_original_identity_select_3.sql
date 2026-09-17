@@ -1,1 +1,0 @@
-SELECT status FROM audible_enrichment_jobs

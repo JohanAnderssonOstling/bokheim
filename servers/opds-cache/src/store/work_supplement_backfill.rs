@@ -1,6 +1,6 @@
 use super::{
-    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, merge_catalog_subject_evidence, params, sequence_in, sequenced_publication_in, storage_i64, unix_timestamp, upsert_active_publication, CatalogDescription,
-    CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, TransactionBehavior, CATALOG_DESCRIPTION_BACKFILL_VERSION,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, merge_catalog_subject_evidence, params, sequence_in, sequenced_book_in, storage_i64, unix_timestamp, upsert_active_book, CatalogDescription,
+    CatalogDescriptionBackfillJob, CatalogDescriptionBackfillUpdate, CatalogBookIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, TransactionBehavior, CATALOG_DESCRIPTION_BACKFILL_VERSION,
     CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
 };
 
@@ -18,9 +18,9 @@ impl CatalogStore {
                    ON metadata_backfill.source_id=metadata_index.source_id AND metadata_backfill.acquisition_url=metadata_index.acquisition_url
                   AND metadata_backfill.version=?3 AND metadata_backfill.status='succeeded'
                  JOIN catalog_source source ON source.source_id=metadata_index.source_id
-                 JOIN catalog_publication publication
-                   ON publication.source_id=metadata_index.source_id AND publication.generation=source.active_generation
-                  AND publication.acquisition_url=metadata_index.acquisition_url
+                 JOIN catalog_book book
+                   ON book.source_id=metadata_index.source_id AND book.generation=source.active_generation
+                  AND book.acquisition_url=metadata_index.acquisition_url
                  WHERE metadata_index.version=?2 AND extraction.status='succeeded'
                    AND NOT EXISTS(
                        SELECT 1 FROM catalog_description_backfill current
@@ -41,13 +41,13 @@ impl CatalogStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rows = {
             let mut statement = transaction.prepare(
-                "SELECT backfill.source_id,backfill.acquisition_url,publication.edition_id,publication.work_id,
+                "SELECT backfill.source_id,backfill.acquisition_url,book.edition_id,book.work_id,
                         metadata_index.isbns_payload,backfill.attempts+1
                  FROM catalog_description_backfill backfill
                  JOIN catalog_source source ON source.source_id=backfill.source_id
-                 JOIN catalog_publication publication
-                   ON publication.source_id=backfill.source_id AND publication.generation=source.active_generation
-                  AND publication.acquisition_url=backfill.acquisition_url
+                 JOIN catalog_book book
+                   ON book.source_id=backfill.source_id AND book.generation=source.active_generation
+                  AND book.acquisition_url=backfill.acquisition_url
                  JOIN catalog_metadata_index metadata_index
                    ON metadata_index.source_id=backfill.source_id AND metadata_index.acquisition_url=backfill.acquisition_url
                   AND metadata_index.version=?1
@@ -72,7 +72,7 @@ impl CatalogStore {
                 "UPDATE catalog_description_backfill SET status='running',attempts=attempts+1,last_attempt_at=?3,last_error=NULL WHERE source_id=?1 AND acquisition_url=?2 AND status='pending'",
                 params![source, acquisition_url, now],
             )?;
-            jobs.push(CatalogDescriptionBackfillJob { source_id, publication: CatalogPublicationIdentity { edition_id, work_id }, acquisition_url, isbns, attempt: super::stored_u64(attempt, "description backfill attempt")? });
+            jobs.push(CatalogDescriptionBackfillJob { source_id, book: CatalogBookIdentity { edition_id, work_id }, acquisition_url, isbns, attempt: super::stored_u64(attempt, "description backfill attempt")? });
         }
         transaction.commit()?;
         Ok(jobs)
@@ -90,16 +90,16 @@ impl CatalogStore {
                 continue;
             }
             let generation = active_generation_in(&transaction, &update.source_id)?;
-            if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
-                if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
-                    merge_catalog_subject_evidence(&mut active.publication, &update.subjects);
-                    if active.publication.description.is_none() {
+            if sequence_in(&transaction, &update.source_id, generation, &update.book)?.is_some() {
+                if let Some(mut active) = sequenced_book_in(&transaction, &update.source_id, generation, &update.book)? {
+                    merge_catalog_subject_evidence(&mut active.book, &update.subjects);
+                    if active.book.description.is_none() {
                         if let Some(description) = update.description.as_deref() {
-                            active.publication.description = Some(CatalogDescription::PlainText { text: description.to_owned() });
+                            active.book.description = Some(CatalogDescription::PlainText { text: description.to_owned() });
                         }
                     }
-                    upsert_active_publication(&transaction, &update.source_id, generation, &active.publication)?;
-                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
+                    upsert_active_book(&transaction, &update.source_id, generation, &active.book)?;
+                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.book)?])?;
                 }
             }
         }

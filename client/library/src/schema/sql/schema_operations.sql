@@ -13,8 +13,7 @@ SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name=:database_name)
 /
 
 -- name: replica_id?
--- param: metadata_key: &str
-SELECT value FROM sync_metadata WHERE key=:metadata_key
+SELECT replica_id FROM sync_metadata WHERE singleton = 1
 /
 
 -- name: database_populated?

@@ -7,7 +7,7 @@ BEGIN
     SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,NEW.description),
       CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
     FROM book b WHERE b.row_id=NEW.book_row_id
-      AND COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'),'local')='local'
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
       replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
       body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
@@ -20,7 +20,7 @@ BEGIN
     SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,NEW.description),
       CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
     FROM book b WHERE b.row_id=NEW.book_row_id
-      AND COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'),'local')='local'
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
       replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
       body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
@@ -33,7 +33,7 @@ BEGIN
     SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,''),
       CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
     FROM book b WHERE b.row_id=OLD.book_row_id
-      AND COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'),'local')='local'
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
       replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
       body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;

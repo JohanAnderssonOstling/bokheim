@@ -23,7 +23,7 @@ class SharedIsbnRankingTest(unittest.TestCase):
                     CREATE TABLE work_classification(work_id INTEGER,scheme INTEGER,notation TEXT);
                     CREATE TABLE edition_work_classification(work_id INTEGER,scheme INTEGER,notation TEXT);
                     CREATE TABLE isbn_lcc(isbn13 INTEGER,notation TEXT);
-                    CREATE TABLE edition_bibliography(edition_id INTEGER,title TEXT,publication_year INTEGER);
+                    CREATE TABLE edition_bibliography(edition_id INTEGER,title TEXT,book_year INTEGER);
                     CREATE TABLE work_bibliography(work_id INTEGER,title TEXT);
                     CREATE TABLE work_author(work_id INTEGER,author_id INTEGER,position INTEGER);
                     CREATE TABLE author(author_id INTEGER,name TEXT);

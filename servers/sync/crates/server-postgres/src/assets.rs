@@ -351,7 +351,7 @@ pub(super) async fn abort_book_upload(pool: &PgPool, reservation: &BookUploadRes
     transaction.commit().await.map_err(storage)
 }
 
-// Thumbnails are keyed by the publication identity, not by their own bytes.
+// Thumbnails are keyed by the book identity, not by their own bytes.
 // A synced lifecycle entry is enough: the book file may still be uploading.
 async fn require_thumbnail_book(transaction: &mut Transaction<'_, Postgres>, library_id: &LibraryId, hash: &ContentHash, size_bytes: u64) -> Result<(), AssetError> {
     if size_bytes > sync_common::MAX_THUMBNAIL_BYTES {
@@ -665,7 +665,7 @@ async fn bind_book_revision(transaction: &mut Transaction<'_, Postgres>, user: &
     let previous = previous.unwrap_or_else(|| identity.to_string());
     if previous != checksum.as_str() {
         sqlx::query(include_str!("sql/cloud_storage/replace_claim_revision.sql")).bind(user).bind(identity.as_str()).bind(checksum.as_str()).execute(&mut **transaction).await.map_err(storage)?;
-        // Keep a charge while another publication still uses the same blob.
+        // Keep a charge while another book still uses the same blob.
         let released: Option<i64> = sqlx::query_scalar(include_str!("sql/cloud_storage/release_replaced_blob_charge.sql"))
             .bind(user).bind(previous).fetch_optional(&mut **transaction).await.map_err(storage)?;
         if let Some(size) = released {
@@ -679,7 +679,7 @@ async fn bind_book_revision(transaction: &mut Transaction<'_, Postgres>, user: &
 pub(super) async fn finish_book_revision_upload(pool: &PgPool, user: &str, library: &LibraryId, identity: &ContentHash, checksum: &ContentHash, admission: &BookUploadAdmission, actual: u64) -> Result<(), AssetError> {
     let mut transaction = begin_authorized_transaction(pool, user, library).await?;
     require_cloud_storage(&mut transaction, user, library).await?;
-    // A library deletion cannot pass between authorization and publication.
+    // A library deletion cannot pass between authorization and book.
     let live = sqlx::query("SELECT id FROM libraries WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL FOR SHARE")
         .bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?.is_some();
     if !live { return Err(AssetError::Forbidden); }
@@ -691,7 +691,7 @@ pub(super) async fn finish_book_revision_upload(pool: &PgPool, user: &str, libra
         if actual != reservation.expected_size_bytes { return Err(AssetError::LengthMismatch { expected: reservation.expected_size_bytes, actual }); }
         let released: Option<i64> = sqlx::query_scalar(include_str!("sql/assets/delete_reservation_by_id_and_user_returning_size.sql"))
             .bind(&reservation.id).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?;
-        let Some(released) = released else { return Err(AssetError::Storage("publication upload reservation expired".into())); };
+        let Some(released) = released else { return Err(AssetError::Storage("book upload reservation expired".into())); };
         if released != size_i64(actual)? { return Err(AssetError::LengthMismatch { expected: released.max(0) as u64, actual }); }
         insert_blob_object(&mut transaction, checksum, released).await?;
         let charged = sqlx::query(include_str!("sql/assets/insert_charge_idempotent.sql")).bind(user).bind(checksum.as_str()).execute(&mut *transaction).await.map_err(storage)?.rows_affected() == 1;

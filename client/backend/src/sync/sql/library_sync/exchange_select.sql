@@ -1,1 +1,0 @@
-SELECT path FROM dir_paths WHERE id=?1

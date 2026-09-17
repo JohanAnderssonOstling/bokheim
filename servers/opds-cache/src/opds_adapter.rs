@@ -55,7 +55,7 @@ pub fn opds_page(source_id: CatalogSourceId, catalog: OpdsCatalog) -> CatalogPag
         title: catalog.title,
         locator: catalog.source_url,
         navigation: catalog.navigation.into_iter().map(catalog_link).collect(),
-        publications: catalog.publications.into_iter().map(|publication| opds_publication(&source_id, &catalog_locator, publication)).collect(),
+        books: catalog.books.into_iter().map(|book| opds_book(&source_id, &catalog_locator, book)).collect(),
         groups: catalog.groups.into_iter().map(|group| opds_group(&source_id, &catalog_locator, group)).collect(),
         facets: catalog.facets.into_iter().filter_map(catalog_facet).collect(),
         pagination: CatalogPagination {
@@ -78,56 +78,56 @@ pub(crate) fn canonicalize_gutenberg_page(page: &mut CatalogPage) {
     if page.source_id.as_str() != "opds-project-gutenberg" {
         return;
     }
-    prefer_illustrated_gutenberg_editions(&mut page.publications);
+    prefer_illustrated_gutenberg_editions(&mut page.books);
     for group in &mut page.groups {
-        prefer_illustrated_gutenberg_editions(&mut group.publications);
+        prefer_illustrated_gutenberg_editions(&mut group.books);
     }
 }
 
-fn prefer_illustrated_gutenberg_editions(publications: &mut Vec<CatalogPublication>) {
+fn prefer_illustrated_gutenberg_editions(books: &mut Vec<CatalogBook>) {
     let mut work_positions = HashMap::<String, usize>::new();
-    let mut canonical = Vec::with_capacity(publications.len());
-    for publication in publications.drain(..) {
-        let Some(work_id) = publication.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
-            canonical.push(publication);
+    let mut canonical = Vec::with_capacity(books.len());
+    for book in books.drain(..) {
+        let Some(work_id) = book.identity.work_id.as_deref().filter(|work_id| work_id.starts_with("urn:gutenberg:")) else {
+            canonical.push(book);
             continue;
         };
         if let Some(&position) = work_positions.get(work_id) {
-            if gutenberg_edition_has_images(&publication) && !gutenberg_edition_has_images(&canonical[position]) {
-                canonical[position] = publication;
+            if gutenberg_edition_has_images(&book) && !gutenberg_edition_has_images(&canonical[position]) {
+                canonical[position] = book;
             }
         } else {
             work_positions.insert(work_id.to_owned(), canonical.len());
-            canonical.push(publication);
+            canonical.push(book);
         }
     }
-    *publications = canonical;
+    *books = canonical;
 }
 
-fn gutenberg_edition_has_images(publication: &CatalogPublication) -> bool {
-    publication.actions.iter().any(|action| {
-        let CatalogPublicationAction::Import { request } = action;
+fn gutenberg_edition_has_images(book: &CatalogBook) -> bool {
+    book.actions.iter().any(|action| {
+        let CatalogBookAction::Import { request } = action;
         let download_url = request.download_url.to_ascii_lowercase();
         download_url.contains(".images") && !download_url.contains(".noimages")
     })
 }
 
-pub(crate) fn opds_publication_popularity(publication: &CatalogPublication) -> u64 {
-    publication
+pub(crate) fn opds_book_popularity(book: &CatalogBook) -> u64 {
+    book
         .metadata
         .interactions
         .iter()
         .find(|statistic| statistic.source == "litteraturbanken:epub_popularity" || statistic.interaction_type == "litteraturbanken:epub-popularity")
         .map(|statistic| statistic.count)
-        .or_else(|| project_gutenberg_download_count(publication))
+        .or_else(|| project_gutenberg_download_count(book))
         .unwrap_or_default()
 }
 
-fn project_gutenberg_download_count(publication: &CatalogPublication) -> Option<u64> {
-    if !publication.identity.edition_id.starts_with("urn:gutenberg:") {
+fn project_gutenberg_download_count(book: &CatalogBook) -> Option<u64> {
+    if !book.identity.edition_id.starts_with("urn:gutenberg:") {
         return None;
     }
-    let CatalogDescription::PlainText { text } = publication.description.as_ref()? else {
+    let CatalogDescription::PlainText { text } = book.description.as_ref()? else {
         return None;
     };
     let value = text.rsplit_once("Downloads:")?.1.trim_start();
@@ -138,20 +138,20 @@ fn project_gutenberg_download_count(publication: &CatalogPublication) -> Option<
 /// Revalidates a client-selected catalogue acquisition against a freshly
 /// fetched OPDS page. Callers must separately validate that `catalog` belongs
 /// to the registered endpoint before invoking this helper.
-pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsPublicationIdentity, OpdsDirectAcquisition), CatalogServiceError> {
-    let requested_identity = OpdsPublicationIdentity { publication_id: request.publication.edition_id.clone(), work_id: request.publication.work_id.clone() };
+pub fn validated_opds_import(request: &CatalogImportRequest, catalog: &OpdsCatalog) -> Result<(OpdsBookIdentity, OpdsDirectAcquisition), CatalogServiceError> {
+    let requested_identity = OpdsBookIdentity { book_id: request.book.edition_id.clone(), work_id: request.book.work_id.clone() };
     requested_identity.validate().map_err(|error| CatalogServiceError(error.to_string()))?;
     if catalog.source_url != request.catalog_locator {
         return Err(CatalogServiceError("catalog import does not belong to the verified catalog page".to_owned()));
     }
-    let publication = catalog
-        .publications
+    let book = catalog
+        .books
         .iter()
-        .chain(catalog.groups.iter().flat_map(|group| group.publications.iter()))
-        .find(|publication| publication.id == requested_identity.publication_id && publication.work_id == requested_identity.work_id)
-        .ok_or_else(|| CatalogServiceError("catalog publication is not present on the verified catalog page".to_owned()))?;
+        .chain(catalog.groups.iter().flat_map(|group| group.books.iter()))
+        .find(|book| book.id == requested_identity.book_id && book.work_id == requested_identity.work_id)
+        .ok_or_else(|| CatalogServiceError("catalog book is not present on the verified catalog page".to_owned()))?;
     let requested_format = opds_book_format(request.book_format);
-    let acquisition = publication
+    let acquisition = book
         .acquisitions
         .iter()
         .find_map(|acquisition| match acquisition {
@@ -215,31 +215,31 @@ fn opds_group(source_id: &CatalogSourceId, catalog_locator: &str, group: OpdsGro
         page_locator: group.self_url,
         number_of_items: group.number_of_items,
         navigation: group.navigation.into_iter().map(catalog_link).collect(),
-        publications: group.publications.into_iter().map(|publication| opds_publication(source_id, catalog_locator, publication)).collect(),
+        books: group.books.into_iter().map(|book| opds_book(source_id, catalog_locator, book)).collect(),
     }
 }
 
 #[doc(hidden)]
-pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publication: OpdsPublication) -> CatalogPublication {
-    let identity = CatalogPublicationIdentity { edition_id: publication.id, work_id: publication.work_id };
+pub fn opds_book(source_id: &CatalogSourceId, catalog_locator: &str, book: OpdsBook) -> CatalogBook {
+    let identity = CatalogBookIdentity { edition_id: book.id, work_id: book.work_id };
     let mut import_formats = Vec::new();
-    let actions = publication
+    let actions = book
         .acquisitions
         .into_iter()
         .filter_map(|acquisition| opds_action(source_id, catalog_locator, &identity, acquisition))
         .filter(|action| match action {
-            CatalogPublicationAction::Import { request } if import_formats.contains(&request.book_format) => false,
-            CatalogPublicationAction::Import { request } => {
+            CatalogBookAction::Import { request } if import_formats.contains(&request.book_format) => false,
+            CatalogBookAction::Import { request } => {
                 import_formats.push(request.book_format);
                 true
             }
         })
         .collect();
-    let description = publication.description.map(|description| match description {
+    let description = book.description.map(|description| match description {
         OpdsDescription::PlainText { text } => CatalogDescription::PlainText { text },
         OpdsDescription::Html { markup } | OpdsDescription::Xhtml { markup } => CatalogDescription::RichHtml { html: markup },
     });
-    let authors = publication
+    let authors = book
         .authors
         .into_iter()
         .map(|author| CatalogAuthorCredit {
@@ -254,14 +254,14 @@ pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publ
             }),
         })
         .collect();
-    let metadata = CatalogPublicationMetadata {
-        title_localizations: publication.metadata.title_localizations.into_iter().map(localized_text).collect(),
-        sort_name: publication.metadata.sort_name,
-        sort_name_localizations: publication.metadata.sort_name_localizations.into_iter().map(localized_text).collect(),
-        published: publication.metadata.published,
-        modified: publication.metadata.modified,
-        dates: publication.metadata.dates,
-        publishers: publication
+    let metadata = CatalogBookMetadata {
+        title_localizations: book.metadata.title_localizations.into_iter().map(localized_text).collect(),
+        sort_name: book.metadata.sort_name,
+        sort_name_localizations: book.metadata.sort_name_localizations.into_iter().map(localized_text).collect(),
+        published: book.metadata.published,
+        modified: book.metadata.modified,
+        dates: book.metadata.dates,
+        publishers: book
             .metadata
             .publishers
             .into_iter()
@@ -274,7 +274,7 @@ pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publ
                 provider_link: publisher.provider_link.map(catalog_author_link),
             })
             .collect(),
-        identifiers: publication
+        identifiers: book
             .metadata
             .identifiers
             .into_iter()
@@ -283,12 +283,12 @@ pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publ
                 Identifier::new(identifier.value, Scheme::from_label(identifier.scheme.as_deref()), scope, identifier.source).ok()
             })
             .collect(),
-        subjects: publication.metadata.subjects,
-        subtitle: publication.metadata.subtitle,
-        subtitle_localizations: publication.metadata.subtitle_localizations.into_iter().map(localized_text).collect(),
-        alternate_titles: publication.metadata.alternate_titles,
-        collections: publication.metadata.collections,
-        contributors: publication
+        subjects: book.metadata.subjects,
+        subtitle: book.metadata.subtitle,
+        subtitle_localizations: book.metadata.subtitle_localizations.into_iter().map(localized_text).collect(),
+        alternate_titles: book.metadata.alternate_titles,
+        collections: book.metadata.collections,
+        contributors: book
             .metadata
             .contributors
             .into_iter()
@@ -302,22 +302,22 @@ pub fn opds_publication(source_id: &CatalogSourceId, catalog_locator: &str, publ
                 roles: contributor.roles,
             })
             .collect(),
-        rights: publication.metadata.rights,
-        sources: publication.metadata.sources,
-        types: publication.metadata.types,
-        formats: publication.metadata.formats,
-        relations: publication.metadata.relations,
-        coverage: publication.metadata.coverage,
-        properties: publication.metadata.properties,
-        audiences: publication.metadata.audiences,
-        age_ranges: publication.metadata.age_ranges,
-        images: publication.metadata.images,
-        ratings: publication.metadata.ratings,
-        interactions: publication.metadata.interactions,
-        popularity_ranks: publication.metadata.popularity_ranks,
+        rights: book.metadata.rights,
+        sources: book.metadata.sources,
+        types: book.metadata.types,
+        formats: book.metadata.formats,
+        relations: book.metadata.relations,
+        coverage: book.metadata.coverage,
+        properties: book.metadata.properties,
+        audiences: book.metadata.audiences,
+        age_ranges: book.metadata.age_ranges,
+        images: book.metadata.images,
+        ratings: book.metadata.ratings,
+        interactions: book.metadata.interactions,
+        popularity_ranks: book.metadata.popularity_ranks,
     };
-    let languages = publication.languages.into_iter().filter_map(|language| LanguageTag::parse(language).ok()).collect();
-    CatalogPublication { identity, title: publication.title, authors, languages, description, image_url: publication.image_url, metadata, actions }
+    let languages = book.languages.into_iter().filter_map(|language| LanguageTag::parse(language).ok()).collect();
+    CatalogBook { identity, title: book.title, authors, languages, description, image_url: book.image_url, metadata, actions }
 }
 
 fn localized_text(value: opds::OpdsLocalizedText) -> LocalizedText {
@@ -326,7 +326,7 @@ fn localized_text(value: opds::OpdsLocalizedText) -> LocalizedText {
 
 fn catalog_identifier_scope(scope: opds::OpdsIdentifierScope) -> Option<Scope> {
     match scope {
-        opds::OpdsIdentifierScope::Publication => Some(Scope::Publication),
+        opds::OpdsIdentifierScope::Book => Some(Scope::Book),
         opds::OpdsIdentifierScope::CatalogEntry => None,
         opds::OpdsIdentifierScope::Edition => Some(Scope::Edition),
         opds::OpdsIdentifierScope::Work => Some(Scope::Work),
@@ -340,10 +340,10 @@ fn catalog_author_link(link: opds::OpdsAuthorLink) -> CatalogLinkTarget {
     }
 }
 
-fn opds_action(source_id: &CatalogSourceId, catalog_locator: &str, identity: &CatalogPublicationIdentity, acquisition: OpdsAcquisition) -> Option<CatalogPublicationAction> {
+fn opds_action(source_id: &CatalogSourceId, catalog_locator: &str, identity: &CatalogBookIdentity, acquisition: OpdsAcquisition) -> Option<CatalogBookAction> {
     match acquisition {
-        OpdsAcquisition::Direct(acquisition) if acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) => Some(CatalogPublicationAction::Import {
-            request: CatalogImportRequest { source_id: source_id.clone(), catalog_locator: catalog_locator.to_owned(), publication: identity.clone(), download_url: acquisition.url, book_format: book_format(acquisition.book_format) },
+        OpdsAcquisition::Direct(acquisition) if acquisition.price.is_none() && matches!(acquisition.kind, OpdsAcquisitionKind::OpenAccess | OpdsAcquisitionKind::Generic) => Some(CatalogBookAction::Import {
+            request: CatalogImportRequest { source_id: source_id.clone(), catalog_locator: catalog_locator.to_owned(), book: identity.clone(), download_url: acquisition.url, book_format: book_format(acquisition.book_format) },
         }),
         OpdsAcquisition::Direct(_) | OpdsAcquisition::Indirect(_) | OpdsAcquisition::Unsupported(_) => None,
     }

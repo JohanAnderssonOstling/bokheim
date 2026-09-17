@@ -222,7 +222,7 @@ fn spoken_duration(duration_ms: u64) -> String {
 /// the *drawn* list — flattened, and shorter than the tree whenever anything is
 /// collapsed. Position in one is not position in the other.
 fn chapter_durations(entries: &[BookTocEntry], total_ms: Option<u64>) -> HashMap<&str, SharedString> {
-    let positions = entries.iter().map(|entry| library_model::audiobook_toc_position(&entry.target)).collect::<Vec<_>>();
+    let positions = entries.iter().map(|entry| book_model::audiobook_toc_position(&entry.target)).collect::<Vec<_>>();
     entries
         .iter()
         .enumerate()
@@ -443,11 +443,11 @@ mod tests {
     #[test]
     fn a_chapter_runs_until_the_next_one_starts() {
         let toc =
-            vec![entry("One", &library_model::audiobook_toc_target(0), Vec::new()), entry("Two", &library_model::audiobook_toc_target(3_600_000), Vec::new()), entry("Three", &library_model::audiobook_toc_target(5_400_000), Vec::new())];
+            vec![entry("One", &book_model::audiobook_toc_target(0), Vec::new()), entry("Two", &book_model::audiobook_toc_target(3_600_000), Vec::new()), entry("Three", &book_model::audiobook_toc_target(5_400_000), Vec::new())];
         let durations = chapter_durations(&toc, Some(9_000_000));
-        assert_eq!(durations[library_model::audiobook_toc_target(0).as_str()], SharedString::from("1 h"));
-        assert_eq!(durations[library_model::audiobook_toc_target(3_600_000).as_str()], SharedString::from("30 min"));
-        assert_eq!(durations[library_model::audiobook_toc_target(5_400_000).as_str()], SharedString::from("1 h"), "the last chapter runs to the end of the book");
+        assert_eq!(durations[book_model::audiobook_toc_target(0).as_str()], SharedString::from("1 h"));
+        assert_eq!(durations[book_model::audiobook_toc_target(3_600_000).as_str()], SharedString::from("30 min"));
+        assert_eq!(durations[book_model::audiobook_toc_target(5_400_000).as_str()], SharedString::from("1 h"), "the last chapter runs to the end of the book");
     }
 
     #[test]

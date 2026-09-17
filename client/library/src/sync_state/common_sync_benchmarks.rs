@@ -1,8 +1,9 @@
 //! Local storage/encoding costs, not network or storage-queue latency.
 use super::*;
 use crate::remote_reducer;
-use library_model::ReadingPositionState;
-use library_model::SyncBookMetadata;
+use crate::sync_state::SyncSql;
+use library_replica::ReadingPositionState;
+use library_replica::SyncBookMetadata;
 use library_replica::MutationBody;
 use library_replica::StateMutation;
 use std::time::{Duration, Instant};
@@ -76,7 +77,7 @@ fn benchmark_prepared_remote_writer() {
             let changes: Vec<_> = (1..=count)
                 .map(|id| {
                     let mut value = SyncBookMetadata { title: format!("Prepared {case}-{trial}"), ..Default::default() };
-                    value.publication.rights.push(format!("{trial}{}", "x".repeat(bytes)));
+                    value.book.rights.push(format!("{trial}{}", "x".repeat(bytes)));
                     let mutation = StateMutation {
                         mutation_id: MutationId::new(),
                         body: MutationBody::Metadata { content_hash: ContentHash::new(&format!("{id:064x}")), value },
@@ -134,11 +135,11 @@ fn benchmark_incoming_candidates() {
         (0..repeats)
             .flat_map(|repeat| {
                 (1..=books).map(move |id| {
-                    let mut publication = library_model::PublicationMetadata::default();
-                    publication.languages.push(library_model::LanguageTag::parse(if repeat % 2 == 0 { "en" } else { "sv" }).unwrap());
+                    let mut book = book_model::BookMetadata::default();
+                    book.languages.push(book_model::LanguageTag::parse(if repeat % 2 == 0 { "en" } else { "sv" }).unwrap());
                     let mutation = StateMutation {
                         mutation_id: MutationId::new(),
-                        body: MutationBody::Metadata { content_hash: ContentHash::new(&format!("{id:064x}")), value: SyncBookMetadata { title: format!("Revision {timestamp}-{repeat}"), publication, ..Default::default() } },
+                        body: MutationBody::Metadata { content_hash: ContentHash::new(&format!("{id:064x}")), value: SyncBookMetadata { title: format!("Revision {timestamp}-{repeat}"), book, ..Default::default() } },
                         changed_at: timestamp + repeat as u64,
                         replica_seq: ReplicaSeq::new((repeat * books + id) as u64).unwrap(),
                     };
@@ -342,7 +343,7 @@ fn benchmark_common_incoming_sync() {
                 let body = match kind {
                     "reading_position" => MutationBody::ReadingPosition {
                         content_hash: hash,
-                        value: ReadingPositionState { location: library_model::ReadingPosition::parse(&format!("epubcfi(/6/{})", 2 * (trial + 1))).unwrap(), progress: trial as f32 / 10.0 },
+                        value: ReadingPositionState { location: book_model::ReadingPosition::parse(&format!("epubcfi(/6/{})", 2 * (trial + 1))).unwrap(), progress: trial as f32 / 10.0 },
                     },
                     "description" => MutationBody::Description { content_hash: hash, value: format!("{trial}{}", "x".repeat(10239)) },
                     _ => MutationBody::Metadata { content_hash: hash, value: SyncBookMetadata { title: format!("Remote {trial}"), ..Default::default() } },

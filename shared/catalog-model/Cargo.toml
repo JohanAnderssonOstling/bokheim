@@ -8,7 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
-publication-model = { path = "../publication-model" }
+book-model = { path = "../book-model" }
 serde = { version = "1", features = ["derive"] }
 unicode-normalization.workspace = true
 

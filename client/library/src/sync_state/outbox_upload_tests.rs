@@ -1,7 +1,7 @@
 use super::*;
 use crate::assets::book_upload_intent;
 use crate::assets::complete_book_upload;
-use crate::assets::observe_local_publication;
+use crate::assets::observe_local_book;
 use crate::schema::init_db;
 use sync_common::ContentHash;
 
@@ -26,7 +26,7 @@ fn only_the_current_upload_acknowledgement_releases_metadata() {
     let original = book_upload_intent(&conn, &book).unwrap().unwrap();
     let tx = conn.transaction().unwrap();
     let edited = test_support::fixture_content_hash(2);
-    observe_local_publication(&tx, &book, &edited, 101).unwrap();
+    observe_local_book(&tx, &book, &edited, 101).unwrap();
     tx.commit().unwrap();
 
     let tx = conn.transaction().unwrap();
@@ -67,7 +67,7 @@ fn add_book(conn: &mut Connection, number: u64, pending_upload: bool) -> Content
     tx.execute(include_str!("sql/outbox_upload_tests/add_book_insert.sql"), [hash.as_str()]).unwrap();
     tx.execute(include_str!("sql/outbox_upload_tests/add_book_insert_2.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), hash.as_str(), format!("{number}.m4b")]).unwrap();
     if pending_upload {
-        observe_local_publication(&tx, &hash, &hash, 100).unwrap();
+        observe_local_book(&tx, &hash, &hash, 100).unwrap();
     }
     tx.commit().unwrap();
     hash

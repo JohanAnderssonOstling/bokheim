@@ -191,7 +191,6 @@ impl AppBackend {
                     database_locator: self.state.registry.library_database_locator(&library_id, library_path),
                     default_sync_server_url: crate::api_server_url(),
                     metadata_server_url: crate::METADATA_SERVER_ORIGIN.to_owned(),
-                    hidden_directory: crate::APP_HIDDEN_DIR.to_owned(),
                     asset_storage_enabled: cloud_enabled,
                     reset_cloud_presence: reset_token.is_some(),
                 },

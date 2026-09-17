@@ -54,7 +54,7 @@ pub struct EditionIdentityQuery {
     pub title: String,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -110,9 +110,9 @@ pub struct EditionIdentityMatch {
     pub title_match: EditionTitleMatch,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
     pub matched_publisher: bool,
-    pub matched_publication_year: bool,
+    pub matched_book_year: bool,
     pub classifications: Vec<Classification>,
     #[serde(default)]
     pub subtitle: Option<String>,
@@ -636,7 +636,7 @@ pub fn encode_v2_edition_identity_request(value: &EditionIdentityRequest) -> Res
         queries: value
             .queries
             .iter()
-            .map(|query| protobuf_v2::EditionIdentityQuery { query_id: query.query_id.clone(), title: query.title.clone(), authors: query.authors.clone(), publishers: query.publishers.clone(), publication_year: query.publication_year })
+            .map(|query| protobuf_v2::EditionIdentityQuery { query_id: query.query_id.clone(), title: query.title.clone(), authors: query.authors.clone(), publishers: query.publishers.clone(), book_year: query.book_year })
             .collect(),
     })
 }
@@ -645,7 +645,7 @@ pub fn decode_v2_edition_identity_request(body: &[u8], limit: usize) -> Result<E
     check_size(body, limit)?;
     let value = protobuf_v2::EditionIdentityRequest::decode(body).map_err(|error| WireError::Decode(error.to_string()))?;
     Ok(EditionIdentityRequest {
-        queries: value.queries.into_iter().map(|query| EditionIdentityQuery { query_id: query.query_id, title: query.title, authors: query.authors, publishers: query.publishers, publication_year: query.publication_year }).collect(),
+        queries: value.queries.into_iter().map(|query| EditionIdentityQuery { query_id: query.query_id, title: query.title, authors: query.authors, publishers: query.publishers, book_year: query.book_year }).collect(),
     })
 }
 
@@ -697,9 +697,9 @@ fn protobuf_edition_identity_match(value: &EditionIdentityMatch) -> protobuf_v2:
         },
         authors: value.authors.clone(),
         publishers: value.publishers.clone(),
-        publication_year: value.publication_year,
+        book_year: value.book_year,
         matched_publisher: value.matched_publisher,
-        matched_publication_year: value.matched_publication_year,
+        matched_book_year: value.matched_book_year,
         classifications: value.classifications.iter().map(protobuf_classification).collect(),
     }
 }
@@ -772,9 +772,9 @@ fn domain_edition_identity_match(value: protobuf_v2::EditionIdentityMatch) -> Re
         },
         authors: value.authors,
         publishers: value.publishers,
-        publication_year: value.publication_year,
+        book_year: value.book_year,
         matched_publisher: value.matched_publisher,
-        matched_publication_year: value.matched_publication_year,
+        matched_book_year: value.matched_book_year,
         classifications: value.classifications.into_iter().map(domain_classification).collect::<Result<_, _>>()?,
     })
 }
@@ -1220,9 +1220,9 @@ mod tests {
             title_match: EditionTitleMatch::Work,
             authors: vec!["Alex Smith".to_owned()],
             publishers: vec!["North Wind Press".to_owned()],
-            publication_year: Some(2004),
+            book_year: Some(2004),
             matched_publisher: true,
-            matched_publication_year: false,
+            matched_book_year: false,
             classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76.6".to_owned(), source: ClassificationSource::Work }],
         };
         let value = EditionIdentityResponse {
@@ -1237,7 +1237,7 @@ mod tests {
         assert!(decoded.results[0].candidates_truncated);
 
         let request =
-            EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "book-1".to_owned(), title: "Work title".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), publication_year: Some(2004) }] };
+            EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "book-1".to_owned(), title: "Work title".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: Some(2004) }] };
         let decoded = decode_v2_edition_identity_request(&encode_v2_edition_identity_request(&request).unwrap(), MAX_REQUEST_BYTES).unwrap();
         assert_eq!(decoded.queries[0].title, "Work title");
     }

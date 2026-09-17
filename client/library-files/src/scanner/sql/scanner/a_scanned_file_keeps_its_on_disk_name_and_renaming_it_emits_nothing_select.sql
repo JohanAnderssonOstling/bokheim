@@ -1,1 +1,0 @@
-SELECT file_name FROM book_dir WHERE deleted_at IS NULL

@@ -1,4 +1,4 @@
--- Book rows, publication metadata projection, and subject taxonomy.
+-- Book rows, book metadata projection, and subject taxonomy.
 create table if not exists book(
     row_id          INTEGER primary key,
     -- Portable identity used by sync and asset APIs. Local relationships use
@@ -8,7 +8,7 @@ create table if not exists book(
     description_scanned INTEGER not null default 0,
     -- Canonical synchronized bibliographic metadata. Dedicated tables below
     -- are disposable query projections rebuilt from this value.
-    publication_metadata BLOB not null default X'',
+    book_metadata BLOB not null default X'',
     -- Canonical extension of the book's format ('epub', 'pdf', ...). Fixed for
     -- the life of the row: identity is derived from the bytes, so the format
     -- cannot change without becoming a different book. Empty only on a row that
@@ -47,7 +47,7 @@ create table if not exists book_identifier(
     value           TEXT not null,
     canonical_value TEXT,
     source          TEXT not null,
-    scope           TEXT not null default 'publication' check(scope in ('publication','edition','work')),
+    scope           TEXT not null default 'book' check(scope in ('book','edition','work')),
     primary key(book_row_id, position)
 );
 create index if not exists idx_book_identifier_lookup on book_identifier(scheme, value, book_row_id);

@@ -3,7 +3,6 @@ use crate::schema::init_db;
 use crate::schema::library_write_transaction;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::unix_millis;
-use crate::sync_state::queries::SyncSql;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
@@ -103,7 +102,6 @@ fn current_state_body(transaction: &Transaction<'_>, cell: &StateCell) -> Result
         "description" => transaction.query_row(include_str!("sql/inventory/current_state_body_select_10.sql"), [key], pair).optional()?,
         "metadata" => transaction.query_row(include_str!("sql/inventory/current_state_body_select_11.sql"), [key], pair).optional()?,
         "annotation" => transaction.query_row(include_str!("sql/inventory/current_state_body_select_12.sql"), [key], pair).optional()?,
-        "catalog_publication" => transaction.query_row(include_str!("sql/inventory/current_state_body_select_13.sql"), [key, subkey], pair).optional()?,
         _ => None,
     };
     Ok(row)
@@ -112,16 +110,60 @@ fn current_state_body(transaction: &Transaction<'_>, cell: &StateCell) -> Result
 fn pair(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Vec<u8>, i64)> {
     Ok((row.get(0)?, row.get(1)?))
 }
+/// Reads one explicit `sync_metadata` column as text. Integer columns are
+/// cast so long-standing string callers keep working; absent rows and null
+/// columns both read as `None`. Unknown keys are never stored and read as
+/// `None`.
 pub fn get_sync_metadata(conn: &Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
-    let mut value: Option<String> = None;
-    conn.get_sync_metadata_value(key, |row| {
-        value = Some(row.get(0)?);
-        Ok(())
-    })?;
-    Ok(value)
+    let sql = match key {
+        "replica_id" => "SELECT replica_id FROM sync_metadata WHERE singleton = 1",
+        "change_origin" => "SELECT change_origin FROM sync_metadata WHERE singleton = 1",
+        "last_successful_sync_at" => "SELECT CAST(last_successful_sync_at AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "last_pull_state_seq" => "SELECT CAST(last_pull_state_seq AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "last_pull_reading_seq" => "SELECT CAST(last_pull_reading_seq AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "cursor_recovery_pending" => "SELECT CAST(cursor_recovery_pending AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "scan_seq" => "SELECT CAST(scan_seq AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "cloud_storage_enabled" => "SELECT CAST(cloud_storage_enabled AS TEXT) FROM sync_metadata WHERE singleton = 1",
+        "remote_library_name" => "SELECT remote_library_name FROM sync_metadata WHERE singleton = 1",
+        "server_library_created" => "SELECT server_library_created FROM sync_metadata WHERE singleton = 1",
+        _ => return Ok(None),
+    };
+    conn.query_row(sql, [], |row| row.get::<_, Option<String>>(0)).optional().map(Option::flatten)
 }
+
+/// Stores one explicit `sync_metadata` column. The upsert also creates the
+/// singleton row, so writers never depend on read order. Unknown keys have
+/// no column and are rejected.
 pub fn set_sync_metadata(conn: &Connection, key: &str, value: &str) -> Result<(), rusqlite::Error> {
-    conn.set_sync_metadata(key, value)?;
+    let column = match key {
+        "replica_id" => "replica_id",
+        "change_origin" => "change_origin",
+        "last_successful_sync_at" => "last_successful_sync_at",
+        "last_pull_state_seq" => "last_pull_state_seq",
+        "last_pull_reading_seq" => "last_pull_reading_seq",
+        "cursor_recovery_pending" => "cursor_recovery_pending",
+        "scan_seq" => "scan_seq",
+        "cloud_storage_enabled" => "cloud_storage_enabled",
+        "remote_library_name" => "remote_library_name",
+        "server_library_created" => "server_library_created",
+        _ => return Err(rusqlite::Error::InvalidParameterName(key.to_owned())),
+    };
+    let sql = format!("INSERT INTO sync_metadata(singleton, {column}) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET {column} = excluded.{column}");
+    conn.execute(&sql, [value])?;
+    Ok(())
+}
+
+/// Clears one nullable `sync_metadata` column back to its absent state.
+fn clear_sync_metadata(conn: &Connection, key: &str) -> Result<(), rusqlite::Error> {
+    let column = match key {
+        "last_successful_sync_at" => "last_successful_sync_at",
+        "last_pull_state_seq" => "last_pull_state_seq",
+        "last_pull_reading_seq" => "last_pull_reading_seq",
+        "cursor_recovery_pending" => "cursor_recovery_pending",
+        _ => return Err(rusqlite::Error::InvalidParameterName(key.to_owned())),
+    };
+    let sql = format!("UPDATE sync_metadata SET {column} = NULL WHERE singleton = 1");
+    conn.execute(&sql, [])?;
     Ok(())
 }
 
@@ -146,7 +188,7 @@ pub fn set_pull_cursor(conn: &Connection, cursor: sync_common::SyncCursor) -> Re
         if let Some(revision) = revision {
             set_sync_metadata(conn, key, &revision.get().to_string())?;
         } else {
-            conn.execute(include_str!("sql/inventory/legacy_recovery_delete.sql"), [key])?;
+            clear_sync_metadata(conn, key)?;
         }
     }
     Ok(())
@@ -164,20 +206,6 @@ pub fn get_library_sync_details(conn: &Connection) -> Result<LibrarySyncDetails,
     Ok(LibrarySyncDetails { has_unsynced_changes, last_synced_at })
 }
 
-/// Starts remote reconciliation from a clean account boundary while retaining
-/// every local book, placement, annotation, and pending mutation.
-pub fn rebind_sync_account(conn: &Connection, user_id: &str) -> Result<(), rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
-    crate::assets::requeue_local_uploads(&tx)?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_delete.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_insert.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_delete_2.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_delete_3.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_delete_4.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_delete_5.sql"), [])?;
-    tx.execute(include_str!("sql/inventory/rebind_sync_account_insert_2.sql"), [user_id])?;
-    tx.commit()
-}
 /// A placement removed by synchronization so the caller can reconcile its file.
 #[derive(Debug, Clone)]
 pub struct RemovedBookDir {
@@ -210,7 +238,7 @@ pub fn recover_state_page(conn: &mut Connection, after: Option<&StateCell>) -> R
 pub fn recover_state_page_in_tx(tx: &Transaction<'_>, after: Option<&StateCell>) -> Result<(Option<StateCell>, usize), rusqlite::Error> {
     let cells = state_inventory_page(tx, after)?;
     if cells.is_empty() {
-        tx.execute(include_str!("sql/inventory/legacy_recovery_delete.sql"), [CURSOR_RECOVERY_PENDING_KEY])?;
+        clear_sync_metadata(tx, CURSOR_RECOVERY_PENDING_KEY)?;
         return Ok((None, 0));
     }
     let inserted = enqueue_missing_state_cells_in_tx(tx, &cells)?;
@@ -233,7 +261,7 @@ mod recovery_benchmarks {
             let (body, rank) = current_state_body(&tx, &cell).unwrap().unwrap();
             inserted += tx.execute(include_str!("sql/inventory/legacy_recovery_insert.sql"), rusqlite::params![cell.kind, cell.entity_key, cell.entity_subkey, body, changed_at, rank]).unwrap();
         }
-        tx.execute(include_str!("sql/inventory/legacy_recovery_delete.sql"), [CURSOR_RECOVERY_PENDING_KEY]).unwrap();
+        clear_sync_metadata(&tx, CURSOR_RECOVERY_PENDING_KEY).unwrap();
         tx.commit().unwrap();
         inserted
     }

@@ -1,4 +1,4 @@
-use crate::{CatalogPublication, CatalogSource};
+use crate::{CatalogBook, CatalogSource};
 
 /// Explicit client language preferences used to constrain catalogue-wide
 /// search and multilingual feeds. An empty list means all languages.
@@ -24,11 +24,11 @@ impl CatalogLanguageFilter {
         languages.is_empty() || languages.iter().any(|language| language == "mul" || language == "und") || languages.iter().take(2).count() > 1
     }
 
-    pub fn publication_supported(&self, publication: &CatalogPublication) -> bool {
+    pub fn book_supported(&self, book: &CatalogBook) -> bool {
         if self.supported.is_empty() {
             return true;
         }
-        publication.languages.iter().filter_map(|language| canonical_language(language.as_str())).any(|language| self.supports(&language))
+        book.languages.iter().filter_map(|language| canonical_language(language.as_str())).any(|language| self.supports(&language))
     }
 
     fn supports(&self, candidate: &str) -> bool {
@@ -70,7 +70,7 @@ fn canonical_language(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CatalogAuthentication, CatalogPublicationIdentity, CatalogSourceId, LanguageTag};
+    use crate::{CatalogAuthentication, CatalogBookIdentity, CatalogSourceId, LanguageTag};
 
     fn source(languages: &[&str]) -> CatalogSource {
         CatalogSource {
@@ -83,9 +83,9 @@ mod tests {
         }
     }
 
-    fn publication(languages: &[&str]) -> CatalogPublication {
-        CatalogPublication {
-            identity: CatalogPublicationIdentity { edition_id: "book".to_owned(), work_id: None },
+    fn book(languages: &[&str]) -> CatalogBook {
+        CatalogBook {
+            identity: CatalogBookIdentity { edition_id: "book".to_owned(), work_id: None },
             title: "Book".to_owned(),
             authors: Vec::new(),
             languages: languages.iter().map(|language| LanguageTag::parse(language).unwrap()).collect(),
@@ -106,19 +106,19 @@ mod tests {
     }
 
     #[test]
-    fn regional_tags_match_supported_publication_languages() {
+    fn regional_tags_match_supported_book_languages() {
         let filter = CatalogLanguageFilter::new(["sv-SE", "en"]);
-        assert!(filter.publication_supported(&publication(&["sv"])));
-        assert!(filter.publication_supported(&publication(&["en-GB"])));
-        assert!(!filter.publication_supported(&publication(&["fr"])));
-        assert!(!filter.publication_supported(&publication(&[])));
+        assert!(filter.book_supported(&book(&["sv"])));
+        assert!(filter.book_supported(&book(&["en-GB"])));
+        assert!(!filter.book_supported(&book(&["fr"])));
+        assert!(!filter.book_supported(&book(&[])));
     }
 
     #[test]
-    fn empty_preference_includes_every_source_and_publication_language() {
+    fn empty_preference_includes_every_source_and_book_language() {
         let filter = CatalogLanguageFilter::new(std::iter::empty::<&str>());
-        assert!(filter.publication_supported(&publication(&["fr"])));
-        assert!(filter.publication_supported(&publication(&[])));
+        assert!(filter.book_supported(&book(&["fr"])));
+        assert!(filter.book_supported(&book(&[])));
         assert!(filter.supported().is_empty());
     }
 }

@@ -4,18 +4,13 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[features]
-default = []
-scanner = ["client-library/scanner", "client-library/audiobook-metadata", "dep:walkdir", "dep:crossbeam-channel", "dep:book-metadata"]
-watcher = ["scanner", "dep:notify"]
-
 [dependencies]
 web-time = "1"
-client-library = { path = "../library", default-features = false }
+library-database = { path = "../library-database" }
 library-model = { path = "../library-model" }
 library-replica = { path = "../library-replica" }
-publication-access = { path = "../publication-access" }
-publication-identity = { path = "../../shared/publication-identity" }
+book-access = { path = "../book-access" }
+book-identity = { path = "../../shared/book-identity" }
 pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
 client-platform-runtime = { path = "../platforms/runtime" }
 thumbnail = { path = "../thumbnail" }
@@ -28,16 +23,13 @@ log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 client-platform-native = { path = "../platforms/native" }
-publication-identity = { path = "../../shared/publication-identity", features = ["native-write"] }
+book-identity = { path = "../../shared/book-identity", features = ["native-write"] }
 reqwest = { version = "0.11", default-features = false, features = ["stream", "rustls-tls"] }
 tempfile = "3"
 fs2 = "0.4"
+walkdir = "2.5"
 tokio = { version = "1", features = ["fs", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
-notify = { version = "6.1", optional = true }
-walkdir = { version = "2.5", optional = true }
-crossbeam-channel = { version = "0.5", optional = true }
-book-metadata = { path = "../book-metadata", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../platforms/web" }

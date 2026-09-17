@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM dir WHERE id IN (?1,?2)

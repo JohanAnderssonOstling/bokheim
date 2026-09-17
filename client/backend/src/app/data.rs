@@ -53,7 +53,7 @@ impl BackendContext {
 
     pub(crate) fn open(app_data_dir: PathBuf, library_root: &Path) -> Result<Self, String> {
         let registry = LibraryRegistry::open_with_library_root(app_data_dir.to_string_lossy(), library_root.to_string_lossy()).map_err(|error| format!("failed to initialize library registry: {error}"))?;
-        crate::storage::files::configure_publication_leases(&app_data_dir).map_err(|error| error.to_string())?;
+        crate::asset_store::configure_book_leases(&app_data_dir).map_err(|error| error.to_string())?;
         Ok(Self { registry })
     }
 

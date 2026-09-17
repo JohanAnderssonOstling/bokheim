@@ -9,8 +9,9 @@ use bokheim_backend::BoxedBookReader;
 use bokheim_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{AnimationExt, AnyView, App, AppContext, Context, EventEmitter, IntoElement, Render, SharedString, Task, Window};
-use html_publication::PublicationFormat;
-use library_model::{BookFormat, BookLocator};
+use html_book::BookSourceFormat;
+use library_model::BookLocator;
+use book_model::BookFormat;
 
 use crate::epub::ReaderView as EpubReaderView;
 use crate::pdf::PdfReaderView;
@@ -23,8 +24,8 @@ pub struct CloseRequested;
 pub struct AudiobookOpened(pub gpui::Entity<audiobook_player::AudiobookReader>);
 
 enum PreparedBook {
-    Publication {
-        publication: Arc<crate::publication::NativePublication>,
+    Book {
+        book: Arc<crate::book::NativeBook>,
         preparation: html_view_core::RendererPreparation,
     },
     Pdf {
@@ -53,7 +54,7 @@ enum ReaderLoadUpdate {
 }
 
 /// The reader page installed directly in the application's single window.
-/// It owns publication loading and replaces its loading state with the
+/// It owns book loading and replaces its loading state with the
 /// format-specific reader when the book is ready.
 pub struct ReaderView {
     title: SharedString,
@@ -79,7 +80,7 @@ async fn prepare_pdf(
     // A requested destination outranks the stored position: it is the reason
     // the book was opened. A contents row asks for `pdf-page:<n>`; anything
     // else is a target for another format and is ignored rather than guessed at.
-    let (initial_page, initial_full_page_position) = match initial_target.as_deref().and_then(library_model::pdf_toc_page) {
+    let (initial_page, initial_full_page_position) = match initial_target.as_deref().and_then(book_model::pdf_toc_page) {
         Some(page) => (page as u32, 0.0),
         None => (stored_page, stored_position),
     };
@@ -88,32 +89,32 @@ async fn prepare_pdf(
     Ok(PreparedBook::Pdf { page_source: document.pdf_page_source, metadata: document.pdf_metadata, reader: document.reader, initial_page: initial_page as usize, initial_full_page_position })
 }
 
-async fn prepare_publication(
+async fn prepare_book(
     locator: &BookLocator, content: bokheim_backend::ResolvedBook, format: BookFormat, library: &Rc<LibraryClient>, executor: &gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig,
     initial_target: Option<String>, startup_started: Instant, updates: &async_channel::Sender<ReaderLoadUpdate>,
 ) -> Result<PreparedBook, String> {
     let phase_started = Instant::now();
-    let publication_format = match format {
-        BookFormat::Epub => PublicationFormat::Epub,
-        BookFormat::Mobi => PublicationFormat::Mobi,
-        _ => return Err(format!("stage=prepare: {} is not a publication format", format.canonical_extension())),
+    let book_format = match format {
+        BookFormat::Epub => BookSourceFormat::Epub,
+        BookFormat::Mobi => BookSourceFormat::Mobi,
+        _ => return Err(format!("stage=prepare: {} is not a book format", format.canonical_extension())),
     };
-    report_stage(updates, "Opening publication…");
+    report_stage(updates, "Opening book…");
     let content = content.into_document()?;
-    let publication = executor.spawn(async move { crate::publication::NativePublication::from_reader(publication_format, content.reader).map_err(|error| format!("stage=publication_open: {error}")) }).await?;
-    startup_phase!("phase=publication_opened content_hash={} elapsed_ms={} phase_ms={}", locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
-    report_stage(updates, "Publication parsed; loading reading position…");
+    let book = executor.spawn(async move { crate::book::NativeBook::from_reader(book_format, content.reader).map_err(|error| format!("stage=book_open: {error}")) }).await?;
+    startup_phase!("phase=book_opened content_hash={} elapsed_ms={} phase_ms={}", locator.content_hash(), startup_started.elapsed().as_millis(), phase_started.elapsed().as_millis());
+    report_stage(updates, "Book parsed; loading reading position…");
     let content_hash = locator.content_hash();
     let nav_state = library.reading_position(content_hash).await.map_err(|error| format!("stage=reading_position: {error}"))?;
     report_stage(updates, "Preparing first document…");
-    let publication = Arc::new(publication);
-    let prepare_publication = publication.clone();
+    let book = Arc::new(book);
+    let prepare_book = book.clone();
     let preparation = executor
         .spawn(async move {
             html_view_core::RendererPreparation::from_provider_with_nav_and_target(
-                prepare_publication.provider.clone(),
-                prepare_publication.document_uris.clone(),
-                prepare_publication.start_index,
+                prepare_book.provider.clone(),
+                prepare_book.document_uris.clone(),
+                prepare_book.start_index,
                 nav_state.as_deref(),
                 initial_target.as_deref(),
                 renderer_config,
@@ -121,7 +122,7 @@ async fn prepare_publication(
             .map_err(|error| format!("stage=document_prepare: {error}"))
         })
         .await?;
-    Ok(PreparedBook::Publication { publication, preparation })
+    Ok(PreparedBook::Book { book, preparation })
 }
 
 // The subscription is owned by this future: completion, failure, and dropping
@@ -193,7 +194,7 @@ async fn load_book(
         BookFormat::M4b => PreparedBook::Audiobook { resolved: content, initial_target },
         #[cfg(not(feature = "audiobooks"))]
         BookFormat::M4b => return Err("stage=prepare: audiobook support is disabled".to_owned()),
-        BookFormat::Epub | BookFormat::Mobi => prepare_publication(&prepare_locator, content, format, &library, &executor, renderer_config, initial_target, startup_started, &updates).await?,
+        BookFormat::Epub | BookFormat::Mobi => prepare_book(&prepare_locator, content, format, &library, &executor, renderer_config, initial_target, startup_started, &updates).await?,
     };
     Ok(prepared)
 }
@@ -263,7 +264,7 @@ impl ReaderView {
                             PreparedBook::Pdf { reader, metadata, page_source, initial_page, initial_full_page_position } => {
                                 cx.new(|cx| PdfReaderView::new(locator, title, library, reader, metadata, page_source, initial_page, initial_full_page_position, close_reader, window, cx)).into()
                             }
-                            PreparedBook::Publication { publication, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, library, publication, preparation, close_reader, window, cx)).into(),
+                            PreparedBook::Book { book, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, library, book, preparation, close_reader, window, cx)).into(),
                             #[cfg(feature = "audiobooks")]
                             PreparedBook::Audiobook { resolved, initial_target } => {
                                 // Narration speed lives with the reader's other

@@ -14,7 +14,7 @@ macro_rules! startup_phase {
 mod epub;
 mod invalidation;
 mod pdf;
-mod publication;
+mod book;
 mod settings;
 mod shell;
 mod windows;

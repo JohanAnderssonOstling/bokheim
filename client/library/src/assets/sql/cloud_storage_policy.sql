@@ -1,1 +1,1 @@
-INSERT INTO sync_metadata(key,value) VALUES('cloud_storage_enabled',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value;
+INSERT INTO sync_metadata(singleton, cloud_storage_enabled) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET cloud_storage_enabled=excluded.cloud_storage_enabled WHERE cloud_storage_enabled IS NOT excluded.cloud_storage_enabled;

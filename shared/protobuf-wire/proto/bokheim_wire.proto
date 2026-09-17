@@ -53,10 +53,11 @@ message MutationValue {
     Placement placement = 5;
     ReadingPosition reading_position = 6;
     Annotation annotation = 7;
-    CatalogPublication catalog_publication = 10;
-    BookMetadata metadata = 11;
+    CatalogBook catalog_book = 10;
+    BookRecord metadata = 11;
     string description = 12;
-    bytes pdf_reader_metadata = 13; // Versioned JSON geometry/navigation, keyed by exact checksum.
+    bytes pdf_reader_metadata = 13; // Versioned JSON geometry, keyed by exact checksum.
+    bytes book_toc = 14; // JSON navigation tree, keyed by the book's identity.
   }
 }
 
@@ -76,7 +77,7 @@ message BookLifecycle {
 }
 
 message PresentBook {
-  BookMetadata metadata = 1;
+  BookRecord metadata = 1;
   uint64 added_at = 2;
   BookFormat format = 3;
 }
@@ -150,18 +151,18 @@ enum AnnotationStyle {
   ANNOTATION_STYLE_STRIKETHROUGH = 4;
 }
 
-message CatalogPublication {
+message CatalogBook {
   string edition_id = 1;
   optional string work_id = 2;
   string content_hash = 3;
 }
 
-message BookMetadata {
+message BookRecord {
   string title = 1;
   repeated Contributor contributors = 2;
   reserved 3;
   reserved "description"; // Description is an independent sync register.
-  PublicationMetadata publication = 4;
+  BookMetadata book = 4;
 }
 message Contributor {
   string contributor_id = 1;
@@ -169,27 +170,27 @@ message Contributor {
   optional string sort_name = 3;
   bytes role = 4;
 }
-message PublicationMetadata {
-  repeated PublicationIdentifier identifiers = 1;
+message BookMetadata {
+  repeated BookIdentifier identifiers = 1;
   repeated Publisher publishers = 2;
   repeated string languages = 3;
-  repeated PublicationDate dates = 4;
-  repeated PublicationSubject subjects = 5;
-  repeated PublicationCollection collections = 6;
-  repeated PublicationTitle alternate_titles = 7;
+  repeated BookDate dates = 4;
+  repeated BookSubject subjects = 5;
+  repeated BookCollection collections = 6;
+  repeated BookTitle alternate_titles = 7;
   repeated string rights = 8;
   repeated string sources = 9;
   repeated string types = 10;
   repeated string formats = 11;
   repeated string relations = 12;
   repeated string coverage = 13;
-  repeated PublicationProperty properties = 14;
+  repeated BookProperty properties = 14;
 }
-message PublicationIdentifier {
+message BookIdentifier {
   string value = 1;
   IdentifierScheme scheme = 2;
   optional string other_scheme = 3;
-  repeated PublicationIdentifierType identifier_types = 4;
+  repeated BookIdentifierType identifier_types = 4;
 }
 enum IdentifierScheme {
   IDENTIFIER_SCHEME_UNSPECIFIED = 0;
@@ -206,7 +207,7 @@ enum IdentifierScheme {
   IDENTIFIER_SCHEME_KOBO = 11;
   IDENTIFIER_SCHEME_OTHER = 12;
 }
-message PublicationIdentifierType {
+message BookIdentifierType {
   string value = 1;
   optional string scheme = 2;
 }
@@ -214,13 +215,13 @@ message Publisher {
   string publisher_id = 1;
   string name = 2;
 }
-message PublicationDate {
+message BookDate {
   optional string id = 1;
   string value = 2;
   optional string event = 3;
   optional string source = 4;
 }
-message PublicationSubject {
+message BookSubject {
   optional string id = 1;
   string name = 2;
   optional string authority = 3;
@@ -230,7 +231,7 @@ message PublicationSubject {
   optional string sort_name = 7;
   repeated LocalizedText sort_name_localizations = 8;
 }
-message PublicationCollection {
+message BookCollection {
   string name = 1;
   optional string collection_type = 2;
   optional string position = 3;
@@ -244,14 +245,14 @@ message LocalizedText {
   string language = 1;
   string value = 2;
 }
-message PublicationTitle {
+message BookTitle {
   optional string id = 1;
   string value = 2;
   optional string title_type = 3;
   optional string sort_as = 4;
   optional string source = 5;
 }
-message PublicationProperty {
+message BookProperty {
   optional string id = 1;
   string property = 2;
   string value = 3;

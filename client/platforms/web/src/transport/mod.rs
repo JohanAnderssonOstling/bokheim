@@ -24,7 +24,7 @@ pub fn failure(error: &str) -> JsValue {
     message.into()
 }
 
-/// Transfer owned buffers instead of copying publication bytes between workers.
+/// Transfer owned buffers instead of copying book bytes between workers.
 pub fn forward(port: &MessagePort, data: &JsValue) -> Result<(), JsValue> {
     let transfer = Array::new();
     if data.is_instance_of::<ArrayBuffer>() {

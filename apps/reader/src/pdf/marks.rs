@@ -1,6 +1,6 @@
 //! PDF projection of shared reader annotations.
 
-use library_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle, ReaderAnnotation};
 use pdf_reader_core::NormalizedRect;
 use pdf_view_gpui::{PdfAnnotationOverlay, PdfAnnotationStyle};
 
@@ -40,8 +40,8 @@ mod tests {
     }
 }
 
-pub(super) fn imported_annotations(content_hash: library_model::ContentHash, metadata: Option<&pdf_reader_core::PdfReaderMetadata>) -> Vec<ReaderAnnotation> {
-    use library_model::{AnnotationAnchor, PdfAnnotationAnchor, PdfAnnotationRect};
+pub(super) fn imported_annotations(content_hash: content_address::ContentHash, metadata: Option<&pdf_reader_core::PdfReaderMetadata>) -> Vec<ReaderAnnotation> {
+    use book_model::{AnnotationAnchor, PdfAnnotationAnchor, PdfAnnotationRect};
     use pdf_reader_core::PdfStoredAnnotationKind as Kind;
     let Some(metadata) = metadata.filter(|m| m.valid_for(&m.checksum)) else { return Vec::new() };
     metadata

@@ -3,16 +3,16 @@
 -- name: upsert_scanned_book_metadata!
 -- param: id: &str
 -- param: title: &str
--- param: publication_metadata: &[u8]
+-- param: book_metadata: &[u8]
 -- param: added_at: i64
 -- param: format: &str
-INSERT INTO book(content_hash,title,description_scanned,publication_metadata,added_at,format,deleted_at,purged_at)
-VALUES(:id,:title,1,:publication_metadata,:added_at,:format,NULL,NULL)
+INSERT INTO book(content_hash,title,description_scanned,book_metadata,added_at,format,deleted_at,purged_at)
+VALUES(:id,:title,1,:book_metadata,:added_at,:format,NULL,NULL)
 ON CONFLICT(content_hash) DO UPDATE SET
     title=excluded.title,
     format=excluded.format,
     description_scanned=1,
-    publication_metadata=excluded.publication_metadata,
+    book_metadata=excluded.book_metadata,
     -- Metadata backfills must not make an existing book look newly added.
     added_at=COALESCE(book.added_at, excluded.added_at),
     deleted_at=NULL,
@@ -36,12 +36,12 @@ DELETE FROM book_subject_assignment WHERE book_row_id=:book_row_id;
 -- name: clear_book_collections!
 -- param: book_row_id: i64
 DELETE FROM book_collection WHERE book_row_id=:book_row_id;
--- name: clear_book_publication_dates!
+-- name: clear_book_dates!
 -- param: book_row_id: i64
-DELETE FROM book_publication_date WHERE book_row_id=:book_row_id;
--- name: clear_book_publication_values!
+DELETE FROM book_date WHERE book_row_id=:book_row_id;
+-- name: clear_book_values!
 -- param: book_row_id: i64
-DELETE FROM book_publication_value WHERE book_row_id=:book_row_id;
+DELETE FROM book_value WHERE book_row_id=:book_row_id;
 
 -- name: insert_publisher!
 -- param: name: &str
@@ -114,7 +114,7 @@ VALUES(:book_row_id,:system_id,:subject_path,:subject_position);
 INSERT INTO book_collection(book_row_id,position,name,collection_type,group_position)
 VALUES(:book_row_id,:position,:name,:collection_type,:group_position);
 
--- name: insert_book_publication_date!
+-- name: insert_book_date!
 -- param: book_row_id: i64
 -- param: position: i64
 -- param: value: &str
@@ -122,17 +122,17 @@ VALUES(:book_row_id,:position,:name,:collection_type,:group_position);
 -- param: normalized_month: Option<i64>
 -- param: normalized_day: Option<i64>
 -- param: event: Option<&str>
-INSERT INTO book_publication_date(book_row_id,position,value,normalized_year,normalized_month,normalized_day,event)
+INSERT INTO book_date(book_row_id,position,value,normalized_year,normalized_month,normalized_day,event)
 VALUES(:book_row_id,:position,:value,:normalized_year,:normalized_month,:normalized_day,:event);
 
--- name: insert_book_publication_value!
+-- name: insert_book_value!
 -- param: book_row_id: i64
 -- param: kind: &str
 -- param: position: i64
 -- param: value: &str
 -- param: qualifier: Option<&str>
 -- param: secondary_value: Option<&str>
-INSERT INTO book_publication_value(book_row_id,kind,position,value,qualifier,secondary_value)
+INSERT INTO book_value(book_row_id,kind,position,value,qualifier,secondary_value)
 VALUES(:book_row_id,:kind,:position,:value,:qualifier,:secondary_value);
 
 -- name: update_book_title!
@@ -140,7 +140,7 @@ VALUES(:book_row_id,:kind,:position,:value,:qualifier,:secondary_value);
 -- param: content_hash: &str
 UPDATE book SET title=:title WHERE content_hash=:content_hash AND title IS NOT :title;
 
--- name: update_book_publication_metadata!
--- param: publication_metadata: &[u8]
+-- name: update_book_metadata!
+-- param: book_metadata: &[u8]
 -- param: content_hash: &str
-UPDATE book SET publication_metadata=:publication_metadata WHERE content_hash=:content_hash AND publication_metadata IS NOT :publication_metadata;
+UPDATE book SET book_metadata=:book_metadata WHERE content_hash=:content_hash AND book_metadata IS NOT :book_metadata;

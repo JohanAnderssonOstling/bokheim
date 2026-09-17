@@ -19,7 +19,6 @@ desktop = [
     "dep:semver",
     "dep:sha2",
     "browser-ui/filesystem-libraries",
-    "bokheim-backend/desktop",
 ]
 # Flatpak installs PDFium as /app/lib/libpdfium.so. Keep this separate from the
 # normal desktop feature, which loads the executable-relative PDFium package.
@@ -27,9 +26,9 @@ flatpak = ["desktop", "reader-ui/packaged-pdfium", "application-shell/packaged-p
 # Kobo is a touch device, so it takes the mobile surface too: swipe handling
 # is gated on `mobile`, and without it the hardware buttons were the only way
 # to turn a page on a touchscreen reader.
-kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "bokheim-backend/scanner", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile", "application-shell/mobile", "ui-components/mobile"]
-android = ["mobile", "audiobooks", "bokheim-backend/scanner", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform"]
+android = ["mobile", "audiobooks", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform"]
 
 [[bin]]
 name = "desktop-gpui"
@@ -55,7 +54,6 @@ gpui_kobo = { path = "../../../GPUI-Fork/crates/gpui_kobo", optional = true }
 fs2 = "0.4"
 image = { version = "0.25.1", default-features = false, features = ["png"], optional = true }
 kobo-device = { path = "../kobo-device", optional = true }
-library-model = { path = "../../client/library-model" }
 log = "0.4"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 reader-ui = { path = "../reader", default-features = false }

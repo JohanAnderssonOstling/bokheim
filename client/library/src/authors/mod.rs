@@ -3,19 +3,19 @@
 //! position sequence shared by every role (author, translator, editor, ...).
 use rusqlite::OptionalExtension;
 
-use crate::authors::queries::AuthorsSql;
-use crate::metadata::queries::MetadataSql;
+use crate::metadata::MetadataSql;
 #[cfg(test)]
 use crate::schema::init_db;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::unix_millis;
-use library_model::AgentId;
-use library_model::AuthorId;
-use library_model::AuthorName;
-use library_model::Contributor;
-use library_model::ExternalAuthorId;
-use library_model::PublicationMetadata;
-use library_model::PublisherCredit;
+use include_sqlite_sql::include_sql;
+use book_model::AgentId;
+use book_model::AuthorId;
+use catalog_model::AuthorName;
+use book_model::Contributor;
+use book_model::ExternalAuthorId;
+use book_model::BookMetadata;
+use book_model::PublisherCredit;
 use rusqlite::Transaction;
 use std::collections::HashMap;
 use sync_common::ContentHash;
@@ -95,7 +95,7 @@ impl IdentityCache {
             let (row, id) = if let Some((row, raw)) = existing {
                 (row, AgentId::parse_str(&raw).map_err(|e| invalid_text_column(1, e.to_string()))?)
             } else {
-                let id = library_model::agent_id_from_migration_seed(format!("external-author:{}:{}", key.0, key.1).as_bytes());
+                let id = book_model::agent_id_from_migration_seed(format!("external-author:{}:{}", key.0, key.1).as_bytes());
                 (self.agent(tx, id, &name)?, id)
             };
             self.agents.insert(id, row);
@@ -107,7 +107,7 @@ impl IdentityCache {
             tx.execute(include_str!("sql/authors/authoritative_update.sql"), rusqlite::params![name.as_str(), name.match_key().as_str(), row])?;
             self.authorities.insert(key, (id, name.as_str().into()));
         }
-        Contributor::with_id(id, name.as_str(), None, library_model::MarcRelatorCode(*b"aut")).map_err(|e| invalid_text_column(0, e.to_string()))
+        Contributor::with_id(id, name.as_str(), None, book_model::MarcRelatorCode(*b"aut")).map_err(|e| invalid_text_column(0, e.to_string()))
     }
 }
 
@@ -142,7 +142,7 @@ pub(super) fn contributors_match(tx: &Transaction, hash: ContentHash, incoming: 
 }
 
 /// Read ordered credits for independent books in one query.
-pub(super) fn contributors_match_batch(tx: &Transaction, incoming: &[(ContentHash, &library_model::SyncBookMetadata)]) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
+pub(super) fn contributors_match_batch(tx: &Transaction, incoming: &[(ContentHash, &library_replica::SyncBookMetadata)]) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
     let keys = serde_json::to_string(&incoming.iter().map(|(hash, _)| hash.as_str()).collect::<Vec<_>>())?;
     let mut matched = vec![true; incoming.len()];
     let mut counts = vec![0usize; incoming.len()];
@@ -212,7 +212,7 @@ pub(super) fn prepare_contributors(transaction: &Transaction, contributors: &[Co
         .collect()
 }
 
-pub(super) fn prepare_publication_agents(transaction: &Transaction, metadata: &PublicationMetadata, policy: AuthorIdPolicy) -> Result<PublicationMetadata, rusqlite::Error> {
+pub(super) fn prepare_book_agents(transaction: &Transaction, metadata: &BookMetadata, policy: AuthorIdPolicy) -> Result<BookMetadata, rusqlite::Error> {
     let mut prepared = metadata.clone();
     prepared.publishers = metadata
         .publishers
@@ -229,7 +229,7 @@ pub(super) fn prepare_publication_agents(transaction: &Transaction, metadata: &P
 }
 
 /// Clear+rewrite all `book_contributor` rows for a book in one pass. Contributor
-/// identity resolution mirrors the identity policy already used for publication
+/// identity resolution mirrors the identity policy already used for book
 /// agents; the merged list shares one flat `(content_hash, position)` sequence across
 /// every role.
 pub(super) fn replace_book_contributors(transaction: &Transaction, content_hash: ContentHash, contributors: &[StoredContributor]) -> Result<(), rusqlite::Error> {
@@ -302,7 +302,7 @@ mod cache_tests {
         init_db(&conn).unwrap();
         let tx = conn.transaction().unwrap();
         let mut cache = IdentityCache::default();
-        let author = Contributor::new("Shared Author", None, library_model::MarcRelatorCode(*b"aut")).unwrap();
+        let author = Contributor::new("Shared Author", None, book_model::MarcRelatorCode(*b"aut")).unwrap();
         let publisher = PublisherCredit::with_id(author.agent_id(), "Shared Author").unwrap();
         let first = cache.contributors(&tx, &[author.clone()]).unwrap()[0].identity_local_id;
         for _ in 0..32 {
@@ -317,4 +317,4 @@ mod cache_tests {
     }
 }
 
-pub(crate) mod queries;
+include_sql!("src/authors/sql/authors.sql");

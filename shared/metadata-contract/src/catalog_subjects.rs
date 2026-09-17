@@ -33,7 +33,7 @@ mod tests {
     use crate::*;
     #[test]
     fn catalog_evidence_round_trips_and_cannot_assign_an_isbn() {
-        let q = EditionIdentityQuery { query_id:"1".into(),title:"French history".into(),authors:vec!["Jane Smith".into()],publishers:vec![],publication_year:None };
+        let q = EditionIdentityQuery { query_id:"1".into(),title:"French history".into(),authors:vec!["Jane Smith".into()],publishers:vec![],book_year:None };
         let m = CatalogSubjectMatch { main_title:q.title.clone(), provider_id:"library_of_congress".into(),record_ids:vec!["12345".into()],title:"French history; a survey".into(),authors:vec!["Smith, Jane".into()],classifications:vec![Classification { scheme:ClassificationScheme::LibraryOfCongress,notation:"DC161".into(),source:ClassificationSource::Work,evidence:vec![] }] };
         let response = EditionIdentityResponse { snapshot:SnapshotDescription {dump_date:"2016".into(),imported_at_ms:1},results:vec![EditionIdentityResult {query_id:"1".into(),status:EditionIdentityStatus::NoMatch,matched:None,candidates:vec![],candidates_truncated:false,catalog_subjects:Some(m)}] };
         let decoded = decode_v2_edition_identity_response(&encode_v2_edition_identity_response(&response).unwrap(),MAX_RESPONSE_BYTES).unwrap();

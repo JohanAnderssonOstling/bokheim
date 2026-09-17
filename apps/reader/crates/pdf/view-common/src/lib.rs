@@ -1,7 +1,7 @@
 //! Framework-independent PDF crop, coordinate, and text-selection geometry.
 
 mod metadata;
-pub use metadata::{PdfReaderMetadata, PdfStoredOutline, PdfStoredPage, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfByteRange, PdfDependencyIndex, PdfPageSource};
+pub use metadata::{PdfReaderMetadata, PdfStoredPage, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfByteRange, PdfDependencyIndex, PdfPageSource};
 
 const DEFAULT_CONTENT_DIFFERENCE_THRESHOLD: u8 = 24;
 const DEFAULT_PADDING_PIXELS: u32 = 12;

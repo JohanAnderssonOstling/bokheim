@@ -16,37 +16,32 @@ crate-type = ["rlib"]
 
 [features]
 storage-contract-tests = ["client-platform-web/storage-contract-tests"]
-web-runtime-tests = ["client-platform-web/web-runtime-tests", "publication-access/web-runtime-tests", "client-platform-runtime/web-runtime-tests"]
-default = ["desktop"]
-desktop = ["watcher", ]
-scanner = ["library-files/scanner"]
-watcher = ["scanner", "library-files/watcher"]
+web-runtime-tests = ["client-platform-web/web-runtime-tests", "book-access/web-runtime-tests", "client-platform-runtime/web-runtime-tests"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
-client-platform-desktop = { path = "../platforms/desktop" }
-library-files = { path = "../library-files" }
+book-model = { path = "../../shared/book-model" }
+client-platform-desktop = { path = "crates/platform-desktop" }
 client-platform-runtime = { path = "../platforms/runtime" }
-publication-access = { path = "../publication-access", features = ["pdf"] }
-pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
-publication-enrichment = { path = "../../shared/publication-enrichment" }
-publication-inspection = { path = "../../shared/publication-inspection" }
-publication-identity = { path = "../../shared/publication-identity" }
+book-access = { path = "../book-access", features = ["pdf"] }
+book-enrichment = { path = "../../shared/book-enrichment" }
+book-inspection = { path = "../../shared/book-inspection" }
+book-identity = { path = "../../shared/book-identity" }
 book-metadata = { path = "../book-metadata" }
 device-sqlite = { path = "../device-sqlite" }
 account-contract = { path = "../../shared/account-contract" }
-asset-transfer = { path = "../sync/asset-transfer" }
 library-registry = { path = "../library-registry" }
 app-preferences = { path = "../preferences" }
-metadata-client = { path = "../metadata-client" }
 library-model = { path = "../library-model" }
 client-library = { path = "../library", default-features = false, features = ["audiobook-metadata"] }
 library-runtime = { path = "../library-runtime" }
+library-database = { path = "../library-database" }
+library-backend = { path = "../library-backend" }
+metadata-client = { path = "../library-backend/crates/metadata-client" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 subject-projection = { path = "../../shared/subject-projection" }
 library-replica = { path = "../library-replica" }
 account-client = { path = "../account-client" }
-sync-engine = { path = "../sync/engine" }
 sync-transport = { path = "../sync/transport" }
 thumbnail = { path = "../thumbnail" }
 log = "0.4"
@@ -54,6 +49,7 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.0", features = ["bundled", "functions", "hooks"] }
+include-sqlite-sql = "0.2.1"
 web-time = "1"
 uuid = { version = "1.0", features = ["v4"] }
 tokio = { version = "1.0", features = ["macros", "rt", "sync", "time"] }
@@ -80,7 +76,7 @@ web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "Fil
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 client-platform-native = { path = "../platforms/native", features = ["websocket"] }
 client-platform-kobo = { path = "../platforms/kobo" }
-publication-identity = { path = "../../shared/publication-identity", features = ["native-write"] }
+book-identity = { path = "../../shared/book-identity", features = ["native-write"] }
 tempfile = "3"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
@@ -101,4 +97,3 @@ libc = "0.2"
 tokio = { version = "1.0", features = ["test-util"] }
 axum = "0.7"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
-

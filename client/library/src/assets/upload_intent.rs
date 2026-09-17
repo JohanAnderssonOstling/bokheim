@@ -7,8 +7,7 @@ use crate::placements::transfer_book_placement_record;
 #[cfg(test)]
 use crate::schema::init_db;
 use crate::storage_values::invalid_text_column;
-#[cfg(test)]
-use crate::sync_state::rebind_sync_account;
+
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
@@ -24,14 +23,14 @@ pub struct BookUploadIntent {
 }
 
 fn observe(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentHash, size: u64, origin: &str) -> rusqlite::Result<bool> {
-    let size = i64::try_from(size).map_err(|_| invalid_text_column(0, "publication size exceeds SQLite range"))?;
+    let size = i64::try_from(size).map_err(|_| invalid_text_column(0, "book size exceeds SQLite range"))?;
     Ok(tx.execute(include_str!("sql/upload_intent/observe_insert.sql"), rusqlite::params![hash.as_str(), checksum.as_str(), size, origin])? != 0)
 }
 
 /// Record a verified local version atomically with its metadata/placement.
 /// Known versions (including downloaded bytes) do not create fresh work when
 /// scanned again, moved, copied to another placement, or imported again.
-pub fn observe_local_publication(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
+pub fn observe_local_book(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
     if !observe(tx, hash, checksum, size, "local")? {
         return Ok(());
     }
@@ -46,8 +45,8 @@ fn enqueue_version(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentH
 
 /// The placement baseline distinguishes a new placement of known bytes from
 /// an edit reverting an existing placement to an older, already seen checksum.
-pub fn observe_local_placement_publication(tx: &Transaction<'_>, dir: &DirId, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
-    let previous: Option<String> = tx.query_row(include_str!("sql/upload_intent/observe_local_placement_publication_select.sql"), rusqlite::params![dir.to_string(), hash.as_str()], |row| row.get(0)).optional()?;
+pub fn observe_local_placement_book(tx: &Transaction<'_>, dir: &DirId, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
+    let previous: Option<String> = tx.query_row(include_str!("sql/upload_intent/observe_local_placement_book_select.sql"), rusqlite::params![dir.to_string(), hash.as_str()], |row| row.get(0)).optional()?;
     if previous.as_deref() == Some(checksum.as_str()) {
         return Ok(());
     }
@@ -56,7 +55,7 @@ pub fn observe_local_placement_publication(tx: &Transaction<'_>, dir: &DirId, ha
     if unseen || changed {
         enqueue_version(tx, hash, checksum, size)?;
     }
-    let origin: String = if changed { "local".to_owned() } else { tx.query_row(include_str!("sql/upload_intent/observe_local_placement_publication_select_2.sql"), rusqlite::params![hash.as_str(), checksum.as_str()], |row| row.get(0))? };
+    let origin: String = if changed { "local".to_owned() } else { tx.query_row(include_str!("sql/upload_intent/observe_local_placement_book_select_2.sql"), rusqlite::params![hash.as_str(), checksum.as_str()], |row| row.get(0))? };
     remember_placement(tx, dir, hash, checksum, &origin)
 }
 
@@ -65,14 +64,14 @@ fn remember_placement(tx: &Transaction<'_>, dir: &DirId, hash: &ContentHash, che
     Ok(())
 }
 
-pub fn observe_downloaded_placement_publication(tx: &Transaction<'_>, dir: &DirId, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
-    observe_downloaded_publication(tx, hash, checksum, size)?;
+pub fn observe_downloaded_placement_book(tx: &Transaction<'_>, dir: &DirId, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
+    observe_downloaded_book(tx, hash, checksum, size)?;
     remember_placement(tx, dir, hash, checksum, "remote")
 }
 
 /// Successful downloads establish provenance but never enqueue upload intent,
 /// nor erase a different pending local version.
-pub fn observe_downloaded_publication(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
+pub fn observe_downloaded_book(tx: &Transaction<'_>, hash: &ContentHash, checksum: &ContentHash, size: u64) -> rusqlite::Result<()> {
     observe(tx, hash, checksum, size, "remote")?;
     Ok(())
 }
@@ -90,8 +89,8 @@ pub fn complete_book_upload(tx: &Transaction<'_>, job: &BookUploadIntent) -> rus
 }
 
 /// Preserve source provenance across a metadata-only copy/move. No upload work.
-pub(crate) fn copy_publication_baseline(tx: &Transaction<'_>, source: &DirId, destination: &DirId, hash: &ContentHash) -> rusqlite::Result<()> {
-    tx.execute(include_str!("sql/upload_intent/copy_publication_baseline_insert.sql"), rusqlite::params![source.to_string(), destination.to_string(), hash.as_str()])?;
+pub(crate) fn copy_book_baseline(tx: &Transaction<'_>, source: &DirId, destination: &DirId, hash: &ContentHash) -> rusqlite::Result<()> {
+    tx.execute(include_str!("sql/upload_intent/copy_book_baseline_insert.sql"), rusqlite::params![source.to_string(), destination.to_string(), hash.as_str()])?;
     Ok(())
 }
 
@@ -114,7 +113,7 @@ mod tests {
         conn.execute(include_str!("sql/upload_intent/account_rebind_requeues_local_sources_but_not_downloads_and_rotates_pending_tokens_insert_2.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), hash.as_str(), "book.epub"])
             .unwrap();
         let tx = conn.transaction().unwrap();
-        observe_downloaded_placement_publication(&tx, &sync_common::ROOT_DIR_ID, &hash, &hash, 100).unwrap();
+        observe_downloaded_placement_book(&tx, &sync_common::ROOT_DIR_ID, &hash, &hash, 100).unwrap();
         tx.commit().unwrap();
         assert!(book_upload_intent(&conn, &hash).unwrap().is_none());
         crate::assets::reset_cloud_presence(&conn, true).unwrap();
@@ -122,7 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn account_rebind_requeues_local_sources_but_not_downloads_and_rotates_pending_tokens() {
+    fn requeue_local_uploads_requeues_local_sources_but_not_downloads_and_rotates_pending_tokens() {
+        fn requeue(conn: &mut Connection) {
+            let tx = conn.unchecked_transaction().unwrap();
+            requeue_local_uploads(&tx).unwrap();
+            tx.commit().unwrap();
+        }
         let mut conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let local = test_support::fixture_content_hash(10);
@@ -136,8 +140,8 @@ mod tests {
             .unwrap();
         }
         let tx = conn.transaction().unwrap();
-        observe_local_placement_publication(&tx, &sync_common::ROOT_DIR_ID, &local, &local, 100).unwrap();
-        observe_downloaded_placement_publication(&tx, &sync_common::ROOT_DIR_ID, &remote, &remote, 100).unwrap();
+        observe_local_placement_book(&tx, &sync_common::ROOT_DIR_ID, &local, &local, 100).unwrap();
+        observe_downloaded_placement_book(&tx, &sync_common::ROOT_DIR_ID, &remote, &remote, 100).unwrap();
         let original = book_upload_intent(&tx, &local).unwrap().unwrap();
         complete_book_upload(&tx, &original).unwrap();
         let destination = DirId::new_v4();
@@ -148,11 +152,11 @@ mod tests {
         assert!(book_upload_intent(&tx, &local).unwrap().is_none(), "moving is not an upload");
         assert!(book_upload_intent(&tx, &remote).unwrap().is_none(), "copying downloaded bytes is not an upload");
         tx.commit().unwrap();
-        rebind_sync_account(&conn, "new-account").unwrap();
+        requeue(&mut conn);
         let rebound = book_upload_intent(&conn, &local).unwrap().unwrap();
         assert!(rebound.id > original.id);
         assert!(book_upload_intent(&conn, &remote).unwrap().is_none());
-        rebind_sync_account(&conn, "another-account").unwrap();
+        requeue(&mut conn);
         let latest = book_upload_intent(&conn, &local).unwrap().unwrap();
         assert!(latest.id > rebound.id);
         assert_eq!(latest.checksum, local);
@@ -172,22 +176,22 @@ mod tests {
         let copy = DirId::new_v4();
         conn.execute(include_str!("sql/work/legacy_asset_trigger_upgrades_once_without_losing_work_insert.sql"), [book.as_str()]).unwrap();
         let tx = conn.transaction().unwrap();
-        observe_downloaded_placement_publication(&tx, &original, &book, &downloaded, 100).unwrap();
-        observe_local_placement_publication(&tx, &original, &book, &downloaded, 100).unwrap();
-        observe_local_placement_publication(&tx, &copy, &book, &downloaded, 100).unwrap();
+        observe_downloaded_placement_book(&tx, &original, &book, &downloaded, 100).unwrap();
+        observe_local_placement_book(&tx, &original, &book, &downloaded, 100).unwrap();
+        observe_local_placement_book(&tx, &copy, &book, &downloaded, 100).unwrap();
         assert!(book_upload_intent(&tx, &book).unwrap().is_none());
-        observe_local_placement_publication(&tx, &original, &book, &edited, 120).unwrap();
+        observe_local_placement_book(&tx, &original, &book, &edited, 120).unwrap();
         let edit = book_upload_intent(&tx, &book).unwrap().unwrap();
-        observe_local_placement_publication(&tx, &original, &book, &edited, 120).unwrap();
+        observe_local_placement_book(&tx, &original, &book, &edited, 120).unwrap();
         assert_eq!(book_upload_intent(&tx, &book).unwrap(), Some(edit.clone()));
         assert!(complete_book_upload(&tx, &edit).unwrap());
-        observe_local_placement_publication(&tx, &original, &book, &downloaded, 100).unwrap();
+        observe_local_placement_book(&tx, &original, &book, &downloaded, 100).unwrap();
         let revert = book_upload_intent(&tx, &book).unwrap().unwrap();
         assert_eq!(revert.checksum, downloaded);
         assert!(revert.id > edit.id);
         assert!(!complete_book_upload(&tx, &edit).unwrap());
         // A downloaded second placement cannot erase the first placement's edit.
-        observe_downloaded_placement_publication(&tx, &copy, &book, &downloaded, 100).unwrap();
+        observe_downloaded_placement_book(&tx, &copy, &book, &downloaded, 100).unwrap();
         assert_eq!(book_upload_intent(&tx, &book).unwrap(), Some(revert));
         let origins: Vec<String> =
             tx.prepare(include_str!("sql/upload_intent/placement_upload_intent_ignores_copies_but_tracks_edits_and_reversions_select.sql")).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
@@ -206,12 +210,12 @@ mod tests {
         let edited = test_support::fixture_content_hash(3);
         conn.execute(include_str!("sql/work/legacy_asset_trigger_upgrades_once_without_losing_work_insert.sql"), [book.as_str()]).unwrap();
         let tx = conn.transaction().unwrap();
-        observe_downloaded_publication(&tx, &book, &downloaded, 100).unwrap();
-        observe_local_publication(&tx, &book, &downloaded, 100).unwrap();
+        observe_downloaded_book(&tx, &book, &downloaded, 100).unwrap();
+        observe_local_book(&tx, &book, &downloaded, 100).unwrap();
         assert!(book_upload_intent(&tx, &book).unwrap().is_none());
-        observe_local_publication(&tx, &book, &edited, 120).unwrap();
+        observe_local_book(&tx, &book, &edited, 120).unwrap();
         let first = book_upload_intent(&tx, &book).unwrap().unwrap();
-        observe_local_publication(&tx, &book, &edited, 120).unwrap();
+        observe_local_book(&tx, &book, &edited, 120).unwrap();
         assert_eq!(book_upload_intent(&tx, &book).unwrap(), Some(first.clone()));
         tx.commit().unwrap();
         drop(conn);
@@ -220,18 +224,18 @@ mod tests {
         assert_eq!(book_upload_intent(&conn, &book).unwrap(), Some(first.clone()));
         let newer = test_support::fixture_content_hash(4);
         let tx = conn.transaction().unwrap();
-        observe_local_publication(&tx, &book, &newer, 130).unwrap();
+        observe_local_book(&tx, &book, &newer, 130).unwrap();
         assert!(!complete_book_upload(&tx, &first).unwrap());
         tx.rollback().unwrap();
         assert_eq!(book_upload_intent(&conn, &book).unwrap(), Some(first.clone()));
         let tx = conn.transaction().unwrap();
-        observe_local_publication(&tx, &book, &newer, 130).unwrap();
+        observe_local_book(&tx, &book, &newer, 130).unwrap();
         let second = book_upload_intent(&tx, &book).unwrap().unwrap();
         assert!(!complete_book_upload(&tx, &first).unwrap());
-        observe_downloaded_publication(&tx, &book, &downloaded, 100).unwrap();
+        observe_downloaded_book(&tx, &book, &downloaded, 100).unwrap();
         assert_eq!(book_upload_intent(&tx, &book).unwrap(), Some(second.clone()));
         assert!(complete_book_upload(&tx, &second).unwrap());
-        observe_local_publication(&tx, &book, &newer, 130).unwrap();
+        observe_local_book(&tx, &book, &newer, 130).unwrap();
         assert!(book_upload_intent(&tx, &book).unwrap().is_none());
         tx.commit().unwrap();
         let schema: i64 = conn.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();

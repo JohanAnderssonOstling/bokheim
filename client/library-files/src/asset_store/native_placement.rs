@@ -1,6 +1,6 @@
 //! Native directory placement and durable filesystem reconciliation.
 use super::{AssetStore, AssetStoreError, imp};
-use crate::ContentHash;
+use sync_common::{ContentHash, DirId};
 
 /// Native directory placement is separate from shared asset byte access.
 pub struct NativePlacement<'a> { pub(super) store: &'a AssetStore }
@@ -13,12 +13,9 @@ impl NativePlacement<'_> {
         imp::directory_available(&self.store.0, relative)
     }
 
-    pub fn prepare_directory(&self, conn: &mut rusqlite::Connection, id: crate::DirId) -> Result<(), AssetStoreError> {
-        imp::prepare_directory(&self.store.0, conn, id)
-    }
-
-    pub fn queue_book_placements(&self, conn: &rusqlite::Connection, hash: &ContentHash) -> Result<(), AssetStoreError> {
-        imp::queue_book_placements(&self.store.0, conn, hash)
+    /// Creates/moves one physical directory from a database-owned snapshot.
+    pub async fn prepare_directory_with_database(&self, database: &library_database::Database, id: DirId) -> Result<(), AssetStoreError> {
+        imp::prepare_directory_with_database(&self.store.0, database, id).await
     }
 
     pub fn purge_trash(&self, hash: &ContentHash) -> Result<(), AssetStoreError> {
@@ -27,127 +24,138 @@ impl NativePlacement<'_> {
 }
 
 impl NativePlacement<'_> {
-    /// Replay metadata-committed file work. Each step is idempotent; failures
-    /// leave the record queued, including a restore awaiting server bytes.
-    pub fn reconcile_file_work(&self, conn: &mut rusqlite::Connection) -> Result<(), AssetStoreError> {
-        // Snapshot once: work queued during publication belongs to a later pass.
-        let jobs = conn
-            .prepare(include_str!("sql/native_placement/reconcile_file_work_select.sql"))?
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+    /// Replay metadata-committed file work. Database snapshots and
+    /// acknowledgements are short; all filesystem work between them is
+    /// connection-free.
+    pub async fn reconcile_file_work(&self, database: &library_database::Database) -> Result<(), AssetStoreError> {
+        let jobs = database.native_file_work().map_err(|error| AssetStoreError(error.to_string()))?;
+        let movable = Self::movable_sources(&jobs);
         let mut failure = None;
-        for (id, operation, hash, original_path) in jobs {
-            if let Err(error) = self.reconcile_file_job(conn, id, operation, hash, original_path) {
+        for work in jobs {
+            if let Err(error) = self.reconcile_file_job(database, work, &movable).await {
                 failure.get_or_insert(error);
             }
         }
         failure.map_or(Ok(()), Err)
     }
 
-    fn reconcile_file_job(&self, conn: &mut rusqlite::Connection, id: i64, operation: String, hash: String, original_path: String) -> Result<(), AssetStoreError> {
-        // Deferred or failed work must not let a later operation retire this
-        // book's source. The durable queue preserves ordering across passes.
-        let preceding: bool = conn.query_row(include_str!("sql/native_placement/reconcile_file_job_select.sql"), rusqlite::params![hash, id], |row| row.get(0))?;
-        if preceding {
-            return Ok(());
+    /// Same as [`Self::reconcile_file_work`], scoped to one book so a reader
+    /// never blocks on an unrelated large copy.
+    pub async fn reconcile_file_work_for(&self, database: &library_database::Database, hash: &ContentHash) -> Result<(), AssetStoreError> {
+        let jobs: Vec<_> = database.native_file_work().map_err(|error| AssetStoreError(error.to_string()))?.into_iter().filter(|work| &work.content_hash == hash).collect();
+        let movable = Self::movable_sources(&jobs);
+        let mut failure = None;
+        for work in jobs {
+            if let Err(error) = self.reconcile_file_job(database, work, &movable).await {
+                failure.get_or_insert(error);
+            }
         }
-        let Some(_lease) = imp::lease(&self.store.0, &hash, true)? else { return Ok(()) };
-        let hash = ContentHash::new(&hash);
-        let original = crate::RelativeBookPath::parse(&original_path).map_err(|e| AssetStoreError(e.to_string()))?;
-        let mut path = original_path.clone();
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Paths a queued `trash` job already claims: safe for a paired
+    /// `restore` to relocate instead of copy.
+    fn movable_sources(jobs: &[library_database::NativeFileWork]) -> std::collections::HashMap<ContentHash, Vec<String>> {
+        let mut movable = std::collections::HashMap::<ContentHash, Vec<String>>::new();
+        for job in jobs.iter().filter(|job| job.operation == "trash") {
+            movable.entry(job.content_hash).or_default().push(job.original_path.clone());
+        }
+        movable
+    }
+
+    async fn reconcile_file_job(&self, database: &library_database::Database, work: library_database::NativeFileWork, movable: &std::collections::HashMap<ContentHash, Vec<String>>) -> Result<(), AssetStoreError> {
+        let Some(snapshot) = database.native_file_work_snapshot(work).map_err(|error| AssetStoreError(error.to_string()))? else { return Ok(()) };
+        let Some(_lease) = imp::lease(&self.store.0, snapshot.work.content_hash.as_str(), true)? else { return Ok(()) };
+        let hash = snapshot.work.content_hash;
+        let mut path = snapshot.resolved_path.clone();
         let mut renamed = None;
-        // Resolve filesystem collisions and stage publication bytes without
-        // holding SQLite's writer. Metadata is rechecked before publication.
-        let prepared = if operation == "trash" {
-            let live: bool = conn.query_row(include_str!("sql/native_placement/reconcile_file_job_select_2.sql"), [hash.as_str()], |r| r.get(0))?;
-            if live && client_library::assets::get_book_dir_entry_by_path(conn, &original)?.is_some_and(|(actual, _, _)| actual == hash) { None } else { Some(imp::prepare_trash(&self.store.0, &hash, &path)?) }
-        } else if operation == "restore" {
-            let live: bool = conn.query_row(include_str!("sql/native_placement/reconcile_file_job_select_3.sql"), [hash.as_str()], |r| r.get(0))?;
-            let placement = if live { client_library::assets::get_book_dir_entry_by_path(conn, &original)? } else { None };
-            if let Some((_, dir, name)) = placement.filter(|(actual, _, _)| *actual == hash) {
-                let mut occupied = client_library::placements::occupied_file_names(conn, &dir.to_string())?;
+        let prepared = if snapshot.work.operation == "trash" {
+            if snapshot.live && snapshot.placement.is_some() { None } else { Some(imp::prepare_trash(&self.store.0, &hash, &path)?) }
+        } else if snapshot.work.operation == "restore" {
+            if let Some((dir, name)) = snapshot.placement {
+                let mut occupied = snapshot.occupied_names;
                 let parent = path.rsplit_once('/').map(|(parent, _)| parent.to_owned()).unwrap_or_default();
                 while imp::placement_conflicts(&self.store.0, &hash, &path)? {
-                    let chosen = library_model::unique_file_name(&name, occupied.iter().map(String::as_str));
+                    let chosen = library_replica::unique_file_name(&name, occupied.iter().map(String::as_str));
                     occupied.push(chosen.clone());
                     path = format!("{parent}/{chosen}");
-                    renamed = Some((dir, chosen));
+                    renamed = Some((dir.clone(), chosen));
                 }
-                let Some(prepared) = imp::prepare_restore(&self.store.0, &hash, &path, conn)? else { return Ok(()) };
+                let empty = Vec::new();
+                let movable_sources = movable.get(&hash).unwrap_or(&empty);
+                let Some(prepared) = imp::prepare_restore(&self.store.0, &hash, &path, snapshot.expected_checksum.as_deref(), &snapshot.book_paths, movable_sources)? else { return Ok(()) };
                 Some(prepared)
             } else {
                 None
             }
         } else {
-            return Err(AssetStoreError(format!("unknown file operation: {operation}")));
+            return Err(AssetStoreError(format!("unknown file operation: {}", snapshot.work.operation)));
         };
-        let tx = client_library::schema::library_write_transaction(conn)?;
-        let current: bool =
-            tx.query_row(include_str!("sql/native_placement/reconcile_file_job_select_5.sql"), rusqlite::params![id, operation, hash.as_str(), original_path], |row| row.get(0))?;
-        if !current {
-            return Ok(());
-        }
-        let live: bool = tx.query_row(include_str!("sql/native_placement/reconcile_file_job_select_3.sql"), [hash.as_str()], |r| r.get(0))?;
-        let placed = live && client_library::assets::get_book_dir_entry_by_path(&tx, &original)?.is_some_and(|(actual, _, _)| actual == hash);
-        let needed = if operation == "trash" { !(live && placed) } else { live && placed };
-        if needed {
-            // A previously obsolete job may have become relevant while
-            // preparing another operation. Leave it queued for a fresh pass.
-            let Some(prepared) = prepared else { return Ok(()) };
-            if let Some((dir, chosen)) = renamed {
-                let occupied: bool = tx.query_row(include_str!("sql/native_placement/reconcile_file_job_select_7.sql"), rusqlite::params![dir.to_string(), chosen], |r| r.get(0))?;
-                if occupied {
-                    return Ok(());
-                }
-                tx.execute(include_str!("sql/asset_store/publish_update.sql"), rusqlite::params![dir.to_string(), hash.as_str(), chosen])?;
-            }
+        let published = if let Some(prepared) = prepared {
             prepared.publish()?;
-            if operation == "trash" {
-                tx.execute(include_str!("sql/native_placement/reconcile_file_job_delete.sql"), rusqlite::params![hash.as_str(), original_path])?;
-            }
-            if operation == "restore" {
-                let relative = crate::RelativeBookPath::parse(&path).map_err(|e| AssetStoreError(e.to_string()))?;
-                client_library::placements::set_book_downloaded(&tx, &relative, hash, true)?;
-                client_library::assets::complete_asset_request(&tx, crate::BlobKind::Book, &hash)?;
-                if !self.store.thumbnail_set_exists(&hash)? {
-                    client_library::thumbnail_jobs::request_missing_thumbnail(&tx, &hash)?;
-                }
-                if let Some((_, dir, _)) = client_library::assets::get_book_dir_entry_by_path(&tx, &relative)? {
-                    tx.execute(
-                        include_str!("sql/asset_store/publish_insert.sql"),
-                        rusqlite::params![hash.as_str(), dir.to_string(), path],
-                    )?;
-                }
-            }
-        }
-        tx.execute(include_str!("sql/native_placement/reconcile_file_job_delete_2.sql"), [id])?;
-        tx.commit()?;
+            true
+        } else {
+            false
+        };
+        let acknowledgement = library_database::NativeFileWorkCompletion {
+            work: snapshot.work,
+            final_path: path,
+            renamed,
+            published,
+            thumbnail_set_exists: self.store.thumbnail_set_exists(&hash)?,
+        };
+        let _ = database.acknowledge_native_file_work(acknowledgement).map_err(|error| AssetStoreError(error.to_string()))?;
         Ok(())
     }
 
     /// Prepare recorded folder/book changes before replaying file operations.
     /// Folder moves rewrite remembered source paths, so a preparation failure
     /// must prevent source retirement until those dependencies are resolved.
-    pub fn recover_files(&self, conn: &mut rusqlite::Connection) -> Result<(), AssetStoreError> {
-        imp::prepare_directory_work(&self.store.0, conn)?;
-        self.reconcile_file_work(conn)?;
+    pub async fn run_jobs(&self, database: &library_database::Database) -> Result<(), AssetStoreError> {
+        self.run_directory_work(database).await?;
+        self.reconcile_file_work(database).await
+    }
+
+    /// Replays every queued directory move/rename; cheap since each is a
+    /// same-volume `fs::rename`, unlike file work.
+    pub async fn run_directory_work(&self, database: &library_database::Database) -> Result<(), AssetStoreError> {
+        let mut directories = database.native_directory_work_ids().map_err(|error| AssetStoreError(error.to_string()))?;
+        directories.extend(database.native_book_work_directory_ids().map_err(|error| AssetStoreError(error.to_string()))?);
+        directories.sort();
+        directories.dedup();
+        for directory in directories {
+            self.prepare_directory_with_database(database, directory).await?;
+        }
         Ok(())
     }
 
-    pub async fn run_jobs(&self, database: &impl crate::database::FileDatabase) -> Result<(), AssetStoreError> {
-            let database = database.clone();
-            let assets = self.store.clone();
-            crate::executor::run_blocking(move || {
-                let mut conn = database.get().map_err(|e| AssetStoreError(e.to_string()))?;
-                let result = assets.placement().recover_files(&mut conn);
-                let error = result.as_ref().err().map(ToString::to_string).unwrap_or_default();
-                if client_library::sync_state::get_sync_metadata(&conn, "local_file_work_error")?.as_deref().unwrap_or_default() != error {
-                    client_library::sync_state::set_sync_metadata(&conn, "local_file_work_error", &error)?;
+    // Small-schema regression fixtures predate the concrete database owner.
+    // Keep their physical replay assertion local to tests; production callers
+    // exclusively use the snapshot/acknowledgement API above.
+    #[cfg(test)]
+    pub fn reconcile_file_work_fixture(&self, conn: &mut rusqlite::Connection) -> Result<(), AssetStoreError> {
+        let jobs = conn.prepare("SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id")?
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut failure = None;
+        for (id, operation, hash, path) in jobs {
+            let preceding: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1 AND id<?2)", rusqlite::params![hash, id], |row| row.get(0))?;
+            if preceding { continue; }
+            let Some(_lease) = imp::lease(&self.store.0, &hash, true)? else { continue; };
+            if operation == "trash" {
+                match imp::prepare_trash(&self.store.0, &ContentHash::new(&hash), &path).and_then(|prepared| prepared.publish()) {
+                    Ok(()) => {
+                        conn.execute("DELETE FROM local_file_projection WHERE content_hash=?1 AND relative_path=?2", rusqlite::params![hash, path])?;
+                        conn.execute("DELETE FROM local_file_work WHERE id=?1", [id])?;
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
                 }
-                result
-            })
-            .await
-            .map_err(|error| AssetStoreError(error.to_string()))
-            .and_then(|result| result)
+            } else {
+                conn.execute("DELETE FROM local_file_work WHERE id=?1", [id])?;
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }

@@ -1,11 +1,11 @@
 //! Completed-transfer persistence owned by one library session.
 
-use crate::database::Database;
-use asset_transfer::TransferQueue;
+use library_database::Database;
+use crate::TransferQueue;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn queue_with_history(_database: &Database, path: std::path::PathBuf) -> TransferQueue {
-    TransferQueue::with_history(asset_transfer::MessagePackTransferHistory::new(path))
+    TransferQueue::with_history(crate::MessagePackTransferHistory::new(path))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -16,11 +16,10 @@ pub fn queue_with_history(database: &Database, _path: std::path::PathBuf) -> Tra
 #[cfg(target_arch = "wasm32")]
 mod sqlite {
     use super::*;
-    use asset_transfer::{HistoryPersistence, TransferStatus};
+    use crate::{HistoryPersistence, TransferStatus};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    const KEY: &str = "local_transfer_history_v1";
 
     struct History {
         database: Database,
@@ -29,8 +28,7 @@ mod sqlite {
 
     pub(super) fn open(database: Database) -> TransferQueue {
         let entries = (|| -> Result<VecDeque<TransferStatus>, String> {
-            let conn = database.get().map_err(|error| error.to_string())?;
-            let saved = client_library::sync_state::get_sync_metadata(&conn, KEY).map_err(|error| error.to_string())?;
+            let saved = database.load_transfer_history().map_err(|error| error.to_string())?;
             saved.map(|json| serde_json::from_str(&json).map_err(|error| error.to_string())).unwrap_or_else(|| Ok(VecDeque::new()))
         })()
         .unwrap_or_else(|error| {
@@ -44,8 +42,7 @@ mod sqlite {
         fn submit(&self, entries: VecDeque<TransferStatus>) {
             let result = (|| -> Result<(), String> {
                 let json = serde_json::to_string(&entries).map_err(|error| error.to_string())?;
-                let conn = self.database.get().map_err(|error| error.to_string())?;
-                client_library::sync_state::set_sync_metadata(&conn, KEY, &json).map_err(|error| error.to_string())
+                self.database.save_transfer_history(&json).map_err(|error| error.to_string())
             })();
             if let Err(error) = &result {
                 log::warn!("Could not persist transfer history: {error}");

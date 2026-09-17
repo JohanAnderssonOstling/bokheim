@@ -14,10 +14,10 @@ impl LibraryClient {
     pub async fn update_reading_position(&self, content_hash: crate::ContentHash, position: String, progress: Option<f32>, entry: Option<String>) -> Result<(), String> {
         self.request(library_requests::UpdateReadingPosition { content_hash, position, progress, entry }).await
     }
-    pub async fn annotations(&self, content_hash: crate::ContentHash) -> Result<Vec<library_model::ReaderAnnotation>, String> {
+    pub async fn annotations(&self, content_hash: crate::ContentHash) -> Result<Vec<book_model::ReaderAnnotation>, String> {
         self.request(library_requests::Annotations { content_hash }).await
     }
-    pub async fn upsert_annotation(&self, annotation: library_model::ReaderAnnotation) -> Result<(), String> {
+    pub async fn upsert_annotation(&self, annotation: book_model::ReaderAnnotation) -> Result<(), String> {
         self.request(library_requests::UpsertAnnotation { annotation }).await
     }
     pub async fn delete_annotation(&self, annotation_id: String, modified_at: i64) -> Result<(), String> {

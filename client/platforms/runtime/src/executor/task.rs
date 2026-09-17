@@ -40,6 +40,21 @@ pub(super) fn owned_task<T: BackendOutput>(future: impl BackendFuture<T>) -> (Ba
     (BackendTask { receiver, abort }, runner)
 }
 
+/// Same handle and cancel-on-drop semantics as [`owned_task`], but the future
+/// need not be `Send` — for work confined to one dedicated thread, such as a
+/// library's owned database connection.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn owned_local_task<T: 'static>(future: impl Future<Output = T> + 'static) -> (BackendTask<T>, impl Future<Output = ()> + 'static) {
+    let (sender, receiver) = oneshot::channel();
+    let (abort, registration) = AbortHandle::new_pair();
+    let runner = async move {
+        if let Ok(result) = Abortable::new(std::panic::AssertUnwindSafe(future).catch_unwind(), registration).await {
+            let _ = sender.send(result.map_err(|_| BackendExecutorError("backend task panicked".to_owned())));
+        }
+    };
+    (BackendTask { receiver, abort }, runner)
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

@@ -2,7 +2,7 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement};
-use library_model::ReaderAnnotation;
+use book_model::ReaderAnnotation;
 use ui_components as components;
 
 use crate::epub::ReaderView;

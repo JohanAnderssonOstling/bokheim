@@ -1,1 +1,1 @@
-INSERT INTO audiobook_metadata(content_hash,duration_ms,chapter_count,chapter_source,chapters_json) VALUES(?1,1800000,2,'embedded_m4b',?2)
+INSERT INTO audiobook_metadata(content_hash,duration_ms) VALUES(?1,1800000)

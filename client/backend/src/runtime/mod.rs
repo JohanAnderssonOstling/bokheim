@@ -52,7 +52,7 @@ impl Transport {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use crate::browser_adapter::requests::{BrowserAppCommand as HostAppCommand, BrowserLibraryCommand as HostLibraryCommand};
+pub use crate::web::requests::{WebAppCommand as HostAppCommand, WebLibraryCommand as HostLibraryCommand};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NoHostCommand as HostLibraryCommand;
 #[cfg(not(target_arch = "wasm32"))]

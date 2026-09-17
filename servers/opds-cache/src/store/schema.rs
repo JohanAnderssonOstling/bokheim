@@ -24,7 +24,7 @@ pub(super) fn initialize_server_schema(store: &CatalogStore) -> Result<(), Catal
     transaction.execute("INSERT OR IGNORE INTO catalog_transport_state(singleton,epoch) VALUES(1,lower(hex(randomblob(16))))", [])?;
     transaction.execute(
         "INSERT OR IGNORE INTO catalog_subject_browse_index_metadata(singleton,index_version)
-         SELECT 1,?1 WHERE NOT EXISTS(SELECT 1 FROM catalog_publication_subject_assignment)",
+         SELECT 1,?1 WHERE NOT EXISTS(SELECT 1 FROM catalog_book_subject_assignment)",
         [CATALOG_SUBJECT_BROWSE_INDEX_VERSION],
     )?;
 

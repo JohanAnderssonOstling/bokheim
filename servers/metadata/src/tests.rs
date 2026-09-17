@@ -42,8 +42,8 @@ pub(super) fn snapshot_from(directory: &Path, edition_records: &[serde_json::Val
     database
 }
 
-fn edition_query(title: &str, publishers: Vec<String>, publication_year: Option<i32>) -> EditionIdentityRequest {
-    EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: title.to_owned(), authors: vec!["Alex Smith".to_owned()], publishers, publication_year }] }
+fn edition_query(title: &str, publishers: Vec<String>, book_year: Option<i32>) -> EditionIdentityRequest {
+    EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: title.to_owned(), authors: vec!["Alex Smith".to_owned()], publishers, book_year }] }
 }
 
 fn wikidata_dump(path: &Path, records: &[serde_json::Value]) {
@@ -475,10 +475,10 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
     let identity = service
         .resolve_editions(EditionIdentityRequest {
             queries: vec![
-                EditionIdentityQuery { query_id: "local-1".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Smith, Alex".to_owned()], publishers: vec!["North-Wind Press".to_owned()], publication_year: Some(2004) },
-                EditionIdentityQuery { query_id: "work-title".to_owned(), title: "Canonical Example Work".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: vec!["North Wind Press".to_owned()], publication_year: Some(2004) },
-                EditionIdentityQuery { query_id: "ambiguous".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: vec!["North Wind Press".to_owned()], publication_year: None },
-                EditionIdentityQuery { query_id: "insufficient".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), publication_year: None },
+                EditionIdentityQuery { query_id: "local-1".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Smith, Alex".to_owned()], publishers: vec!["North-Wind Press".to_owned()], book_year: Some(2004) },
+                EditionIdentityQuery { query_id: "work-title".to_owned(), title: "Canonical Example Work".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: vec!["North Wind Press".to_owned()], book_year: Some(2004) },
+                EditionIdentityQuery { query_id: "ambiguous".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: vec!["North Wind Press".to_owned()], book_year: None },
+                EditionIdentityQuery { query_id: "insufficient".to_owned(), title: "The Example Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: None },
             ],
         })
         .unwrap();
@@ -487,7 +487,7 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
     assert_eq!(identity_match.canonical_isbn13, "9780306406157");
     assert_eq!(identity_match.open_library_edition_id, "OL1M");
     assert_eq!(identity_match.title_match, EditionTitleMatch::Edition);
-    assert!(identity_match.matched_publisher && identity_match.matched_publication_year);
+    assert!(identity_match.matched_publisher && identity_match.matched_book_year);
     assert_eq!(identity.results[1].status, EditionIdentityStatus::Matched);
     assert_eq!(identity.results[1].matched.as_ref().unwrap().title_match, EditionTitleMatch::Work);
     for result in &identity.results[2..=3] {
@@ -670,11 +670,11 @@ fn edition_identity_matches_a_single_edition_that_carries_several_isbns() {
     assert_eq!(response.results[0].status, EditionIdentityStatus::Matched, "two ISBNs on one edition are still one edition");
     let matched = response.results[0].matched.as_ref().unwrap();
     assert_eq!(matched.open_library_edition_id, "OL1M");
-    assert!(matched.matched_publisher && matched.matched_publication_year);
+    assert!(matched.matched_publisher && matched.matched_book_year);
 }
 
 #[test]
-fn edition_identity_accepts_a_local_subtitle_and_newer_publication_details() {
+fn edition_identity_accepts_a_local_subtitle_and_newer_book_details() {
     let temporary = tempfile::tempdir().unwrap();
     let database = snapshot_from(
         temporary.path(),
@@ -692,7 +692,7 @@ fn edition_identity_accepts_a_local_subtitle_and_newer_publication_details() {
     let matched = response.results[0].matched.as_ref().unwrap();
     assert_eq!(matched.open_library_edition_id, "OL1M");
     assert!(!matched.matched_publisher);
-    assert!(!matched.matched_publication_year);
+    assert!(!matched.matched_book_year);
 }
 
 #[test]
@@ -746,8 +746,8 @@ fn edition_identity_uses_author_only_to_break_a_longest_substring_tie() {
     let response = service
         .resolve_editions(EditionIdentityRequest {
             queries: vec![
-                EditionIdentityQuery { query_id: "title-only".to_owned(), title: title.clone(), authors: Vec::new(), publishers: vec!["Preferred Press".to_owned()], publication_year: None },
-                EditionIdentityQuery { query_id: "with-author".to_owned(), title, authors: vec!["Alex Smith".to_owned()], publishers: vec!["Preferred Press".to_owned()], publication_year: None },
+                EditionIdentityQuery { query_id: "title-only".to_owned(), title: title.clone(), authors: Vec::new(), publishers: vec!["Preferred Press".to_owned()], book_year: None },
+                EditionIdentityQuery { query_id: "with-author".to_owned(), title, authors: vec!["Alex Smith".to_owned()], publishers: vec!["Preferred Press".to_owned()], book_year: None },
             ],
         })
         .unwrap();
@@ -774,7 +774,7 @@ fn edition_identity_requires_an_author_match_for_automatic_acceptance() {
 
     let response = service
         .resolve_editions(EditionIdentityRequest {
-            queries: vec![EditionIdentityQuery { query_id: "wrong-author".to_owned(), title: "Delphi Complete Works Of Athenaeus".to_owned(), authors: vec!["Athenaeus".to_owned()], publishers: Vec::new(), publication_year: None }],
+            queries: vec![EditionIdentityQuery { query_id: "wrong-author".to_owned(), title: "Delphi Complete Works Of Athenaeus".to_owned(), authors: vec!["Athenaeus".to_owned()], publishers: Vec::new(), book_year: None }],
         })
         .unwrap();
 
@@ -810,7 +810,7 @@ fn edition_identity_accepts_one_work_after_author_matched_editions_are_collapsed
                 title: "Delphi Complete Works of Homer".to_owned(),
                 authors: vec!["Homer".to_owned()],
                 publishers: vec!["Delphi Classics".to_owned()],
-                publication_year: None,
+                book_year: None,
             }],
         })
         .unwrap();
@@ -844,7 +844,7 @@ fn edition_identity_combines_inferred_author_and_year_to_remove_other_candidates
     );
     let service = MetadataService::open(&database).unwrap();
     let request = EditionIdentityRequest {
-        queries: vec![EditionIdentityQuery { query_id: "noisy-filename".to_owned(), title: "Algorithms".to_owned(), authors: vec!["Jeff Erickson".to_owned()], publishers: Vec::new(), publication_year: Some(2019) }],
+        queries: vec![EditionIdentityQuery { query_id: "noisy-filename".to_owned(), title: "Algorithms".to_owned(), authors: vec!["Jeff Erickson".to_owned()], publishers: Vec::new(), book_year: Some(2019) }],
     };
 
     let response = service.resolve_editions(request).unwrap();
@@ -873,9 +873,9 @@ fn edition_identity_batch_keeps_results_attached_to_each_query() {
     let service = MetadataService::open(&database).unwrap();
     let request = EditionIdentityRequest {
         queries: vec![
-            EditionIdentityQuery { query_id: "second".to_owned(), title: "Second Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), publication_year: None },
-            EditionIdentityQuery { query_id: "missing".to_owned(), title: "Missing Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), publication_year: None },
-            EditionIdentityQuery { query_id: "first".to_owned(), title: "First Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), publication_year: None },
+            EditionIdentityQuery { query_id: "second".to_owned(), title: "Second Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: None },
+            EditionIdentityQuery { query_id: "missing".to_owned(), title: "Missing Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: None },
+            EditionIdentityQuery { query_id: "first".to_owned(), title: "First Book".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: None },
         ],
     };
 
@@ -987,7 +987,7 @@ fn edition_identity_combines_classification_sources_and_suggests_only_one_editio
     let service = MetadataService::open(&database).unwrap();
 
     let response = service
-        .resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: "The Example Book".to_owned(), authors: Vec::new(), publishers: Vec::new(), publication_year: None }] })
+        .resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: "The Example Book".to_owned(), authors: Vec::new(), publishers: Vec::new(), book_year: None }] })
         .unwrap();
     assert_eq!(response.results[0].status, EditionIdentityStatus::Ambiguous);
     assert_eq!(response.results[0].candidates.len(), 1);
@@ -1332,7 +1332,7 @@ fn edition_identity_tries_main_title_before_long_subtitle_expansion() {
     let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
     let response=MetadataService::open(database).unwrap().resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{
         query_id:"main".into(),title:format!("An Empire of Wealth: {}", "a very long descriptive subtitle about the political social and economic history of a nation ".repeat(3)),
-        authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),publication_year:None
+        authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),book_year:None
     }]}).unwrap();
     assert_eq!(response.results[0].status,EditionIdentityStatus::Matched);
     assert_eq!(response.results[0].matched.as_ref().unwrap().open_library_edition_id,"OL2M");
@@ -1343,7 +1343,7 @@ fn edition_identity_preserves_volume_when_searching_main_title() {
     let temp=tempfile::tempdir().unwrap();
     let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth: Volume 2","John Steele Gordon");
     let response=MetadataService::open(database).unwrap().resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{
-        query_id:"volume".into(),title:"An Empire of Wealth: Volume 4: A long subtitle".into(),authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),publication_year:None
+        query_id:"volume".into(),title:"An Empire of Wealth: Volume 4: A long subtitle".into(),authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),book_year:None
     }]}).unwrap();
     assert_eq!(response.results[0].status,EditionIdentityStatus::NoMatch);
 }
@@ -1407,7 +1407,7 @@ fn edition_identity_returns_separate_subtitle_and_prefers_full_title() {
     ]);
     let service = MetadataService::open(&database).unwrap();
     let response = service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
-        query_id: "logic".into(), title: "Logic: A Very Short Introduction".into(), authors: vec![], publishers: vec![], publication_year: None,
+        query_id: "logic".into(), title: "Logic: A Very Short Introduction".into(), authors: vec![], publishers: vec![], book_year: None,
     }] }).unwrap();
     let result = &response.results[0];
     let candidates = result.matched.iter().chain(result.candidates.iter()).collect::<Vec<_>>();
@@ -1431,7 +1431,7 @@ fn edition_identity_matches_possessive_apostrophe_before_substrings() {
     for apostrophe in ["'", "’", "ʼ"] {
         let response = service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
             query_id: "startup".into(), title: format!("The Startup Owner{apostrophe}s Manual: The Step-by-Step Guide for Building a Great Company"),
-            authors: vec!["Blank, Steve".into(), "Dorf, Bob".into()], publishers: vec![], publication_year: None,
+            authors: vec!["Blank, Steve".into(), "Dorf, Bob".into()], publishers: vec![], book_year: None,
         }] }).unwrap();
         let matched = response.results[0].matched.as_ref().unwrap();
         assert_eq!(matched.open_library_edition_id, "OL1M");
@@ -1456,7 +1456,7 @@ fn rebuild_existing_titles_backfills_subtitles_without_changing_source() {
     assert_eq!(c.query_row("SELECT normalized_title FROM work_subtitle", [], |r| r.get::<_,String>(0)).unwrap(), "owners manual a practical guide");
     for title in ["Owners Manual: A Practical Guide", "Owner's Manual: A Practical Guide", "Owner’s Manual: A Practical Guide"] {
         let result = MetadataService::open(&output).unwrap().resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
-            query_id:"test".into(),title:title.into(),authors:vec![],publishers:vec![],publication_year:None
+            query_id:"test".into(),title:title.into(),authors:vec![],publishers:vec![],book_year:None
         }]}).unwrap();
         assert_eq!(result.results[0].candidates[0].subtitle.as_deref(), Some("A Practical Guide"));
     }
@@ -1492,7 +1492,7 @@ fn edition_identity_fallback_waits_for_usable_candidates_and_preserves_ambiguity
         ("empty", "", vec![]),
     ].into_iter().map(|(id,title,authors)| EditionIdentityQuery {
         query_id:id.into(), title:title.into(), authors:authors.into_iter().map(str::to_owned).collect(),
-        publishers:vec!["Preferred Publisher".into()], publication_year:None,
+        publishers:vec!["Preferred Publisher".into()], book_year:None,
     }).collect();
     let results = service.resolve_editions(EditionIdentityRequest { queries }).unwrap().results;
     assert_eq!(results.iter().map(|r| r.query_id.as_str()).collect::<Vec<_>>(), vec!["author","code","ambiguous","unknown-author","exhausted","empty"]);
@@ -1539,7 +1539,7 @@ fn wikidata_ingestion_persists_books_and_authors_without_runtime_source() {
     assert_eq!(c.query_row("SELECT edition_id FROM edition_isbn WHERE isbn13=9780306406157",[],|r|r.get::<_,i64>(0)).unwrap(),-10);
     assert_eq!(c.query_row("SELECT notation FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=2",[],|r|r.get::<_,String>(0)).unwrap(),"QA76.6");
     assert!(c.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='wikidata book' AND scheme=2",[],|r|r.get::<_,i64>(0)).unwrap()>0);
-    let response=service.resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{query_id:"wd".into(),title:"Wikidata book".into(),authors:vec!["Alex Smith".into()],publishers:vec![],publication_year:None}]}).unwrap();
+    let response=service.resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{query_id:"wd".into(),title:"Wikidata book".into(),authors:vec!["Alex Smith".into()],publishers:vec![],book_year:None}]}).unwrap();
     assert_eq!(response.results[0].matched.as_ref().unwrap().canonical_isbn13,"9780306406157");
     assert!(response.results[0].matched.as_ref().unwrap().open_library_edition_id.is_empty());
 
@@ -1608,10 +1608,10 @@ fn wikidata_bibliography_descriptions_and_books_without_isbn_survive_split() {
     let input=temp.path().join("input.sqlite");let c=Connection::open(&input).unwrap();
     c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
     c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01'),('bibliography_status','complete');
-        CREATE TABLE bibliography(book TEXT PRIMARY KEY,title TEXT,subtitle TEXT,publication_year INTEGER);
-        CREATE TABLE publication_publisher(book TEXT,publisher TEXT,name TEXT);
+        CREATE TABLE bibliography(book TEXT PRIMARY KEY,title TEXT,subtitle TEXT,book_year INTEGER);
+        CREATE TABLE book_publisher(book TEXT,publisher TEXT,name TEXT);
         INSERT INTO bibliography VALUES('Q10','Logic','A careful introduction',2001),('Q20','Ancient letters','Collected correspondence',1850);
-        INSERT INTO publication_publisher VALUES('Q10','Q200','Example Press');
+        INSERT INTO book_publisher VALUES('Q10','Q200','Example Press');
         INSERT INTO profile VALUES('Q10','Old label','[]',NULL,NULL,'[]',NULL,'A book about logic'),('Q20','Ancient letters','[]',NULL,NULL,'[]',NULL,'Historical correspondence'),('Q1','Jane Smith','[]',NULL,NULL,'[]',NULL,NULL);
         INSERT INTO isbn VALUES('9780306406157','Q10');
         INSERT INTO credit VALUES('Q10','Q1',0),('Q20','Q1',0);
@@ -1625,10 +1625,10 @@ fn wikidata_bibliography_descriptions_and_books_without_isbn_survive_split() {
     for service in [MetadataService::open(&target).unwrap(),MetadataService::open_with_stores(subjects,rich,identity,None::<PathBuf>,None::<PathBuf>).unwrap()] {
         let response=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
         assert_eq!(response.results[0].matches[0].description.as_deref(),Some("A book about logic"));
-        let query=|title:&str,author:&str|EditionIdentityQuery{query_id:"test".into(),title:title.into(),authors:vec![author.into()],publishers:vec!["Example Press".into()],publication_year:Some(2001)};
+        let query=|title:&str,author:&str|EditionIdentityQuery{query_id:"test".into(),title:title.into(),authors:vec![author.into()],publishers:vec!["Example Press".into()],book_year:Some(2001)};
         let response=service.resolve_editions(EditionIdentityRequest{queries:vec![query("Logic: A careful introduction","Jane Smith")]}).unwrap();
         let matched=response.results[0].matched.as_ref().unwrap();
-        assert_eq!(matched.subtitle.as_deref(),Some("A careful introduction"));assert!(matched.matched_publisher && matched.matched_publication_year);
+        assert_eq!(matched.subtitle.as_deref(),Some("A careful introduction"));assert!(matched.matched_publisher && matched.matched_book_year);
         let q=query("Ancient letters: Collected correspondence","Jane Smith");
         let response=service.resolve_editions(EditionIdentityRequest{queries:vec![q.clone()]}).unwrap();
         assert!(response.results[0].matched.is_none());assert!(response.results[0].candidates.is_empty());

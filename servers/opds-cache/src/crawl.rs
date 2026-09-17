@@ -1,7 +1,7 @@
 use super::{
     canonicalize_gutenberg_page, canonicalize_opds_catalog_locator, catalog_crawls_disabled, duration_millis, opds_catalog_source_id, opds_page, prepare_catalog_subject_assignments, store_error, validate_opds_catalog_locator,
     AdaptiveCrawlWriteBatch, AdaptiveOriginThrottle, AdaptiveOriginThrottleState, Arc, CatalogCrawlGeneration, CatalogLinkTarget, CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogPage, CatalogPageWrite,
-    CatalogProcess, CatalogPublication, CatalogService, CatalogServiceError, CatalogSourceId, CatalogStore, CatalogStoreError, CrawlLocator, DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint,
+    CatalogProcess, CatalogBook, CatalogService, CatalogServiceError, CatalogSourceId, CatalogStore, CatalogStoreError, CrawlLocator, DiskCrawlFrontier, Duration, HashSet, Instant, Mutex, OpdsConditionalCatalog, OpdsEndpoint,
     OpdsError, OpdsHttpValidators, OriginThrottleFeedback, OriginThrottleSnapshot, PopularityRank, Url, CRAWL_ACTIVATION_BATCH, CRAWL_CYCLE, CRAWL_ORIGIN_DEFAULT_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_INITIAL_SPACING, CRAWL_ORIGIN_MAX_ATTEMPTS,
     CRAWL_ORIGIN_MAX_RATE_LIMIT_BACKOFF, CRAWL_ORIGIN_MAX_SPACING, CRAWL_ORIGIN_MIN_SPACING, CRAWL_ORIGIN_SUCCESS_WINDOW, CRAWL_ORIGIN_TRANSIENT_BACKOFF, CRAWL_PAGE_CONCURRENCY, CRAWL_PAGE_CONCURRENCY_MAX, CRAWL_PAUSE_SENTINEL,
     EPUB_EXTRACTION_SWEEP_INTERVAL, EXTRACTION_RECONCILIATION_BATCH, INACTIVE_GENERATION_CLEANUP_BATCH, METADATA_BACKFILL_BATCH_SIZE, PRIORITY_CRAWL_SOURCE, REGISTRY_REFRESH_INTERVAL,
@@ -279,14 +279,14 @@ impl CatalogService {
             return Ok(());
         }
         let pages = batch.take_pages();
-        let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
+        let book_counts = pages.iter().map(|write| page_book_count(&write.page)).collect::<Vec<_>>();
         let prepared = self.store_call(move |_| CatalogStore::prepare_page_writes(pages)).await?;
         let cache_crawl = crawl.clone();
         let started = Instant::now();
         self.store_write_call_named("crawl_page_write", move |cache| cache.stage_prepared_pages(&cache_crawl, &prepared)).await?;
         batch.record_commit(started.elapsed());
-        for publications in publication_counts {
-            self.record_crawl_page(source_id, publications).await;
+        for books in book_counts {
+            self.record_crawl_page(source_id, books).await;
         }
         tokio::task::yield_now().await;
         Ok(())
@@ -311,12 +311,12 @@ impl CatalogService {
                     Ok(page)
                 })
                 .await?;
-            self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
+            self.prepare_book_cover_fallbacks(source_id, &mut page).await;
             write.page = page;
             enriched_pages.push(write);
         }
         let pages = enriched_pages;
-        let publication_counts = pages.iter().map(|write| page_publication_count(&write.page)).collect::<Vec<_>>();
+        let book_counts = pages.iter().map(|write| page_book_count(&write.page)).collect::<Vec<_>>();
         let prepared = self.store_call(move |_| CatalogStore::prepare_page_writes(pages)).await?;
         let cache_source = source_id.clone();
         let cache_root = source_url.to_owned();
@@ -324,8 +324,8 @@ impl CatalogService {
         self.store_write_call_named("crawl_page_write", move |cache| cache.put_prepared_pages(&cache_source, &cache_root, &prepared)).await?;
         batch.record_commit(started.elapsed());
         drop(_update);
-        for publications in publication_counts {
-            self.record_crawl_page(source_id, publications).await;
+        for books in book_counts {
+            self.record_crawl_page(source_id, books).await;
         }
         self.wake_process(CatalogProcess::CoverDownloads);
         tokio::task::yield_now().await;
@@ -402,9 +402,9 @@ impl CatalogService {
                 while let Some(page) = pages.next().await {
                     let page = page?;
                     frontier.enqueue(page.links)?;
-                    let publications = page_publication_count(&page.write.page) as usize;
+                    let books = page_book_count(&page.write.page) as usize;
                     let bytes = wire::encode(&page.write.page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
-                    write_batch.push(page.write, publications, bytes);
+                    write_batch.push(page.write, books, bytes);
                     if write_batch.reached_capacity() {
                         self.flush_replacement_crawl_batch(&crawl, &source_id, &mut write_batch).await?;
                     }
@@ -463,9 +463,9 @@ impl CatalogService {
                         IncrementalCrawlPage::Cached { links } => frontier.enqueue(links)?,
                         IncrementalCrawlPage::Fetched(page) => {
                             frontier.enqueue(page.links)?;
-                            let publications = page_publication_count(&page.write.page) as usize;
+                            let books = page_book_count(&page.write.page) as usize;
                             let bytes = wire::encode(&page.write.page).map_err(|error| CatalogServiceError(error.to_string()))?.len();
-                            write_batch.push(page.write, publications, bytes);
+                            write_batch.push(page.write, books, bytes);
                             if write_batch.should_flush_incremental() {
                                 self.flush_incremental_crawl_batch(&source_id, &endpoint.url, &mut write_batch).await?;
                             }
@@ -543,7 +543,7 @@ impl CatalogService {
                 Ok(page)
             })
             .await?;
-        self.prepare_publication_cover_fallbacks(source_id, &mut page).await;
+        self.prepare_book_cover_fallbacks(source_id, &mut page).await;
         annotate_popular_listing(&mut page, popular_listing);
         let links = internal_page_links(root_url, &page, popular_listing)?;
         Ok(FetchedCrawlPage { write: CatalogPageWrite { page, etag: validators.etag, last_modified: validators.last_modified, provider_paginated }, links })
@@ -844,9 +844,9 @@ pub(crate) fn classify_catalog_failure(message: &str) -> (&'static str, bool) {
     } else if message.contains("unsupported") {
         ("unsupported_format", false)
     } else if message.contains("no longer active") {
-        ("stale_publication", false)
+        ("stale_book", false)
     } else if message.contains("zip") || message.contains("epub") || message.contains("container") || message.contains("truncated") {
-        ("invalid_publication", false)
+        ("invalid_book", false)
     } else if message.contains("metadata") || message.contains("opf") || message.contains("xml") {
         ("metadata_parse", false)
     } else {
@@ -870,25 +870,25 @@ pub(crate) fn reconcile_stored_sources(store: &CatalogStore, endpoints: &[OpdsEn
                 crate::source_cleanup::purge_files(store,&source.source_id,acquisitions,covers)?;
             }
             store.remove_source(&source.source_id).map_err(store_error)?;
-            tracing::info!(source=source.source_id.as_str(),publications=source.active_publication_count,"purged removed catalogue source");
+            tracing::info!(source=source.source_id.as_str(),books=source.active_book_count,"purged removed catalogue source");
             removed.push(source.source_id);
         }
     }
     Ok(removed)
 }
 
-pub(crate) fn page_publication_count(page: &CatalogPage) -> u64 {
-    page.publications.len().saturating_add(page.groups.iter().map(|group| group.publications.len()).sum::<usize>()) as u64
+pub(crate) fn page_book_count(page: &CatalogPage) -> u64 {
+    page.books.len().saturating_add(page.groups.iter().map(|group| group.books.len()).sum::<usize>()) as u64
 }
 
 fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
     let mut pages = pages.into_iter();
     let mut compacted = pages.next().expect("provider page compaction requires a first page");
     let mut top_level = HashSet::new();
-    retain_unique_publications(&mut compacted.publications, &mut top_level);
+    retain_unique_books(&mut compacted.books, &mut top_level);
     for group in &mut compacted.groups {
         let mut seen = HashSet::new();
-        retain_unique_publications(&mut group.publications, &mut seen);
+        retain_unique_books(&mut group.books, &mut seen);
     }
 
     for mut page in pages {
@@ -897,8 +897,8 @@ fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
                 compacted.navigation.push(link);
             }
         }
-        retain_unique_publications(&mut page.publications, &mut top_level);
-        compacted.publications.extend(page.publications);
+        retain_unique_books(&mut page.books, &mut top_level);
+        compacted.books.extend(page.books);
 
         for mut group in page.groups {
             if let Some(existing) = compacted.groups.iter_mut().find(|existing| existing.title == group.title && existing.page_locator == group.page_locator) {
@@ -908,12 +908,12 @@ fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
                         existing.navigation.push(link);
                     }
                 }
-                let mut seen = existing.publications.iter().map(|publication| (publication.identity.edition_id.clone(), publication.identity.work_id.clone().unwrap_or_default())).collect::<HashSet<_>>();
-                retain_unique_publications(&mut group.publications, &mut seen);
-                existing.publications.extend(group.publications);
+                let mut seen = existing.books.iter().map(|book| (book.identity.edition_id.clone(), book.identity.work_id.clone().unwrap_or_default())).collect::<HashSet<_>>();
+                retain_unique_books(&mut group.books, &mut seen);
+                existing.books.extend(group.books);
             } else {
                 let mut seen = HashSet::new();
-                retain_unique_publications(&mut group.publications, &mut seen);
+                retain_unique_books(&mut group.books, &mut seen);
                 compacted.groups.push(group);
             }
         }
@@ -936,8 +936,8 @@ fn compact_catalog_pages(pages: Vec<CatalogPage>) -> CatalogPage {
     compacted
 }
 
-fn retain_unique_publications(publications: &mut Vec<CatalogPublication>, seen: &mut HashSet<(String, String)>) {
-    publications.retain(|publication| seen.insert((publication.identity.edition_id.clone(), publication.identity.work_id.clone().unwrap_or_default())));
+fn retain_unique_books(books: &mut Vec<CatalogBook>, seen: &mut HashSet<(String, String)>) {
+    books.retain(|book| seen.insert((book.identity.edition_id.clone(), book.identity.work_id.clone().unwrap_or_default())));
 }
 
 pub(crate) fn internal_page_links(root: &Url, page: &CatalogPage, current_popular_listing: bool) -> Result<Vec<CrawlLocator>, CatalogServiceError> {
@@ -969,16 +969,16 @@ pub(crate) fn annotate_popular_listing(page: &mut CatalogPage, popular_listing: 
         return;
     }
     let source = format!("opds:sort/popular:{}", page.locator);
-    for (index, publication) in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())).enumerate() {
+    for (index, book) in page.books.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.books.iter_mut())).enumerate() {
         let rank = PopularityRank { position: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1), source: source.clone() };
-        if !publication.metadata.popularity_ranks.contains(&rank) {
-            publication.metadata.popularity_ranks.push(rank);
+        if !book.metadata.popularity_ranks.contains(&rank) {
+            book.metadata.popularity_ranks.push(rank);
         }
     }
 }
 
 fn page_has_popular_rank(page: &CatalogPage) -> bool {
-    page.publications.iter().chain(page.groups.iter().flat_map(|group| group.publications.iter())).any(|publication| publication.metadata.popularity_ranks.iter().any(|rank| rank.source.starts_with("opds:sort/popular:")))
+    page.books.iter().chain(page.groups.iter().flat_map(|group| group.books.iter())).any(|book| book.metadata.popularity_ranks.iter().any(|rank| rank.source.starts_with("opds:sort/popular:")))
 }
 
 pub(crate) fn canonicalize_page_layout_locators(endpoint: &OpdsEndpoint, page: &mut catalog_protocol::CatalogPageLayout) -> Result<(), CatalogServiceError> {

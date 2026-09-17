@@ -137,7 +137,7 @@ impl StoredPosition {
     /// the position string without affecting progress.
     pub(crate) fn pdf_page(page_index: usize, offset: f32, page_count: usize) -> Self {
         let percent = if page_count == 0 { 0.0 } else { (page_index.saturating_add(1) as f32 / page_count as f32 * 100.0).clamp(0.0, 100.0) };
-        Self { position: library_model::pdf_page_position_reading_position(page_index as u32, offset), percent, entry: Some(library_model::pdf_toc_target(page_index)) }
+        Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent, entry: Some(book_model::pdf_toc_target(page_index)) }
     }
 
     /// The entry the position was resolved to, once the reader knows it. An

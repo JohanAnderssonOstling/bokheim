@@ -1,4 +1,4 @@
-SELECT json_array('book',content_hash,title,added_at,format,deleted_at,purged_at,hex(publication_metadata)) AS value FROM book
+SELECT json_array('book',content_hash,title,added_at,format,deleted_at,purged_at,hex(book_metadata)) AS value FROM book
 UNION ALL
 SELECT json_array('version',state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
 FROM sync_state_version WHERE state_key IN (SELECT content_hash FROM book)

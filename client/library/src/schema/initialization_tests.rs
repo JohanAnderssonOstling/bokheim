@@ -1,8 +1,8 @@
 use super::*;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 #[test]

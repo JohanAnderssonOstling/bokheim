@@ -11,8 +11,10 @@
 //! `Backend/tests/run_sync_e2e.sh`
 
 use crate::ContentHash;
-use library_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat, BookLifecycleState, BookMetadataState, ReadingPositionState};
-use library_model::{Contributor, MarcRelatorCode};
+use library_replica::{BookLifecycleState, ReadingPositionState};
+use book_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat};
+use book_model::BookRecord;
+use book_model::{Contributor, MarcRelatorCode};
 use library_replica::{MutationBody, StateKey, StateMutation, VersionKey};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
@@ -283,10 +285,11 @@ fn outbox_storage_key(body: &MutationBody) -> (&'static str, String) {
         MutationBody::Placement { content_hash, .. } => ("placement", content_hash.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone()),
-        MutationBody::CatalogPublication { source_id, .. } => ("catalog_publication", source_id.as_str().to_owned()),
+        MutationBody::CatalogBook { source_id, .. } => ("catalog_book", source_id.as_str().to_owned()),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string()),
         MutationBody::PdfReaderMetadata { content_hash, .. } => ("pdf_reader_metadata", content_hash.to_string()),
         MutationBody::Description { content_hash, .. } => ("description", content_hash.to_string()),
+        MutationBody::BookToc { content_hash, .. } => ("book_toc", content_hash.to_string()),
     }
 }
 
@@ -294,7 +297,7 @@ fn outbox_storage_subkey(body: &MutationBody) -> String {
     match body {
         MutationBody::PdfReaderMetadata { value, .. } => value.checksum.clone(),
         MutationBody::Placement { dir_id, .. } => dir_id.to_string(),
-        MutationBody::CatalogPublication { publication, .. } => library_replica::catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()),
+        MutationBody::CatalogBook { book, .. } => library_replica::catalog_book_state_subkey(&book.edition_id, book.work_id.as_deref()),
         MutationBody::DirectoryName { .. }
         | MutationBody::DirectoryParent { .. }
         | MutationBody::DirectoryLifecycle { .. }
@@ -302,7 +305,8 @@ fn outbox_storage_subkey(body: &MutationBody) -> String {
         | MutationBody::Annotation { .. }
         | MutationBody::Metadata { .. }
         | MutationBody::Description { .. }
-        | MutationBody::BookLifecycle { .. } => String::new(),
+        | MutationBody::BookLifecycle { .. }
+        | MutationBody::BookToc { .. } => String::new(),
     }
 }
 
@@ -310,8 +314,8 @@ fn change(body: MutationBody, pt: u64) -> StateMutation {
     StateMutation { mutation_id: MutationId::new(), body, changed_at: pt, replica_seq: ReplicaSeq::new(1).unwrap() }
 }
 
-fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookMetadataState {
-    BookMetadataState { title: title.into(), contributors: authors, description: description.into(), publication: Default::default() }
+fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookRecord {
+    BookRecord { title: title.into(), contributors: authors, description: description.into(), book: Default::default() }
 }
 
 fn placement_add(content_hash: ContentHash, dir_id: &str, _file_name: &str, _content_hash: &ContentHash, pt: u64) -> StateMutation {
@@ -324,7 +328,7 @@ fn placement_remove(content_hash: ContentHash, dir_id: &str, _file_name: &str, p
 
 fn reading_position(content_hash: ContentHash, location: impl Into<String>, progress: f32, pt: u64) -> StateMutation {
     let location = location.into();
-    change(MutationBody::ReadingPosition { content_hash, value: ReadingPositionState { location: library_model::ReadingPosition::parse(&location).unwrap(), progress } }, pt)
+    change(MutationBody::ReadingPosition { content_hash, value: ReadingPositionState { location: book_model::ReadingPosition::parse(&location).unwrap(), progress } }, pt)
 }
 
 fn book_present(content_hash: ContentHash, title: impl Into<String>, added_at: u64, pt: u64) -> StateMutation {
@@ -341,7 +345,7 @@ fn directory_present(dir_id: &str, parent_id: &str, name: &str, pt: u64) -> [Sta
     [
         change(MutationBody::DirectoryName { dir_id: dir_id.clone(), name: name.to_owned() }, pt),
         change(MutationBody::DirectoryParent { dir_id: dir_id.clone(), parent_id }, pt),
-        change(MutationBody::DirectoryLifecycle { dir_id, value: library_model::DirectoryLifecycleState::Present }, pt),
+        change(MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Present }, pt),
     ]
 }
 

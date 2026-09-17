@@ -1,5 +1,5 @@
 use catalog_model::normalize_search_text;
-use catalog_model::{CatalogBookFormat, CatalogLink, CatalogLinkTarget, CatalogPage, CatalogPublication, CatalogPublicationAction, CatalogPublicationIdentity, CatalogSourceId, PublicationSubject};
+use catalog_model::{CatalogBookFormat, CatalogLink, CatalogLinkTarget, CatalogPage, CatalogBook, CatalogBookAction, CatalogBookIdentity, CatalogSourceId, BookSubject};
 #[cfg(not(target_arch = "wasm32"))]
 use r2d2::Pool;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,10 +41,10 @@ pub const CATALOG_CACHE_FILE_VERSION: i64 = 1;
 // cache; Gutenberg normalization and edition preference are server-owned.
 // Version 29 moves persisted server-registry state into catalog-client; the
 // shared schema no longer installs any client-only value tables.
-// Version 28 moves the partial subject publication cache into catalog-client;
+// Version 28 moves the partial subject book cache into catalog-client;
 // server and shared cache schemas no longer install client-only tables.
 // Version 27 removes complete subject-collection synchronization; clients keep
-// only immutable publication payloads for server-authoritative result ranges.
+// only immutable book payloads for server-authoritative result ranges.
 // Version 26 stores provider rich HTML directly, without a generated
 // plain-text copy.
 // Version 25 records whether a logical page was compacted from provider
@@ -59,7 +59,7 @@ pub const CATALOG_CACHE_FILE_VERSION: i64 = 1;
 // Version 20 adopts the shared bibliographic collection representation.
 // Version 19 adopts the shared bibliographic identifier representation.
 // Version 18 stored provider-native popularity alongside normalized
-// publication inventory so catalogue ordering is complete before range
+// book inventory so catalogue ordering is complete before range
 // selection.
 // The cache is rehydratable, so replacing it is safer than attempting to
 // decode an incompatible persisted representation during startup.
@@ -156,16 +156,16 @@ pub struct CachedCatalogPage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SequencedCatalogPublication {
-    pub publication: CatalogPublication,
+pub struct SequencedCatalogBook {
+    pub book: CatalogBook,
     pub sequence: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogSearchMatches {
-    pub title_matches: Vec<SequencedCatalogPublication>,
-    pub author_matches: Vec<SequencedCatalogPublication>,
-    pub toc_matches: Vec<SequencedCatalogPublication>,
+    pub title_matches: Vec<SequencedCatalogBook>,
+    pub author_matches: Vec<SequencedCatalogBook>,
+    pub toc_matches: Vec<SequencedCatalogBook>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,7 +177,7 @@ pub struct CatalogSourceState {
 
 pub type CatalogSubjectAssignment = subject_projection::ProjectedSubjectAssignment;
 
-pub fn prepare_catalog_subject_assignments(subjects: &[PublicationSubject]) -> Vec<CatalogSubjectAssignment> {
+pub fn prepare_catalog_subject_assignments(subjects: &[BookSubject]) -> Vec<CatalogSubjectAssignment> {
     if subjects.is_empty() {
         return Vec::new();
     }
@@ -185,18 +185,18 @@ pub fn prepare_catalog_subject_assignments(subjects: &[PublicationSubject]) -> V
 }
 
 mod pages;
-mod publication_writes;
-mod publications;
+mod book_writes;
+mod books;
 mod schema;
 mod sources;
 mod subjects;
 pub(crate) use pages::decode_page;
-pub use pages::{allocate_sequence, decode_cached, optional_stored_u64, publication_key, put_page_row, sequence_in, sql_decode_error, storage_i64, stored_u64};
-pub use publication_writes::upsert_publication_with_sequence;
-pub use publications::{book_format_storage, catalog_book_format_from_storage, publication_entry_id, publication_extraction, publication_inventory, replace_publication_metadata};
+pub use pages::{allocate_sequence, decode_cached, optional_stored_u64, book_key, put_page_row, sequence_in, sql_decode_error, storage_i64, stored_u64};
+pub use book_writes::upsert_book_with_sequence;
+pub use books::{book_format_storage, catalog_book_format_from_storage, book_entry_id, book_extraction, book_inventory, replace_book_metadata};
 pub use schema::{advance_catalog_transport_revision, unix_timestamp};
 pub use sources::{active_generation_in, active_generation_optional, clear_source_rows, ensure_source_in, next_sequence_in, refresh_active_counts, source_state_in};
-pub use subjects::{replace_feed_publication_subjects_prepared, replace_publication_subjects, replace_publication_subjects_prepared, replace_publication_toc};
+pub use subjects::{replace_feed_book_subjects_prepared, replace_book_subjects, replace_book_subjects_prepared, replace_book_toc};
 
 #[cfg(feature = "server-extension")]
 #[doc(hidden)]
@@ -204,8 +204,8 @@ pub mod server_extension {
     pub use super::subjects::{insert_prepared_subject_assignments, insert_subject_browse_memberships, rebuild_subject_assignments, ENRICHED_SUBJECT_POSITION_BASE};
     pub use super::{
         active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, catalog_book_format_from_storage, clear_source_rows, decode_cached, ensure_source_in, next_sequence_in,
-        optional_stored_u64, publication_entry_id, publication_extraction, publication_inventory, publication_key, put_page_row, refresh_active_counts, replace_feed_publication_subjects_prepared, replace_publication_metadata,
-        replace_publication_subjects, replace_publication_subjects_prepared, replace_publication_toc, sequence_in, source_state_in, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogServerConnection,
+        optional_stored_u64, book_entry_id, book_extraction, book_inventory, book_key, put_page_row, refresh_active_counts, replace_feed_book_subjects_prepared, replace_book_metadata,
+        replace_book_subjects, replace_book_subjects_prepared, replace_book_toc, sequence_in, source_state_in, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogServerConnection,
         CATALOG_CACHE_FILE_VERSION, CATALOG_CACHE_SCHEMA_VERSION, CATALOG_SEARCH_INDEX_VERSION, CATALOG_SUBJECT_BROWSE_INDEX_VERSION,
     };
 }

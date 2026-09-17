@@ -1,6 +1,7 @@
 //! Exact subject hierarchy with durable and bounded filtered views.
 use super::*;
-use library_model::{BrowseContents, LibraryBrowseQuery, normalize_search_text};
+use library_model::{BrowseContents, LibraryBrowseQuery};
+use catalog_model::normalize_search_text;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -247,7 +248,11 @@ fn subject_contents_view(conn: &Connection, query: &LibraryBrowseQuery, download
         while let Some(row) = rows.next()? {
             downloads[row.get::<_, i64>(0)? as usize] = (row.get(1)?, row.get(2)?);
         }
-        if grouped { projection.grouped_view(query, &downloads) } else { (projection.view(query, &downloads), Vec::new()) }
+        if grouped {
+            projection.grouped_view(query, &downloads)
+        } else {
+            (projection.view(query, &downloads), Vec::new())
+        }
     };
     if let Some(tx) = tx {
         tx.commit()?;

@@ -1,5 +1,5 @@
 //! Recording evidence shared by scanning, Audible lookup and chapter alignment.
-//! Recording release dates remain separate from original publication dates.
+//! Recording release dates remain separate from original book dates.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

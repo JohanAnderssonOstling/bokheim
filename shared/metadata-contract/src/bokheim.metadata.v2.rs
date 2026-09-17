@@ -20,7 +20,7 @@ pub struct EditionIdentityQuery {
     #[prost(string, repeated, tag = "4")]
     pub publishers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(sint32, optional, tag = "5")]
-    pub publication_year: ::core::option::Option<i32>,
+    pub book_year: ::core::option::Option<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EditionIdentityResponse {
@@ -63,11 +63,11 @@ pub struct EditionIdentityMatch {
     #[prost(string, repeated, tag = "8")]
     pub publishers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(sint32, optional, tag = "9")]
-    pub publication_year: ::core::option::Option<i32>,
+    pub book_year: ::core::option::Option<i32>,
     #[prost(bool, tag = "10")]
     pub matched_publisher: bool,
     #[prost(bool, tag = "11")]
-    pub matched_publication_year: bool,
+    pub matched_book_year: bool,
     #[prost(message, repeated, tag = "12")]
     pub classifications: ::prost::alloc::vec::Vec<Classification>,
     #[prost(string, optional, tag = "13")]

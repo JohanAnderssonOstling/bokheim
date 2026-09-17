@@ -21,7 +21,7 @@ impl Focusable for ReaderView {
     /// the HTML view establishes, so anything that focuses this view has to
     /// land on the document or the keyboard goes dead. Answering with the
     /// document handle keeps that true for every caller instead of leaving a
-    /// list of call sites to remember. Before the publication is ready there
+    /// list of call sites to remember. Before the book is ready there
     /// is no document, so the page container stands in.
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.document_focus(cx).unwrap_or_else(|| self.focus.clone())
@@ -64,7 +64,7 @@ impl Render for ReaderView {
             document_body.into_any_element()
         };
 
-        // The page container is only focusable while the publication is
+        // The page container is only focusable while the book is
         // loading, when it is the one thing that can hold the keyboard. A
         // focusable container steals focus from the document on any click that
         // reaches it — a margin, the toolbar's background, the sidebar — and

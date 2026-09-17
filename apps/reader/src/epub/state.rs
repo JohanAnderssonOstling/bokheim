@@ -43,7 +43,7 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 
 impl ReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, library: Rc<LibraryClient>, publication: Arc<crate::publication::NativePublication>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
+        locator: BookLocator, title: String, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let reader_started = Instant::now();
@@ -83,7 +83,7 @@ impl ReaderView {
             wheel_debounce: None,
             search_input,
             search: SearchState::default(),
-            publication,
+            book,
             current_cfi: None,
             progress: ProgressState::default(),
             marks,
@@ -132,7 +132,7 @@ impl ReaderView {
             let renderer = renderer.read(cx);
             TocState::resolve(&toc, |href| renderer.resolve_href(href))
         };
-        let toc_anchors = TocState::anchor_strings_by_doc(&resolutions, self.publication.document_uris.len());
+        let toc_anchors = TocState::anchor_strings_by_doc(&resolutions, self.book.document_uris.len());
         self.set_toc(toc, resolutions, cx);
         renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(toc_anchors, cx));
         startup_phase!("phase=toc_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), toc_started.elapsed().as_millis());
@@ -155,7 +155,7 @@ impl ReaderView {
     /// and parsing every chapter. The renderer command retains its historical
     /// name, but consumes generic relative weights.
     fn install_document_progress_weights(&mut self, cx: &mut Context<Self>) {
-        let weights = self.publication.document_weights.clone();
+        let weights = self.book.document_weights.clone();
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetDocumentTextLengths(weights), cx));
     }
 }

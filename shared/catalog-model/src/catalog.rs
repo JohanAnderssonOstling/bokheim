@@ -1,6 +1,6 @@
-pub use publication_model::{
-    AgeRange, AggregateRating, Audience, Collection, CollectionKind, Identifier, InteractionStatistic, LanguageTag, LocalizedText, PopularityRank, PublicationDate, PublicationImage, PublicationProperty, PublicationSubject,
-    PublicationTitle, Scheme, Scope,
+pub use book_model::{
+    AgeRange, AggregateRating, Audience, Collection, CollectionKind, Identifier, InteractionStatistic, LanguageTag, LocalizedText, PopularityRank, BookDate, BookImage, BookProperty, BookSubject,
+    BookTitle, Scheme, Scope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -239,7 +239,7 @@ impl CatalogSubjectSort {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CatalogPublicationIdentity {
+pub struct CatalogBookIdentity {
     pub edition_id: String,
     pub work_id: Option<String>,
 }
@@ -269,27 +269,27 @@ pub struct CatalogSubjectBrowseRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogSourcedPublication {
+pub struct CatalogSourcedBook {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublication,
+    pub book: CatalogBook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogSubjectBrowseEntryPayload {
     pub entry_id: u64,
-    pub publication: CatalogSourcedPublication,
+    pub book: CatalogSourcedBook,
 }
 
-/// Resolves immutable publication cards after a client has received their
+/// Resolves immutable book cards after a client has received their
 /// authoritative order from a subject browse request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogSubjectPublicationPayloadRequest {
+pub struct CatalogSubjectBookPayloadRequest {
     pub epoch: String,
     pub entry_ids: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogSubjectPublicationPayloadResponse {
+pub struct CatalogSubjectBookPayloadResponse {
     pub epoch: String,
     pub payloads: Vec<CatalogSubjectBrowseEntryPayload>,
 }
@@ -319,7 +319,7 @@ pub struct CatalogSubjectBrowseCapabilities {
 }
 
 /// Authoritative subject result order and controls for one requested range.
-/// Native clients resolve immutable publication cards by `entry_ids`.
+/// Native clients resolve immutable book cards by `entry_ids`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogSubjectBrowseIndexResponse {
     pub epoch: String,
@@ -334,7 +334,7 @@ pub struct CatalogSubjectBrowseIndexResponse {
 pub struct CatalogSubjectBrowseResponse {
     pub epoch: String,
     pub navigation: Vec<CatalogLink>,
-    pub publications: Vec<CatalogSourcedPublication>,
+    pub books: Vec<CatalogSourcedBook>,
     pub range: CatalogResultRangeResponse,
     #[serde(default)]
     pub capabilities: CatalogSubjectBrowseCapabilities,
@@ -344,7 +344,7 @@ pub struct CatalogSubjectBrowseResponse {
 pub struct CatalogImportRequest {
     pub source_id: CatalogSourceId,
     pub catalog_locator: String,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub download_url: String,
     pub book_format: CatalogBookFormat,
 }
@@ -353,30 +353,30 @@ impl CatalogImportRequest {
     /// Produces a portable filename without trusting a provider-controlled URL
     /// path. Platform adapters may still reject formats they cannot import.
     pub fn suggested_file_name(&self) -> String {
-        let stem = self.publication.edition_id.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') { character } else { '-' }).collect::<String>();
+        let stem = self.book.edition_id.chars().map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') { character } else { '-' }).collect::<String>();
         let stem = stem.trim_matches('-');
         format!("{}.{}", if stem.is_empty() { "catalog-book" } else { stem }, self.book_format.file_extension())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CatalogPublicationAction {
+pub enum CatalogBookAction {
     Import { request: CatalogImportRequest },
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogPublicationAction", tag = "kind", rename_all = "snake_case")]
-enum CatalogPublicationActionHuman {
+#[serde(remote = "CatalogBookAction", tag = "kind", rename_all = "snake_case")]
+enum CatalogBookActionHuman {
     Import { request: CatalogImportRequest },
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "CatalogPublicationAction")]
-enum CatalogPublicationActionBinary {
+#[serde(remote = "CatalogBookAction")]
+enum CatalogBookActionBinary {
     Import { request: CatalogImportRequest },
 }
 
-dual_serde!(CatalogPublicationAction, CatalogPublicationActionHuman, CatalogPublicationActionBinary);
+dual_serde!(CatalogBookAction, CatalogBookActionHuman, CatalogBookActionBinary);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogDescription {
@@ -414,19 +414,19 @@ pub struct CatalogAuthorCredit {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CatalogPublicationMetadata {
+pub struct CatalogBookMetadata {
     pub title_localizations: Vec<LocalizedText>,
     pub sort_name: Option<String>,
     pub sort_name_localizations: Vec<LocalizedText>,
     pub published: Option<String>,
     pub modified: Option<String>,
-    pub dates: Vec<PublicationDate>,
+    pub dates: Vec<BookDate>,
     pub publishers: Vec<CatalogPublisherCredit>,
     pub identifiers: Vec<Identifier>,
-    pub subjects: Vec<PublicationSubject>,
+    pub subjects: Vec<BookSubject>,
     pub subtitle: Option<String>,
     pub subtitle_localizations: Vec<LocalizedText>,
-    pub alternate_titles: Vec<PublicationTitle>,
+    pub alternate_titles: Vec<BookTitle>,
     pub collections: Vec<Collection>,
     pub contributors: Vec<CatalogContributorCredit>,
     pub rights: Vec<String>,
@@ -435,10 +435,10 @@ pub struct CatalogPublicationMetadata {
     pub formats: Vec<String>,
     pub relations: Vec<String>,
     pub coverage: Vec<String>,
-    pub properties: Vec<PublicationProperty>,
+    pub properties: Vec<BookProperty>,
     pub audiences: Vec<Audience>,
     pub age_ranges: Vec<AgeRange>,
-    pub images: Vec<PublicationImage>,
+    pub images: Vec<BookImage>,
     pub ratings: Vec<AggregateRating>,
     pub interactions: Vec<InteractionStatistic>,
     pub popularity_ranks: Vec<PopularityRank>,
@@ -471,17 +471,17 @@ pub struct CatalogContributorCredit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogPublication {
-    pub identity: CatalogPublicationIdentity,
+pub struct CatalogBook {
+    pub identity: CatalogBookIdentity,
     pub title: String,
     pub authors: Vec<CatalogAuthorCredit>,
-    /// Canonical BCP-47 language tags advertised for this publication.
+    /// Canonical BCP-47 language tags advertised for this book.
     pub languages: Vec<LanguageTag>,
     pub description: Option<CatalogDescription>,
     pub image_url: Option<String>,
     #[serde(default)]
-    pub metadata: CatalogPublicationMetadata,
-    pub actions: Vec<CatalogPublicationAction>,
+    pub metadata: CatalogBookMetadata,
+    pub actions: Vec<CatalogBookAction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,7 +490,7 @@ pub struct CatalogGroup {
     pub page_locator: Option<String>,
     pub number_of_items: Option<u32>,
     pub navigation: Vec<CatalogLink>,
-    pub publications: Vec<CatalogPublication>,
+    pub books: Vec<CatalogBook>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,7 +506,7 @@ pub struct CatalogPage {
     pub title: String,
     pub locator: String,
     pub navigation: Vec<CatalogLink>,
-    pub publications: Vec<CatalogPublication>,
+    pub books: Vec<CatalogBook>,
     pub groups: Vec<CatalogGroup>,
     pub facets: Vec<CatalogFacet>,
     pub pagination: CatalogPagination,
@@ -551,7 +551,7 @@ mod tests {
         let response: CatalogSubjectBrowseResponse = serde_json::from_value(serde_json::json!({
             "epoch": "catalogue-1",
             "navigation": [],
-            "publications": [],
+            "books": [],
             "range": {
                 "offset": 0,
                 "returned_items": 0,
@@ -568,7 +568,7 @@ mod tests {
         let request = CatalogImportRequest {
             source_id: CatalogSourceId::parse("opds-test").unwrap(),
             catalog_locator: "https://catalog.example/root".to_owned(),
-            publication: CatalogPublicationIdentity { edition_id: "urn:book/edition 1".to_owned(), work_id: None },
+            book: CatalogBookIdentity { edition_id: "urn:book/edition 1".to_owned(), work_id: None },
             download_url: "https://catalog.example/download".to_owned(),
             book_format: CatalogBookFormat::Epub,
         };

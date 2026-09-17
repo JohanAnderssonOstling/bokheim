@@ -1,1 +1,1 @@
-SELECT publication_metadata FROM book
+SELECT book_metadata FROM book

@@ -1,1 +1,0 @@
-UPDATE rejected_asset_upload SET rejected_at=unixepoch()-86400

@@ -1,16 +1,16 @@
 use super::*;
 
-fn fixture() -> (Connection, ContentHash, BookMetadataState) {
+fn fixture() -> (Connection, ContentHash, BookRecord) {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
     let hash = test_support::fixture_content_hash(991);
-    let mut metadata = BookMetadataState { title: "Original title".into(), description: "Original description".into(), contributors: Vec::new(), publication: Default::default() };
+    let mut metadata = BookRecord { title: "Original title".into(), description: "Original description".into(), contributors: Vec::new(), book: Default::default() };
     metadata.contributors.push(Contributor::new("An Author", None, MarcRelatorCode(*b"aut")).unwrap());
-    metadata.publication.subjects.push(PublicationSubject::new(None, "History", "test", Some("bisac".into()), Some("HIS000000".into())).unwrap());
-    metadata.publication.publishers.push(PublisherCredit::new("A Publisher").unwrap());
-    metadata.publication.languages.push(library_model::LanguageTag::parse("en").unwrap());
-    metadata.publication.identifiers.push(library_model::Identifier::new("9780192854216", Scheme::Isbn, Scope::Edition, "test").unwrap());
-    metadata.publication.rights.push("Copyright".into());
+    metadata.book.subjects.push(BookSubject::new(None, "History", "test", Some("bisac".into()), Some("HIS000000".into())).unwrap());
+    metadata.book.publishers.push(PublisherCredit::new("A Publisher").unwrap());
+    metadata.book.languages.push(book_model::LanguageTag::parse("en").unwrap());
+    metadata.book.identifiers.push(book_model::Identifier::new("9780192854216", Scheme::Isbn, Scope::Edition, "test").unwrap());
+    metadata.book.rights.push("Copyright".into());
     let tx = conn.transaction().unwrap();
     insert_scanned_book_metadata(&tx, hash, &metadata, BookFormat::Epub).unwrap();
     tx.commit().unwrap();
@@ -18,7 +18,7 @@ fn fixture() -> (Connection, ContentHash, BookMetadataState) {
     conn.execute_batch(include_str!("sql/delta_tests/fixture_query.sql")).unwrap();
     (conn, hash, metadata)
 }
-fn apply(conn: &mut Connection, hash: ContentHash, metadata: &BookMetadataState) {
+fn apply(conn: &mut Connection, hash: ContentHash, metadata: &BookRecord) {
     let tx = conn.transaction().unwrap();
     super::metadata_batch::run(&tx, || {
         update_book_metadata_state_preserving_ids(&tx, hash, &metadata.clone().into())?;
@@ -55,15 +55,15 @@ fn title_and_description_share_one_update_without_projection_writes() {
 }
 
 #[test]
-fn title_only_update_does_not_target_publication_column() {
+fn title_only_update_does_not_target_book_column() {
     let (mut conn, hash, mut metadata) = fixture();
-    let before: Vec<u8> = conn.query_row(include_str!("sql/metadata/stored_publication_select.sql"), [hash.as_str()], |r| r.get(0)).unwrap();
-    conn.execute_batch(include_str!("sql/metadata_delta_tests/title_only_update_does_not_target_publication_column_create.sql")).unwrap();
+    let before: Vec<u8> = conn.query_row(include_str!("sql/metadata/stored_book_select.sql"), [hash.as_str()], |r| r.get(0)).unwrap();
+    conn.execute_batch(include_str!("sql/metadata_delta_tests/title_only_update_does_not_target_book_column_create.sql")).unwrap();
     metadata.title = "Only a new title".into();
     apply(&mut conn, hash, &metadata);
     assert_only(&conn, &["book"]);
     assert_eq!(writes(&conn, "book"), 1);
-    let after: Vec<u8> = conn.query_row(include_str!("sql/metadata/stored_publication_select.sql"), [hash.as_str()], |r| r.get(0)).unwrap();
+    let after: Vec<u8> = conn.query_row(include_str!("sql/metadata/stored_book_select.sql"), [hash.as_str()], |r| r.get(0)).unwrap();
     assert_eq!(before, after);
 }
 
@@ -93,9 +93,9 @@ fn contributor_comparison_preserves_all_ordered_credit_fields() {
 
 fn before_contributor_fast_path(tx: &Transaction, hash: ContentHash, metadata: &SyncBookMetadata) -> rusqlite::Result<()> {
     super::metadata_batch::run(tx, || {
-        let previous = stored_publication(tx, hash)?;
+        let previous = stored_book(tx, hash)?;
         let contributors = prepare_contributors(tx, &metadata.contributors, AuthorIdPolicy::PreserveIncoming, Some(hash))?;
-        assert_eq!(previous.as_ref(), Some(&metadata.publication));
+        assert_eq!(previous.as_ref(), Some(&metadata.book));
         tx.prepare_cached(include_str!("sql/metadata_delta_tests/before_contributor_fast_path_update.sql"))?.execute(rusqlite::params![hash.as_str(), metadata.title])?;
         replace_book_contributors(tx, hash, &contributors)
     })
@@ -134,7 +134,7 @@ fn benchmark_unchanged_contributors() {
                 let conn = &mut conns[mode];
                 let start = std::time::Instant::now();
                 let tx = library_write_transaction(conn).unwrap();
-                tx.set_sync_metadata("change_origin", "remote").unwrap();
+                crate::sync_state::set_sync_metadata(&tx, "change_origin", "remote").unwrap();
                 for hash in &hashes {
                     if mode == 0 {
                         before_contributor_fast_path(&tx, *hash, &metadata).unwrap();
@@ -142,7 +142,7 @@ fn benchmark_unchanged_contributors() {
                         update_book_metadata_state_preserving_ids(&tx, *hash, &metadata).unwrap();
                     }
                 }
-                tx.set_sync_metadata("change_origin", "local").unwrap();
+                crate::sync_state::set_sync_metadata(&tx, "change_origin", "local").unwrap();
                 tx.commit().unwrap();
                 times[mode].push(start.elapsed());
                 assert_eq!(conn.query_row(include_str!("sql/metadata_delta_tests/benchmark_unchanged_contributors_select.sql"), [&metadata.title], |r| r.get::<_, i64>(0)).unwrap(), 32);
@@ -158,24 +158,24 @@ fn benchmark_unchanged_contributors() {
 
 fn legacy_metadata_apply(tx: &Transaction, hash: ContentHash, metadata: &SyncBookMetadata) -> rusqlite::Result<()> {
     super::metadata_batch::run(tx, || {
-        let previous = stored_publication(tx, hash)?;
+        let previous = stored_book(tx, hash)?;
         let contributors = prepare_contributors(tx, &metadata.contributors, AuthorIdPolicy::PreserveIncoming, Some(hash))?;
-        let publication = if previous.as_ref() == Some(&metadata.publication) { metadata.publication.clone() } else { prepare_publication_agents(tx, &metadata.publication, AuthorIdPolicy::PreserveIncoming)? };
-        let encoded = sync_common::wire::encode(&publication).map_err(|e| invalid_text_column(0, e.to_string()))?;
+        let book = if previous.as_ref() == Some(&metadata.book) { metadata.book.clone() } else { prepare_book_agents(tx, &metadata.book, AuthorIdPolicy::PreserveIncoming)? };
+        let encoded = sync_common::wire::encode(&book).map_err(|e| invalid_text_column(0, e.to_string()))?;
         tx.execute(include_str!("sql/metadata_delta_tests/legacy_metadata_apply_update.sql"), rusqlite::params![hash.as_str(), metadata.title, encoded])?;
         replace_book_contributors(tx, hash, &contributors)?;
-        replace_publication_metadata_projections(tx, hash, &publication, previous.as_ref())
+        replace_book_metadata_projections(tx, hash, &book, previous.as_ref())
     })
 }
 
 #[test]
-#[ignore = "manual release unchanged-publication metadata fast path comparison"]
-fn benchmark_title_only_publication_fast_path() {
+#[ignore = "manual release unchanged-book metadata fast path comparison"]
+fn benchmark_title_only_book_fast_path() {
     for extra_bytes in [0, 1024, 10240] {
         let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
         let (_, _, mut state) = fixture();
         if extra_bytes > 0 {
-            state.publication.rights = vec!["x".repeat(extra_bytes)];
+            state.book.rights = vec!["x".repeat(extra_bytes)];
         }
         let hashes = (1..=32).map(test_support::fixture_content_hash).collect::<Vec<_>>();
         let mut conns = Vec::new();
@@ -198,7 +198,7 @@ fn benchmark_title_only_publication_fast_path() {
                 let conn = &mut conns[mode];
                 let start = std::time::Instant::now();
                 let tx = library_write_transaction(conn).unwrap();
-                tx.set_sync_metadata("change_origin", "remote").unwrap();
+                crate::sync_state::set_sync_metadata(&tx, "change_origin", "remote").unwrap();
                 for hash in &hashes {
                     if mode == 0 {
                         legacy_metadata_apply(&tx, *hash, &metadata).unwrap();
@@ -206,7 +206,7 @@ fn benchmark_title_only_publication_fast_path() {
                         update_book_metadata_state_preserving_ids(&tx, *hash, &metadata).unwrap();
                     }
                 }
-                tx.set_sync_metadata("change_origin", "local").unwrap();
+                crate::sync_state::set_sync_metadata(&tx, "change_origin", "local").unwrap();
                 tx.commit().unwrap();
                 times[mode].push(start.elapsed());
                 assert_eq!(conn.query_row(include_str!("sql/metadata_delta_tests/benchmark_unchanged_contributors_select.sql"), [&metadata.title], |r| r.get::<_, i64>(0)).unwrap(), 32);
@@ -216,13 +216,13 @@ fn benchmark_title_only_publication_fast_path() {
         for t in &mut times {
             t.sort();
         }
-        eprintln!("32 title-only incoming domain updates publication_extra_bytes={extra_bytes} before={:?} after={:?} trials=15", times[0][7], times[1][7]);
+        eprintln!("32 title-only incoming domain updates book_extra_bytes={extra_bytes} before={:?} after={:?} trials=15", times[0][7], times[1][7]);
     }
 }
 #[test]
 fn changing_languages_does_not_rewrite_classifications_or_publishers() {
     let (mut conn, hash, mut metadata) = fixture();
-    metadata.publication.languages = vec![library_model::LanguageTag::parse("sv").unwrap()];
+    metadata.book.languages = vec![book_model::LanguageTag::parse("sv").unwrap()];
     apply(&mut conn, hash, &metadata);
     assert_only(&conn, &["book", "book_language"]);
     assert_eq!(writes(&conn, "book_language"), 2);
@@ -231,7 +231,7 @@ fn changing_languages_does_not_rewrite_classifications_or_publishers() {
 #[test]
 fn removing_subjects_clears_classifications_without_rewriting_other_fields() {
     let (mut conn, hash, mut metadata) = fixture();
-    metadata.publication.subjects.clear();
+    metadata.book.subjects.clear();
     apply(&mut conn, hash, &metadata);
     assert_only(&conn, &["book", "book_subject", "book_subject_assignment", "book_unified_concept"]);
     assert!(writes(&conn, "book_subject") > 0);
@@ -253,24 +253,24 @@ fn standalone_description_and_contributor_noops_do_not_fire_triggers() {
     assert_only(&conn, &[]);
 }
 #[test]
-fn changing_rights_preserves_other_publication_value_kinds() {
+fn changing_rights_preserves_other_book_value_kinds() {
     let (mut conn, hash, mut metadata) = fixture();
-    metadata.publication.rights = vec!["Updated rights".into()];
+    metadata.book.rights = vec!["Updated rights".into()];
     apply(&mut conn, hash, &metadata);
-    assert_only(&conn, &["book", "book_publication_value"]);
-    assert_eq!(writes(&conn, "book_publication_value"), 2);
+    assert_only(&conn, &["book", "book_value"]);
+    assert_eq!(writes(&conn, "book_value"), 2);
 }
 
 #[test]
 fn adding_unclassified_subject_preserves_existing_classification_rows() {
     let (mut conn, hash, mut metadata) = fixture();
     conn.execute_batch(include_str!("sql/delta_tests/adding_unclassified_subject_preserves_existing_classification_rows_query.sql")).unwrap();
-    metadata.publication.subjects.push(PublicationSubject::new(None, "Personal note", "test", None, None).unwrap());
+    metadata.book.subjects.push(BookSubject::new(None, "Personal note", "test", None, None).unwrap());
     apply(&mut conn, hash, &metadata);
     assert_only(&conn, &["book", "book_subject"]);
     assert_eq!(writes(&conn, "book_subject"), 1);
     conn.execute(include_str!("sql/metadata_delta_tests/adding_unclassified_subject_preserves_existing_classification_rows_delete.sql"), []).unwrap();
-    metadata.publication.subjects.pop();
+    metadata.book.subjects.pop();
     apply(&mut conn, hash, &metadata);
     assert_only(&conn, &["book", "book_subject"]);
     assert_eq!(writes(&conn, "book_subject"), 1);
@@ -279,11 +279,11 @@ fn adding_unclassified_subject_preserves_existing_classification_rows() {
 #[test]
 fn subject_reordering_and_removal_match_a_fresh_projection() {
     let (mut conn, hash, mut metadata) = fixture();
-    metadata.publication.subjects.push(PublicationSubject::new(None, "Art", "test", Some("bisac".into()), Some("ART000000".into())).unwrap());
+    metadata.book.subjects.push(BookSubject::new(None, "Art", "test", Some("bisac".into()), Some("ART000000".into())).unwrap());
     apply(&mut conn, hash, &metadata);
-    metadata.publication.subjects.swap(0, 1);
+    metadata.book.subjects.swap(0, 1);
     apply(&mut conn, hash, &metadata);
-    metadata.publication.subjects.pop();
+    metadata.book.subjects.pop();
     apply(&mut conn, hash, &metadata);
     let mut fresh = Connection::open_in_memory().unwrap();
     init_db(&fresh).unwrap();

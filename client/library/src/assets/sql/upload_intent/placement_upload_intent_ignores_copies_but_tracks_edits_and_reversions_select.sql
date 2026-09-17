@@ -1,1 +1,1 @@
-SELECT origin FROM local_publication_current ORDER BY origin
+SELECT origin FROM local_book_current ORDER BY origin

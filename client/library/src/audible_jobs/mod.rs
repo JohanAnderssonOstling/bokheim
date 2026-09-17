@@ -1,16 +1,16 @@
 //! Durable local Audible work. Lookup results are proposals until their metadata
 //! is committed to the library database.
 #[cfg(test)]
-use crate::audiobooks::queries::AudiobooksSql;
+use crate::audiobooks::AudiobooksSql;
 #[cfg(test)]
-use crate::books::queries::BooksSql;
+use crate::books::BooksSql;
 use crate::external_metadata;
 use crate::schema::library_write_transaction;
 use crate::storage_values::invalid_text_column;
 use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus};
+use rusqlite::types::Type;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use rusqlite::types::Type;
 use sync_common::ContentHash;
 
 fn json<T: serde::Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
@@ -104,7 +104,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::schema::init_db(&conn).unwrap();
         let hash = ContentHash::new(&"1".repeat(64));
-        conn.upsert_audiobook_metadata(hash.as_str(), 1000, 0, "embedded_m4b", "[]").unwrap();
+        conn.upsert_audiobook_metadata(hash.as_str(), 1000).unwrap();
         let request = LookupRequest { title: "Book".into(), authors: vec![], duration_ms: 1000, recording: Default::default(), chapters: vec![] };
         (conn, hash, request)
     }
@@ -149,7 +149,7 @@ mod tests {
         let path = dir.path().join("library.db");
         let mut conn = Connection::open(&path).unwrap();
         crate::schema::init_db(&conn).unwrap();
-        conn.upsert_audiobook_metadata(hash.as_str(), 1000, 0, "embedded_m4b", "[]").unwrap();
+        conn.upsert_audiobook_metadata(hash.as_str(), 1000).unwrap();
         discover(&conn, &hash, "v1", &request, 0).unwrap();
         let interrupted = claim(&mut conn, 1).unwrap().unwrap();
         // Invalid supported responses cannot leave a completed job behind.

@@ -24,10 +24,15 @@ pub enum InsertError<E> {
 
 /// The runtime owns session handles and serializes their lifecycle. The host
 /// supplies the concrete handle type and its construction/shutdown behavior.
-#[derive(Default)]
 pub struct SessionDirectory<H> {
     handles: Mutex<HashMap<LibraryId, H>>,
     lifecycle: Mutex<()>,
+}
+
+impl<H> Default for SessionDirectory<H> {
+    fn default() -> Self {
+        Self { handles: Mutex::new(HashMap::new()), lifecycle: Mutex::new(()) }
+    }
 }
 
 impl<H: Clone> SessionDirectory<H> {

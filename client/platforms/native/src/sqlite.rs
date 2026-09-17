@@ -1,6 +1,6 @@
 //! Native SQLite connection mechanisms; callers own schema and transaction policy.
 use rusqlite::{Connection, OpenFlags};
-use std::{panic::Location, path::Path};
+use std::path::Path;
 use crate::database_diagnostics;
 
 pub const SINGLE_OWNER: bool = false;
@@ -15,14 +15,6 @@ pub fn initialize(connection: &Connection, initialize: fn(&Connection) -> rusqli
         database_diagnostics::install(connection);
     }
     result
-}
-
-pub fn set_caller(connection: &Connection, caller: &'static Location<'static>) {
-    database_diagnostics::set_caller(connection, caller);
-}
-
-pub fn command_failed(connection: &Connection) {
-    database_diagnostics::command_failed(connection);
 }
 
 /// Pool expansion must not recreate a database whose library was moved.

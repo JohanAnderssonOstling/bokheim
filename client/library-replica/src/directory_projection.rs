@@ -1,5 +1,5 @@
 use crate::VersionKey;
-use library_model::DirectoryLifecycleState;
+use crate::DirectoryLifecycleState;
 use std::collections::{HashMap, HashSet};
 use sync_common::{DirId, FileName, ROOT_DIR_ID};
 
@@ -98,7 +98,7 @@ fn resolve_path_collisions(intents: &HashMap<DirId, DirectoryIntent>, suppressed
     let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
     let mut names = HashMap::new();
     for intent in intents.values().filter(|intent| !suppressed.contains(&intent.id)) {
-        let key = library_model::portable_name_key(&intent.name);
+        let key = crate::portable_name_key(&intent.name);
         occupied.entry(intent.parent_id).or_default().insert(key.clone());
         groups.entry((intent.parent_id, key)).or_default().push(intent);
         names.insert(intent.id, intent.name.clone());
@@ -113,7 +113,7 @@ fn resolve_path_collisions(intents: &HashMap<DirId, DirectoryIntent>, suppressed
             let mut number = offset + 2;
             loop {
                 let candidate = format!("{base} {number}");
-                if parent_occupied.insert(library_model::portable_name_key(&candidate)) {
+                if parent_occupied.insert(crate::portable_name_key(&candidate)) {
                     names.insert(loser.id, candidate);
                     break;
                 }

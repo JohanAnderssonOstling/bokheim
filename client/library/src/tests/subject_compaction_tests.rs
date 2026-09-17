@@ -1,6 +1,7 @@
 use super::*;
 use crate::browse::grouped_subject_contents;
-use library_model::{BrowseContents, LibraryBrowseQuery, ROOT_SUBJECT_PATH};
+use library_model::{BrowseContents, LibraryBrowseQuery};
+use subject_projection::ROOT_SUBJECT_PATH;
 
 fn fixture() -> Connection {
     let conn = Connection::open_in_memory().unwrap();

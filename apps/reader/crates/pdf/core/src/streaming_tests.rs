@@ -21,7 +21,7 @@ fn annotated_streaming_fixture(rotation: u16) -> Vec<u8> {
 fn ingestion_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -> PdfResult<()> {
     let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for rotation in [0, 90] {
-        let (_, metadata) = inspect_reader_metadata(Cursor::new(annotated_streaming_fixture(rotation)))?;
+        let (_, metadata, _) = inspect_reader_metadata(Cursor::new(annotated_streaming_fixture(rotation)))?;
         assert!(metadata.valid_for(&metadata.checksum));
         assert_eq!(metadata.annotations.len(), 2, "complex and app-owned annotations must be omitted");
         assert_eq!(metadata.annotations[0].note, "Imported highlight");
@@ -44,7 +44,7 @@ fn document_prepares_startup_then_only_requested_pages() -> PdfResult<()> {
         fn prepare_page(&self, page: usize) -> Result<(), String> { self.0.lock().unwrap().push(Some(page)); Ok(()) }
     }
     let bytes = annotated_streaming_fixture(0);
-    let (_, metadata) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
+    let (_, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
     let checksum = metadata.checksum.clone(); let hook = Arc::new(Hook::default());
     let document = PdfDocumentSession::from_reader_with_page_source("fixture", Cursor::new(bytes), &checksum, Some(metadata), Some(hook.clone()))?;
     assert_eq!(*hook.0.lock().unwrap(), vec![None]);

@@ -1,8 +1,8 @@
 use super::super::{
-    extraction_book_format, prepare_catalog_subject_assignments, publication_has_acquisition_url, CatalogOcrBackfillJob, CatalogProcess, CatalogService, CatalogServiceError, OpdsAcquisitionKind, OpdsDirectAcquisition,
+    extraction_book_format, prepare_catalog_subject_assignments, book_has_acquisition_url, CatalogOcrBackfillJob, CatalogProcess, CatalogService, CatalogServiceError, OpdsAcquisitionKind, OpdsDirectAcquisition,
     OCR_BACKFILL_BATCH_SIZE, OCR_BACKFILL_MAX_JOBS_PER_PASS,
 };
-use crate::extraction::{extract_catalog_ocr_isolated, merge_catalog_publication_subjects};
+use crate::extraction::{extract_catalog_ocr_isolated, merge_catalog_book_subjects};
 
 impl CatalogService {
     /// Runs after the metadata/title-author wave has drained. OCR is kept at
@@ -46,13 +46,13 @@ impl CatalogService {
 
     async fn run_ocr_backfill_job(&self, job: CatalogOcrBackfillJob) -> Result<(), CatalogServiceError> {
         let source_id = job.source_id.clone();
-        let identity = job.publication.clone();
+        let identity = job.book.clone();
         let acquisition_url = job.acquisition_url.clone();
-        let Some(publication) = self
+        let Some(book) = self
             .store_call({
                 let source_id = source_id.clone();
                 let identity = identity.clone();
-                move |store| store.active_publication(&source_id, &identity)
+                move |store| store.active_book(&source_id, &identity)
             })
             .await?
         else {
@@ -61,7 +61,7 @@ impl CatalogService {
             return Ok(());
         };
 
-        let already_resolved = publication
+        let already_resolved = book
             .metadata
             .subjects
             .iter()
@@ -82,15 +82,15 @@ impl CatalogService {
         drop(downloaded);
 
         // OCR runs without the source lock, but the final merge is based on a
-        // fresh publication snapshot so a crawl or another enrichment cannot
+        // fresh book snapshot so a crawl or another enrichment cannot
         // be overwritten by the stale pre-OCR payload.
         let update_lock = self.source_update_lock(&source_id).await;
         let _update = update_lock.lock().await;
-        let Some(mut publication) = self
+        let Some(mut book) = self
             .store_call({
                 let source_id = source_id.clone();
                 let identity = identity.clone();
-                move |store| store.active_publication(&source_id, &identity)
+                move |store| store.active_book(&source_id, &identity)
             })
             .await?
         else {
@@ -98,22 +98,22 @@ impl CatalogService {
             self.store_write_call(move |store| store.mark_ocr_not_needed(&source_id, &acquisition_url, attempt)).await?;
             return Ok(());
         };
-        if !publication_has_acquisition_url(&publication, &acquisition_url) {
+        if !book_has_acquisition_url(&book, &acquisition_url) {
             let attempt = job.attempt;
             self.store_write_call(move |store| store.mark_ocr_not_needed(&source_id, &acquisition_url, attempt)).await?;
             return Ok(());
         }
-        merge_catalog_publication_subjects(&mut publication, &extracted.subjects);
-        let subjects = publication
+        merge_catalog_book_subjects(&mut book, &extracted.subjects);
+        let subjects = book
             .metadata
             .subjects
             .iter()
-            .map(|subject| publication_model::PublicationSubject::new(None, &subject.name, &subject.source, subject.authority.clone(), subject.code.clone()).map_err(|error| CatalogServiceError(error.to_string())))
+            .map(|subject| book_model::BookSubject::new(None, &subject.name, &subject.source, subject.authority.clone(), subject.code.clone()).map_err(|error| CatalogServiceError(error.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
         let assignments = prepare_catalog_subject_assignments(&subjects);
         let source_for_write = job.source_id.clone();
         let url_for_write = job.acquisition_url.clone();
-        self.store_write_call_named("ocr_backfill_finish", move |store| store.finish_ocr_backfill(&source_for_write, &url_for_write, &publication, &subjects, &assignments, job.attempt)).await?;
+        self.store_write_call_named("ocr_backfill_finish", move |store| store.finish_ocr_backfill(&source_for_write, &url_for_write, &book, &subjects, &assignments, job.attempt)).await?;
         Ok(())
     }
 }

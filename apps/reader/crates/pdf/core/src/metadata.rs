@@ -1,5 +1,5 @@
 use super::*;
-use pdf_view_common::{PdfStoredOutline, PdfStoredPage};
+use pdf_view_common::PdfStoredPage;
 use std::sync::Mutex;
 
 struct SharedReader<R>(Arc<Mutex<R>>);
@@ -16,7 +16,11 @@ impl<R: Seek> Seek for SharedReader<R> {
 
 /// Ingestion only: hashes the exact bytes and inspects page geometry/navigation.
 /// Returns the original reader, rewound, without retaining a full-file copy.
-pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfResult<(R, PdfReaderMetadata)> {
+/// The ingestion pass: the byte-specific snapshot a later open reuses, and the
+/// book's navigation, which is neither byte-specific nor the renderer's
+/// to keep. The outline is returned beside the snapshot rather than inside it
+/// so a PDF reaches the library in the same navigation form an EPUB does.
+pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
     let mut hash = blake3::Hasher::new();
     let mut buffer = [0; 64 * 1024];
@@ -40,10 +44,8 @@ pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfRe
         let rotation = page.rotation().map_err(|e| PdfError::new(e.to_string()))?.as_degrees() as u16;
         Ok(PdfStoredPage { width: info.width_points, height: info.height_points, rotation })
     }).collect::<PdfResult<Vec<_>>>()?;
-    let outline = session.info.outline.iter().map(|o| PdfStoredOutline {
-        title: o.title.clone(), page_index: o.page_index, depth: o.depth,
-    }).collect();
-    let mut metadata = PdfReaderMetadata { version: 1, checksum: hash.finalize().to_hex().to_string(), pages, outline, annotations, dependencies: None };
+    let outline = document_outline(&session.document);
+    let mut metadata = PdfReaderMetadata { version: 1, checksum: hash.finalize().to_hex().to_string(), pages, annotations, dependencies: None };
     drop(session);
     drop(pdfium);
     let mut reader = Arc::try_unwrap(shared).map_err(|_| PdfError::new("PDF ingestion reader still in use"))?
@@ -52,7 +54,7 @@ pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfRe
     metadata.dependencies = pdf_range_reader::dependency_index(&mut reader).ok().filter(|d| d.valid(metadata.pages.len()));
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
     metadata.bound_optional_data();
-    Ok((reader, metadata))
+    Ok((reader, metadata, outline))
 }
 
 impl PdfError {
@@ -75,7 +77,11 @@ impl PdfDocumentSession {
             return Self::from_document(source_name, document);
         }
         let pages = metadata.pages.into_iter().map(|p| PdfPageInfo { width_points: p.width, height_points: p.height }).collect();
-        let outline = metadata.outline.into_iter().map(|o| PdfOutlineEntry { title: o.title, page_index: o.page_index, depth: o.depth }).collect();
+        // Page geometry is cached because reading it costs one call per page.
+        // The outline is not: it is one walk of a tree the document already
+        // holds, and keeping a second copy of the library's navigation only to
+        // save that walk is what this stopped being.
+        let outline = document_outline(&document);
         Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
     }
 }

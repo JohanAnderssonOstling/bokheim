@@ -19,7 +19,7 @@ impl ReaderView {
         entries.iter().map(|entry| TreeItem::new(entry.link.clone(), entry.title.clone()).children(Self::toc_tree_items(&entry.children))).collect()
     }
 
-    /// The document's focus handle, once the publication has loaded.
+    /// The document's focus handle, once the book has loaded.
     pub(in crate::epub) fn document_focus(&self, cx: &App) -> Option<FocusHandle> {
         match &self.load_state {
             LoadState::Ready(renderer) => Some(renderer.read(cx).focus_handle()),

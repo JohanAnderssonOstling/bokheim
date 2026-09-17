@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE VIEW IF NOT EXISTS isbn_classification_direct AS
  SELECT i.isbn13,c.*,0 AS inferred,'wikidata:direct' AS method FROM isbn i JOIN classification c ON c.entity=i.entity;
 CREATE VIEW IF NOT EXISTS isbn_classification_inferred AS
- SELECT i.isbn13,i.entity AS publication_entity,c.entity AS source_topic,c.property,c.scheme,c.value,c.statement,
+ SELECT i.isbn13,i.entity AS book_entity,c.entity AS source_topic,c.property,c.scheme,c.value,c.statement,
  l.statement AS topic_link,1 AS inferred,'wikidata:topic:P921' AS method
  FROM isbn i JOIN topic_link l ON l.entity=i.entity JOIN classification c ON c.entity=l.topic WHERE c.scope='topic';
 '''

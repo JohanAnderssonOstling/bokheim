@@ -375,16 +375,16 @@ mod tests {
 }
 
 
-/// Ordered, concatenated ranges from one pinned publication generation.
+/// Ordered, concatenated ranges from one pinned book generation.
 pub(super) async fn get_blob_ranges(State(state): State<AppState>, user: AuthUser,
     Path((library_id, hash)): Path<(LibraryId, ContentHash)>, headers: HeaderMap, body: Body) -> Result<Response, StatusCode> {
     let body = to_bytes(body, 64 * 1024).await.map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
-    let request: sync_common::api::assets::PublicationRanges = server_wire_http::decode_request(&headers, &body, 64 * 1024)?;
+    let request: sync_common::api::assets::BookRanges = server_wire_http::decode_request(&headers, &body, 64 * 1024)?;
     let asset = state.assets.open_from(&user.user_id, &library_id, AssetKind::Book, &hash, 0).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
     stream_ranges(asset, request, state.transfer_governor.clone(), user.user_id).await
 }
 
-async fn stream_ranges(asset: server_asset_store::StoredAsset, request: sync_common::api::assets::PublicationRanges,
+async fn stream_ranges(asset: server_asset_store::StoredAsset, request: sync_common::api::assets::BookRanges,
     governor: crate::bandwidth::TransferGovernor, user: String) -> Result<Response, StatusCode> {
     if request.checksum != asset.checksum { return Err(StatusCode::PRECONDITION_FAILED); }
     let length = request.byte_count(asset.total_len).ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
@@ -419,7 +419,7 @@ mod bundle_tests {
         let checksum = ContentHash::new(&"b".repeat(64));
         let asset = || server_asset_store::StoredAsset { reader: Box::new(Cursor::new(b"0123456789abcdef".to_vec())), total_len: 16, offset: 0, checksum };
         let governor = || crate::bandwidth::TransferGovernor::new(Default::default());
-        let request = |ranges| sync_common::api::assets::PublicationRanges { checksum, ranges };
+        let request = |ranges| sync_common::api::assets::BookRanges { checksum, ranges };
         let response = stream_ranges(asset(), request(vec![(1, 2), (8, 3)]), governor(), "test".into()).await.unwrap();
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "5");
         assert_eq!(axum::body::to_bytes(response.into_body(), 32).await.unwrap().as_ref(), b"1289a");

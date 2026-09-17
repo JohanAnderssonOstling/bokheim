@@ -63,17 +63,17 @@ fn normalized_author_match_key(value: &str) -> String {
     normalized_author_match_key_without_reordering(reordered)
 }
 
-/// Reordering lives in publication-model so that identity matching and
+/// Reordering lives in book-model so that identity matching and
 /// ingestion answer this the same way: a name matched as one person must not
 /// then be displayed backwards.
 fn comma_reordered_name(value: &str) -> Option<String> {
-    publication_model::given_name_first(value)
+    book_model::given_name_first(value)
 }
 
-/// The same key publication-model uses, so a name compared here and a name
+/// The same key book-model uses, so a name compared here and a name
 /// compared there cannot disagree.
 fn normalized_author_match_key_without_reordering(value: &str) -> String {
-    publication_model::comparison_key(value)
+    book_model::comparison_key(value)
 }
 
 

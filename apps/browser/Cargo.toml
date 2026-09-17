@@ -10,6 +10,8 @@ kobo = ["mobile", "dep:gpui_kobo", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
+subject-projection = { path = "../../shared/subject-projection" }
+book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 account-contract = { path = "../../shared/account-contract" }
 app-preferences = { path = "../../client/preferences" }

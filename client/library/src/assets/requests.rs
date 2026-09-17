@@ -1,4 +1,4 @@
-use crate::assets::queries::AssetsSql;
+use crate::assets::AssetsSql;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::unix_secs;
 use library_replica::BlobKind;

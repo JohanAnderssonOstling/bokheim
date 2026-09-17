@@ -111,12 +111,12 @@ mod tests {
 
     #[test]
     fn interrupted_audible_claim_waits_but_provider_failure_releases_the_book() {
-        use crate::audiobooks::queries::AudiobooksSql;
+        use crate::audiobooks::AudiobooksSql;
         let mut conn = Connection::open_in_memory().unwrap();
         crate::schema::init_db(&conn).unwrap();
         let audio = add(&conn, 'a');
         let other = add(&conn, 'b');
-        conn.upsert_audiobook_metadata(audio.as_str(), 1000, 0, "embedded_m4b", "[]").unwrap();
+        conn.upsert_audiobook_metadata(audio.as_str(), 1000).unwrap();
         let request = metadata_contract::audible::LookupRequest { title: "Book".into(), authors: vec![], duration_ms: 1000, recording: Default::default(), chapters: vec![] };
         crate::audible_jobs::discover(&conn, &audio, metadata_contract::audible::POLICY_VERSION, &request, 0).unwrap();
         let claim = crate::audible_jobs::claim_live(&mut conn, 0).unwrap().unwrap();

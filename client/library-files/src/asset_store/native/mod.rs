@@ -1,9 +1,10 @@
 //! Native library-file access and adjacent transfer staging.
 mod projection;
-pub(super) use projection::{readable_publication_paths, evict_publication_files, queue_book_placements, prepare_directory, prepare_directory_work};
-use projection::{readable_path, projection_error, publication_paths};
+pub(super) use projection::{readable_book_paths, evict_book_files, prepare_directory_with_database};
+use projection::{readable_path, projection_error};
 
 use super::{AssetStoreError, ContentHash};
+use book_access::BoxedBookReader;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 const RESERVED_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
@@ -12,13 +13,13 @@ pub(super) struct Handle(PathBuf, String, PathBuf, Option<PathBuf>, std::sync::A
 
 pub(super) fn upload_stream(book: super::VerifiedBook) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> + Send {
     futures_util::stream::try_unfold((book, 0u64), |(mut book, sent)| async move {
-        crate::executor::run_blocking(move || {
+        client_platform_runtime::executor::run_blocking(move || {
             use std::io::Read as _;
             let mut chunk = vec![0_u8; 64 * 1024];
             let length = book.reader.read(&mut chunk)?;
             let sent = sent + length as u64;
             if sent > book.length || (length == 0 && sent != book.length) {
-                return Err(std::io::Error::other("publication length changed while streaming"));
+                return Err(std::io::Error::other("book length changed while streaming"));
             }
             chunk.truncate(length);
             Ok::<_, std::io::Error>((length != 0).then_some((chunk, (book, sent))))
@@ -53,7 +54,7 @@ pub(super) fn purge_trash(handle: &Handle, hash: &ContentHash) -> Result<(), Ass
 
 pub(super) fn open(library_locator: &str) -> Result<Handle, AssetStoreError> {
     #[cfg(target_os = "android")]
-    let private_leases = Some(client_platform_android::publication::lease_root()?);
+    let private_leases = Some(client_platform_android::book::lease_root()?);
     #[cfg(not(target_os = "android"))]
     let private_leases = None;
     open_with_lease_root(library_locator, private_leases)
@@ -130,7 +131,7 @@ pub(super) fn directory_available(handle: &Handle, relative: &str) -> bool {
 
 fn content_matches(path: &Path, hash: &ContentHash) -> Result<bool, AssetStoreError> {
     let mut file = std::fs::File::open(path)?;
-    Ok(publication_identity::identify(&mut file)? == *hash)
+    Ok(book_identity::identify(&mut file)? == *hash)
 }
 
 fn trash_path(handle: &Handle, hash: &ContentHash, relative: &str) -> PathBuf {
@@ -161,7 +162,7 @@ impl VerifiedPath {
         let metadata = std::fs::metadata(&path)?;
         let verified = Self { path, length: metadata.len(), modified: metadata.modified()? };
         if !content_matches(&verified.path, hash)? {
-            return Err(AssetStoreError("file contains different publication bytes".into()));
+            return Err(AssetStoreError("file contains different book bytes".into()));
         }
         verified.check()?;
         Ok(verified)
@@ -170,7 +171,7 @@ impl VerifiedPath {
     fn check(&self) -> Result<(), AssetStoreError> {
         let metadata = std::fs::symlink_metadata(&self.path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != self.length || metadata.modified()? != self.modified {
-            return Err(AssetStoreError("publication changed while preparing file work".into()));
+            return Err(AssetStoreError("book changed while preparing file work".into()));
         }
         Ok(())
     }
@@ -180,6 +181,9 @@ pub(super) enum PreparedPlacement {
     Absent,
     Existing(VerifiedPath),
     Restore { output: tempfile::NamedTempFile, destination: PathBuf },
+    /// A move whose source is also queued for trash: nothing else can need
+    /// it, so relocate instead of copying.
+    Renamed { source: PathBuf, destination: PathBuf },
     Trash { source: VerifiedPath, destination: PathBuf, existing: Option<VerifiedPath> },
 }
 
@@ -189,8 +193,23 @@ impl PreparedPlacement {
             Self::Absent => Ok(()),
             Self::Existing(file) => file.check(),
             Self::Restore { output, destination } => {
-                persist_publication_noclobber(output.into_temp_path(), &destination).map_err(|error| AssetStoreError(error.to_string()))?;
+                persist_book_noclobber(output.into_temp_path(), &destination).map_err(|error| AssetStoreError(error.to_string()))?;
                 sync_parent(&destination)
+            }
+            Self::Renamed { source, destination } => {
+                if destination.exists() {
+                    return Err(AssetStoreError("restore destination changed".into()));
+                }
+                match std::fs::rename(&source, &destination) {
+                    Ok(()) => {}
+                    // Cross-device: fall back to copy.
+                    Err(_) => {
+                        std::fs::copy(&source, &destination)?;
+                        std::fs::remove_file(&source)?;
+                    }
+                }
+                sync_parent(&destination)?;
+                sync_parent(&source)
             }
             Self::Trash { source, destination, existing } => {
                 source.check()?;
@@ -225,22 +244,37 @@ pub(super) fn prepare_trash(handle: &Handle, hash: &ContentHash, relative: &str)
     Ok(PreparedPlacement::Trash { source, destination, existing })
 }
 
-pub(super) fn prepare_restore(handle: &Handle, hash: &ContentHash, relative: &str, conn: &rusqlite::Connection) -> Result<Option<PreparedPlacement>, AssetStoreError> {
+pub(super) fn prepare_restore(
+    handle: &Handle,
+    hash: &ContentHash,
+    relative: &str,
+    expected: Option<&str>,
+    source_paths: &[String],
+    movable_sources: &[String],
+) -> Result<Option<PreparedPlacement>, AssetStoreError> {
     use std::io::Write as _;
     let destination = placement_path(handle, relative)?;
     if destination.exists() {
         return Ok(Some(PreparedPlacement::Existing(VerifiedPath::new(destination, hash)?)));
     }
-    let expected: Option<String> = conn.query_row(include_str!("../sql/native_assets/prepare_restore_select.sql"),
-        rusqlite::params![hash.as_str(), relative], |row| row.get(0))?;
     let matches_version = |path: &Path| -> Result<bool, AssetStoreError> {
         if !content_matches(path, hash)? { return Ok(false); }
-        let Some(expected) = &expected else { return Ok(true) };
+        let Some(expected) = expected else { return Ok(true) };
         let mut hasher = blake3::Hasher::new();
         hasher.update_reader(std::fs::File::open(path)?)?;
         Ok(hasher.finalize().to_hex().as_str() == expected)
     };
-    let source = if let Some(source) = publication_paths(handle, conn, hash)?.into_iter().find(|path| path.is_file() && matches_version(path).unwrap_or(false)) {
+    let found = source_paths.iter().filter_map(|relative| placement_path(handle, relative).ok().map(|path| (relative, path))).find(|(_, path)| path.is_file() && matches_version(path).unwrap_or(false));
+    // Only a source with a queued trash job for this path is safe to move.
+    if let Some((source_relative, source)) = &found {
+        if movable_sources.iter().any(|movable| movable == *source_relative) {
+            if !destination.parent().unwrap().is_dir() {
+                return Err(AssetStoreError("restore folder is unavailable".into()));
+            }
+            return Ok(Some(PreparedPlacement::Renamed { source: source.clone(), destination }));
+        }
+    }
+    let source = if let Some((_, source)) = found {
         Some(source)
     } else {
         let directory = handle.0.parent().unwrap().join("trash").join(hash.as_str());
@@ -268,7 +302,7 @@ pub(super) fn prepare_restore(handle: &Handle, hash: &ContentHash, relative: &st
     // Verify the staged bytes too: an external editor can change the source
     // between source discovery and copying it.
     if !matches_version(output.path())? {
-        return Err(AssetStoreError("publication changed during copy".into()));
+        return Err(AssetStoreError("book changed during copy".into()));
     }
     Ok(Some(PreparedPlacement::Restore { output, destination }))
 }
@@ -290,7 +324,7 @@ impl AsyncWriter {
         Ok(())
     }
 
-    pub(super) async fn finish_publication(mut self) -> Result<tempfile::TempPath, AssetStoreError> {
+    pub(super) async fn finish_book(mut self) -> Result<tempfile::TempPath, AssetStoreError> {
         use tokio::io::AsyncWriteExt as _;
         self.file.flush().await?;
         self.file.sync_all().await?;
@@ -312,16 +346,15 @@ pub(super) fn sync_parent(path: &Path) -> Result<(), AssetStoreError> {
 }
 
 #[cfg(target_os = "android")]
-pub(super) use client_platform_android::publication::persist_publication_noclobber;
+pub(super) use client_platform_android::book::persist_book_noclobber;
 
 #[cfg(not(target_os = "android"))]
-pub(super) fn persist_publication_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
+pub(super) fn persist_book_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
     client_platform_native::filesystem::persist_noclobber(temporary, destination)
 }
 
-
 pub(super) async fn begin_write_at(final_path: PathBuf) -> Result<AsyncWriter, AssetStoreError> {
-    let temporary = crate::executor::run_blocking(move || {
+    let temporary = client_platform_runtime::executor::run_blocking(move || {
         tempfile::Builder::new().prefix(".bokheim-download.part-").tempfile_in(final_path.parent().unwrap())
     }).await.map_err(|error| AssetStoreError(error.to_string()))??;
     let (file, temporary_path) = temporary.into_parts();
@@ -334,17 +367,17 @@ pub(super) struct StagedBook {
     pub(super) content_hash: String,
     pub(super) checksum: ContentHash,
     pub(super) size_bytes: u64,
-    pub(super) direct: Option<DirectPublication>,
+    pub(super) direct: Option<DirectBook>,
 }
 
 static DIRECT_IMPORTS: std::sync::OnceLock<std::sync::Mutex<HashSet<PathBuf>>> = std::sync::OnceLock::new();
 
-pub(super) struct DirectPublication {
+pub(super) struct DirectBook {
     pub(super) relative: String,
     path: PathBuf,
 }
 
-impl Drop for DirectPublication {
+impl Drop for DirectBook {
     fn drop(&mut self) {
         DIRECT_IMPORTS.get().unwrap().lock().unwrap().remove(&self.path);
     }
@@ -361,14 +394,14 @@ pub(super) fn copy_book_to_destination(handle: &Handle, relative: &str, source: 
     let directory = placement_path(handle, parent)?.canonicalize()?;
     occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
     loop {
-        let name = library_model::unique_file_name(requested, occupied.iter().map(String::as_str));
+        let name = library_replica::unique_file_name(requested, occupied.iter().map(String::as_str));
         let path = directory.join(&name);
         let imports = DIRECT_IMPORTS.get_or_init(Default::default);
         if !imports.lock().unwrap().insert(path.clone()) {
             occupied.push(name);
             continue;
         }
-        let direct = DirectPublication { relative: format!("{parent}/{name}"), path: path.clone() };
+        let direct = DirectBook { relative: format!("{parent}/{name}"), path: path.clone() };
         let file = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => { occupied.push(name); continue; }
@@ -383,7 +416,7 @@ pub(super) fn copy_book_to_destination(handle: &Handle, relative: &str, source: 
     }
 }
 
-pub(super) fn open_staged_reader(staged: &StagedBook) -> Result<crate::BoxedBookReader, AssetStoreError> {
+pub(super) fn open_staged_reader(staged: &StagedBook) -> Result<BoxedBookReader, AssetStoreError> {
     Ok(Box::new(std::fs::File::open(&staged.temporary_path)?))
 }
 
@@ -411,12 +444,12 @@ fn write_import_bytes(file: &mut std::fs::File, source: &mut (dyn std::io::Read 
         hasher.update(&buffer[..read]);
     }
     if hasher.count() == 0 {
-        return Err(AssetStoreError("publication is empty".to_owned()));
+        return Err(AssetStoreError("book is empty".to_owned()));
     }
     file.sync_all()
         .map_err(|error| AssetStoreError(format!("could not flush the imported book in library folder '{}': {error}", directory.display())))?;
     let checksum = ContentHash::new(hasher.finalize().to_hex().as_str());
-    let identity = publication_identity::read(file)?.unwrap_or(checksum);
+    let identity = book_identity::read(file)?.unwrap_or(checksum);
     Ok((identity.to_string(), checksum, hasher.count()))
 }
 
@@ -433,10 +466,31 @@ pub(super) fn open_playback_file(handle: &Handle, name: String) -> Result<Option
     readable_path(handle, name)?.map(std::fs::File::open).transpose().map_err(Into::into)
 }
 
-pub(super) fn open_reader(handle: &Handle, name: String) -> Result<Option<crate::BoxedBookReader>, AssetStoreError> {
+pub(super) fn open_reader(handle: &Handle, name: String) -> Result<Option<BoxedBookReader>, AssetStoreError> {
     let Some(path) = readable_path(handle, name)? else { return Ok(None) };
     match std::fs::File::open(path) {
         Ok(file) => Ok(Some(Box::new(file))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn open_book_at_path(handle: &Handle, relative_path: &str) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+    let path = placement_path(handle, relative_path)?;
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(Some(Box::new(file))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn open_pdf_at_path(handle: &Handle, relative_path: &str) -> Result<Option<(BoxedBookReader, String)>, AssetStoreError> {
+    let path = placement_path(handle, relative_path)?;
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            let fingerprint = client_platform_native::file_fingerprint::file_metadata_fingerprint(&file.metadata()?)?.to_string();
+            Ok(Some((Box::new(file), fingerprint)))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -454,13 +508,13 @@ pub(super) fn read(handle: &Handle, name: String) -> Result<Option<Vec<u8>>, Ass
 pub(super) async fn write(handle: &Handle, name: String, bytes: &[u8]) -> Result<(), AssetStoreError> {
     use std::io::Write as _;
     if name.starts_with("book/") {
-        return Err(AssetStoreError("native publications require a library destination".into()));
+        return Err(AssetStoreError("native books require a library destination".into()));
     }
     let hash = name.strip_prefix("thumbnail/").and_then(|name| name.split('.').next()).ok_or_else(|| AssetStoreError("unsupported native asset path".into()))?;
-    let Some(lease) = lease(handle, hash, false)? else { return Err(AssetStoreError("publication is busy; retry thumbnail write".into())) };
+    let Some(lease) = lease(handle, hash, false)? else { return Err(AssetStoreError("book is busy; retry thumbnail write".into())) };
     let destination = path(handle, name);
     let bytes = bytes.to_owned();
-    crate::executor::run_blocking(move || {
+    client_platform_runtime::executor::run_blocking(move || {
         let _lease = lease;
         let mut file = tempfile::Builder::new().prefix(".bokheim-thumbnail.part-").tempfile_in(destination.parent().unwrap())?;
         file.write_all(&bytes)?;
@@ -554,7 +608,7 @@ mod lease_location_tests {
     }
 
     #[test]
-    fn cancelled_thumbnail_write_retains_its_lease_until_publication_finishes() {
+    fn cancelled_thumbnail_write_retains_its_lease_until_book_finishes() {
         let library = tempfile::tempdir().unwrap();
         let handle = open(library.path().to_str().unwrap()).unwrap();
         let hash = blake3::hash(b"thumbnail owner").to_hex().to_string();
@@ -605,29 +659,27 @@ mod prepared_file_tests {
     use super::*;
 
     #[test]
-    fn prepared_trash_preserves_a_file_changed_before_publication() {
+    fn prepared_trash_preserves_a_file_changed_before_book() {
         let root = tempfile::tempdir().unwrap();
         let handle = open(root.path().to_str().unwrap()).unwrap();
         let path = root.path().join("book.epub");
         std::fs::write(&path, b"original").unwrap();
         let hash = ContentHash::new(blake3::hash(b"original").to_hex().as_str());
         let prepared = prepare_trash(&handle, &hash, "/book.epub").unwrap();
-        std::fs::write(&path, b"externally changed publication").unwrap();
+        std::fs::write(&path, b"externally changed book").unwrap();
         assert!(prepared.publish().is_err());
-        assert_eq!(std::fs::read(path).unwrap(), b"externally changed publication");
+        assert_eq!(std::fs::read(path).unwrap(), b"externally changed book");
     }
 
     #[test]
     fn prepared_restore_preserves_a_new_destination() {
         let root = tempfile::tempdir().unwrap();
         let handle = open(root.path().to_str().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        client_library::schema::init_db(&conn).unwrap();
         let hash = ContentHash::new(blake3::hash(b"original").to_hex().as_str());
         let retained = trash_path(&handle, &hash, "/book.epub");
         std::fs::create_dir_all(retained.parent().unwrap()).unwrap();
         std::fs::write(&retained, b"original").unwrap();
-        let prepared = prepare_restore(&handle, &hash, "/book.epub", &conn).unwrap().unwrap();
+        let prepared = prepare_restore(&handle, &hash, "/book.epub", None, &[]).unwrap().unwrap();
         let destination = root.path().join("book.epub");
         std::fs::write(&destination, b"unrelated user file").unwrap();
         assert!(prepared.publish().is_err());
@@ -645,7 +697,7 @@ mod identity_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("book.m4b");
         std::fs::write(&path, include_bytes!("../../../tests/fixtures/embedded-cover.m4b")).unwrap();
-        let identity = publication_identity::ensure(&path).unwrap();
+        let identity = book_identity::ensure(&path).unwrap();
         // Alter an independent MP4 box without changing the identity metadata.
         use std::io::Write as _;
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"\0\0\0\x0cfreedata").unwrap();
@@ -658,27 +710,7 @@ mod identity_tests {
         assert!(content_matches(&trash, &identity).unwrap());
         assert!(!content_matches(&trash, &ContentHash::new(&"0".repeat(64))).unwrap());
     }
-}
-
-
-pub(super) fn open_pdf_reader(handle: &Handle, hash: &ContentHash) -> Result<Option<(crate::BoxedBookReader, Option<pdf_view_common::PdfReaderMetadata>)>, AssetStoreError> {
-    use rusqlite::OptionalExtension;
-    let Some(path) = readable_path(handle, format!("book/{hash}"))? else { return Ok(None) };
-    let reader = std::fs::File::open(&path)?;
-    let metadata = (|| -> Result<_, AssetStoreError> {
-        let fingerprint = client_platform_native::file_fingerprint::file_metadata_fingerprint(&reader.metadata()?)?.to_string();
-        let conn = rusqlite::Connection::open_with_flags(handle.3.as_ref().ok_or_else(|| AssetStoreError("database location unavailable".into()))?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let root = handle.0.parent().unwrap().parent().unwrap();
-        let relative = format!("/{}", path.strip_prefix(root).map_err(projection_error)?.to_string_lossy().replace('\\', "/"));
-        let checksum: Option<String> = conn.query_row(include_str!("../sql/native_assets/open_pdf_reader_select.sql"),
-            rusqlite::params![hash.as_str(), fingerprint, relative], |row| row.get(0)).optional()?;
-        let Some(checksum) = checksum.and_then(|s| s.parse().ok()) else { return Ok(None) };
-        client_library::pdf_metadata::get(&conn, hash, &checksum).map_err(projection_error)
-    })().unwrap_or_else(|error| { log::debug!("Local PDF metadata unavailable: {error}"); None });
-    Ok(Some((Box::new(reader), metadata)))
-}
-
-pub(super) fn with_database_path(mut handle: Handle, path: PathBuf) -> Handle { handle.3 = Some(path); handle }
+}pub(super) fn with_database_path(mut handle: Handle, path: PathBuf) -> Handle { handle.3 = Some(path); handle }
 
 pub(super) fn enabled(handle: &Handle) -> bool { handle.4.load(std::sync::atomic::Ordering::Acquire) }
 pub(super) fn suspend(handle: &Handle) { handle.4.store(false, std::sync::atomic::Ordering::Release); }

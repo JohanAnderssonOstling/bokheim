@@ -53,15 +53,15 @@ pub(super) fn purge_source(connection: &Connection, source: &str, sidecar: bool)
     if !sidecar {
         connection.execute("INSERT INTO catalog_browse_search_fts(catalog_browse_search_fts,rowid,search_text)
             SELECT 'delete',document.entry_id,document.search_text FROM catalog_browse_search_document document
-            JOIN catalog_browse_publication browse USING(entry_id) WHERE browse.source_id=?1", [source])?;
+            JOIN catalog_browse_book browse USING(entry_id) WHERE browse.source_id=?1", [source])?;
     }
     for table in ["catalog_browse_search_document","catalog_browse_subject","catalog_browse_language","catalog_browse_format"] {
-        connection.execute(&format!("DELETE FROM {table} WHERE entry_id IN (SELECT entry_id FROM catalog_browse_publication WHERE source_id=?1)"), [source])?;
+        connection.execute(&format!("DELETE FROM {table} WHERE entry_id IN (SELECT entry_id FROM catalog_browse_book WHERE source_id=?1)"), [source])?;
     }
-    connection.execute("DELETE FROM catalog_browse_publication WHERE source_id=?1", [source])?;
+    connection.execute("DELETE FROM catalog_browse_book WHERE source_id=?1", [source])?;
     if sidecar {
-        connection.execute("DELETE FROM projection_retired WHERE entry_id IN (SELECT entry_id FROM catalog_publication WHERE source_id=?1)", [source])?;
-        connection.execute("DELETE FROM catalog_publication WHERE source_id=?1", [source])?;
+        connection.execute("DELETE FROM projection_retired WHERE entry_id IN (SELECT entry_id FROM catalog_book WHERE source_id=?1)", [source])?;
+        connection.execute("DELETE FROM catalog_book WHERE source_id=?1", [source])?;
         connection.execute("DELETE FROM projection_source WHERE source_id=?1", [source])?;
         connection.execute("UPDATE projection_state SET revision=revision+1,incarnation=lower(hex(randomblob(16)))", [])?;
         connection.execute("UPDATE catalog_browse_serving_metadata SET revision=(SELECT revision FROM projection_state)", [])?;
@@ -85,8 +85,8 @@ pub(super) fn initialize(store: &CatalogStore) -> Result<(), CatalogStoreError> 
         "catalog_browse_subject",
         "catalog_browse_language",
         "catalog_browse_format",
-        "catalog_browse_publication",
-        "catalog_publication",
+        "catalog_browse_book",
+        "catalog_book",
         "projection_retired",
         "catalog_subject_node",
         "projection_source",
@@ -97,7 +97,7 @@ pub(super) fn initialize(store: &CatalogStore) -> Result<(), CatalogStoreError> 
     transaction.execute("INSERT INTO projection_state(singleton,authority_epoch) VALUES(1,?1)", [&epoch])?;
     transaction.execute("INSERT OR REPLACE INTO catalog_browse_serving_metadata VALUES(1,?1,0,0)", [CATALOG_BROWSE_SERVING_INDEX_VERSION])?;
     // Bootstrap from sources, not the journal: a deleted sidecar must also
-    // recover publications whose journal records were already acknowledged.
+    // recover books whose journal records were already acknowledged.
     let mut statement = authority.prepare("SELECT source_id FROM catalog_source")?;
     for source in statement.query_map([], |r| r.get::<_, String>(0))? {
         transaction.execute("INSERT INTO projection_source(source_id,sequence) VALUES(?1,-1)", [source?])?;
@@ -154,8 +154,8 @@ fn prepare(connection: &Connection, key: &Key) -> Result<Option<Prepared>, Catal
     let mut statement = connection.prepare_cached(&format!(
         "SELECT p.entry_id,p.generation,p.payload,p.normalized_title,p.provider_popularity,p.sequence,
                 COALESCE(pop.reading_log_count,0),COALESCE(pop.rating_count,0),p.edition_id
-         FROM catalog_publication p JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
-         LEFT JOIN catalog_publication_popularity pop USING(source_id,generation,edition_id,work_id)
+         FROM catalog_book p JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation
+         LEFT JOIN catalog_book_popularity pop USING(source_id,generation,edition_id,work_id)
          WHERE p.source_id=?1 AND p.work_id=?3 AND p.importable=1 {identity_filter}
          ORDER BY CASE WHEN instr(lower(COALESCE(p.acquisition_url,'')),'.images')>0
                       AND instr(lower(COALESCE(p.acquisition_url,'')),'.noimages')=0 THEN 1 ELSE 0 END DESC,p.edition_id LIMIT 1"
@@ -185,17 +185,17 @@ fn prepare(connection: &Connection, key: &Key) -> Result<Option<Prepared>, Catal
     let key = &row.key;
     row.languages = strings(
         connection,
-        "SELECT DISTINCT lower(substr(language,1,instr(language || '-', '-')-1)) FROM catalog_publication_language WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND language!=''",
+        "SELECT DISTINCT lower(substr(language,1,instr(language || '-', '-')-1)) FROM catalog_book_language WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND language!=''",
         key,
         row.generation,
     )?;
-    row.formats = strings(connection, "SELECT book_format FROM catalog_publication_format WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4", key, row.generation)?;
-    let authors = strings(connection, "SELECT normalized_name FROM catalog_publication_author WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position", key, row.generation)?;
-    let toc = strings(connection, "SELECT normalized_title FROM catalog_publication_toc WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position", key, row.generation)?;
+    row.formats = strings(connection, "SELECT book_format FROM catalog_book_format WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4", key, row.generation)?;
+    let authors = strings(connection, "SELECT normalized_name FROM catalog_book_author WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position", key, row.generation)?;
+    let toc = strings(connection, "SELECT normalized_title FROM catalog_book_toc WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 ORDER BY position", key, row.generation)?;
     row.search = format!("{} {} {}", row.title, authors.join(" "), toc.join(" ")).trim().to_owned();
-    // Derive ancestors locally: no scan/rebuild of the publication-subject
+    // Derive ancestors locally: no scan/rebuild of the book-subject
     // membership table, and only the curated unified taxonomy is browsable.
-    for path in strings(connection, "SELECT subject_path FROM catalog_publication_subject_assignment WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND system_id='unified'", key, row.generation)? {
+    for path in strings(connection, "SELECT subject_path FROM catalog_book_subject_assignment WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND system_id='unified'", key, row.generation)? {
         row.subjects.insert(String::new());
         let mut ancestor = String::new();
         for title in path.split(" / ") {
@@ -212,7 +212,7 @@ fn prepare(connection: &Connection, key: &Key) -> Result<Option<Prepared>, Catal
 fn apply(connection: &Connection, key: &Key, row: Option<&Prepared>) -> Result<(), CatalogStoreError> {
     let ids = {
         let identity_filter = if key.canonical_group() { "" } else { " AND edition_id=?2" };
-        let mut statement = connection.prepare_cached(&format!("SELECT entry_id FROM catalog_browse_publication WHERE source_id=?1 AND work_id=?3 {identity_filter}"))?;
+        let mut statement = connection.prepare_cached(&format!("SELECT entry_id FROM catalog_browse_book WHERE source_id=?1 AND work_id=?3 {identity_filter}"))?;
         let ids = statement.query_map(params![key.source, key.edition, key.work], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
         ids
     };
@@ -221,16 +221,16 @@ fn apply(connection: &Connection, key: &Key, row: Option<&Prepared>) -> Result<(
         // Retain old cards for in-flight index requests without invalidating
         // every client's cache on each projection commit.
         connection.prepare_cached("INSERT OR IGNORE INTO projection_retired VALUES(?1,unixepoch())")?.execute([id])?;
-        for table in ["catalog_browse_search_document", "catalog_browse_subject", "catalog_browse_language", "catalog_browse_format", "catalog_browse_publication"] {
+        for table in ["catalog_browse_search_document", "catalog_browse_subject", "catalog_browse_language", "catalog_browse_format", "catalog_browse_book"] {
             connection.prepare_cached(&format!("DELETE FROM {table} WHERE entry_id=?1"))?.execute([id])?;
         }
     }
     let Some(row) = row else {
         return Ok(());
     };
-    connection.prepare_cached("INSERT OR IGNORE INTO catalog_publication VALUES(?1,?2,?3,?4,?5,?6)")?.execute(params![row.entry, row.key.source, row.generation, row.key.edition, row.key.work, row.payload])?;
+    connection.prepare_cached("INSERT OR IGNORE INTO catalog_book VALUES(?1,?2,?3,?4,?5,?6)")?.execute(params![row.entry, row.key.source, row.generation, row.key.edition, row.key.work, row.payload])?;
     connection.prepare_cached("DELETE FROM projection_retired WHERE entry_id=?1")?.execute([row.entry])?;
-    connection.prepare_cached("INSERT INTO catalog_browse_publication VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?.execute(params![
+    connection.prepare_cached("INSERT INTO catalog_browse_book VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?.execute(params![
         row.entry,
         row.key.source,
         row.generation,
@@ -268,8 +268,8 @@ fn source_keys(authority: &Connection, serving: &Connection, source: &str, curso
     let mut keys = BTreeSet::new();
     let (edition, work) = cursor.unwrap_or(("", ""));
     for (connection, sql) in [
-        (authority, "SELECT p.edition_id,p.work_id FROM catalog_publication p JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation WHERE p.source_id=?1 {cursor} ORDER BY p.edition_id,p.work_id LIMIT ?4"),
-        (serving, "SELECT edition_id,work_id FROM catalog_browse_publication WHERE source_id=?1 {cursor} ORDER BY edition_id,work_id LIMIT ?4"),
+        (authority, "SELECT p.edition_id,p.work_id FROM catalog_book p JOIN catalog_source s ON s.source_id=p.source_id AND s.active_generation=p.generation WHERE p.source_id=?1 {cursor} ORDER BY p.edition_id,p.work_id LIMIT ?4"),
+        (serving, "SELECT edition_id,work_id FROM catalog_browse_book WHERE source_id=?1 {cursor} ORDER BY edition_id,work_id LIMIT ?4"),
     ] {
         let sql = sql.replace("{cursor}", if cursor.is_some() { "AND (edition_id,work_id)>(?2,?3)" } else { "" });
         let mut statement = connection.prepare_cached(&sql)?;
@@ -308,7 +308,7 @@ impl CatalogStore {
         let fence_started = Instant::now();
         let snapshot = reader.transaction_with_behavior(TransactionBehavior::Deferred)?;
         snapshot.query_row("SELECT sequence FROM catalog_serving_change_sequence", [], |r| r.get::<_, i64>(0))?;
-        let changes = serving_changes::publications(&snapshot, BATCH)?;
+        let changes = serving_changes::books(&snapshot, BATCH)?;
         let sources = serving_changes::sources(&snapshot)?;
         let source_count: i64 = snapshot.query_row("SELECT COUNT(*) FROM catalog_serving_dirty_source", [], |r| r.get(0))?;
         let work = !changes.is_empty() || !sources.is_empty() || pending;
@@ -321,7 +321,7 @@ impl CatalogStore {
         drop(writer);
         let preparation_started = Instant::now();
         let mut keys = changes.iter().map(|c| Key { source: c.source_id.clone(), edition: c.edition_id.clone(), work: c.work_id.clone() }).collect::<BTreeSet<_>>();
-        // Process one source per batch; publication edits still make progress.
+        // Process one source per batch; book edits still make progress.
         let source = if let Some(source) = sources.first() {
             Some((source.source_id.clone(), source.sequence))
         } else {
@@ -379,7 +379,7 @@ impl CatalogStore {
             serving_changes::acknowledge(&transaction, &changes, &ack_sources)?;
             transaction.commit()?;
         }
-        tracing::debug!(publications = prepared.len(), fence_ms, preparation_ms, commit_ms, "catalogue serving projection batch");
+        tracing::debug!(books = prepared.len(), fence_ms, preparation_ms, commit_ms, "catalogue serving projection batch");
         expire_payloads(&mut serving)?;
         Ok(work)
     }
@@ -396,7 +396,7 @@ fn expire_payloads(serving: &mut Connection) -> Result<(), CatalogStoreError> {
     }
     let transaction = serving.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for id in ids {
-        transaction.execute("DELETE FROM catalog_publication WHERE entry_id=?1", [id])?;
+        transaction.execute("DELETE FROM catalog_book WHERE entry_id=?1", [id])?;
         transaction.execute("DELETE FROM projection_retired WHERE entry_id=?1", [id])?;
     }
     transaction.commit()?;

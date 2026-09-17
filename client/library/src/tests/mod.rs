@@ -1,5 +1,4 @@
-use super::{browse::*, catalog::*, placements::upsert_dir, sync_state::*};
-use crate::LIBRARY_SCHEMA_VERSION;
+use super::{browse::*, placements::upsert_dir, sync_state::*};
 use crate::assets::add_asset_request;
 use crate::assets::book_placement_expects_hash;
 use crate::assets::complete_asset_request;
@@ -20,14 +19,12 @@ use crate::audiobooks::audiobook_chapters;
 use crate::books::get_book_cards_by_author_scoped;
 use crate::books::get_book_cards_in_dir_scoped;
 use crate::books::get_book_cards_in_dir_sorted_scoped;
-use crate::books::queries::BooksSql;
+use crate::books::BooksSql;
 use crate::browse::get_book_ancestor_dir_ids;
 use crate::browse::get_descendant_content_hashes;
 use crate::browse::get_folder_download_counts;
-use crate::browse::queries::HomeSql;
-use crate::catalog;
-use crate::local_paths::BookPlacement;
-use crate::local_paths::RelativeBookPath;
+use crate::browse::HomeSql;
+use library_replica::{BookPlacement, RelativeBookPath};
 use crate::metadata::attach_external_author_id;
 use crate::metadata::get_book_author_identities;
 #[cfg(test)]
@@ -39,7 +36,7 @@ use crate::metadata::recorded_taxonomy_codes_for_library;
 use crate::metadata::resolve_book_author_identity;
 use crate::metadata::seed_subject_systems;
 use crate::metadata::split_book_author;
-use crate::metadata::update_book_metadata;
+use crate::metadata::update_book_title_and_author;
 use crate::metadata::update_book_metadata_contributors;
 use crate::metadata::update_book_metadata_contributors_preserving_ids;
 use crate::placements;
@@ -74,26 +71,27 @@ use crate::sync_state::get_library_sync_details;
 use crate::sync_state::get_or_create_replica_id;
 use crate::sync_state::get_pending_mutations;
 use crate::sync_state::get_sync_metadata;
-use crate::sync_state::queries::SyncSql;
 use crate::sync_state::set_sync_metadata;
 use crate::sync_state::state_inventory;
+use crate::sync_state::SyncSql;
 use crate::toc;
-use library_model::AgentId;
+use crate::LIBRARY_SCHEMA_VERSION;
+use book_model::AgentId;
 #[cfg(test)]
-use library_model::AuthorAuthority;
-use library_model::BookFormat;
-use library_model::BookLifecycleState;
-use library_model::BookMetadataState;
-use library_model::Contributor;
-use library_model::ExternalAuthorId;
+use book_model::AuthorAuthority;
+use book_model::BookFormat;
+use library_replica::BookLifecycleState;
+use book_model::BookRecord;
+use book_model::Contributor;
+use book_model::ExternalAuthorId;
 #[cfg(test)]
-use library_model::MarcRelatorCode;
-use library_model::PublicationMetadata;
-use library_model::ReadProgress;
-use library_model::ReadingPositionState;
-use library_model::Scheme;
-use library_model::Scope;
-use library_model::SyncBookMetadata;
+use book_model::MarcRelatorCode;
+use book_model::BookMetadata;
+use book_model::ReadProgress;
+use library_replica::ReadingPositionState;
+use book_model::Scheme;
+use book_model::Scope;
+use library_replica::SyncBookMetadata;
 use library_model::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter};
 use library_replica::BlobKind;
 use library_replica::MutationBody;
@@ -189,7 +187,7 @@ fn subject_facets_use_derived_ancestor_ownership() {
     assert_eq!(languages.into_iter().map(|count| (count.language, count.book_count)).collect::<Vec<_>>(), [("de".to_owned(), 1), ("en".to_owned(), 1)]);
     assert_eq!(formats.into_iter().map(|count| (count.format, count.book_count)).collect::<Vec<_>>(), [(LibraryFileTypeFilter::Book, 1), (LibraryFileTypeFilter::Pdf, 1)]);
 
-    let (root_languages, _) = subject_facet_counts(&conn, library_model::ROOT_SUBJECT_PATH, "child", &[LibraryFileTypeFilter::Pdf], &[]).unwrap();
+    let (root_languages, _) = subject_facet_counts(&conn, subject_projection::ROOT_SUBJECT_PATH, "child", &[LibraryFileTypeFilter::Pdf], &[]).unwrap();
     assert_eq!(root_languages.into_iter().map(|count| (count.language, count.book_count)).collect::<Vec<_>>(), [("de".to_owned(), 1), ("en".to_owned(), 1)]);
 
     conn.execute(include_str!("sql/tests/subject_facets_use_derived_ancestor_ownership_delete.sql"), []).unwrap();
@@ -208,6 +206,7 @@ fn shared_trash_lifecycle_restores_then_purges_folder_and_book() {
     insert_scanned_book_metadata(&transaction, content_hash.clone(), &metadata("Disposable", Vec::new(), "description"), BookFormat::Epub).unwrap();
     transaction.execute(include_str!("sql/tests/shared_trash_lifecycle_restores_then_purges_folder_and_book_insert.sql"), rusqlite::params![directory_id.to_string(), content_hash.as_str()]).unwrap();
     transaction.execute(include_str!("sql/tests/shared_trash_lifecycle_restores_then_purges_folder_and_book_insert_2.sql"), [content_hash.as_str()]).unwrap();
+    transaction.execute(include_str!("sql/tests/shared_trash_lifecycle_restores_then_purges_folder_and_book_insert_3.sql"), [content_hash.as_str()]).unwrap();
     trash_directory_record(&transaction, &directory_id).unwrap();
     transaction.commit().unwrap();
     let trash = library_trash(&conn).unwrap();
@@ -226,21 +225,6 @@ fn shared_trash_lifecycle_restores_then_purges_folder_and_book() {
     assert_eq!(conn.query_row(include_str!("sql/tests/shared_trash_lifecycle_restores_then_purges_folder_and_book_select_2.sql"), [content_hash.as_str()], |row| row.get::<_, bool>(0)).unwrap(), true);
     assert_eq!(conn.query_row(include_str!("sql/tests/shared_trash_lifecycle_restores_then_purges_folder_and_book_select_3.sql"), [content_hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert!(audiobook_chapters(&conn, &content_hash).unwrap().is_empty());
-}
-#[test]
-fn shared_catalog_ownership_returns_complete_live_keys() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_db(&conn).unwrap();
-    let content_hash = fixture_content_hash(92);
-    let transaction = conn.transaction().unwrap();
-    insert_scanned_book_metadata(&transaction, content_hash.clone(), &metadata("Owned", Vec::new(), ""), BookFormat::Epub).unwrap();
-    transaction.execute(include_str!("sql/tests/shared_catalog_ownership_returns_complete_live_keys_insert.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), content_hash.as_str()]).unwrap();
-    let source_id = catalog_model::CatalogSourceId::parse("test-source").unwrap();
-    let publication = catalog_model::CatalogPublicationIdentity { edition_id: "edition-1".to_owned(), work_id: Some("work-1".to_owned()) };
-    catalog::record_catalog_publication(&transaction, &source_id, &publication, &content_hash).unwrap();
-    transaction.commit().unwrap();
-    let keys = catalog::all_owned_catalog_publications(&conn).unwrap();
-    assert_eq!(keys, vec![(source_id, publication)]);
 }
 fn test_content_hash() -> ContentHash {
     ContentHash::new(&TEST_CONTENT_HASH)
@@ -262,8 +246,8 @@ fn scanner_directory_snapshot_accepts_the_roots_null_path() {
     let directories = get_known_directories_for_scan(&conn).unwrap();
     assert!(matches!(directories.get(&sync_common::ROOT_DIR_ID).map(|directory| &directory.state), Some(KnownDirectoryState::Live(None))));
 }
-fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookMetadataState {
-    BookMetadataState { title: title.into(), contributors: authors, description: description.into(), publication: PublicationMetadata::default() }
+fn metadata(title: impl Into<String>, authors: Vec<Contributor>, description: impl Into<String>) -> BookRecord {
+    BookRecord { title: title.into(), contributors: authors, description: description.into(), book: BookMetadata::default() }
 }
 
 #[test]
@@ -337,7 +321,7 @@ fn embedded_epub_lcc_codes_are_projected_on_import_without_startup_reclassificat
     init_db(&conn).unwrap();
     let raw = "QA76.73.R87";
     let mut book_metadata = metadata("Rust book", Vec::new(), "");
-    book_metadata.publication.subjects = vec![library_model::PublicationSubject::new(None, raw, "dc:subject", None, None).unwrap()];
+    book_metadata.book.subjects = vec![book_model::BookSubject::new(None, raw, "dc:subject", None, None).unwrap()];
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &book_metadata, BookFormat::Epub).unwrap();
     transaction.commit().unwrap();
@@ -363,14 +347,14 @@ fn embedded_epub_lcc_codes_are_projected_on_import_without_startup_reclassificat
 fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let declarations = ["History", "General"].into_iter().map(|name| library_model::PublicationSubject::new(None, name, "dc:subject", None, None).unwrap()).collect();
-    let categorized = BookMetadataState { title: "A general history".to_owned(), contributors: Vec::new(), description: String::new(), publication: PublicationMetadata { subjects: declarations, ..PublicationMetadata::default() } };
+    let declarations = ["History", "General"].into_iter().map(|name| book_model::BookSubject::new(None, name, "dc:subject", None, None).unwrap()).collect();
+    let categorized = BookRecord { title: "A general history".to_owned(), contributors: Vec::new(), description: String::new(), book: BookMetadata { subjects: declarations, ..BookMetadata::default() } };
     let uncategorized = metadata("No subjects", Vec::new(), "");
-    let other_system = BookMetadataState {
+    let other_system = BookRecord {
         title: "Library of Congress history".to_owned(),
         contributors: Vec::new(),
         description: String::new(),
-        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("LCSH".to_owned()), None).unwrap()], ..PublicationMetadata::default() },
+        book: BookMetadata { subjects: vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("LCSH".to_owned()), None).unwrap()], ..BookMetadata::default() },
     };
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &categorized, BookFormat::Epub).unwrap();
@@ -406,7 +390,7 @@ fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
         .unwrap();
     assert!(external_assignments.contains(&("lcsh".to_owned(), "LCC / LCSH / History / United States / 20th Century".to_owned())));
     assert_eq!(conn.query_row(include_str!("sql/tests/bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects_select_5.sql"), [], |row| row.get::<_, String>(0)).unwrap(), "dc:subject");
-    let roots = get_subject_children(&conn, library_model::ROOT_SUBJECT_PATH).unwrap();
+    let roots = get_subject_children(&conn, subject_projection::ROOT_SUBJECT_PATH).unwrap();
     assert_eq!(roots.len(), 1, "empty taxonomy roots are omitted from browse results");
     let humanities = roots.iter().find(|subject| subject.id.as_str() == "Humanities").expect("unified root is visible");
     assert_eq!(humanities.book_count, 2, "both history books match the locally bundled complete taxonomy");
@@ -428,11 +412,11 @@ fn bisac_assignments_are_projected_and_browsed_separately_from_raw_subjects() {
 fn plain_dc_bisac_heading_uses_general_code_for_library_unified_assignment() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let state = BookMetadataState {
+    let state = BookRecord {
         title: "Plain fiction".to_owned(),
         contributors: Vec::new(),
         description: String::new(),
-        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Fiction", "dc:subject", None, None).unwrap()], ..PublicationMetadata::default() },
+        book: BookMetadata { subjects: vec![book_model::BookSubject::new(None, "Fiction", "dc:subject", None, None).unwrap()], ..BookMetadata::default() },
     };
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
@@ -452,11 +436,11 @@ fn plain_dc_bisac_heading_uses_general_code_for_library_unified_assignment() {
 fn complete_lcsh_style_dc_subject_uses_bisac_code_for_library_unified_assignment() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let state = BookMetadataState {
+    let state = BookRecord {
         title: "Short-story fiction".to_owned(),
         contributors: Vec::new(),
         description: String::new(),
-        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Fiction -- Short Stories", "dc:subject", None, None).unwrap()], ..PublicationMetadata::default() },
+        book: BookMetadata { subjects: vec![book_model::BookSubject::new(None, "Fiction -- Short Stories", "dc:subject", None, None).unwrap()], ..BookMetadata::default() },
     };
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
@@ -483,11 +467,11 @@ fn complete_lcsh_style_dc_subject_uses_bisac_code_for_library_unified_assignment
 fn external_codes_are_recorded_before_exact_local_coverage_is_checked() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let state = BookMetadataState {
+    let state = BookRecord {
         title: "Future LCC detail".to_owned(),
         contributors: Vec::new(),
         description: String::new(),
-        publication: PublicationMetadata { subjects: vec![library_model::PublicationSubject::new(None, "Future schedule", "marc", Some("lcc".to_owned()), Some("ZZZZ999".to_owned())).unwrap()], ..PublicationMetadata::default() },
+        book: BookMetadata { subjects: vec![book_model::BookSubject::new(None, "Future schedule", "marc", Some("lcc".to_owned()), Some("ZZZZ999".to_owned())).unwrap()], ..BookMetadata::default() },
     };
     let content_hash = fixture_content_hash(77);
     let transaction = conn.transaction().unwrap();
@@ -501,8 +485,8 @@ fn external_codes_are_recorded_before_exact_local_coverage_is_checked() {
 fn lcc_assignments_use_named_outline_and_upgrade_flat_call_number_paths() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let lcc = library_model::PublicationSubject::new(None, "QA76.73.R3", "openlibrary", Some("lcc".to_owned()), None).unwrap();
-    let state = BookMetadataState { title: "Rust programming".to_owned(), contributors: Vec::new(), description: String::new(), publication: PublicationMetadata { subjects: vec![lcc], ..PublicationMetadata::default() } };
+    let lcc = book_model::BookSubject::new(None, "QA76.73.R3", "openlibrary", Some("lcc".to_owned()), None).unwrap();
+    let state = BookRecord { title: "Rust programming".to_owned(), contributors: Vec::new(), description: String::new(), book: BookMetadata { subjects: vec![lcc], ..BookMetadata::default() } };
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
     transaction.commit().unwrap();
@@ -650,8 +634,8 @@ fn browse_rows_are_always_sorted_by_name_or_title_in_sql() {
     init_db(&conn).unwrap();
     conn.execute_batch(include_str!("sql/mod/browse_rows_are_always_sorted_by_name_or_title_in_sql_query.sql")).unwrap();
     let transaction = conn.transaction().unwrap();
-    update_book_metadata(&transaction, fixture_content_hash(1), "Zulu Query", "Other Writer").unwrap();
-    update_book_metadata(&transaction, fixture_content_hash(2), "Alpha Story", "Query Writer").unwrap();
+    update_book_title_and_author(&transaction, fixture_content_hash(1), "Zulu Query", "Other Writer").unwrap();
+    update_book_title_and_author(&transaction, fixture_content_hash(2), "Alpha Story", "Query Writer").unwrap();
     transaction.commit().unwrap();
     let rows = get_folder_list_rows(&conn, "00000000-0000-0000-0000-000000000000", "", LibraryFileTypeFilter::All).unwrap();
     assert_eq!(rows.into_iter().map(|row| row.name).collect::<Vec<_>>(), ["alpha", "Zulu"]);
@@ -672,8 +656,8 @@ fn downloaded_only_scope_is_applied_inside_browsing_queries() {
     init_db(&conn).unwrap();
     conn.execute_batch(include_str!("sql/tests/downloaded_only_scope_is_applied_inside_browsing_queries_insert.sql")).unwrap();
     let transaction = conn.transaction().unwrap();
-    update_book_metadata(&transaction, fixture_content_hash(1), "Local book", "Shared Author").unwrap();
-    update_book_metadata(&transaction, fixture_content_hash(2), "Remote book", "Shared Author").unwrap();
+    update_book_title_and_author(&transaction, fixture_content_hash(1), "Local book", "Shared Author").unwrap();
+    update_book_title_and_author(&transaction, fixture_content_hash(2), "Remote book", "Shared Author").unwrap();
     transaction.commit().unwrap();
     assert_eq!(get_recently_read_cards(&conn, 1, true, FINISHED_THRESHOLD).unwrap()[0].content_hash, fixture_content_hash(1), "scope must be applied before LIMIT");
     assert_eq!(get_recently_added_cards(&conn, 1, true).unwrap()[0].content_hash, fixture_content_hash(1), "scope must be applied before LIMIT");
@@ -873,7 +857,7 @@ fn library_search_separates_normalized_title_and_author_substrings() {
     conn.execute(include_str!("sql/tests/library_search_separates_normalized_title_and_author_substrings_insert.sql"), [fixture_content_hash(1).as_str()]).unwrap();
     conn.execute(include_str!("sql/tests/library_search_separates_normalized_title_and_author_substrings_insert_2.sql"), [fixture_content_hash(1).as_str()]).unwrap();
     let transaction = conn.transaction().unwrap();
-    update_book_metadata(&transaction, fixture_content_hash(1), "Power and Progress", "GÖRAN Smith").unwrap();
+    update_book_title_and_author(&transaction, fixture_content_hash(1), "Power and Progress", "GÖRAN Smith").unwrap();
     transaction.commit().unwrap();
     assert_eq!(search_book_cards_scoped(&conn, "ow", false).unwrap().title_matches.len(), 1);
     assert_eq!(search_book_cards_scoped(&conn, "progress", false).unwrap().title_matches.len(), 1);
@@ -972,56 +956,56 @@ fn transfer_jobs_are_not_persisted_in_the_library_schema() {
     assert_eq!(transfer_jobs, 0);
 }
 #[test]
-fn scanned_publication_metadata_is_canonical_and_relationally_projected() {
+fn scanned_book_metadata_is_canonical_and_relationally_projected() {
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
-    let publication = PublicationMetadata {
-        identifiers: vec![library_model::Identifier::new("9781234567897", Scheme::Isbn, Scope::Edition, "test:embedded").unwrap()],
-        publishers: vec![library_model::PublisherCredit::new("North Wind Press").unwrap()],
-        languages: vec![library_model::LanguageTag::parse("SV-se").unwrap()],
-        dates: vec![library_model::PublicationDate::new(None, "2026-08-04", Some("publication".to_owned()), "test:publication-date").unwrap()],
-        subjects: vec![library_model::PublicationSubject::new(None, "Distributed systems", "dc:subject", None, None).unwrap()],
-        collections: vec![library_model::Collection::new("Bokheim Studies", Some(library_model::CollectionKind::Series), Some("2".to_owned()), "test:embedded").unwrap()],
+    let book = BookMetadata {
+        identifiers: vec![book_model::Identifier::new("9781234567897", Scheme::Isbn, Scope::Edition, "test:embedded").unwrap()],
+        publishers: vec![book_model::PublisherCredit::new("North Wind Press").unwrap()],
+        languages: vec![book_model::LanguageTag::parse("SV-se").unwrap()],
+        dates: vec![book_model::BookDate::new(None, "2026-08-04", Some("book".to_owned()), "test:book-date").unwrap()],
+        subjects: vec![book_model::BookSubject::new(None, "Distributed systems", "dc:subject", None, None).unwrap()],
+        collections: vec![book_model::Collection::new("Bokheim Studies", Some(book_model::CollectionKind::Series), Some("2".to_owned()), "test:embedded").unwrap()],
         rights: vec!["Copyright example".to_owned()],
-        ..PublicationMetadata::default()
+        ..BookMetadata::default()
     };
     // Mixed author + non-author contributors share one flat book_contributor
     // position sequence now that Contributor is the sole relational model.
     let translator = Contributor::new("Example Translator", None, MarcRelatorCode(*b"trl")).unwrap();
     let contributors = vec![author("Example Author"), translator.clone()];
-    let state = BookMetadataState { title: "Metadata book".to_owned(), contributors, description: "A description".to_owned(), publication: publication.clone() };
+    let state = BookRecord { title: "Metadata book".to_owned(), contributors, description: "A description".to_owned(), book: book.clone() };
     let transaction = conn.transaction().unwrap();
     insert_scanned_book_metadata(&transaction, fixture_content_hash(1), &state, BookFormat::Epub).unwrap();
     transaction.commit().unwrap();
-    let encoded: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select.sql"), [], |row| row.get(0)).unwrap();
-    assert_eq!(sync_common::wire::decode::<PublicationMetadata>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES,).unwrap(), publication,);
+    let encoded: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select.sql"), [], |row| row.get(0)).unwrap();
+    assert_eq!(sync_common::wire::decode::<BookMetadata>(&encoded, sync_common::wire::MAX_DECODED_REQUEST_BYTES,).unwrap(), book,);
     for (table, sql) in [
-        ("book_identifier", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_identifier.sql")),
-        ("book_publisher", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_publisher.sql")),
-        ("book_language", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_language.sql")),
-        ("book_publication_date", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_publication_date.sql")),
-        ("book_subject", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_subject.sql")),
-        ("book_collection", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_collection.sql")),
-        ("book_publication_value", include_str!("sql/mod/scanned_publication_metadata_is_canonical_and_relationally_projected_query_book_publication_value.sql")),
+        ("book_identifier", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_identifier.sql")),
+        ("book_publisher", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_publisher.sql")),
+        ("book_language", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_language.sql")),
+        ("book_date", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_date.sql")),
+        ("book_subject", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_subject.sql")),
+        ("book_collection", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_collection.sql")),
+        ("book_value", include_str!("sql/mod/scanned_book_metadata_is_canonical_and_relationally_projected_query_book_value.sql")),
     ] {
         let count: i64 = conn.query_row(sql, [], |row| row.get(0)).unwrap();
         assert_eq!(count, 1, "missing {table} projection");
     }
-    let contributor_count: i64 = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_2.sql"), [], |row| row.get(0)).unwrap();
+    let contributor_count: i64 = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_2.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(contributor_count, 2, "author and non-author contributor rows both project into the merged table");
-    let canonical_identifier: Option<String> = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_3.sql"), [], |row| row.get(0)).unwrap();
+    let canonical_identifier: Option<String> = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_3.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(canonical_identifier.as_deref(), Some("9781234567897"));
     let normalized_date = conn
-        .query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_4.sql"), [], |row| Ok((row.get::<_, Option<i32>>(0)?, row.get::<_, Option<u8>>(1)?, row.get::<_, Option<u8>>(2)?)))
+        .query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_4.sql"), [], |row| Ok((row.get::<_, Option<i32>>(0)?, row.get::<_, Option<u8>>(1)?, row.get::<_, Option<u8>>(2)?)))
         .unwrap();
     assert_eq!(normalized_date, (None, None, None));
-    let publisher_agent: String = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_5.sql"), [], |row| row.get(0)).unwrap();
-    assert_eq!(publisher_agent, publication.publishers[0].agent_id().to_string());
-    let contributor_agent: String = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_6.sql"), [], |row| row.get(0)).unwrap();
+    let publisher_agent: String = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_5.sql"), [], |row| row.get(0)).unwrap();
+    assert_eq!(publisher_agent, book.publishers[0].agent_id().to_string());
+    let contributor_agent: String = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_6.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(contributor_agent, translator.agent_id().to_string());
-    let contributor_role: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_7.sql"), [], |row| row.get(0)).unwrap();
+    let contributor_role: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_7.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(contributor_role, b"trl");
-    let author_role: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_select_8.sql"), [], |row| row.get(0)).unwrap();
+    let author_role: Vec<u8> = conn.query_row(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_select_8.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(author_role, b"aut");
     let pending = get_pending_mutations(&conn).unwrap();
     assert_eq!(pending.len(), 2);
@@ -1033,7 +1017,7 @@ fn scanned_publication_metadata_is_canonical_and_relationally_projected() {
         } if metadata == &state.clone().into()
     )));
     assert!(pending.iter().any(|entry| matches!(&entry.body, MutationBody::Description { value, .. } if value==&state.description)));
-    conn.execute(include_str!("sql/tests/scanned_publication_metadata_is_canonical_and_relationally_projected_insert.sql"), [fixture_content_hash(1).as_str()]).unwrap();
+    conn.execute(include_str!("sql/tests/scanned_book_metadata_is_canonical_and_relationally_projected_insert.sql"), [fixture_content_hash(1).as_str()]).unwrap();
 }
 #[test]
 fn authority_evidence_distinguishes_namesakes_without_splitting_spelling_variants() {
@@ -1147,46 +1131,6 @@ fn title_search_needs_no_derived_index_backfill() {
     assert_eq!(search_book_cards_scoped(&conn, "ra", false).unwrap().title_matches.len(), 1);
     let absent_author = search_book_cards_scoped(&conn, "butler", false).unwrap();
     assert!(absent_author.title_matches.is_empty() && absent_author.author_matches.is_empty());
-}
-#[test]
-fn catalog_publication_ownership_is_exact_and_ignores_deleted_books() {
-    use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_db(&conn).unwrap();
-    conn.execute(include_str!("sql/tests/catalog_publication_ownership_is_exact_and_ignores_deleted_books_insert.sql"), [fixture_content_hash(1).as_str()]).unwrap();
-    conn.execute(include_str!("sql/tests/failed_recovery_page_rolls_back_and_retains_marker_delete.sql"), []).unwrap();
-    let source_id = CatalogSourceId::parse("standard-ebooks").unwrap();
-    let owned = CatalogPublicationIdentity { edition_id: "edition-one".to_owned(), work_id: Some("work-one".to_owned()) };
-    let transaction = conn.transaction().unwrap();
-    record_catalog_publication(&transaction, &source_id, &owned, &fixture_content_hash(1)).unwrap();
-    transaction.commit().unwrap();
-    let identities = vec![owned.clone(), CatalogPublicationIdentity { edition_id: "edition-two".to_owned(), work_id: Some("work-one".to_owned()) }, CatalogPublicationIdentity { edition_id: "unknown".to_owned(), work_id: None }];
-    assert_eq!(owned_catalog_publications(&conn, &source_id, &identities).unwrap(), vec![owned.clone()]);
-    let pending = get_pending_mutations(&conn).unwrap();
-    assert!(pending.iter().any(|mutation| matches!(
-        &mutation.body,
-        MutationBody::CatalogPublication { source_id, publication, content_hash }
-            if source_id.as_str() == "standard-ebooks"
-                && publication.edition_id == "edition-one"
-                && publication.work_id.as_deref() == Some("work-one")
-                && content_hash == &fixture_content_hash(1)
-    )));
-    conn.execute(include_str!("sql/tests/catalog_publication_ownership_is_exact_and_ignores_deleted_books_update.sql"), [fixture_content_hash(1).as_str()]).unwrap();
-    assert!(owned_catalog_publications(&conn, &source_id, &[owned]).unwrap().is_empty());
-}
-#[test]
-fn remote_catalog_publication_relation_materializes_without_echoing_to_outbox() {
-    use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_db(&conn).unwrap();
-    let source_id = CatalogSourceId::parse("remote-catalog").unwrap();
-    let identity = CatalogPublicationIdentity { edition_id: "remote-edition".to_owned(), work_id: None };
-    let change = server_change(MutationBody::CatalogPublication { source_id: source_id.clone(), publication: identity.clone(), content_hash: fixture_content_hash(2) }, 10, 0);
-    let transaction = conn.transaction().unwrap();
-    apply_remote_change_in_tx(&transaction, &change).unwrap();
-    transaction.commit().unwrap();
-    assert_eq!(owned_catalog_publications(&conn, &source_id, &[identity.clone()]).unwrap(), vec![identity]);
-    assert!(get_pending_mutations(&conn).unwrap().is_empty());
 }
 fn server_change(body: MutationBody, pt: u64, l: u64) -> ServerMutation {
     server_change_from(body, pt, l, "remote", 1, 1)
@@ -1328,7 +1272,7 @@ fn apply_dir_state(tx: &Transaction<'_>, dir_id: &str, parent_id: &str, name: &s
     let changes = [
         server_change(MutationBody::DirectoryName { dir_id: id.clone(), name: test_file_name(name) }, pt, 0),
         server_change(MutationBody::DirectoryParent { dir_id: id.clone(), parent_id: test_dir_id(parent_id) }, pt, 0),
-        server_change(MutationBody::DirectoryLifecycle { dir_id: id, value: if deleted { library_model::DirectoryLifecycleState::Deleted } else { library_model::DirectoryLifecycleState::Present } }, pt, 0),
+        server_change(MutationBody::DirectoryLifecycle { dir_id: id, value: if deleted { library_replica::DirectoryLifecycleState::Deleted } else { library_replica::DirectoryLifecycleState::Present } }, pt, 0),
     ];
     for change in changes {
         apply_remote_change_in_tx(tx, &change).unwrap();
@@ -1375,7 +1319,7 @@ fn placement_dependency_can_cross_committed_pull_pages() {
     assert_eq!(get_book_file_path(&conn, fixture_content_hash(7)).unwrap().unwrap().as_str(), format!("/Shelf/{}", fixture_content_hash(7)));
 }
 fn reading_position_change(cfi: &str, pt: u64, l: u64) -> ServerMutation {
-    server_change(MutationBody::ReadingPosition { content_hash: fixture_content_hash(1), value: ReadingPositionState { location: library_model::ReadingPosition::parse(cfi).unwrap(), progress: 0.0 } }, pt, l)
+    server_change(MutationBody::ReadingPosition { content_hash: fixture_content_hash(1), value: ReadingPositionState { location: book_model::ReadingPosition::parse(cfi).unwrap(), progress: 0.0 } }, pt, l)
 }
 fn singleton_guard_conn() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -1390,7 +1334,7 @@ fn read_pos_raw(conn: &Connection) -> String {
 #[test]
 fn pdf_page_position_uses_the_synchronized_reading_register() {
     let conn = singleton_guard_conn();
-    update_reading_position(&conn, fixture_content_hash(1), &library_model::pdf_page_reading_position(17), None).unwrap();
+    update_reading_position(&conn, fixture_content_hash(1), &book_model::pdf_page_reading_position(17), None).unwrap();
     assert_eq!(get_pdf_reading_page(&conn, fixture_content_hash(1)).unwrap(), Some(17));
     assert_eq!(get_book_reading_position(&conn, fixture_content_hash(1)).unwrap(), None);
     assert_eq!(read_pos_raw(&conn), "pdfpage(17)");
@@ -1399,7 +1343,7 @@ fn pdf_page_position_uses_the_synchronized_reading_register() {
 #[test]
 fn audiobook_position_uses_the_synchronized_reading_register() {
     let conn = singleton_guard_conn();
-    update_reading_position(&conn, fixture_content_hash(1), &library_model::audiobook_reading_position(1_234_567), Some(ReadProgress::new(42.5).unwrap())).unwrap();
+    update_reading_position(&conn, fixture_content_hash(1), &book_model::audiobook_reading_position(1_234_567), Some(ReadProgress::new(42.5).unwrap())).unwrap();
     assert_eq!(get_audiobook_reading_position(&conn, fixture_content_hash(1)).unwrap(), Some(1_234_567));
     assert_eq!(get_book_reading_position(&conn, fixture_content_hash(1)).unwrap(), None);
     assert_eq!(get_pdf_reading_page(&conn, fixture_content_hash(1)).unwrap(), None);
@@ -1514,7 +1458,7 @@ fn newly_scanned_book_emits_only_lifecycle_and_placement() {
     assert_eq!(lifecycle.1.iter().map(Contributor::name).collect::<Vec<_>>(), vec!["Scanned author"]);
     conn.execute(include_str!("sql/tests/failed_recovery_page_rolls_back_and_retains_marker_delete.sql"), []).unwrap();
     let tx = conn.transaction().unwrap();
-    update_book_metadata(&tx, content_hash, "Edited title", "Edited author").unwrap();
+    update_book_title_and_author(&tx, content_hash, "Edited title", "Edited author").unwrap();
     tx.commit().unwrap();
     let metadata_count: i64 = conn.query_row(include_str!("sql/tests/newly_scanned_book_emits_only_lifecycle_and_placement_select_2.sql"), [], |row| row.get(0)).unwrap();
     assert_eq!(metadata_count, 1, "later metadata edits must remain independently synchronized");
@@ -1528,7 +1472,7 @@ fn dir_state_triggers_coalesce_to_the_latest_full_state() {
     conn.execute(include_str!("sql/tests/book_path_chooses_the_first_live_path_in_name_order_update.sql"), [DIR_D1]).unwrap();
     let count: i64 = conn.query_row(include_str!("sql/tests/dir_state_triggers_coalesce_to_the_latest_full_state_select.sql"), [DIR_D1], |row| row.get(0)).unwrap();
     assert_eq!(count, 3);
-    assert!(get_pending_mutations(&conn).unwrap().into_iter().any(|mutation| matches!(mutation.body, MutationBody::DirectoryLifecycle { value: library_model::DirectoryLifecycleState::Deleted, .. })));
+    assert!(get_pending_mutations(&conn).unwrap().into_iter().any(|mutation| matches!(mutation.body, MutationBody::DirectoryLifecycle { value: library_replica::DirectoryLifecycleState::Deleted, .. })));
 }
 #[test]
 fn stale_remote_dir_state_does_not_overwrite_unpushed_local_move() {
@@ -1595,7 +1539,7 @@ fn persisted_reading_state_is_validated_in_rust() {
 fn invalid_remote_reading_position_is_rejected_before_storage() {
     // Decoding validates a remote location before it can become a typed
     // mutation, so the reducer never receives malformed reading state.
-    assert!(library_model::ReadingPosition::parse("not-a-cfi").is_err());
+    assert!(book_model::ReadingPosition::parse("not-a-cfi").is_err());
 }
 #[test]
 fn scalar_registers_arriving_before_book_lifecycle_are_preserved() {
@@ -1649,7 +1593,7 @@ fn lifecycle_initializer_does_not_overwrite_existing_metadata() {
     set_sync_metadata(&conn, "change_origin", "remote").unwrap();
     conn.execute(include_str!("sql/tests/lifecycle_initializer_does_not_overwrite_existing_metadata_insert.sql"), []).unwrap();
     let tx = conn.transaction().unwrap();
-    update_book_metadata(&tx, fixture_content_hash(1), "Existing title", "Existing author").unwrap();
+    update_book_title_and_author(&tx, fixture_content_hash(1), "Existing title", "Existing author").unwrap();
     tx.commit().unwrap();
     set_sync_metadata(&conn, "change_origin", "local").unwrap();
     let tx = conn.transaction().unwrap();
@@ -1787,17 +1731,17 @@ fn completing_one_asset_request_cannot_erase_a_concurrent_request() {
     assert_eq!(get_asset_requests(&conn, BlobKind::Book).unwrap(), vec![(second, TransferOrigin::Background)]);
 }
 #[test]
-fn placement_publication_guard_requires_exact_live_book_path_and_hash() {
+fn placement_book_guard_requires_exact_live_book_path_and_hash() {
     let conn = fk_conn();
     let hash = test_content_hash();
     let placement = BookPlacement::new(hash, RelativeBookPath::parse("/A/f.epub").unwrap());
     conn.execute(include_str!("sql/tests/dir_state_triggers_coalesce_to_the_latest_full_state_insert.sql"), [DIR_D1]).unwrap();
     conn.execute(include_str!("sql/tests/shared_asset_download_marks_every_live_placement_insert_2.sql"), [hash.as_str()]).unwrap();
-    conn.execute(include_str!("sql/tests/placement_publication_guard_requires_exact_live_book_path_and_hash_insert_3.sql"), rusqlite::params![hash.as_str(), DIR_D1]).unwrap();
+    conn.execute(include_str!("sql/tests/placement_book_guard_requires_exact_live_book_path_and_hash_insert_3.sql"), rusqlite::params![hash.as_str(), DIR_D1]).unwrap();
     assert!(book_placement_expects_hash(&conn, &placement, &hash).unwrap());
-    conn.execute(include_str!("sql/tests/placement_publication_guard_requires_exact_live_book_path_and_hash_update.sql"), ["b".repeat(64)]).unwrap();
+    conn.execute(include_str!("sql/tests/placement_book_guard_requires_exact_live_book_path_and_hash_update.sql"), ["b".repeat(64)]).unwrap();
     assert!(!book_placement_expects_hash(&conn, &placement, &hash).unwrap());
-    conn.execute(include_str!("sql/tests/placement_publication_guard_requires_exact_live_book_path_and_hash_update.sql"), [hash.as_str()]).unwrap();
+    conn.execute(include_str!("sql/tests/placement_book_guard_requires_exact_live_book_path_and_hash_update.sql"), [hash.as_str()]).unwrap();
     conn.execute(include_str!("sql/tests/live_book_pages_skip_unplaced_and_hidden_books_without_duplicates_update.sql"), []).unwrap();
     assert!(!book_placement_expects_hash(&conn, &placement, &hash).unwrap());
 }
@@ -2321,7 +2265,7 @@ fn initialization_rejects_incompatible_schemas_without_upgrading() {
 fn reopening_current_schema_does_not_decode_or_rewrite_book_metadata() {
     let conn = Connection::open_in_memory().unwrap();
     let replica = init_db(&conn).unwrap();
-    conn.set_sync_metadata("change_origin", "remote").unwrap();
+    set_sync_metadata(&conn, "change_origin", "remote").unwrap();
     conn.execute(include_str!("sql/tests/reopening_current_schema_does_not_decode_or_rewrite_book_metadata_insert.sql"), [fixture_content_hash(9999).as_str()]).unwrap();
     conn.execute_batch(include_str!("sql/tests/reopening_current_schema_does_not_decode_or_rewrite_book_metadata_create.sql")).unwrap();
     assert_eq!(init_db(&conn).unwrap(), replica);
@@ -2386,8 +2330,8 @@ fn authoritative_author_credits_replace_local_names_and_preserve_other_roles() {
     init_db(&conn).unwrap();
     let tx = conn.transaction().unwrap();
     let hash = fixture_content_hash(1);
-    let author = library_model::Contributor::new("George F. Kennan", None, library_model::MarcRelatorCode(*b"aut")).unwrap();
-    let translator = library_model::Contributor::new("Local Translator", None, library_model::MarcRelatorCode(*b"trl")).unwrap();
+    let author = book_model::Contributor::new("George F. Kennan", None, book_model::MarcRelatorCode(*b"aut")).unwrap();
+    let translator = book_model::Contributor::new("Local Translator", None, book_model::MarcRelatorCode(*b"trl")).unwrap();
     insert_scanned_book_contributors(&tx, hash, "Diaries", &[author, translator]).unwrap();
     let id = ExternalAuthorId::parse(AuthorAuthority::OpenLibrary, "OL139896A").unwrap();
     super::external_metadata::apply_authoritative_authors_in_transaction(&tx, hash, "authority-test", "9780393242768", &[(0, "George Frost Kennan".into(), id)]).unwrap();
@@ -2405,7 +2349,7 @@ fn title_subtitle_storage_search_and_sync() {
     init_db(&conn).unwrap();
     let hash = fixture_content_hash(981);
     let tx = conn.transaction().unwrap();
-    insert_scanned_book_metadata(&tx, hash, &BookMetadataState { title: "Fluid: The Approach Applied by Geniuses".into(), contributors: vec![], description: String::new(), publication: Default::default() }, BookFormat::Epub).unwrap();
+    insert_scanned_book_metadata(&tx, hash, &BookRecord { title: "Fluid: The Approach Applied by Geniuses".into(), contributors: vec![], description: String::new(), book: Default::default() }, BookFormat::Epub).unwrap();
     tx.execute(include_str!("sql/tests/title_subtitle_storage_search_sync_and_migration_insert.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), hash.as_str()]).unwrap();
     tx.commit().unwrap();
     let card = book_detail_summary(&conn, hash).unwrap().book;
@@ -2416,7 +2360,7 @@ fn title_subtitle_storage_search_and_sync() {
         .unwrap()
         .into_iter()
         .find_map(|mutation| match mutation.body {
-            MutationBody::BookLifecycle { value: library_model::BookLifecycleState::Present { metadata, .. }, .. } => Some(metadata),
+            MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Present { metadata, .. }, .. } => Some(metadata),
             _ => None,
         })
         .unwrap();
@@ -2441,14 +2385,13 @@ mod chip_group_tests;
 
 #[test]
 fn pdf_reader_metadata_syncs_by_revision_without_echoing_or_overwriting_other_revisions() {
-    use pdf_view_common::{PdfReaderMetadata, PdfStoredOutline, PdfStoredPage};
+    use pdf_view_common::{PdfReaderMetadata, PdfStoredPage};
     let hash = fixture_content_hash(975);
     let checksum = fixture_content_hash(976);
     let data = PdfReaderMetadata {
         version: 1,
         checksum: checksum.to_string(),
         pages: vec![PdfStoredPage { width: 800.0, height: 600.0, rotation: 90 }],
-        outline: vec![PdfStoredOutline { title: "Chapter".into(), page_index: 0, depth: 0 }],
         annotations: vec![pdf_view_common::PdfStoredAnnotation {
             page_index: 0,
             index: 2,
@@ -2500,7 +2443,7 @@ fn pdf_reader_metadata_syncs_by_revision_without_echoing_or_overwriting_other_re
 /// simply never asked for the other roles.
 #[test]
 fn the_detail_page_is_given_narrators_and_translators_but_not_production_credits() {
-    use library_model::{AUTHOR_MARC_RELATOR_CODE, Contributor, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, Contributor, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
 
     let mut conn = Connection::open_in_memory().unwrap();
     init_db(&conn).unwrap();
@@ -2509,16 +2452,16 @@ fn the_detail_page_is_given_narrators_and_translators_but_not_production_credits
     insert_scanned_book_metadata(
         &tx,
         hash,
-        &BookMetadataState {
+        &BookRecord {
             title: "Weimarrepubliken".into(),
             contributors: vec![
                 Contributor::new("Olle Larsson", None, AUTHOR_MARC_RELATOR_CODE).unwrap(),
                 Contributor::new("Per Juhlin", None, NARRATOR_MARC_RELATOR_CODE).unwrap(),
                 Contributor::new("Kerstin Gustafsson", None, TRANSLATOR_MARC_RELATOR_CODE).unwrap(),
-                Contributor::new("calibre (0.8.55)", None, library_model::marc_relator_code_from_metadata_role("bookproducer")).unwrap(),
+                Contributor::new("calibre (0.8.55)", None, book_model::marc_relator_code_from_metadata_role("bookproducer")).unwrap(),
             ],
             description: String::new(),
-            publication: Default::default(),
+            book: Default::default(),
         },
         BookFormat::Epub,
     )
@@ -2543,7 +2486,7 @@ fn the_detail_payload_carries_the_folder_trail_to_the_book() {
     let sociology = create_directory(&mut conn, &sync_common::ROOT_DIR_ID, &"Sociology".to_owned()).unwrap();
     let communities = create_directory(&mut conn, &sociology.id, &"Communities".to_owned()).unwrap();
     let tx = conn.transaction().unwrap();
-    insert_scanned_book_metadata(&tx, hash, &BookMetadataState { title: "Bowling Alone".into(), contributors: vec![], description: String::new(), publication: Default::default() }, BookFormat::Epub).unwrap();
+    insert_scanned_book_metadata(&tx, hash, &BookRecord { title: "Bowling Alone".into(), contributors: vec![], description: String::new(), book: Default::default() }, BookFormat::Epub).unwrap();
     tx.execute(include_str!("sql/tests/the_detail_payload_carries_the_folder_trail_to_the_book_insert.sql"), rusqlite::params![communities.id.to_string(), hash.as_str()]).unwrap();
     tx.commit().unwrap();
 
@@ -2562,12 +2505,11 @@ fn a_documents_position_is_named_by_the_entry_the_reader_recorded() {
     init_db(&conn).unwrap();
     let hash = fixture_content_hash(984);
     let tx = conn.transaction().unwrap();
-    insert_scanned_book_metadata(&tx, hash, &BookMetadataState { title: "Bowling Alone".into(), contributors: vec![], description: String::new(), publication: Default::default() }, BookFormat::Epub).unwrap();
+    insert_scanned_book_metadata(&tx, hash, &BookRecord { title: "Bowling Alone".into(), contributors: vec![], description: String::new(), book: Default::default() }, BookFormat::Epub).unwrap();
     tx.execute(include_str!("sql/tests/the_detail_payload_carries_the_folder_trail_to_the_book_insert.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), hash.as_str()]).unwrap();
     toc::upsert_book_toc(
         &tx,
         &hash,
-        toc::TocSource::EmbeddedEpub,
         &[library_model::BookTocEntry { title: "Section II".into(), target: "s2.xhtml".into(), children: vec![library_model::BookTocEntry { title: "Against the Tide?".into(), target: "ch9.xhtml".into(), children: Vec::new() }] }],
     )
     .unwrap();
@@ -2594,18 +2536,21 @@ fn an_audiobooks_position_names_its_chapter_without_anything_being_stored_for_it
     init_db(&conn).unwrap();
     let hash = fixture_content_hash(985);
     let tx = conn.transaction().unwrap();
-    insert_scanned_book_metadata(&tx, hash, &BookMetadataState { title: "Weimarrepubliken".into(), contributors: vec![], description: String::new(), publication: Default::default() }, BookFormat::M4b).unwrap();
+    insert_scanned_book_metadata(&tx, hash, &BookRecord { title: "Weimarrepubliken".into(), contributors: vec![], description: String::new(), book: Default::default() }, BookFormat::M4b).unwrap();
     tx.execute(include_str!("sql/tests/an_audiobooks_position_names_its_chapter_without_anything_being_stored_for_it_insert.sql"), rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), hash.as_str()]).unwrap();
-    let chapters = r#"[{"title":"Inledning","start_ms":0,"end_ms":600000},{"title":"Kapp-kuppen","start_ms":600000,"end_ms":1800000}]"#;
-    tx.execute(include_str!("sql/tests/an_audiobooks_position_names_its_chapter_without_anything_being_stored_for_it_insert_2.sql"), rusqlite::params![hash.as_str(), chapters]).unwrap();
+    // Chapters are navigation now: a title and the offset it opens at. The end
+    // of each is the next one's start, and of the last one, the duration.
+    let chapters = r#"[{"title":"Inledning","target":"audiobook-position-ms:0","children":[]},{"title":"Kapp-kuppen","target":"audiobook-position-ms:600000","children":[]}]"#;
+    tx.execute(include_str!("sql/tests/an_audiobooks_position_names_its_chapter_without_anything_being_stored_for_it_insert_2.sql"), [hash.as_str()]).unwrap();
+    tx.execute(include_str!("sql/tests/an_audiobooks_position_names_its_chapter_without_anything_being_stored_for_it_insert_3.sql"), rusqlite::params![hash.as_str(), chapters]).unwrap();
     tx.commit().unwrap();
 
-    update_reading_position(&conn, hash, &library_model::audiobook_reading_position(900_000), None).unwrap();
+    update_reading_position(&conn, hash, &book_model::audiobook_reading_position(900_000), None).unwrap();
 
     let detail = book_detail_summary(&conn, hash).unwrap();
     assert_eq!(detail.current_entry.as_deref(), Some("Kapp-kuppen"), "fifteen minutes in is the second chapter");
     // The chapter's own navigation target, so the contents list can mark the
     // row rather than searching for one whose title happens to match.
-    assert_eq!(detail.current_target.as_deref(), Some(library_model::audiobook_toc_target(600_000).as_str()));
+    assert_eq!(detail.current_target.as_deref(), Some(book_model::audiobook_toc_target(600_000).as_str()));
     assert!(detail.toc.iter().any(|entry| Some(entry.target.as_str()) == detail.current_target.as_deref()), "and that target is one of the entries the page draws");
 }

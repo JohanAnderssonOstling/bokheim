@@ -12,7 +12,8 @@ pub mod descriptions;
 pub mod file_work;
 mod metadata_batch;
 
-pub mod filenames;
+/// Compatibility re-export: filename utilities live in `library-replica`.
+pub use library_replica::filenames;
 mod local_paths;
 pub use local_paths::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 
@@ -55,7 +56,6 @@ pub mod toc;
 /// Read models used by library browsing pages.
 pub mod browse;
 
-pub mod catalog;
 
 /// Local and remote asset state and durable download intent.
 pub mod assets;
@@ -77,7 +77,7 @@ pub mod metadata;
 pub mod pdf_metadata;
 pub mod prepared_enrichment;
 
-/// Directory and physical publication placement persistence.
+/// Directory and physical book placement persistence.
 pub mod placements;
 
 pub mod audible_jobs;

@@ -1,1 +1,0 @@
-DELETE FROM local_book_upload WHERE content_hash=?1

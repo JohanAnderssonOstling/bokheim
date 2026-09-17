@@ -1,4 +1,4 @@
-//! Per-window composition for the library and publication reader.
+//! Per-window composition for the library and book reader.
 
 #[cfg(feature = "audiobooks")]
 mod audiobook_footer;
@@ -156,7 +156,7 @@ impl ApplicationRoot {
             let library = self.backend.library(*locator.library_id());
             self.pending_audiobook = None;
             self.open_task = Some(cx.spawn(async move |root, cx| {
-                let audio = matches!(library.book_format(locator.content_hash()).await, Ok(Some(library_model::BookFormat::M4b)));
+                let audio = matches!(library.book_format(locator.content_hash()).await, Ok(Some(book_model::BookFormat::M4b)));
                 let _ = root.update_in(cx, |root, window, cx| {
                     if audio {
                         if !root.playback.update(cx, |controller, cx| controller.prepare_open(audio_request, &locator, cx)) {

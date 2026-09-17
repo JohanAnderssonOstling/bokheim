@@ -1,23 +1,23 @@
-use crate::books::queries::BooksSql;
-use crate::browse::queries::RebuildsSql as BrowseRebuildsSql;
+use crate::books::BooksSql;
+use crate::browse::RebuildsSql as BrowseRebuildsSql;
 use crate::file_work::queue_book_work;
 use crate::file_work::queue_directory_work;
-use crate::placements::queries::PlacementsSql;
-use crate::reading::queries::ReadingSql;
-use crate::remote_reducer::queries::RemoteReducerSql;
+use crate::placements::PlacementsSql;
+use crate::reading::ReadingSql;
 use crate::storage_values::invalid_integer_column;
 use crate::storage_values::parse_uuid_column;
 use crate::storage_values::storage_i64;
+use crate::sync_state::get_sync_metadata;
+use crate::sync_state::set_sync_metadata;
 use crate::sync_state::RemovedBookDir;
 use crate::sync_state::StoredVersion;
-use crate::sync_state::get_sync_metadata;
-use crate::sync_state::queries::SyncSql;
-use library_model::ReadProgress;
-use library_model::{BookFormat, DirectoryLifecycleState};
+use include_sqlite_sql::include_sql;
+use book_model::ReadProgress;
+use library_replica::DirectoryLifecycleState;
+use book_model::BookFormat;
 use library_replica::MutationBody;
 use library_replica::VersionKey;
-use library_replica::catalog_publication_state_subkey;
-use library_replica::{DirectoryIntent, project_directories};
+use library_replica::{project_directories, DirectoryIntent};
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
 use std::collections::HashMap;
@@ -34,11 +34,11 @@ struct TxOriginGuard<'a> {
 impl<'a> TxOriginGuard<'a> {
     fn activate(tx: &'a Transaction<'a>) -> rusqlite::Result<Self> {
         let previous = get_sync_metadata(tx, "change_origin")?.unwrap_or_else(|| "local".into());
-        tx.set_sync_metadata("change_origin", "remote")?;
+        set_sync_metadata(tx, "change_origin", "remote")?;
         Ok(Self { tx, previous, active: true })
     }
     fn finish(mut self) -> rusqlite::Result<()> {
-        self.tx.set_sync_metadata("change_origin", &self.previous)?;
+        set_sync_metadata(self.tx, "change_origin", &self.previous)?;
         self.active = false;
         Ok(())
     }
@@ -46,7 +46,7 @@ impl<'a> TxOriginGuard<'a> {
 impl Drop for TxOriginGuard<'_> {
     fn drop(&mut self) {
         if self.active {
-            let _ = self.tx.set_sync_metadata("change_origin", &self.previous);
+            let _ = set_sync_metadata(self.tx, "change_origin", &self.previous);
         }
     }
 }
@@ -64,6 +64,10 @@ pub struct PreparedRemoteChanges<'a> {
 pub fn prepare_remote_changes(changes: &[ServerMutation]) -> Result<PreparedRemoteChanges<'_>, Box<dyn std::error::Error>> {
     let mut prepared = Vec::with_capacity(changes.len());
     for change in changes {
+        if change.mutation.kind == sync_common::mutation_kind::CATALOG_BOOK {
+            log::debug!("Skipping retired catalog-book mutation");
+            continue;
+        }
         if let Some(body) = MutationBody::from_wire(&change.mutation)? {
             let identity = sync_state_identity(&body);
             prepared.push((change, body, identity));
@@ -130,15 +134,15 @@ fn apply_remote_change_inner<'a>(
             apply_remote_directory_lifecycle(tx, dir_id, *value)?;
             true
         }
-        MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Present { metadata, added_at, format } } => {
+        MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { metadata, added_at, format } } => {
             apply_remote_book_added(tx, content_hash.clone(), metadata, *added_at, *format, None)?;
             true
         }
-        MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Deleted { origin_folder_id } } => {
+        MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Deleted { origin_folder_id } } => {
             apply_remote_book_deleted(tx, content_hash.clone(), change.mutation.changed_at, origin_folder_id.as_deref())?;
             true
         }
-        MutationBody::BookLifecycle { content_hash, value: library_model::BookLifecycleState::Purged } => {
+        MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Purged } => {
             apply_remote_book_purged(tx, content_hash.clone(), change.mutation.changed_at)?;
             tx.execute(include_str!("sql/remote_reducer/apply_remote_change_inner_insert.sql"), [content_hash.as_str()])?;
             true
@@ -167,17 +171,18 @@ fn apply_remote_change_inner<'a>(
             }
             true
         }
-        MutationBody::CatalogPublication { source_id, publication, content_hash } => {
-            if !book_is_purged(tx, content_hash)? {
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
-                super::catalog::record_catalog_publication(tx, source_id, publication, content_hash)?;
-            }
-            true
-        }
+        MutationBody::CatalogBook { .. } => unreachable!("catalog mutations are filtered before decoding"),
         MutationBody::PdfReaderMetadata { content_hash, value } => {
             if !book_is_purged(tx, content_hash)? {
                 tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
                 super::pdf_metadata::upsert(tx, content_hash, &ContentHash::new(&value.checksum), value)?;
+            }
+            true
+        }
+        MutationBody::BookToc { content_hash, value } => {
+            if !book_is_purged(tx, content_hash)? {
+                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
+                super::toc::upsert_book_toc(tx, content_hash, value)?;
             }
             true
         }
@@ -216,15 +221,15 @@ fn book_is_purged(tx: &Transaction<'_>, content_hash: &ContentHash) -> Result<bo
     tx.prepare_cached(include_str!("sql/remote_reducer/book_is_purged_select.sql"))?.query_row([content_hash.as_str()], |row| row.get(0))
 }
 
-fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, value: &library_model::AnnotationState) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_remote_annotation(tx: &Transaction, change: &ServerMutation, id: &str, value: &book_model::AnnotationState) -> Result<(), Box<dyn std::error::Error>> {
     tx.first_book_insert(value.content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp")?)?;
     let style = match value.style {
-        library_model::AnnotationStyle::Highlight => "highlight",
-        library_model::AnnotationStyle::Underline => "underline",
-        library_model::AnnotationStyle::Squiggly => "squiggly",
-        library_model::AnnotationStyle::Strikethrough => "strikethrough",
+        book_model::AnnotationStyle::Highlight => "highlight",
+        book_model::AnnotationStyle::Underline => "underline",
+        book_model::AnnotationStyle::Squiggly => "squiggly",
+        book_model::AnnotationStyle::Strikethrough => "strikethrough",
     };
-    let app_anchor = library_model::AnnotationAnchor::from(value.anchor.clone());
+    let app_anchor = book_model::AnnotationAnchor::from(value.anchor.clone());
     let anchor = super::marks::store_annotation_anchor(&app_anchor)?;
     let created_at = storage_i64(value.created_at, "annotation creation timestamp")?;
     let modified_at = storage_i64(value.modified_at, "annotation modification timestamp")?;
@@ -256,10 +261,11 @@ fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
         MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
         MutationBody::Annotation { annotation_id, .. } => ("annotation", annotation_id.clone(), String::new()),
-        MutationBody::CatalogPublication { source_id, publication, .. } => ("catalog_publication", source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref())),
+        MutationBody::CatalogBook { .. } => unreachable!("catalog mutations are filtered before decoding"),
         MutationBody::Metadata { content_hash, .. } => ("metadata", content_hash.to_string(), String::new()),
         MutationBody::PdfReaderMetadata { content_hash, value } => ("pdf_reader_metadata", content_hash.to_string(), value.checksum.clone()),
         MutationBody::Description { content_hash, .. } => ("description", content_hash.to_string(), String::new()),
+        MutationBody::BookToc { content_hash, .. } => ("book_toc", content_hash.to_string(), String::new()),
     }
 }
 
@@ -267,7 +273,11 @@ fn sync_state_version_wins(tx: &Transaction, change: &ServerMutation, kind: &str
     #[cfg(test)]
     let _profile = profiling::Span::new("version_check");
     let version = VersionKey::new(change.mutation.changed_at, change.mutation.conflict_rank, change.replica_id.clone(), change.mutation.replica_seq.get(), change.mutation.mutation_id);
-    if let Some(snapshot) = snapshot { Ok(snapshot.version.as_ref().is_none_or(|stored| &version > stored)) } else { Ok(read_sync_state_version(tx, kind, key, subkey)?.is_none_or(|stored| version > stored)) }
+    if let Some(snapshot) = snapshot {
+        Ok(snapshot.version.as_ref().is_none_or(|stored| &version > stored))
+    } else {
+        Ok(read_sync_state_version(tx, kind, key, subkey)?.is_none_or(|stored| version > stored))
+    }
 }
 
 fn record_sync_state_version(tx: &Transaction, change: &ServerMutation, kind: &str, key: &str, subkey: &str) -> Result<(), rusqlite::Error> {
@@ -395,7 +405,7 @@ fn read_sync_state_version(tx: &Transaction, kind: &str, key: &str, subkey: &str
 }
 
 fn apply_remote_book_added(
-    tx: &Transaction, content_hash: ContentHash, metadata: &library_model::SyncBookMetadata, added_at: sync_common::UnixMillis, format: BookFormat, known_metadata: Option<bool>,
+    tx: &Transaction, content_hash: ContentHash, metadata: &library_replica::SyncBookMetadata, added_at: sync_common::UnixMillis, format: BookFormat, known_metadata: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Lifecycle metadata seeds a new row (including placeholders created by a
     // placement or reader-state mutation), but it is not a second metadata
@@ -446,9 +456,8 @@ fn apply_remote_book_purged(tx: &Transaction, content_hash: ContentHash, changed
         include_str!("sql/purge_book_external_entity.sql"),
         include_str!("sql/purge_external_metadata_attempt.sql"),
         include_str!("sql/purge_book_collection.sql"),
-        include_str!("sql/purge_book_publication_date.sql"),
-        include_str!("sql/purge_book_publication_value.sql"),
-        include_str!("sql/purge_catalog_publication_book.sql"),
+        include_str!("sql/purge_book_date.sql"),
+        include_str!("sql/purge_book_value.sql"),
         include_str!("sql/purge_annotation.sql"),
     ] {
         tx.execute(sql, [row_id])?;
@@ -472,7 +481,7 @@ pub(super) fn apply_remote_book_dir(tx: &Transaction, changed_at: sync_common::U
     Ok(())
 }
 
-pub(crate) mod queries;
+include_sql!("src/remote_reducer/sql/remote_reducer.sql");
 
 #[cfg(test)]
 mod profiling;

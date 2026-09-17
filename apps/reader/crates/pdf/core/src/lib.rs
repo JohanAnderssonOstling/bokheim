@@ -7,6 +7,7 @@ compile_error!("the packaged-pdfium feature is only supported by Linux applicati
 use image::RgbaImage;
 pub use pdf_view_common::{FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthPlanError, FitWidthViewport, NormalizedRect, PageSelection as PdfTextSelection, PageTextGeometry, PixelCrop, SelectionGranularity, SelectionOptions};
 use pdf_view_common::{PageRotation, PageTransform, TextCharacter, merge_line_rects};
+use book_model::{pdf_toc_target, BookTocEntry};
 use pdfium_render::prelude::*;
 pub use reader_style::{ReaderInteractionStyle, RgbaColor};
 use std::cell::RefCell;
@@ -329,24 +330,7 @@ impl PdfDocumentSession {
         if pages.is_empty() {
             return Err(PdfError::new("the PDF has no pages"));
         }
-        let outline = document
-            .bookmarks()
-            .iter()
-            .filter_map(|bookmark| {
-                let title = bookmark.title()?.trim().to_owned();
-                if title.is_empty() {
-                    return None;
-                }
-                let page_index = bookmark.destination().and_then(|destination| destination.page_index().ok()).or_else(|| bookmark.action()?.as_local_destination_action()?.destination().ok()?.page_index().ok())? as usize;
-                let mut depth = 0;
-                let mut parent = bookmark.parent();
-                while let Some(ancestor) = parent {
-                    depth += 1;
-                    parent = ancestor.parent();
-                }
-                Some(PdfOutlineEntry { title, page_index, depth })
-            })
-            .collect();
+        let outline = document_outline(&document);
         Ok(Self { document, info: PdfDocumentInfo { source_name, pages, outline }, analysis: RefCell::new(PageAnalysisCache::default()), page_source: None })
     }
 
@@ -482,7 +466,7 @@ fn suppress_bokheim_annotation_rendering(page: &mut PdfPage<'_>) {
 pub struct PdfDocumentInfo {
     source_name: String,
     pages: Vec<PdfPageInfo>,
-    outline: Vec<PdfOutlineEntry>,
+    outline: Vec<BookTocEntry>,
 }
 
 impl PdfDocumentInfo {
@@ -506,30 +490,63 @@ impl PdfDocumentInfo {
         &self.pages
     }
 
-    pub fn outline(&self) -> &[PdfOutlineEntry] {
+    pub fn outline(&self) -> &[BookTocEntry] {
         &self.outline
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PdfOutlineEntry {
-    title: String,
-    page_index: usize,
-    depth: usize,
+/// Bounds on one walk. A PDF's bookmark graph is not required to be acyclic,
+/// and nothing downstream wants an outline larger than a reader can show.
+const MAX_OUTLINE_ENTRIES: usize = 4096;
+const MAX_OUTLINE_DEPTH: usize = 256;
+
+/// The outline as the tree PDFium already holds, rather than a flat list whose
+/// nesting has to be guessed back from an ancestor count. `first_child` and
+/// `next_sibling` are what `/First` and `/Next` are called here.
+///
+/// An entry whose destination will not resolve is dropped and its children take
+/// its place, which is the decision the flat form could not express: there,
+/// depth was absolute, so losing a parent silently re-filed its children under
+/// whichever ancestor happened to survive.
+///
+/// `remaining` is spent across the whole tree and `depth` is capped, because a
+/// PDF's bookmark graph is not required to be acyclic.
+fn outline_entries(first: PdfBookmark<'_>, depth: usize, remaining: &mut usize) -> Vec<BookTocEntry> {
+    let mut entries = Vec::new();
+    let mut next = Some(first);
+    while let Some(bookmark) = next.take() {
+        if *remaining == 0 {
+            break;
+        }
+        let children = match bookmark.first_child() {
+            Some(child) if depth < MAX_OUTLINE_DEPTH => outline_entries(child, depth + 1, remaining),
+            _ => Vec::new(),
+        };
+        match (bookmark.title().map(|title| title.trim().to_owned()).filter(|title| !title.is_empty()), bookmark_page(&bookmark)) {
+            (Some(title), Some(page_index)) => {
+                *remaining -= 1;
+                entries.push(BookTocEntry { title, target: pdf_toc_target(page_index), children });
+            }
+            _ => entries.extend(children),
+        }
+        next = bookmark.next_sibling();
+    }
+    entries
 }
 
-impl PdfOutlineEntry {
-    pub fn title(&self) -> &str {
-        &self.title
-    }
+/// The whole outline of one open document.
+fn document_outline(document: &runtime::Document) -> Vec<BookTocEntry> {
+    let mut remaining = MAX_OUTLINE_ENTRIES;
+    document.bookmarks().root().map(|root| outline_entries(root, 0, &mut remaining)).unwrap_or_default()
+}
 
-    pub fn page_index(&self) -> usize {
-        self.page_index
-    }
-
-    pub fn depth(&self) -> usize {
-        self.depth
-    }
+/// The page a bookmark opens, whether it says so directly or through an action.
+fn bookmark_page(bookmark: &PdfBookmark<'_>) -> Option<usize> {
+    let page_index = bookmark
+        .destination()
+        .and_then(|destination| destination.page_index().ok())
+        .or_else(|| bookmark.action()?.as_local_destination_action()?.destination().ok()?.page_index().ok())?;
+    Some(page_index as usize)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1039,7 +1056,7 @@ mod tests {
                 for _ in 0..4 {
                     let cover = render_first_page_image_from_reader(Cursor::new(bytes.clone()), 320)?;
                     assert_eq!(cover.pixel_width(), 320);
-                    let (reader, metadata) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
+                    let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
                     assert_eq!(metadata.pages.len(), 2);
                     let checksum = metadata.checksum.clone();
                     let session = PdfDocumentSession::from_reader_with_metadata("concurrent", reader, &checksum, Some(metadata))?;
@@ -1082,7 +1099,7 @@ mod tests {
         let path = fixture_path("ingestion")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|e| PdfError::new(e.to_string()))?;
-        let (reader, metadata) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
+        let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
         assert_eq!(reader.position(), 0);
         assert_eq!(metadata.checksum, blake3::hash(&bytes).to_hex().to_string());
         assert_eq!(metadata.pages.len(), 2);

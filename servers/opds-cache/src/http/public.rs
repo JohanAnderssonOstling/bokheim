@@ -1,6 +1,6 @@
 use super::super::{
     fmt, get, header, post, Any, ApiError, AsyncReadExt, AxumPath, Body, Bytes, CatalogBookFormat, CatalogImportRequest, CatalogPageRequest, CatalogSearchRequest, CatalogService, CatalogServiceError, CatalogSourceId,
-    CatalogSubjectBrowseRequest, CatalogSubjectPublicationPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, Method, Path, Query, Response, Router, State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL,
+    CatalogSubjectBrowseRequest, CatalogSubjectBookPayloadRequest, CorsLayer, CoverQuery, HeaderMap, HeaderValue, IntoResponse, Json, Method, Path, Query, Response, Router, State, StatusCode, COVER_CACHE_CONTROL, DATA_CACHE_CONTROL,
     MAX_REGISTRY_BYTES, REGISTRY_CACHE_CONTROL,
 };
 use super::operations::catalog_operations;
@@ -13,7 +13,7 @@ pub fn app(service: CatalogService) -> Router {
         .route("/api/opds/sources/:source_id/page", post(catalog_page))
         .route("/api/opds/sources/:source_id/search", post(catalog_search))
         .route("/api/opds/subjects", post(catalog_subjects))
-        .route("/api/opds/subject-publications", post(catalog_subject_publications))
+        .route("/api/opds/subject-books", post(catalog_subject_books))
         .route("/api/opds/sources/:source_id/acquire", post(catalog_acquire))
         .route("/api/opds/sources/:source_id/cover", get(catalog_cover))
         .route("/api/opds/covers/:asset", get(catalog_cover_asset))
@@ -89,10 +89,10 @@ pub(crate) async fn catalog_subjects(State(service): State<CatalogService>, head
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
-pub(crate) async fn catalog_subject_publications(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+pub(crate) async fn catalog_subject_books(State(service): State<CatalogService>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
     require_wire_accept(&headers)?;
-    let request: CatalogSubjectPublicationPayloadRequest = decode_wire_request(&headers, &body)?;
-    let response = service.subject_publication_payloads(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let request: CatalogSubjectBookPayloadRequest = decode_wire_request(&headers, &body)?;
+    let response = service.subject_book_payloads(&request).await.map_err(|error| ApiError::bad_request(error.to_string()))?;
     wire_response(&response, DATA_CACHE_CONTROL)
 }
 
@@ -113,7 +113,7 @@ pub(crate) async fn browser_catalog_stats(State(service): State<CatalogService>)
 pub(crate) async fn browser_catalog_page(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, Json(mut request): Json<CatalogPageRequest>) -> Result<Response, ApiError> {
     let source_id = CatalogSourceId::parse(&source_id).map_err(ApiError::bad_request)?;
     request.epoch = None;
-    request.known_publications.clear();
+    request.known_books.clear();
     let page = service.browser_page(&source_id, request).await.map_err(ApiError::unavailable)?;
     json_response(&page, DATA_CACHE_CONTROL)
 }
@@ -121,7 +121,7 @@ pub(crate) async fn browser_catalog_page(State(service): State<CatalogService>, 
 pub(crate) async fn browser_catalog_search(State(service): State<CatalogService>, AxumPath(source_id): AxumPath<String>, Json(mut request): Json<CatalogSearchRequest>) -> Result<Response, ApiError> {
     let source_id = CatalogSourceId::parse(&source_id).map_err(ApiError::bad_request)?;
     request.epoch = None;
-    request.known_publications.clear();
+    request.known_books.clear();
     let page = service.browser_search(&source_id, request).await.map_err(ApiError::unavailable)?;
     json_response(&page, DATA_CACHE_CONTROL)
 }

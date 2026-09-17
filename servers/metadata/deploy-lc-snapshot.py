@@ -20,7 +20,7 @@ def check_http(port, full, samples):
         checked=False
         for record_id,m in samples:
             if not m.get('title') or not m.get('authors'): continue
-            result=request(port,'v2/edition-identities',{'queries':[{'query_id':'lc-check','title':m['title'],'authors':m['authors'],'publishers':[],'publication_year':None}]})
+            result=request(port,'v2/edition-identities',{'queries':[{'query_id':'lc-check','title':m['title'],'authors':m['authors'],'publishers':[],'book_year':None}]})
             r=result['results'][0]
             if r.get('catalog_subjects'):
                 hit=r['catalog_subjects']

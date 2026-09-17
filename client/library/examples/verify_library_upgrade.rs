@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for blob in query.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
         let blob = blob?;
         if !blob.is_empty() {
-            let _: library_model::PublicationMetadata = sync_common::wire::decode(&blob, usize::MAX)?;
+            let _: book_model::BookMetadata = sync_common::wire::decode(&blob, usize::MAX)?;
         }
         books += 1;
     }

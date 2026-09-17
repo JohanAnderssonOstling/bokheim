@@ -118,7 +118,7 @@ mod catalog_tests {
     fn setup() -> (Connection, crate::EditionIdentityQuery) {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE lc_record(lc_record_id TEXT PRIMARY KEY, metadata TEXT); CREATE TABLE lc_record_lcc(lc_record_id TEXT,notation TEXT); CREATE TABLE lc_title(title_key TEXT,lc_record_id TEXT,PRIMARY KEY(title_key,lc_record_id));").unwrap();
-        let q = crate::EditionIdentityQuery { query_id: "book".into(), title: "French history".into(), authors: vec!["Jane Smith".into()], publishers: vec![], publication_year: None };
+        let q = crate::EditionIdentityQuery { query_id: "book".into(), title: "French history".into(), authors: vec!["Jane Smith".into()], publishers: vec![], book_year: None };
         (c,q)
     }
     fn add(c: &Connection,id: &str,title: &str,author: &str,code: &str) {

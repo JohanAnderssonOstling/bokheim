@@ -2,24 +2,17 @@ use crate::storage_values::bounded_u8;
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::nonnegative_u64;
 use crate::storage_values::parse_uuid_column;
-use crate::sync_state::queries::SyncSql;
 use library_replica::VersionKey;
 use rusqlite::Connection;
 use sync_common::MutationId;
 use sync_common::ReplicaId;
 
 pub fn get_or_create_replica_id(db: &Connection) -> Result<ReplicaId, rusqlite::Error> {
-    let mut replica_id: Option<String> = None;
-    db.get_sync_metadata_value("replica_id", |row| {
-        replica_id = Some(row.get(0)?);
-        Ok(())
-    })?;
-
-    match replica_id {
+    match super::get_sync_metadata(db, "replica_id")? {
         Some(id) => parse_uuid_column(id, 0),
         None => {
             let new_id = ReplicaId::new_v4();
-            db.set_sync_metadata("replica_id", &new_id.to_string())?;
+            super::set_sync_metadata(db, "replica_id", &new_id.to_string())?;
             Ok(new_id)
         }
     }

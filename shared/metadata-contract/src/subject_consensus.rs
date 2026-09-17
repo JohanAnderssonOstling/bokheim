@@ -164,7 +164,7 @@ mod tests {
             title: "Art History: A Very Short Introduction (Very Short Introductions)".into(),
             authors: vec!["Arnold, Dana".into()],
             publishers: vec!["Oxford University Press".into()],
-            publication_year: Some(2004),
+            book_year: Some(2004),
         };
         let candidates = [2004, 2020]
             .into_iter()
@@ -177,9 +177,9 @@ mod tests {
                 title_match: EditionTitleMatch::Both,
                 authors: vec!["Dana Arnold".into()],
                 publishers: vec![if year == 2004 { "Oxford University Press, USA" } else { "Oxford University Press" }.into()],
-                publication_year: Some(year),
+                book_year: Some(year),
                 matched_publisher: year == 2020,
-                matched_publication_year: year == 2004,
+                matched_book_year: year == 2004,
                 classifications: vec![
                     code("N5300", ClassificationSource::ExactEdition),
                     code(if year == 2004 { "N7425 .A646 2004" } else { "N7480 .A773 2010" }, if year == 2004 { ClassificationSource::ExactEdition } else { ClassificationSource::Work }),

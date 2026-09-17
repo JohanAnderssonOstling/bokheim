@@ -1,13 +1,13 @@
-//! Conservative publication-identity evidence derived from filename-like titles.
+//! Conservative book-identity evidence derived from filename-like titles.
 //!
 //! These helpers only prepare lookup evidence. They do not mutate embedded
-//! publication metadata or claim that a filename identifies an edition.
+//! book metadata or claim that a filename identifies an edition.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditionIdentityEvidence {
     pub title: String,
     pub author: Option<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
 }
 
 /// Extracts conservative title, author, and year evidence from a title that
@@ -92,7 +92,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
         if let Some(year) = fields[2].parse::<i32>().ok().filter(|year| (1450..=2100).contains(year)) {
             return EditionIdentityEvidence {
                 title: fields[0].to_owned(), author: Some(fields[1].to_owned()),
-                publication_year: Some(year),
+                book_year: Some(year),
             };
         }
     }
@@ -100,7 +100,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
     let mut inferred_author = None;
     let mut inferred_year = None;
     for segment in &segments {
-        inferred_year = inferred_year.or_else(|| plausible_publication_year(segment));
+        inferred_year = inferred_year.or_else(|| plausible_book_year(segment));
         if inferred_author.is_some() {
             continue;
         }
@@ -145,7 +145,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
         && part.chars().all(|c| c.is_alphabetic() || matches!(c, '\'' | '’'))) {
         title = parts.join(" ");
     }
-    EditionIdentityEvidence { title, author: inferred_author, publication_year: inferred_year }
+    EditionIdentityEvidence { title, author: inferred_author, book_year: inferred_year }
 }
 
 /// Normalize unmistakable release naming while preserving initials and decimals.
@@ -253,7 +253,7 @@ fn parenthetical_segments(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty()).map(str::to_owned).collect()
 }
 
-fn plausible_publication_year(value: &str) -> Option<i32> {
+fn plausible_book_year(value: &str) -> Option<i32> {
     value.split(|character: char| !character.is_ascii_digit()).filter(|part| part.len() == 4).filter_map(|part| part.parse::<i32>().ok()).find(|year| (1450..=2100).contains(year))
 }
 
@@ -347,7 +347,7 @@ mod delimiter_tests {
         for value in ["The Old Money Book_ How to Live Better While Spending Less_ How to Live-Acorn Street Press (2020)", "The Old Money Book__ How to Live Better While Spending Less___ HOW TO LIVE (2020)"] {
             let parsed = filename_identity_evidence(value);
             assert_eq!(parsed.title, "The Old Money Book: How to Live Better While Spending Less");
-            assert_eq!(parsed.publication_year, Some(2020));
+            assert_eq!(parsed.book_year, Some(2020));
         }
         assert_eq!(filename_identity_evidence("Title_ A Better Life_ A Better Life").title, "Title: A Better Life");
         for value in ["Title_ How to Live_ How to Live Better", "Title_ How to Live_ How to Leave", "Title_ A Guide_ A", "Title_ First Subtitle_ Different Subtitle", "Title_ How to Live_ How to Live_ Extra"] {
@@ -412,7 +412,7 @@ mod delimiter_tests {
     #[test]
     fn brackets_extract_identity_and_remove_distribution_notes() {
         assert_eq!(edition_identity_evidence("Algorithms [Jeff Erickson] [2019] [electronic resource]"),
-            EditionIdentityEvidence { title: "Algorithms".into(), author: Some("Jeff Erickson".into()), publication_year: Some(2019) });
+            EditionIdentityEvidence { title: "Algorithms".into(), author: Some("Jeff Erickson".into()), book_year: Some(2019) });
         assert_eq!(edition_identity_evidence("History [z-lib.org]").title, "History");
         assert_eq!(edition_identity_evidence("History [scan (archive)]").title, "History");
         assert_eq!(edition_identity_evidence("History (scan [archive])").title, "History");

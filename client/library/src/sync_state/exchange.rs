@@ -24,12 +24,22 @@ pub fn apply_prepared_pull_page_in_tx(tx: &rusqlite::Transaction<'_>, page: &Pul
 }
 
 pub fn inventory_checkpoint(conn: &rusqlite::Connection) -> Result<Option<StateCell>, Box<dyn std::error::Error>> {
-    crate::sync_state::get_sync_metadata(conn, "inventory_repair_after")?.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    use rusqlite::OptionalExtension;
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row("SELECT inventory_repair_kind, inventory_repair_key, inventory_repair_subkey FROM sync_metadata WHERE singleton = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()?;
+    Ok(row.and_then(|(kind, key, subkey)| kind.map(|kind| StateCell { kind, entity_key: key.unwrap_or_default(), entity_subkey: subkey.unwrap_or_default() })))
 }
 
 pub fn save_inventory_checkpoint(conn: &rusqlite::Connection, after: Option<StateCell>) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(after) = after {
-        crate::sync_state::set_sync_metadata(conn, "inventory_repair_after", &serde_json::to_string(&after)?)?;
+        conn.execute(
+            "INSERT INTO sync_metadata(singleton, inventory_repair_kind, inventory_repair_key, inventory_repair_subkey) VALUES (1, ?1, ?2, ?3)
+            ON CONFLICT(singleton) DO UPDATE SET inventory_repair_kind = excluded.inventory_repair_kind, inventory_repair_key = excluded.inventory_repair_key, inventory_repair_subkey = excluded.inventory_repair_subkey",
+            rusqlite::params![after.kind, after.entity_key, after.entity_subkey],
+        )?;
     } else {
         conn.execute(include_str!("sql/exchange/save_inventory_checkpoint_delete.sql"), [])?;
     }

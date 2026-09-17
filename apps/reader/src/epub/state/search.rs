@@ -1,4 +1,4 @@
-//! EPUB search visibility, debounce, and whole-publication scanning.
+//! EPUB search visibility, debounce, and whole-book scanning.
 
 use std::time::Duration;
 
@@ -46,8 +46,8 @@ impl ReaderView {
             return true;
         }
         let request = self.search.current_request();
-        let provider = self.publication.provider.clone();
-        let documents = self.publication.document_uris.clone();
+        let provider = self.book.provider.clone();
+        let documents = self.book.document_uris.clone();
         let cancellation = self.search.cancellation.clone();
         let executor = cx.background_executor().clone();
         self.with_renderer(cx, |renderer, cx| {

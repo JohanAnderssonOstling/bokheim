@@ -1,1 +1,1 @@
-DELETE FROM book_publication_value WHERE book_row_id=?1 AND kind=?2
+DELETE FROM book_value WHERE book_row_id=?1 AND kind=?2

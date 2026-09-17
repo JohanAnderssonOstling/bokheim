@@ -1,6 +1,6 @@
 use super::{
-    active_generation_in, advance_catalog_transport_revision, allocate_sequence, catalog_book_format_from_storage, decode_cached, params, replace_publication_subjects_prepared, sql_decode_error, storage_i64, stored_u64, unix_timestamp,
-    upsert_active_publication, CatalogOcrBackfillJob, CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, OptionalExtension, TransactionBehavior,
+    active_generation_in, advance_catalog_transport_revision, allocate_sequence, catalog_book_format_from_storage, decode_cached, params, replace_book_subjects_prepared, sql_decode_error, storage_i64, stored_u64, unix_timestamp,
+    upsert_active_book, CatalogOcrBackfillJob, CatalogBook, CatalogBookIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, OptionalExtension, TransactionBehavior,
     CATALOG_METADATA_BACKFILL_VERSION,
 };
 use std::io;
@@ -17,9 +17,9 @@ impl CatalogStore {
                    JOIN catalog_epub_extraction extraction
                      ON extraction.source_id=backfill.source_id AND extraction.acquisition_url=backfill.acquisition_url
                    JOIN catalog_source source ON source.source_id=backfill.source_id
-                  JOIN catalog_publication publication
-                     ON publication.source_id=backfill.source_id AND publication.generation=source.active_generation
-                    AND publication.acquisition_url=backfill.acquisition_url
+                  JOIN catalog_book book
+                     ON book.source_id=backfill.source_id AND book.generation=source.active_generation
+                    AND book.acquisition_url=backfill.acquisition_url
                   WHERE backfill.version=?1 AND backfill.status='succeeded' AND backfill.ocr_status='pending'
                     AND extraction.status='succeeded' AND extraction.metadata_payload IS NOT NULL
                     AND NOT EXISTS(
@@ -40,7 +40,7 @@ impl CatalogStore {
                 Ok(CatalogOcrBackfillJob {
                     source_id: CatalogSourceId::parse(&source).map_err(|error| sql_decode_error(io::Error::new(io::ErrorKind::InvalidData, error)))?,
                     acquisition_url: row.get(1)?,
-                    publication: CatalogPublicationIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
+                    book: CatalogBookIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
                     book_format: catalog_book_format_from_storage(&format).ok_or_else(|| sql_decode_error(io::Error::new(io::ErrorKind::InvalidData, format!("unsupported OCR book format {format}"))))?,
                     attempt: stored_u64(row.get(5)?, "OCR backfill attempt")?,
                 })
@@ -70,21 +70,21 @@ impl CatalogStore {
     }
 
     pub fn finish_ocr_backfill(
-        &self, source_id: &CatalogSourceId, acquisition_url: &str, publication: &CatalogPublication, subjects: &[publication_model::PublicationSubject], assignments: &[CatalogSubjectAssignment], attempt: u64,
+        &self, source_id: &CatalogSourceId, acquisition_url: &str, book: &CatalogBook, subjects: &[book_model::BookSubject], assignments: &[CatalogSubjectAssignment], attempt: u64,
     ) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = active_generation_in(&transaction, source_id)?;
         let current_acquisition_url = transaction
             .query_row(
-                "SELECT acquisition_url FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
-                params![source_id.as_str(), storage_i64(generation, "generation")?, publication.identity.edition_id, publication.identity.work_id.as_deref().unwrap_or("")],
+                "SELECT acquisition_url FROM catalog_book WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+                params![source_id.as_str(), storage_i64(generation, "generation")?, book.identity.edition_id, book.identity.work_id.as_deref().unwrap_or("")],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
         if current_acquisition_url.as_deref() != Some(acquisition_url) {
             transaction.execute(
-                "UPDATE catalog_metadata_backfill SET ocr_status='not_needed',ocr_last_error='publication is no longer active' WHERE source_id=?1 AND acquisition_url=?2 AND ocr_status='running' AND ocr_attempts=?3",
+                "UPDATE catalog_metadata_backfill SET ocr_status='not_needed',ocr_last_error='book is no longer active' WHERE source_id=?1 AND acquisition_url=?2 AND ocr_status='running' AND ocr_attempts=?3",
                 params![source_id.as_str(), acquisition_url, storage_i64(attempt, "OCR backfill attempt")?],
             )?;
             transaction.commit()?;
@@ -99,21 +99,21 @@ impl CatalogStore {
             return Ok(false);
         }
         let current_payload = transaction.query_row(
-            "SELECT payload FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
-            params![source_id.as_str(), storage_i64(generation, "generation")?, publication.identity.edition_id, publication.identity.work_id.as_deref().unwrap_or("")],
+            "SELECT payload FROM catalog_book WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            params![source_id.as_str(), storage_i64(generation, "generation")?, book.identity.edition_id, book.identity.work_id.as_deref().unwrap_or("")],
             |row| row.get::<_, Vec<u8>>(0),
         )?;
-        let mut current_publication: CatalogPublication = decode_cached(&current_payload)?;
-        current_publication.metadata.subjects = publication.metadata.subjects.clone();
-        upsert_active_publication(&transaction, source_id, generation, &current_publication)?;
+        let mut current_book: CatalogBook = decode_cached(&current_payload)?;
+        current_book.metadata.subjects = book.metadata.subjects.clone();
+        upsert_active_book(&transaction, source_id, generation, &current_book)?;
         let sequence = allocate_sequence(&transaction, source_id)?;
-        let identity = &current_publication.identity;
+        let identity = &current_book.identity;
         transaction.execute(
-            "UPDATE catalog_publication SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            "UPDATE catalog_book SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
             params![source_id.as_str(), storage_i64(generation, "generation")?, identity.edition_id, identity.work_id.as_deref().unwrap_or(""), sequence],
         )?;
-        replace_publication_subjects_prepared(&transaction, source_id, generation, identity, subjects, assignments)?;
-        transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&current_publication)?])?;
+        replace_book_subjects_prepared(&transaction, source_id, generation, identity, subjects, assignments)?;
+        transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&current_book)?])?;
         advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(true)

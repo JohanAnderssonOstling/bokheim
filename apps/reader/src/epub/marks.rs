@@ -7,7 +7,7 @@
 //! reader has.
 
 use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
-use library_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle, ReaderAnnotation};
 
 use crate::epub::Selection;
 
@@ -64,7 +64,7 @@ fn highlight_color(color: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use library_model::{AnnotationAnchor, AnnotationStyle};
+    use book_model::{AnnotationAnchor, AnnotationStyle};
 
     const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
@@ -115,8 +115,8 @@ mod tests {
     #[test]
     fn overlays_skip_annotations_the_renderer_cannot_place() {
         let mut pdf_annotation = annotation("pdf", "#f6c945");
-        let rects = vec![library_model::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
-        let anchor = library_model::PdfAnnotationAnchor::new(0, rects, None);
+        let rects = vec![book_model::PdfAnnotationRect { left: 0.1, top: 0.1, width: 0.2, height: 0.05 }];
+        let anchor = book_model::PdfAnnotationAnchor::new(0, rects, None);
         pdf_annotation.anchor = AnnotationAnchor::pdf(anchor);
         let annotations = vec![annotation("epub", "#f6c945"), pdf_annotation];
 

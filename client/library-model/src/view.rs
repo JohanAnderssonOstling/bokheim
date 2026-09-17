@@ -1,4 +1,7 @@
-use crate::{AuthorId, AuthorName, AuthorNameError, ContentHash};
+use catalog_model::{AuthorName, AuthorNameError};
+use content_address::ContentHash;
+use crate::BookTocEntry;
+use book_model::AuthorId;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
@@ -60,7 +63,7 @@ impl std::fmt::Display for SubjectPath {
     }
 }
 
-/// Limits hierarchical library browsing to one broad publication family.
+/// Limits hierarchical library browsing to one broad book family.
 /// `Book` intentionally means every supported reading format except PDF and
 /// M4B, which have dedicated filters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,38 +352,6 @@ pub struct BookDetailCredit {
     pub role: String,
 }
 
-/// A reader target in the publication's own hierarchical navigation model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BookTocEntry {
-    pub title: String,
-    pub target: String,
-    pub children: Vec<BookTocEntry>,
-}
-
-pub const AUDIOBOOK_TOC_TARGET_PREFIX: &str = "audiobook-position-ms:";
-
-pub fn audiobook_toc_target(position_ms: u64) -> String {
-    format!("{AUDIOBOOK_TOC_TARGET_PREFIX}{position_ms}")
-}
-
-pub fn audiobook_toc_position(target: &str) -> Option<u64> {
-    target.strip_prefix(AUDIOBOOK_TOC_TARGET_PREFIX)?.parse().ok()
-}
-
-/// A PDF outline entry points at a page rather than at a document fragment, so
-/// it carries the page the way an audiobook chapter carries its offset. An
-/// EPUB target needs no prefix: it is the publisher's own href, and resolving
-/// it to a document and anchor is the renderer's business.
-pub const PDF_TOC_TARGET_PREFIX: &str = "pdf-page:";
-
-pub fn pdf_toc_target(page_index: usize) -> String {
-    format!("{PDF_TOC_TARGET_PREFIX}{page_index}")
-}
-
-pub fn pdf_toc_page(target: &str) -> Option<usize> {
-    target.strip_prefix(PDF_TOC_TARGET_PREFIX)?.parse().ok()
-}
-
 /// Complete initial payload for a book detail screen. Related books are kept
 /// in the same response for native callers; browser workers may still resolve
 /// the command independently from route rendering.
@@ -398,7 +369,7 @@ pub struct BookDetail {
     /// Canonical full paths. Frontends display their leaf and use the complete
     /// value for navigation and accessible names.
     pub subject_paths: Vec<String>,
-    /// Narrators and translators, in the order the publication credits them.
+    /// Narrators and translators, in the order the book credits them.
     pub credits: Vec<BookDetailCredit>,
     /// Where the reader is, named: "Against the Tide?" rather than a percentage
     /// nobody can picture. Absent for a book nobody has opened, and for one
@@ -512,23 +483,7 @@ impl AuthorSort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_id_from_migration_seed;
-
-    #[test]
-    fn toc_targets_round_trip_and_reject_other_formats() {
-        let audiobook_target = audiobook_toc_target(3_726_500);
-        assert_eq!(audiobook_target, "audiobook-position-ms:3726500");
-        assert_eq!(audiobook_toc_position(&audiobook_target), Some(3_726_500));
-        assert_eq!(audiobook_toc_position("chapter.xhtml"), None);
-        assert_eq!(audiobook_toc_position("audiobook-position-ms:not-a-number"), None);
-
-        let pdf_target = pdf_toc_target(42);
-        assert_eq!(pdf_target, "pdf-page:42");
-        assert_eq!(pdf_toc_page(&pdf_target), Some(42));
-        assert_eq!(pdf_toc_page("chapter.xhtml#part2"), None);
-        assert_eq!(pdf_toc_page(&audiobook_target), None);
-        assert_eq!(pdf_toc_page("pdf-page:"), None);
-    }
+    use book_model::agent_id_from_migration_seed;
 
     #[test]
     fn author_summary_uses_sort_name_fallback_and_distinct_identity() {

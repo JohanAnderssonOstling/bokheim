@@ -1,6 +1,6 @@
 pub(super) use super::data::{AppDataLocation, BackendContext, LibraryEntry, LibraryRegistry};
 pub(super) use crate::LibraryId;
-use crate::executor::{BackendExecutor, BackendTask};
+use crate::executor::{BackendExecutor, BackendTask, LibraryExecutor};
 use serde::Serialize;
 pub(super) use std::collections::HashSet;
 pub(super) use std::path::{Path, PathBuf};

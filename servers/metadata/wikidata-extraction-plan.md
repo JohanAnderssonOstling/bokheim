@@ -25,17 +25,17 @@ its editions. Do not restrict authors to entities with a writer occupation.
 | Authors | P50 | Agent identities; retain P1545 ordering when present |
 | Author name strings | P2093 | Name evidence without inventing an author entity |
 | Edition/version/translation parent | P629 | Resolve edition-to-work relationships after scanning |
-| Publication dates | P577 | Edition discrimination, preserving date precision |
-| Publication language | P407 | Distinguish language editions |
+| Book dates | P577 | Edition discrimination, preserving date precision |
+| Book language | P407 | Distinguish language editions |
 | Publisher | P123 | Supporting edition evidence |
 | Genre and main subjects | P136, P921 | Typed genre/topic links, separate from LCC |
 | Series and sequence | P179, P155, P156 | Series membership and predecessor/successor links |
 | Volume, issue, edition and ordering | P478, P433, P393, P1545 | Preserve values and qualifiers on their original record |
 | Translators, editors and illustrators | P655, P98, P110 | Contributor identities with distinct roles |
 | Page count | P1104 | Edition-specific quantity, preserving bounds and units |
-| Publication place and format | P291, P437 | Edition-specific publication context |
+| Book place and format | P291, P437 | Edition-specific book context |
 | Available text and scans | P953, P996, P724 | Links/references only; no content download in the scan |
-| LCC | P8360 | Explicit publication classification evidence |
+| LCC | P8360 | Explicit book classification evidence |
 | Open Library IDs | P648 | Crosswalk works, editions, and authors by ID type |
 | Author dates | P569, P570 | Birth/death dates with precision |
 | Occupations | P106 | Author roles and profile browsing |
@@ -229,7 +229,7 @@ builder selects bibliographic records and authors from this projected evidence;
 projection alone is not a ready-to-query book/author database.
 
 Genre and main-subject QIDs remain distinct from explicit LCC. Page counts,
-formats, publication places and contributor roles retain edition scope. Preserve
+formats, book places and contributor roles retain edition scope. Preserve
 series order qualifiers and directed predecessor/successor relationships rather
 than assuming the order of statements is the order of books. Digital-text and
 scan references are metadata only.

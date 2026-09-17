@@ -196,7 +196,7 @@ impl AssetApplication {
             let actual = self.store.put(user_id, AssetKind::Book, checksum, Some(length), reader).await?;
             let phase_started = std::time::Instant::now();
             if self.store.book_identity(checksum).await? != *identity { return Err(AssetError::HashMismatch); }
-            tracing::debug!(target: "sync_performance", phase = "verify_publication_identity", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+            tracing::debug!(target: "sync_performance", phase = "verify_book_identity", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
             let phase_started = std::time::Instant::now();
             let result = assets::finish_book_revision_upload(&self.pool, user_id, library_id, identity, checksum, &admission, actual).await;
             tracing::debug!(target: "sync_performance", phase = "commit_upload_accounting", ok = result.is_ok(), elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
@@ -255,11 +255,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn mutable_book_revisions_keep_identity_verify_bytes_and_isolate_accounts() {
-        let pool = crate::test_support::isolated_pool("publication_revisions", 4).await.expect("test database required");
+        let pool = crate::test_support::isolated_pool("book_revisions", 4).await.expect("test database required");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("book.m4b");
         std::fs::write(&path, include_bytes!("../../../../../client/backend/tests/fixtures/embedded-cover.m4b")).unwrap();
-        let identity = publication_identity::ensure(&path).unwrap();
+        let identity = book_identity::ensure(&path).unwrap();
         let first = std::fs::read(&path).unwrap();
         let first_checksum = ContentHash::new(blake3::hash(&first).to_hex().as_str());
         assert_ne!(identity, first_checksum);

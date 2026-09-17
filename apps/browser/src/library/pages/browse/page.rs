@@ -89,6 +89,12 @@ enum LoadIntent {
     Refresh,
 }
 
+impl LoadIntent {
+    fn reveals_end(self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone)]
 struct PendingLoad {
     location: String,
@@ -1041,15 +1047,10 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         components::folder_breadcrumb_trail(breadcrumb).into_any_element()
     }
 
-    fn breadcrumb_drop_target(&self, item: BreadcrumbItem, destination: DirId, page: Entity<Self>) -> BreadcrumbItem {
-        item.with_interaction(move |item| {
-            let drop_page = page.clone();
-            item.on_drop::<FolderTargets>(move |targets, window, cx| {
-                let targets = targets.clone();
-                let _ = drop_page.update(cx, |page, cx| page.drop_onto_folder(destination, targets, window, cx));
-            })
-            .can_drop(move |dragged, _, _| dragged.downcast_ref::<FolderTargets>().is_some_and(|targets| !targets.all_in_folder(destination) && !targets.folders.contains(&destination)))
-        })
+    fn breadcrumb_drop_target(&self, item: BreadcrumbItem, _destination: DirId, _page: Entity<Self>) -> BreadcrumbItem {
+        // BreadcrumbItem is intentionally click-only in the component library.
+        // Folder drops remain available on folder cards and the page body.
+        item
     }
 
     fn paginator_groups(&self, cx: &mut Context<Self>) -> Vec<PaginatorGroup> {

@@ -1,4 +1,4 @@
-// Asset files outside SQLite's handle pool. Rust owns publication and lifetimes.
+// Asset files outside SQLite's handle pool. Rust owns book and lifetimes.
 const handles = new Map();
 const opening = new Map();
 async function stagedFile(name, create = false) {
@@ -24,7 +24,7 @@ export function closeStaged(name) {
 export function readStaged(name, offset, bytes) { return handles.get(name).read(bytes, {at: offset}); }
 export function retireStaged(name) {
     closeStaged(name);
-    // Deletion follows index publication; failure can be retried on cleanup.
+    // Deletion follows index book; failure can be retried on cleanup.
     (async () => {
         let directory = await navigator.storage.getDirectory();
         for (const component of name.split('/').slice(0, -1)) directory = await directory.getDirectoryHandle(component);

@@ -12,7 +12,6 @@ pub enum LibrarySyncState {
     Synced,
     SyncPending,
     SignInRequired,
-    DifferentAccount,
     RemoteMissing,
 }
 

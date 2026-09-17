@@ -1,1 +1,0 @@
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded,last_scan) VALUES('00000000-0000-0000-0000-000000000000',(SELECT row_id FROM book WHERE content_hash=?1),'missing.epub','old',1,1)

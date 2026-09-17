@@ -15,7 +15,7 @@ message EditionIdentityQuery {
   string title = 2;
   repeated string authors = 3;
   repeated string publishers = 4;
-  optional sint32 publication_year = 5;
+  optional sint32 book_year = 5;
 }
 
 message EditionIdentityResponse {
@@ -41,9 +41,9 @@ message EditionIdentityMatch {
   EditionTitleMatch title_match = 6;
   repeated string authors = 7;
   repeated string publishers = 8;
-  optional sint32 publication_year = 9;
+  optional sint32 book_year = 9;
   bool matched_publisher = 10;
-  bool matched_publication_year = 11;
+  bool matched_book_year = 11;
   repeated Classification classifications = 12;
   optional string subtitle = 13;
 }

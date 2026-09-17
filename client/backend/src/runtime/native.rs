@@ -255,7 +255,7 @@ impl crate::LibraryClient {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum NoHostCommand {}
 impl NoHostCommand {
-    pub(crate) fn is_publication_subscription(&self) -> bool {
+    pub(crate) fn is_book_subscription(&self) -> bool {
         match *self {}
     }
     pub(crate) async fn dispatch_app(self, _: AppBackend) -> Result<WorkerDispatchResult, String> {

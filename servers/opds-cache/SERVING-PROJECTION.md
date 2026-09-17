@@ -15,7 +15,7 @@ removed.
 
 ## Transactions and recovery
 
-1. Triggers coalesce active-publication changes into a journal. Inactive crawl
+1. Triggers coalesce active-book changes into a journal. Inactive crawl
    staging does not dirty individual books; activation records one source marker.
 2. The projector briefly reserves the authoritative SQLite writer, pins a second
    connection's WAL read snapshot, and advances the journal observation epoch.
@@ -34,7 +34,7 @@ removed.
 Ordinary catalog revision changes never clear the serving tables or restart a
 source cursor. A newer activation of that source restarts only its reconciliation.
 The cursor walks both active catalog identities and previous serving identities,
-so deletion does not require retaining publication rows in the authority.
+so deletion does not require retaining book rows in the authority.
 
 Initial creation and taxonomy/schema versions use a new sidecar. Readers use the
 authoritative fallback until initial source reconciliation is ready, then switch
@@ -54,7 +54,7 @@ source cursors still advance transactionally with changes.
 
 ## Diagnostics
 
-Debug log `catalogue serving projection batch` reports publication count,
+Debug log `catalogue serving projection batch` reports book count,
 `fence_ms` (writer reservation through durable fence commit), `preparation_ms`,
 and `commit_ms` (sidecar transaction). These measure separate resources; the
 preparation time is not catalog writer-lock duration.

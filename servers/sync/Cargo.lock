@@ -331,6 +331,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "book-identity"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "content-address",
+ "fs2",
+ "lopdf",
+ "pdf-range-reader",
+ "tempfile",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1942,18 +1954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "publication-identity"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "content-address",
- "fs2",
- "lopdf",
- "pdf-range-reader",
- "tempfile",
-]
-
-[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2588,8 +2588,8 @@ name = "server-asset-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "book-identity",
  "image",
- "publication-identity",
  "sync-common",
  "tempfile",
  "thiserror 1.0.69",
@@ -2630,7 +2630,7 @@ name = "server-postgres"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "publication-identity",
+ "book-identity",
  "server-asset-store",
  "sqlx",
  "sync-common",

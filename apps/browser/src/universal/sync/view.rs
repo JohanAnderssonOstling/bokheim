@@ -607,7 +607,6 @@ impl SyncPage {
             LibrarySyncState::SyncPending => ("Changes pending", Tag::warning()),
             LibrarySyncState::SignInRequired => ("Sign in required", Tag::warning()),
             LibrarySyncState::RemoteMissing => ("Not on server", Tag::warning()),
-            LibrarySyncState::DifferentAccount => ("Unavailable", Tag::danger()),
             LibrarySyncState::LocalOnly => ("Local", Tag::secondary()),
         };
         tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(label.to_owned()).into_any_element()

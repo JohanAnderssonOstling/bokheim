@@ -4,21 +4,25 @@ use crate::schema::init_db;
 #[cfg(test)]
 use crate::schema::library_write_transaction;
 #[cfg(test)]
-use crate::sync_state::queries::SyncSql;
+use crate::sync_state::SyncSql;
+use include_sqlite_sql::include_sql;
 use rusqlite::Connection;
 use sync_common::ContentHash;
 
 /// Retain the small inspection-completion flag on book; the text lives only in
 /// book_description. Empty, never-stored descriptions need no additional row.
 pub(super) fn set(conn: &Connection, hash: ContentHash, description: &str) -> rusqlite::Result<()> {
-    conn.execute(include_str!("sql/descriptions/set_insert.sql"), rusqlite::params![hash.as_str(), description])?;
-    conn.execute(include_str!("sql/descriptions/set_update.sql"), [hash.as_str()])?;
+    conn.set_description(hash.as_str(), description)?;
+    conn.mark_description_scanned(hash.as_str())?;
     Ok(())
 }
+
+include_sql!("src/descriptions/sql/descriptions.sql");
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_state::set_sync_metadata;
 
     #[test]
     fn description_edits_sync_invalidate_browse_and_cascade_without_book_text() {
@@ -38,7 +42,7 @@ mod tests {
         tx.commit().unwrap();
         assert_eq!(conn.total_changes(), changes);
         conn.execute(include_str!("sql/descriptions/description_edits_sync_invalidate_browse_and_cascade_without_book_text_delete.sql"), []).unwrap();
-        conn.set_sync_metadata("change_origin", "remote").unwrap();
+        set_sync_metadata(&conn, "change_origin", "remote").unwrap();
         let tx = library_write_transaction(&mut conn).unwrap();
         super::super::metadata::update_book_description(&tx, hash, "Remote description").unwrap();
         tx.commit().unwrap();

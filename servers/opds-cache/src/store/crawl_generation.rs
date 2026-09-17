@@ -1,6 +1,6 @@
 use super::{
-    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, decode_cached, ensure_source_in, insert_staged_publication, next_sequence_in, params, put_page_row, queue_publication_extraction,
-    rebuild_subject_assignments, refresh_active_counts, source_state_in, storage_i64, unix_timestamp, CatalogCrawlGeneration, CatalogPublication, CatalogPublicationIdentity, CatalogSourceId, CatalogSourceState, CatalogStore,
+    active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, decode_cached, ensure_source_in, insert_staged_book, next_sequence_in, params, put_page_row, queue_book_extraction,
+    rebuild_subject_assignments, refresh_active_counts, source_state_in, storage_i64, unix_timestamp, CatalogCrawlGeneration, CatalogBook, CatalogBookIdentity, CatalogSourceId, CatalogSourceState, CatalogStore,
     CatalogStoreError, OptionalExtension, PreparedCatalogPageWrite, Transaction, TransactionBehavior, ENRICHED_SUBJECT_POSITION_BASE,
 };
 impl CatalogStore {
@@ -11,7 +11,7 @@ impl CatalogStore {
         let active = active_generation_in(&transaction, source_id)?;
         let generation = active.checked_add(1).ok_or_else(|| CatalogStoreError::new("catalog generation overflow"))?;
         transaction.execute("DELETE FROM catalog_page WHERE source_id=?1 AND generation=?2", params![source_id.as_str(), storage_i64(generation, "generation")?])?;
-        transaction.execute("DELETE FROM catalog_publication WHERE source_id=?1 AND generation=?2", params![source_id.as_str(), storage_i64(generation, "generation")?])?;
+        transaction.execute("DELETE FROM catalog_book WHERE source_id=?1 AND generation=?2", params![source_id.as_str(), storage_i64(generation, "generation")?])?;
         transaction.execute("UPDATE catalog_source SET last_crawl_started_at=?2, crawl_status='running', last_crawl_error=NULL WHERE source_id=?1", params![source_id.as_str(), unix_timestamp()?])?;
         transaction.commit()?;
         Ok(CatalogCrawlGeneration { source_id: source_id.clone(), generation })
@@ -44,7 +44,7 @@ impl CatalogStore {
     }
 
     /// Stages several replacement-crawl pages in one bounded transaction.
-    /// Encoding and publication preparation remain outside BEGIN IMMEDIATE.
+    /// Encoding and book preparation remain outside BEGIN IMMEDIATE.
     pub(crate) fn stage_prepared_pages(&self, crawl: &CatalogCrawlGeneration, pages: &[PreparedCatalogPageWrite]) -> Result<(), CatalogStoreError> {
         if pages.is_empty() {
             return Ok(());
@@ -55,18 +55,18 @@ impl CatalogStore {
         for prepared_page in pages {
             let write = &prepared_page.write;
             put_page_row(&transaction, &crawl.source_id, crawl.generation, &write.page, &prepared_page.payload, write.etag.as_deref(), write.last_modified.as_deref(), write.provider_paginated)?;
-            for publication in &prepared_page.publications {
-                insert_staged_publication(&transaction, &crawl.source_id, crawl.generation, publication)?;
-                copy_subject_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
-                copy_toc_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
-                copy_popularity_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &publication.publication.identity)?;
+            for book in &prepared_page.books {
+                insert_staged_book(&transaction, &crawl.source_id, crawl.generation, book)?;
+                copy_subject_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &book.book.identity)?;
+                copy_toc_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &book.book.identity)?;
+                copy_popularity_metadata(&transaction, &crawl.source_id, active_generation, crawl.generation, &book.book.identity)?;
             }
         }
         transaction.commit()?;
         Ok(())
     }
 
-    /// Assigns stable publication sequences to a bounded slice of a hidden
+    /// Assigns stable book sequences to a bounded slice of a hidden
     /// generation. Each call commits independently so a large catalogue never
     /// monopolizes SQLite's single writer.
     pub fn prepare_crawl_activation_batch(&self, crawl: &CatalogCrawlGeneration, batch_size: usize) -> Result<bool, CatalogStoreError> {
@@ -79,7 +79,7 @@ impl CatalogStore {
         let active_generation = storage_i64(active, "generation")?;
         let staged = {
             let mut statement = transaction.prepare(
-                "SELECT edition_id,work_id,payload_hash FROM catalog_publication
+                "SELECT edition_id,work_id,payload_hash FROM catalog_book
                  WHERE source_id=?1 AND generation=?2 AND sequence=0
                  ORDER BY edition_id,work_id LIMIT ?3",
             )?;
@@ -89,7 +89,7 @@ impl CatalogStore {
         for (edition_id, work_id, payload_hash) in &staged {
             let previous_sequence = transaction
                 .query_row(
-                    "SELECT sequence FROM catalog_publication
+                    "SELECT sequence FROM catalog_book
                      WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND payload_hash=?5",
                     params![crawl.source_id.as_str(), active_generation, edition_id, work_id, payload_hash],
                     |row| row.get::<_, i64>(0),
@@ -98,19 +98,19 @@ impl CatalogStore {
             let sequence = match previous_sequence {
                 Some(sequence) => sequence,
                 None => {
-                    next_sequence = next_sequence.checked_add(1).ok_or_else(|| CatalogStoreError::new("publication sequence overflow"))?;
-                    storage_i64(next_sequence, "publication sequence")?
+                    next_sequence = next_sequence.checked_add(1).ok_or_else(|| CatalogStoreError::new("book sequence overflow"))?;
+                    storage_i64(next_sequence, "book sequence")?
                 }
             };
             transaction.execute(
-                "UPDATE catalog_publication SET sequence=?5
+                "UPDATE catalog_book SET sequence=?5
                  WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4 AND sequence=0",
                 params![crawl.source_id.as_str(), generation, edition_id, work_id, sequence],
             )?;
         }
-        transaction.execute("UPDATE catalog_source SET next_sequence=?2 WHERE source_id=?1", params![crawl.source_id.as_str(), storage_i64(next_sequence, "publication sequence")?])?;
+        transaction.execute("UPDATE catalog_source SET next_sequence=?2 WHERE source_id=?1", params![crawl.source_id.as_str(), storage_i64(next_sequence, "book sequence")?])?;
         let remaining = staged.len() == usize::try_from(batch_size).unwrap_or(usize::MAX)
-            && transaction.query_row("SELECT EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND sequence=0)", params![crawl.source_id.as_str(), generation], |row| row.get::<_, bool>(0))?;
+            && transaction.query_row("SELECT EXISTS(SELECT 1 FROM catalog_book WHERE source_id=?1 AND generation=?2 AND sequence=0)", params![crawl.source_id.as_str(), generation], |row| row.get::<_, bool>(0))?;
         transaction.commit()?;
         Ok(remaining)
     }
@@ -121,26 +121,26 @@ impl CatalogStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = storage_i64(crawl.generation, "generation")?;
-        let unprepared = transaction.query_row("SELECT EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND sequence=0)", params![crawl.source_id.as_str(), generation], |row| row.get::<_, bool>(0))?;
+        let unprepared = transaction.query_row("SELECT EXISTS(SELECT 1 FROM catalog_book WHERE source_id=?1 AND generation=?2 AND sequence=0)", params![crawl.source_id.as_str(), generation], |row| row.get::<_, bool>(0))?;
         if unprepared {
             return Err(CatalogStoreError::new("crawl generation must be prepared before activation"));
         }
 
-        let (page_count, publication_count, epub_count): (i64, i64, i64) = transaction.query_row(
+        let (page_count, book_count, epub_count): (i64, i64, i64) = transaction.query_row(
             "SELECT
                  (SELECT COUNT(*) FROM catalog_page WHERE source_id=?1 AND generation=?2),
                  COUNT(*),
                  COALESCE(SUM(CASE WHEN book_format='epub' AND importable=1 THEN 1 ELSE 0 END), 0)
-             FROM catalog_publication WHERE source_id=?1 AND generation=?2",
+             FROM catalog_book WHERE source_id=?1 AND generation=?2",
             params![crawl.source_id.as_str(), generation],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         transaction.execute(
             "UPDATE catalog_source
              SET active_generation=?2, last_crawl_succeeded_at=?3, crawl_status='succeeded', last_crawl_error=NULL,
-                 active_page_count=?4, active_publication_count=?5, active_epub_count=?6
+                 active_page_count=?4, active_book_count=?5, active_epub_count=?6
              WHERE source_id=?1",
-            params![crawl.source_id.as_str(), generation, unix_timestamp()?, page_count, publication_count, epub_count],
+            params![crawl.source_id.as_str(), generation, unix_timestamp()?, page_count, book_count, epub_count],
         )?;
         advance_catalog_transport_revision(&transaction)?;
         let state = source_state_in(&transaction, &crawl.source_id)?.expect("crawl source exists");
@@ -150,7 +150,7 @@ impl CatalogStore {
 
     /// Reconciles a bounded slice of the durable extraction queue with the
     /// active generation. Stale jobs are removed only after every retained
-    /// publication has been marked with the new generation.
+    /// book has been marked with the new generation.
     pub fn reconcile_active_epub_extractions_batch(&self, source_id: &CatalogSourceId, batch_size: usize) -> Result<bool, CatalogStoreError> {
         let batch_size = i64::try_from(batch_size.clamp(1, 1_024)).map_err(|_| CatalogStoreError::new("extraction reconciliation batch size overflow"))?;
         let mut connection = self.connection()?;
@@ -158,43 +158,43 @@ impl CatalogStore {
         let generation = active_generation_in(&transaction, source_id)?;
         let payloads = {
             let mut statement = transaction.prepare(
-                "SELECT publication.payload
-                 FROM catalog_publication publication
+                "SELECT book.payload
+                 FROM catalog_book book
                  LEFT JOIN catalog_epub_extraction extraction
-                   ON extraction.source_id=publication.source_id AND extraction.acquisition_url=publication.acquisition_url
-                 WHERE publication.source_id=?1 AND publication.generation=?2
-                   AND publication.acquisition_url IS NOT NULL AND publication.extraction_format IS NOT NULL
+                   ON extraction.source_id=book.source_id AND extraction.acquisition_url=book.acquisition_url
+                 WHERE book.source_id=?1 AND book.generation=?2
+                   AND book.acquisition_url IS NOT NULL AND book.extraction_format IS NOT NULL
                    AND (extraction.acquisition_url IS NULL OR extraction.catalog_generation IS NOT ?2)
-                 ORDER BY publication.edition_id,publication.work_id LIMIT ?3",
+                 ORDER BY book.edition_id,book.work_id LIMIT ?3",
             )?;
             let rows = statement.query_map(params![source_id.as_str(), storage_i64(generation, "generation")?, batch_size], |row| row.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
             rows
         };
         for payload in &payloads {
-            let publication: CatalogPublication = decode_cached(payload)?;
-            queue_publication_extraction(&transaction, source_id, generation, &publication, false)?;
+            let book: CatalogBook = decode_cached(payload)?;
+            queue_book_extraction(&transaction, source_id, generation, &book, false)?;
         }
-        let more_publications = transaction.query_row(
+        let more_books = transaction.query_row(
             "SELECT EXISTS(
-                 SELECT 1 FROM catalog_publication publication
+                 SELECT 1 FROM catalog_book book
                  LEFT JOIN catalog_epub_extraction extraction
-                   ON extraction.source_id=publication.source_id AND extraction.acquisition_url=publication.acquisition_url
-                 WHERE publication.source_id=?1 AND publication.generation=?2
-                   AND publication.acquisition_url IS NOT NULL AND publication.extraction_format IS NOT NULL
+                   ON extraction.source_id=book.source_id AND extraction.acquisition_url=book.acquisition_url
+                 WHERE book.source_id=?1 AND book.generation=?2
+                   AND book.acquisition_url IS NOT NULL AND book.extraction_format IS NOT NULL
                    AND (extraction.acquisition_url IS NULL OR extraction.catalog_generation IS NOT ?2)
              )",
             params![source_id.as_str(), storage_i64(generation, "generation")?],
             |row| row.get::<_, bool>(0),
         )?;
         let mut stale_removed = 0;
-        if !more_publications {
+        if !more_books {
             stale_removed = transaction.execute(
                 "DELETE FROM catalog_epub_extraction WHERE rowid IN (
                      SELECT extraction.rowid FROM catalog_epub_extraction extraction
                      WHERE extraction.source_id=?1 AND NOT EXISTS(
-                         SELECT 1 FROM catalog_publication publication
-                         WHERE publication.source_id=extraction.source_id AND publication.generation=?2
-                           AND publication.acquisition_url=extraction.acquisition_url
+                         SELECT 1 FROM catalog_book book
+                         WHERE book.source_id=extraction.source_id AND book.generation=?2
+                           AND book.acquisition_url=extraction.acquisition_url
                      )
                      LIMIT ?3
                  )",
@@ -202,7 +202,7 @@ impl CatalogStore {
             )?;
         }
         transaction.commit()?;
-        Ok(more_publications || stale_removed == usize::try_from(batch_size).unwrap_or(usize::MAX))
+        Ok(more_books || stale_removed == usize::try_from(batch_size).unwrap_or(usize::MAX))
     }
 
     /// Reclaims inactive generations without monopolizing SQLite's writer
@@ -219,14 +219,14 @@ impl CatalogStore {
             params![source_id.as_str(), active, batch_size],
         )?;
         transaction.execute(
-            "DELETE FROM catalog_publication WHERE rowid IN (
-                 SELECT rowid FROM catalog_publication WHERE source_id=?1 AND generation<>?2 LIMIT ?3
+            "DELETE FROM catalog_book WHERE rowid IN (
+                 SELECT rowid FROM catalog_book WHERE source_id=?1 AND generation<>?2 LIMIT ?3
              )",
             params![source_id.as_str(), active, batch_size],
         )?;
         let remaining = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM catalog_page WHERE source_id=?1 AND generation<>?2)
-                 OR EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation<>?2)",
+                 OR EXISTS(SELECT 1 FROM catalog_book WHERE source_id=?1 AND generation<>?2)",
             params![source_id.as_str(), active],
             |row| row.get::<_, bool>(0),
         )?;
@@ -244,7 +244,7 @@ impl CatalogStore {
     }
 }
 
-fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
+fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogBookIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
@@ -252,15 +252,15 @@ fn copy_subject_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourc
     let to_generation = storage_i64(to_generation, "generation")?;
     let work_id = identity.work_id.as_deref().unwrap_or("");
     transaction.execute(
-        "INSERT OR IGNORE INTO catalog_publication_subject(source_id,generation,edition_id,work_id,position,name,source,authority,code)
-         SELECT source_id,?2,edition_id,work_id,position,name,source,authority,code FROM catalog_publication_subject
+        "INSERT OR IGNORE INTO catalog_book_subject(source_id,generation,edition_id,work_id,position,name,source,authority,code)
+         SELECT source_id,?2,edition_id,work_id,position,name,source,authority,code FROM catalog_book_subject
          WHERE source_id=?1 AND generation=?3 AND edition_id=?4 AND work_id=?5 AND position>=?6",
         params![source_id.as_str(), to_generation, from_generation, identity.edition_id, work_id, ENRICHED_SUBJECT_POSITION_BASE],
     )?;
     rebuild_subject_assignments(transaction, source_id, to_generation, identity, None)
 }
 
-fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
+fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogBookIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
@@ -268,15 +268,15 @@ fn copy_toc_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId,
     let to_generation = storage_i64(to_generation, "generation")?;
     let work_id = identity.work_id.as_deref().unwrap_or("");
     transaction.execute(
-        "INSERT OR IGNORE INTO catalog_publication_toc(source_id,generation,edition_id,work_id,position,normalized_title)
-         SELECT source_id,?2,edition_id,work_id,position,normalized_title FROM catalog_publication_toc
+        "INSERT OR IGNORE INTO catalog_book_toc(source_id,generation,edition_id,work_id,position,normalized_title)
+         SELECT source_id,?2,edition_id,work_id,position,normalized_title FROM catalog_book_toc
          WHERE source_id=?1 AND generation=?3 AND edition_id=?4 AND work_id=?5",
         params![source_id.as_str(), to_generation, from_generation, identity.edition_id, work_id],
     )?;
     Ok(())
 }
 
-fn copy_popularity_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogPublicationIdentity) -> Result<(), CatalogStoreError> {
+fn copy_popularity_metadata(transaction: &Transaction<'_>, source_id: &CatalogSourceId, from_generation: u64, to_generation: u64, identity: &CatalogBookIdentity) -> Result<(), CatalogStoreError> {
     if from_generation == to_generation {
         return Ok(());
     }
@@ -284,10 +284,10 @@ fn copy_popularity_metadata(transaction: &Transaction<'_>, source_id: &CatalogSo
     let to_generation = storage_i64(to_generation, "generation")?;
     let work_id = identity.work_id.as_deref().unwrap_or("");
     transaction.execute(
-        "INSERT OR IGNORE INTO catalog_publication_popularity(
+        "INSERT OR IGNORE INTO catalog_book_popularity(
             source_id,generation,edition_id,work_id,want_to_read_count,currently_reading_count,already_read_count,reading_log_count,rating_count,rating_sum
          ) SELECT source_id,?2,edition_id,work_id,want_to_read_count,currently_reading_count,already_read_count,reading_log_count,rating_count,rating_sum
-           FROM catalog_publication_popularity
+           FROM catalog_book_popularity
           WHERE source_id=?1 AND generation=?3 AND edition_id=?4 AND work_id=?5",
         params![source_id.as_str(), to_generation, from_generation, identity.edition_id, work_id],
     )?;

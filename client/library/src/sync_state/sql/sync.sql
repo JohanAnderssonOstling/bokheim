@@ -31,16 +31,6 @@ ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
     replica_seq=excluded.replica_seq,
     mutation_id=excluded.mutation_id;
 
--- name: get_sync_metadata_value?
--- param: key: &str
-SELECT value FROM sync_metadata WHERE key = :key;
-
--- name: set_sync_metadata!
--- param: key: &str
--- param: value: &str
-INSERT INTO sync_metadata (key, value) VALUES (:key, :value)
-ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-
 -- name: acknowledge_mutation!
 -- param: mutation_id: &str
 DELETE FROM sync_outbox WHERE mutation_id=:mutation_id;

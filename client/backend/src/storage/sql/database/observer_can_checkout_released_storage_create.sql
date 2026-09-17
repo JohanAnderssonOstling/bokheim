@@ -1,1 +1,0 @@
-CREATE TABLE value(number INTEGER)

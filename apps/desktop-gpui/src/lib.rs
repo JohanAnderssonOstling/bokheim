@@ -76,14 +76,14 @@ fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, _: &mut App) 
 }
 
 /// Install and open the existing Bokheim browser/reader UI in the selected GPUI platform.
-pub struct IncomingPublication {
+pub struct IncomingBook {
     pub name: String,
     pub path: std::path::PathBuf,
 }
-pub type IncomingPublicationResult = Result<IncomingPublication, String>;
+pub type IncomingBookResult = Result<IncomingBook, String>;
 
 #[cfg(any(target_os = "android", test))]
-fn stage_incoming_publication(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
+fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write as _;
     const RESERVED_BYTES: u64 = 128 * 1024 * 1024;
     let mut destination = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
@@ -93,7 +93,7 @@ fn stage_incoming_publication(mut source: impl std::io::Read, path: &std::path::
     loop {
         if bytes_until_check == 0 {
             if fs2::available_space(directory)? <= RESERVED_BYTES {
-                return Err(std::io::Error::other("not enough free storage to stage publication"));
+                return Err(std::io::Error::other("not enough free storage to stage book"));
             }
             bytes_until_check = 8 * 1024 * 1024;
         }
@@ -111,16 +111,16 @@ fn stage_incoming_publication(mut source: impl std::io::Read, path: &std::path::
 #[cfg(test)]
 mod incoming_tests {
     #[test]
-    fn stages_an_incoming_reader_without_buffering_the_publication() {
+    fn stages_an_incoming_reader_without_buffering_the_book() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("incoming.part");
-        super::stage_incoming_publication(std::io::Cursor::new(b"incoming publication"), &path).unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"incoming publication");
+        super::stage_incoming_book(std::io::Cursor::new(b"incoming book"), &path).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"incoming book");
     }
 }
 
 pub fn open_ui(
-    backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingPublicationResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<()>>, cx: &mut App,
+    backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingBookResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<()>>, cx: &mut App,
 ) -> Option<WeakEntity<ApplicationRoot>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(error) = cx.text_system().add_fonts(vec![
@@ -334,7 +334,7 @@ fn open_extra_window(services: AppServices, backend: AppClient, playback_restore
     }
 }
 
-fn forward_incoming_files(files: async_channel::Receiver<IncomingPublicationResult>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
+fn forward_incoming_files(files: async_channel::Receiver<IncomingBookResult>, application_root: Rc<RefCell<Option<WeakEntity<ApplicationRoot>>>>, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Ok(result) = files.recv().await {
             let Some(root) = application_root.borrow().clone() else {

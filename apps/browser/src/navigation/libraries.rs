@@ -77,7 +77,6 @@ impl Libraries {
         // uses the initial local list and subscribes to discovery updates.
         let sessions = library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), id, cx)))).collect();
         let mut libraries = Self { backend, open_book, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, navigate, _list_updates: list_updates };
-        libraries.publish_active_library(cx);
         libraries
     }
 

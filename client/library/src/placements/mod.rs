@@ -3,18 +3,18 @@
 use super::assets::get_dir_path_components;
 use crate::assets::add_asset_request;
 use crate::assets::get_book_dir_entry_by_path;
-use crate::books::queries::BooksSql;
+use crate::books::BooksSql;
+use crate::browse::BrowsingSql;
 use crate::file_work::placement_path;
 use crate::file_work::queue_directory_work;
 use crate::file_work::queue_file_work;
-use crate::local_paths::RelativeBookPath;
-use crate::local_paths::RelativeDirPath;
-use crate::placements::queries::PlacementsSql;
+use library_replica::{RelativeBookPath, RelativeDirPath};
 use crate::storage_values::invalid_text_column;
 use crate::storage_values::parse_uuid_column;
 use crate::storage_values::unix_millis;
+use include_sqlite_sql::include_sql;
 #[cfg(test)]
-use library_model::BookFormat;
+use book_model::BookFormat;
 use library_model::Dir;
 use library_model::LibraryFolderDestination;
 use library_model::LibraryTrashView;
@@ -37,14 +37,14 @@ fn choose_move_folder_name(conn: &Connection, parent: &str, excluded: &str, requ
     let mut statement = conn.prepare_cached(include_str!("sql/placements/choose_move_folder_name_select.sql"))?;
     // Bound probes so a heavily duplicated base name still uses one bulk scan.
     for number in 1..=8 {
-        let candidate = if number == 1 { requested.to_owned() } else { library_model::numbered_folder_name(requested, number) };
-        let occupied: bool = statement.query_row(rusqlite::params![parent, library_model::portable_name_key(&candidate), excluded], |row| row.get(0))?;
+        let candidate = if number == 1 { requested.to_owned() } else { library_replica::numbered_folder_name(requested, number) };
+        let occupied: bool = statement.query_row(rusqlite::params![parent, library_replica::portable_name_key(&candidate), excluded], |row| row.get(0))?;
         if !occupied {
             return Ok(candidate);
         }
     }
     let names = conn.prepare(include_str!("sql/placements/choose_move_folder_name_select_2.sql"))?.query_map(rusqlite::params![parent, excluded], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    Ok(library_model::unique_folder_name(requested, names.iter().map(String::as_str)))
+    Ok(library_replica::unique_folder_name(requested, names.iter().map(String::as_str)))
 }
 
 /// Live database names reserved in a destination. Physical collisions are checked by the file store.
@@ -65,14 +65,14 @@ pub fn is_live_destination(conn: &Connection, directory: &DirId) -> rusqlite::Re
 fn choose_move_file_name(conn: &Connection, destination: &str, requested: &str) -> Result<String, rusqlite::Error> {
     let mut statement = conn.prepare_cached(include_str!("sql/placements/choose_move_file_name_select.sql"))?;
     for number in 1..=8 {
-        let candidate = if number == 1 { requested.to_owned() } else { library_model::numbered_file_name(requested, number) };
-        let occupied: bool = statement.query_row(rusqlite::params![destination, library_model::portable_name_key(&candidate)], |row| row.get(0))?;
+        let candidate = if number == 1 { requested.to_owned() } else { library_replica::numbered_file_name(requested, number) };
+        let occupied: bool = statement.query_row(rusqlite::params![destination, library_replica::portable_name_key(&candidate)], |row| row.get(0))?;
         if !occupied {
             return Ok(candidate);
         }
     }
     let names = occupied_file_names(conn, destination)?;
-    Ok(library_model::unique_file_name(requested, names.iter().map(String::as_str)))
+    Ok(library_replica::unique_file_name(requested, names.iter().map(String::as_str)))
 }
 
 pub fn directory_relative_path(conn: &Connection, dir_id: &DirId) -> Result<Option<RelativeDirPath>, rusqlite::Error> {
@@ -210,7 +210,7 @@ pub fn copy_directory_record(transaction: &Transaction, directory_id: &DirId, de
         return Err(invalid_text_column(0, "a folder cannot be copied into itself"));
     }
     let occupied = transaction.prepare(include_str!("sql/placements/copy_directory_record_select_2.sql"))?.query_map([destination_parent_id.to_string()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    let chosen = library_model::unique_folder_name(&name, occupied.iter().map(String::as_str));
+    let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
 
     let copy_id = DirId::new_v4();
     let mut pending = vec![(*directory_id, copy_id, chosen, *destination_parent_id)];
@@ -229,7 +229,7 @@ pub fn copy_directory_record(transaction: &Transaction, directory_id: &DirId, de
             // Names are already unique within the source folder and the copy is
             // empty, so each placement keeps the name it had.
             transaction.execute(include_str!("sql/placements/copy_directory_record_insert.sql"), rusqlite::params![copy_id.to_string(), hash.as_str(), file_name, i32::from(downloaded)])?;
-            super::assets::copy_publication_baseline(transaction, &source_id, &copy_id, &ContentHash::new(&hash))?;
+            super::assets::copy_book_baseline(transaction, &source_id, &copy_id, &ContentHash::new(&hash))?;
             #[cfg(not(target_arch = "wasm32"))]
             queue_file_work(transaction, "restore", &ContentHash::new(&hash), &placement_path(transaction, &copy_id, &file_name)?)?;
         }
@@ -260,7 +260,7 @@ pub fn restore_book_placement_record(transaction: &Transaction, content_hash: &C
         .prepare(include_str!("sql/placements/restore_book_placement_record_select_3.sql"))?
         .query_map(rusqlite::params![directory_id.to_string(), content_hash.as_str()], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let chosen = library_model::unique_file_name(&requested, occupied.iter().map(String::as_str));
+    let chosen = library_replica::unique_file_name(&requested, occupied.iter().map(String::as_str));
     transaction.execute(include_str!("sql/placements/restore_book_placement_record_update.sql"), [content_hash.as_str()])?;
     transaction.execute(include_str!("sql/placements/restore_book_placement_record_insert.sql"), rusqlite::params![directory_id.to_string(), content_hash.as_str(), chosen])?;
     #[cfg(not(target_arch = "wasm32"))]
@@ -286,7 +286,7 @@ pub fn transfer_book_placement_record(transaction: &Transaction, content_hash: &
     } else {
         let chosen = choose_move_file_name(transaction, &destination_id.to_string(), &source_name)?;
         transaction.execute(include_str!("sql/placements/transfer_book_placement_record_insert.sql"), rusqlite::params![destination_id.to_string(), content_hash.as_str(), chosen, i32::from(downloaded)])?;
-        super::assets::copy_publication_baseline(transaction, source_id, destination_id, content_hash)?;
+        super::assets::copy_book_baseline(transaction, source_id, destination_id, content_hash)?;
         chosen
     };
     if remove_source {
@@ -377,7 +377,7 @@ pub fn restore_book_record_with_parent(tx: &Transaction, content_hash: &ContentH
             existing
         } else {
             let occupied = occupied_file_names(&tx, &target.to_string())?;
-            library_model::unique_file_name(&name, occupied.iter().map(String::as_str))
+            library_replica::unique_file_name(&name, occupied.iter().map(String::as_str))
         };
         tx.execute(include_str!("sql/placements/restore_book_record_with_parent_insert.sql"), rusqlite::params![target.to_string(), content_hash.as_str(), chosen])?;
         queue_file_work(tx, "restore", content_hash, &placement_path(tx, &target, &chosen)?)?;
@@ -390,7 +390,7 @@ pub fn restore_book_record_with_parent(tx: &Transaction, content_hash: &ContentH
 /// retaining its synchronized identity and Purged lifecycle tombstone.
 ///
 /// Filesystem-backed callers remove projected files separately; browser callers
-/// similarly remove their OPFS publication after this transaction commits.
+/// similarly remove their OPFS book after this transaction commits.
 pub fn purge_book_record(tx: &Transaction, content_hash: &ContentHash) -> Result<(), rusqlite::Error> {
     tx.execute(include_str!("sql/placements/purge_book_record_insert.sql"), [content_hash.as_str()])?;
     let book_row_id = tx.query_row(include_str!("sql/placements/purge_book_record_select.sql"), [content_hash.as_str()], |row| row.get::<_, i64>(0)).optional()?.ok_or_else(|| invalid_text_column(0, "book is not in Trash"))?;
@@ -410,9 +410,8 @@ pub fn purge_book_record(tx: &Transaction, content_hash: &ContentHash) -> Result
         include_str!("sql/purge_book_external_entity.sql"),
         include_str!("sql/purge_external_metadata_attempt.sql"),
         include_str!("sql/purge_book_collection.sql"),
-        include_str!("sql/purge_book_publication_date.sql"),
-        include_str!("sql/purge_book_publication_value.sql"),
-        include_str!("sql/purge_catalog_publication_book.sql"),
+        include_str!("sql/purge_book_date.sql"),
+        include_str!("sql/purge_book_value.sql"),
         include_str!("sql/purge_annotation.sql"),
     ] {
         tx.execute(sql, [book_row_id])?;
@@ -463,7 +462,7 @@ pub fn restore_directory_record(tx: &Transaction, directory_id: &DirId, requeste
     let parent = if directory_exists(tx, &requested_parent.to_string())? { requested_parent } else { sync_common::ROOT_DIR_ID };
     let occupied =
         tx.prepare(include_str!("sql/placements/choose_move_folder_name_select_2.sql"))?.query_map(rusqlite::params![parent.to_string(), directory_id.to_string()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    let chosen = library_model::unique_folder_name(&name, occupied.iter().map(String::as_str));
+    let chosen = library_replica::unique_folder_name(&name, occupied.iter().map(String::as_str));
     upsert_dir(tx, directory_id, &parent, &chosen)?;
     queue_directory_work(tx, directory_id)?;
     let restored_files = tx
@@ -501,7 +500,7 @@ pub fn empty_trash_records(tx: &Transaction) -> Result<(), rusqlite::Error> {
 }
 
 #[cfg(any(test, feature = "scanner"))]
-pub use super::scanner::{BookDir, book_has_live_placement, get_book_dirs_by_local_fingerprint, get_tombstoned_book_file_keys, insert_book, mark_known_book_dirs_seen};
+pub use super::scanner::{book_has_live_placement, get_book_dirs_by_local_fingerprint, get_tombstoned_book_file_keys, insert_book, mark_known_book_dirs_seen, BookDir};
 pub use super::scanner::{insert_imported_book_dir, insert_local_book_dir};
 
 #[cfg(test)]
@@ -656,5 +655,13 @@ mod tests {
     }
 }
 
-pub(crate) mod queries;
-pub use queries::*;
+include_sql!("src/placements/sql/placements.sql");
+
+pub fn directory_exists(conn: &rusqlite::Connection, directory_id: &str) -> rusqlite::Result<bool> {
+    let mut exists = false;
+    conn.live_directory_exists(directory_id, |row| {
+        exists = row.get(0)?;
+        Ok(())
+    })?;
+    Ok(exists)
+}

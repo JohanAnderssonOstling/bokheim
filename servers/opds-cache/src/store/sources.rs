@@ -6,9 +6,9 @@ impl CatalogStore {
         let mut staged=connection.prepare("SELECT DISTINCT staged_path FROM catalog_epub_extraction p WHERE source_id=?1 AND staged_path IS NOT NULL
             AND NOT EXISTS(SELECT 1 FROM catalog_epub_extraction other WHERE other.source_id!=?1 AND other.staged_path=p.staged_path)")?;
         let paths=staged.query_map([source.as_str()], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?;
-        let mut own=connection.prepare("SELECT image_url FROM catalog_cover_download WHERE source_id=?1 UNION SELECT cover_url FROM catalog_publication WHERE source_id=?1 AND cover_url IS NOT NULL")?;
+        let mut own=connection.prepare("SELECT image_url FROM catalog_cover_download WHERE source_id=?1 UNION SELECT cover_url FROM catalog_book WHERE source_id=?1 AND cover_url IS NOT NULL")?;
         let urls=own.query_map([source.as_str()], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?;
-        let mut others=connection.prepare("SELECT image_url FROM catalog_cover_download WHERE source_id!=?1 UNION SELECT cover_url FROM catalog_publication WHERE source_id!=?1 AND cover_url IS NOT NULL")?;
+        let mut others=connection.prepare("SELECT image_url FROM catalog_cover_download WHERE source_id!=?1 UNION SELECT cover_url FROM catalog_book WHERE source_id!=?1 AND cover_url IS NOT NULL")?;
         let retained=others.query_map([source.as_str()], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?;
         Ok((paths,urls,retained))
     }
@@ -74,8 +74,8 @@ pub(crate) fn refresh_active_counts(transaction: &Transaction<'_>, source_id: &C
     transaction.execute(
         "UPDATE catalog_source
          SET active_page_count=(SELECT COUNT(*) FROM catalog_page WHERE source_id=?1 AND generation=?2),
-             active_publication_count=(SELECT COUNT(*) FROM catalog_publication WHERE source_id=?1 AND generation=?2),
-             active_epub_count=(SELECT COUNT(*) FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND book_format='epub' AND importable=1)
+             active_book_count=(SELECT COUNT(*) FROM catalog_book WHERE source_id=?1 AND generation=?2),
+             active_epub_count=(SELECT COUNT(*) FROM catalog_book WHERE source_id=?1 AND generation=?2 AND book_format='epub' AND importable=1)
          WHERE source_id=?1",
         params![source_id.as_str(), generation],
     )?;

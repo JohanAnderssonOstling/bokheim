@@ -1,6 +1,6 @@
 //! Shared review rules for filesystem roots and provider-backed directory trees.
 use gpui::SelectedDirectory;
-use library_model::BookFormat;
+use book_model::BookFormat;
 
 fn eligible(path: &[String]) -> bool {
     !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| std::path::Path::new(name).extension()).and_then(|ext| ext.to_str()).and_then(BookFormat::from_import_extension).is_some()

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use bokheim_backend::LibraryClient;
 use gpui::App;
-use library_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle, ReaderAnnotation};
 
 use crate::shell::persistence::MutationWriter;
 
@@ -156,7 +156,7 @@ pub(crate) fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use library_model::AnnotationAnchor;
+    use book_model::AnnotationAnchor;
 
     const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 

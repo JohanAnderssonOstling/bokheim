@@ -1,9 +1,9 @@
 use super::{
-    publication_cover_fallback, publication_metadata_acquisition, CatalogPage, CatalogProcess, CatalogService, CatalogServiceError, CatalogSourceId, BROWSER_UPSTREAM_TIMEOUT, COVER_RECONCILIATION_BATCH, EPUB_EXTRACTION_SWEEP_INTERVAL,
+    book_cover_fallback, book_metadata_acquisition, CatalogPage, CatalogProcess, CatalogService, CatalogServiceError, CatalogSourceId, BROWSER_UPSTREAM_TIMEOUT, COVER_RECONCILIATION_BATCH, EPUB_EXTRACTION_SWEEP_INTERVAL,
 };
-use crate::extraction::{generate_publication_thumbnail, is_synthetic_cover_key};
-use catalog_model::{CatalogSourcedPublication, CatalogSubjectBrowseEntryPayload};
-use catalog_protocol::CatalogPublicationPayload;
+use crate::extraction::{generate_book_thumbnail, is_synthetic_cover_key};
+use catalog_model::{CatalogSourcedBook, CatalogSubjectBrowseEntryPayload};
+use catalog_protocol::CatalogBookPayload;
 use futures_util::future::join_all;
 impl CatalogService {
     pub(crate) async fn reconcile_active_cover_downloads(&self) -> Result<(), CatalogServiceError> {
@@ -56,42 +56,42 @@ impl CatalogService {
         let outcome_error = self.state.covers.cover(&job.source_id, &job.image_url).await.err().map(|error| error.to_string());
         let cache_job = job.clone();
         if let Err(error) = self.store_write_call_named("cover_finish", move |cache| cache.finish_cover_download(&cache_job, outcome_error.as_deref().map_or(Ok(()), Err))).await {
-            tracing::warn!(source = job.source_id.as_str(), edition = job.publication.edition_id, %error, "could not persist cover download outcome");
+            tracing::warn!(source = job.source_id.as_str(), edition = job.book.edition_id, %error, "could not persist cover download outcome");
         }
     }
 
-    pub(crate) async fn prepare_publication_cover_fallbacks(&self, source_id: &CatalogSourceId, page: &mut CatalogPage) {
-        for publication in page.publications.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.publications.iter_mut())) {
-            let _ = publication_cover_fallback(source_id, publication);
+    pub(crate) async fn prepare_book_cover_fallbacks(&self, source_id: &CatalogSourceId, page: &mut CatalogPage) {
+        for book in page.books.iter_mut().chain(page.groups.iter_mut().flat_map(|group| group.books.iter_mut())) {
+            let _ = book_cover_fallback(source_id, book);
         }
     }
 
-    pub(crate) async fn publicize_payload_covers(&self, payloads: &mut [CatalogPublicationPayload]) {
-        let image_urls = payloads.iter().map(|payload| payload.publication.image_url.clone()).collect::<Vec<_>>();
+    pub(crate) async fn publicize_payload_covers(&self, payloads: &mut [CatalogBookPayload]) {
+        let image_urls = payloads.iter().map(|payload| payload.book.image_url.clone()).collect::<Vec<_>>();
         let references = self.public_cover_references(&image_urls).await;
         for (payload, reference) in payloads.iter_mut().zip(references) {
             if let Some(reference) = reference {
-                payload.publication.image_url = Some(reference);
+                payload.book.image_url = Some(reference);
             }
         }
     }
 
     pub(crate) async fn publicize_subject_covers(&self, payloads: &mut [CatalogSubjectBrowseEntryPayload]) {
-        let image_urls = payloads.iter().map(|payload| payload.publication.publication.image_url.clone()).collect::<Vec<_>>();
+        let image_urls = payloads.iter().map(|payload| payload.book.book.image_url.clone()).collect::<Vec<_>>();
         let references = self.public_cover_references(&image_urls).await;
         for (payload, reference) in payloads.iter_mut().zip(references) {
             if let Some(reference) = reference {
-                payload.publication.publication.image_url = Some(reference);
+                payload.book.book.image_url = Some(reference);
             }
         }
     }
 
-    pub(crate) async fn publicize_sourced_covers(&self, publications: &mut [CatalogSourcedPublication]) {
-        let image_urls = publications.iter().map(|publication| publication.publication.image_url.clone()).collect::<Vec<_>>();
+    pub(crate) async fn publicize_sourced_covers(&self, books: &mut [CatalogSourcedBook]) {
+        let image_urls = books.iter().map(|book| book.book.image_url.clone()).collect::<Vec<_>>();
         let references = self.public_cover_references(&image_urls).await;
-        for (publication, reference) in publications.iter_mut().zip(references) {
+        for (book, reference) in books.iter_mut().zip(references) {
             if let Some(reference) = reference {
-                publication.publication.image_url = Some(reference);
+                book.book.image_url = Some(reference);
             }
         }
     }
@@ -117,10 +117,10 @@ impl CatalogService {
         self.public_endpoint(source_id).await?;
         let cache_source = source_id.clone();
         let cache_image = image_url.to_owned();
-        let active = self.store_call(move |store| store.active_publication_for_cover(&cache_source, &cache_image)).await?.ok_or_else(|| CatalogServiceError("cover URL is not present in the active catalog generation".to_owned()))?;
+        let active = self.store_call(move |store| store.active_book_for_cover(&cache_source, &cache_image)).await?.ok_or_else(|| CatalogServiceError("cover URL is not present in the active catalog generation".to_owned()))?;
         self.state.covers.remember_cover_url(source_id, image_url);
-        let publication_identity = active.identity.clone();
-        let epub_acquisition = publication_metadata_acquisition(&active);
+        let book_identity = active.identity.clone();
+        let epub_acquisition = book_metadata_acquisition(&active);
         if let Some(acquisition) = epub_acquisition {
             let mut upstream_cover_is_unsuitable = false;
             // A real OPDS URL may already have produced a sufficiently large,
@@ -146,7 +146,7 @@ impl CatalogService {
                 let cache_source = source_id.clone();
                 let cache_url = acquisition.url.clone();
                 self.store_write_call(move |cache| cache.queue_epub_extractions(&cache_source, std::slice::from_ref(&cache_url), false)).await?;
-                if let Err(error) = self.enrich_active_publication(source_id, publication_identity.clone(), acquisition.clone(), Some(image_url.to_owned())).await {
+                if let Err(error) = self.enrich_active_book(source_id, book_identity.clone(), acquisition.clone(), Some(image_url.to_owned())).await {
                     tracing::warn!(source = source_id.as_str(), %error, "on-demand EPUB cover enrichment failed");
                 }
                 let deadline = tokio::time::Instant::now() + BROWSER_UPSTREAM_TIMEOUT;
@@ -179,7 +179,7 @@ impl CatalogService {
                 .map_err(|_| CatalogServiceError("interactive cover extraction capacity timed out".to_owned()))?
                 .map_err(|error| CatalogServiceError(error.to_string()))?;
             let path = downloaded.path().to_owned();
-            let thumbnail = tokio::task::spawn_blocking(move || generate_publication_thumbnail(&path)).await.map_err(|error| CatalogServiceError(error.to_string()))?.map_err(CatalogServiceError)?;
+            let thumbnail = tokio::task::spawn_blocking(move || generate_book_thumbnail(&path)).await.map_err(|error| CatalogServiceError(error.to_string()))?.map_err(CatalogServiceError)?;
             drop(downloaded);
             if let Some(thumbnail) = thumbnail {
                 return self.state.covers.cover_with(source_id, image_url, async move { Ok(thumbnail) }).await.map_err(|error| CatalogServiceError(error.to_string()));
@@ -188,7 +188,7 @@ impl CatalogService {
                 let cache_source = source_id.clone();
                 let cache_url = acquisition.url.clone();
                 let cache_image = image_url.to_owned();
-                self.store_write_call(move |store| store.clear_active_publication_cover(&cache_source, &publication_identity, &cache_url, &cache_image)).await?;
+                self.store_write_call(move |store| store.clear_active_book_cover(&cache_source, &book_identity, &cache_url, &cache_image)).await?;
             }
             return Err(CatalogServiceError("EPUB and catalogue do not contain a suitable cover image".to_owned()));
         }

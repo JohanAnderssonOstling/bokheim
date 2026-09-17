@@ -2,15 +2,15 @@
 use crate::metadata;
 use crate::schema::init_db;
 use crate::schema::library_write_transaction;
-use crate::sync_state::queries::SyncSql;
+use crate::sync_state::SyncSql;
 use crate::sync_state::*;
-use library_model::AgentId;
-use library_model::BookFormat;
-use library_model::BookMetadataState;
-use library_model::Contributor;
-use rusqlite::Connection;
+use book_model::AgentId;
+use book_model::BookFormat;
+use book_model::BookRecord;
+use book_model::Contributor;
 use rusqlite::functions::Context as FunctionContext;
 use rusqlite::functions::FunctionFlags;
+use rusqlite::Connection;
 use std::time::Instant;
 
 fn joined_encoder(context: &FunctionContext<'_>) -> rusqlite::Result<Vec<u8>> {
@@ -29,7 +29,7 @@ fn joined_encoder(context: &FunctionContext<'_>) -> rusqlite::Result<Vec<u8>> {
         let sort_name: Option<String> = row.get(2)?;
         let role_bytes: Vec<u8> = row.get(3)?;
         let role_array: [u8; 3] = role_bytes.as_slice().try_into().map_err(|_| function_error("stored contributor role must be exactly 3 bytes"))?;
-        let role = library_model::MarcRelatorCode(role_array);
+        let role = book_model::MarcRelatorCode(role_array);
         let contributor_id = AgentId::parse_str(&stable_id).map_err(|error| function_error(error.to_string()))?;
         contributors.push(Contributor::with_id(contributor_id, name, sort_name, role).map_err(|error| function_error(error.to_string()))?);
     }
@@ -52,7 +52,7 @@ fn legacy_encoder(context: &FunctionContext<'_>) -> rusqlite::Result<Vec<u8>> {
         let sort_name: Option<String> = row.get(2)?;
         let role_bytes: Vec<u8> = row.get(3)?;
         let role_array: [u8; 3] = role_bytes.as_slice().try_into().map_err(|_| function_error("stored contributor role must be exactly 3 bytes"))?;
-        let role = library_model::MarcRelatorCode(role_array);
+        let role = book_model::MarcRelatorCode(role_array);
         let stable_id: String = connection.query_row(include_str!("sql/contributor_encoding_tests/legacy_encoder_select_2.sql"), [author_identity_id], |identity_row| identity_row.get(0))?;
         let contributor_id = AgentId::parse_str(&stable_id).map_err(|error| function_error(error.to_string()))?;
         contributors.push(Contributor::with_id(contributor_id, name, sort_name, role).map_err(|error| function_error(error.to_string()))?);
@@ -60,15 +60,15 @@ fn legacy_encoder(context: &FunctionContext<'_>) -> rusqlite::Result<Vec<u8>> {
     sync_common::wire::encode(&contributors).map_err(|error| function_error(error.to_string()))
 }
 
-fn state(count: usize) -> BookMetadataState {
-    BookMetadataState {
+fn state(count: usize) -> BookRecord {
+    BookRecord {
         title: "Initial".into(),
-        contributors: (0..count).map(|i| Contributor::new(&format!("Contributor {i}"), Some(format!("Sort {i}")), library_model::MarcRelatorCode(if i % 3 == 2 { *b"trl" } else { *b"aut" })).unwrap()).collect(),
+        contributors: (0..count).map(|i| Contributor::new(&format!("Contributor {i}"), Some(format!("Sort {i}")), book_model::MarcRelatorCode(if i % 3 == 2 { *b"trl" } else { *b"aut" })).unwrap()).collect(),
         description: "Fixture description".into(),
-        publication: Default::default(),
+        book: Default::default(),
     }
 }
-fn seed(conn: &mut Connection, metadata: &BookMetadataState) {
+fn seed(conn: &mut Connection, metadata: &BookRecord) {
     init_db(conn).unwrap();
     let tx = library_write_transaction(conn).unwrap();
     for id in 1..=32 {
@@ -99,7 +99,7 @@ fn joined_encoder_matches_previous_bytes_and_rejects_missing_identity() {
         assert_eq!(credits, metadata.contributors);
     }
     conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
-    conn.set_sync_metadata("change_origin", "remote").unwrap();
+    set_sync_metadata(&conn, "change_origin", "remote").unwrap();
     conn.execute(include_str!("sql/contributor_encoding_tests/joined_encoder_matches_previous_bytes_and_rejects_missing_identity_update.sql"), []).unwrap();
     assert!(conn.query_row(include_str!("sql/contributor_encoding_tests/joined_encoder_matches_previous_bytes_and_rejects_missing_identity_select_2.sql"), [], |r| r.get::<_, Vec<u8>>(0)).is_err());
     assert!(conn.query_row(include_str!("sql/contributor_encoding_tests/joined_encoder_matches_previous_bytes_and_rejects_missing_identity_select_3.sql"), [], |r| r.get::<_, Vec<u8>>(0)).is_err());

@@ -10,11 +10,13 @@ audiobook-metadata = ["dep:book-metadata"]
 scanner = []
 
 [dependencies]
-pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
-publication-enrichment = { path = "../../shared/publication-enrichment" }
-publication-inspection = { path = "../../shared/publication-inspection" }
-book-metadata = { path = "../book-metadata", optional = true }
+book-model = { path = "../../shared/book-model" }
+content-address = { path = "../../shared/content-address" }
 catalog-model = { path = "../../shared/catalog-model" }
+pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
+book-enrichment = { path = "../../shared/book-enrichment" }
+book-inspection = { path = "../../shared/book-inspection" }
+book-metadata = { path = "../book-metadata", optional = true }
 include-sqlite-sql = "0.2.1"
 library-model = { path = "../library-model", default-features = false }
 library-replica = { path = "../library-replica", default-features = false }

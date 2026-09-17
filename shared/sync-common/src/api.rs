@@ -10,13 +10,13 @@ pub mod assets {
     use std::collections::HashSet;
     use std::fmt;
 
-    pub const MAX_PUBLICATION_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+    pub const MAX_BOOK_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
     #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct PublicationRanges {
+    pub struct BookRanges {
         pub checksum: ContentHash,
         pub ranges: Vec<(u64, usize)>,
     }
-    impl PublicationRanges {
+    impl BookRanges {
         pub fn byte_count(&self, length: u64) -> Option<usize> {
             if self.ranges.is_empty() || self.ranges.len() > 128 { return None; }
             let mut end = 0;
@@ -25,7 +25,7 @@ pub mod assets {
                 if count == 0 || offset < end { return None; }
                 end = offset.checked_add(count as u64)?;
                 total = total.checked_add(count)?;
-                if end > length || total > MAX_PUBLICATION_BUNDLE_BYTES { return None; }
+                if end > length || total > MAX_BOOK_BUNDLE_BYTES { return None; }
             }
             Some(total)
         }

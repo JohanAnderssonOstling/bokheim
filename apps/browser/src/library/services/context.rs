@@ -151,7 +151,7 @@ impl LibraryContext {
     }
 
     /// Opens the book where the reader asked for it — a contents entry rather
-    /// than wherever they left off. The target is the publication's own, so the
+    /// than wherever they left off. The target is the book's own, so the
     /// reader that receives it is the one that knows how to resolve it.
     pub(crate) fn open_book_at(&self, content_hash: ContentHash, title: String, target: Option<String>, window: &mut Window, cx: &mut App) {
         let locator = BookLocator::new(*self.backend.id(), content_hash);
@@ -166,7 +166,7 @@ struct DroppedImport {
 }
 
 /// Classifies a dropped path and enumerates folders on a background thread.
-/// Publication bytes are opened by the backend only when the import starts.
+/// Book bytes are opened by the backend only when the import starts.
 #[cfg(not(target_arch = "wasm32"))]
 fn scan_dropped_path(path: &std::path::Path) -> Result<DroppedImport, String> {
     let metadata = path.metadata().map_err(|error| format!("{}: {error}", path.display()))?;
@@ -223,7 +223,7 @@ mod tests {
         std::fs::create_dir_all(root.join("Shelf")).unwrap();
         std::fs::create_dir(root.join("Empty")).unwrap();
         std::fs::write(root.join("Shelf/book.EPUB"), b"before selection").unwrap();
-        std::fs::write(root.join("notes.txt"), b"not a publication").unwrap();
+        std::fs::write(root.join("notes.txt"), b"not a book").unwrap();
         std::os::unix::fs::symlink(&root, root.join("Shelf/loop")).unwrap();
         std::os::unix::fs::symlink(root.join("Shelf/book.EPUB"), root.join("linked.epub")).unwrap();
         let selected = scan_dropped_path(&root).unwrap();

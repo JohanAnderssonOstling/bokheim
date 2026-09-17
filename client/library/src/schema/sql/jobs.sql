@@ -80,7 +80,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
     SELECT 'pdf_reader_metadata',NEW.content_hash,NEW.checksum,bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata),
       CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    WHERE COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'),'local')='local'
+    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
       replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
       body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
@@ -90,7 +90,7 @@ BEGIN
     INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
     SELECT 'pdf_reader_metadata',NEW.content_hash,NEW.checksum,bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata),
       CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    WHERE COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'),'local')='local'
+    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
       replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
       body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
@@ -102,3 +102,4 @@ BEGIN
     DELETE FROM pdf_reader_metadata WHERE content_hash=NEW.content_hash;
     DELETE FROM sync_outbox WHERE state_kind='pdf_reader_metadata' AND state_key=NEW.content_hash;
 END;
+

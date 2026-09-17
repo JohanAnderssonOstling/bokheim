@@ -29,7 +29,7 @@ impl Drop for WebPendingRequest<'_> {
 
 pub(crate) struct WebWorkerClient {
     _session: Session,
-    _connection: crate::browser_adapter::BrowserConnection,
+    _connection: crate::web::WebConnection,
     port: SessionSender,
     failure: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     recovering: std::rc::Rc<std::cell::Cell<bool>>,
@@ -40,12 +40,12 @@ pub(crate) struct WebWorkerClient {
 }
 
 impl Transport {
-    pub(crate) async fn connect_web_transport(config: crate::browser_adapter::BrowserConfiguration) -> Result<(Self, AppStartupState), String> {
-        let connection = crate::browser_adapter::BrowserConnection::connect(config).await?;
+    pub(crate) async fn connect_web_transport(config: crate::web::WebConfiguration) -> Result<(Self, AppStartupState), String> {
+        let connection = crate::web::WebConnection::connect(config).await?;
         Self::finish_web_connection(connection).await
     }
 
-    async fn finish_web_connection(connection: crate::browser_adapter::BrowserConnection) -> Result<(Self, AppStartupState), String> {
+    async fn finish_web_connection(connection: crate::web::WebConnection) -> Result<(Self, AppStartupState), String> {
         let port = SessionSender::new(connection.worker.clone(), connection.port());
 
         let pending = std::rc::Rc::new(Pending::<oneshot::Sender<Result<WorkerPayload, String>>>::default());
@@ -180,7 +180,7 @@ impl Transport {
             return Err("Database connection is being restored. Try again shortly.".into());
         }
         let id = self.remote.pending.next_id();
-        let restore = !matches!(&command, WorkerCommand::App(command) if command.is_publication_subscription());
+        let restore = !matches!(&command, WorkerCommand::App(command) if command.is_book_subscription());
         let bytes = encode_worker_message(&AppWorkerClientMessage::Request(AppWorkerRequest { id, command }))?;
         let (sender, receiver) = oneshot::channel();
         self.remote.pending.insert(id, sender);
@@ -320,12 +320,14 @@ impl Transport {
         let command = WorkerCommand::Library { library_id, command: command.command() };
         let (id, receiver) = self.send_web_request(command, None)?;
         let _pending = WebPendingRequest { client: &self.remote, id, subscription: false };
-        decode_worker_payload(receiver.await.map_err(|_| "backend worker stopped during request".to_owned())?)
+        // The outer result reports a lost worker; the inner one is the reply the
+        // library actor produced.
+        decode_worker_payload(receiver.await.map_err(|_| "backend worker stopped during request".to_owned())??)
     }
 }
 
 impl AppClient {
-    pub async fn connect_web(config: crate::host::web::BrowserConfiguration) -> Result<(Self, AppStartupState), String> {
+    pub async fn connect_web(config: crate::host::web::WebConfiguration) -> Result<(Self, AppStartupState), String> {
         let (transport, startup) = Transport::connect_web_transport(config).await?;
         Ok((Self { transport }, startup))
     }
@@ -344,6 +346,6 @@ impl Transport {
         self.remote._connection.import_selected_directory(library.library_id, parent_id, directory, create_root).await
     }
     pub(crate) async fn resolve_book(&self, library: &crate::LibraryClient, content_hash: crate::ContentHash) -> Result<crate::ResolvedBook, String> {
-        crate::browser_adapter::publication_source::resolve_book(library, content_hash).await
+        crate::web::book_source::resolve_book(library, content_hash).await
     }
 }

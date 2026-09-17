@@ -1,6 +1,6 @@
-use super::subject_browse::{CatalogSequencedSubjectPublication, CatalogSubjectBrowseQuery, CatalogSubjectPublicationPage};
+use super::subject_browse::{CatalogSequencedSubjectBook, CatalogSubjectBrowseQuery, CatalogSubjectBookPage};
 use super::*;
-use catalog_model::{CatalogBookFormat, CatalogBookFormatFacetValue, CatalogLanguageFacetValue, CatalogSourcedPublication, CatalogSubjectBrowseCapabilities, CatalogSubjectSort};
+use catalog_model::{CatalogBookFormat, CatalogBookFormatFacetValue, CatalogLanguageFacetValue, CatalogSourcedBook, CatalogSubjectBrowseCapabilities, CatalogSubjectSort};
 
 const SERVING_SOURCE_FILTER: &str = "(json_array_length(?4)=0 OR browse.source_id IN (SELECT value FROM json_each(?4)))";
 const SERVING_LANGUAGE_FILTER: &str = "(json_array_length(?5)=0 OR browse.has_language=0 OR EXISTS(
@@ -20,11 +20,11 @@ const SERVING_SUBJECT_FILTER: &str = "EXISTS(
        AND (?2='' OR subject.node_path=?2)
 )";
 
-pub(super) fn load_publications_if_ready(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<Option<CatalogSubjectPublicationPage>, CatalogStoreError> {
+pub(super) fn load_books_if_ready(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<Option<CatalogSubjectBookPage>, CatalogStoreError> {
     if !serving_index_ready(connection)? {
         return Ok(None);
     }
-    load_publications(connection, query, include_payloads).map(Some)
+    load_books(connection, query, include_payloads).map(Some)
 }
 
 pub(super) fn load_capabilities_if_ready(
@@ -45,7 +45,7 @@ pub(super) fn load_navigation_if_ready(connection: &Connection, query: &CatalogS
            FROM catalog_subject_node node
            JOIN catalog_browse_subject subject
              ON subject.system_id=node.system_id AND subject.node_path=node.node_path
-           JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+           JOIN catalog_browse_book browse ON browse.entry_id=subject.entry_id
           WHERE node.system_id=?1 AND node.parent_path=?2
             AND {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER} AND {SERVING_FORMAT_FILTER}
           ORDER BY node.title"
@@ -81,7 +81,7 @@ fn search_parameter(normalized_query: &str) -> String {
     format!("\"{}\"", normalized_query.replace('"', "\"\""))
 }
 
-fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_payloads: bool) -> ServingQuery {
+fn book_query(normalized_query: &str, sort: CatalogSubjectSort, include_payloads: bool) -> ServingQuery {
     let ordering = match sort {
         CatalogSubjectSort::Popularity => {
             "(page.reading_log_count>0 OR page.rating_count>0) DESC,
@@ -91,10 +91,10 @@ fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_p
         }
         CatalogSubjectSort::Title => "page.normalized_title,page.source_id,page.edition_id,page.work_id",
     };
-    let selection = if include_payloads { "publication.source_id,publication.payload,page.entry_id" } else { "page.entry_id" };
+    let selection = if include_payloads { "book.source_id,book.payload,page.entry_id" } else { "page.entry_id" };
     let payload_join = if include_payloads {
-        "JOIN catalog_publication publication
-           ON publication.entry_id=page.entry_id"
+        "JOIN catalog_book book
+           ON book.entry_id=page.entry_id"
     } else {
         ""
     };
@@ -103,7 +103,7 @@ fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_p
             "WITH filtered AS MATERIALIZED (
                  SELECT browse.*
                    FROM catalog_browse_subject subject
-                   JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+                   JOIN catalog_browse_book browse ON browse.entry_id=subject.entry_id
                   WHERE subject.system_id=?1 AND subject.node_path=?2
                     AND {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER} AND {SERVING_FORMAT_FILTER}
              )"
@@ -116,7 +116,7 @@ fn publication_query(normalized_query: &str, sort: CatalogSubjectSort, include_p
              ), filtered AS MATERIALIZED (
                  SELECT browse.*
                    FROM matching
-                   JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
+                   JOIN catalog_browse_book browse ON browse.entry_id=matching.entry_id
                   WHERE {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER}
                     AND {SERVING_FORMAT_FILTER} AND {SERVING_SUBJECT_FILTER}
              )"
@@ -146,7 +146,7 @@ fn capabilities_query(normalized_query: &str) -> ServingQuery {
             "WITH filtered AS MATERIALIZED (
                  SELECT browse.entry_id,browse.has_language
                    FROM catalog_browse_subject subject
-                   JOIN catalog_browse_publication browse ON browse.entry_id=subject.entry_id
+                   JOIN catalog_browse_book browse ON browse.entry_id=subject.entry_id
                   WHERE subject.system_id=?1 AND subject.node_path=?2 AND {SERVING_SOURCE_FILTER}
              )
              SELECT 'format',format.book_format,COUNT(*)
@@ -168,7 +168,7 @@ fn capabilities_query(normalized_query: &str) -> ServingQuery {
          )
          SELECT 'format',format.book_format,COUNT(*)
            FROM matching
-           JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
+           JOIN catalog_browse_book browse ON browse.entry_id=matching.entry_id
            JOIN catalog_browse_format format ON format.entry_id=browse.entry_id
           WHERE {SERVING_SOURCE_FILTER} AND {SERVING_LANGUAGE_FILTER}
             AND {SERVING_SUBJECT_FILTER}
@@ -176,7 +176,7 @@ fn capabilities_query(normalized_query: &str) -> ServingQuery {
          UNION ALL
          SELECT 'language',language.language,COUNT(*)
            FROM matching
-           JOIN catalog_browse_publication browse ON browse.entry_id=matching.entry_id
+           JOIN catalog_browse_book browse ON browse.entry_id=matching.entry_id
            JOIN catalog_browse_language language ON language.entry_id=browse.entry_id
           WHERE {SERVING_SOURCE_FILTER} AND {SERVING_FORMAT_FILTER}
             AND {SERVING_SUBJECT_FILTER}
@@ -185,8 +185,8 @@ fn capabilities_query(normalized_query: &str) -> ServingQuery {
     ServingQuery { sql, search_parameter: search_parameter(normalized_query) }
 }
 
-fn load_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectPublicationPage, CatalogStoreError> {
-    let query = publication_query(browse.normalized_query, browse.sort, include_payloads);
+fn load_books(connection: &Connection, browse: &CatalogSubjectBrowseQuery<'_>, include_payloads: bool) -> Result<CatalogSubjectBookPage, CatalogStoreError> {
+    let query = book_query(browse.normalized_query, browse.sort, include_payloads);
     let started = Instant::now();
     let mut statement = connection.prepare(&query.sql)?;
     let parameters = params![
@@ -199,26 +199,26 @@ fn load_publications(connection: &Connection, browse: &CatalogSubjectBrowseQuery
         storage_i64(browse.limit.saturating_add(1) as u64, "subject result limit")?,
         storage_i64(browse.offset as u64, "subject result offset")?
     ];
-    let mut publications = Vec::new();
+    let mut books = Vec::new();
     if include_payloads {
         let rows = statement.query_map(parameters, |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?)))?;
         for row in rows {
             let (source, payload, entry_id) = row?;
-            publications.push(CatalogSequencedSubjectPublication {
-                item: Some(CatalogSourcedPublication { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, publication: decode_cached(&payload)? }),
-                entry_id: stored_u64(entry_id, "subject publication entry ID")?,
+            books.push(CatalogSequencedSubjectBook {
+                item: Some(CatalogSourcedBook { source_id: CatalogSourceId::parse(&source).map_err(CatalogStoreError::new)?, book: decode_cached(&payload)? }),
+                entry_id: stored_u64(entry_id, "subject book entry ID")?,
             });
         }
     } else {
         let rows = statement.query_map(parameters, |row| row.get::<_, i64>(0))?;
         for row in rows {
-            publications.push(CatalogSequencedSubjectPublication { item: None, entry_id: stored_u64(row?, "subject publication entry ID")? });
+            books.push(CatalogSequencedSubjectBook { item: None, entry_id: stored_u64(row?, "subject book entry ID")? });
         }
     }
-    let has_more = publications.len() > browse.limit;
-    publications.truncate(browse.limit);
-    tracing::info!(include_payloads, has_more, returned = publications.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject serving page loaded");
-    Ok(CatalogSubjectPublicationPage { publications, has_more })
+    let has_more = books.len() > browse.limit;
+    books.truncate(browse.limit);
+    tracing::info!(include_payloads, has_more, returned = books.len(), elapsed_ms = started.elapsed().as_millis(), "catalogue subject serving page loaded");
+    Ok(CatalogSubjectBookPage { books, has_more })
 }
 
 fn load_capabilities(connection: &Connection, query: &CatalogSubjectBrowseQuery<'_>, selected_formats: &[CatalogBookFormat], selected_languages: &[String]) -> Result<CatalogSubjectBrowseCapabilities, CatalogStoreError> {

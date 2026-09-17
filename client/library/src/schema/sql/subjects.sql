@@ -61,6 +61,14 @@ CREATE TRIGGER subject_browse_audiobook_metadata_update AFTER UPDATE ON audioboo
 BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;
 CREATE TRIGGER subject_browse_audiobook_metadata_delete AFTER DELETE ON audiobook_metadata
 BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;
+-- The card's chapter count is a navigation entry count, so the browse
+-- projection follows book_toc as well as the duration beside it.
+CREATE TRIGGER subject_browse_book_toc_insert AFTER INSERT ON book_toc
+BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER subject_browse_book_toc_update AFTER UPDATE ON book_toc
+BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;
+CREATE TRIGGER subject_browse_book_toc_delete AFTER DELETE ON book_toc
+BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;
 CREATE TRIGGER subject_browse_sync_state_version_insert AFTER INSERT ON sync_state_version
 WHEN NEW.state_kind='reading_position'
 BEGIN UPDATE subject_browse_state SET revision=revision+1 WHERE id=1; END;

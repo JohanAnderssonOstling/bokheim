@@ -2,7 +2,7 @@
 //!
 //! LCC, DDC, LCSH, and LCGFT values are cached with provider provenance.
 //! This module neither bundles classification schedules nor matches embedded
-//! publication subjects against them.
+//! book subjects against them.
 
 use crate::{canonical_isbn13, Classification, ClassificationScheme, ClassificationSource, MetadataError, SubjectHeading};
 use futures_util::StreamExt;

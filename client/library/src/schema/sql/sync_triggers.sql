@@ -67,7 +67,7 @@ BEGIN UPDATE browse_projection_state SET dirty=1 WHERE projection='subject_owner
 CREATE TRIGGER trig_dir_state_insert
 AFTER INSERT ON dir
 WHEN NEW.id != '00000000-0000-0000-0000-000000000000'
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -102,7 +102,7 @@ CREATE TRIGGER trig_dir_name_update
 AFTER UPDATE OF name ON dir
 WHEN NEW.id != '00000000-0000-0000-0000-000000000000'
   AND OLD.name IS NOT NEW.name
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -118,7 +118,7 @@ END;
 CREATE TRIGGER trig_dir_parent_update
 AFTER UPDATE OF parent_id ON dir
 WHEN NEW.id != '00000000-0000-0000-0000-000000000000' AND OLD.parent_id IS NOT NEW.parent_id
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES ('directory_parent', NEW.id, bokheim_mutation('directory_parent', NEW.id, NEW.parent_id),
@@ -132,7 +132,7 @@ CREATE TRIGGER trig_dir_lifecycle_update
 AFTER UPDATE OF deleted_at, purged_at ON dir
 WHEN NEW.id != '00000000-0000-0000-0000-000000000000'
   AND (OLD.deleted_at IS NOT NEW.deleted_at OR OLD.purged_at IS NOT NEW.purged_at)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES ('directory_lifecycle', NEW.id, bokheim_mutation('directory_lifecycle', NEW.id, CASE WHEN NEW.purged_at IS NOT NULL THEN 2 WHEN NEW.deleted_at IS NOT NULL THEN 1 ELSE 0 END),
@@ -145,12 +145,12 @@ END;
 CREATE TRIGGER trig_book_added
 AFTER INSERT ON book
 WHEN NEW.deleted_at IS NULL
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'book_lifecycle', NEW.content_hash,
-        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.format, NULL),
+        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), NEW.book_metadata, COALESCE(NEW.added_at, 0), NEW.format, NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -161,12 +161,12 @@ END;
 CREATE TRIGGER trig_book_added_reactivate
 AFTER UPDATE OF deleted_at, purged_at ON book
 WHEN NEW.deleted_at IS NULL AND (OLD.deleted_at IS NOT NULL OR OLD.purged_at IS NOT NULL)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
         'book_lifecycle', NEW.content_hash,
-        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), NEW.publication_metadata, COALESCE(NEW.added_at, 0), NEW.format, NULL),
+        bokheim_mutation('book_lifecycle', NEW.content_hash, 0, COALESCE(NEW.title, NEW.content_hash), contributors_for_book(NEW.row_id), NEW.book_metadata, COALESCE(NEW.added_at, 0), NEW.format, NULL),
         CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
     )
     ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
@@ -178,7 +178,7 @@ CREATE TRIGGER trig_book_deleted
 AFTER UPDATE OF deleted_at, purged_at ON book
 WHEN NEW.deleted_at IS NOT NULL AND NEW.purged_at IS NULL
   AND (OLD.deleted_at IS NULL OR OLD.purged_at IS NOT NULL)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -194,7 +194,7 @@ END;
 CREATE TRIGGER trig_book_purged
 AFTER UPDATE OF purged_at ON book
 WHEN NEW.purged_at IS NOT NULL AND OLD.purged_at IS NULL
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -338,7 +338,7 @@ END;
 CREATE TRIGGER trig_folder_book_ownership_directory_update
 AFTER UPDATE OF parent_id, deleted_at, purged_at ON dir
 WHEN (OLD.parent_id IS NOT NEW.parent_id OR OLD.deleted_at IS NOT NEW.deleted_at OR OLD.purged_at IS NOT NEW.purged_at)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'), 'local') != 'remote'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') != 'remote'
 BEGIN
     DELETE FROM folder_book_ownership;
     INSERT INTO folder_book_ownership(folder_id, book_row_id, placement_count, downloaded_placement_count)
@@ -361,7 +361,7 @@ END;
 
 CREATE TRIGGER trig_folder_book_ownership_directory_delete
 AFTER DELETE ON dir
-WHEN COALESCE((SELECT value FROM sync_metadata WHERE key='change_origin'), 'local') != 'remote'
+WHEN COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') != 'remote'
 BEGIN
     DELETE FROM folder_book_ownership;
     INSERT INTO folder_book_ownership(folder_id, book_row_id, placement_count, downloaded_placement_count)
@@ -385,7 +385,7 @@ END;
 CREATE TRIGGER trig_book_dir_added_insert
 AFTER INSERT ON book_dir
 WHEN NEW.deleted_at IS NULL
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
@@ -401,7 +401,7 @@ CREATE TRIGGER trig_book_dir_added_reactivate
 AFTER UPDATE OF deleted_at, dir_id, book_row_id ON book_dir
 WHEN NEW.deleted_at IS NULL
   AND (OLD.deleted_at IS NOT NULL OR OLD.dir_id IS NOT NEW.dir_id OR OLD.book_row_id IS NOT NEW.book_row_id)
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
@@ -416,7 +416,7 @@ END;
 CREATE TRIGGER trig_book_dir_deleted
 AFTER UPDATE OF deleted_at ON book_dir
 WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
     VALUES (
@@ -432,7 +432,7 @@ CREATE TRIGGER trig_book_read_pos
 AFTER UPDATE OF read_pos, read_progress ON book
 WHEN NEW.read_pos IS NOT NULL
   AND (COALESCE(OLD.read_pos, '') != COALESCE(NEW.read_pos, '') OR COALESCE(OLD.read_progress, 0) != COALESCE(NEW.read_progress, 0))
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+  AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -447,7 +447,7 @@ END;
 
 CREATE TRIGGER trig_annotation_state_insert
 AFTER INSERT ON annotation
-WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+WHEN COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -463,7 +463,7 @@ END;
 
 CREATE TRIGGER trig_annotation_state_update
 AFTER UPDATE OF anchor_kind, anchor_cfi, anchor_page, anchor_rects, anchor_fallback_cfi, exact_text, style, color, note, modified_at, deleted_at ON annotation
-WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
+WHEN COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1), 'local') = 'local'
 BEGIN
     INSERT INTO sync_outbox(state_kind, state_key, body, changed_at, conflict_rank)
     VALUES (
@@ -477,50 +477,13 @@ BEGIN
         body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
 END;
 
-CREATE TRIGGER trig_catalog_publication_insert
-AFTER INSERT ON catalog_publication_book
-WHEN COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-BEGIN
-    INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
-    VALUES (
-        'catalog_publication', NEW.source_id,
-        catalog_publication_state_subkey(NEW.edition_id, NULLIF(NEW.work_id, '')),
-        bokheim_mutation('catalog_publication', NEW.source_id, NEW.edition_id,
-            NULLIF(NEW.work_id, ''),
-            (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id)),
-        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    )
-    ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
-        replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
-        body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
-END;
-
-CREATE TRIGGER trig_catalog_publication_update
-AFTER UPDATE OF book_row_id ON catalog_publication_book
-WHEN OLD.book_row_id IS NOT NEW.book_row_id
-  AND COALESCE((SELECT value FROM sync_metadata WHERE key = 'change_origin'), 'local') = 'local'
-BEGIN
-    INSERT INTO sync_outbox(state_kind, state_key, state_subkey, body, changed_at, conflict_rank)
-    VALUES (
-        'catalog_publication', NEW.source_id,
-        catalog_publication_state_subkey(NEW.edition_id, NULLIF(NEW.work_id, '')),
-        bokheim_mutation('catalog_publication', NEW.source_id, NEW.edition_id,
-            NULLIF(NEW.work_id, ''),
-            (SELECT content_hash FROM book WHERE row_id=NEW.book_row_id)),
-        CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0
-    )
-    ON CONFLICT(state_kind, state_key, state_subkey) DO UPDATE SET
-        replica_seq=excluded.replica_seq, mutation_id=excluded.mutation_id,
-        body=excluded.body, changed_at=excluded.changed_at, conflict_rank=excluded.conflict_rank;
-END;
-
 CREATE TRIGGER trig_sync_outbox_stamp_insert
 AFTER INSERT ON sync_outbox
 BEGIN
     INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
     VALUES (NEW.state_kind,
         NEW.state_key, NEW.state_subkey, NEW.changed_at, NEW.conflict_rank,
-        COALESCE((SELECT value FROM sync_metadata WHERE key='replica_id'), ''),NEW.replica_seq,NEW.mutation_id)
+        COALESCE((SELECT replica_id FROM sync_metadata WHERE singleton = 1), ''),NEW.replica_seq,NEW.mutation_id)
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET changed_at=excluded.changed_at,
         conflict_rank=excluded.conflict_rank,replica_id=excluded.replica_id,
         replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id;
@@ -531,9 +494,38 @@ AFTER UPDATE OF replica_seq ON sync_outbox
 BEGIN
     INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
     VALUES (NEW.state_kind, NEW.state_key, NEW.state_subkey, NEW.changed_at, NEW.conflict_rank,
-        COALESCE((SELECT value FROM sync_metadata WHERE key='replica_id'), ''),NEW.replica_seq,NEW.mutation_id)
+        COALESCE((SELECT replica_id FROM sync_metadata WHERE singleton = 1), ''),NEW.replica_seq,NEW.mutation_id)
     ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET changed_at=excluded.changed_at,
         conflict_rank=excluded.conflict_rank,replica_id=excluded.replica_id,
         replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id;
 END;
+-- Navigation travels because a replica cannot always rebuild it: an audiobook's
+-- chapters may have come from enrichment rather than from the file, and a
+-- replica that has not downloaded a book has no file to rebuild from at all.
+CREATE TRIGGER IF NOT EXISTS book_toc_insert AFTER INSERT ON book_toc
+BEGIN
+    INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
+    SELECT 'book_toc',NEW.content_hash,'',bokheim_mutation('book_toc',NEW.content_hash,NEW.toc_json),
+      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
+    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
+    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
+      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
+      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+END;
+CREATE TRIGGER IF NOT EXISTS book_toc_update AFTER UPDATE ON book_toc
+BEGIN
+    INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
+    SELECT 'book_toc',NEW.content_hash,'',bokheim_mutation('book_toc',NEW.content_hash,NEW.toc_json),
+      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
+    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
+    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
+      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
+      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+END;
 
+CREATE TRIGGER IF NOT EXISTS book_toc_purge AFTER UPDATE OF purged_at ON book
+WHEN NEW.purged_at IS NOT NULL
+BEGIN
+    DELETE FROM book_toc WHERE content_hash=NEW.content_hash;
+    DELETE FROM sync_outbox WHERE state_kind='book_toc' AND state_key=NEW.content_hash;
+END;

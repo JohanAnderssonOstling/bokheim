@@ -4,7 +4,6 @@
 use rusqlite::{ffi, Connection};
 use std::collections::HashMap;
 use std::ffi::{c_int, c_uint, c_void, CStr};
-use std::panic::Location;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -12,8 +11,8 @@ const SLOW: Duration = Duration::from_secs(1);
 
 struct State {
     database: String,
-    caller: &'static Location<'static>,
-    writer: Option<(Instant, &'static Location<'static>)>,
+    caller: &'static str,
+    writer: Option<(Instant, &'static str)>,
     statement: Option<(Instant, StatementLabel)>,
     waiting: Option<Instant>,
     timeout: Duration,
@@ -36,18 +35,10 @@ pub(crate) fn install(conn: &Connection) {
         if database.is_empty() {
             database = format!("memory:{:x}", db as usize);
         }
-        registry().lock().unwrap_or_else(|p| p.into_inner()).insert(db as usize, State { database, caller: Location::caller(), writer: None, statement: None, waiting: None, timeout: Duration::from_millis(u64::from(timeout_ms)) });
+        registry().lock().unwrap_or_else(|p| p.into_inner()).insert(db as usize, State { database, caller: "SQLite connection", writer: None, statement: None, waiting: None, timeout: Duration::from_millis(u64::from(timeout_ms)) });
         ffi::sqlite3_trace_v2(db, ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE | ffi::SQLITE_TRACE_CLOSE, Some(trace), db.cast());
         // Same timeout budget, now with attribution and bounded retry sleeps.
         ffi::sqlite3_busy_handler(db, Some(busy), db.cast());
-    }
-}
-
-pub(crate) fn set_caller(conn: &Connection, caller: &'static Location<'static>) {
-    let mut states = registry().lock().unwrap_or_else(|p| p.into_inner());
-    // SAFETY: the caller owns this live connection.
-    if let Some(state) = states.get_mut(&(unsafe { conn.handle() } as usize)) {
-        state.caller = caller;
     }
 }
 
@@ -196,7 +187,6 @@ mod tests {
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch(include_str!("sql/database_diagnostics/contending_writer_is_identified_and_waiter_resumes_pragma.sql")).unwrap();
         install(&writer);
-        set_caller(&writer, Location::caller());
         let waiter = Connection::open(&path).unwrap();
         install(&waiter);
         let writer_id = unsafe { writer.handle() } as usize;

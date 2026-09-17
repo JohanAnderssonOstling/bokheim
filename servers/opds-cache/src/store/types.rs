@@ -15,20 +15,20 @@ pub struct CatalogSourceState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SequencedCatalogPublication {
-    pub publication: CatalogPublication,
+pub struct SequencedCatalogBook {
+    pub book: CatalogBook,
     pub sequence: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CatalogSearchMatches {
-    pub title_matches: Vec<SequencedCatalogPublication>,
-    pub author_matches: Vec<SequencedCatalogPublication>,
-    pub toc_matches: Vec<SequencedCatalogPublication>,
+    pub title_matches: Vec<SequencedCatalogBook>,
+    pub author_matches: Vec<SequencedCatalogBook>,
+    pub toc_matches: Vec<SequencedCatalogBook>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CatalogPublicationPopularity {
+pub struct CatalogBookPopularity {
     pub want_to_read_count: u64,
     pub currently_reading_count: u64,
     pub already_read_count: u64,
@@ -36,19 +36,19 @@ pub struct CatalogPublicationPopularity {
     pub rating_sum: u64,
 }
 
-impl CatalogPublicationPopularity {
+impl CatalogBookPopularity {
     pub fn reading_log_count(&self) -> u64 {
         self.want_to_read_count.saturating_add(self.currently_reading_count).saturating_add(self.already_read_count)
     }
 }
 
 /// The same lossless EPUB package metadata retained for imported library
-/// books, plus the publication's hierarchical navigation document. This is a
+/// books, plus the book's hierarchical navigation document. This is a
 /// catalogue-server sidecar and is deliberately not repeated in every card.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogEpubMetadata {
-    pub book: publication_model::BookMetadataState,
-    pub toc: Vec<publication_model::PublicationTocEntry>,
+    pub book: book_model::BookRecord,
+    pub toc: Vec<book_model::BookTocEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub struct CatalogSourceInventory {
     pub last_crawl_error: Option<String>,
     pub crawl_frontier_count: u64,
     pub active_page_count: u64,
-    pub active_publication_count: u64,
+    pub active_book_count: u64,
     pub active_epub_count: u64,
     pub epub_extractions: CatalogEpubExtractionInventory,
 }
@@ -69,7 +69,7 @@ pub struct CatalogSourceInventory {
 pub struct CatalogInventory {
     pub search_index_ready: bool,
     pub active_page_count: u64,
-    pub active_publication_count: u64,
+    pub active_book_count: u64,
     pub active_epub_count: u64,
     pub epub_extractions: CatalogEpubExtractionInventory,
     pub cover_downloads: CatalogCoverDownloadInventory,
@@ -92,7 +92,7 @@ pub struct CatalogCoverDownloadInventory {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogCoverDownloadJob {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub image_url: String,
 }
 
@@ -130,11 +130,11 @@ pub struct CatalogIdentityReviewInventory {
 pub struct CatalogIdentityReview {
     pub review_id: String,
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub title: String,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
     pub status: String,
     pub detail: Option<String>,
     pub candidates: Vec<CatalogIdentityReviewCandidate>,
@@ -151,9 +151,9 @@ pub struct CatalogIdentityReviewCandidate {
     pub subtitle: Option<String>,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
     pub matched_publisher: bool,
-    pub matched_publication_year: bool,
+    pub matched_book_year: bool,
     pub classifications: Vec<String>,
 }
 
@@ -178,9 +178,9 @@ impl From<metadata_contract::EditionIdentityMatch> for CatalogIdentityReviewCand
             subtitle: candidate.subtitle,
             authors: candidate.authors,
             publishers: candidate.publishers,
-            publication_year: candidate.publication_year,
+            book_year: candidate.book_year,
             matched_publisher: candidate.matched_publisher,
-            matched_publication_year: candidate.matched_publication_year,
+            matched_book_year: candidate.matched_book_year,
             classifications,
         }
     }
@@ -202,7 +202,7 @@ pub struct CatalogEpubExtractionInventory {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogEpubExtractionJob {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
     pub book_format: CatalogBookFormat,
     pub cover_key: Option<String>,
@@ -221,13 +221,13 @@ pub struct CatalogMetadataIndex {
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
     pub isbns: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogMetadataBackfillIndexedJob {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
     pub index: CatalogMetadataIndex,
     pub attempt: u64,
@@ -236,10 +236,10 @@ pub struct CatalogMetadataBackfillIndexedJob {
 #[derive(Clone, Debug)]
 pub struct CatalogMetadataBackfillIndexedUpdate {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
-    pub subjects: Vec<PublicationSubject>,
-    pub popularity: Option<CatalogPublicationPopularity>,
+    pub subjects: Vec<BookSubject>,
+    pub popularity: Option<CatalogBookPopularity>,
     pub index: CatalogMetadataIndex,
     pub identity_result: Option<metadata_contract::EditionIdentityResult>,
     pub attempt: u64,
@@ -248,7 +248,7 @@ pub struct CatalogMetadataBackfillIndexedUpdate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogOcrBackfillJob {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
     pub book_format: CatalogBookFormat,
     pub attempt: u64,
@@ -257,7 +257,7 @@ pub struct CatalogOcrBackfillJob {
 #[derive(Clone, Debug)]
 pub struct CatalogDescriptionBackfillJob {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
     pub isbns: Vec<String>,
     pub attempt: u64,
@@ -266,10 +266,10 @@ pub struct CatalogDescriptionBackfillJob {
 #[derive(Clone, Debug)]
 pub struct CatalogDescriptionBackfillUpdate {
     pub source_id: CatalogSourceId,
-    pub publication: CatalogPublicationIdentity,
+    pub book: CatalogBookIdentity,
     pub acquisition_url: String,
     pub description: Option<String>,
-    pub subjects: Vec<PublicationSubject>,
+    pub subjects: Vec<BookSubject>,
     pub open_library_description_missing: bool,
     pub attempt: u64,
 }
@@ -288,7 +288,7 @@ pub struct CatalogMetadataBackfillWriteTimings {
 pub struct CatalogEpubFailureExample {
     pub source_id: CatalogSourceId,
     pub acquisition_host: String,
-    pub publication_id: String,
+    pub book_id: String,
     pub attempts: u64,
     pub last_failed_at: u64,
 }

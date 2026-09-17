@@ -74,20 +74,10 @@ pub(super) struct LibraryActivity {
 
 impl LibraryActivity {
     pub(super) fn new(backend: Rc<AppClient>, cx: &mut Context<Self>) -> Self {
-        let updates_backend = backend.clone();
         let updates = cx.spawn(async move |activity, cx| {
-            let changes = match updates_backend.transfer_changes().await {
-                Ok(changes) => changes,
-                Err(error) => {
-                    log::error!("failed to subscribe to transfer updates: {error}");
-                    return;
-                }
-            };
-            // Subscribe before reading the initial snapshot so no transition is lost.
+            // Transfer presentation is a snapshot owned by each library. There
+            // is no app-global transfer event stream after the ownership split.
             let _ = activity.update(cx, |activity, cx| activity.refresh(cx));
-            while changes.recv().await.is_ok() {
-                let _ = activity.update(cx, |activity, cx| activity.schedule_refresh(cx));
-            }
         });
         Self { backend, groups: Arc::new(Vec::new()), display: ActivityDisplay::default(), display_timer: None, refresh_scheduled: false, refresh_active: false, refresh_pending: false, _updates: updates }
     }

@@ -41,7 +41,7 @@ CREATE TABLE snapshot(
                 edition_id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
                 normalized_title TEXT NOT NULL,
-                publication_year INTEGER
+                book_year INTEGER
              ) STRICT;
              CREATE INDEX edition_bibliography_by_title ON edition_bibliography(normalized_title,edition_id);
              CREATE TABLE work_bibliography(
@@ -78,13 +78,13 @@ CREATE TABLE snapshot(
                 normalized_title TEXT NOT NULL,
                 normalized_subtitle TEXT NOT NULL,
                 normalized_author TEXT NOT NULL,
-                publication_year INTEGER NOT NULL,
+                book_year INTEGER NOT NULL,
                 normalized_publisher TEXT NOT NULL,
                 scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),
                 notation TEXT NOT NULL,
-                PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher,scheme,notation)
+                PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher,scheme,notation)
              ) WITHOUT ROWID;
-             CREATE INDEX title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher);
+             CREATE INDEX title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher);
              CREATE TABLE edition_work_classification(
                 work_id INTEGER NOT NULL,
                 scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),
@@ -195,7 +195,7 @@ CREATE TABLE snapshot(
              -- query schema once per phase.
              CREATE TABLE edition_stage(edition_id INTEGER NOT NULL, work_id INTEGER);
              CREATE TABLE edition_isbn_stage(isbn13 INTEGER NOT NULL, edition_id INTEGER NOT NULL);
-             CREATE TABLE edition_bibliography_stage(edition_id INTEGER NOT NULL, title TEXT NOT NULL, normalized_title TEXT NOT NULL, publication_year INTEGER);
+             CREATE TABLE edition_bibliography_stage(edition_id INTEGER NOT NULL, title TEXT NOT NULL, normalized_title TEXT NOT NULL, book_year INTEGER);
              CREATE TABLE edition_publisher_stage(edition_id INTEGER NOT NULL, position INTEGER NOT NULL, name TEXT NOT NULL, normalized_name TEXT NOT NULL);
              CREATE TABLE edition_classification_stage(edition_id INTEGER NOT NULL, scheme INTEGER NOT NULL, notation TEXT NOT NULL);
              CREATE TABLE edition_work_classification_stage(work_id INTEGER NOT NULL, scheme INTEGER NOT NULL, notation TEXT NOT NULL);

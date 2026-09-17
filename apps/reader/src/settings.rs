@@ -169,14 +169,14 @@ impl ReaderPreferences {
             ReaderTextAlignment::Justify => Some(html::pipeline::TextAlign::Justify),
         };
         // `foreground` stays unset on purpose: it replaces every run's colour,
-        // which flattens a publication rather than adapting it. `theme` is the
+        // which flattens a book rather than adapting it. `theme` is the
         // one that re-lights instead of overwriting.
         html::pipeline::ReaderStyleOverrides { font_family: family, text_align: alignment, line_height: Some(self.line_height), minimum_font_size: None, foreground: None, background: None, theme }
     }
 }
 
 /// The two ends of the reader's lightness range, taken from the application
-/// theme, so a publication's colours are re-lit into the page it is drawn on.
+/// theme, so a book's colours are re-lit into the page it is drawn on.
 pub(crate) fn library_theme_adaptation(cx: &App) -> html::pipeline::ThemeAdaptation {
     let theme = ui_components::browser_theme(cx);
     let opaque = |colour: gpui::Hsla| u32::from(gpui::Rgba::from(colour)) | 0xff;
@@ -186,7 +186,7 @@ pub(crate) fn library_theme_adaptation(cx: &App) -> html::pipeline::ThemeAdaptat
 pub(crate) fn library_paint_palette(cx: &App) -> html_view_core::ReaderPaintPalette {
     let theme = ui_components::browser_theme(cx);
     // A paint-time foreground replaces the computed color of every text run,
-    // including colors explicitly supplied by the publication. Leave it unset
+    // including colors explicitly supplied by the book. Leave it unset
     // so EPUB styles reach the painter; the reader theme still owns the canvas.
     html_view_core::ReaderPaintPalette { foreground: None, background: Some(u32::from(gpui::Rgba::from(theme.page_bg))) }
 }

@@ -1,1 +1,0 @@
-SELECT b.content_hash FROM book b JOIN book_dir d ON d.book_row_id=b.row_id WHERE d.file_name=?1

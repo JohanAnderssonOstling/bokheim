@@ -1,5 +1,5 @@
 use super::{canonical_subject_system, compact_whitespace, normalize_path, normalize_term, split_path, BISAC_SYSTEM_ID, BISAC_VERSION};
-use publication_model::PublicationSubject;
+use book_model::BookSubject;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 
@@ -124,7 +124,7 @@ fn parse_bisac(csv: &str) -> SubjectSystem {
     SubjectSystem { id: BISAC_SYSTEM_ID, version: BISAC_VERSION, nodes, path_index, code_index, tail_component_index }
 }
 
-pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssignment> {
+pub fn match_bisac_subjects(subjects: &[BookSubject]) -> Vec<SubjectAssignment> {
     let system = bisac_subject_system();
     let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
     let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
@@ -193,7 +193,7 @@ pub fn match_bisac_subjects(subjects: &[PublicationSubject]) -> Vec<SubjectAssig
 /// Matches a BISAC node only when the combined subject evidence supports at
 /// least `minimum_adjacent` consecutive components of that node's hierarchy.
 /// Unrelated and unmatched headings do not invalidate supported branches.
-pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[PublicationSubject], minimum_adjacent: usize) -> Vec<SubjectAssignment> {
+pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[BookSubject], minimum_adjacent: usize) -> Vec<SubjectAssignment> {
     if minimum_adjacent == 0 {
         return match_bisac_subjects(subjects);
     }
@@ -239,8 +239,8 @@ pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[PublicationSubject
 mod adjacent_tests {
     use super::*;
 
-    fn subject(value: &str) -> PublicationSubject {
-        PublicationSubject::new(None, value, "openlibrary:subject", None, None).unwrap()
+    fn subject(value: &str) -> BookSubject {
+        BookSubject::new(None, value, "openlibrary:subject", None, None).unwrap()
     }
 
     #[test]

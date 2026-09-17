@@ -1,10 +1,10 @@
 //! Account discovery, queued account writes, registration, and credential retries.
-use super::core::*;
+use super::super::core::*;
 use sync_common::api::libraries::{CloudStorageChange, LibraryCloudStorage};
 
 /// Account-global maintenance is owned by the account subsystem.  It holds
 /// only a weak app state; library workers are never scheduled from here.
-pub(super) fn start_maintenance(executor: &crate::executor::BackendExecutor, state: &std::sync::Weak<AppState>, account: (SyncScheduler, async_channel::Receiver<crate::sync::SyncRequest>)) {
+pub(in crate::app) fn start_maintenance(executor: &crate::executor::BackendExecutor, state: &std::sync::Weak<AppState>, account: (SyncScheduler, async_channel::Receiver<crate::sync::SyncRequest>)) {
     let (account_scheduler, account_requests) = account;
     let account_state = state.clone();
     executor.spawn_detached(account_scheduler.run(

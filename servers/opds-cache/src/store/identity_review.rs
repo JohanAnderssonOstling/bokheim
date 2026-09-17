@@ -1,5 +1,5 @@
 use super::{
-    decode_cached, params, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewInventory, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError,
+    decode_cached, params, sql_decode_error, storage_i64, stored_u64, unix_timestamp, CatalogEpubMetadata, CatalogIdentityReview, CatalogIdentityReviewInventory, CatalogBookIdentity, CatalogSourceId, CatalogStore, CatalogStoreError,
     Connection, OptionalExtension, Transaction, TransactionBehavior, CATALOG_METADATA_BACKFILL_VERSION,
 };
 
@@ -27,9 +27,9 @@ impl CatalogStore {
              JOIN catalog_epub_extraction extraction
                ON extraction.source_id=review.source_id AND extraction.acquisition_url=review.acquisition_url
              JOIN catalog_source source ON source.source_id=review.source_id
-             JOIN catalog_publication publication
-               ON publication.source_id=review.source_id AND publication.generation=source.active_generation
-              AND publication.acquisition_url=review.acquisition_url
+             JOIN catalog_book book
+               ON book.source_id=review.source_id AND book.generation=source.active_generation
+              AND book.acquisition_url=review.acquisition_url
              WHERE (?1 IS NULL OR review.source_id=?1)
                AND ((?2 IS NULL AND review.status IN ('ambiguous','no_match','insufficient_metadata','failed')) OR review.status=?2)
              ORDER BY CASE review.status WHEN 'ambiguous' THEN 0 WHEN 'no_match' THEN 1 WHEN 'insufficient_metadata' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,
@@ -41,18 +41,18 @@ impl CatalogStore {
             let metadata: CatalogEpubMetadata = decode_cached(&metadata_payload).map_err(sql_decode_error)?;
             let result_payload = row.get::<_, Option<Vec<u8>>>(7)?;
             let result = result_payload.map(|payload| serde_json::from_slice::<metadata_contract::EditionIdentityResult>(&payload)).transpose().map_err(sql_decode_error)?;
-            let publication_year = publication_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value()));
+            let book_year = book_model::unique_book_year(metadata.book.book.dates.iter().map(|date| date.value()));
             let title = metadata.book.title.clone();
             let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect();
-            let publishers = metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect();
+            let publishers = metadata.book.book.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect();
             Ok(CatalogIdentityReview {
                 review_id: row.get(0)?,
                 source_id: CatalogSourceId::parse(&source).map_err(|error| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?,
-                publication: CatalogPublicationIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
+                book: CatalogBookIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
                 title,
                 authors,
                 publishers,
-                publication_year,
+                book_year,
                 status: row.get(5)?,
                 detail: row.get(6)?,
                 candidates: result.as_ref().map(|result| result.candidates.clone().into_iter().map(Into::into).collect()).unwrap_or_default(),
@@ -86,9 +86,9 @@ impl CatalogStore {
             .optional()?;
         let Some((source_id, acquisition_url, payload)) = row else { return Ok(false) };
         let mut metadata: CatalogEpubMetadata = decode_cached(&payload)?;
-        let identifier = publication_model::Identifier::new(canonical_isbn13, publication_model::Scheme::Isbn, publication_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogStoreError::new(error.to_string()))?;
-        metadata.book.publication.identifiers.retain(|existing| existing.scheme() != &publication_model::Scheme::Isbn);
-        metadata.book.publication.identifiers.push(identifier);
+        let identifier = book_model::Identifier::new(canonical_isbn13, book_model::Scheme::Isbn, book_model::Scope::Edition, "openlibrary:edition-match").map_err(|error| CatalogStoreError::new(error.to_string()))?;
+        metadata.book.book.identifiers.retain(|existing| existing.scheme() != &book_model::Scheme::Isbn);
+        metadata.book.book.identifiers.push(identifier);
         transaction.execute("UPDATE catalog_epub_extraction SET metadata_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id, acquisition_url, wire::encode(&metadata)?])?;
         transaction.execute(
             "INSERT INTO catalog_metadata_backfill(source_id,acquisition_url,version,status) VALUES(?1,?2,?3,'pending')

@@ -1,1 +1,0 @@
-SELECT id FROM local_directory_work WHERE dir_id=?1

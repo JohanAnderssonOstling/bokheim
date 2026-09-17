@@ -55,9 +55,9 @@ impl AppCommand {
         )
     }
 
-    pub(crate) fn is_publication_subscription(&self) -> bool {
+    pub(crate) fn is_book_subscription(&self) -> bool {
         match self {
-            Self::Host(command) => command.is_publication_subscription(),
+            Self::Host(command) => command.is_book_subscription(),
             _ => false,
         }
     }

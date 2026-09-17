@@ -1,1 +1,0 @@
-SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id

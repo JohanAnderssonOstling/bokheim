@@ -1,43 +1,103 @@
 //! Persistence for metadata derived from audiobook files.
 
 use crate::audible_jobs;
-use crate::audiobooks::queries::AudiobooksSql;
 #[cfg(test)]
 use crate::schema::library_write_transaction;
 use crate::storage_values::invalid_integer_column;
 use crate::storage_values::invalid_text_column;
+use include_sqlite_sql::include_sql;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use sync_common::ContentHash;
 
 pub fn audiobook_chapters(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<library_model::AudiobookChapter>, rusqlite::Error> {
-    let chapters = conn.query_row(include_str!("sql/audiobooks/audiobook_chapters_select.sql"), [content_hash.as_str()], |row| row.get::<_, String>(0)).optional()?;
-    chapters.map_or_else(|| Ok(Vec::new()), |chapters| serde_json::from_str(&chapters).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))))
+    let stored = conn
+        .query_row(include_str!("sql/audiobooks/audiobook_chapters_select.sql"), [content_hash.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .optional()?;
+    let Some((toc_json, duration_ms)) = stored else { return Ok(Vec::new()) };
+    let entries: Vec<library_model::BookTocEntry> =
+        serde_json::from_str(&toc_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+    Ok(chapters_from_navigation(&entries, duration_ms.max(0) as u64))
+}
+
+/// A chapter is an interval; a navigation entry is a point. The end is the next
+/// chapter's start, and the last chapter runs to the end of the audio — which
+/// is why the duration is the one audiobook fact that is not navigation and
+/// stays stored. Nothing persists the end, because the file never supplied one
+/// either: it was always this arithmetic, previously done before the write.
+pub fn chapters_from_navigation(entries: &[library_model::BookTocEntry], duration_ms: u64) -> Vec<library_model::AudiobookChapter> {
+    let starts = entries.iter().filter_map(|entry| Some((entry.title.as_str(), book_model::audiobook_toc_position(&entry.target)?))).collect::<Vec<_>>();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (title, start_ms))| library_model::AudiobookChapter { title: (*title).to_owned(), start_ms: *start_ms, end_ms: starts.get(index + 1).map_or(duration_ms, |(_, next)| *next) })
+        .collect()
+}
+
+/// The file's chapters as the navigation every format shares: a title and the
+/// offset it opens at, flat, because an M4B chapter list has no nesting.
+#[cfg(feature = "audiobook-metadata")]
+fn navigation_from_chapters(chapters: &[book_metadata::AudiobookChapterMetadata]) -> Vec<library_model::BookTocEntry> {
+    chapters.iter().map(|chapter| library_model::BookTocEntry { title: chapter.title.clone(), target: book_model::audiobook_toc_target(chapter.start_ms), children: Vec::new() }).collect()
 }
 
 /// Persist imported chapters, recording evidence and lookup work in the caller's transaction.
 #[cfg(feature = "audiobook-metadata")]
 pub fn upsert_audiobook_metadata(conn: &rusqlite::Transaction<'_>, content_hash: &ContentHash, metadata: &book_metadata::AudiobookMetadata) -> Result<(), rusqlite::Error> {
     let duration_ms = i64::try_from(metadata.duration_ms).map_err(|_| invalid_integer_column(1, "audiobook duration exceeds SQLite integer range"))?;
-    let chapter_count = i64::try_from(metadata.chapters.len()).map_err(|_| invalid_integer_column(2, "audiobook chapter count exceeds SQLite integer range"))?;
-    let chapters_json = serde_json::to_string(&metadata.chapters).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let chapter_source = match metadata.chapter_origin {
-        book_metadata::ChapterOrigin::EmbeddedM4b => "embedded_m4b",
-        book_metadata::ChapterOrigin::Audnexus => "audnexus",
-        book_metadata::ChapterOrigin::FullAudiobookFallback => "full_audiobook_fallback",
-    };
+    // The duration is the file's, so re-inspecting it is never a clobber.
+    conn.upsert_audiobook_metadata(content_hash.as_str(), duration_ms)?;
     // Preserve a database-only chapter plan while the imported evidence is unchanged.
     let applied_request: Option<String> = conn.query_row(include_str!("sql/audiobooks/upsert_audiobook_metadata_select.sql"), [content_hash.as_str()], |row| row.get(0)).optional()?;
     let request = metadata.audible_lookup_request();
     let preserve_chapters = applied_request.and_then(|json| serde_json::from_str::<metadata_contract::audible::LookupRequest>(&json).ok()).is_some_and(|applied| applied == request);
     if !preserve_chapters {
-        conn.upsert_audiobook_metadata(content_hash.as_str(), duration_ms, chapter_count, chapter_source, &chapters_json)?;
+        crate::toc::upsert_book_toc(conn, content_hash, &navigation_from_chapters(&metadata.chapters))?;
     }
     // Every inspection path (including browser imports and playback recovery)
     // queues from the original file evidence, never the enriched chapter overlay.
     let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     audible_jobs::discover(conn, content_hash, metadata_contract::audible::POLICY_VERSION, &request, now)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod derivation_tests {
+    use super::chapters_from_navigation;
+
+    fn entry(title: &str, start_ms: u64) -> library_model::BookTocEntry {
+        library_model::BookTocEntry { title: title.to_owned(), target: book_model::audiobook_toc_target(start_ms), children: Vec::new() }
+    }
+
+    #[test]
+    fn a_chapter_ends_where_the_next_one_starts_and_the_last_runs_to_the_end() {
+        let chapters = chapters_from_navigation(&[entry("One", 0), entry("Two", 600_000), entry("Three", 1_200_000)], 1_800_000);
+
+        assert_eq!(chapters.iter().map(|chapter| (chapter.start_ms, chapter.end_ms)).collect::<Vec<_>>(), vec![(0, 600_000), (600_000, 1_200_000), (1_200_000, 1_800_000)]);
+        assert_eq!(chapters[2].title, "Three", "the wording is the navigation's, not the player's");
+    }
+
+    #[test]
+    fn a_single_chapter_spans_the_whole_audiobook() {
+        let chapters = chapters_from_navigation(&[entry("Full audiobook", 0)], 42_000);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].end_ms, 42_000);
+    }
+
+    #[test]
+    fn an_entry_that_does_not_name_an_offset_is_not_a_chapter() {
+        let mixed = vec![entry("One", 0), library_model::BookTocEntry { title: "Stray".into(), target: "chapter.xhtml".into(), children: Vec::new() }, entry("Two", 500)];
+
+        let chapters = chapters_from_navigation(&mixed, 1_000);
+
+        assert_eq!(chapters.len(), 2, "a target this format cannot read is skipped rather than given a position");
+        assert_eq!(chapters[0].end_ms, 500, "and skipping it does not stretch the chapter before it past the next real one");
+    }
+
+    #[test]
+    fn navigation_with_no_entries_yields_no_chapters() {
+        assert!(chapters_from_navigation(&[], 1_000).is_empty());
+    }
 }
 
 #[cfg(all(test, feature = "audiobook-metadata"))]
@@ -124,7 +184,7 @@ mod evidence_tests {
     }
 }
 
-pub(crate) mod queries;
+include_sql!("src/audiobooks/sql/audiobooks.sql");
 
 /// Persisted playback information, independent of the application's audio host.
 pub struct CachedPlaybackMetadata {
@@ -137,15 +197,16 @@ pub struct CachedPlaybackMetadata {
 
 pub fn cached_playback_metadata(conn: &Connection, hash: ContentHash) -> rusqlite::Result<Option<CachedPlaybackMetadata>> {
     let row = conn.query_row(include_str!("sql/cached_playback_metadata.sql"), [hash.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))).optional()?;
-    let Some((title, author, duration_ms, chapters)) = row else {
+    let Some((title, author, duration_ms, toc_json)) = row else {
         return Ok(None);
     };
-    let chapters = serde_json::from_str(&chapters).map_err(|error| invalid_text_column(3, format!("Invalid cached chapters: {error}")))?;
+    let entries: Vec<library_model::BookTocEntry> = serde_json::from_str(&toc_json).map_err(|error| invalid_text_column(3, format!("Invalid cached chapters: {error}")))?;
+    let chapters = chapters_from_navigation(&entries, duration_ms.max(0) as u64);
     let narrator = recording_narrator(conn, hash)?;
     Ok(Some(CachedPlaybackMetadata { title, author, narrator, duration_ms: duration_ms as u64, chapters }))
 }
 
-/// Display metadata is available before a publication has been inspected.
+/// Display metadata is available before a book has been inspected.
 pub fn playback_title_author(conn: &Connection, hash: ContentHash) -> rusqlite::Result<(String, String)> {
     conn.query_row(include_str!("sql/playback_title_author.sql"), [hash.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
 }
@@ -159,6 +220,8 @@ pub fn recording_narrator(conn: &Connection, hash: ContentHash) -> rusqlite::Res
 #[cfg(all(test, feature = "audiobook-metadata"))]
 mod playback_tests {
     use super::*;
+    use crate::sync_state::SyncSql;
+    use crate::sync_state::set_sync_metadata;
 
     #[test]
     fn playback_cache_preserves_uncached_inspection_and_validates_chapters() {
@@ -194,7 +257,15 @@ mod playback_tests {
                 assert_eq!(cached.narrator.as_deref(), Some("First"));
             }
         }
+        // Navigation is synchronized now, so the outbox trigger encodes every
+        // write — which makes an unreadable tree impossible to store locally.
+        assert!(conn.execute(include_str!("sql/playback_test_invalid_chapters.sql"), [hash.as_str()]).is_err(), "a local write cannot store navigation that cannot be encoded");
+
+        // The read still guards, because a row can hold a value this device did
+        // not write: only local changes are encoded on the way out.
+        set_sync_metadata(&conn, "change_origin", "remote").unwrap();
         conn.execute(include_str!("sql/playback_test_invalid_chapters.sql"), [hash.as_str()]).unwrap();
+        set_sync_metadata(&conn, "change_origin", "local").unwrap();
         assert!(cached_playback_metadata(&conn, hash).is_err());
     }
 }

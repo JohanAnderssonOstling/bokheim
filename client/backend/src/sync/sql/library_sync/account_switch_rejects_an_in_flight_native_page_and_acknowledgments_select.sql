@@ -1,1 +1,0 @@
-SELECT count(*) FROM book WHERE content_hash=?1

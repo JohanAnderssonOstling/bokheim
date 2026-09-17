@@ -23,8 +23,8 @@ fn schema(c:&Connection)->Result<(),MetadataError>{
     CREATE TABLE IF NOT EXISTS wikidata_ingestion(id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL,status TEXT NOT NULL,after_isbn TEXT NOT NULL,after_author TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS isbn_classification(isbn13 INTEGER NOT NULL,scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),notation TEXT NOT NULL,PRIMARY KEY(isbn13,scheme,notation)) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS isbn_classification_by_code ON isbn_classification(scheme,notation,isbn13);
-    CREATE TABLE IF NOT EXISTS title_author_classification(normalized_title TEXT NOT NULL,normalized_subtitle TEXT NOT NULL,normalized_author TEXT NOT NULL,publication_year INTEGER NOT NULL,normalized_publisher TEXT NOT NULL,scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),notation TEXT NOT NULL,PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher,scheme,notation)) WITHOUT ROWID;
-    CREATE INDEX IF NOT EXISTS title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,publication_year,normalized_publisher);
+    CREATE TABLE IF NOT EXISTS title_author_classification(normalized_title TEXT NOT NULL,normalized_subtitle TEXT NOT NULL,normalized_author TEXT NOT NULL,book_year INTEGER NOT NULL,normalized_publisher TEXT NOT NULL,scheme INTEGER NOT NULL CHECK(scheme IN (1,2)),notation TEXT NOT NULL,PRIMARY KEY(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher,scheme,notation)) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS title_author_classification_lookup ON title_author_classification(normalized_title,normalized_subtitle,normalized_author,book_year,normalized_publisher);
     CREATE INDEX IF NOT EXISTS author_identifier_by_external ON author_identifier(authority,external_id,author_id);").map_err(error)?;
     for (column,kind) in [("aliases","TEXT"),("birth_year","INTEGER"),("death_year","INTEGER"),("image","TEXT"),("description","TEXT")]{add_column(c,"author",column,kind)?;}
     add_column(c,"edition_bibliography","description","TEXT")?;
@@ -79,7 +79,7 @@ fn put_author_profile(c:&Connection,input:&Connection,a:&metadata_contract::Wiki
 fn put_code(c:&Connection,isbn:i64,edition:i64,scheme:i64,notation:&str,global:bool)->Result<(),MetadataError>{
     c.execute("INSERT OR IGNORE INTO edition_classification(edition_id,scheme,notation) VALUES(?1,?2,?3)",params![edition,scheme,notation]).map_err(error)?;
     if global{c.execute("INSERT OR IGNORE INTO isbn_classification(isbn13,scheme,notation) VALUES(?1,?2,?3)",params![isbn,scheme,notation]).map_err(error)?;}
-    let bibliography:Option<(String,Option<i32>)>=c.query_row("SELECT title,publication_year FROM edition_bibliography WHERE edition_id=?1",[edition],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(error)?;
+    let bibliography:Option<(String,Option<i32>)>=c.query_row("SELECT title,book_year FROM edition_bibliography WHERE edition_id=?1",[edition],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(error)?;
     if let Some((title,year))=bibliography {
         let subtitle:Option<String>=c.query_row("SELECT subtitle FROM edition_subtitle WHERE edition_id=?1",[edition],|r|r.get(0)).optional().map_err(error)?;
         let publishers=c.prepare("SELECT normalized_name FROM edition_publisher WHERE edition_id=?1").map_err(error)?.query_map([edition],|r|r.get::<_,String>(0)).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
@@ -92,10 +92,10 @@ fn put_code(c:&Connection,isbn:i64,edition:i64,scheme:i64,notation:&str,global:b
 }
 fn put_bibliography(c:&Connection,input:&Connection,id:i64,book:&metadata_contract::WikidataBookEvidence)->Result<(),MetadataError>{
     let has:bool=input.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='bibliography')",[],|r|r.get(0)).map_err(error)?;
-    let extra:Option<(String,Option<String>,Option<i32>)>=if has {input.query_row("SELECT title,subtitle,publication_year FROM bibliography WHERE book=?1",[&book.wikidata_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(error)?}else{None};
+    let extra:Option<(String,Option<String>,Option<i32>)>=if has {input.query_row("SELECT title,subtitle,book_year FROM bibliography WHERE book=?1",[&book.wikidata_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(error)?}else{None};
     let title=extra.as_ref().map(|r|r.0.as_str()).or(book.title.as_deref());
     if let Some(title)=title {
-        c.execute("INSERT INTO edition_bibliography(edition_id,title,normalized_title,publication_year,description) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(edition_id) DO UPDATE SET publication_year=COALESCE(edition_bibliography.publication_year,excluded.publication_year),description=COALESCE(NULLIF(trim(edition_bibliography.description),''),excluded.description)",params![id,title,bibliographic_title_match_key(title),extra.as_ref().and_then(|r|r.2),book.description]).map_err(error)?;
+        c.execute("INSERT INTO edition_bibliography(edition_id,title,normalized_title,book_year,description) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(edition_id) DO UPDATE SET book_year=COALESCE(edition_bibliography.book_year,excluded.book_year),description=COALESCE(NULLIF(trim(edition_bibliography.description),''),excluded.description)",params![id,title,bibliographic_title_match_key(title),extra.as_ref().and_then(|r|r.2),book.description]).map_err(error)?;
         if let Some(subtitle)=extra.as_ref().and_then(|r|r.1.as_ref()) {
             let existing:String=c.query_row("SELECT title FROM edition_bibliography WHERE edition_id=?1",[id],|r|r.get(0)).map_err(error)?;
             if bibliographic_title_match_key(&existing)==bibliographic_title_match_key(title){
@@ -107,7 +107,7 @@ fn put_bibliography(c:&Connection,input:&Connection,id:i64,book:&metadata_contra
         c.execute("INSERT INTO edition_description VALUES(?1,?2) ON CONFLICT(edition_id) DO UPDATE SET description=COALESCE(NULLIF(trim(edition_description.description),''),excluded.description)",params![id,description]).map_err(error)?;
     }
     if has {
-        let publishers=input.prepare_cached("SELECT name FROM publication_publisher WHERE book=?1 AND name IS NOT NULL ORDER BY publisher").map_err(error)?.query_map([&book.wikidata_id],|r|r.get::<_,String>(0)).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
+        let publishers=input.prepare_cached("SELECT name FROM book_publisher WHERE book=?1 AND name IS NOT NULL ORDER BY publisher").map_err(error)?.query_map([&book.wikidata_id],|r|r.get::<_,String>(0)).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
         let populated:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM edition_publisher WHERE edition_id=?1)",[id],|r|r.get(0)).map_err(error)?;
         if !populated{for (position,name) in publishers.iter().enumerate(){c.execute("INSERT INTO edition_publisher VALUES(?1,?2,?3,?4)",params![id,position as i64,name,bibliographic_match_key(name)]).map_err(error)?;}}
     }Ok(())
@@ -195,7 +195,7 @@ pub fn ingest_wikidata_catalog(service:&MetadataService,evidence:&Path,target:&P
         }
     }
     // Retain all credited Wikidata author profiles in the existing author
-    // tables, including authors of publications without an ISBN. Names alone
+    // tables, including authors of books without an ISBN. Names alone
     // do not merge these with Open Library people.
     if !isbn_only {
     let mut after_author:String=c.query_row("SELECT after_author FROM wikidata_ingestion WHERE id=1",[],|r|r.get(0)).map_err(error)?;

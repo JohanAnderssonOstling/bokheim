@@ -33,7 +33,8 @@ pub type UnixMillis = u64;
 pub mod mutation_kind {
     pub const ANNOTATION: &str = "annotation";
     pub const BOOK_LIFECYCLE: &str = "book_lifecycle";
-    pub const CATALOG_PUBLICATION: &str = "catalog_publication";
+    pub const BOOK_TOC: &str = "book_toc";
+    pub const CATALOG_BOOK: &str = "catalog_book";
     pub const DIRECTORY_LIFECYCLE: &str = "directory_lifecycle";
     pub const DIRECTORY_NAME: &str = "directory_name";
     pub const DIRECTORY_PARENT: &str = "directory_parent";
@@ -175,7 +176,7 @@ pub struct WireMutation {
     pub replica_seq: ReplicaSeq,
 }
 
-/// Server-visible publication prerequisite. Lifecycle declarations also own the
+/// Server-visible book prerequisite. Lifecycle declarations also own the
 /// reference count; declarations on other state kinds do not affect accounting.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeclaredBlobReference {

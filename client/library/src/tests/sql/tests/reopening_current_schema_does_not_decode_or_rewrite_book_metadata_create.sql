@@ -1,1 +1,1 @@
-CREATE TRIGGER reject_metadata_rewrite BEFORE UPDATE OF publication_metadata ON book BEGIN SELECT RAISE(ABORT,'metadata rewritten during open'); END;
+CREATE TRIGGER reject_metadata_rewrite BEFORE UPDATE OF book_metadata ON book BEGIN SELECT RAISE(ABORT,'metadata rewritten during open'); END;

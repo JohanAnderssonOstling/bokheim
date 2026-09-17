@@ -1,5 +1,5 @@
 use crate::{AppBackend, AppDataLocation, BackendContext, DownloadState};
-use library_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
+use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
 use lopdf::Document;
 use std::io::Read;
 use std::path::Path;
@@ -16,9 +16,9 @@ async fn test_scan() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = temp.path().join("library");
     std::fs::create_dir(&fixture).unwrap();
-    let publication = fixture.join("fixture.pdf");
-    write_annotated_pdf(&publication);
-    let original_hash = raw_hash(&publication);
+    let book = fixture.join("fixture.pdf");
+    write_annotated_pdf(&book);
+    let original_hash = raw_hash(&book);
     let context = BackendContext::initialize(AppDataLocation::native_path(temp.path().join("app"))).unwrap();
     let app = AppBackend::new(context).unwrap();
     let entry = app.create_library("library".to_owned(), Some(fixture.to_string_lossy().into_owned())).unwrap();
@@ -31,9 +31,9 @@ async fn test_scan() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(library.book_count().unwrap(), 1);
-    assert_eq!(publication_identity::identify(&mut std::fs::File::open(&publication).unwrap()).unwrap(), original_hash);
-    assert_ne!(raw_hash(&publication), original_hash, "first scan embeds the original identity");
-    let document = Document::load(&publication).unwrap();
+    assert_eq!(book_identity::identify(&mut std::fs::File::open(&book).unwrap()).unwrap(), original_hash);
+    assert_ne!(raw_hash(&book), original_hash, "first scan embeds the original identity");
+    let document = Document::load(&book).unwrap();
     let page = *document.get_pages().values().next().unwrap();
     assert_eq!(document.get_object(page).unwrap().as_dict().unwrap().get(b"Annots").unwrap().as_array().unwrap().len(), 1);
 }
@@ -45,7 +45,7 @@ fn raw_hash(path: &Path) -> ContentHash {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pdf_annotations_use_a_sqlite_overlay_and_leave_publication_bytes_pristine() {
+async fn pdf_annotations_use_a_sqlite_overlay_and_leave_book_bytes_pristine() {
     let _guard = SCAN_TEST_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let app_data = temp.path().join("app");
@@ -53,7 +53,7 @@ async fn pdf_annotations_use_a_sqlite_overlay_and_leave_publication_bytes_pristi
     let source = temp.path().join("source.pdf");
     std::fs::create_dir_all(&library_root).unwrap();
     write_annotated_pdf(&source);
-    publication_identity::ensure(&source).unwrap();
+    book_identity::ensure(&source).unwrap();
 
     let context = BackendContext::initialize(AppDataLocation::native_path(app_data)).unwrap();
     let app = AppBackend::new(context).unwrap();
@@ -74,7 +74,7 @@ async fn pdf_annotations_use_a_sqlite_overlay_and_leave_publication_bytes_pristi
         assert_eq!(metadata.annotations.len(), 1);
         assert_eq!(metadata.annotations[0].note, "Existing interoperable comment");
     }
-    assert!(library.annotations(content_hash.clone()).unwrap().is_empty(), "embedded PDF annotations are publication content, not synchronized Bokheim annotations");
+    assert!(library.annotations(content_hash.clone()).unwrap().is_empty(), "embedded PDF annotations are book content, not synchronized Bokheim annotations");
 
     let annotation = ReaderAnnotation {
         id: "bokheim-annotation".to_owned(),
@@ -106,8 +106,8 @@ async fn read_only_pdf_asset_accepts_a_sqlite_annotation_overlay() {
     let mut source_permissions = std::fs::metadata(&source).unwrap().permissions();
     source_permissions.set_readonly(true);
     std::fs::set_permissions(&source, source_permissions).unwrap();
-    assert_eq!(publication_identity::ensure(&source).unwrap(), raw_hash(&source));
-    assert!(publication_identity::read(&mut std::fs::File::open(&source).unwrap()).unwrap().is_none());
+    assert_eq!(book_identity::ensure(&source).unwrap(), raw_hash(&source));
+    assert!(book_identity::read(&mut std::fs::File::open(&source).unwrap()).unwrap().is_none());
 
     let context = BackendContext::initialize(AppDataLocation::native_path(app_data)).unwrap();
     let app = AppBackend::new(context).unwrap();
@@ -134,7 +134,7 @@ async fn read_only_pdf_asset_accepts_a_sqlite_annotation_overlay() {
     library.upsert_annotation(&annotation).unwrap();
 
     assert_eq!(raw_hash(&asset_path), pristine_hash, "annotation edits must not rewrite the PDF");
-    assert_eq!(publication_identity::identify(&mut std::fs::File::open(&asset_path).unwrap()).unwrap(), content_hash);
+    assert_eq!(book_identity::identify(&mut std::fs::File::open(&asset_path).unwrap()).unwrap(), content_hash);
     let annotations = library.annotations(content_hash).unwrap();
     assert_eq!(annotations.iter().filter(|candidate| candidate.id == "read-only-overlay").count(), 1);
 }
@@ -148,7 +148,7 @@ async fn reader_preparation_uses_local_content_or_queues_its_download() {
     let source = temp.path().join("source.pdf");
     std::fs::create_dir_all(&library_root).unwrap();
     write_annotated_pdf(&source);
-    publication_identity::ensure(&source).unwrap();
+    book_identity::ensure(&source).unwrap();
 
     let context = BackendContext::initialize(AppDataLocation::native_path(app_data)).unwrap();
     let app = AppBackend::new(context).unwrap();

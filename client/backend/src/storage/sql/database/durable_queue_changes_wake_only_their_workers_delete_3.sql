@@ -1,1 +1,0 @@
-DELETE FROM local_book_work WHERE content_hash=?1

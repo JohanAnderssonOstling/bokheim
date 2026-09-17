@@ -38,7 +38,7 @@ SELECT
     book.content_hash,
     book.title,
     COALESCE(book.added_at, 0) AS added_at,
-    (SELECT value FROM book_publication_value
+    (SELECT value FROM book_value
      WHERE book_row_id=book.row_id AND kind='alternate_title' AND lower(qualifier)='subtitle'
      ORDER BY position LIMIT 1) AS subtitle,
     COALESCE((
@@ -85,7 +85,8 @@ SELECT
         ORDER BY placement.rowid DESC LIMIT 1
     ) AS audiobook_duration_ms,
     (
-        SELECT metadata.chapter_count FROM book_dir placement
+        SELECT toc.entry_count FROM book_dir placement
+        JOIN book_toc toc ON toc.content_hash = book.content_hash
         JOIN audiobook_metadata metadata ON metadata.content_hash = book.content_hash
         WHERE placement.book_row_id = book.row_id AND placement.deleted_at IS NULL
         ORDER BY placement.rowid DESC LIMIT 1

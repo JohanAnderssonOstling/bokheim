@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use gpui::{AnyElement, App, AppContext, Context, Entity, IntoElement};
 use library_model::{BrowseBookSort, BrowseContents, BrowseRow, LibraryBrowseQuery, LibraryFileTypeFilter};
+use subject_projection::ROOT_SUBJECT_PATH;
 use sync_common::ROOT_DIR_ID;
 
 use super::adapter::{BrowseAdapter, BrowseCrumb, BrowseQuery, BrowseRequest};

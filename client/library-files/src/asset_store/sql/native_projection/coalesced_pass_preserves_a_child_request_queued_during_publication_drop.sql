@@ -1,1 +1,0 @@
-DROP TRIGGER queue_new_child_request

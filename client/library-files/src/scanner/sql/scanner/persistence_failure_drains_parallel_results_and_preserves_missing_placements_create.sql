@@ -1,1 +1,0 @@
-CREATE TRIGGER fail_scanned_insert BEFORE INSERT ON book BEGIN SELECT RAISE(FAIL, 'injected persistence failure'); END;

@@ -64,7 +64,7 @@ PYTHONPATH=/home/johan/lib/indexed-bzip2-1.7.0:/home/johan/lib/wikidata-extracti
 Interrupted `.part` files or data files without a commit marker are replaced
 when their chunk is retried. Successfully committed chunks are never appended
 twice. Every non-final checkpoint is checked against the seek index before
-publication. Completed data and metadata are fsynced before atomic publication.
+book. Completed data and metadata are fsynced before atomic book.
 
 The default free-space reserve is 100 GiB, checked before each chunk. A failure
 leaves prior committed chunks intact and does not publish a complete snapshot.
@@ -85,19 +85,19 @@ and activating lookup indexes.
 
 The v1 Dewey exclusion documented above is superseded. Projection v2 retains **all
 string and external-ID statements**, plus the selected linked-entity properties.
-This covers publication and topic classifiers without depending on a fixed list
+This covers book and topic classifiers without depending on a fixed list
 of property IDs. Full ranks, qualifiers, references and original property IDs
 remain intact; deprecated statements are retained for fallback use.
 
 Classifier-property definitions present in the dump are retained in chunk metadata.
-`wikidata-classifiers.py` recognizes publication/topic classification definitions,
+`wikidata-classifiers.py` recognizes book/topic classification definitions,
 with defaults for LCC, DDC, UDC, RVK, Basisklassifikation, Colon and BISAC. New
 classifier properties retain their own property ID as their scheme identifier.
 The helper selects preferred values, then normal values, then deprecated values
 only when no active value exists. It returns direct and inferred evidence separately.
 Inference follows an explicit book `P921` link to a topic carrying a topic-scope
 classifier, preserving both the topic link and the original classification statement.
-It does not traverse broader topics or treat a topic's publication-specific code as
+It does not traverse broader topics or treat a topic's book-specific code as
 classification evidence for a different book.
 
 The replacement output is:

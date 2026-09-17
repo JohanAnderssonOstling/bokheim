@@ -274,7 +274,7 @@ impl FsAssetStore {
         let checksum = *checksum;
         tokio::task::spawn_blocking(move || {
             let mut file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
-            publication_identity::read(&mut file).map(|identity| identity.unwrap_or(checksum)).map_err(|error| AssetError::InvalidInput(error.to_string()))
+            book_identity::read(&mut file).map(|identity| identity.unwrap_or(checksum)).map_err(|error| AssetError::InvalidInput(error.to_string()))
         }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declared_book_length_is_enforced_before_publication() {
+    async fn declared_book_length_is_enforced_before_book() {
         let temp = tempfile::tempdir().unwrap();
         let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
         store.initialize().await.unwrap();

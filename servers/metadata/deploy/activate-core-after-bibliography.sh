@@ -114,7 +114,7 @@ done
 [[ ${ready} == true ]] || { verify_cleanup; echo "staged metadata server could not open core snapshot" >&2; exit 1; }
 curl --fail --silent --show-error --max-time 10 \
     -H 'Content-Type: application/json' \
-    --data '{"queries":[{"query_id":"core-smoke","title":"Core smoke test","authors":["Bokheim"],"publishers":[],"publication_year":2000}]}' \
+    --data '{"queries":[{"query_id":"core-smoke","title":"Core smoke test","authors":["Bokheim"],"publishers":[],"book_year":2000}]}' \
     http://127.0.0.1:18091/v2/edition-identities >/dev/null
 verify_cleanup
 

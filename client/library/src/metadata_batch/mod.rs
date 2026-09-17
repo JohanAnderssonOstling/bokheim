@@ -2,9 +2,9 @@
 #[cfg(test)]
 use crate::schema::init_db;
 use crate::sync_state::get_sync_metadata;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 use rusqlite::Transaction;
-use rusqlite::functions::FunctionFlags;
 #[cfg(test)]
 use sync_common::ContentHash;
 
@@ -56,7 +56,8 @@ pub(super) fn run<T>(tx: &Transaction<'_>, write: impl FnOnce() -> rusqlite::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync_state::queries::SyncSql;
+    use crate::sync_state::SyncSql;
+    use crate::sync_state::set_sync_metadata;
     fn setup() -> (Connection, ContentHash) {
         let mut conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
@@ -112,7 +113,7 @@ mod tests {
     fn remote_batch_does_not_echo() {
         let (mut conn, _) = setup();
         let tx = conn.transaction().unwrap();
-        tx.set_sync_metadata("change_origin", "remote").unwrap();
+        set_sync_metadata(&tx, "change_origin", "remote").unwrap();
         run(&tx, || {
             tx.execute(include_str!("sql/metadata_batch/remote_batch_does_not_echo_update.sql"), [])?;
             Ok(())

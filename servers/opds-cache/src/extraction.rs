@@ -1,7 +1,7 @@
 use super::{
-    apply_catalog_description_if_missing, apply_catalog_metadata, classify_catalog_failure, extraction_book_format, merge_catalog_epub_metadata, metadata_publication_byte_limit, opds_catalog_source_id, prepare_catalog_subject_assignments,
-    publication_has_acquisition_url, CatalogAuthorCredit, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogProcess, CatalogPublicationIdentity, CatalogPublicationPopularity, CatalogService, CatalogServiceError, CatalogSourceId,
-    duration_millis, Deserialize, HashSet, Identifier, Instant, LanguageTag, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, Path, PathBuf, PublicationSubject, Scheme, Serialize, Url, BACKGROUND_DOWNLOAD_LIMIT, CATALOG_METADATA_DOWNLOAD_TIMEOUT, MAX_CONCURRENT_EXTRACTIONS,
+    apply_catalog_description_if_missing, apply_catalog_metadata, classify_catalog_failure, extraction_book_format, merge_catalog_epub_metadata, metadata_book_byte_limit, opds_catalog_source_id, prepare_catalog_subject_assignments,
+    book_has_acquisition_url, CatalogAuthorCredit, CatalogEpubExtractionJob, CatalogEpubMetadata, CatalogProcess, CatalogBookIdentity, CatalogBookPopularity, CatalogService, CatalogServiceError, CatalogSourceId,
+    duration_millis, Deserialize, HashSet, Identifier, Instant, LanguageTag, OpdsAcquisitionKind, OpdsBookFormat, OpdsDirectAcquisition, Path, PathBuf, BookSubject, Scheme, Serialize, Url, BACKGROUND_DOWNLOAD_LIMIT, CATALOG_METADATA_DOWNLOAD_TIMEOUT, MAX_CONCURRENT_EXTRACTIONS,
     EPUB_COVER_KEY_PREFIX, MAX_EMBEDDED_DESCRIPTION_BYTES, MAX_EMBEDDED_METADATA_TEXT_BYTES, MAX_EXTRACTION_RESULT_BYTES,
 };
 #[cfg(not(test))]
@@ -12,8 +12,8 @@ use tokio::task::JoinSet;
 struct PreparedCatalogEnrichment {
     metadata: ExtractedCatalogMetadata,
     saved_metadata: Option<CatalogEpubMetadata>,
-    subjects: Vec<PublicationSubject>,
-    popularity: Option<CatalogPublicationPopularity>,
+    subjects: Vec<BookSubject>,
+    popularity: Option<CatalogBookPopularity>,
     external_description: Option<String>,
     cover_is_definitively_absent: bool,
     downloaded_bytes: u64,
@@ -51,7 +51,7 @@ impl CatalogService {
                             claimed = true;
                         }
                         Ok(None) => {}
-                        Err(error) => tracing::warn!(source = source_id.as_str(), %error, "could not claim a staged publication extraction"),
+                        Err(error) => tracing::warn!(source = source_id.as_str(), %error, "could not claim a staged book extraction"),
                     }
                 }
                 if !claimed {
@@ -70,14 +70,14 @@ impl CatalogService {
                     let failure_url = job.acquisition_url.clone();
                     let failure_attempt = job.attempt;
                     let failure_path = job.staged_path.clone();
-                    let result = service.extract_staged_publication(job).await;
+                    let result = service.extract_staged_book(job).await;
                     (failure_source, failure_url, failure_attempt, failure_path, result)
                 });
             }
             while let Some(result) = workers.join_next().await {
                 let Ok((failure_source, failure_url, failure_attempt, failure_path, result)) = result else { continue };
                 if let Err(error) = result {
-                    tracing::warn!(source = failure_source.as_str(), %error, "could not extract staged catalogue publication");
+                    tracing::warn!(source = failure_source.as_str(), %error, "could not extract staged catalogue book");
                     let message = error.to_string();
                     let (category, retryable) = classify_catalog_failure(&message);
                     let cache_source = failure_source.clone();
@@ -102,7 +102,7 @@ impl CatalogService {
         for source_id in &source_ids {
             let cache_source = source_id.clone();
             if let Err(error) = self.store_write_call(move |cache| cache.retry_failed_epub_extractions(&cache_source)).await {
-                tracing::warn!(source = source_id.as_str(), %error, "could not schedule due publication extraction retries");
+                tracing::warn!(source = source_id.as_str(), %error, "could not schedule due book extraction retries");
             }
         }
         loop {
@@ -128,7 +128,7 @@ impl CatalogService {
                             claimed = true;
                         }
                         Ok(None) => {}
-                        Err(error) => tracing::warn!(source = source_id.as_str(), %error, "could not claim a publication download"),
+                        Err(error) => tracing::warn!(source = source_id.as_str(), %error, "could not claim a book download"),
                     }
                 }
                 if !claimed {
@@ -141,11 +141,11 @@ impl CatalogService {
             let mut workers = JoinSet::new();
             for job in jobs {
                 let service = self.clone();
-                workers.spawn(async move { (job.clone(), service.download_claimed_publication(job).await) });
+                workers.spawn(async move { (job.clone(), service.download_claimed_book(job).await) });
             }
             while let Some(result) = workers.join_next().await {
                 if let Ok((job, Err(error))) = result {
-                    tracing::warn!(source = job.source_id.as_str(), %error, "catalogue publication download failed");
+                    tracing::warn!(source = job.source_id.as_str(), %error, "catalogue book download failed");
                     let message = error.to_string();
                     let (category, retryable) = classify_catalog_failure(&message);
                     let cache_source = job.source_id.clone();
@@ -156,7 +156,7 @@ impl CatalogService {
         }
     }
 
-    pub(crate) async fn enrich_next_publication(&self, source_id: &CatalogSourceId) -> bool {
+    pub(crate) async fn enrich_next_book(&self, source_id: &CatalogSourceId) -> bool {
         // Bound claimed rows and completed temporary files together. Jobs that
         // cannot enter the disk-backed pipeline remain durably pending.
         let _queued_permit = match self.state.queued_download_slots.acquire().await {
@@ -171,17 +171,17 @@ impl CatalogService {
             Ok(Some(job)) => job,
             Ok(None) => return false,
             Err(error) => {
-                tracing::warn!(source = source_id.as_str(), %error, "could not claim a queued publication extraction");
+                tracing::warn!(source = source_id.as_str(), %error, "could not claim a queued book extraction");
                 return false;
             }
         };
-        if let Err(error) = self.enrich_claimed_publication(job).await {
-            tracing::warn!(source = source_id.as_str(), %error, "could not enrich active catalogue publication from embedded metadata");
+        if let Err(error) = self.enrich_claimed_book(job).await {
+            tracing::warn!(source = source_id.as_str(), %error, "could not enrich active catalogue book from embedded metadata");
         }
         true
     }
 
-    pub(crate) async fn enrich_active_publication(&self, source_id: &CatalogSourceId, identity: CatalogPublicationIdentity, acquisition: OpdsDirectAcquisition, embedded_cover_key: Option<String>) -> Result<(), CatalogServiceError> {
+    pub(crate) async fn enrich_active_book(&self, source_id: &CatalogSourceId, identity: CatalogBookIdentity, acquisition: OpdsDirectAcquisition, embedded_cover_key: Option<String>) -> Result<(), CatalogServiceError> {
         let _queued_permit = self.state.queued_download_slots.acquire().await.map_err(|error| CatalogServiceError(error.to_string()))?;
         let acquisition_url = acquisition.url.clone();
         let cache_source = source_id.clone();
@@ -189,21 +189,21 @@ impl CatalogService {
         let Some(attempt) = self.store_write_call(move |cache| cache.begin_epub_extraction(&cache_source, &cache_url)).await? else {
             return Ok(());
         };
-        self.enrich_claimed_publication_with(source_id, identity, acquisition, embedded_cover_key, attempt).await
+        self.enrich_claimed_book_with(source_id, identity, acquisition, embedded_cover_key, attempt).await
     }
 
-    pub(crate) async fn enrich_claimed_publication(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
+    pub(crate) async fn enrich_claimed_book(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
         if job.staged_path.is_some() {
-            return self.extract_staged_publication(job).await;
+            return self.extract_staged_book(job).await;
         }
-        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued publication has an unsupported extraction format".to_owned()))?;
+        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued book has an unsupported extraction format".to_owned()))?;
         let digest = blake3::hash(job.acquisition_url.as_bytes()).to_hex();
         let acquisition = OpdsDirectAcquisition { url: job.acquisition_url, kind: OpdsAcquisitionKind::OpenAccess, book_format, suggested_file_name: format!("{digest}.{}", book_format.extension()), price: None };
-        self.enrich_claimed_publication_with(&job.source_id, job.publication, acquisition, job.cover_key, job.attempt).await
+        self.enrich_claimed_book_with(&job.source_id, job.book, acquisition, job.cover_key, job.attempt).await
     }
 
-    async fn download_claimed_publication(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
-        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued publication has an unsupported extraction format".to_owned()))?;
+    async fn download_claimed_book(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
+        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued book has an unsupported extraction format".to_owned()))?;
         let digest = blake3::hash(format!("{}\0{}\0{}", job.source_id.as_str(), job.acquisition_url, job.attempt).as_bytes()).to_hex();
         let acquisition = OpdsDirectAcquisition { url: job.acquisition_url.clone(), kind: OpdsAcquisitionKind::OpenAccess, book_format, suggested_file_name: format!("{digest}.{}", book_format.extension()), price: None };
         let downloaded = self.download_catalog_metadata(&acquisition, job.cover_key.is_some(), true).await?;
@@ -222,10 +222,10 @@ impl CatalogService {
         Ok(())
     }
 
-    async fn extract_staged_publication(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
+    async fn extract_staged_book(&self, job: CatalogEpubExtractionJob) -> Result<(), CatalogServiceError> {
         let staged_path = job.staged_path.clone().ok_or_else(|| CatalogServiceError("staged extraction has no local path".to_owned()))?;
         let path = PathBuf::from(&staged_path);
-        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued publication has an unsupported extraction format".to_owned()))?;
+        let book_format = extraction_book_format(job.book_format).ok_or_else(|| CatalogServiceError("queued book has an unsupported extraction format".to_owned()))?;
         let permit = self.state.extraction_slots.acquire().await.map_err(|error| CatalogServiceError(error.to_string()))?;
         let mut extracted = extract_catalog_metadata_isolated(&path, book_format, job.cover_key.is_some()).await?;
         drop(permit);
@@ -251,23 +251,23 @@ impl CatalogService {
         }
         self.state.extraction_metrics.record(&extracted.timings);
         let prepared = self.prepare_extracted_catalog_enrichment(&job.source_id, &acquisition, job.cover_key.as_deref(), job.attempt, extracted, downloaded_bytes).await?;
-        let result = self.commit_catalog_enrichment(&job.source_id, job.publication, &job.acquisition_url, job.attempt, prepared).await;
+        let result = self.commit_catalog_enrichment(&job.source_id, job.book, &job.acquisition_url, job.attempt, prepared).await;
         let _ = tokio::fs::remove_file(path).await;
         result
     }
 
-    pub(crate) async fn enrich_claimed_publication_with(
-        &self, source_id: &CatalogSourceId, identity: CatalogPublicationIdentity, acquisition: OpdsDirectAcquisition, embedded_cover_key: Option<String>, attempt: u64,
+    pub(crate) async fn enrich_claimed_book_with(
+        &self, source_id: &CatalogSourceId, identity: CatalogBookIdentity, acquisition: OpdsDirectAcquisition, embedded_cover_key: Option<String>, attempt: u64,
     ) -> Result<(), CatalogServiceError> {
         let acquisition_url = acquisition.url.clone();
-        let result = self.run_claimed_publication_enrichment(source_id, identity, &acquisition, embedded_cover_key.as_deref(), attempt).await;
+        let result = self.run_claimed_book_enrichment(source_id, identity, &acquisition, embedded_cover_key.as_deref(), attempt).await;
         if let Err(error) = &result {
             let cache_source = source_id.clone();
             let cache_url = acquisition_url.clone();
             let message = error.to_string();
             let (category, retryable) = classify_catalog_failure(&message);
             if let Err(state_error) = self.store_write_call(move |cache| cache.fail_epub_extraction(&cache_source, &cache_url, attempt, &message, category, retryable)).await {
-                tracing::warn!(source = source_id.as_str(), %state_error, "could not persist failed publication extraction");
+                tracing::warn!(source = source_id.as_str(), %state_error, "could not persist failed book extraction");
             }
         }
         if result.is_ok() {
@@ -277,8 +277,8 @@ impl CatalogService {
         result
     }
 
-    async fn run_claimed_publication_enrichment(
-        &self, source_id: &CatalogSourceId, identity: CatalogPublicationIdentity, acquisition: &OpdsDirectAcquisition, embedded_cover_key: Option<&str>, attempt: u64,
+    async fn run_claimed_book_enrichment(
+        &self, source_id: &CatalogSourceId, identity: CatalogBookIdentity, acquisition: &OpdsDirectAcquisition, embedded_cover_key: Option<&str>, attempt: u64,
     ) -> Result<(), CatalogServiceError> {
         let prepared = self.prepare_catalog_enrichment(source_id, acquisition, embedded_cover_key, attempt).await?;
         self.commit_catalog_enrichment(source_id, identity, &acquisition.url, attempt, prepared).await
@@ -300,7 +300,7 @@ impl CatalogService {
             let extracted = extract_catalog_metadata_isolated(&path, acquisition.book_format, extract_cover).await?;
             if downloaded.is_metadata_only() && extract_cover && extracted.thumbnail.is_none() {
                 // Ranged metadata succeeded but the declared artwork was
-                // absent or unsuitable. Retry this publication in full.
+                // absent or unsuitable. Retry this book in full.
                 drop(extraction_permit);
                 drop(downloaded);
                 let cache_source = source_id.clone();
@@ -344,7 +344,7 @@ impl CatalogService {
             (Some(key), Some(thumbnail)) => {
                 self.state.covers.remember_cover_url(source_id, key);
                 if let Err(error) = self.state.covers.cover_with(source_id, key, async move { Ok(thumbnail) }).await {
-                    tracing::warn!(source = source_id.as_str(), %error, "could not cache embedded publication cover during metadata enrichment");
+                    tracing::warn!(source = source_id.as_str(), %error, "could not cache embedded book cover during metadata enrichment");
                 }
                 false
             }
@@ -361,7 +361,7 @@ impl CatalogService {
         }
     }
 
-    async fn commit_catalog_enrichment(&self, source_id: &CatalogSourceId, identity: CatalogPublicationIdentity, acquisition_url: &str, attempt: u64, prepared: PreparedCatalogEnrichment) -> Result<(), CatalogServiceError> {
+    async fn commit_catalog_enrichment(&self, source_id: &CatalogSourceId, identity: CatalogBookIdentity, acquisition_url: &str, attempt: u64, prepared: PreparedCatalogEnrichment) -> Result<(), CatalogServiceError> {
         let extracted_subjects = prepared.subjects;
         // Subject projection may initialize the embedded taxonomy, so do it
         // before taking either the source update lock or SQLite writer lock.
@@ -372,37 +372,37 @@ impl CatalogService {
         let _update = update_lock.lock().await;
         let cache_source = source_id.clone();
         let cache_identity = identity;
-        let mut publication = self.store_call(move |cache| cache.active_publication(&cache_source, &cache_identity)).await?.ok_or_else(|| CatalogServiceError("EPUB publication is no longer active".to_owned()))?;
-        if !publication_has_acquisition_url(&publication, acquisition_url) {
+        let mut book = self.store_call(move |cache| cache.active_book(&cache_source, &cache_identity)).await?.ok_or_else(|| CatalogServiceError("EPUB book is no longer active".to_owned()))?;
+        if !book_has_acquisition_url(&book, acquisition_url) {
             return Err(CatalogServiceError("EPUB acquisition is no longer active".to_owned()));
         }
-        apply_catalog_metadata(&mut publication, prepared.metadata);
+        apply_catalog_metadata(&mut book, prepared.metadata);
         if let Some(metadata) = prepared.saved_metadata.as_ref() {
-            merge_catalog_epub_metadata(&mut publication, metadata);
+            merge_catalog_epub_metadata(&mut book, metadata);
         }
-        merge_catalog_publication_subjects(&mut publication, &extracted_subjects);
-        let cache_subjects = publication
+        merge_catalog_book_subjects(&mut book, &extracted_subjects);
+        let cache_subjects = book
             .metadata
             .subjects
             .iter()
-            .map(|subject| PublicationSubject::new(None, &subject.name, &subject.source, subject.authority.clone(), subject.code.clone()).map_err(|error| CatalogServiceError(error.to_string())))
+            .map(|subject| BookSubject::new(None, &subject.name, &subject.source, subject.authority.clone(), subject.code.clone()).map_err(|error| CatalogServiceError(error.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
         let assignments = prepare_catalog_subject_assignments(&cache_subjects);
-        apply_catalog_description_if_missing(&mut publication, prepared.external_description);
+        apply_catalog_description_if_missing(&mut book, prepared.external_description);
         if prepared.cover_is_definitively_absent {
-            publication.image_url = None;
+            book.image_url = None;
         }
         let toc = prepared.saved_metadata.as_ref().map(|metadata| metadata.toc.clone()).unwrap_or_default();
         let cache_source = source_id.clone();
-        let cache_publication = publication.clone();
+        let cache_book = book.clone();
         let cache_popularity = prepared.popularity;
         let cache_claim_url = acquisition_url.to_owned();
-        if !self.store_write_call(move |cache| cache.enrich_active_publication_prepared(&cache_source, &cache_publication, &cache_subjects, &assignments, &toc, cache_popularity.as_ref(), Some((&cache_claim_url, attempt)))).await? {
-            return Err(CatalogServiceError("EPUB publication is no longer active".to_owned()));
+        if !self.store_write_call(move |cache| cache.enrich_active_book_prepared(&cache_source, &cache_book, &cache_subjects, &assignments, &toc, cache_popularity.as_ref(), Some((&cache_claim_url, attempt)))).await? {
+            return Err(CatalogServiceError("EPUB book is no longer active".to_owned()));
         }
         let cache_source = source_id.clone();
         let cache_url = acquisition_url.to_owned();
-        if !self.store_write_call(move |cache| cache.finish_epub_extraction(&cache_source, &cache_url, attempt, prepared.downloaded_bytes, &publication, prepared.saved_metadata.as_ref())).await? {
+        if !self.store_write_call(move |cache| cache.finish_epub_extraction(&cache_source, &cache_url, attempt, prepared.downloaded_bytes, &book, prepared.saved_metadata.as_ref())).await? {
             return Err(CatalogServiceError("EPUB extraction claim was lost".to_owned()));
         }
         Ok(())
@@ -417,7 +417,7 @@ impl CatalogService {
                 None => false,
             };
             if prefer_range && acquisition.book_format == OpdsBookFormat::Epub && !range_disabled {
-                match self.state.opds.download_epub_metadata_with_limit(acquisition, &self.state.acquisition_directory, metadata_publication_byte_limit(acquisition.book_format), include_cover).await {
+                match self.state.opds.download_epub_metadata_with_limit(acquisition, &self.state.acquisition_directory, metadata_book_byte_limit(acquisition.book_format), include_cover).await {
                     Ok(downloaded) => {
                         if let Some(origin) = range_origin {
                             self.state.epub_range_origins.lock().await.insert(origin, true);
@@ -434,17 +434,17 @@ impl CatalogService {
                     }
                 }
             }
-            self.state.opds.download_book_with_limit(acquisition, &self.state.acquisition_directory, metadata_publication_byte_limit(acquisition.book_format)).await.map_err(|error| CatalogServiceError(error.to_string()))
+            self.state.opds.download_book_with_limit(acquisition, &self.state.acquisition_directory, metadata_book_byte_limit(acquisition.book_format)).await.map_err(|error| CatalogServiceError(error.to_string()))
         };
-        tokio::time::timeout(CATALOG_METADATA_DOWNLOAD_TIMEOUT, operation).await.map_err(|_| CatalogServiceError(format!("publication download exceeded {} seconds", CATALOG_METADATA_DOWNLOAD_TIMEOUT.as_secs())))?
+        tokio::time::timeout(CATALOG_METADATA_DOWNLOAD_TIMEOUT, operation).await.map_err(|_| CatalogServiceError(format!("book download exceeded {} seconds", CATALOG_METADATA_DOWNLOAD_TIMEOUT.as_secs())))?
     }
 }
 
-pub(crate) fn merge_catalog_publication_subjects(publication: &mut catalog_model::CatalogPublication, subjects: &[PublicationSubject]) {
+pub(crate) fn merge_catalog_book_subjects(book: &mut catalog_model::CatalogBook, subjects: &[BookSubject]) {
     for subject in subjects {
         let candidate = subject.clone();
-        if !publication.metadata.subjects.contains(&candidate) {
-            publication.metadata.subjects.push(candidate);
+        if !book.metadata.subjects.contains(&candidate) {
+            book.metadata.subjects.push(candidate);
         }
     }
 }
@@ -453,7 +453,7 @@ pub(crate) fn is_synthetic_cover_key(value: &str) -> bool {
     value.starts_with(EPUB_COVER_KEY_PREFIX)
 }
 
-pub(crate) fn generate_publication_thumbnail(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn generate_book_thumbnail(path: &Path) -> Result<Option<Vec<u8>>, String> {
     thumbnail::generate_thumbnail(path).map_err(|error| error.to_string())
 }
 
@@ -461,7 +461,7 @@ pub(crate) fn generate_publication_thumbnail(path: &Path) -> Result<Option<Vec<u
 pub(crate) struct ExtractedCatalogData {
     pub(crate) metadata: ExtractedCatalogMetadata,
     pub(crate) isbns: Vec<String>,
-    pub(crate) subjects: Vec<PublicationSubject>,
+    pub(crate) subjects: Vec<BookSubject>,
     pub(crate) saved_metadata: Option<CatalogEpubMetadata>,
     pub(crate) thumbnail: Option<Vec<u8>>,
     #[serde(default)]
@@ -481,7 +481,7 @@ pub(crate) struct CatalogExtractionTimings {
 /// particular, OCR cannot carry embedded metadata or a table of contents.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ExtractedCatalogOcrData {
-    pub(crate) subjects: Vec<PublicationSubject>,
+    pub(crate) subjects: Vec<BookSubject>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -572,20 +572,20 @@ async fn run_isolated_extraction_worker(path: &Path, book_format: OpdsBookFormat
         .kill_on_drop(true);
     let status = tokio::time::timeout(EXTRACTION_WORKER_TIMEOUT, command.status())
         .await
-        .map_err(|_| CatalogServiceError("publication extraction worker exceeded its time limit".to_owned()))?
-        .map_err(|error| CatalogServiceError(format!("could not start publication extraction worker: {error}")))?;
+        .map_err(|_| CatalogServiceError("book extraction worker exceeded its time limit".to_owned()))?
+        .map_err(|error| CatalogServiceError(format!("could not start book extraction worker: {error}")))?;
     if !status.success() {
-        return Err(CatalogServiceError(format!("publication extraction worker exceeded a resource limit or failed with {status}")));
+        return Err(CatalogServiceError(format!("book extraction worker exceeded a resource limit or failed with {status}")));
     }
     let length = tokio::fs::metadata(&output_path).await.map_err(|error| CatalogServiceError(error.to_string()))?.len();
     if length > MAX_EXTRACTION_RESULT_BYTES as u64 {
-        return Err(CatalogServiceError(format!("publication extraction result exceeded the {MAX_EXTRACTION_RESULT_BYTES}-byte size limit")));
+        return Err(CatalogServiceError(format!("book extraction result exceeded the {MAX_EXTRACTION_RESULT_BYTES}-byte size limit")));
     }
     tokio::fs::read(&output_path).await.map_err(|error| CatalogServiceError(error.to_string()))
 }
 
 /// Internal subprocess entry point. Expensive and native format parsers run
-/// here under an address-space and CPU limit so one malformed publication can
+/// here under an address-space and CPU limit so one malformed book can
 /// never make the catalogue HTTP process unavailable.
 pub fn run_catalog_extraction_worker(input: &Path, format: &str, mode: &str, output: &Path) -> Result<(), String> {
     let book_format = match format {
@@ -600,9 +600,9 @@ pub fn run_catalog_extraction_worker(input: &Path, format: &str, mode: &str, out
         _ => return Err(format!("unsupported extraction worker mode: {mode}")),
     };
     let input_length = std::fs::metadata(input).map_err(|error| error.to_string())?.len();
-    let input_limit = metadata_publication_byte_limit(book_format);
+    let input_limit = metadata_book_byte_limit(book_format);
     if input_length > input_limit {
-        return Err(format!("publication exceeds the {input_limit}-byte extraction size limit"));
+        return Err(format!("book exceeds the {input_limit}-byte extraction size limit"));
     }
     let bytes = if mode == "ocr" {
         wire::encode(&extract_catalog_ocr(input, book_format)?)
@@ -613,7 +613,7 @@ pub fn run_catalog_extraction_worker(input: &Path, format: &str, mode: &str, out
     };
     let bytes = bytes.map_err(|error| error.to_string())?;
     if bytes.len() > MAX_EXTRACTION_RESULT_BYTES {
-        return Err(format!("publication extraction result exceeded the {MAX_EXTRACTION_RESULT_BYTES}-byte size limit"));
+        return Err(format!("book extraction result exceeded the {MAX_EXTRACTION_RESULT_BYTES}-byte size limit"));
     }
     std::fs::write(output, bytes).map_err(|error| error.to_string())
 }
@@ -621,12 +621,12 @@ pub fn run_catalog_extraction_worker(input: &Path, format: &str, mode: &str, out
 fn extract_catalog_ocr(path: &Path, book_format: OpdsBookFormat) -> Result<ExtractedCatalogOcrData, String> {
     match book_format {
         OpdsBookFormat::Epub => {
-            let book = publication_inspection::inspect_epub_ocr_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-            Ok(ExtractedCatalogOcrData { subjects: book.publication.subjects.clone() })
+            let book = book_inspection::inspect_epub_ocr_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            Ok(ExtractedCatalogOcrData { subjects: book.book.subjects.clone() })
         }
         OpdsBookFormat::Pdf => {
-            let book = publication_inspection::inspect_pdf_ocr_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-            Ok(ExtractedCatalogOcrData { subjects: book.metadata.publication.subjects.clone() })
+            let book = book_inspection::inspect_pdf_ocr_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            Ok(ExtractedCatalogOcrData { subjects: book.metadata.book.subjects.clone() })
         }
         OpdsBookFormat::Mobi => Err("catalogue OCR is not supported for MOBI".to_owned()),
         _ => Err(format!("catalogue OCR is unsupported for {}", book_format.extension())),
@@ -638,7 +638,7 @@ pub(crate) fn extract_epub_catalog_metadata(path: &Path, extract_cover: bool) ->
     // reads bounded EPUB text and never performs OCR. Keeping this here also
     // preserves checksum-validated back-matter ISBN/LCC evidence for the
     // later title/author and taxonomy stages. OCR remains isolated below.
-    let inspected = publication_inspection::inspect_epub(path).map_err(|error| error.to_string())?;
+    let inspected = book_inspection::inspect_epub(path).map_err(|error| error.to_string())?;
     let inspection_timings = inspected.timings;
     let book = inspected.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
@@ -653,15 +653,15 @@ pub(crate) fn extract_epub_catalog_metadata(path: &Path, extract_cover: bool) ->
             provider_link: None,
         })
         .collect();
-    let languages = book.publication.languages.clone();
+    let languages = book.book.languages.clone();
     let description = bounded_embedded_text(&book.description, MAX_EMBEDDED_DESCRIPTION_BYTES, true);
-    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect::<HashSet<_>>().into_iter().collect();
-    let subjects = book.publication.subjects.clone();
+    let isbns = book.book.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect::<HashSet<_>>().into_iter().collect();
+    let subjects = book.book.subjects.clone();
     let metadata = ExtractedCatalogMetadata { title, authors, languages, description };
     let saved_metadata = Some(CatalogEpubMetadata { book, toc: inspected.toc });
     // Cover corruption must not discard otherwise valid bibliographic data.
     let thumbnail_started = Instant::now();
-    let thumbnail = if extract_cover { generate_publication_thumbnail(path).ok().flatten() } else { None };
+    let thumbnail = if extract_cover { generate_book_thumbnail(path).ok().flatten() } else { None };
     let thumbnail_ms = duration_millis(thumbnail_started.elapsed());
     Ok(ExtractedCatalogData {
         metadata,
@@ -680,7 +680,7 @@ pub(crate) fn extract_epub_catalog_metadata(path: &Path, extract_cover: bool) ->
 }
 
 pub(crate) fn extract_mobi_catalog_metadata(path: &Path, extract_cover: bool) -> Result<ExtractedCatalogData, String> {
-    let book = publication_inspection::inspect_mobi_metadata_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let book = book_inspection::inspect_mobi_metadata_reader(path, std::fs::File::open(path).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     let metadata = ExtractedCatalogMetadata {
         title: bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false),
         authors: book
@@ -694,17 +694,17 @@ pub(crate) fn extract_mobi_catalog_metadata(path: &Path, extract_cover: bool) ->
                 provider_link: None,
             })
             .collect(),
-        languages: book.publication.languages.clone(),
+        languages: book.book.languages.clone(),
         description: bounded_embedded_text(&book.description, MAX_EMBEDDED_DESCRIPTION_BYTES, true),
     };
-    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect();
-    let subjects = book.publication.subjects.clone();
-    let thumbnail = if extract_cover { generate_publication_thumbnail(path).ok().flatten() } else { None };
+    let isbns = book.book.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(|identifier| identifier.canonical_value()).collect();
+    let subjects = book.book.subjects.clone();
+    let thumbnail = if extract_cover { generate_book_thumbnail(path).ok().flatten() } else { None };
     Ok(ExtractedCatalogData { metadata, isbns, subjects, saved_metadata: Some(CatalogEpubMetadata { book, toc: Vec::new() }), thumbnail, timings: CatalogExtractionTimings::default() })
 }
 
 #[cfg(test)]
-pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCatalogMetadata, Vec<String>, Vec<PublicationSubject>) {
+pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCatalogMetadata, Vec<String>, Vec<BookSubject>) {
     let title = bounded_embedded_text(&mobi.title(), MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
     let authors = mobi
         .author()
@@ -713,7 +713,7 @@ pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCata
         .into_iter()
         .collect();
     let description = mobi.description().and_then(|description| bounded_embedded_text(&description, MAX_EMBEDDED_DESCRIPTION_BYTES, true));
-    let isbns = mobi.isbn().and_then(|isbn| publication_model::canonical_isbn(&isbn)).into_iter().collect();
+    let isbns = mobi.isbn().and_then(|isbn| book_model::canonical_isbn(&isbn)).into_iter().collect();
     let subjects = mobi
         .subjects()
         .unwrap_or_default()
@@ -721,14 +721,14 @@ pub(crate) fn mobi_catalog_metadata(mobi: &mobi::MobiMetadata) -> (ExtractedCata
         .take(256)
         .filter_map(|subject| {
             let subject = bounded_embedded_text(&subject, MAX_EMBEDDED_METADATA_TEXT_BYTES, false)?;
-            PublicationSubject::new(None, subject, "mobi:subject", None, None).ok()
+            BookSubject::new(None, subject, "mobi:subject", None, None).ok()
         })
         .collect();
     (ExtractedCatalogMetadata { title, authors, languages: Vec::new(), description }, isbns, subjects)
 }
 
 pub(crate) fn extract_pdf_catalog_metadata(path: &Path, extract_cover: bool) -> Result<ExtractedCatalogData, String> {
-    let book = publication_inspection::inspect_pdf_metadata(path).map_err(|error| error.to_string())?.metadata;
+    let book = book_inspection::inspect_pdf_metadata(path).map_err(|error| error.to_string())?.metadata;
     let title = bounded_embedded_text(&book.title, MAX_EMBEDDED_METADATA_TEXT_BYTES, false);
     let authors = book
         .authors()
@@ -741,10 +741,10 @@ pub(crate) fn extract_pdf_catalog_metadata(path: &Path, extract_cover: bool) -> 
             provider_link: None,
         })
         .collect();
-    let languages = book.publication.languages.clone();
+    let languages = book.book.languages.clone();
     let description = bounded_embedded_text(&book.description, MAX_EMBEDDED_DESCRIPTION_BYTES, true);
-    let isbns = book.publication.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(Identifier::canonical_value).collect::<HashSet<_>>().into_iter().collect();
-    let subjects = book.publication.subjects.clone();
+    let isbns = book.book.identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn).filter_map(Identifier::canonical_value).collect::<HashSet<_>>().into_iter().collect();
+    let subjects = book.book.subjects.clone();
     // PDF rasterization is not metadata extraction. It has a much larger and
     // less predictable native working set, so covers are handled only by the
     // independently bounded cover pipeline.
@@ -764,10 +764,10 @@ pub(crate) fn bounded_embedded_text(value: &str, max_bytes: usize, multiline: bo
 
 fn extract_catalog_pages(path: &Path, format: OpdsBookFormat) -> Result<ExtractedCatalogData, String> {
     let book = match format {
-        OpdsBookFormat::Epub => publication_inspection::inspect_epub_pages_reader(path, std::fs::File::open(path).map_err(|e| e.to_string())?),
-        OpdsBookFormat::Pdf => publication_inspection::inspect_pdf_pages_reader(path, std::fs::File::open(path).map_err(|e| e.to_string())?).map(|p| p.metadata),
+        OpdsBookFormat::Epub => book_inspection::inspect_epub_pages_reader(path, std::fs::File::open(path).map_err(|e| e.to_string())?),
+        OpdsBookFormat::Pdf => book_inspection::inspect_pdf_pages_reader(path, std::fs::File::open(path).map_err(|e| e.to_string())?).map(|p| p.metadata),
         _ => return Err("page inspection requires EPUB or PDF".into()),
     }
     .map_err(|e| e.to_string())?;
-    Ok(ExtractedCatalogData { metadata: Default::default(), isbns: Vec::new(), subjects: book.publication.subjects.clone(), saved_metadata: Some(CatalogEpubMetadata { book, toc: Vec::new() }), thumbnail: None, timings: CatalogExtractionTimings::default() })
+    Ok(ExtractedCatalogData { metadata: Default::default(), isbns: Vec::new(), subjects: book.book.subjects.clone(), saved_metadata: Some(CatalogEpubMetadata { book, toc: Vec::new() }), thumbnail: None, timings: CatalogExtractionTimings::default() })
 }

@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM book WHERE content_hash IN (?1,?2)

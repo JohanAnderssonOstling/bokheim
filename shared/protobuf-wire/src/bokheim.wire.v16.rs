@@ -76,7 +76,7 @@ pub struct MapEntry {
 /// them. Additive fields must remain optional or have a safe zero default.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MutationValue {
-    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13")]
+    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14")]
     pub kind: ::core::option::Option<mutation_value::Kind>,
 }
 /// Nested message and enum types in `MutationValue`.
@@ -98,13 +98,15 @@ pub mod mutation_value {
         #[prost(message, tag = "7")]
         Annotation(super::Annotation),
         #[prost(message, tag = "10")]
-        CatalogPublication(super::CatalogPublication),
+        CatalogBook(super::CatalogBook),
         #[prost(message, tag = "11")]
-        Metadata(super::BookMetadata),
+        Metadata(super::BookRecord),
         #[prost(string, tag = "12")]
         Description(::prost::alloc::string::String),
         #[prost(bytes, tag = "13")]
         PdfReaderMetadata(::prost::alloc::vec::Vec<u8>),
+        #[prost(bytes, tag = "14")]
+        BookToc(::prost::alloc::vec::Vec<u8>),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -127,7 +129,7 @@ pub mod book_lifecycle {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PresentBook {
     #[prost(message, optional, tag = "1")]
-    pub metadata: ::core::option::Option<BookMetadata>,
+    pub metadata: ::core::option::Option<BookRecord>,
     #[prost(uint64, tag = "2")]
     pub added_at: u64,
     #[prost(enumeration = "BookFormat", tag = "3")]
@@ -225,7 +227,7 @@ pub struct PdfAnnotationRect {
     pub height: f32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CatalogPublication {
+pub struct CatalogBook {
     #[prost(string, tag = "1")]
     pub edition_id: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "2")]
@@ -234,13 +236,13 @@ pub struct CatalogPublication {
     pub content_hash: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BookMetadata {
+pub struct BookRecord {
     #[prost(string, tag = "1")]
     pub title: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "2")]
     pub contributors: ::prost::alloc::vec::Vec<Contributor>,
     #[prost(message, optional, tag = "4")]
-    pub publication: ::core::option::Option<PublicationMetadata>,
+    pub book: ::core::option::Option<BookMetadata>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Contributor {
@@ -254,21 +256,21 @@ pub struct Contributor {
     pub role: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PublicationMetadata {
+pub struct BookMetadata {
     #[prost(message, repeated, tag = "1")]
-    pub identifiers: ::prost::alloc::vec::Vec<PublicationIdentifier>,
+    pub identifiers: ::prost::alloc::vec::Vec<BookIdentifier>,
     #[prost(message, repeated, tag = "2")]
     pub publishers: ::prost::alloc::vec::Vec<Publisher>,
     #[prost(string, repeated, tag = "3")]
     pub languages: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "4")]
-    pub dates: ::prost::alloc::vec::Vec<PublicationDate>,
+    pub dates: ::prost::alloc::vec::Vec<BookDate>,
     #[prost(message, repeated, tag = "5")]
-    pub subjects: ::prost::alloc::vec::Vec<PublicationSubject>,
+    pub subjects: ::prost::alloc::vec::Vec<BookSubject>,
     #[prost(message, repeated, tag = "6")]
-    pub collections: ::prost::alloc::vec::Vec<PublicationCollection>,
+    pub collections: ::prost::alloc::vec::Vec<BookCollection>,
     #[prost(message, repeated, tag = "7")]
-    pub alternate_titles: ::prost::alloc::vec::Vec<PublicationTitle>,
+    pub alternate_titles: ::prost::alloc::vec::Vec<BookTitle>,
     #[prost(string, repeated, tag = "8")]
     pub rights: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "9")]
@@ -282,10 +284,10 @@ pub struct PublicationMetadata {
     #[prost(string, repeated, tag = "13")]
     pub coverage: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "14")]
-    pub properties: ::prost::alloc::vec::Vec<PublicationProperty>,
+    pub properties: ::prost::alloc::vec::Vec<BookProperty>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PublicationIdentifier {
+pub struct BookIdentifier {
     #[prost(string, tag = "1")]
     pub value: ::prost::alloc::string::String,
     #[prost(enumeration = "IdentifierScheme", tag = "2")]
@@ -293,10 +295,10 @@ pub struct PublicationIdentifier {
     #[prost(string, optional, tag = "3")]
     pub other_scheme: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "4")]
-    pub identifier_types: ::prost::alloc::vec::Vec<PublicationIdentifierType>,
+    pub identifier_types: ::prost::alloc::vec::Vec<BookIdentifierType>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationIdentifierType {
+pub struct BookIdentifierType {
     #[prost(string, tag = "1")]
     pub value: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "2")]
@@ -310,7 +312,7 @@ pub struct Publisher {
     pub name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationDate {
+pub struct BookDate {
     #[prost(string, optional, tag = "1")]
     pub id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag = "2")]
@@ -321,7 +323,7 @@ pub struct PublicationDate {
     pub source: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationSubject {
+pub struct BookSubject {
     #[prost(string, optional, tag = "1")]
     pub id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag = "2")]
@@ -340,7 +342,7 @@ pub struct PublicationSubject {
     pub sort_name_localizations: ::prost::alloc::vec::Vec<LocalizedText>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationCollection {
+pub struct BookCollection {
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "2")]
@@ -366,7 +368,7 @@ pub struct LocalizedText {
     pub value: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationTitle {
+pub struct BookTitle {
     #[prost(string, optional, tag = "1")]
     pub id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag = "2")]
@@ -379,7 +381,7 @@ pub struct PublicationTitle {
     pub source: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PublicationProperty {
+pub struct BookProperty {
     #[prost(string, optional, tag = "1")]
     pub id: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, tag = "2")]

@@ -1,5 +1,5 @@
 //! Bounded snapshots for transfer planning, independent of physical file access.
-use crate::RelativeBookPath;
+use library_replica::RelativeBookPath;
 use rusqlite::Connection;
 use sync_common::ContentHash;
 

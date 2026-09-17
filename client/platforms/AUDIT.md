@@ -7,8 +7,8 @@
 | Browser connections | `web::transport::{session,tab,endpoint,port,scope}` | Backend requests, worker roles, election and subscription recovery |
 | Browser network | `web::transport::{socket,network_client,network_server,upload}` | Authentication, heartbeat/retry policy, verified uploads and HTTP status classification |
 | Import | `web::transport::import_io` and `web/import_io.js` | Backend journal ordering, checkpoints, source validation and recovery |
-| Media and publication ranges | `web::transport::{resources,range}` | Playback leases, renewal requests, reader seeking and range-cache policy |
-| Native files | `native::{filesystem,file_fingerprint,discovery}`; Android publication fallback | Library scanning, managed directory markers, collision naming, trash/restore and reconciliation |
+| Media and book ranges | `web::transport::{resources,range}` | Playback leases, renewal requests, reader seeking and range-cache policy |
+| Native files | `native::{filesystem,file_fingerprint,discovery}`; Android book fallback | Library scanning, managed directory markers, collision naming, trash/restore and reconciliation |
 | Runtime and SQLite | Target-selected runtime and platform SQLite services | Backend transactions, database notifications and work scheduling |
 
 ## Cleanup decisions
@@ -39,7 +39,7 @@ Native notification connections and TLS live in `native::socket` behind the
 policy remain in backend. Tungstenite remains a backend dev-dependency for its
 existing protocol fixtures, but production backend code uses the platform API.
 
-The shared-WASM-memory wait/notify mechanism lives in `web::signal`. Publication
+The shared-WASM-memory wait/notify mechanism lives in `web::signal`. Book
 access retains request/reply queues, reader deadlines and cancellation policy,
 and supplies the wait duration. Its unused direct browser-binding dependencies
 have been removed. `library-files` still exposes a browser Blob capability for
@@ -96,7 +96,7 @@ The existing opt-in port lifecycle contract also checks payload delivery through
   atomic persistence: it handles provider restrictions and cleans up incomplete
   copies. Desktop directory discovery and Kobo mount discovery serve different
   locations and have no duplicate implementation worth merging.
-- Remaining backend OS conditionals select Android publication capabilities and
+- Remaining backend OS conditionals select Android book capabilities and
   Kobo device APIs. Filesystem operations express library layout/reconciliation;
   enrichment timing controls and retry durations remain application policy.
   Browser adapters still use JS protocol types; this is not a claim that backend
@@ -119,8 +119,8 @@ Valid late sync/import responses still have no effect once their request is gone
 Request counters fail on exhaustion instead of wrapping to another request ID.
 
 Storage callbacks and one-shot transfer executors are explicit bridge
-capabilities; CPU publication requests require a source port when a source is
-provided. Backend retains payload interpretation, scheduling, and publication
+capabilities; CPU book requests require a source port when a source is
+provided. Backend retains payload interpretation, scheduling, and book
 policy. No blanket platform-service abstraction was added around ordinary domain
 operations.
 
@@ -140,9 +140,9 @@ entry points are release type-checked; browser integration is not run.
   settlement. The coordinator races the reply against cancellation, dropping the
   operation and removing queued work. Work already dispatched retains the CPU
   slot until completion. This is cooperative message delivery, not preemption.
-- Queued publication sources own their port until successful transfer. Rejection,
+- Queued book sources own their port until successful transfer. Rejection,
   cancellation, queue failure and failed transfer close that endpoint. The caller's
-  existing publication-server owner releases its reader lease when its future is
+  existing book-server owner releases its reader lease when its future is
   dropped. Successful transfer hands source cleanup to the receiving worker.
 - CPU callback generations reject events and errors from replaced connections.
   CPU startup defaults to 5 seconds; database startup defaults to 15 seconds.
@@ -173,7 +173,7 @@ separately from temporary queue saturation.
 
 These limits cover queued and running input payloads, not response sizes, transient
 message decoding allocations, source files, caches or total browser memory. Transfer
-coordination stores ports rather than publication contents and keeps its existing
+coordination stores ports rather than book contents and keeps its existing
 job/subscriber limits. Import checkpoints and write retry semantics are unchanged.
 
 CPU/database startup timers are cancelled on readiness, failure and host suspension;
@@ -204,7 +204,7 @@ Startup deadlines, cancellation cleanup, byte limits and generation checks remai
 - Host failure reporting and teardown share one implementation. Ordinary host
   departure explicitly stops the old host and elects a new one, without an
   optional-error restart API.
-- Removed the forwarding-only CPU endpoint constructor. Publication source
+- Removed the forwarding-only CPU endpoint constructor. Book source
   validation is shared by both CPU request decoders.
 - Byte-envelope inspection no longer copies buffers when a transfer adapter only
   forwards the reply. Consumers that need Rust bytes still copy at that boundary.

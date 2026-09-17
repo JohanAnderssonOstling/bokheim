@@ -96,7 +96,7 @@ impl PdfReaderView {
                 let full_page_position = pdf.read(cx).full_page_position();
                 if !self.toc.is_loaded() {
                     let outline = pdf.read(cx).info().map(|info| info.outline().to_vec()).unwrap_or_default();
-                    self.set_toc(&outline, cx);
+                    self.set_toc(outline, cx);
                     self.focus_document(window, cx);
                 }
                 let unchanged = self.current_page == current_page && self.page_count == *total;

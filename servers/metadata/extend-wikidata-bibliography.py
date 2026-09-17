@@ -7,9 +7,9 @@ from pathlib import Path
 import importlib.util
 spec=importlib.util.spec_from_file_location('authors',Path(__file__).with_name('index-wikidata-authors.py'))
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-SCHEMA='''CREATE TABLE IF NOT EXISTS bibliography(book TEXT PRIMARY KEY,title TEXT,subtitle TEXT,publication_year INTEGER);
-CREATE TABLE IF NOT EXISTS publication_publisher(book TEXT,publisher TEXT,name TEXT,PRIMARY KEY(book,publisher));
-CREATE INDEX IF NOT EXISTS publication_publisher_by_entity ON publication_publisher(publisher);
+SCHEMA='''CREATE TABLE IF NOT EXISTS bibliography(book TEXT PRIMARY KEY,title TEXT,subtitle TEXT,book_year INTEGER);
+CREATE TABLE IF NOT EXISTS book_publisher(book TEXT,publisher TEXT,name TEXT,PRIMARY KEY(book,publisher));
+CREATE INDEX IF NOT EXISTS book_publisher_by_entity ON book_publisher(publisher);
 CREATE TABLE IF NOT EXISTS bibliography_chunk(phase TEXT,path TEXT,sha256 TEXT,PRIMARY KEY(phase,path));'''
 BOOK_TYPES={'Q571','Q7725634','Q47461344','Q8261','Q49084','Q49085','Q860861','Q35760'}
 def title_value(claims,prop):
@@ -28,7 +28,7 @@ def insert(c,r):
     if not title or len(title)>4096:return
     m.insert(c,r) # Also retain profiles, direct codes and credits for ISBN-less books.
     c.execute('INSERT OR REPLACE INTO bibliography VALUES(?,?,?,?)',(qid,title,title_value(claims,'P1680'),m.year(claims,'P577')))
-    c.executemany('INSERT OR IGNORE INTO publication_publisher VALUES(?,?,NULL)',[(qid,p) for p in m.qids(claims,'P123')])
+    c.executemany('INSERT OR IGNORE INTO book_publisher VALUES(?,?,NULL)',[(qid,p) for p in m.qids(claims,'P123')])
 
 def extend(root,path):
     with open(str(path)+'.lock','a') as lock:
@@ -39,7 +39,7 @@ def extend(root,path):
         c.execute("INSERT OR REPLACE INTO state VALUES('bibliography_status','building')");c.commit()
         chunks=list(m.bundle.completed_chunks(Path(root)))
         for phase in ('bibliography','publishers'):
-            publishers={r[0] for r in c.execute('SELECT DISTINCT publisher FROM publication_publisher')} if phase=='publishers' else set()
+            publishers={r[0] for r in c.execute('SELECT DISTINCT publisher FROM book_publisher')} if phase=='publishers' else set()
             for n,chunk in enumerate(chunks,1):
                 key=str(chunk.relative_to(root));sha=json.loads(chunk.with_suffix('.meta.json').read_text())['sha256']
                 old=c.execute('SELECT sha256 FROM bibliography_chunk WHERE phase=? AND path=?',(phase,key)).fetchone()
@@ -53,7 +53,7 @@ def extend(root,path):
                             if phase=='bibliography':insert(c,r)
                             elif r.get('id') in publishers:
                                 labels=r.get('labels',{});name=labels.get('en',{}).get('value') or next((v.get('value') for _,v in sorted(labels.items()) if v.get('value')),None)
-                                if name and len(name)<=4096:c.execute('UPDATE publication_publisher SET name=? WHERE publisher=?',(name,r['id']))
+                                if name and len(name)<=4096:c.execute('UPDATE book_publisher SET name=? WHERE publisher=?',(name,r['id']))
                         if proc.wait()!=0:raise RuntimeError('decompression failed')
                         c.execute('INSERT INTO bibliography_chunk VALUES(?,?,?)',(phase,key,sha))
                 finally:

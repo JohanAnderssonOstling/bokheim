@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1) OR EXISTS(SELECT 1 FROM local_book_work WHERE content_hash=?1) OR EXISTS(SELECT 1 FROM local_file_projection WHERE content_hash=?1)

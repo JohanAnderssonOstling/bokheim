@@ -183,7 +183,7 @@ impl AudiobookSource {
 }
 
 #[derive(Clone)]
-struct AudiobookPublication {
+struct AudiobookBook {
     title: String,
     author: Option<String>,
     narrator: Option<String>,
@@ -338,8 +338,8 @@ impl AudiobookReader {
     /// Commits the drag: the seek happens once, where the pointer was released.
     fn finish_scrub(&mut self, cx: &mut Context<Self>) {
         let Some(fraction) = self.scrub.take() else { return };
-        if let Some(publication) = &self.playback.read(cx).publication {
-            let chapter = &publication.chapters[active_chapter_index(&publication.chapters, self.playback.read(cx).position)];
+        if let Some(book) = &self.playback.read(cx).book {
+            let chapter = &book.chapters[active_chapter_index(&book.chapters, self.playback.read(cx).position)];
             let target = chapter_position_at_fraction(chapter.start, chapter.end, fraction);
             self.seek_to(target, cx);
         }
@@ -525,7 +525,7 @@ impl AudiobookReader {
         let theme = ui_components::browser_theme(cx);
         let target = cx.entity().downgrade();
 
-        let Some(book) = self.playback.read(cx).publication.clone() else {
+        let Some(book) = self.playback.read(cx).book.clone() else {
             let mut opening = ui_components::reader_document_message("Opening audiobook…", theme).flex_col().gap(px(ui_components::SPACE_SM));
             if let Some(error) = self.playback.read(cx).error.clone() {
                 opening = opening.child(div().text_color(theme.danger).child(error));
@@ -682,7 +682,7 @@ impl AudiobookReader {
         let theme = ui_components::browser_theme(cx);
         let library = cx.entity();
         if ui_components::uses_mobile_navigation(window) {
-            let title = self.playback.read(cx).publication.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Audiobook".into());
+            let title = self.playback.read(cx).book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Audiobook".into());
             let back = ui_components::mobile_back_button(theme).on_click(move |_, window, cx| library.update(cx, |this, cx| this.close(window, cx)));
             return ui_components::mobile_navigation_bar(title, back, theme).into_any_element();
         }

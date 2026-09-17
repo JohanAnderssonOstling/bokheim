@@ -1,8 +1,8 @@
 //! Explicit, file-backed reducer diagnostics. Instrumentation is test-only.
 use super::*;
 use rusqlite::{
-    Connection,
     trace::{TraceEvent, TraceEventCodes},
+    Connection,
 };
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
 
@@ -84,8 +84,8 @@ fn benchmark_reducer_record_costs() {
                 changed_at: 10,
                 body: MutationBody::BookLifecycle {
                     content_hash: test_support::fixture_content_hash(100_000 + revision),
-                    value: library_model::BookLifecycleState::Present {
-                        metadata: library_model::SyncBookMetadata { title: format!("Remote {revision}"), contributors: Vec::new(), publication: Default::default() },
+                    value: library_replica::BookLifecycleState::Present {
+                        metadata: library_replica::SyncBookMetadata { title: format!("Remote {revision}"), contributors: Vec::new(), book: Default::default() },
                         added_at: 10,
                         format: BookFormat::Epub,
                     },
@@ -171,10 +171,10 @@ fn benchmark_metadata_edits() {
                 changed_at: 10,
                 body: MutationBody::Metadata {
                     content_hash: ContentHash::new(&format!("{:064x}", revision - 1)),
-                    value: library_model::SyncBookMetadata {
+                    value: library_replica::SyncBookMetadata {
                         title: format!("Edited {revision}"),
-                        contributors: vec![library_model::Contributor::new("Example Author", None, library_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
-                        publication: Default::default(),
+                        contributors: vec![book_model::Contributor::new("Example Author", None, book_model::AUTHOR_MARC_RELATOR_CODE).unwrap()],
+                        book: Default::default(),
                     },
                 },
             }

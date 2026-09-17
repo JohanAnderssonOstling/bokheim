@@ -1,5 +1,6 @@
 //! Durable library workflows above file, thumbnail, and synchronization jobs.
 //! Records are device-local. Progress comes from durable work, not job lifetimes.
+use include_sqlite_sql::include_sql;
 use library_replica::{LibraryOperation, LibraryOperationKind as Kind, LibraryOperationState as State};
 use rusqlite::{Connection, OptionalExtension};
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -20,13 +21,59 @@ impl Record {
         Self { id: uuid::Uuid::new_v4().to_string(), kind, scan_complete: kind == Kind::Sync, scan_failed: false, discovered: 0, failures: 0, requires_sync, completed: false, sync_unfinished: false }
     }
 }
+fn flag(value: bool) -> i64 {
+    i64::from(value)
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Import => "Import",
+        Kind::Sync => "Sync",
+    }
+}
+
+fn parse_kind(value: &str) -> rusqlite::Result<Kind> {
+    match value {
+        "Import" => Ok(Kind::Import),
+        "Sync" => Ok(Kind::Sync),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, format!("unknown library operation {value}").into())),
+    }
+}
+
 fn read(conn: &Connection) -> rusqlite::Result<Option<Record>> {
-    let value: Option<String> = conn.prepare_cached(include_str!("sql/read.sql"))?.query_row([], |row| row.get(0)).optional()?;
-    value.map(|value| serde_json::from_str(&value).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))).transpose()
+    let mut record = None;
+    conn.read_operation(|row| {
+        let id: Option<String> = row.get(0)?;
+        let Some(id) = id else { return Ok(()) };
+        let kind: Option<String> = row.get(1)?;
+        let get_flag = |index: usize| row.get::<_, Option<i64>>(index).map(|value| value.unwrap_or(0) != 0);
+        record = Some(Record {
+            id,
+            kind: parse_kind(kind.as_deref().unwrap_or(""))?,
+            scan_complete: get_flag(2)?,
+            scan_failed: get_flag(3)?,
+            discovered: row.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
+            failures: row.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u64,
+            requires_sync: get_flag(6)?,
+            completed: get_flag(7)?,
+            sync_unfinished: get_flag(8)?,
+        });
+        Ok(())
+    }).optional()?;
+    Ok(record)
 }
 fn write(conn: &Connection, record: &Record) -> rusqlite::Result<()> {
-    let value = serde_json::to_string(record).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    conn.prepare_cached(include_str!("sql/write.sql"))?.execute([value])?;
+    conn.write_operation(
+        &record.id,
+        kind_name(record.kind),
+        flag(record.scan_complete),
+        flag(record.scan_failed),
+        record.discovered.min(i64::MAX as u64) as i64,
+        record.failures.min(i64::MAX as u64) as i64,
+        flag(record.requires_sync),
+        flag(record.completed),
+        flag(record.sync_unfinished),
+    )?;
     Ok(())
 }
 
@@ -117,19 +164,18 @@ pub struct OperationStatus {
 
 pub fn status(conn: &Connection, activity: Activity<'_>) -> rusqlite::Result<OperationStatus> {
     let tx = conn.unchecked_transaction()?;
-    let (books, uploaded_books, pending_uploads, pending_changes, pending_thumbnails, pending_covers, rejections, checkpoint): (u64, u64, u64, u64, u64, u64, u64, bool) =
-        tx.prepare_cached(include_str!("sql/progress.sql"))?.query_row([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?.max(0) as u64,
-                r.get::<_, i64>(1)?.max(0) as u64,
-                r.get::<_, i64>(2)?.max(0) as u64,
-                r.get::<_, i64>(3)?.max(0) as u64,
-                r.get::<_, i64>(4)?.max(0) as u64,
-                r.get::<_, i64>(5)?.max(0) as u64,
-                r.get::<_, i64>(6)?.max(0) as u64,
-                r.get(7)?,
-            ))
-        })?;
+    let (books, uploaded_books, pending_uploads, pending_changes, pending_thumbnails, pending_covers, rejections, checkpoint): (u64, u64, u64, u64, u64, u64, u64, bool) = tx.operation_progress(|r| {
+        Ok((
+            r.get::<_, i64>(0)?.max(0) as u64,
+            r.get::<_, i64>(1)?.max(0) as u64,
+            r.get::<_, i64>(2)?.max(0) as u64,
+            r.get::<_, i64>(3)?.max(0) as u64,
+            r.get::<_, i64>(4)?.max(0) as u64,
+            r.get::<_, i64>(5)?.max(0) as u64,
+            r.get::<_, i64>(6)?.max(0) as u64,
+            r.get(7)?,
+        ))
+    })?;
     let (pending_uploads, pending_covers, rejections) = if activity.asset_uploads_disabled { (0, 0, 0) } else { (pending_uploads, pending_covers, rejections) };
     let mut stored = read(&tx)?;
     let remote_pending = pending_uploads + pending_changes + pending_covers > 0;
@@ -202,3 +248,5 @@ pub fn status(conn: &Connection, activity: Activity<'_>) -> rusqlite::Result<Ope
     tx.commit()?;
     Ok(OperationStatus { operation: Some(result), total_books: books, uploaded_books })
 }
+
+include_sql!("src/operations/sql/library_operation_workflow.sql");

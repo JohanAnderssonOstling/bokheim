@@ -350,7 +350,7 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
 /// by weight rather than hue, because a hit and a note rarely land on the same
 /// word while an active one always has to win against its own passive form.
 ///
-/// Alphas rather than blends: a highlight is laid over text the publication
+/// Alphas rather than blends: a highlight is laid over text the book
 /// drew, so it has to stay translucent whatever is underneath it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InteractionHighlights {

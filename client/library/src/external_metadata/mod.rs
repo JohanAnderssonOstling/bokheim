@@ -1,8 +1,8 @@
 use crate::storage_values::invalid_integer_column;
 use crate::storage_values::invalid_text_column;
-use library_model::AgentId;
-use library_model::ExternalAuthorId;
-use library_model::{Identifier, PublicationMetadata, PublicationSubject, Scheme, Scope, canonical_isbn};
+use book_model::AgentId;
+use book_model::ExternalAuthorId;
+use book_model::{Identifier, BookMetadata, BookSubject, Scheme, Scope, canonical_isbn};
 use metadata_contract::{EntitySource, PersonEntity, PlaceEntity, RichWorkMetadataMatch};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use sync_common::ContentHash;
 
-// Imported CIP references remain separate from publication identity.
+// Imported CIP references remain separate from book identity.
 
 const ALTERNATIVE_EDITION_PROVENANCE: &str = "openlibrary-alternative-edition-match";
 fn unresolved_entity_id(kind: &str, name: &str) -> String {
@@ -35,7 +35,7 @@ pub struct SubjectEnrichmentCandidate {
 pub struct RichEnrichmentCandidate {
     pub content_hash: ContentHash,
     pub isbns: Vec<String>,
-    /// ISBNs which identify the local publication itself. ISBNs attached from
+    /// ISBNs which identify the local book itself. ISBNs attached from
     /// every ambiguous Open Library edition remain useful for locating work
     /// records, but their edition metadata must not be treated as exact
     /// evidence for the local file.
@@ -64,7 +64,7 @@ pub struct EditionIdentityCandidate {
     pub title: String,
     pub authors: Vec<String>,
     pub publishers: Vec<String>,
-    pub publication_year: Option<i32>,
+    pub book_year: Option<i32>,
     pub resource_isbns: Vec<String>,
 }
 
@@ -105,7 +105,7 @@ pub fn cover_enrichment_candidates_after_scoped(conn: &Connection, provider: &st
 
 /// Recover review/lookup evidence from original placements without opening files.
 fn filename_review_identity(conn: &Connection, hash: &ContentHash, title: String, authors: Vec<String>, year: Option<i32>) -> rusqlite::Result<(String, Vec<String>, Option<i32>)> {
-    use publication_enrichment::filename_identity::{unusable_identity, with_filename};
+    use book_enrichment::filename_identity::{unusable_identity, with_filename};
     if !unusable_identity(&title) && authors.iter().any(|a| !unusable_identity(a)) && year.is_some() {
         return Ok((title, authors, year));
     }
@@ -117,30 +117,30 @@ fn filename_review_identity(conn: &Connection, hash: &ContentHash, title: String
     Ok(identity)
 }
 
-fn edition_identity_input(conn: &Connection, content_hash: ContentHash, title: String, raw_publication: &[u8]) -> Result<EditionIdentityCandidate, rusqlite::Error> {
-    let publication = decode_publication_metadata(raw_publication)?;
-    let publishers = publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect();
-    let publication_year = library_model::unique_publication_year(publication.dates.iter().map(|date| date.value()));
+fn edition_identity_input(conn: &Connection, content_hash: ContentHash, title: String, raw_book: &[u8]) -> Result<EditionIdentityCandidate, rusqlite::Error> {
+    let book = decode_book_metadata(raw_book)?;
+    let publishers = book.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect();
+    let book_year = book_model::unique_book_year(book.dates.iter().map(|date| date.value()));
     let mut statement = conn.prepare_cached(include_str!("sql/external_metadata/edition_identity_input_select.sql"))?;
     let authors = statement.query_map([content_hash.as_str()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    let title = publication_enrichment::title_identity::full_title(&title, &publication);
-    let (title, authors, publication_year) = filename_review_identity(conn, &content_hash, title, authors, publication_year)?;
-    let resource_isbns = publication_enrichment::related_isbn::resource_candidates(&publication.properties);
-    Ok(EditionIdentityCandidate { content_hash, title, authors, publishers, publication_year, resource_isbns })
+    let title = book_enrichment::title_identity::full_title(&title, &book);
+    let (title, authors, book_year) = filename_review_identity(conn, &content_hash, title, authors, book_year)?;
+    let resource_isbns = book_enrichment::related_isbn::resource_candidates(&book.properties);
+    Ok(EditionIdentityCandidate { content_hash, title, authors, publishers, book_year, resource_isbns })
 }
 
 /// Read local bibliographic evidence after an ISBN lookup misses, without
-/// changing or inferring any publication identifiers.
+/// changing or inferring any book identifiers.
 pub fn isbn_miss_identity_input(conn: &Connection, content_hash: ContentHash) -> Result<Option<EditionIdentityCandidate>, rusqlite::Error> {
     let row = conn.query_row(include_str!("sql/external_metadata/related_isbn_input_select.sql"), [content_hash.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))).optional()?;
     row.map(|(title, raw)| edition_identity_input(conn, content_hash, title, &raw)).transpose()
 }
 
 /// Persisted local inspection evidence, read without opening book files.
-pub fn related_isbn_input(conn: &Connection, content_hash: ContentHash) -> rusqlite::Result<Option<(EditionIdentityCandidate, Vec<library_model::PublicationProperty>)>> {
+pub fn related_isbn_input(conn: &Connection, content_hash: ContentHash) -> rusqlite::Result<Option<(EditionIdentityCandidate, Vec<book_model::BookProperty>)>> {
     let row = conn.query_row(include_str!("sql/external_metadata/related_isbn_input_select.sql"), [content_hash.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))).optional()?;
     row.map(|(title, raw)| {
-        let properties = decode_publication_metadata(&raw)?.properties;
+        let properties = decode_book_metadata(&raw)?.properties;
         Ok((edition_identity_input(conn, content_hash, title, &raw)?, properties))
     })
     .transpose()
@@ -169,10 +169,10 @@ pub fn edition_identity_candidates_after(conn: &Connection, provider_id: &str, l
     let rows = statement.query_map(rusqlite::params![provider_id, i32::from(retry_failed), after, i64::try_from(limit).unwrap_or(i64::MAX)], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)))?;
     let mut candidates = Vec::new();
     for row in rows {
-        let (raw_hash, title, raw_publication) = row?;
+        let (raw_hash, title, raw_book) = row?;
         let content_hash = ContentHash::new(&raw_hash);
-        let candidate = edition_identity_input(conn, content_hash, title, &raw_publication)?;
-        if !publication_enrichment::filename_identity::unusable_identity(&candidate.title) {
+        let candidate = edition_identity_input(conn, content_hash, title, &raw_book)?;
+        if !book_enrichment::filename_identity::unusable_identity(&candidate.title) {
             candidates.push(candidate);
         }
     }
@@ -181,12 +181,12 @@ pub fn edition_identity_candidates_after(conn: &Connection, provider_id: &str, l
 
 pub fn edition_identity_candidate(conn: &Connection, provider_id: &str, content_hash: &ContentHash) -> Result<Option<EditionIdentityCandidate>, rusqlite::Error> {
     let row = conn.query_row(include_str!("sql/external_metadata/edition_identity_candidate_select.sql"), [content_hash.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))).optional()?;
-    let Some((title, raw_publication)) = row else { return Ok(None) };
+    let Some((title, raw_book)) = row else { return Ok(None) };
     let has_attempt: bool = conn.query_row(include_str!("sql/external_metadata/edition_identity_candidate_select_2.sql"), rusqlite::params![content_hash.as_str(), provider_id], |row| row.get(0))?;
     if !has_attempt {
         return Ok(None);
     }
-    Ok(Some(edition_identity_input(conn, *content_hash, title, &raw_publication)?))
+    Ok(Some(edition_identity_input(conn, *content_hash, title, &raw_book)?))
 }
 
 pub fn apply_edition_identity(conn: &mut Connection, content_hash: ContentHash, provider_id: &str, identifier: &str, isbn: Option<&str>, status: &str, detail: Option<&str>) -> Result<bool, rusqlite::Error> {
@@ -209,18 +209,18 @@ fn apply_edition_identity_with_provenance_in_transaction(
     conn: &rusqlite::Transaction<'_>, content_hash: ContentHash, provider_id: &str, identifier: &str, isbns: &[&str], status: &str, detail: Option<&str>, provenance_value: &str,
 ) -> Result<bool, rusqlite::Error> {
     let transaction = conn;
-    let raw_publication = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
-    let Some(raw_publication) = raw_publication else { return Ok(false) };
+    let raw_book = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
+    let Some(raw_book) = raw_book else { return Ok(false) };
     let mut updated = false;
     if !isbns.is_empty() {
         let already_has_isbn: bool = transaction.query_row(include_str!("sql/external_metadata/apply_edition_identity_with_provenance_in_transaction_select_2.sql"), [content_hash.as_str()], |row| row.get(0))?;
         if !already_has_isbn {
-            let mut publication = decode_publication_metadata(&raw_publication)?;
+            let mut book = decode_book_metadata(&raw_book)?;
             for isbn in isbns.iter().copied().collect::<BTreeSet<_>>() {
                 let inferred = Identifier::new(isbn, Scheme::Isbn, Scope::Edition, provenance_value).map_err(|error| invalid_text_column(0, error.to_string()))?;
-                publication.identifiers.push(inferred);
+                book.identifiers.push(inferred);
             }
-            super::metadata::update_book_publication_metadata_preserving_ids(&transaction, content_hash.clone(), &publication)?;
+            super::metadata::update_book_metadata_preserving_ids(&transaction, content_hash.clone(), &book)?;
             updated = true;
         }
     }
@@ -271,7 +271,7 @@ pub fn rich_enrichment_candidates_after(conn: &Connection, provider_id: &str, li
 }
 
 pub fn apply_rich_enrichment(
-    conn: &mut Connection, content_hash: ContentHash, provider_id: &str, isbn: &str, matched: Option<&RichWorkMetadataMatch>, places: &[PlaceEntity], people: &[PersonEntity], subjects: Vec<PublicationSubject>, status: &str,
+    conn: &mut Connection, content_hash: ContentHash, provider_id: &str, isbn: &str, matched: Option<&RichWorkMetadataMatch>, places: &[PlaceEntity], people: &[PersonEntity], subjects: Vec<BookSubject>, status: &str,
     detail: Option<&str>, replace_previous_work_classifications: bool,
 ) -> Result<usize, rusqlite::Error> {
     let transaction = crate::schema::library_write_transaction(conn)?;
@@ -282,12 +282,12 @@ pub fn apply_rich_enrichment(
 
 /// Apply inside an existing library write transaction.
 pub fn apply_rich_enrichment_in_transaction(
-    conn: &rusqlite::Transaction<'_>, content_hash: ContentHash, provider_id: &str, isbn: &str, matched: Option<&RichWorkMetadataMatch>, places: &[PlaceEntity], people: &[PersonEntity], subjects: Vec<PublicationSubject>, status: &str,
+    conn: &rusqlite::Transaction<'_>, content_hash: ContentHash, provider_id: &str, isbn: &str, matched: Option<&RichWorkMetadataMatch>, places: &[PlaceEntity], people: &[PersonEntity], subjects: Vec<BookSubject>, status: &str,
     detail: Option<&str>, replace_previous_work_classifications: bool,
 ) -> Result<usize, rusqlite::Error> {
     let transaction = conn;
-    let raw_publication = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
-    let Some(raw_publication) = raw_publication else { return Ok(0) };
+    let raw_book = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
+    let Some(raw_book) = raw_book else { return Ok(0) };
 
     for place in places {
         transaction.execute(include_str!("sql/external_metadata/apply_rich_enrichment_in_transaction_insert.sql"), rusqlite::params![place.wikidata_id, place.label, place.latitude_e7, place.longitude_e7])?;
@@ -361,29 +361,29 @@ pub fn apply_rich_enrichment_in_transaction(
         }
     }
     if !subjects.is_empty() || replace_previous_work_classifications {
-        let mut publication = decode_publication_metadata(&raw_publication)?;
-        let before = publication.subjects.len();
+        let mut book = decode_book_metadata(&raw_book)?;
+        let before = book.subjects.len();
         if replace_previous_work_classifications {
             let fallback_codes = {
                 let mut statement = transaction.prepare(include_str!("sql/external_metadata/apply_rich_enrichment_in_transaction_select_3.sql"))?;
                 let codes = statement.query_map([content_hash.as_str()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<BTreeSet<_>, _>>()?;
                 codes
             };
-            publication.subjects.retain(|subject| {
+            book.subjects.retain(|subject| {
                 let authority = subject.authority().unwrap_or_default().to_ascii_lowercase();
                 let notation = subject.code().unwrap_or_else(|| subject.name());
                 !fallback_codes.contains(&(authority, notation.to_owned()))
             });
         }
-        let removed = publication.subjects.len() != before;
+        let removed = book.subjects.len() != before;
         for subject in subjects {
-            if !publication.subjects.contains(&subject) {
-                publication.subjects.push(subject);
+            if !book.subjects.contains(&subject) {
+                book.subjects.push(subject);
                 imported += 1;
             }
         }
         if imported > 0 || removed {
-            super::metadata::update_book_publication_metadata_preserving_ids(&transaction, content_hash.clone(), &publication)?;
+            super::metadata::update_book_metadata_preserving_ids(&transaction, content_hash.clone(), &book)?;
         }
     }
     let bounded_detail = detail.map(|value| value.chars().take(1_024).collect::<String>());
@@ -425,13 +425,13 @@ pub fn apply_authoritative_authors_in_transaction(conn: &rusqlite::Transaction<'
     if authors.is_empty() {
         return Ok(0);
     }
-    let mut credits = authors.iter().map(|(_, name, _)| library_model::Contributor::new(name, None, library_model::MarcRelatorCode(*b"aut")).map_err(|e| invalid_text_column(0, e.to_string()))).collect::<Result<Vec<_>, _>>()?;
+    let mut credits = authors.iter().map(|(_, name, _)| book_model::Contributor::new(name, None, book_model::MarcRelatorCode(*b"aut")).map_err(|e| invalid_text_column(0, e.to_string()))).collect::<Result<Vec<_>, _>>()?;
     let mut statement = conn.prepare(include_str!("sql/external_metadata/apply_authoritative_authors_in_transaction_select.sql"))?;
     for row in statement.query_map([content_hash.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Vec<u8>>(3)?)))? {
         let (id, name, sort, role) = row?;
         let id = AgentId::parse_str(&id).map_err(|e| invalid_text_column(0, e.to_string()))?;
-        let role = library_model::MarcRelatorCode(role.try_into().map_err(|_| invalid_text_column(3, "invalid contributor role"))?);
-        credits.push(library_model::Contributor::with_id(id, &name, sort, role).map_err(|e| invalid_text_column(0, e.to_string()))?);
+        let role = book_model::MarcRelatorCode(role.try_into().map_err(|_| invalid_text_column(3, "invalid contributor role"))?);
+        credits.push(book_model::Contributor::with_id(id, &name, sort, role).map_err(|e| invalid_text_column(0, e.to_string()))?);
     }
     drop(statement);
     let prepared = super::authors::prepare_contributors(conn, &credits, super::authors::AuthorIdPolicy::PreserveIncoming, None)?;
@@ -480,20 +480,20 @@ pub fn subject_enrichment_candidates(conn: &Connection, provider_id: &str, limit
     Ok(candidates)
 }
 
-pub fn apply_external_subjects(conn: &mut Connection, content_hash: ContentHash, provider_id: &str, isbn: &str, subjects: Vec<PublicationSubject>, status: &str, detail: Option<&str>) -> Result<usize, rusqlite::Error> {
+pub fn apply_external_subjects(conn: &mut Connection, content_hash: ContentHash, provider_id: &str, isbn: &str, subjects: Vec<BookSubject>, status: &str, detail: Option<&str>) -> Result<usize, rusqlite::Error> {
     let transaction = crate::schema::library_write_transaction(conn)?;
-    let raw_publication = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
-    let Some(raw_publication) = raw_publication else {
+    let raw_book = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [content_hash.as_str()], |row| row.get::<_, Vec<u8>>(0)).optional()?;
+    let Some(raw_book) = raw_book else {
         return Ok(0);
     };
     let mut imported = 0;
     if !subjects.is_empty() {
         let has_subjects: bool = transaction.query_row(include_str!("sql/external_metadata/apply_external_subjects_select_2.sql"), [content_hash.as_str()], |row| row.get(0))?;
         if !has_subjects {
-            let mut publication = decode_publication_metadata(&raw_publication)?;
+            let mut book = decode_book_metadata(&raw_book)?;
             imported = subjects.len();
-            publication.subjects.extend(subjects);
-            super::metadata::update_book_publication_metadata_preserving_ids(&transaction, content_hash.clone(), &publication)?;
+            book.subjects.extend(subjects);
+            super::metadata::update_book_metadata_preserving_ids(&transaction, content_hash.clone(), &book)?;
         }
     }
     let bounded_detail = detail.map(|value| value.chars().take(1_024).collect::<String>());
@@ -502,21 +502,21 @@ pub fn apply_external_subjects(conn: &mut Connection, content_hash: ContentHash,
     Ok(imported)
 }
 
-pub(super) fn decode_publication_metadata(raw: &[u8]) -> Result<PublicationMetadata, rusqlite::Error> {
+pub(super) fn decode_book_metadata(raw: &[u8]) -> Result<BookMetadata, rusqlite::Error> {
     if raw.is_empty() {
-        return Ok(PublicationMetadata::default());
+        return Ok(BookMetadata::default());
     }
     match sync_common::wire::decode(raw, sync_common::wire::MAX_DECODED_REQUEST_BYTES) {
         Ok(metadata) => Ok(metadata),
         Err(sync_common::wire::WireError::UnsupportedVersion(version @ (10 | 11))) if raw.starts_with(b"BKHM") && raw.get(4) == Some(&version) => {
             let mut compatible = raw.to_vec();
             compatible[4] = sync_common::wire::header_bytes()[4];
-            let metadata = sync_common::wire::decode::<PublicationMetadata>(&compatible, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|error| invalid_text_column(0, error.to_string()))?;
+            let metadata = sync_common::wire::decode::<BookMetadata>(&compatible, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|error| invalid_text_column(0, error.to_string()))?;
             let reencoded = sync_common::wire::encode(&metadata).map_err(|error| invalid_text_column(0, error.to_string()))?;
             if reencoded.get(5..) != raw.get(5..) {
-                return Err(invalid_text_column(0, format!("wire version {version} publication payload is not byte-compatible with the current wire version")));
+                return Err(invalid_text_column(0, format!("wire version {version} book payload is not byte-compatible with the current wire version")));
             }
-            log::info!("upgrading a byte-compatible publication metadata value from wire version {version}");
+            log::info!("upgrading a byte-compatible book metadata value from wire version {version}");
             Ok(metadata)
         }
         Err(error) => Err(invalid_text_column(0, error.to_string())),
@@ -545,16 +545,16 @@ pub fn apply_filename_isbn_in_transaction(conn: &rusqlite::Transaction<'_>, cont
 pub fn apply_audible_identifiers(conn: &rusqlite::Transaction<'_>, hash: ContentHash, asin: &str, isbns: &[String]) -> rusqlite::Result<()> {
     let raw: Option<Vec<u8>> = conn.query_row(include_str!("sql/external_metadata/apply_external_subjects_select.sql"), [hash.as_str()], |row| row.get(0)).optional()?;
     let Some(raw) = raw else { return Ok(()) };
-    let mut publication = decode_publication_metadata(&raw)?;
+    let mut book = decode_book_metadata(&raw)?;
     let source = format!("audible:{asin}");
     let mut new_isbn = false;
     for (value, scheme) in std::iter::once((asin, Scheme::Asin)).chain(isbns.iter().map(|isbn| (isbn.as_str(), Scheme::Isbn))) {
-        if !publication.identifiers.iter().any(|id| id.scheme == scheme && id.value == value) {
+        if !book.identifiers.iter().any(|id| id.scheme == scheme && id.value == value) {
             new_isbn |= scheme == Scheme::Isbn;
-            publication.identifiers.push(Identifier::new(value, scheme, Scope::Edition, &source).map_err(|e| invalid_text_column(0, e.to_string()))?);
+            book.identifiers.push(Identifier::new(value, scheme, Scope::Edition, &source).map_err(|e| invalid_text_column(0, e.to_string()))?);
         }
     }
-    super::metadata::update_book_publication_metadata_preserving_ids(conn, hash, &publication)?;
+    super::metadata::update_book_metadata_preserving_ids(conn, hash, &book)?;
     if new_isbn {
         // A previous title/ISBN miss must not hide newly verified recording IDs.
         conn.execute(include_str!("sql/external_metadata/apply_audible_identifiers_delete.sql"), [hash.as_str()])?;
@@ -593,12 +593,12 @@ mod subtitle_storage_tests {
         crate::metadata::insert_scanned_book(&tx, hash, "Algorithms: A Guide (Jeff Erickson) (2019)", "").unwrap();
         tx.commit().unwrap();
         let raw: Vec<u8> = conn.query_row(include_str!("../metadata/sql/metadata/normalize_stored_title_select.sql"), [hash.as_str()], |row| row.get(1)).unwrap();
-        let publication = decode_publication_metadata(&raw).unwrap();
-        assert_eq!(publication.subtitle(), Some("A Guide"));
-        assert_eq!(publication.dates[0].value(), "2019");
+        let book = decode_book_metadata(&raw).unwrap();
+        assert_eq!(book.subtitle(), Some("A Guide"));
+        assert_eq!(book.dates[0].value(), "2019");
         let candidate = edition_identity_input(&conn, hash, "Algorithms".into(), &raw).unwrap();
         assert_eq!(candidate.title, "Algorithms: A Guide");
         assert_eq!(candidate.authors, ["Jeff Erickson"]);
-        assert_eq!(candidate.publication_year, Some(2019));
+        assert_eq!(candidate.book_year, Some(2019));
     }
 }

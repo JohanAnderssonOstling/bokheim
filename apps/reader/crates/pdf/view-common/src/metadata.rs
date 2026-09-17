@@ -4,7 +4,6 @@ pub struct PdfReaderMetadata {
     pub version: u32,
     pub checksum: String,
     pub pages: Vec<PdfStoredPage>,
-    pub outline: Vec<PdfStoredOutline>,
     #[serde(default)]
     pub annotations: Vec<PdfStoredAnnotation>,
     #[serde(default)]
@@ -19,13 +18,6 @@ pub struct PdfStoredPage {
     pub rotation: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PdfStoredOutline {
-    pub title: String,
-    pub page_index: usize,
-    pub depth: usize,
-}
-
 impl PdfReaderMetadata {
     pub fn valid_for(&self, checksum: &str) -> bool {
         self.version == 1 && self.checksum == checksum
@@ -33,9 +25,6 @@ impl PdfReaderMetadata {
             && !self.pages.is_empty() && self.pages.len() <= 32767
             && self.pages.iter().all(|p| p.width.is_finite() && p.height.is_finite()
                 && p.width > 0.0 && p.height > 0.0 && matches!(p.rotation, 0 | 90 | 180 | 270))
-            && self.outline.len() <= 4096
-            && self.outline.iter().map(|o| o.title.len()).sum::<usize>() <= 256 * 1024
-            && self.outline.iter().all(|o| o.page_index < self.pages.len() && o.depth <= 256 && o.title.len() <= 4096)
             && self.annotations.len() <= 16384
             && self.annotations.iter().all(|a| a.valid(self.pages.len()))
             && self.dependencies.as_ref().is_none_or(|d| d.valid(self.pages.len()))

@@ -1,10 +1,10 @@
 WITH lookup_isbn AS (
     SELECT book_row_id,canonical_value,source,'isbn' AS scheme FROM book_identifier identifier
     WHERE scheme='isbn' AND canonical_value IS NOT NULL
-      AND NOT EXISTS(SELECT 1 FROM book_publication_value evidence
+      AND NOT EXISTS(SELECT 1 FROM book_value evidence
                      WHERE evidence.book_row_id=identifier.book_row_id AND evidence.kind='enrichment_isbn')
     UNION
-    SELECT book_row_id,value,'inspection-reference','isbn' FROM book_publication_value WHERE kind='enrichment_isbn'
+    SELECT book_row_id,value,'inspection-reference','isbn' FROM book_value WHERE kind='enrichment_isbn'
 ) SELECT book.content_hash, GROUP_CONCAT(DISTINCT identifier.canonical_value)
          FROM book
          JOIN lookup_isbn identifier ON identifier.book_row_id=book.row_id

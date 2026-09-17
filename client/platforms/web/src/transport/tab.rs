@@ -1,7 +1,7 @@
 //! Page-owned workers, ports, Web Locks, and page lifecycle callbacks.
 //! Worker roles and application messages are supplied by the caller.
 /// Host identity and worker scripts supplied by the application entry point.
-pub struct BrowserConfiguration {
+pub struct WebConfiguration {
     pub broker_url: String,
     pub broker_name: String,
     pub lifetime_lock: String,

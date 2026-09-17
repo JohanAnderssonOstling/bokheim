@@ -2743,7 +2743,7 @@ mod tests {
     }
 
     #[test]
-    fn bracketed_publication_years_preserve_the_complete_dated_call() {
+    fn bracketed_book_years_preserve_the_complete_dated_call() {
         for (code, base) in [("AC8 .S6588 [1981]", "AC8 .S6588 1981"),
             ("QA76 .A1 [1999B]", "QA76 .A1 1999B"), ("QA76 [1999]", "QA76 1999")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));

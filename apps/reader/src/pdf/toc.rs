@@ -1,26 +1,27 @@
 //! The PDF outline, and which of its entries the current page falls under.
 //!
-//! A PDF outline is a flat list of entries carrying a depth, which has to be
-//! nested into a tree before it can be shown. Deciding which entry the reader
-//! is inside is then a "last entry at or before this page" search, with depth
-//! and document order breaking ties so a page that several entries could claim
-//! resolves to the innermost, latest one.
+//! The outline arrives as the tree the publisher authored, in the navigation
+//! form every format shares, and that tree is the only copy this view keeps.
+//! An entry is named by its position in document order, so the sidebar, the
+//! page lookup and the active-entry search all agree on identity without
+//! anything having to be stored twice.
 
 use gpui_component::tree::TreeItem;
-use pdf_reader_core::PdfOutlineEntry;
+use book_model::{pdf_toc_page, BookTocEntry};
 
-/// One outline entry, flattened to what the reader needs from it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PdfTocTarget {
-    id: String,
-    title: String,
-    page_index: usize,
-    depth: usize,
+const TOC_ID_PREFIX: &str = "pdf-toc-";
+
+fn toc_id(order: usize) -> String {
+    format!("{TOC_ID_PREFIX}{order}")
+}
+
+fn toc_order(id: &str) -> Option<usize> {
+    id.strip_prefix(TOC_ID_PREFIX)?.parse().ok()
 }
 
 #[derive(Default)]
 pub(crate) struct PdfTocState {
-    targets: Vec<PdfTocTarget>,
+    entries: Vec<BookTocEntry>,
     /// The entry the current page sits under, if any.
     active_id: Option<String>,
     /// Whether the outline has been read off the document yet. The PDF reports
@@ -34,8 +35,8 @@ impl PdfTocState {
         self.loaded
     }
 
-    pub(crate) fn replace_targets(&mut self, targets: Vec<PdfTocTarget>) {
-        self.targets = targets;
+    pub(crate) fn replace_entries(&mut self, entries: Vec<BookTocEntry>) {
+        self.entries = entries;
         self.loaded = true;
     }
 
@@ -48,92 +49,76 @@ impl PdfTocState {
         true
     }
 
-    /// The entry covering `page_index`: the last one at or before that page.
+    /// The entry covering `page_index`: the one opening at the highest page at
+    /// or before it.
     ///
     /// Ties break towards the deepest entry, then the latest in document
     /// order, so a chapter and the section opening it both starting on one
     /// page resolve to the section.
     pub(crate) fn entry_at(&self, page_index: usize) -> Option<String> {
-        self.targets.iter().enumerate().filter(|(_, target)| target.page_index <= page_index).max_by_key(|(order, target)| (target.page_index, target.depth, *order)).map(|(_, target)| target.id.clone())
+        let mut best = None;
+        best_entry_at(&self.entries, page_index, 0, &mut 0, &mut best);
+        best.map(|(_, _, order)| toc_id(order))
     }
 
     pub(crate) fn page_of(&self, id: &str) -> Option<usize> {
-        self.targets.iter().find(|target| target.id == id).map(|target| target.page_index)
+        pdf_toc_page(&self.entry(id)?.target)
     }
 
     /// The title of the active entry, shown in the reader toolbar.
     pub(crate) fn active_title(&self) -> Option<&str> {
-        let id = self.active_id.as_ref()?;
-        self.targets.iter().find(|target| target.id == *id).map(|target| target.title.as_str())
+        Some(self.entry(self.active_id.as_ref()?)?.title.as_str())
+    }
+
+    fn entry(&self, id: &str) -> Option<&BookTocEntry> {
+        entry_in_order(&self.entries, toc_order(id)?, &mut 0)
     }
 }
 
-/// A nested outline entry, ready to become a tree item.
-#[derive(Clone, Debug)]
-pub(crate) struct PdfTocNode {
-    id: String,
-    title: String,
-    page_index: usize,
-    depth: usize,
-    children: Vec<PdfTocNode>,
-}
-
-#[derive(Clone, Debug)]
-struct FlatPdfTocItem {
-    id: String,
-    title: String,
-    page_index: usize,
-    depth: usize,
-}
-
-#[derive(Clone, Debug)]
-struct PdfTocArenaNode {
-    item: FlatPdfTocItem,
-    children: Vec<usize>,
-}
-
-/// Flattens a PDF's outline entries and nests them by their reported depth.
-pub(crate) fn nest_pdf_outline(outline: &[PdfOutlineEntry]) -> Vec<PdfTocNode> {
-    let items = outline.iter().enumerate().map(|(index, entry)| FlatPdfTocItem { id: format!("pdf-toc-{index}"), title: entry.title().to_owned(), page_index: entry.page_index(), depth: entry.depth() }).collect();
-    nest_pdf_toc_items(items)
-}
-
-fn nest_pdf_toc_items(items: Vec<FlatPdfTocItem>) -> Vec<PdfTocNode> {
-    let mut arena = Vec::<PdfTocArenaNode>::with_capacity(items.len());
-    let mut roots = Vec::<usize>::new();
-    let mut ancestors = Vec::<(usize, usize)>::new();
-
-    for item in items {
-        while ancestors.last().is_some_and(|(depth, _)| *depth >= item.depth) {
-            ancestors.pop();
+/// The entry at one position in document order.
+fn entry_in_order<'a>(entries: &'a [BookTocEntry], order: usize, next: &mut usize) -> Option<&'a BookTocEntry> {
+    for entry in entries {
+        let current = *next;
+        *next += 1;
+        if current == order {
+            return Some(entry);
         }
-        let index = arena.len();
-        arena.push(PdfTocArenaNode { item, children: Vec::new() });
-        if let Some((_, parent)) = ancestors.last().copied() {
-            arena[parent].children.push(index);
-        } else {
-            roots.push(index);
+        if let Some(found) = entry_in_order(&entry.children, order, next) {
+            return Some(found);
         }
-        let depth = arena[index].item.depth;
-        ancestors.push((depth, index));
     }
-
-    fn materialize(index: usize, arena: &[PdfTocArenaNode]) -> PdfTocNode {
-        let node = &arena[index];
-        PdfTocNode { id: node.item.id.clone(), title: node.item.title.clone(), page_index: node.item.page_index, depth: node.item.depth, children: node.children.iter().map(|child| materialize(*child, arena)).collect() }
-    }
-
-    roots.into_iter().map(|root| materialize(root, &arena)).collect()
+    None
 }
 
-/// Builds the sidebar tree, collecting a flat target list as it goes so page
-/// lookups do not have to walk the tree again.
-pub(crate) fn pdf_toc_tree_items(nodes: &[PdfTocNode], targets: &mut Vec<PdfTocTarget>) -> Vec<TreeItem> {
-    nodes
+/// Searches for the entry a page belongs to, carrying the best candidate so
+/// far as `(page, depth, order)` — the ordering that decides ties.
+fn best_entry_at(entries: &[BookTocEntry], page_index: usize, depth: usize, next: &mut usize, best: &mut Option<(usize, usize, usize)>) {
+    for entry in entries {
+        let order = *next;
+        *next += 1;
+        if let Some(page) = pdf_toc_page(&entry.target).filter(|page| *page <= page_index) {
+            let candidate = (page, depth, order);
+            if best.is_none_or(|current| candidate > current) {
+                *best = Some(candidate);
+            }
+        }
+        best_entry_at(&entry.children, page_index, depth + 1, next, best);
+    }
+}
+
+/// Builds the sidebar tree, naming each entry by its position in document
+/// order so [`PdfTocState`] can find it again.
+pub(crate) fn pdf_toc_tree_items(entries: &[BookTocEntry]) -> Vec<TreeItem> {
+    tree_items(entries, &mut 0)
+}
+
+fn tree_items(entries: &[BookTocEntry], next: &mut usize) -> Vec<TreeItem> {
+    entries
         .iter()
-        .map(|node| {
-            targets.push(PdfTocTarget { id: node.id.clone(), title: node.title.clone(), page_index: node.page_index, depth: node.depth });
-            TreeItem::new(node.id.clone(), node.title.clone()).children(pdf_toc_tree_items(&node.children, targets))
+        .map(|entry| {
+            let id = toc_id(*next);
+            *next += 1;
+            TreeItem::new(id, entry.title.clone()).children(tree_items(&entry.children, next))
         })
         .collect()
 }
@@ -142,44 +127,67 @@ pub(crate) fn pdf_toc_tree_items(nodes: &[PdfTocNode], targets: &mut Vec<PdfTocT
 mod tests {
     use super::*;
 
-    fn target(id: &str, title: &str, page_index: usize, depth: usize) -> PdfTocTarget {
-        PdfTocTarget { id: id.to_owned(), title: title.to_owned(), page_index, depth }
+    fn entry(title: &str, page_index: usize, children: Vec<BookTocEntry>) -> BookTocEntry {
+        BookTocEntry { title: title.to_owned(), target: book_model::pdf_toc_target(page_index), children }
     }
 
     fn sample() -> PdfTocState {
-        PdfTocState { targets: vec![target("intro", "Introduction", 0, 0), target("method", "Method", 12, 0), target("method-a", "Sampling", 12, 1), target("results", "Results", 40, 0)], active_id: None, loaded: true }
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![entry("Introduction", 0, Vec::new()), entry("Method", 12, vec![entry("Sampling", 12, Vec::new())]), entry("Results", 40, Vec::new())]);
+        toc
     }
 
     #[test]
-    fn pdf_outline_depths_become_the_same_nested_tree_used_by_epub() {
-        let item = |id: &str, title: &str, page_index, depth| FlatPdfTocItem { id: id.to_owned(), title: title.to_owned(), page_index, depth };
-        let tree = nest_pdf_toc_items(vec![item("one", "Chapter one", 0, 0), item("one-a", "Section one A", 1, 1), item("one-a-i", "Detail", 2, 2), item("two", "Chapter two", 8, 0), item("two-a", "Section two A", 9, 1)]);
+    fn document_order_names_every_entry_including_nested_ones() {
+        let toc = sample();
+        let titles = ["Introduction", "Method", "Sampling", "Results"];
 
-        assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0].title, "Chapter one");
-        assert_eq!(tree[0].children[0].title, "Section one A");
-        assert_eq!(tree[0].children[0].children[0].page_index, 2);
-        assert_eq!(tree[1].title, "Chapter two");
-        assert_eq!(tree[1].children[0].title, "Section two A");
+        for (order, title) in titles.iter().enumerate() {
+            assert_eq!(toc.entry(&toc_id(order)).map(|entry| entry.title.as_str()), Some(*title), "a parent is followed by its children, not by its sibling");
+        }
+        assert!(toc.entry("pdf-toc-4").is_none());
+        assert!(toc.entry("epub-toc-0").is_none());
+    }
+
+    #[test]
+    fn the_sidebar_and_the_page_lookup_agree_on_identity() {
+        let toc = sample();
+        let items = pdf_toc_tree_items(&toc.entries);
+
+        assert_eq!(items.len(), 3, "the tree keeps its shape rather than being flattened");
+        assert_eq!(items[1].children.len(), 1);
+        assert_eq!(toc.page_of(&items[1].children[0].id), Some(12), "the nested item's id resolves to the page it opens");
+        assert_eq!(toc.page_of(&items[2].id), Some(40));
+        assert_eq!(toc.page_of("missing"), None);
     }
 
     #[test]
     fn a_page_resolves_to_the_last_entry_at_or_before_it() {
         let toc = sample();
-        assert_eq!(toc.entry_at(0).as_deref(), Some("intro"));
-        assert_eq!(toc.entry_at(11).as_deref(), Some("intro"), "a page before the next entry stays in the previous section");
-        assert_eq!(toc.entry_at(41).as_deref(), Some("results"));
+        assert_eq!(toc.entry_at(0).as_deref(), Some("pdf-toc-0"));
+        assert_eq!(toc.entry_at(11).as_deref(), Some("pdf-toc-0"), "a page before the next entry stays in the previous section");
+        assert_eq!(toc.entry_at(41).as_deref(), Some("pdf-toc-3"));
     }
 
     #[test]
     fn entries_sharing_a_page_resolve_to_the_innermost() {
         let toc = sample();
-        assert_eq!(toc.entry_at(12).as_deref(), Some("method-a"), "a section opening its chapter's page wins over the chapter");
+        assert_eq!(toc.entry_at(12).as_deref(), Some("pdf-toc-2"), "a section opening its chapter's page wins over the chapter");
+    }
+
+    #[test]
+    fn an_outline_that_moves_backwards_still_resolves_to_the_nearest_page() {
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![entry("Chapter", 10, Vec::new()), entry("Frontispiece", 2, Vec::new())]);
+
+        assert_eq!(toc.entry_at(5).as_deref(), Some("pdf-toc-1"), "only the frontispiece opens at or before page five");
+        assert_eq!(toc.entry_at(12).as_deref(), Some("pdf-toc-0"), "the chapter opens later than the frontispiece, so it wins");
     }
 
     #[test]
     fn a_page_before_the_first_entry_belongs_to_nothing() {
-        let toc = PdfTocState { targets: vec![target("later", "Later", 5, 0)], ..PdfTocState::default() };
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![entry("Later", 5, Vec::new())]);
         assert_eq!(toc.entry_at(0), None);
     }
 
@@ -193,14 +201,7 @@ mod tests {
     #[test]
     fn the_active_entry_exposes_its_title() {
         let mut toc = sample();
-        toc.active_id = Some("method-a".to_owned());
+        toc.set_active(Some("pdf-toc-2".to_owned()));
         assert_eq!(toc.active_title(), Some("Sampling"));
-    }
-
-    #[test]
-    fn a_navigation_target_maps_back_to_its_page() {
-        let toc = sample();
-        assert_eq!(toc.page_of("results"), Some(40));
-        assert_eq!(toc.page_of("missing"), None);
     }
 }

@@ -1,1 +1,0 @@
-SELECT COALESCE(SUM(seq),0) FROM sqlite_sequence WHERE name IN ('local_directory_work','local_book_work','local_file_work')

@@ -1,1 +1,0 @@
-DELETE FROM local_isbn_response WHERE isbn IN (SELECT isbn FROM local_isbn_response ORDER BY expires_at DESC,isbn LIMIT -1 OFFSET 4096)

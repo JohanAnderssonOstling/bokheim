@@ -1,2 +1,2 @@
-INSERT INTO local_publication_current(dir_id,content_hash,checksum,origin) VALUES(?1,?2,?3,?4)
+INSERT INTO local_book_current(dir_id,content_hash,checksum,origin) VALUES(?1,?2,?3,?4)
         ON CONFLICT(dir_id,content_hash) DO UPDATE SET id=excluded.id,checksum=excluded.checksum,origin=excluded.origin

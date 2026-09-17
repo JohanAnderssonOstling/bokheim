@@ -2,16 +2,25 @@
 //!
 //! The sync service depends only on `sync-common` and never links this crate.
 
-use catalog_model::{CatalogPublicationIdentity, CatalogSourceId};
-use library_model::{AnnotationState, BookLifecycleState, SyncBookMetadata, DirectoryLifecycleState, ReadingPositionState};
+use catalog_model::{CatalogBookIdentity, CatalogSourceId};
+use book_model::AnnotationState;
+pub mod filenames;
+mod folder_management;
+mod library_state;
+
+pub use folder_management::{numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name, FolderDestinationPolicy};
+pub use library_state::{portable_name_key, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, SyncBookMetadata};
+
 use serde::{Deserialize, Serialize};
 
 mod transfer;
+mod transfer_values;
 use std::collections::HashMap;
 use sync_common::ContentHash;
 pub use sync_common::VersionKey;
 use sync_common::{DeclaredBlobReference, DirId, FileName, MutationId, ReplicaSeq, UnixMillis, WireMutation};
 pub use transfer::{LibraryOperation, LibraryOperationKind, LibraryOperationState,BlobKey, BlobKind, LibraryTransfers, ScanProgress, TransferJobKind, TransferOrigin, TransferState, TransferStatus};
+pub use transfer_values::{BookPlacement, BookUploadIntent, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 
 mod directory_projection;
 mod mutation_protobuf;
@@ -26,10 +35,11 @@ pub enum StateKey {
     Placement { content_hash: ContentHash, dir_id: DirId },
     ReadingPosition(ContentHash),
     Annotation(String),
-    CatalogPublication { source_id: String, publication_key: String },
+    CatalogBook { source_id: String, book_key: String },
     Metadata(ContentHash),
     Description(ContentHash),
     PdfReaderMetadata(ContentHash, String),
+    BookToc(ContentHash),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -42,16 +52,21 @@ pub enum MutationBody {
     Placement { dir_id: DirId, content_hash: ContentHash, present: bool, origin_folder_id: Option<String> },
     ReadingPosition { content_hash: ContentHash, value: ReadingPositionState },
     Annotation { annotation_id: String, value: AnnotationState },
-    CatalogPublication { source_id: CatalogSourceId, publication: CatalogPublicationIdentity, content_hash: ContentHash },
+    CatalogBook { source_id: CatalogSourceId, book: CatalogBookIdentity, content_hash: ContentHash },
     Metadata { content_hash: ContentHash, value: SyncBookMetadata },
     Description { content_hash: ContentHash, value: String },
     PdfReaderMetadata { content_hash: ContentHash, value: pdf_view_common::PdfReaderMetadata },
+    /// The book's navigation, keyed by the book's identity rather than
+    /// by the bytes it was read from. Transported because it is the one
+    /// navigation a replica cannot always rebuild: an audiobook's chapters may
+    /// have come from enrichment rather than from the file.
+    BookToc { content_hash: ContentHash, value: Vec<book_model::BookTocEntry> },
 }
 
 /// Collision-free register subkey for an edition/work identity. The edition's
 /// UTF-8 byte length makes the boundary unambiguous without constraining OPDS
 /// identifiers or storing provider URLs.
-pub fn catalog_publication_state_subkey(edition_id: &str, work_id: Option<&str>) -> String {
+pub fn catalog_book_state_subkey(edition_id: &str, work_id: Option<&str>) -> String {
     format!("{}:{edition_id}{}", edition_id.len(), work_id.unwrap_or_default())
 }
 
@@ -108,7 +123,7 @@ fn same_replica_candidate_wins(current: &StateMutation, candidate: &StateMutatio
 }
 
 impl MutationBody {
-    /// Publication bytes that must be uploaded before this state can be shared.
+    /// Book bytes that must be uploaded before this state can be shared.
     /// Removals must remain possible even when a local import never uploaded.
     pub fn upload_dependency(&self) -> Option<sync_common::ContentHash> {
         match self {
@@ -117,9 +132,9 @@ impl MutationBody {
             | Self::Placement { present: false, .. } => None,
             Self::Annotation { value, .. } => (!value.deleted).then_some(value.content_hash),
             Self::BookLifecycle { content_hash, .. } | Self::Placement { content_hash, .. }
-            | Self::ReadingPosition { content_hash, .. } | Self::CatalogPublication { content_hash, .. }
+            | Self::ReadingPosition { content_hash, .. } | Self::CatalogBook { content_hash, .. }
             | Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. }
-            | Self::PdfReaderMetadata { content_hash, .. } => Some(*content_hash),
+            | Self::PdfReaderMetadata { content_hash, .. } | Self::BookToc { content_hash, .. } => Some(*content_hash),
         }
     }
 
@@ -134,10 +149,11 @@ impl MutationBody {
             Self::Placement { .. } => sync_common::mutation_kind::PLACEMENT,
             Self::ReadingPosition { .. } => sync_common::mutation_kind::READING_POSITION,
             Self::Annotation { .. } => sync_common::mutation_kind::ANNOTATION,
-            Self::CatalogPublication { .. } => sync_common::mutation_kind::CATALOG_PUBLICATION,
+            Self::CatalogBook { .. } => sync_common::mutation_kind::CATALOG_BOOK,
             Self::Metadata { .. } => sync_common::mutation_kind::METADATA,
             Self::PdfReaderMetadata { .. } => sync_common::mutation_kind::PDF_READER_METADATA,
             Self::Description { .. } => sync_common::mutation_kind::DESCRIPTION,
+            Self::BookToc { .. } => sync_common::mutation_kind::BOOK_TOC,
         }
     }
 
@@ -157,9 +173,9 @@ impl MutationBody {
             Self::Placement { dir_id, content_hash, .. } => (content_hash.to_string(), dir_id.to_string(), None),
             Self::ReadingPosition { content_hash, .. } => (content_hash.to_string(), String::new(), None),
             Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new(), None),
-            Self::CatalogPublication { source_id, publication, content_hash: _ } => (source_id.as_str().to_owned(), catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()), None),
+            Self::CatalogBook { source_id, book, content_hash: _ } => (source_id.as_str().to_owned(), catalog_book_state_subkey(&book.edition_id, book.work_id.as_deref()), None),
             Self::PdfReaderMetadata { content_hash, value } => (content_hash.to_string(), value.checksum.clone(), None),
-            Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. } => (content_hash.to_string(), String::new(), None),
+            Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. } | Self::BookToc { content_hash, .. } => (content_hash.to_string(), String::new(), None),
         };
         // Non-lifecycle declarations are upload prerequisites only; they do not
         // increment the server's lifecycle reference count.
@@ -184,7 +200,7 @@ impl MutationBody {
                 | sync_common::mutation_kind::PLACEMENT
                 | sync_common::mutation_kind::READING_POSITION
                 | sync_common::mutation_kind::ANNOTATION
-                | sync_common::mutation_kind::CATALOG_PUBLICATION
+                | sync_common::mutation_kind::CATALOG_BOOK
                 | sync_common::mutation_kind::METADATA
                 | sync_common::mutation_kind::PDF_READER_METADATA
                 | sync_common::mutation_kind::DESCRIPTION
@@ -206,12 +222,13 @@ impl MutationBody {
             Self::Placement { dir_id, content_hash, .. } => StateKey::Placement { content_hash: content_hash.clone(), dir_id: dir_id.clone() },
             Self::ReadingPosition { content_hash, value: _ } => StateKey::ReadingPosition(content_hash.clone()),
             Self::Annotation { annotation_id, value: _ } => StateKey::Annotation(annotation_id.clone()),
-            Self::CatalogPublication { source_id, publication, content_hash: _ } => {
-                StateKey::CatalogPublication { source_id: source_id.as_str().to_owned(), publication_key: catalog_publication_state_subkey(&publication.edition_id, publication.work_id.as_deref()) }
+            Self::CatalogBook { source_id, book, content_hash: _ } => {
+                StateKey::CatalogBook { source_id: source_id.as_str().to_owned(), book_key: catalog_book_state_subkey(&book.edition_id, book.work_id.as_deref()) }
             }
             Self::Metadata { content_hash, value: _ } => StateKey::Metadata(content_hash.clone()),
             Self::PdfReaderMetadata { content_hash, value } => StateKey::PdfReaderMetadata(*content_hash, value.checksum.clone()),
             Self::Description { content_hash, value: _ } => StateKey::Description(content_hash.clone()),
+            Self::BookToc { content_hash, value: _ } => StateKey::BookToc(content_hash.clone()),
         }
     }
 
@@ -240,7 +257,8 @@ impl StateMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use library_model::{AnnotationAnchor, AnnotationStyle, BookFormat, Collection, CollectionKind, LocalizedText, PublicationSubject, ReadingPosition};
+    use book_model::{AnnotationAnchor, AnnotationStyle, BookFormat, ReadingPosition};
+    use book_model::{Collection, CollectionKind, LocalizedText, BookSubject};
 
     fn content_hash(character: char) -> ContentHash {
         ContentHash::new(&character.to_string().repeat(64))
@@ -262,13 +280,13 @@ mod tests {
             "test:collection",
         )
         .unwrap();
-        let mut publication = library_model::PublicationMetadata::default();
-        publication.collections.push(collection);
-        publication.subjects.push(
-            PublicationSubject::with_details(None, "Historiska romaner", vec![LocalizedText::new("en", "Historical fiction").unwrap()], Some("Romaner, historiska".to_owned()), Vec::new(), "test:subject", Some("saogf".to_owned()), None)
+        let mut book = book_model::BookMetadata::default();
+        book.collections.push(collection);
+        book.subjects.push(
+            BookSubject::with_details(None, "Historiska romaner", vec![LocalizedText::new("en", "Historical fiction").unwrap()], Some("Romaner, historiska".to_owned()), Vec::new(), "test:subject", Some("saogf".to_owned()), None)
                 .unwrap(),
         );
-        SyncBookMetadata { title: "Book".to_owned(), contributors: Vec::new(), publication }
+        SyncBookMetadata { title: "Book".to_owned(), contributors: Vec::new(), book }
     }
 
     #[test]
@@ -297,9 +315,9 @@ mod tests {
                     deleted: false,
                 },
             },
-            MutationBody::CatalogPublication {
+            MutationBody::CatalogBook {
                 source_id: CatalogSourceId::parse("standard-ebooks").unwrap(),
-                publication: CatalogPublicationIdentity { edition_id: "urn:uuid:edition".to_owned(), work_id: Some("urn:uuid:work".to_owned()) },
+                book: CatalogBookIdentity { edition_id: "urn:uuid:edition".to_owned(), work_id: Some("urn:uuid:work".to_owned()) },
                 content_hash: first_hash,
             },
             MutationBody::Metadata { content_hash: first_hash, value: metadata() },

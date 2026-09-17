@@ -1,7 +1,7 @@
 use super::{
     active_generation_in, advance_catalog_transport_revision, bounded_crawl_error, decode_cached, merge_catalog_subject_evidence, merge_extracted_author_names, metadata_index_from_metadata, params, record_identity_review,
-    record_identity_review_failure, sequence_in, sequenced_publication_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, CatalogEpubMetadata, CatalogMetadataBackfillIndexedJob,
-    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogPublicationIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, Instant, TransactionBehavior,
+    record_identity_review_failure, sequence_in, sequenced_book_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_book, CatalogEpubMetadata, CatalogMetadataBackfillIndexedJob,
+    CatalogMetadataBackfillIndexedUpdate, CatalogMetadataBackfillWriteTimings, CatalogMetadataIndex, CatalogBookIdentity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, Instant, TransactionBehavior,
     CATALOG_METADATA_BACKFILL_VERSION, CATALOG_METADATA_INDEX_VERSION,
 };
 
@@ -15,9 +15,9 @@ impl CatalogStore {
                         CASE WHEN extraction.book_format IN ('epub','pdf') THEN 'pending' ELSE 'not_needed' END
                  FROM catalog_epub_extraction extraction
                  JOIN catalog_source source ON source.source_id=extraction.source_id
-                 JOIN catalog_publication publication
-                   ON publication.source_id=extraction.source_id AND publication.generation=source.active_generation
-                  AND publication.acquisition_url=extraction.acquisition_url
+                 JOIN catalog_book book
+                   ON book.source_id=extraction.source_id AND book.generation=source.active_generation
+                  AND book.acquisition_url=extraction.acquisition_url
                  WHERE extraction.status='succeeded' AND extraction.metadata_payload IS NOT NULL
                    AND NOT EXISTS(
                        SELECT 1 FROM catalog_epub_extraction pending_extraction
@@ -62,18 +62,18 @@ impl CatalogStore {
             .map(|(source_id, acquisition_url, payload)| {
                 let metadata: CatalogEpubMetadata = decode_cached(payload).map_err(sql_decode_error)?;
                 let index = metadata_index_from_metadata(&metadata);
-                Ok::<_, CatalogStoreError>((source_id.clone(), acquisition_url.clone(), index.title, index.publication_year, wire::encode(&index.authors)?, wire::encode(&index.publishers)?, wire::encode(&index.isbns)?))
+                Ok::<_, CatalogStoreError>((source_id.clone(), acquisition_url.clone(), index.title, index.book_year, wire::encode(&index.authors)?, wire::encode(&index.publishers)?, wire::encode(&index.isbns)?))
             })
             .collect::<Result<Vec<_>, CatalogStoreError>>()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for (source_id, acquisition_url, title, publication_year, authors_payload, publishers_payload, isbns_payload) in &prepared {
+        for (source_id, acquisition_url, title, book_year, authors_payload, publishers_payload, isbns_payload) in &prepared {
             transaction.execute(
-                "INSERT INTO catalog_metadata_index(source_id,acquisition_url,version,title,publication_year,authors_payload,publishers_payload,isbns_payload)
+                "INSERT INTO catalog_metadata_index(source_id,acquisition_url,version,title,book_year,authors_payload,publishers_payload,isbns_payload)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
                  ON CONFLICT(source_id,acquisition_url) DO UPDATE SET
-                   version=excluded.version,title=excluded.title,publication_year=excluded.publication_year,
+                   version=excluded.version,title=excluded.title,book_year=excluded.book_year,
                    authors_payload=excluded.authors_payload,publishers_payload=excluded.publishers_payload,isbns_payload=excluded.isbns_payload",
-                params![source_id, acquisition_url, CATALOG_METADATA_INDEX_VERSION, title, publication_year, authors_payload, publishers_payload, isbns_payload],
+                params![source_id, acquisition_url, CATALOG_METADATA_INDEX_VERSION, title, book_year, authors_payload, publishers_payload, isbns_payload],
             )?;
         }
         transaction.commit()?;
@@ -87,15 +87,15 @@ impl CatalogStore {
         let jobs = {
             let mut statement = transaction.prepare(
                 "SELECT backfill.source_id,backfill.acquisition_url,extraction.edition_id,extraction.work_id,
-                        metadata_index.title,metadata_index.publication_year,metadata_index.authors_payload,
+                        metadata_index.title,metadata_index.book_year,metadata_index.authors_payload,
                         metadata_index.publishers_payload,metadata_index.isbns_payload,backfill.attempts+1
                  FROM catalog_metadata_backfill backfill
                  JOIN catalog_epub_extraction extraction
                    ON extraction.source_id=backfill.source_id AND extraction.acquisition_url=backfill.acquisition_url
                  JOIN catalog_source source ON source.source_id=backfill.source_id
-                 JOIN catalog_publication publication
-                   ON publication.source_id=backfill.source_id AND publication.generation=source.active_generation
-                  AND publication.acquisition_url=backfill.acquisition_url
+                 JOIN catalog_book book
+                   ON book.source_id=backfill.source_id AND book.generation=source.active_generation
+                  AND book.acquisition_url=backfill.acquisition_url
                  JOIN catalog_metadata_index metadata_index
                    ON metadata_index.source_id=backfill.source_id AND metadata_index.acquisition_url=backfill.acquisition_url
                   AND metadata_index.version=?1
@@ -113,10 +113,10 @@ impl CatalogStore {
                 Ok(CatalogMetadataBackfillIndexedJob {
                     source_id: CatalogSourceId::parse(&source).map_err(|error| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?,
                     acquisition_url: row.get(1)?,
-                    publication: CatalogPublicationIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
+                    book: CatalogBookIdentity { edition_id: row.get(2)?, work_id: row.get::<_, Option<String>>(3)?.filter(|value| !value.is_empty()) },
                     index: CatalogMetadataIndex {
                         title: row.get(4)?,
-                        publication_year: row.get(5)?,
+                        book_year: row.get(5)?,
                         authors: wire::decode(&row.get::<_, Vec<u8>>(6)?, wire::MAX_DECODED_RESPONSE_BYTES).map_err(sql_decode_error)?,
                         publishers: wire::decode(&row.get::<_, Vec<u8>>(7)?, wire::MAX_DECODED_RESPONSE_BYTES).map_err(sql_decode_error)?,
                         isbns: wire::decode(&row.get::<_, Vec<u8>>(8)?, wire::MAX_DECODED_RESPONSE_BYTES).map_err(sql_decode_error)?,
@@ -155,27 +155,27 @@ impl CatalogStore {
             if claimed != 1 {
                 continue;
             }
-            if sequence_in(&transaction, &update.source_id, generation, &update.publication)?.is_some() {
+            if sequence_in(&transaction, &update.source_id, generation, &update.book)?.is_some() {
                 let authors_started = Instant::now();
-                merge_extracted_author_names(&transaction, &update.source_id, generation, &update.publication, &update.index.authors)?;
+                merge_extracted_author_names(&transaction, &update.source_id, generation, &update.book, &update.index.authors)?;
                 authors_ms += u64::try_from(authors_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let subjects_started = Instant::now();
-                if let Some(mut active) = sequenced_publication_in(&transaction, &update.source_id, generation, &update.publication)? {
-                    merge_catalog_subject_evidence(&mut active.publication, &update.subjects);
-                    merge_identity_evidence(&mut active.publication, update.identity_result.as_ref());
-                    upsert_active_publication(&transaction, &update.source_id, generation, &active.publication)?;
-                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.publication)?])?;
+                if let Some(mut active) = sequenced_book_in(&transaction, &update.source_id, generation, &update.book)? {
+                    merge_catalog_subject_evidence(&mut active.book, &update.subjects);
+                    merge_identity_evidence(&mut active.book, update.identity_result.as_ref());
+                    upsert_active_book(&transaction, &update.source_id, generation, &active.book)?;
+                    transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![update.source_id.as_str(), update.acquisition_url, wire::encode(&active.book)?])?;
                 }
                 subjects_ms += u64::try_from(subjects_started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if let Some(popularity) = &update.popularity {
-                    let work_id = update.publication.work_id.as_deref().unwrap_or("");
+                    let work_id = update.book.work_id.as_deref().unwrap_or("");
                     transaction.execute(
-                        "INSERT OR REPLACE INTO catalog_publication_popularity(source_id,generation,edition_id,work_id,want_to_read_count,currently_reading_count,already_read_count,reading_log_count,rating_count,rating_sum)
+                        "INSERT OR REPLACE INTO catalog_book_popularity(source_id,generation,edition_id,work_id,want_to_read_count,currently_reading_count,already_read_count,reading_log_count,rating_count,rating_sum)
                          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                         params![
                             update.source_id.as_str(),
                             storage_i64(generation, "generation")?,
-                            update.publication.edition_id,
+                            update.book.edition_id,
                             work_id,
                             storage_i64(popularity.want_to_read_count, "want-to-read count")?,
                             storage_i64(popularity.currently_reading_count, "currently-reading count")?,
@@ -192,12 +192,12 @@ impl CatalogStore {
             identity_review_ms += u64::try_from(review_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let index_started = Instant::now();
             transaction.execute(
-                "UPDATE catalog_metadata_index SET title=?3,publication_year=?4,authors_payload=?5,publishers_payload=?6,isbns_payload=?7 WHERE source_id=?1 AND acquisition_url=?2 AND version=?8",
+                "UPDATE catalog_metadata_index SET title=?3,book_year=?4,authors_payload=?5,publishers_payload=?6,isbns_payload=?7 WHERE source_id=?1 AND acquisition_url=?2 AND version=?8",
                 params![
                     update.source_id.as_str(),
                     update.acquisition_url,
                     update.index.title,
-                    update.index.publication_year,
+                    update.index.book_year,
                     wire::encode(&update.index.authors)?,
                     wire::encode(&update.index.publishers)?,
                     wire::encode(&update.index.isbns)?,
@@ -235,22 +235,22 @@ impl CatalogStore {
     }
 }
 
-fn merge_identity_evidence(publication: &mut catalog_model::CatalogPublication, result: Option<&metadata_contract::EditionIdentityResult>) {
+fn merge_identity_evidence(book: &mut catalog_model::CatalogBook, result: Option<&metadata_contract::EditionIdentityResult>) {
     let Some(matched) = result.and_then(|result| result.matched.as_ref()) else { return };
     let evidence = [
-        catalog_model::Identifier::new(&matched.canonical_isbn13, catalog_model::Scheme::Isbn, catalog_model::Scope::Publication, "openlibrary:identity-match").expect("Open Library returned a bounded ISBN"),
+        catalog_model::Identifier::new(&matched.canonical_isbn13, catalog_model::Scheme::Isbn, catalog_model::Scope::Book, "openlibrary:identity-match").expect("Open Library returned a bounded ISBN"),
         catalog_model::Identifier::new(&matched.open_library_edition_id, catalog_model::Scheme::Other("openlibrary".to_owned()), catalog_model::Scope::Edition, "openlibrary:identity-match")
             .expect("Open Library returned a bounded edition identifier"),
     ];
     for identifier in evidence {
-        if !publication.metadata.identifiers.contains(&identifier) {
-            publication.metadata.identifiers.push(identifier);
+        if !book.metadata.identifiers.contains(&identifier) {
+            book.metadata.identifiers.push(identifier);
         }
     }
     if let Some(work_id) = &matched.open_library_work_id {
         let identifier = catalog_model::Identifier::new(work_id, catalog_model::Scheme::Other("openlibrary".to_owned()), catalog_model::Scope::Work, "openlibrary:identity-match").expect("Open Library returned a bounded work identifier");
-        if !publication.metadata.identifiers.contains(&identifier) {
-            publication.metadata.identifiers.push(identifier);
+        if !book.metadata.identifiers.contains(&identifier) {
+            book.metadata.identifiers.push(identifier);
         }
     }
 }

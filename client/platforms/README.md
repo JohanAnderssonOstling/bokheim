@@ -5,7 +5,7 @@ and synchronization logic. None of these crates depends on `bokheim-backend`.
 
 | Crate | Responsibility |
 | --- | --- |
-| `android` | Private publication locks and shared-storage publication fallback. |
+| `android` | Private book locks and shared-storage book fallback. |
 | `web` | OPFS storage plus worker creation, owned ports, cancellation, Fetch transport, and tab lifetimes. |
 | `desktop` | Conventional application, Documents, and home directory locations. |
 | `kobo` | Mounted-device discovery and library transfers; optional on-device hardware services through the `device` feature. |
@@ -26,7 +26,7 @@ Shared application policy has explicit homes:
 
 - `client/library` owns database mutations and durable library state.
 - `client/library-files` owns scanning and asset reconciliation policy.
-- `client/publication-access` owns publication-cache policy.
+- `client/book-access` owns book-cache policy.
 - `client/backend/src/storage` coordinates connections, write notifications,
   and adapters for those shared services.
 - `client/backend/src/library/events.rs` and `discovery.rs` connect domain events
@@ -58,7 +58,7 @@ Android filesystem fallback tests also run on a native host. Browser OPFS and
 timer contracts run through `client/backend/scripts/test-web-storage.mjs`.
 
 Shared-memory range transport lives in `web/src/transport/range.rs`, including
-source handles and synchronous/asynchronous callback ownership. Publication
+source handles and synchronous/asynchronous callback ownership. Book
 seeking, range caching, authentication, and fetch policy remain in backend.
 
 ## Remaining adapter boundary
@@ -72,7 +72,7 @@ classification. JavaScript values can still cross these application interfaces;
 that alone does not make their application policy a platform service.
 
 Native filesystem auditing extracted directory durability and no-clobber file
-publication into `native::filesystem`. Android keeps its specialized publication
+book into `native::filesystem`. Android keeps its specialized book
 fallback. Scanning, reconciliation, trash/restore decisions, managed directory
 markers, collision naming and content verification remain in `library-files`:
 those operations depend on library identity and durable library state. Ordinary

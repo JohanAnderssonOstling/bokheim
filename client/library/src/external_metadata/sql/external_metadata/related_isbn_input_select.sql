@@ -1,1 +1,1 @@
-SELECT COALESCE(title,''),publication_metadata FROM book WHERE content_hash=?1 AND deleted_at IS NULL AND hidden_at IS NULL
+SELECT COALESCE(title,''),book_metadata FROM book WHERE content_hash=?1 AND deleted_at IS NULL AND hidden_at IS NULL

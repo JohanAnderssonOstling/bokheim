@@ -85,7 +85,7 @@ pub(crate) struct ReaderView {
     wheel_debounce: Option<gpui::Task<()>>,
     search_input: Entity<InputState>,
     search: SearchState,
-    publication: Arc<crate::publication::NativePublication>,
+    book: Arc<crate::book::NativeBook>,
     current_cfi: Option<String>,
     progress: ProgressState,
     marks: MarkSession,

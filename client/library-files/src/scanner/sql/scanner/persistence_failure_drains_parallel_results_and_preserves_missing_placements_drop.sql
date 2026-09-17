@@ -1,1 +1,0 @@
-DROP TRIGGER fail_scanned_insert

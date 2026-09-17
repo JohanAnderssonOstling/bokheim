@@ -223,7 +223,7 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
     let count = read_open_library_resumable::<EditionRecord>(connection, path, limit, "editions", |transaction, records| {
         let mut edition_insert = transaction.prepare_cached("INSERT INTO edition_stage(edition_id,work_id) VALUES(?1,?2)").map_err(error)?;
         let mut isbn_insert = transaction.prepare_cached("INSERT INTO edition_isbn_stage(isbn13,edition_id) VALUES(?1,?2)").map_err(error)?;
-        let mut bibliography_insert = transaction.prepare_cached("INSERT INTO edition_bibliography_stage(edition_id,title,normalized_title,publication_year) VALUES(?1,?2,?3,?4)").map_err(error)?;
+        let mut bibliography_insert = transaction.prepare_cached("INSERT INTO edition_bibliography_stage(edition_id,title,normalized_title,book_year) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut publisher_insert = transaction.prepare_cached("INSERT INTO edition_publisher_stage(edition_id,position,name,normalized_name) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut classification_insert = transaction.prepare_cached("INSERT INTO edition_classification_stage(edition_id,scheme,notation) VALUES(?1,?2,?3)").map_err(error)?;
         let mut work_classification_insert = transaction.prepare_cached("INSERT INTO edition_work_classification_stage(work_id,scheme,notation) VALUES(?1,?2,?3)").map_err(error)?;
@@ -248,7 +248,7 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
             if let Some(title) = record.title.as_deref().map(compact_text).filter(|title| !title.is_empty() && title.len() <= 4_096) {
                 let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
                 if !normalized_title.is_empty() {
-                    bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(publication_year)]).map_err(error)?;
+                    bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(book_year)]).map_err(error)?;
                     if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
                         transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
                             params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
@@ -280,7 +280,7 @@ fn import_edition_identities(connection: &mut Connection, path: &Path, limit: Op
         return Ok(());
     }
     read_open_library_resumable::<EditionRecord>(connection, path, limit, "edition_identities", |transaction, records| {
-        let mut bibliography_insert = transaction.prepare_cached("INSERT INTO edition_bibliography_stage(edition_id,title,normalized_title,publication_year) VALUES(?1,?2,?3,?4)").map_err(error)?;
+        let mut bibliography_insert = transaction.prepare_cached("INSERT INTO edition_bibliography_stage(edition_id,title,normalized_title,book_year) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut publisher_insert = transaction.prepare_cached("INSERT INTO edition_publisher_stage(edition_id,position,name,normalized_name) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut retained = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM edition WHERE edition_id=?1)").map_err(error)?;
         for record in records {
@@ -293,7 +293,7 @@ fn import_edition_identities(connection: &mut Connection, path: &Path, limit: Op
             if normalized_title.is_empty() {
                 continue;
             }
-            bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(publication_year)]).map_err(error)?;
+            bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(book_year)]).map_err(error)?;
             if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
                 transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
                     params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
@@ -520,8 +520,8 @@ fn materialize_editions(connection: &mut Connection) -> Result<(), MetadataError
                  SELECT edition_id,work_id FROM edition_stage ORDER BY edition_id;
              INSERT OR IGNORE INTO edition_isbn(isbn13,edition_id)
                  SELECT isbn13,edition_id FROM edition_isbn_stage ORDER BY isbn13,edition_id;
-             INSERT OR REPLACE INTO edition_bibliography(edition_id,title,normalized_title,publication_year)
-                 SELECT edition_id,title,normalized_title,publication_year FROM edition_bibliography_stage ORDER BY normalized_title,edition_id;
+             INSERT OR REPLACE INTO edition_bibliography(edition_id,title,normalized_title,book_year)
+                 SELECT edition_id,title,normalized_title,book_year FROM edition_bibliography_stage ORDER BY normalized_title,edition_id;
              INSERT OR IGNORE INTO edition_publisher(edition_id,position,name,normalized_name)
                  SELECT edition_id,position,name,normalized_name FROM edition_publisher_stage ORDER BY edition_id,position;
              INSERT OR IGNORE INTO edition_classification(edition_id,scheme,notation)
@@ -554,8 +554,8 @@ fn materialize_edition_identities(connection: &mut Connection) -> Result<(), Met
     let transaction = connection.transaction().map_err(error)?;
     transaction
         .execute_batch(
-            "INSERT OR REPLACE INTO edition_bibliography(edition_id,title,normalized_title,publication_year)
-                 SELECT edition_id,title,normalized_title,publication_year FROM edition_bibliography_stage ORDER BY normalized_title,edition_id;
+            "INSERT OR REPLACE INTO edition_bibliography(edition_id,title,normalized_title,book_year)
+                 SELECT edition_id,title,normalized_title,book_year FROM edition_bibliography_stage ORDER BY normalized_title,edition_id;
              INSERT OR IGNORE INTO edition_publisher(edition_id,position,name,normalized_name)
                  SELECT edition_id,position,name,normalized_name FROM edition_publisher_stage ORDER BY edition_id,position;
              DROP TABLE edition_bibliography_stage;
@@ -696,7 +696,7 @@ pub(crate) fn title_substring_keys(value: &str) -> Vec<(String, usize)> {
     metadata_contract::matching::title_substring_keys(value, MAX_TITLE_SUBSTRINGS_PER_QUERY)
 }
 
-pub(crate) fn publication_year(value: &str) -> Option<i32> {
+pub(crate) fn book_year(value: &str) -> Option<i32> {
     let mut years = BTreeSet::new();
     for run in value.split(|character: char| !character.is_ascii_digit()) {
         if run.len() == 4 {

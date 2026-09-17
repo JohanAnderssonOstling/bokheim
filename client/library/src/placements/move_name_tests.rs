@@ -11,11 +11,19 @@ fn fixture() -> Connection {
 fn legacy(conn: &Connection, folder: bool, requested: &str) -> String {
     let sql = if folder { include_str!("sql/move_name_tests/legacy_select.sql") } else { include_str!("sql/move_name_tests/legacy_select_2.sql") };
     let names = conn.prepare(sql).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-    if folder { library_model::unique_folder_name(requested, names.iter().map(String::as_str)) } else { library_model::unique_file_name(requested, names.iter().map(String::as_str)) }
+    if folder {
+        library_replica::unique_folder_name(requested, names.iter().map(String::as_str))
+    } else {
+        library_replica::unique_file_name(requested, names.iter().map(String::as_str))
+    }
 }
 
 fn candidate(conn: &Connection, folder: bool, requested: &str) -> String {
-    if folder { choose_move_folder_name(conn, "dest", "self", requested).unwrap() } else { choose_move_file_name(conn, "dest", requested).unwrap() }
+    if folder {
+        choose_move_folder_name(conn, "dest", "self", requested).unwrap()
+    } else {
+        choose_move_file_name(conn, "dest", requested).unwrap()
+    }
 }
 
 #[test]

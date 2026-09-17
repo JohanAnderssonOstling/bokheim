@@ -5,7 +5,7 @@ impl CatalogStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT source_id, crawl_status, last_crawl_started_at, last_crawl_succeeded_at, last_crawl_error,
-                    active_page_count, active_publication_count, active_epub_count,
+                    active_page_count, active_book_count, active_epub_count,
                     (CASE WHEN NOT EXISTS(
                          SELECT 1 FROM catalog_page root
                          WHERE root.source_id=s.source_id AND root.generation=s.active_generation AND root.locator=s.source_url
@@ -35,15 +35,15 @@ impl CatalogStore {
                 last_crawl_succeeded_at: optional_stored_u64(row.get(3)?, "last crawl succeeded at")?,
                 last_crawl_error: row.get(4)?,
                 active_page_count: stored_u64(row.get(5)?, "active page count")?,
-                active_publication_count: stored_u64(row.get(6)?, "active publication count")?,
+                active_book_count: stored_u64(row.get(6)?, "active book count")?,
                 active_epub_count: stored_u64(row.get(7)?, "active EPUB count")?,
                 crawl_frontier_count: stored_u64(row.get(8)?, "crawl frontier count")?,
                 epub_extractions: CatalogEpubExtractionInventory {
                     pending: stored_u64(row.get(9)?, "pending EPUB extraction count")?,
                     running: stored_u64(row.get(10)?, "running EPUB extraction count")?,
-                    downloading: stored_u64(row.get(11)?, "downloading publication count")?,
-                    extracting: stored_u64(row.get(12)?, "extracting publication count")?,
-                    enriching: stored_u64(row.get(13)?, "enriching publication count")?,
+                    downloading: stored_u64(row.get(11)?, "downloading book count")?,
+                    extracting: stored_u64(row.get(12)?, "extracting book count")?,
+                    enriching: stored_u64(row.get(13)?, "enriching book count")?,
                     succeeded: stored_u64(row.get(14)?, "succeeded EPUB extraction count")?,
                     failed: stored_u64(row.get(15)?, "failed EPUB extraction count")?,
                     attempts: stored_u64(row.get(16)?, "EPUB extraction attempt count")?,
@@ -88,7 +88,7 @@ impl CatalogStore {
         Ok(CatalogInventory {
             search_index_ready: connection.query_row("SELECT index_version=?1 AND ready=1 FROM catalog_search_index_metadata WHERE singleton=1", [CATALOG_SEARCH_INDEX_VERSION], |row| row.get(0))?,
             active_page_count: sources.iter().map(|source| source.active_page_count).sum(),
-            active_publication_count: sources.iter().map(|source| source.active_publication_count).sum(),
+            active_book_count: sources.iter().map(|source| source.active_book_count).sum(),
             active_epub_count: sources.iter().map(|source| source.active_epub_count).sum(),
             epub_extractions: sources.iter().fold(CatalogEpubExtractionInventory::default(), |mut total, source| {
                 total.pending += source.epub_extractions.pending;
@@ -138,7 +138,7 @@ impl CatalogStore {
         })?;
         let mut groups = BTreeMap::<(String, bool), CatalogEpubFailureDiagnostic>::new();
         for row in rows {
-            let (category, retryable, first_failed_at, last_failed_at, next_retry_at, source_id, acquisition_url, publication_id, attempts) = row?;
+            let (category, retryable, first_failed_at, last_failed_at, next_retry_at, source_id, acquisition_url, book_id, attempts) = row?;
             let key = (category.clone(), retryable);
             let entry = groups.entry(key).or_insert_with(|| CatalogEpubFailureDiagnostic { category, retryable, count: 0, first_failed_at: u64::MAX, last_failed_at: 0, next_retry_at: None, examples: Vec::new() });
             entry.count = entry.count.saturating_add(1);
@@ -153,7 +153,7 @@ impl CatalogStore {
             if entry.examples.len() < 3 {
                 let source_id = CatalogSourceId::parse(&source_id).map_err(CatalogStoreError::new)?;
                 let acquisition_host = url::Url::parse(&acquisition_url).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_else(|| "invalid-host".to_owned());
-                entry.examples.push(CatalogEpubFailureExample { source_id, acquisition_host, publication_id, attempts: stored_u64(attempts, "extraction attempt count")?, last_failed_at });
+                entry.examples.push(CatalogEpubFailureExample { source_id, acquisition_host, book_id, attempts: stored_u64(attempts, "extraction attempt count")?, last_failed_at });
             }
         }
         let mut diagnostics = groups.into_values().collect::<Vec<_>>();

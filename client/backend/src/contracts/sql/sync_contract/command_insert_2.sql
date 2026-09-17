@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO book(content_hash,title,format) VALUES(?1,'Download fixture','epub')

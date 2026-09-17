@@ -1,28 +1,28 @@
 mod folders;
 #[cfg(feature = "scanner")]
-use crate::{RelativeDirPath, scanner::queries::ScannerSql};
+use library_replica::RelativeDirPath;
+#[cfg(feature = "scanner")]
+use crate::scanner::ScannerSql;
 pub use folders::{folder_contents_filtered_sorted, grouped_folder_contents};
+use include_sqlite_sql::include_sql;
 #[cfg(feature = "scanner")]
 use sync_common::FileName;
 mod subject_incremental;
 use super::books::{get_book_cards_by_author_scoped, get_book_cards_in_dir_scoped};
+use crate::books::read_book_card_row;
+use crate::storage_values::invalid_integer_column;
+use crate::storage_values::invalid_text_column;
+use crate::storage_values::parse_uuid_column;
 use crate::LibraryAuthorsView;
 use crate::LibraryFolderEntry;
 use crate::LibraryFolderView;
 use crate::LibrarySubjectEntry;
 use crate::LibrarySubjectView;
-use crate::books::read_book_card_row;
-use crate::browse::queries::BrowsingSql;
-use crate::browse::queries::HomeSql;
-use crate::browse::queries::RebuildsSql as BrowseRebuildsSql;
-use crate::storage_values::invalid_integer_column;
-use crate::storage_values::invalid_text_column;
-use crate::storage_values::parse_uuid_column;
-use library_model::AgentId;
-use library_model::AuthorId;
+use book_model::AgentId;
+use book_model::AuthorId;
 use library_model::BookCardRow;
 use library_model::Dir;
-use library_model::ROOT_SUBJECT_PATH;
+use subject_projection::ROOT_SUBJECT_PATH;
 use library_model::{AuthorSort, AuthorSummary, BookDetail, BookDetailAuthor, BrowseBookSort, BrowseChipSort, BrowseRow, LibraryFileTypeFilter, LibraryFormatCount, LibraryHomeView, LibraryLanguageCount, LibrarySearchResult, SubjectPath};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -632,7 +632,7 @@ pub fn get_recently_added_cards(conn: &Connection, limit: i32, downloaded_only: 
     Ok(cards)
 }
 pub fn search_book_cards_scoped(conn: &Connection, query: &str, downloaded_only: bool) -> Result<LibrarySearchResult, rusqlite::Error> {
-    let normalized_query = library_model::normalize_search_text(query);
+    let normalized_query = catalog_model::normalize_search_text(query);
     if normalized_query.is_empty() {
         return Ok(LibrarySearchResult::default());
     }
@@ -832,8 +832,8 @@ pub fn book_detail_summary(conn: &Connection, content_hash: ContentHash) -> Resu
     // contributor list answers a question a reader is asking.
     let mut credits = Vec::new();
     let mut statement = conn.prepare(include_str!("sql/browse/book_detail_summary_select_4.sql"))?;
-    let narrator = library_model::NARRATOR_MARC_RELATOR_CODE.0.to_vec();
-    let translator = library_model::TRANSLATOR_MARC_RELATOR_CODE.0.to_vec();
+    let narrator = book_model::NARRATOR_MARC_RELATOR_CODE.0.to_vec();
+    let translator = book_model::TRANSLATOR_MARC_RELATOR_CODE.0.to_vec();
     for row in statement.query_map(rusqlite::params![content_hash.as_str(), narrator, translator], |row| {
         let id: String = row.get(0)?;
         let role: Vec<u8> = row.get(2)?;
@@ -861,7 +861,7 @@ pub fn book_detail_summary(conn: &Connection, content_hash: ContentHash) -> Resu
             related.push(row?);
         }
     }
-    let toc = book_navigation(conn, &content_hash, book.format_category)?;
+    let toc = book_navigation(conn, &content_hash)?;
     let (current_entry, current_target) = current_entry(conn, &content_hash, book.format_category, &toc)?;
     Ok(BookDetail { book, source_directory_id, path, authors, subject_paths, credits, current_entry, current_target, toc, related })
 }
@@ -883,7 +883,7 @@ fn current_entry(conn: &Connection, content_hash: &ContentHash, format: library_
         let Some(position) = super::reading::get_audiobook_reading_position(conn, content_hash.clone())? else { return Ok((None, None)) };
         let chapter = super::audiobooks::audiobook_chapters(conn, content_hash)?.into_iter().find(|chapter| position >= chapter.start_ms && position < chapter.end_ms);
         return Ok(match chapter {
-            Some(chapter) => (Some(chapter.title), Some(library_model::audiobook_toc_target(chapter.start_ms))),
+            Some(chapter) => (Some(chapter.title), Some(book_model::audiobook_toc_target(chapter.start_ms))),
             None => (None, None),
         });
     }
@@ -891,17 +891,10 @@ fn current_entry(conn: &Connection, content_hash: &ContentHash, format: library_
     Ok((super::toc::entry_title(toc, &target), Some(target)))
 }
 
-/// One shape for every medium. An audiobook's chapters are a flat ordered list,
-/// which is a tree one level deep — the duration each chapter carries is left
-/// to the caller, since the entry model is about navigation and not about how
-/// long a thing takes.
-fn book_navigation(conn: &Connection, content_hash: &ContentHash, format: library_model::LibraryFileTypeFilter) -> Result<Vec<library_model::BookTocEntry>, rusqlite::Error> {
-    if format == library_model::LibraryFileTypeFilter::Audiobook {
-        return Ok(super::audiobooks::audiobook_chapters(conn, content_hash)?
-            .into_iter()
-            .map(|chapter| library_model::BookTocEntry { title: chapter.title, target: library_model::audiobook_toc_target(chapter.start_ms), children: Vec::new() })
-            .collect());
-    }
+/// One shape for every medium, read from one place. An audiobook's chapters are
+/// a flat ordered list, which is a tree one level deep, so nothing about a
+/// format survives into how its navigation is stored or fetched.
+fn book_navigation(conn: &Connection, content_hash: &ContentHash) -> Result<Vec<library_model::BookTocEntry>, rusqlite::Error> {
     Ok(super::toc::book_toc(conn, content_hash)?.unwrap_or_default())
 }
 
@@ -947,4 +940,6 @@ pub fn group_folder_children(conn: &Connection, children: &mut Vec<BrowseRow>, f
     Ok(expand_chip_groups(children, replacements))
 }
 
-pub(crate) mod queries;
+include_sql!("src/browse/sql/browsing.sql");
+include_sql!("src/browse/sql/rebuilds.sql");
+include_sql!("src/browse/sql/home.sql");

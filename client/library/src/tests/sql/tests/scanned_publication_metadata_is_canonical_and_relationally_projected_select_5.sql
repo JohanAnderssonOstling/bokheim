@@ -1,1 +1,0 @@
-SELECT author_identity.stable_id FROM book_publisher JOIN author_identity ON author_identity.id=book_publisher.agent_identity_id WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',1))

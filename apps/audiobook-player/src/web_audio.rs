@@ -1,4 +1,4 @@
-use crate::{AudiobookPublication, PlaybackPosition};
+use crate::{AudiobookBook, PlaybackPosition};
 use std::time::Duration;
 use wasm_bindgen::{closure::Closure, prelude::*};
 
@@ -47,8 +47,8 @@ pub(crate) struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn open(source: bokheim_backend::BrowserAudiobook, publication: &AudiobookPublication, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
-        let metadata = js_sys::JSON::parse(&serde_json::json!({"title": publication.title, "artist": publication.author.clone().unwrap_or_default()}).to_string()).map_err(|e| format!("{e:?}"))?;
+    pub fn open(source: bokheim_backend::BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
+        let metadata = js_sys::JSON::parse(&serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default()}).to_string()).map_err(|e| format!("{e:?}"))?;
         let save = Closure::new(move |position: f64, progress: f64| {
             if let Some(position) = crate::browser_position_update(position, progress) {
                 let _ = updates.try_send(position);
@@ -56,9 +56,9 @@ impl AudioEngine {
         });
         let browser = BrowserAudio::new(
             &source.url,
-            publication.cover.as_ref().map(|cover| cover.bytes()).unwrap_or_default(),
+            book.cover.as_ref().map(|cover| cover.bytes()).unwrap_or_default(),
             &metadata,
-            initial.min(publication.duration).as_secs_f64(),
+            initial.min(book.duration).as_secs_f64(),
             save.as_ref().unchecked_ref(),
             &source.direct_config()?,
             &source.renewal(),

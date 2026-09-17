@@ -47,7 +47,7 @@ async fn profile_endpoint(client: &OpdsClient, endpoint: &OpdsEndpoint, run: usi
     let (result, profile) = client.profile_catalog_fetch(&endpoint.url).await;
     match result {
         Ok(catalog) => {
-            let items = catalog.navigation.len() + catalog.publications.len() + catalog.groups.len();
+            let items = catalog.navigation.len() + catalog.books.len() + catalog.groups.len();
             println!(
                 "{}\t{}\tok\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{:?}\t",
                 endpoint.id.as_str(),

@@ -2,7 +2,7 @@ use super::requests::dispatch_request;
 use super::*;
 
 pub(crate) async fn storage_command<T: crate::executor::BackendOutput>(operation: impl FnOnce() -> Result<T, String> + crate::executor::BackendSend + 'static) -> Result<T, String> {
-    crate::storage::storage_queue::run(crate::storage::storage_queue::Priority::Interactive, operation).await?
+    library_runtime::storage_queue::run(library_runtime::storage_queue::Priority::Interactive, operation).await?
 }
 
 pub async fn dispatch_worker_request(backend: AppBackend, request: AppWorkerRequest) -> Result<WorkerDispatchResult, String> {
@@ -49,10 +49,10 @@ mod ownership_tests {
             "hash": test_support::fixture_content_hash(991), "checksum": test_support::fixture_content_hash(992), "length":10485760
         }))
         .unwrap();
-        let resolved = ResolvedBookData { pdf_metadata: None, format: library_model::BookFormat::Epub, source: PublicationSource::Remote { source: remote, prefix: vec![42; 65536] } };
+        let resolved = ResolvedBookData { pdf_metadata: None, format: book_model::BookFormat::Epub, source: BookSource::Remote { source: remote, prefix: vec![42; 65536] } };
         let WorkerPayload(bytes) = encode_reply(resolved).unwrap();
         let decoded: ResolvedBookData = decode_worker_message(&bytes).unwrap();
-        let PublicationSource::Remote { source, prefix } = decoded.source else {
+        let BookSource::Remote { source, prefix } = decoded.source else {
             panic!("expected remote source");
         };
         assert_eq!(prefix, vec![42; 65536]);

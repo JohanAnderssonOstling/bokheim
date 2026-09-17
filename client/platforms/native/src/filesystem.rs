@@ -1,4 +1,4 @@
-//! Filesystem durability mechanisms independent of publication layout.
+//! Filesystem durability mechanisms independent of book layout.
 use std::path::Path;
 pub fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -33,7 +33,7 @@ mod tests {
 /// An owned source opened by the backend thread when its import reaches the file.
 pub struct ImportSource(Box<dyn FnOnce() -> ImportReaderFuture + Send>);
 pub type ImportReader = Box<dyn std::io::Read + Send>;
-pub type ImportReaderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>>>>;
+pub type ImportReaderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>> + Send>>;
 impl ImportSource {
     /// The opener must not depend on the UI thread.
     pub fn new(open: Box<dyn FnOnce() -> ImportReaderFuture + Send>) -> Self { Self(open) }

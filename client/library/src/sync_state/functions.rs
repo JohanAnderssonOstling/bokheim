@@ -1,23 +1,20 @@
-use catalog_model::CatalogPublicationIdentity;
-use catalog_model::CatalogSourceId;
-use library_model::AgentId;
-use library_model::AnnotationAnchor;
-use library_model::AnnotationState;
-use library_model::AnnotationStyle;
-use library_model::BookFormat;
-use library_model::BookLifecycleState;
-use library_model::Contributor;
-use library_model::DirectoryLifecycleState;
-use library_model::PdfAnnotationAnchor;
-use library_model::PdfAnnotationRect;
-use library_model::PublicationMetadata;
-use library_model::ReadingPositionState;
-use library_model::SyncBookMetadata;
+use book_model::AgentId;
+use book_model::AnnotationAnchor;
+use book_model::AnnotationState;
+use book_model::AnnotationStyle;
+use book_model::BookFormat;
+use library_replica::BookLifecycleState;
+use book_model::Contributor;
+use library_replica::DirectoryLifecycleState;
+use book_model::PdfAnnotationAnchor;
+use book_model::PdfAnnotationRect;
+use book_model::BookMetadata;
+use library_replica::ReadingPositionState;
+use library_replica::SyncBookMetadata;
 use library_replica::MutationBody;
-use library_replica::catalog_publication_state_subkey;
-use rusqlite::Connection;
 use rusqlite::functions::Context as FunctionContext;
 use rusqlite::functions::FunctionFlags;
+use rusqlite::Connection;
 use sync_common::ContentHash as SyncContentHash;
 use sync_common::UnixMillis;
 use uuid::Uuid;
@@ -61,7 +58,7 @@ pub(crate) fn contributors_for_book(context: &FunctionContext<'_>) -> rusqlite::
         let sort_name: Option<String> = row.get(2)?;
         let role_bytes: Vec<u8> = row.get(3)?;
         let role_array: [u8; 3] = role_bytes.as_slice().try_into().map_err(|_| function_error("stored contributor role must be exactly 3 bytes"))?;
-        let role = library_model::MarcRelatorCode(role_array);
+        let role = book_model::MarcRelatorCode(role_array);
         let stable_id: String = connection.query_row(include_str!("sql/contributors_for_book_select_2.sql"), [author_identity_id], |identity_row| identity_row.get(0))?;
         let contributor_id = AgentId::parse_str(&stable_id).map_err(|error| function_error(error.to_string()))?;
         contributors.push(Contributor::with_id(contributor_id, name, sort_name, role).map_err(|error| function_error(error.to_string()))?);
@@ -69,10 +66,10 @@ pub(crate) fn contributors_for_book(context: &FunctionContext<'_>) -> rusqlite::
     sync_common::wire::encode(&contributors).map_err(|error| function_error(error.to_string()))
 }
 
-pub(crate) fn function_publication(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<PublicationMetadata> {
+pub(crate) fn function_book(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<BookMetadata> {
     let bytes = context.get::<Vec<u8>>(index)?;
     if bytes.is_empty() {
-        return Ok(PublicationMetadata::default());
+        return Ok(BookMetadata::default());
     }
     sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|error| function_error(error.to_string()))
 }
@@ -115,7 +112,7 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
             let content_hash = function_content_hash(context, 1)?;
             let value = match context.get::<i64>(2)? {
                 0 => BookLifecycleState::Present {
-                    metadata: SyncBookMetadata { title: context.get(3)?, contributors: function_contributors(context, 4)?, publication: function_publication(context, 5 + offset)? },
+                    metadata: SyncBookMetadata { title: context.get(3)?, contributors: function_contributors(context, 4)?, book: function_book(context, 5 + offset)? },
                     added_at: function_timestamp(context, 6 + offset)?,
                     // A book is only ever added by the scanner, which refuses to
                     // index a file whose extension it cannot classify, so a live
@@ -132,12 +129,17 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
         }
         "metadata" if matches!(context.len(), 5 | 6) => MutationBody::Metadata {
             content_hash: function_content_hash(context, 1)?,
-            value: SyncBookMetadata { title: context.get(2)?, contributors: function_contributors(context, 3)?, publication: function_publication(context, context.len() - 1)? },
+            value: SyncBookMetadata { title: context.get(2)?, contributors: function_contributors(context, 3)?, book: function_book(context, context.len() - 1)? },
         },
         "pdf_reader_metadata" if context.len() == 3 => {
             let bytes: Vec<u8> = context.get(2)?;
             let value = serde_json::from_slice(&bytes).map_err(|_| function_error("invalid PDF reader metadata"))?;
             MutationBody::PdfReaderMetadata { content_hash: function_content_hash(context, 1)?, value }
+        }
+        "book_toc" if context.len() == 3 => {
+            let toc_json: String = context.get(2)?;
+            let value = serde_json::from_str(&toc_json).map_err(|_| function_error("invalid navigation document"))?;
+            MutationBody::BookToc { content_hash: function_content_hash(context, 1)?, value }
         }
         "description" if context.len() == 3 => MutationBody::Description { content_hash: function_content_hash(context, 1)?, value: context.get(2)? },
         "placement" if context.len() == 5 => {
@@ -148,7 +150,7 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
         }
         "reading_position" if context.len() == 4 => MutationBody::ReadingPosition {
             content_hash: function_content_hash(context, 1)?,
-            value: ReadingPositionState { location: library_model::ReadingPosition::parse(&context.get::<String>(2)?).map_err(|error| function_error(error.to_string()))?, progress: context.get(3)? },
+            value: ReadingPositionState { location: book_model::ReadingPosition::parse(&context.get::<String>(2)?).map_err(|error| function_error(error.to_string()))?, progress: context.get(3)? },
         },
         "annotation" if context.len() == 15 => {
             let anchor_kind = context.get::<String>(3)?;
@@ -179,11 +181,6 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
                 },
             }
         }
-        "catalog_publication" if context.len() == 5 => MutationBody::CatalogPublication {
-            source_id: CatalogSourceId::parse(&context.get::<String>(1)?).map_err(function_error)?,
-            publication: CatalogPublicationIdentity { edition_id: context.get(2)?, work_id: context.get(3)? },
-            content_hash: function_content_hash(context, 4)?,
-        },
         _ => return Err(function_error(format!("invalid {kind} trigger mutation arguments"))),
     };
     sync_common::wire::encode(&body).map_err(|error| function_error(error.to_string()))
@@ -191,13 +188,8 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
 
 pub(crate) fn register_sync_functions(conn: &Connection) -> rusqlite::Result<()> {
     conn.create_scalar_function("bokheim_mutation", -1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, encode_trigger_mutation)?;
-    conn.create_scalar_function("catalog_publication_state_subkey", 2, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| {
-        let edition_id = context.get::<String>(0)?;
-        let work_id = context.get::<Option<String>>(1)?;
-        Ok(catalog_publication_state_subkey(&edition_id, work_id.as_deref()))
-    })?;
-    conn.create_scalar_function("normalize_search_text", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(library_model::normalize_search_text(&context.get::<String>(0)?)))?;
-    conn.create_scalar_function("portable_name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(library_model::portable_name_key(&context.get::<String>(0)?)))?;
+    conn.create_scalar_function("normalize_search_text", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(catalog_model::normalize_search_text(&context.get::<String>(0)?)))?;
+    conn.create_scalar_function("portable_name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(library_replica::portable_name_key(&context.get::<String>(0)?)))?;
     // Not SQLITE_DETERMINISTIC: this function re-enters the connection to
     // query live book_contributor state, so its result depends on database
     // contents, not solely its arguments.

@@ -1,12 +1,12 @@
 use rusqlite::Connection;
+use subject_projection::bisac_subject_system;
+use subject_projection::lcc_subject_path;
 use subject_projection::BISAC_MATCHER_VERSION;
 use subject_projection::LCC_MATCHER_VERSION;
 use subject_projection::LCC_SYSTEM_ID;
 use subject_projection::LCC_VERSION;
 use subject_projection::UNIFIED_MATCHER_VERSION;
 use subject_projection::UNIFIED_SYSTEM_ID;
-use subject_projection::bisac_subject_system;
-use subject_projection::lcc_subject_path;
 use sync_common::ContentHash;
 use taxonomy_contract::TaxonomyCode;
 use taxonomy_contract::TaxonomySystem;

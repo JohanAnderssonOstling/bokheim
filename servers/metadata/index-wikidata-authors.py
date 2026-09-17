@@ -30,7 +30,7 @@ def insert(c,record):
     isbn_values={isbn for prop in ('P212','P957') for v in strings(claims,prop) if (isbn:=classifier.canonical_isbn(v))}
     authors=list(dict.fromkeys(v['id'] for v in values(claims,'P50') if isinstance(v,dict) and re.fullmatch(r'Q[1-9][0-9]*',v.get('id',''))));works=qids(claims,'P629')
     is_human='Q5' in qids(claims,'P31')
-    # Keep profiles of humans and publications/works, not every unrelated item.
+    # Keep profiles of humans and books/works, not every unrelated item.
     has_author_ids=any(p in claims for p in ('P214','P213','P496','P244')) or any(re.fullmatch(r'OL[1-9][0-9]*A',v) for v in strings(claims,'P648'))
     if is_human or has_author_ids or authors or works or isbn_values:
         labels=record.get('labels',{});name=labels.get('en',{}).get('value')
@@ -44,7 +44,7 @@ def insert(c,record):
     c.executemany('INSERT OR IGNORE INTO credit VALUES(?,?,?)',[(qid,a,i) for i,a in enumerate(authors)])
     c.executemany('INSERT OR IGNORE INTO edition_work VALUES(?,?)',[(qid,w) for w in works])
     c.executemany('INSERT OR IGNORE INTO topic_link VALUES(?,?)',[(qid,t) for t in qids(claims,'P921')])
-    # Publication classifications can fill fields; topic codes remain evidence.
+    # Book classifications can fill fields; topic codes remain evidence.
     for prop,(scheme,scope) in classifier.classifiers.KNOWN.items():
         for notation in strings(claims,prop):
             c.execute('INSERT OR IGNORE INTO classification VALUES(?,?,?,?,?,?)',(qid,scheme,notation,prop,int(scope=='topic'),qid))

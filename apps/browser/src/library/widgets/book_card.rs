@@ -8,7 +8,7 @@ use web_time::Instant;
 const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
-use gpui::{Anchor, AppContext, Context, DismissEvent, Entity, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, anchored, deferred, px};
+use gpui::{Anchor, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, anchored, deferred, px};
 use gpui_component::menu::PopupMenu;
 use gpui_component::tag::Tag;
 use gpui_component::{IconName, Sizable, Size};
@@ -426,8 +426,12 @@ impl BookCardView {
                     .item(components::menu_item_with_icon("Move to folder…", IconName::FolderOpen, move |_, _, cx| move_book(content_hash, source_directory, BookPlacement::Move, cx)))
                     .separator();
             }
-            let removal = move |menu| {
-                menu.item(components::menu_item_with_icon(if source_directory.is_some() { "Remove from this folder" } else { "Move to Trash" }, components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+            if let (Some(source_directory), Some(remove_book)) = (source_directory, remove_book) {
+                menu.item(components::menu_item_with_icon("Remove from this folder", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+                    remove_book(content_hash, source_directory, format!("“{title}” remains available in its other folders. Its final placement moves to Trash."), window, cx);
+                }))
+            } else {
+                menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
                     let choices = if source_directory.is_some() { ["Remove", "Cancel"] } else { ["Move to Trash", "Cancel"] };
                     let answer = window.prompt(
                         PromptLevel::Warning,
@@ -457,13 +461,6 @@ impl BookCardView {
                         .detach();
                     });
                 }))
-            };
-            if let (Some(source_directory), Some(remove_book)) = (source_directory, remove_book) {
-                menu.item(components::menu_item_with_icon("Remove from this folder", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
-                    remove_book(content_hash, source_directory, format!("“{title}” remains available in its other folders. Its final placement moves to Trash."), window, cx);
-                }))
-            } else {
-                removal(menu)
             }
         });
         let subscription = cx.subscribe(&menu, |card, _, _: &DismissEvent, cx| {

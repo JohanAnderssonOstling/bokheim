@@ -1,5 +1,6 @@
-//! Browser OPFS stores publication bytes; folder and trash changes are metadata-only.
-use crate::ContentHash;
+//! Browser OPFS stores book bytes; folder and trash changes are metadata-only.
+use book_access::BoxedBookReader;
+use sync_common::ContentHash;
 use super::AssetStoreError;
 
 #[derive(Clone, Debug)]
@@ -62,7 +63,7 @@ pub(super) struct StagedBook {
 pub(super) fn finish_staged_write(handle: &Handle, writer: client_platform_web::web_storage::FileWriter, content_hash: String) -> Result<StagedBook, AssetStoreError> {
     let checksum = ContentHash::new(&content_hash);
     let size_bytes = std::io::Seek::seek(&mut writer.open_reader(), std::io::SeekFrom::End(0))?;
-    let content_hash = publication_identity::read(&mut writer.open_reader())?.map(|identity| identity.to_string()).unwrap_or(content_hash);
+    let content_hash = book_identity::read(&mut writer.open_reader())?.map(|identity| identity.to_string()).unwrap_or(content_hash);
     let destination = name(handle, format!("book/{content_hash}"));
     Ok(StagedBook { writer, content_hash, checksum, size_bytes, destination })
 }
@@ -82,7 +83,7 @@ pub(super) async fn stage_book(handle: &Handle, source: &mut (dyn std::io::Read 
         length += read as u64;
     }
     if length == 0 {
-        return Err(AssetStoreError("publication is empty".into()));
+        return Err(AssetStoreError("book is empty".into()));
     }
     let content_hash = hasher.finish().await.map_err(AssetStoreError)?;
     finish_staged_write(handle, writer, content_hash)
@@ -94,7 +95,7 @@ impl StagedBook {
     }
 }
 
-pub(super) fn open_staged_reader(staged: &StagedBook) -> Result<crate::BoxedBookReader, AssetStoreError> {
+pub(super) fn open_staged_reader(staged: &StagedBook) -> Result<BoxedBookReader, AssetStoreError> {
     Ok(Box::new(staged.writer.open_reader()))
 }
 
@@ -102,7 +103,7 @@ pub(super) struct AsyncWriter(client_platform_web::web_storage::FileWriter);
 
 impl AsyncWriter {
     pub(super) fn embedded_identity(&self) -> Result<Option<ContentHash>, AssetStoreError> {
-        Ok(publication_identity::read(&mut self.0.open_reader())?)
+        Ok(book_identity::read(&mut self.0.open_reader())?)
     }
     pub(super) async fn write_all(&mut self, bytes: &[u8]) -> Result<(), AssetStoreError> {
         self.0.write_all(bytes).map_err(AssetStoreError)
@@ -125,9 +126,9 @@ pub(super) async fn read(handle: &Handle, asset_name: String) -> Result<Option<V
     client_platform_web::web_storage::read_file(&name(handle, asset_name)).await.map_err(AssetStoreError)
 }
 
-pub(super) async fn open_reader(handle: &Handle, asset_name: String) -> Result<Option<crate::BoxedBookReader>, AssetStoreError> {
+pub(super) async fn open_reader(handle: &Handle, asset_name: String) -> Result<Option<BoxedBookReader>, AssetStoreError> {
     let name = name(handle, asset_name);
-    client_platform_web::web_storage::open_reader(&name).await.map(|reader| reader.map(|reader| Box::new(reader) as crate::BoxedBookReader)).map_err(AssetStoreError)
+    client_platform_web::web_storage::open_reader(&name).await.map(|reader| reader.map(|reader| Box::new(reader) as BoxedBookReader)).map_err(AssetStoreError)
 }
 
 pub(super) async fn write(handle: &Handle, asset_name: String, bytes: &[u8]) -> Result<(), AssetStoreError> {

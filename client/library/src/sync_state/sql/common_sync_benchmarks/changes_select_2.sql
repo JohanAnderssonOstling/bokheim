@@ -1,1 +1,1 @@
-SELECT json_array(content_hash,title,hex(publication_metadata)) FROM book WHERE content_hash<=?1 ORDER BY content_hash
+SELECT json_array(content_hash,title,hex(book_metadata)) FROM book WHERE content_hash<=?1 ORDER BY content_hash

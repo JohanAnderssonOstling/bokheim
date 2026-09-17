@@ -1,5 +1,6 @@
 //! Runtime contract probes, compiled only into the test example.
-use crate::storage::files::AssetStore;
+use super::queries::ContractsSql;
+use crate::asset_store::AssetStore;
 use crate::{BlobKind, ContentHash};
 use wasm_bindgen::JsValue;
 
@@ -165,10 +166,6 @@ pub async fn run(phase: &str) -> Result<(), String> {
     observe_staged_handles();
     block_object_sweep();
     crate::platform::web_storage::initialize().await?;
-    if let Some(phase) = phase.strip_prefix("history-") {
-        release_object_sweep().await;
-        return crate::storage::transfer_history::contract(phase);
-    }
     // Initialization must return even while object enumeration is blocked.
     release_object_sweep().await;
     assert_eq!(book_handle_count(), 0, "initialization must not open book handles");
@@ -176,15 +173,15 @@ pub async fn run(phase: &str) -> Result<(), String> {
         assert_eq!(book_open_count(), 0, "subsequent startup must not open any book objects");
     }
     assert_eq!(staged_open_count(), 0, "startup must not open imported book files");
-    crate::platform::web_storage::asset_lifecycle_contract(phase, |locator| crate::storage::database::has_pending_outbox(locator).map_err(|error| error.to_string())).await?;
-    crate::library::browser_publication::contract().await?;
-    let store = crate::storage::files::open("storage-contract").map_err(|error| error.to_string())?;
+    crate::platform::web_storage::asset_lifecycle_contract(phase).await?;
+    crate::library::browser_book::contract().await?;
+    let store = crate::asset_store::open("storage-contract").map_err(|error| error.to_string())?;
     if let Some(server) = phase.strip_prefix("upload:") {
         return crate::sync::transfer::web_upload::contract(server).await;
     }
-    let key = hash(b"publication");
+    let key = hash(b"book");
     match phase {
-        "publication-identity" => {
+        "book-identity" => {
             // Small valid catalog fixture: the original identity intentionally
             // differs from the checksum of this later PDF revision.
             let identity = hash(b"original PDF revision");
@@ -208,7 +205,7 @@ pub async fn run(phase: &str) -> Result<(), String> {
             writer.write_all(&bytes).await.map_err(|error| error.to_string())?;
             writer.commit().await.map_err(|error| error.to_string())?;
             assert_eq!(read_book(&store, &identity).await?, bytes);
-            let wrong_identity = hash(b"unrelated publication");
+            let wrong_identity = hash(b"unrelated book");
             let mut wrong = store.begin_stream_write(BlobKind::Book, &wrong_identity).await.map_err(|error| error.to_string())?;
             wrong.set_transfer_checksum(checksum);
             wrong.write_all(&bytes).await.map_err(|error| error.to_string())?;
@@ -245,7 +242,7 @@ pub async fn run(phase: &str) -> Result<(), String> {
             let mut rejected = store.begin_stream_write(BlobKind::Book, &key).await.map_err(|e| e.to_string())?;
             rejected.write_all(b"wrong content").await.map_err(|e| e.to_string())?;
             assert!(rejected.commit().await.is_err());
-            assert_eq!(read_book(&store, &key).await?, b"publication");
+            assert_eq!(read_book(&store, &key).await?, b"book");
             assert_eq!(store.read_bytes(BlobKind::Thumbnail, &key).await.map_err(|e| e.to_string())?.unwrap(), b"previous thumbnail");
             // Cancellation runs through the actual browser scheduler.
             let (started, ready) = tokio::sync::oneshot::channel();
@@ -266,7 +263,7 @@ pub async fn run(phase: &str) -> Result<(), String> {
             released.await.map_err(|e| e.to_string())?;
         }
         "restart" => {
-            assert_eq!(read_book(&store, &key).await?, b"publication");
+            assert_eq!(read_book(&store, &key).await?, b"book");
             assert_eq!(store.read_bytes(BlobKind::Thumbnail, &key).await.map_err(|e| e.to_string())?.unwrap(), b"previous thumbnail");
             use std::io::Read as _;
             let mut previous = store.prepare_reader(BlobKind::Thumbnail, &key).await.map_err(|e| e.to_string())?.unwrap();
@@ -283,15 +280,15 @@ pub async fn run(phase: &str) -> Result<(), String> {
             deleted.read_to_end(&mut deleted_bytes).map_err(|e| e.to_string())?;
             assert_eq!(deleted_bytes, b"replacement thumbnail");
             store.write(BlobKind::Thumbnail, &key, &deleted_bytes).await.map_err(|e| e.to_string())?;
-            let staged = store.stage_reader(Box::new(std::io::Cursor::new(b"staged browser publication".to_vec()))).await.map_err(|e| e.to_string())?;
+            let staged = store.stage_reader(Box::new(std::io::Cursor::new(b"staged browser book".to_vec()))).await.map_err(|e| e.to_string())?;
             let staged_hash = staged.content_hash();
             let mut reader = staged.open_reader().map_err(|e| e.to_string())?;
             let mut inspected = Vec::new();
             reader.read_to_end(&mut inspected).map_err(|e| e.to_string())?;
-            assert_eq!(inspected, b"staged browser publication");
+            assert_eq!(inspected, b"staged browser book");
             staged.commit().await.map_err(|e| e.to_string())?;
             assert!(store.exists(BlobKind::Book, &staged_hash).map_err(|e| e.to_string())?);
-            // A publication larger than the former browser limit, without a book-sized allocation.
+            // A book larger than the former browser limit, without a book-sized allocation.
             let chunk = vec![42; 1024 * 1024];
             let mut hasher = blake3::Hasher::new();
             for _ in 0..129 {
@@ -307,9 +304,9 @@ pub async fn run(phase: &str) -> Result<(), String> {
         }
         "verify" => {
             assert_eq!(store.read_bytes(BlobKind::Thumbnail, &key).await.map_err(|e| e.to_string())?.unwrap(), b"replacement thumbnail");
-            let bytes = crate::storage::files::book_bytes("storage-contract", "storage-contract").await.map_err(|e| e.to_string())?;
+            let bytes = crate::asset_store::book_bytes("storage-contract", "storage-contract").await.map_err(|e| e.to_string())?;
             assert!(bytes > 128 * 1024 * 1024);
-            assert_eq!(bytes, 129 * 1024 * 1024 + b"publication".len() as u64 + b"staged browser publication".len() as u64);
+            assert_eq!(bytes, 129 * 1024 * 1024 + b"book".len() as u64 + b"staged browser book".len() as u64);
         }
         _ => return Err("unknown contract phase".into()),
     }
@@ -323,9 +320,9 @@ pub async fn run(phase: &str) -> Result<(), String> {
 // A real library with SQLite metadata and OPFS bytes, without an account or
 // networking. Each phase executes in a freshly started browser worker.
 async fn cover_recovery_contract(phase: &str) -> Result<(), String> {
-    let database = crate::storage::database::Database::open_library("cover-recovery-contract", client_library::schema::configure_connection).map_err(|e| e.to_string())?;
+    let database = library_database::Database::open("cover-recovery-contract").map_err(|e| e.to_string())?;
     client_library::schema::init_db(&*database.get().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let assets = crate::storage::files::open("cover-recovery-contract").map_err(|e| e.to_string())?;
+    let assets = crate::asset_store::open("cover-recovery-contract").map_err(|e| e.to_string())?;
     let (events, receiver) = crate::library::events::library_event_channel();
     let metadata = metadata_client::MetadataClient::new(crate::METADATA_SERVER_ORIGIN).map_err(|error| error.to_string())?;
     let library = crate::library::LibrarySession::from_parts(crate::LibraryId::new_v4(), database, assets, metadata, events, receiver, crate::library::discovery::LibraryScanner::Disabled);
@@ -334,7 +331,7 @@ async fn cover_recovery_contract(phase: &str) -> Result<(), String> {
     match phase {
         "prepare" => {
             assert_eq!(library.import_book_reader(&crate::ROOT_DIR_ID, Box::new(std::io::Cursor::new(bytes.to_vec())), "contract.epub".into()).await.map_err(|e| e.to_string())?, key);
-            let placements: i64 = library.db.get().map_err(|e| e.to_string())?.query_row(include_str!("sql/storage_contract/cover_recovery_contract_select.sql"), [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let placements: i64 = library.db.get().map_err(|e| e.to_string())?.local_file_projection_count(|row| row.get(0)).map_err(|e| e.to_string())?;
             assert_eq!(placements, 0, "browser imports must keep flat hash storage");
             library.run_local_jobs().await.map_err(|e| e.to_string())?;
             assert!(library.assets.thumbnail_set_exists(&key).map_err(|e| e.to_string())?);
@@ -358,9 +355,9 @@ async fn cover_recovery_contract(phase: &str) -> Result<(), String> {
 }
 
 async fn trash_recovery_contract(phase: &str) -> Result<(), String> {
-    let database = crate::storage::database::Database::open_library("trash-contract", client_library::schema::configure_connection).map_err(|e| e.to_string())?;
+    let database = library_database::Database::open("trash-contract").map_err(|e| e.to_string())?;
     client_library::schema::init_db(&*database.get().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let assets = crate::storage::files::open("trash-contract").map_err(|e| e.to_string())?;
+    let assets = crate::asset_store::open("trash-contract").map_err(|e| e.to_string())?;
     let (events, receiver) = crate::library::events::library_event_channel();
     let metadata = metadata_client::MetadataClient::new(crate::METADATA_SERVER_ORIGIN).map_err(|error| error.to_string())?;
     let library = crate::library::LibrarySession::from_parts(crate::LibraryId::new_v4(), database, assets, metadata, events, receiver, crate::library::discovery::LibraryScanner::Disabled);
@@ -385,7 +382,7 @@ async fn trash_recovery_contract(phase: &str) -> Result<(), String> {
         "verify" => {
             assert!(client_library::placements::library_trash(&*library.db.get().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?.books.is_empty());
             assert_eq!(read_book(&library.assets, &hash).await?, bytes);
-            let pending: i64 = library.db.get().map_err(|e| e.to_string())?.query_row(include_str!("sql/storage_contract/trash_recovery_contract_select.sql"), [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let pending: i64 = library.db.get().map_err(|e| e.to_string())?.local_file_work_count(|r| r.get(0)).map_err(|e| e.to_string())?;
             assert_eq!(pending, 0, "virtual restores must not queue physical work");
             let conn = library.db.get().map_err(|e| e.to_string())?;
             assert!(client_library::assets::is_book_downloaded(&conn, hash).map_err(|e| e.to_string())?);
@@ -393,10 +390,10 @@ async fn trash_recovery_contract(phase: &str) -> Result<(), String> {
             drop(conn);
 
             library.run_local_jobs().await.map_err(|e| e.to_string())?;
-            let pending: i64 = library.db.get().map_err(|e| e.to_string())?.query_row(include_str!("sql/storage_contract/trash_recovery_contract_select.sql"), [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let pending: i64 = library.db.get().map_err(|e| e.to_string())?.local_file_work_count(|r| r.get(0)).map_err(|e| e.to_string())?;
             assert_eq!(pending, 0);
             assert_eq!(read_book(&library.assets, &hash).await?, bytes);
-            let shelf: String = library.db.get().map_err(|e| e.to_string())?.query_row(include_str!("sql/storage_contract/trash_recovery_contract_select_3.sql"), [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let shelf: String = library.db.get().map_err(|e| e.to_string())?.live_shelf_id(|row| row.get(0)).map_err(|e| e.to_string())?;
             let shelf = crate::DirId::parse_str(&shelf).map_err(|e| e.to_string())?;
             library.move_directory_to_trash(&shelf).map_err(|e| e.to_string())?;
             library.restore_directory(&shelf, None).map_err(|e| e.to_string())?;
@@ -412,7 +409,7 @@ async fn trash_recovery_contract(phase: &str) -> Result<(), String> {
             library.run_local_jobs().await.map_err(|e| e.to_string())?;
             assert!(!library.assets.exists(BlobKind::Book, &hash).map_err(|e| e.to_string())?);
             assert!(!library.assets.thumbnail_set_exists(&hash).map_err(|e| e.to_string())?);
-            assert_eq!(library.db.get().map_err(|e| e.to_string())?.query_row(include_str!("sql/storage_contract/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())?, 0);
+            assert_eq!(library.db.get().map_err(|e| e.to_string())?.local_file_work_count(|row| row.get::<_, i64>(0)).map_err(|e| e.to_string())?, 0);
             client_library::file_work::queue_directory_work(&*library.db.get().map_err(|e| e.to_string())?, &crate::ROOT_DIR_ID).map_err(|e| e.to_string())?;
             assert!(!library.pending_local_jobs().map_err(|e| e.to_string())?);
         }
@@ -447,7 +444,7 @@ async fn index_paging_contract(phase: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn read_book(store: &crate::storage::files::AssetStore, hash: &crate::ContentHash) -> Result<Vec<u8>, String> {
+async fn read_book(store: &crate::asset_store::AssetStore, hash: &crate::ContentHash) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut reader = store.prepare_reader(crate::BlobKind::Book, hash).await.map_err(|e| e.to_string())?.ok_or("Missing book")?;
     let mut bytes = Vec::new();

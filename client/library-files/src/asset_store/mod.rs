@@ -1,14 +1,16 @@
-//! Publication access, transfer staging, and thumbnail storage.
+//! Book access, transfer staging, and thumbnail storage.
 //!
-//! Native publications live directly in library folders, with adjacent temporary
-//! files for imports and downloads. Browser publications have one hash-addressed
+//! Native books live directly in library folders, with adjacent temporary
+//! files for imports and downloads. Browser books have one hash-addressed
 //! object in OPFS; their folder and trash locations exist only in SQLite.
 
-use crate::{BlobKind, ContentHash};
+use library_replica::RelativeBookPath;
+use library_replica::BlobKind;
+use book_access::BoxedBookReader;
+use sync_common::{ContentHash, DirId};
 use std::fmt;
 
 mod import;
-mod placement_changes;
 pub use import::PreparedImport;
 
 #[derive(Debug)]
@@ -30,6 +32,12 @@ impl From<std::io::Error> for AssetStoreError {
 
 impl From<rusqlite::Error> for AssetStoreError {
     fn from(error: rusqlite::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl From<library_database::DatabaseError> for AssetStoreError {
+    fn from(error: library_database::DatabaseError) -> Self {
         Self(error.to_string())
     }
 }
@@ -66,8 +74,16 @@ impl AssetStore {
         imp::open(library_locator, hash_service).map(Self)
     }
 
+    pub fn ensure_restore_available(&self) -> Result<(), AssetStoreError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.placement().root_available() {
+            return Err(AssetStoreError("library storage is unavailable".into()));
+        }
+        Ok(())
+    }
+
     /// Each browser command releases SQLite and yields before the next page.
-    pub async fn run_file_jobs(&self, database: &impl crate::database::FileDatabase) -> Result<(), AssetStoreError> {
+    pub async fn run_file_jobs(&self, database: &library_database::Database) -> Result<(), AssetStoreError> {
         let mut failure = None;
         #[cfg(not(target_arch = "wasm32"))]
         if let Err(error) = self.placement().run_jobs(database).await {
@@ -75,21 +91,11 @@ impl AssetStore {
         }
         let mut after = String::new();
         loop {
-            let cursor = after.clone();
-            let jobs = database
-                .command(crate::database::Priority::Background, move |conn| {
-                    Ok(conn.prepare(include_str!("sql/asset_store/run_file_jobs_select.sql"))?.query_map([cursor], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
-                })
-                .await
-                .map_err(|error| AssetStoreError(error.to_string()))?;
+            let jobs = database.requested_purge_books(&after).map_err(|error| AssetStoreError(error.to_string()))?;
             let Some(last) = jobs.last() else { break };
-            after = last.clone();
+            after = last.to_string();
             for hash in jobs {
-                let assets = self.clone();
-                let result = database
-                    .command(crate::database::Priority::Background, move |conn| assets.purge_requested_book(conn, ContentHash::new(&hash)).map_err(crate::database::FileDatabaseError::operation))
-                    .await
-                    .map_err(|error| AssetStoreError(error.to_string()));
+                let result = self.purge_requested_book(database, hash);
                 if let Err(error) = result {
                     failure.get_or_insert(error);
                 }
@@ -98,15 +104,82 @@ impl AssetStore {
         failure.map_or(Ok(()), Err)
     }
 
+    /// Replays queued directory moves/renames immediately rather than
+    /// waiting for the next scheduled pass.
+    pub async fn run_directory_work(&self, database: &library_database::Database) -> Result<(), AssetStoreError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.placement().run_directory_work(database).await;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = database;
+            Ok(())
+        }
+    }
+
+    /// Same as [`Self::run_file_jobs`], scoped to one book's queued work.
+    pub async fn run_file_jobs_for(&self, database: &library_database::Database, hash: &ContentHash) -> Result<(), AssetStoreError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.placement().reconcile_file_work_for(database, hash).await;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (database, hash);
+            Ok(())
+        }
+    }
+
     pub async fn verified_book_reader(&self, hash: ContentHash) -> Result<Option<VerifiedBook>, AssetStoreError> {
         self.verified_book_version_reader(hash, None).await
+    }
+
+    /// Verifies one of the database-selected native placements.  Unlike the
+    /// legacy hash reader, this never discovers paths by opening SQLite.
+    pub async fn verified_book_version_reader_at_paths(
+        &self,
+        hash: ContentHash,
+        expected: Option<ContentHash>,
+        paths: Vec<String>,
+    ) -> Result<Option<VerifiedBook>, AssetStoreError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = paths;
+            self.verified_book_version_reader(hash, expected).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let store = self.clone();
+            client_platform_runtime::executor::run_blocking(move || {
+                use std::io::{Read as _, Seek as _};
+                let lease = imp::lease(&store.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError("book is in use; retry verification".into()))?;
+                for relative_path in paths {
+                    let Some(mut reader) = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
+                    let mut hasher = blake3::Hasher::new();
+                    let mut buffer = [0_u8; 64 * 1024];
+                    loop {
+                        let read = reader.read(&mut buffer)?;
+                        if read == 0 {
+                            break;
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    let checksum = ContentHash::new(hasher.finalize().to_hex().as_str());
+                    if expected.is_some_and(|expected| expected != checksum) { continue; }
+                    reader.seek(std::io::SeekFrom::Start(0))?;
+                    if book_identity::read(&mut reader)?.unwrap_or(checksum) != hash { continue; }
+                    reader.seek(std::io::SeekFrom::Start(0))?;
+                    return Ok(Some(VerifiedBook { reader, length: hasher.count(), checksum, _lease: BookLease(lease) }));
+                }
+                Ok(None)
+            })
+            .await
+            .map_err(|error| AssetStoreError(error.to_string()))?
+        }
     }
 
     pub async fn verified_book_version_reader(&self, hash: ContentHash, expected: Option<ContentHash>) -> Result<Option<VerifiedBook>, AssetStoreError> {
         #[cfg(target_arch = "wasm32")]
         {
             use std::io::{Read as _, Seek as _};
-            let lease = imp::lease(&self.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError("publication is in use; retry verification".into()))?;
+            let lease = imp::lease(&self.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError("book is in use; retry verification".into()))?;
             let Some(mut reader) = imp::open_verified_reader(&self.0, &hash).await? else { return Ok(None) };
             let mut hasher = self.0.hash_service.start().await.map_err(AssetStoreError)?;
             let mut length = 0_u64;
@@ -122,7 +195,7 @@ impl AssetStore {
             let checksum: ContentHash = hasher.finish().await.map_err(AssetStoreError)?.parse().map_err(|error| AssetStoreError(format!("invalid checksum: {error}")))?;
             if expected.is_some_and(|expected| expected != checksum) { return Ok(None); }
             reader.seek(std::io::SeekFrom::Start(0))?;
-            if publication_identity::read(&mut reader)?.unwrap_or(checksum) != hash {
+            if book_identity::read(&mut reader)?.unwrap_or(checksum) != hash {
                 drop(reader);
                 self.remove(BlobKind::Book, &hash)?;
                 return Ok(None);
@@ -133,11 +206,11 @@ impl AssetStore {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let store = self.clone();
-            crate::executor::run_blocking(move || {
+            client_platform_runtime::executor::run_blocking(move || {
                 use std::io::{Read as _, Seek as _};
-                let lease = imp::lease(&store.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError("publication is in use; retry verification".into()))?;
-                for path in imp::readable_publication_paths(&store.0, &hash)? {
-                    let mut reader: crate::BoxedBookReader = match std::fs::File::open(&path) {
+                let lease = imp::lease(&store.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError("book is in use; retry verification".into()))?;
+                for path in imp::readable_book_paths(&store.0, &hash)? {
+                    let mut reader: BoxedBookReader = match std::fs::File::open(&path) {
                         Ok(file) => Box::new(file),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                         Err(error) => return Err(error.into()),
@@ -154,7 +227,7 @@ impl AssetStore {
                     let checksum = ContentHash::new(hasher.finalize().to_hex().as_str());
                     if expected.is_some_and(|expected| expected != checksum) { continue; }
                     reader.seek(std::io::SeekFrom::Start(0))?;
-                    if publication_identity::read(&mut reader)?.unwrap_or(checksum) != hash {
+                    if book_identity::read(&mut reader)?.unwrap_or(checksum) != hash {
                         continue;
                     }
                     reader.seek(std::io::SeekFrom::Start(0))?;
@@ -182,7 +255,7 @@ impl AssetStore {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let store = self.clone();
-            crate::executor::run_blocking(move || imp::read(&store.0, name)).await.map_err(|error| AssetStoreError(error.to_string()))?
+            client_platform_runtime::executor::run_blocking(move || imp::read(&store.0, name)).await.map_err(|error| AssetStoreError(error.to_string()))?
         }
     }
 
@@ -196,25 +269,40 @@ impl AssetStore {
         imp::open_verified_reader(&self.0, hash).await
     }
 
+    /// Opens one explicitly selected native book.  The caller owns
+    /// selecting that placement from the library catalogue; this layer only
+    /// validates and opens the corresponding filesystem path.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn prepare_pdf_reader(&self, hash: ContentHash) -> Result<Option<(crate::BoxedBookReader, Option<pdf_view_common::PdfReaderMetadata>)>, AssetStoreError> {
+    pub async fn prepare_book_at_path(&self, relative_path: String) -> Result<Option<BoxedBookReader>, AssetStoreError> {
         let store = self.clone();
-        crate::executor::run_blocking(move || imp::open_pdf_reader(&store.0, &hash)).await.map_err(|e| AssetStoreError(e.to_string()))?
+        client_platform_runtime::executor::run_blocking(move || imp::open_book_at_path(&store.0, &relative_path))
+            .await
+            .map_err(|error| AssetStoreError(error.to_string()))?
     }
 
-    pub async fn prepare_reader(&self, kind: BlobKind, content_hash: &ContentHash) -> Result<Option<crate::BoxedBookReader>, AssetStoreError> {
+    /// Opens an explicitly selected PDF and returns the filesystem fingerprint
+    /// used by the database owner to select still-valid cached metadata.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn prepare_pdf_at_path(&self, relative_path: String) -> Result<Option<(BoxedBookReader, String)>, AssetStoreError> {
+        let store = self.clone();
+        client_platform_runtime::executor::run_blocking(move || imp::open_pdf_at_path(&store.0, &relative_path))
+            .await
+            .map_err(|error| AssetStoreError(error.to_string()))?
+    }
+
+    pub async fn prepare_reader(&self, kind: BlobKind, content_hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
         #[cfg(target_arch = "wasm32")]
         { imp::open_reader(&self.0, asset_name(kind, content_hash)).await }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let store = self.clone();
             let hash = *content_hash;
-            crate::executor::run_blocking(move || store.open_reader(kind, &hash)).await.map_err(|error| AssetStoreError(error.to_string()))?
+            client_platform_runtime::executor::run_blocking(move || store.open_reader(kind, &hash)).await.map_err(|error| AssetStoreError(error.to_string()))?
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_reader(&self, kind: BlobKind, content_hash: &ContentHash) -> Result<Option<crate::BoxedBookReader>, AssetStoreError> {
+    pub fn open_reader(&self, kind: BlobKind, content_hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
         imp::open_reader(&self.0, asset_name(kind, content_hash))
     }
 
@@ -247,9 +335,9 @@ impl AssetStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn stage_publication(&self, relative: String, mut source: Box<dyn std::io::Read + Send>) -> Result<StagedBook, AssetStoreError> {
+    pub async fn stage_book(&self, relative: String, mut source: Box<dyn std::io::Read + Send>) -> Result<StagedBook, AssetStoreError> {
         let store = self.clone();
-        crate::executor::run_blocking(move || {
+        client_platform_runtime::executor::run_blocking(move || {
             let parent = relative.rsplit_once('/').map(|(parent, _)| parent).unwrap_or_default();
             let directory = imp::placement_path(&store.0, parent)?;
             imp::stage_book_in(&directory, source.as_mut()).map(|inner| StagedBook { inner })
@@ -259,17 +347,17 @@ impl AssetStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn copy_publication(&self, relative: String, mut source: Box<dyn std::io::Read + Send>, occupied: Vec<String>) -> Result<(String, StagedBook), AssetStoreError> {
+    pub async fn copy_book(&self, relative: String, mut source: Box<dyn std::io::Read + Send>, occupied: Vec<String>) -> Result<(String, StagedBook), AssetStoreError> {
         let store = self.clone();
-        crate::executor::run_blocking(move || {
+        client_platform_runtime::executor::run_blocking(move || {
             imp::copy_book_to_destination(&store.0, &relative, source.as_mut(), occupied)
                 .map(|(name, inner)| (name, StagedBook { inner }))
         }).await.map_err(|error| AssetStoreError(error.to_string()))?
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn begin_publication_write(&self, relative: &str, hash: &ContentHash) -> Result<AsyncAssetWriter, AssetStoreError> {
-        let relative = crate::RelativeBookPath::parse(relative).map_err(|error| AssetStoreError(error.to_string()))?;
+    pub async fn begin_book_write(&self, relative: &str, hash: &ContentHash) -> Result<AsyncAssetWriter, AssetStoreError> {
+        let relative = RelativeBookPath::parse(relative).map_err(|error| AssetStoreError(error.to_string()))?;
         let (parent, name) = relative.as_str().rsplit_once('/').unwrap();
         let destination = imp::placement_path(&self.0, parent)?.join(name);
         let inner = imp::begin_write_at(destination).await?;
@@ -290,7 +378,7 @@ impl AssetStore {
     pub fn check_write_capacity(&self, additional_bytes: u64) -> Result<(), AssetStoreError> {
         if let Some(available) = imp::write_capacity(&self.0)? {
             if additional_bytes > available {
-                return Err(AssetStoreError("not enough free storage to write publication".to_owned()));
+                return Err(AssetStoreError("not enough free storage to write book".to_owned()));
             }
         }
         Ok(())
@@ -324,19 +412,39 @@ impl AssetStore {
         imp::exists(&self.0, asset_name(kind, content_hash))
     }
 
+    /// Whether a library-relative placement path is a readable file. Lets the
+    /// import orchestrator resolve restore work from a database snapshot
+    /// without holding the writer.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn evict_publication_files(&self, conn: &rusqlite::Connection, hash: &ContentHash) -> Result<(), AssetStoreError> {
-        imp::evict_publication_files(&self.0, conn, hash)
+    pub fn placement_file_exists(&self, relative: &str) -> bool {
+        imp::placement_path(&self.0, relative).is_ok_and(|path| path.is_file())
     }
 
-    /// Hold across publication and the referencing metadata commit. Cleanup
+    /// Best-effort filesystem ensure of a placement's parent directory, with
+    /// no database involvement. Directory identity healing stays with the
+    /// directory passes; this only keeps a download from failing on a
+    /// missing folder that its snapshot still considers live.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ensure_placement_parent(&self, relative: &str) -> Result<(), AssetStoreError> {
+        let (parent, _) = relative.rsplit_once('/').unwrap_or(("", relative));
+        let path = imp::placement_path(&self.0, parent)?;
+        std::fs::create_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn evict_book_files(&self, relative_paths: &[String], hash: &ContentHash) -> Result<(), AssetStoreError> {
+        imp::evict_book_files(&self.0, relative_paths, hash)
+    }
+
+    /// Hold across book and the referencing metadata commit. Cleanup
     /// skips leased hashes, including leases held by another native process.
     pub async fn lease_book(&self, hash: &ContentHash) -> Result<BookLease, AssetStoreError> {
         loop {
             if let Some(lease) = imp::lease(&self.0, hash.as_str(), false)? {
                 return Ok(BookLease(lease));
             }
-            crate::executor::sleep(std::time::Duration::from_millis(25)).await;
+            client_platform_runtime::executor::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
 
@@ -350,35 +458,20 @@ impl AssetStore {
         }
     }
 
-    fn purge_requested_book(&self, conn: &mut rusqlite::Connection, hash: ContentHash) -> Result<(), AssetStoreError> {
+    fn purge_requested_book(&self, database: &library_database::Database, hash: ContentHash) -> Result<(), AssetStoreError> {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.placement().root_available() {
             return Err(AssetStoreError("library storage is unavailable".into()));
         }
-        let tx = client_library::schema::library_write_transaction(conn)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Retire source placements before deleting their retained Trash
-            // bytes. An unrelated folder failure must not break this ordering.
-            let pending: bool = tx.query_row(
-                include_str!("sql/asset_store/purge_requested_book_select.sql"),
-                [hash.as_str()],
-                |row| row.get(0),
-            )?;
-            if pending {
-                return Ok(());
-            }
-        }
+        let Some(snapshot) = database.purge_book_snapshot(hash).map_err(|error| AssetStoreError(error.to_string()))? else { return Ok(()) };
         let Some(_exclusive) = imp::lease(&self.0, hash.as_str(), true)? else { return Ok(()) };
-        let purged: bool = tx.query_row(include_str!("sql/asset_store/purge_requested_book_select_2.sql"), [hash.as_str()], |row| row.get(0))?;
-        if purged {
+        if snapshot.remove_bytes {
             self.remove(BlobKind::Book, &hash)?;
             self.remove(BlobKind::Thumbnail, &hash)?;
             #[cfg(not(target_arch = "wasm32"))]
             self.placement().purge_trash(&hash)?;
         }
-        tx.execute(include_str!("sql/asset_store/purge_requested_book_delete.sql"), [hash.as_str()])?;
-        tx.commit()?;
+        database.acknowledge_purge_book(snapshot).map_err(|error| AssetStoreError(error.to_string()))?;
         Ok(())
     }
 
@@ -390,15 +483,42 @@ pub async fn book_bytes(library_locator: &str, database_locator: &str) -> Result
     {
         let locator = library_locator.to_owned();
         let database = database_locator.to_owned();
-        crate::executor::run_blocking(move || imp::book_bytes(&locator, &database)).await.map_err(|error| AssetStoreError(error.to_string()))?
+        client_platform_runtime::executor::run_blocking(move || imp::book_bytes(&locator, &database)).await.map_err(|error| AssetStoreError(error.to_string()))?
     }
     #[cfg(target_arch = "wasm32")]
     { let _ = database_locator; imp::book_bytes(library_locator).await }
 }
 
+impl AssetStore {
+    /// Count already-resolved native book paths. Resolving placements is
+    /// database policy and deliberately belongs to the caller.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn book_bytes_at_paths(&self, relative_paths: Vec<String>) -> Result<u64, AssetStoreError> {
+        let store = self.clone();
+        client_platform_runtime::executor::run_blocking(move || {
+            let mut total = 0_u64;
+            let mut counted = std::collections::HashSet::new();
+            for relative in relative_paths {
+                let path = imp::placement_path(&store.0, &relative)?;
+                if counted.insert(path.clone()) {
+                    match std::fs::metadata(path) {
+                        Ok(metadata) if metadata.is_file() => total = total.saturating_add(metadata.len()),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            Ok(total)
+        })
+        .await
+        .map_err(|error| AssetStoreError(error.to_string()))?
+    }
+}
+
 pub struct VerifiedBook {
     #[cfg(not(target_arch = "wasm32"))]
-    reader: crate::BoxedBookReader,
+    reader: BoxedBookReader,
     #[cfg(target_arch = "wasm32")]
     reader: client_platform_web::web_storage::FileReader,
     pub length: u64,
@@ -479,11 +599,11 @@ impl AsyncAssetWriter {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn finish_publication(mut self) -> Result<StagedBook, AssetStoreError> {
+    pub async fn finish_book(mut self) -> Result<StagedBook, AssetStoreError> {
         self.verify().await?;
-        let temporary_path = self.inner.finish_publication().await?;
-        if publication_identity::read(&mut std::fs::File::open(&temporary_path)?)?.unwrap_or(self.transfer_checksum) != self.expected_hash {
-            return Err(AssetStoreError("downloaded publication identity does not match the requested book".into()));
+        let temporary_path = self.inner.finish_book().await?;
+        if book_identity::read(&mut std::fs::File::open(&temporary_path)?)?.unwrap_or(self.transfer_checksum) != self.expected_hash {
+            return Err(AssetStoreError("downloaded book identity does not match the requested book".into()));
         }
         Ok(StagedBook { inner: imp::StagedBook { temporary_path, content_hash: self.expected_hash.as_str().to_owned(), checksum: self.transfer_checksum, size_bytes: self.written, direct: None } })
     }
@@ -492,7 +612,7 @@ impl AsyncAssetWriter {
     pub async fn commit(mut self) -> Result<(), AssetStoreError> {
         self.verify().await?;
         if self.inner.embedded_identity()?.unwrap_or(self.transfer_checksum) != self.expected_hash {
-            return Err(AssetStoreError("downloaded publication identity does not match the requested book".into()));
+            return Err(AssetStoreError("downloaded book identity does not match the requested book".into()));
         }
         self.inner.commit_verified(self.transfer_checksum).await
     }
@@ -502,90 +622,43 @@ pub struct StagedBook {
     inner: imp::StagedBook,
 }
 
+#[derive(Clone, Debug)]
+pub struct PublishedStagedBook {
+    pub name: String,
+    pub relative_path: String,
+    pub published: bool,
+    pub fingerprint: Option<String>,
+}
+
 impl StagedBook {
-    /// Publish verified bytes without replacing a user's file. Metadata and the
-    /// remembered location are committed by the caller's existing transaction.
-    /// Returns false when an existing file was kept and staged bytes discarded.
+    /// Publishes bytes from an immutable database snapshot. The caller records
+    /// the resulting placement through the database acknowledgement API.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn publish(self, store: &AssetStore, conn: &rusqlite::Connection, dir: &crate::DirId) -> Result<bool, AssetStoreError> {
+    pub fn publish_snapshot(self, store: &AssetStore, relative_path: &str, occupied_names: &[String]) -> Result<PublishedStagedBook, AssetStoreError> {
         let hash = self.content_hash();
-        let name: String = conn.query_row(include_str!("sql/asset_store/publish_select.sql"), rusqlite::params![dir.to_string(), hash.as_str()], |row| row.get(0))?;
-        let mut occupied = client_library::placements::occupied_file_names(conn, &dir.to_string())?;
-        let mut chosen = name.clone();
+        let (parent, name) = relative_path.rsplit_once('/').ok_or_else(|| AssetStoreError("invalid staged book path".into()))?;
+        let mut occupied = occupied_names.to_vec();
+        let mut chosen = name.to_owned();
         let mut temporary = self.inner.temporary_path;
-        let mut published = true;
-        if let Some(direct) = self.inner.direct {
-            let remembered = client_library::file_work::placement_path(conn, dir, &name)?;
-            let existing = imp::placement_path(&store.0, &remembered)?;
-            let copied_name = direct.relative.rsplit_once('/').unwrap().1;
-            let relative = if existing.canonicalize().ok().as_deref() != Some(temporary.as_ref()) && existing.is_file() && !imp::placement_conflicts(&store.0, &hash, &remembered)? {
-                // The same book already has a readable placement in this folder.
-                // Keep it and discard only the new copy we created.
-                temporary.close()?;
-                published = false;
-                remembered
-            } else {
-                let current = client_library::file_work::placement_path(conn, dir, copied_name)?;
-                let destination = imp::placement_path(&store.0, &current)?;
-                if current != direct.relative || destination.canonicalize()?.as_path() != &*temporary {
-                    return Err(AssetStoreError("destination folder changed during import; retry the import".into()));
-                }
-                let conflict: bool = conn.query_row(
-                    include_str!("sql/asset_store/publish_select_3.sql"),
-                    rusqlite::params![dir.to_string(), library_model::portable_name_key(copied_name), hash.as_str()], |row| row.get(0),
-                )?;
-                if conflict { return Err(AssetStoreError("destination filename changed during import; retry the import".into())); }
-                temporary.keep().map_err(|error| AssetStoreError(error.to_string()))?;
-                current
-            };
-            let destination = imp::placement_path(&store.0, &relative)?;
-            imp::sync_parent(&destination)?;
-            let chosen = relative.rsplit_once('/').unwrap().1;
-            conn.execute(include_str!("sql/asset_store/publish_update.sql"), rusqlite::params![dir.to_string(), hash.as_str(), chosen])?;
-            conn.execute(
-                include_str!("sql/asset_store/publish_insert.sql"),
-                rusqlite::params![hash.as_str(), dir.to_string(), relative],
-            )?;
-            if published {
-                let fingerprint = client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(&destination)?)?;
-                conn.execute(include_str!("sql/asset_store/publish_update_2.sql"), rusqlite::params![dir.to_string(), hash.as_str(), fingerprint.to_string()])?;
-            }
-            return Ok(published);
-        }
         loop {
-            let relative = client_library::file_work::placement_path(conn, dir, &chosen)?;
+            let relative = format!("{parent}/{chosen}");
             if !imp::placement_conflicts(&store.0, &hash, &relative)? {
                 let destination = imp::placement_path(&store.0, &relative)?;
-                if destination.is_file() {
+                let published = if destination.is_file() {
                     temporary.close()?;
-                    published = false;
+                    false
                 } else {
-                    match imp::persist_publication_noclobber(temporary, &destination) {
-                        Ok(()) => {}
-                        Err(error) => {
-                            let kind = error.error.kind();
-                            let cause = error.error;
-                            temporary = error.path;
-                            if kind == std::io::ErrorKind::AlreadyExists {
-                                continue;
-                            }
-                            return Err(AssetStoreError(format!("could not move the temporary book to '{}' without replacing existing files: {cause}", destination.display())));
-                        }
+                    match imp::persist_book_noclobber(temporary, &destination) {
+                        Ok(()) => true,
+                        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => { temporary = error.path; chosen = library_replica::unique_file_name(name, occupied.iter().map(String::as_str)); occupied.push(chosen.clone()); continue; }
+                        Err(error) => return Err(AssetStoreError(format!("could not move the temporary book to '{}' without replacing existing files: {}", destination.display(), error.error))),
                     }
-                }
+                };
                 imp::sync_parent(&destination)?;
-                conn.execute(include_str!("sql/asset_store/publish_update.sql"), rusqlite::params![dir.to_string(), hash.as_str(), chosen])?;
-                conn.execute(
-                    include_str!("sql/asset_store/publish_insert.sql"),
-                    rusqlite::params![hash.as_str(), dir.to_string(), relative],
-                )?;
-                if published {
-                let fingerprint = client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(&destination)?)?;
-                conn.execute(include_str!("sql/asset_store/publish_update_2.sql"), rusqlite::params![dir.to_string(), hash.as_str(), fingerprint.to_string()])?;
+                let fingerprint = if published { Some(client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(&destination)?)?.to_string()) } else { None };
+                return Ok(PublishedStagedBook { name: chosen, relative_path: relative, published, fingerprint });
             }
-            return Ok(published);
-            }
-            chosen = library_model::unique_file_name(&name, occupied.iter().map(String::as_str));
+            chosen = library_replica::unique_file_name(name, occupied.iter().map(String::as_str));
             occupied.push(chosen.clone());
         }
     }
@@ -595,7 +668,7 @@ impl StagedBook {
     }
     pub fn checksum(&self) -> ContentHash { self.inner.checksum }
     pub fn size_bytes(&self) -> u64 { self.inner.size_bytes }
-    pub fn open_reader(&self) -> Result<crate::BoxedBookReader, AssetStoreError> {
+    pub fn open_reader(&self) -> Result<BoxedBookReader, AssetStoreError> {
         imp::open_staged_reader(&self.inner)
     }
     #[cfg(target_arch = "wasm32")]
@@ -638,47 +711,47 @@ mod tests {
             conn.execute(include_str!("sql/asset_store/failed_file_work_blocks_only_its_own_book_insert.sql"), rusqlite::params![id, hash, path]).unwrap();
         }
 
-        assert!(store.placement().reconcile_file_work(&mut conn).is_err());
+        assert!(store.placement().reconcile_file_work_fixture(&mut conn).is_err());
         assert!(library.path().join("second.epub").exists());
         assert!(!library.path().join("other.epub").exists());
         assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 2);
 
         // A full pass also advances independent work while reporting failure.
         conn.execute(include_str!("sql/asset_store/failed_file_work_blocks_only_its_own_book_insert_2.sql"), [&other]).unwrap();
-        assert!(store.placement().reconcile_file_work(&mut conn).is_err());
+        assert!(store.placement().reconcile_file_work_fixture(&mut conn).is_err());
         assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         std::fs::write(library.path().join("first.epub"), b"original").unwrap();
-        store.placement().reconcile_file_work(&mut conn).unwrap();
+        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
         assert!(!library.path().join("second.epub").exists());
         assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn file_work_advances_past_leases_and_preserves_work_queued_during_publication() {
+    async fn file_work_advances_past_leases_and_preserves_work_queued_during_book() {
         let library = tempfile::tempdir().unwrap();
         let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_publication_create.sql"),
+            include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_create.sql"),
         )
         .unwrap();
         let hash = ContentHash::new(blake3::hash(b"leased job").to_hex().as_str());
         for id in 1..=34 {
             let value = if id == 1 { hash.to_string() } else { blake3::hash(id.to_string().as_bytes()).to_hex().to_string() };
-            conn.execute(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_publication_insert.sql"), rusqlite::params![id, value]).unwrap();
+            conn.execute(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_insert.sql"), rusqlite::params![id, value]).unwrap();
         }
         let lease = store.lease_book(&hash).await.unwrap();
-        conn.execute_batch(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_publication_create_2.sql")).unwrap();
-        store.placement().reconcile_file_work(&mut conn).unwrap();
-        let ids = conn.prepare(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_publication_select.sql")).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        conn.execute_batch(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_create_2.sql")).unwrap();
+        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
+        let ids = conn.prepare(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_select.sql")).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(ids, vec![1, 35]);
         drop(lease);
-        store.placement().reconcile_file_work(&mut conn).unwrap();
+        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
         assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn failed_thumbnail_publication_preserves_the_browse_variant() {
+    async fn failed_thumbnail_book_preserves_the_browse_variant() {
         let library = tempfile::tempdir().unwrap();
         let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
         let hash = ContentHash::new(blake3::hash(b"thumbnail owner").to_hex().as_str());
@@ -687,7 +760,7 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         assert!(store.write(BlobKind::Thumbnail, &hash, b"replacement cover").await.is_err());
         assert_eq!(store.read_thumbnail_variant(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH).await.unwrap().unwrap(), b"previous browse cover");
-        assert_eq!(std::fs::read_dir(destination.parent().unwrap()).unwrap().count(), 2, "failed publication must remove its temporary file");
+        assert_eq!(std::fs::read_dir(destination.parent().unwrap()).unwrap().count(), 2, "failed book must remove its temporary file");
     }
 
     #[tokio::test]
@@ -697,10 +770,10 @@ mod tests {
         let hash = ContentHash::new(blake3::hash(b"complete").to_hex().as_str());
         std::fs::write(library.path().join("book.epub"), b"existing user file").unwrap();
         for verify in [false, true] {
-            let mut writer = store.begin_publication_write("/book.epub", &hash).await.unwrap();
+            let mut writer = store.begin_book_write("/book.epub", &hash).await.unwrap();
             writer.write_all(b"incomplete").await.unwrap();
             if verify {
-                assert!(writer.finish_publication().await.is_err());
+                assert!(writer.finish_book().await.is_err());
             } else {
                 drop(writer);
             }
@@ -714,7 +787,7 @@ mod tests {
     async fn empty_import_removes_adjacent_temporary_file() {
         let library = tempfile::tempdir().unwrap();
         let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
-        assert!(store.stage_publication("/book.epub".into(), Box::new(std::io::empty())).await.is_err());
+        assert!(store.stage_book("/book.epub".into(), Box::new(std::io::empty())).await.is_err());
         assert_eq!(std::fs::read_dir(library.path()).unwrap().count(), 1);
     }
 }
@@ -724,10 +797,10 @@ mod browser;
 #[cfg(target_arch = "wasm32")]
 use browser as imp;
 
-/// Initialize platform resources required for publication leases.
-pub fn configure_publication_leases(app_data: &std::path::Path) -> Result<(), AssetStoreError> {
+/// Initialize platform resources required for book leases.
+pub fn configure_book_leases(app_data: &std::path::Path) -> Result<(), AssetStoreError> {
     #[cfg(target_os = "android")]
-    client_platform_android::publication::configure_lease_root(app_data)?;
+    client_platform_android::book::configure_lease_root(app_data)?;
     let _ = app_data;
     Ok(())
 }

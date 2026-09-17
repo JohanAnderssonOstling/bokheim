@@ -1,20 +1,20 @@
 use super::{
-    active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, normalize_search_text, params, publication_extraction,
-    publication_key, replace_publication_subjects_prepared, replace_publication_toc, sequenced_publication_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_publication, BTreeSet, CatalogEpubExtractionJob,
-    CatalogEpubMetadata, CatalogMetadataIndex, CatalogPublication, CatalogPublicationIdentity, CatalogPublicationPopularity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, OptionalExtension, Transaction,
+    active_generation_in, active_generation_optional, advance_catalog_transport_revision, allocate_sequence, book_format_storage, bounded_crawl_error, catalog_book_format_from_storage, normalize_search_text, params, book_extraction,
+    book_key, replace_book_subjects_prepared, replace_book_toc, sequenced_book_in, sql_decode_error, storage_i64, unix_timestamp, upsert_active_book, BTreeSet, CatalogEpubExtractionJob,
+    CatalogEpubMetadata, CatalogMetadataIndex, CatalogBook, CatalogBookIdentity, CatalogBookPopularity, CatalogSourceId, CatalogStore, CatalogStoreError, CatalogSubjectAssignment, OptionalExtension, Transaction,
     TransactionBehavior, CATALOG_EPUB_ENRICHMENT_VERSION, CATALOG_METADATA_BACKFILL_VERSION,
 };
-use publication_model::PublicationSubject;
+use book_model::BookSubject;
 
-pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublication, force: bool) -> Result<(), CatalogStoreError> {
+pub(crate) fn queue_book_extraction(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, book: &CatalogBook, force: bool) -> Result<(), CatalogStoreError> {
     let generation = storage_i64(generation, "generation")?;
-    let work_id = publication.identity.work_id.as_deref().unwrap_or("");
-    let extraction = publication_extraction(publication);
+    let work_id = book.identity.work_id.as_deref().unwrap_or("");
+    let extraction = book_extraction(book);
     transaction.execute(
         "DELETE FROM catalog_epub_extraction
          WHERE source_id=?1 AND edition_id=?2 AND work_id=?3
            AND acquisition_url IS NOT ?4",
-        params![source_id.as_str(), publication.identity.edition_id, work_id, extraction.as_ref().map(|item| item.acquisition_url)],
+        params![source_id.as_str(), book.identity.edition_id, work_id, extraction.as_ref().map(|item| item.acquisition_url)],
     )?;
     let Some(extraction) = extraction else {
         return Ok(());
@@ -55,27 +55,27 @@ pub(crate) fn queue_publication_extraction(transaction: &Transaction<'_>, source
              book_format=excluded.book_format,
              cover_key=excluded.cover_key,
              catalog_generation=excluded.catalog_generation",
-        params![source_id.as_str(), extraction.acquisition_url, CATALOG_EPUB_ENRICHMENT_VERSION, publication.identity.edition_id, work_id, book_format_storage(extraction.book_format), publication.image_url, generation, force,],
+        params![source_id.as_str(), extraction.acquisition_url, CATALOG_EPUB_ENRICHMENT_VERSION, book.identity.edition_id, work_id, book_format_storage(extraction.book_format), book.image_url, generation, force,],
     )?;
     Ok(())
 }
 
-pub(crate) fn merge_extracted_publication_authors(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, metadata: &CatalogEpubMetadata) -> Result<(), CatalogStoreError> {
+pub(crate) fn merge_extracted_book_authors(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, book: &CatalogBookIdentity, metadata: &CatalogEpubMetadata) -> Result<(), CatalogStoreError> {
     let authors = metadata.book.authors().map(|author| author.name().to_owned()).collect::<Vec<_>>();
-    merge_extracted_author_names(transaction, source_id, generation, publication, &authors)
+    merge_extracted_author_names(transaction, source_id, generation, book, &authors)
 }
 
-pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, publication: &CatalogPublicationIdentity, authors: &[String]) -> Result<(), CatalogStoreError> {
+pub(crate) fn merge_extracted_author_names(transaction: &Transaction<'_>, source_id: &CatalogSourceId, generation: u64, book: &CatalogBookIdentity, authors: &[String]) -> Result<(), CatalogStoreError> {
     let generation = storage_i64(generation, "generation")?;
-    let work_id = publication.work_id.as_deref().unwrap_or("");
+    let work_id = book.work_id.as_deref().unwrap_or("");
     for (position, author) in authors.iter().enumerate() {
         let normalized_name = normalize_search_text(author);
         if normalized_name.is_empty() {
             continue;
         }
         transaction.execute(
-            "INSERT OR IGNORE INTO catalog_publication_author(source_id,generation,edition_id,work_id,position,normalized_name) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![source_id.as_str(), generation, publication.edition_id, work_id, 1_000_000_i64 + i64::try_from(position).map_err(|_| CatalogStoreError::new("extracted author position overflow"))?, normalized_name],
+            "INSERT OR IGNORE INTO catalog_book_author(source_id,generation,edition_id,work_id,position,normalized_name) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![source_id.as_str(), generation, book.edition_id, work_id, 1_000_000_i64 + i64::try_from(position).map_err(|_| CatalogStoreError::new("extracted author position overflow"))?, normalized_name],
         )?;
     }
     Ok(())
@@ -85,18 +85,18 @@ pub(crate) fn metadata_index_from_metadata(metadata: &CatalogEpubMetadata) -> Ca
     CatalogMetadataIndex {
         title: metadata.book.title.clone(),
         authors: metadata.book.authors().map(|author| author.name().to_owned()).collect(),
-        publishers: metadata.book.publication.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect(),
+        publishers: metadata.book.book.publishers.iter().map(|publisher| publisher.name().as_str().to_owned()).collect(),
         isbns: metadata
             .book
-            .publication
+            .book
             .identifiers
             .iter()
-            .filter(|identifier| identifier.scheme() == &publication_model::Scheme::Isbn)
-            .filter_map(publication_model::Identifier::canonical_value)
+            .filter(|identifier| identifier.scheme() == &book_model::Scheme::Isbn)
+            .filter_map(book_model::Identifier::canonical_value)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
-        publication_year: publication_model::unique_publication_year(metadata.book.publication.dates.iter().map(|date| date.value())),
+        book_year: book_model::unique_book_year(metadata.book.book.dates.iter().map(|date| date.value())),
     }
 }
 
@@ -145,7 +145,7 @@ impl CatalogStore {
 
     /// Atomically claims one bounded job. Rows created by older binaries do
     /// not contain job metadata and are ignored until queue reconciliation
-    /// backfills them from the active publication table.
+    /// backfills them from the active book table.
     pub fn claim_next_epub_download(&self, source_id: &CatalogSourceId) -> Result<Option<CatalogEpubExtractionJob>, CatalogStoreError> {
         self.claim_next_epub_job(source_id, false)
     }
@@ -173,10 +173,10 @@ impl CatalogStore {
                      WHERE source_id=?1 AND {selector}
                        AND edition_id IS NOT NULL AND book_format IS NOT NULL
                        AND EXISTS(
-                           SELECT 1 FROM catalog_publication publication
-                           WHERE publication.source_id=catalog_epub_extraction.source_id
-                             AND publication.generation=(SELECT active_generation FROM catalog_source WHERE source_id=?1)
-                             AND publication.acquisition_url=catalog_epub_extraction.acquisition_url
+                           SELECT 1 FROM catalog_book book
+                           WHERE book.source_id=catalog_epub_extraction.source_id
+                             AND book.generation=(SELECT active_generation FROM catalog_source WHERE source_id=?1)
+                             AND book.acquisition_url=catalog_epub_extraction.acquisition_url
                        )
                      ORDER BY attempts, acquisition_url LIMIT 1
                  ) AND {selector}
@@ -192,7 +192,7 @@ impl CatalogStore {
                     let book_format = catalog_book_format_from_storage(&format).ok_or_else(|| sql_decode_error(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unsupported extraction book format {format}"))))?;
                     Ok(CatalogEpubExtractionJob {
                         source_id,
-                        publication: CatalogPublicationIdentity { edition_id, work_id },
+                        book: CatalogBookIdentity { edition_id, work_id },
                         acquisition_url,
                         book_format,
                         cover_key: row.get(5)?,
@@ -257,7 +257,7 @@ impl CatalogStore {
         Ok(changed == 1)
     }
 
-    pub fn finish_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, downloaded_bytes: u64, publication: &CatalogPublication, metadata: Option<&CatalogEpubMetadata>) -> Result<bool, CatalogStoreError> {
+    pub fn finish_epub_extraction(&self, source_id: &CatalogSourceId, acquisition_url: &str, attempt: u64, downloaded_bytes: u64, book: &CatalogBook, metadata: Option<&CatalogEpubMetadata>) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
@@ -267,7 +267,7 @@ impl CatalogStore {
                 acquisition_url,
                 storage_i64(downloaded_bytes, "EPUB extraction downloaded bytes")?,
                 unix_timestamp()?,
-                wire::encode(publication)?,
+                wire::encode(book)?,
                 metadata.map(wire::encode).transpose()?,
                 CATALOG_EPUB_ENRICHMENT_VERSION,
                 storage_i64(attempt, "EPUB extraction attempt")?
@@ -288,22 +288,22 @@ impl CatalogStore {
         transaction.execute("DELETE FROM catalog_epub_failure WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url])?;
         if let Some(metadata) = metadata {
             if let Some(generation) = active_generation_optional(&transaction, source_id)? {
-                merge_extracted_publication_authors(&transaction, source_id, generation, &publication.identity, metadata)?;
+                merge_extracted_book_authors(&transaction, source_id, generation, &book.identity, metadata)?;
             }
         }
         transaction.commit()?;
         Ok(true)
     }
 
-    pub fn active_publication(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity) -> Result<Option<CatalogPublication>, CatalogStoreError> {
+    pub fn active_book(&self, source_id: &CatalogSourceId, identity: &CatalogBookIdentity) -> Result<Option<CatalogBook>, CatalogStoreError> {
         let connection = self.connection()?;
         let Some(generation) = active_generation_optional(&connection, source_id)? else { return Ok(None) };
-        sequenced_publication_in(&connection, source_id, generation, identity).map(|publication| publication.map(|publication| publication.publication))
+        sequenced_book_in(&connection, source_id, generation, identity).map(|book| book.map(|book| book.book))
     }
 
-    pub fn enrich_active_publication_prepared(
-        &self, source_id: &CatalogSourceId, publication: &CatalogPublication, subjects: &[PublicationSubject], assignments: &[CatalogSubjectAssignment], toc: &[publication_model::PublicationTocEntry],
-        popularity: Option<&CatalogPublicationPopularity>, extraction_claim: Option<(&str, u64)>,
+    pub fn enrich_active_book_prepared(
+        &self, source_id: &CatalogSourceId, book: &CatalogBook, subjects: &[BookSubject], assignments: &[CatalogSubjectAssignment], toc: &[book_model::BookTocEntry],
+        popularity: Option<&CatalogBookPopularity>, extraction_claim: Option<(&str, u64)>,
     ) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -318,29 +318,29 @@ impl CatalogStore {
             }
         }
         let generation = active_generation_in(&transaction, source_id)?;
-        let (edition_id, work_id) = publication_key(publication);
+        let (edition_id, work_id) = book_key(book);
         let exists = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM catalog_publication WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4)",
+            "SELECT EXISTS(SELECT 1 FROM catalog_book WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4)",
             params![source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id],
             |row| row.get::<_, bool>(0),
         )?;
         if !exists {
             return Ok(false);
         }
-        upsert_active_publication(&transaction, source_id, generation, publication)?;
+        upsert_active_book(&transaction, source_id, generation, book)?;
         // Completion can make a cached cover available without changing the
-        // publication payload. Always advance the sequence so connected
+        // book payload. Always advance the sequence so connected
         // clients refresh that card and retry its cover request.
         let completion_sequence = allocate_sequence(&transaction, source_id)?;
         transaction.execute(
-            "UPDATE catalog_publication SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            "UPDATE catalog_book SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
             params![source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id, completion_sequence],
         )?;
-        replace_publication_subjects_prepared(&transaction, source_id, generation, &publication.identity, subjects, assignments)?;
-        replace_publication_toc(&transaction, source_id, generation, &publication.identity, toc)?;
+        replace_book_subjects_prepared(&transaction, source_id, generation, &book.identity, subjects, assignments)?;
+        replace_book_toc(&transaction, source_id, generation, &book.identity, toc)?;
         if let Some(popularity) = popularity {
             transaction.execute(
-                "INSERT OR REPLACE INTO catalog_publication_popularity(
+                "INSERT OR REPLACE INTO catalog_book_popularity(
                     source_id,generation,edition_id,work_id,want_to_read_count,currently_reading_count,already_read_count,reading_log_count,rating_count,rating_sum
                  ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
@@ -366,23 +366,23 @@ impl CatalogStore {
     /// evidence produced by an earlier successful EPUB extraction. The saved
     /// extraction payload is updated too, so a later crawl cannot restore the
     /// rejected URL while overlaying persistent metadata.
-    pub fn clear_active_publication_cover(&self, source_id: &CatalogSourceId, identity: &CatalogPublicationIdentity, acquisition_url: &str, expected_image_url: &str) -> Result<bool, CatalogStoreError> {
+    pub fn clear_active_book_cover(&self, source_id: &CatalogSourceId, identity: &CatalogBookIdentity, acquisition_url: &str, expected_image_url: &str) -> Result<bool, CatalogStoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let generation = active_generation_in(&transaction, source_id)?;
-        let Some(mut publication) = sequenced_publication_in(&transaction, source_id, generation, identity)?.map(|publication| publication.publication) else { return Ok(false) };
-        if publication.image_url.as_deref() != Some(expected_image_url) {
+        let Some(mut book) = sequenced_book_in(&transaction, source_id, generation, identity)?.map(|book| book.book) else { return Ok(false) };
+        if book.image_url.as_deref() != Some(expected_image_url) {
             return Ok(false);
         }
-        publication.image_url = None;
-        upsert_active_publication(&transaction, source_id, generation, &publication)?;
+        book.image_url = None;
+        upsert_active_book(&transaction, source_id, generation, &book)?;
         let completion_sequence = allocate_sequence(&transaction, source_id)?;
-        let (edition_id, work_id) = publication_key(&publication);
+        let (edition_id, work_id) = book_key(&book);
         transaction.execute(
-            "UPDATE catalog_publication SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
+            "UPDATE catalog_book SET sequence=?5 WHERE source_id=?1 AND generation=?2 AND edition_id=?3 AND work_id=?4",
             params![source_id.as_str(), storage_i64(generation, "generation")?, edition_id, work_id, completion_sequence],
         )?;
-        transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&publication)?])?;
+        transaction.execute("UPDATE catalog_epub_extraction SET result_payload=?3 WHERE source_id=?1 AND acquisition_url=?2", params![source_id.as_str(), acquisition_url, wire::encode(&book)?])?;
         advance_catalog_transport_revision(&transaction)?;
         transaction.commit()?;
         Ok(true)

@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 web-runtime-tests = ["bokheim-backend/web-runtime-tests", "client-platform-web/web-runtime-tests"]
 
 [dependencies]
+book-model = { path = "../../shared/book-model" }
 bokheim-backend = { path = "../../client/backend", default-features = false }
 console_error_panic_hook = "0.1"
 futures-channel = "0.3"

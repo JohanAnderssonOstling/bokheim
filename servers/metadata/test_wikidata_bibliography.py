@@ -9,7 +9,7 @@ class BibliographyTest(unittest.TestCase):
   claims={'P31':[claim({'id':'Q571'})],'P1476':[claim({'language':'en','text':'Real title'})],'P1680':[claim({'language':'en','text':'Subtitle'})],'P577':[claim({'time':'+2001-01-01T00:00:00Z','precision':9})],'P123':[claim({'id':'Q2'}),claim({'id':'Q3'},'deprecated')],'P50':[claim({'id':'Q1'})]}
   m.insert(c,{'id':'Q10','labels':{'en':{'value':'Label'}},'claims':claims})
   self.assertEqual(c.execute('SELECT * FROM bibliography').fetchall(),[('Q10','Real title','Subtitle',2001)])
-  self.assertEqual(c.execute('SELECT publisher FROM publication_publisher').fetchall(),[('Q2',)])
+  self.assertEqual(c.execute('SELECT publisher FROM book_publisher').fetchall(),[('Q2',)])
   m.insert(c,{'id':'Q11','labels':{'en':{'value':'Paper'}},'claims':{'P31':[claim({'id':'Q13442814'})],'P50':[claim({'id':'Q1'})]}})
   self.assertEqual(c.execute('SELECT count(*) FROM bibliography').fetchone()[0],1)
   self.assertIsNone(m.title_value({'P1680':[claim({'language':'en','text':'First'}),claim({'language':'en','text':'Second'})]},'P1680'))
@@ -25,4 +25,4 @@ class BackfillTest(unittest.TestCase):
    chunk=root/'chunk.jsonl.zst';chunk.write_bytes(subprocess.check_output(['zstd','-q','-c'],input=b''.join(json.dumps(r).encode()+b'\n' for r in records)));chunk.with_suffix('.meta.json').write_text(json.dumps({'sha256':hashlib.sha256(chunk.read_bytes()).hexdigest()}))
    with patch.object(m.m.bundle,'completed_chunks',return_value=iter([chunk])):m.extend(root,db)
    m.extend(root,db)
-   c=sqlite3.connect(db);self.assertEqual(c.execute('SELECT name FROM publication_publisher').fetchone()[0],'Publisher name');self.assertEqual(c.execute('SELECT count(*) FROM bibliography_chunk').fetchone()[0],2)
+   c=sqlite3.connect(db);self.assertEqual(c.execute('SELECT name FROM book_publisher').fetchone()[0],'Publisher name');self.assertEqual(c.execute('SELECT count(*) FROM bibliography_chunk').fetchone()[0],2)

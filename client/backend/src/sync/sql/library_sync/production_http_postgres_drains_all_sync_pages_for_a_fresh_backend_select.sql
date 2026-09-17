@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM book WHERE read_pos IS NOT NULL

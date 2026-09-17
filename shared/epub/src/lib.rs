@@ -10,7 +10,7 @@ const MAX_MARKUP_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_BINARY_RESOURCE_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 65_536;
 
-/// Publication navigation entry, available even in lightweight builds that
+/// Book navigation entry, available even in lightweight builds that
 /// do not link an HTML renderer (for example the browser metadata WASM).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TocEntry {
@@ -316,7 +316,7 @@ impl EpubProvider {
         visit(&mut entry.take(max_bytes))
     }
 
-    /// Returns cheap publication-progress weights for the resolved documents.
+    /// Returns cheap book-progress weights for the resolved documents.
     /// ZIP central-directory metadata provides the uncompressed sizes without
     /// reading or parsing every spine document.
     pub fn document_progress_weights(&self, documents: &[String]) -> io::Result<Vec<u64>> {
@@ -772,7 +772,7 @@ impl EpubProvider {
     }
 
     /// Returns the documents the reader can present, preferring the package
-    /// spine and falling back to HTML archive entries for older publications.
+    /// spine and falling back to HTML archive entries for older books.
     pub fn document_uris(&self) -> io::Result<Vec<String>> {
         if let Some(spine) = self.resolve_spine_entries()? {
             return Ok(spine);
@@ -824,7 +824,7 @@ fn resolve_href(base_dir: &str, href: &str) -> String {
 
 fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
     for entry in entries {
-        entry.link = publication_root_href(resolve_toc_href(base_path, entry.link.as_str()));
+        entry.link = book_root_href(resolve_toc_href(base_path, entry.link.as_str()));
         resolve_toc_links(base_path, &mut entry.children);
     }
 }
@@ -832,7 +832,7 @@ fn resolve_toc_links(base_path: &str, entries: &mut [TocEntry]) {
 /// TOC entries are resolved relative to the nav/NCX document when they are
 /// parsed. Mark the resulting archive path as root-relative so opening it does
 /// not resolve it a second time against whichever spine document is visible.
-fn publication_root_href(href: String) -> String {
+fn book_root_href(href: String) -> String {
     if href.is_empty() || href.starts_with('/') || href.split('#').next().is_some_and(|path| path.contains(':')) { href } else { format!("/{href}") }
 }
 
@@ -944,13 +944,13 @@ mod streaming_tests {
     }
 
     #[test]
-    fn publication_root_hrefs_do_not_depend_on_the_current_chapter() {
+    fn book_root_hrefs_do_not_depend_on_the_current_chapter() {
         assert_eq!(resolve_resource_href("OEBPS/Text/current.xhtml", "/OEBPS/Text/chapter.xhtml#section"), "OEBPS/Text/chapter.xhtml");
         assert_eq!(resolve_resource_href("OPS/another.xhtml", "/OEBPS/Text/chapter.xhtml#section"), "OEBPS/Text/chapter.xhtml");
     }
 
     #[test]
-    fn toc_links_are_marked_as_publication_root_hrefs() {
+    fn toc_links_are_marked_as_book_root_hrefs() {
         let mut entries = vec![TocEntry { title: "Chapter".to_owned(), link: "../Text/chapter.xhtml#section".to_owned(), children: Vec::new() }];
         resolve_toc_links("OEBPS/Navigation/nav.xhtml", &mut entries);
         assert_eq!(entries[0].link, "/OEBPS/Text/chapter.xhtml#section");
@@ -1244,7 +1244,7 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
         }
         // A checksum-valid whole value outranks the producer's scheme,
         // including EPUB 3 identifier-type refinements.
-        if let Some(isbn) = publication_model::metadata_isbn(&identifier.value) {
+        if let Some(isbn) = book_model::metadata_isbn(&identifier.value) {
             identifier.value = isbn;
             identifier.scheme = IdentifierScheme::ISBN;
         } else if matches!(identifier.scheme, IdentifierScheme::ISBN) {
@@ -1290,8 +1290,8 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
 
 fn add_metadata_isbns(metadata: &mut EpubMetadata, values: impl IntoIterator<Item = String>) {
     for value in values {
-        let Some(isbn) = publication_model::metadata_isbn(&value) else { continue };
-        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && publication_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) { continue; }
+        let Some(isbn) = book_model::metadata_isbn(&value) else { continue };
+        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && book_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) { continue; }
         metadata.identifiers.push(EpubIdentifier { value: isbn, scheme: IdentifierScheme::ISBN, identifier_types: Vec::new() });
     }
 }
@@ -1565,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn opf_metadata_preserves_every_publication_identifier_and_its_type_evidence() {
+    fn opf_metadata_preserves_every_book_identifier_and_its_type_evidence() {
         let metadata = parse_opf_metadata(
             r##"<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
                 <metadata>
@@ -1633,7 +1633,7 @@ mod tests {
                     <dc:publisher>South Wind Imprint</dc:publisher>
                     <dc:language>sv-SE</dc:language>
                     <dc:language>en</dc:language>
-                    <dc:date opf:event="publication">2026-08-04</dc:date>
+                    <dc:date opf:event="book">2026-08-04</dc:date>
                     <dc:date>2026</dc:date>
                     <dc:subject>Libraries</dc:subject>
                     <dc:rights>Copyright example</dc:rights>
@@ -1654,7 +1654,7 @@ mod tests {
         assert_eq!(metadata.alternate_titles, vec![EpubTitle { id: None, value: "Alternate title".to_owned(), title_type: None, sort_as: None }],);
         assert_eq!(metadata.publishers, vec!["North Wind Press", "South Wind Imprint"]);
         assert_eq!(metadata.languages, vec!["sv-SE", "en"]);
-        assert_eq!(metadata.dates, vec![EpubDate { id: None, value: "2026-08-04".to_owned(), event: Some("publication".to_owned()) }, EpubDate { id: None, value: "2026".to_owned(), event: None },],);
+        assert_eq!(metadata.dates, vec![EpubDate { id: None, value: "2026-08-04".to_owned(), event: Some("book".to_owned()) }, EpubDate { id: None, value: "2026".to_owned(), event: None },],);
         assert_eq!(metadata.subjects, vec![EpubSubject { id: None, value: "Libraries".to_owned(), source: "dc:subject".to_owned(), authority: None, code: None }],);
         assert_eq!(metadata.rights, vec!["Copyright example"]);
         assert_eq!(metadata.sources, vec!["urn:isbn:9781234567897"]);

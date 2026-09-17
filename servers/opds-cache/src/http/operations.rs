@@ -42,7 +42,7 @@ pub(crate) async fn catalog_operations(State(service): State<CatalogService>) ->
                 .map(|example| EpubFailureExampleResponse {
                     source_id: example.source_id.as_str().to_owned(),
                     acquisition_host: example.acquisition_host,
-                    publication_id: example.publication_id,
+                    book_id: example.book_id,
                     attempts: example.attempts,
                     last_failed_at: example.last_failed_at,
                 })
@@ -136,7 +136,7 @@ pub(crate) async fn catalog_inventory_response(service: &CatalogService) -> Resu
         metadata_enrichment_configured,
         search_index_ready: inventory.search_index_ready,
         active_page_count: inventory.active_page_count,
-        active_publication_count: inventory.active_publication_count,
+        active_book_count: inventory.active_book_count,
         active_epub_count: inventory.active_epub_count,
         cover_downloads: CoverDownloadInventoryResponse {
             pending: inventory.cover_downloads.pending,
@@ -181,14 +181,14 @@ pub(crate) async fn catalog_inventory_response(service: &CatalogService) -> Resu
                     last_crawl_error_category: source.last_crawl_error.as_deref().map(|error| classify_catalog_failure(error).0),
                     crawl_frontier_count: source.crawl_frontier_count,
                     crawl_pages_fetched: progress.map_or(0, |progress| progress.pages_fetched),
-                    crawl_publications_seen: progress.map_or(0, |progress| progress.publications_seen),
+                    crawl_books_seen: progress.map_or(0, |progress| progress.books_seen),
                     crawl_elapsed_seconds: progress.map_or(0, |progress| progress.started_at.elapsed().as_secs()),
                     crawl_origin_in_flight: origin_throttle.in_flight,
                     crawl_origin_concurrency: origin_throttle.concurrency_limit,
                     crawl_origin_spacing_ms: origin_throttle.minimum_spacing_ms,
                     crawl_origin_blocked_ms: origin_throttle.blocked_for_ms,
                     active_page_count: source.active_page_count,
-                    active_publication_count: source.active_publication_count,
+                    active_book_count: source.active_book_count,
                     active_epub_count: source.active_epub_count,
                     epub_extractions: epub_extraction_inventory_response(source.epub_extractions),
                 }

@@ -405,6 +405,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "bokheim-backend",
+ "book-model",
  "browser-ui",
  "futures-util",
  "gpui",
@@ -526,9 +527,11 @@ dependencies = [
  "client-platform-runtime",
  "client-platform-web",
  "futures-util",
+ "library-database",
  "library-files",
  "library-model",
  "library-replica",
+ "library-runtime",
  "log",
  "reqwest",
  "rmp-serde",
@@ -795,6 +798,7 @@ dependencies = [
  "audiobook-library",
  "bokheim-backend",
  "book-metadata",
+ "book-model",
  "crossbeam-channel",
  "gpui",
  "gpui-component",
@@ -1170,11 +1174,15 @@ dependencies = [
  "account-client",
  "account-contract",
  "app-preferences",
- "asset-transfer",
  "async-channel",
  "axum",
  "blake3",
+ "book-access",
+ "book-enrichment",
+ "book-identity",
+ "book-inspection",
  "book-metadata",
+ "book-model",
  "client-library",
  "client-platform-android",
  "client-platform-desktop",
@@ -1191,9 +1199,11 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "image 0.24.9",
+ "include-sqlite-sql",
  "js-sys",
  "libc",
- "library-files",
+ "library-backend",
+ "library-database",
  "library-model",
  "library-registry",
  "library-replica",
@@ -1202,11 +1212,6 @@ dependencies = [
  "lopdf",
  "metadata-client",
  "metadata-contract",
- "pdf-view-common",
- "publication-access",
- "publication-enrichment",
- "publication-identity",
- "publication-inspection",
  "reqwest",
  "rmp-serde",
  "rusqlite",
@@ -1216,7 +1221,6 @@ dependencies = [
  "sqlx",
  "subject-projection",
  "sync-common",
- "sync-engine",
  "sync-transport",
  "tempfile",
  "test-support",
@@ -1232,20 +1236,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "book-access"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "client-platform-runtime",
+ "client-platform-web",
+ "crossbeam-channel",
+ "epub_provider",
+ "futures-channel",
+ "futures-util",
+ "log",
+ "pdf-view-common",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "sync-common",
+ "tempfile",
+ "test-support",
+ "tokio",
+ "wasm-bindgen-futures",
+ "zip",
+]
+
+[[package]]
+name = "book-enrichment"
+version = "0.1.0"
+dependencies = [
+ "book-model",
+ "catalog-model",
+ "metadata-contract",
+ "serde",
+ "serde_json",
+ "subject-projection",
+]
+
+[[package]]
+name = "book-identity"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "content-address",
+ "fs2",
+ "lopdf",
+ "pdf-range-reader",
+ "tempfile",
+]
+
+[[package]]
+name = "book-inspection"
+version = "0.1.0"
+dependencies = [
+ "book-enrichment",
+ "book-model",
+ "epub_provider",
+ "getrandom 0.4.2",
+ "image 0.25.10",
+ "lopdf",
+ "metadata-contract",
+ "mobi",
+ "pdf-range-reader",
+ "pdf-reader-core",
+ "quick-xml 0.31.0",
+ "regex",
+ "roxmltree 0.20.0",
+ "serde",
+ "serde_json",
+ "subject-projection",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
 name = "book-metadata"
 version = "0.1.0"
 dependencies = [
  "audiobook-library",
+ "book-inspection",
+ "book-model",
  "library-model",
  "metadata-contract",
  "mobi",
  "mp4ameta",
  "pdf-reader-core",
  "pdf-view-common",
- "publication-inspection",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "book-model"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "content-address",
+ "language-tags",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+ "uuid",
+ "wire",
 ]
 
 [[package]]
@@ -1287,6 +1378,7 @@ dependencies = [
  "app-preferences",
  "async-channel",
  "bokheim-backend",
+ "book-model",
  "chrono",
  "futures-util",
  "gpui",
@@ -1303,6 +1395,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "subject-projection",
  "sync-common",
  "ui-components",
  "uuid",
@@ -1430,25 +1523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "catalog-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "catalog-core",
- "catalog-model",
- "device-sqlite",
- "futures-util",
- "image 0.24.9",
- "protobuf-wire",
- "reqwest",
- "rusqlite",
- "serde",
- "tempfile",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "catalog-core"
 version = "0.1.0"
 dependencies = [
@@ -1461,6 +1535,7 @@ dependencies = [
  "log",
  "outbound-http",
  "reqwest",
+ "subject-projection",
  "tempfile",
  "thumbnail",
  "tokio",
@@ -1472,7 +1547,7 @@ dependencies = [
 name = "catalog-model"
 version = "0.1.0"
 dependencies = [
- "publication-model",
+ "book-model",
  "serde",
  "serde_json",
  "unicode-normalization",
@@ -1492,6 +1567,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blake3",
+ "book-enrichment",
+ "book-inspection",
+ "book-model",
  "catalog-core",
  "catalog-model",
  "catalog-protocol",
@@ -1502,9 +1580,6 @@ dependencies = [
  "mobi",
  "opds",
  "protobuf-wire",
- "publication-enrichment",
- "publication-inspection",
- "publication-model",
  "r2d2",
  "r2d2_sqlite",
  "reqwest",
@@ -1676,16 +1751,18 @@ dependencies = [
 name = "client-library"
 version = "0.1.0"
 dependencies = [
+ "book-enrichment",
+ "book-inspection",
  "book-metadata",
+ "book-model",
  "catalog-model",
+ "content-address",
  "include-sqlite-sql",
  "library-model",
  "library-replica",
  "log",
  "metadata-contract",
  "pdf-view-common",
- "publication-enrichment",
- "publication-inspection",
  "rusqlite",
  "serde",
  "serde_bytes",
@@ -2485,7 +2562,6 @@ dependencies = [
  "image 0.25.10",
  "jni 0.22.4",
  "kobo-device",
- "library-model",
  "log",
  "reader-ui",
  "reqwest",
@@ -2882,7 +2958,7 @@ dependencies = [
 name = "epub_provider"
 version = "0.1.0"
 dependencies = [
- "publication-model",
+ "book-model",
  "quick-xml 0.31.0",
  "serde_json",
  "zip",
@@ -4276,6 +4352,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "html-book"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "epub_provider",
+ "html-engine",
+ "mobi",
+ "regex",
+ "zip",
+]
+
+[[package]]
 name = "html-dom"
 version = "0.1.0"
 dependencies = [
@@ -4338,18 +4426,6 @@ dependencies = [
  "html-resources",
  "html-style",
  "web-time",
-]
-
-[[package]]
-name = "html-publication"
-version = "0.1.0"
-dependencies = [
- "encoding_rs",
- "epub_provider",
- "html-engine",
- "mobi",
- "regex",
- "zip",
 ]
 
 [[package]]
@@ -5496,29 +5572,117 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "library-backend"
+version = "0.1.0"
+dependencies = [
+ "account-client",
+ "account-contract",
+ "asset-transfer",
+ "async-channel",
+ "axum",
+ "blake3",
+ "book-access",
+ "book-enrichment",
+ "book-identity",
+ "book-inspection",
+ "book-metadata",
+ "book-model",
+ "catalog-model",
+ "client-library",
+ "client-platform-kobo",
+ "client-platform-native",
+ "client-platform-runtime",
+ "client-platform-web",
+ "crossbeam-channel",
+ "futures-channel",
+ "futures-util",
+ "getrandom 0.3.4",
+ "image 0.24.9",
+ "js-sys",
+ "libc",
+ "library-database",
+ "library-files",
+ "library-model",
+ "library-replica",
+ "library-runtime",
+ "log",
+ "lopdf",
+ "metadata-client",
+ "metadata-contract",
+ "notify 6.1.1",
+ "pdf-view-common",
+ "reqwest",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sqlx",
+ "subject-projection",
+ "sync-common",
+ "sync-engine",
+ "sync-transport",
+ "tempfile",
+ "test-support",
+ "thumbnail",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+ "walkdir",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "zip",
+]
+
+[[package]]
+name = "library-database"
+version = "0.1.0"
+dependencies = [
+ "book-enrichment",
+ "book-metadata",
+ "book-model",
+ "catalog-model",
+ "client-platform-native",
+ "client-platform-runtime",
+ "client-platform-web",
+ "device-sqlite",
+ "include-sqlite-sql",
+ "library-model",
+ "library-replica",
+ "log",
+ "metadata-contract",
+ "pdf-view-common",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subject-projection",
+ "sync-common",
+ "uuid",
+]
+
+[[package]]
 name = "library-files"
 version = "0.1.0"
 dependencies = [
  "async-channel",
  "blake3",
- "book-metadata",
- "client-library",
+ "book-access",
+ "book-identity",
  "client-platform-android",
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
- "crossbeam-channel",
  "fs2",
  "futures-util",
+ "library-database",
  "library-model",
  "library-replica",
  "log",
  "lopdf",
  "metadata-contract",
- "notify 6.1.1",
  "pdf-view-common",
- "publication-access",
- "publication-identity",
  "reqwest",
  "rusqlite",
  "serde_json",
@@ -5538,12 +5702,11 @@ dependencies = [
 name = "library-model"
 version = "0.1.0"
 dependencies = [
+ "book-model",
  "catalog-model",
  "content-address",
- "publication-model",
  "serde",
  "serde_json",
- "subject-projection",
  "tempfile",
  "unicode-normalization",
  "uuid",
@@ -5567,6 +5730,7 @@ dependencies = [
 name = "library-replica"
 version = "0.1.0"
 dependencies = [
+ "book-model",
  "catalog-model",
  "library-model",
  "pdf-view-common",
@@ -5574,6 +5738,7 @@ dependencies = [
  "serde_json",
  "sync-common",
  "test-support",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -5581,21 +5746,23 @@ name = "library-runtime"
 version = "0.1.0"
 dependencies = [
  "account-client",
- "asset-transfer",
  "async-channel",
  "client-library",
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
- "device-sqlite",
- "library-files",
+ "library-database",
  "library-model",
  "library-replica",
  "log",
- "rusqlite",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
  "serde_json",
  "sync-common",
  "sync-transport",
+ "tempfile",
+ "thumbnail",
  "tokio",
  "uuid",
  "web-time",
@@ -7051,13 +7218,13 @@ dependencies = [
  "atom_syndication",
  "axum",
  "blake3",
+ "book-model",
  "futures-util",
  "getrandom 0.3.4",
  "httpdate",
  "litteraturbanken",
  "log",
  "outbound-http",
- "publication-model",
  "quick-xml 0.41.0",
  "reqwest",
  "serde",
@@ -7254,6 +7421,7 @@ name = "pdf-reader-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "book-model",
  "concurrent-queue",
  "console_error_panic_hook",
  "image 0.25.10",
@@ -7763,91 +7931,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "publication-access"
-version = "0.1.0"
-dependencies = [
- "axum",
- "client-platform-runtime",
- "client-platform-web",
- "crossbeam-channel",
- "epub_provider",
- "futures-channel",
- "futures-util",
- "log",
- "pdf-view-common",
- "reqwest",
- "rusqlite",
- "serde",
- "sync-common",
- "tempfile",
- "test-support",
- "tokio",
- "wasm-bindgen-futures",
- "zip",
-]
-
-[[package]]
-name = "publication-enrichment"
-version = "0.1.0"
-dependencies = [
- "catalog-model",
- "metadata-contract",
- "publication-model",
- "serde",
- "serde_json",
- "subject-projection",
-]
-
-[[package]]
-name = "publication-identity"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "content-address",
- "fs2",
- "lopdf",
- "pdf-range-reader",
- "tempfile",
-]
-
-[[package]]
-name = "publication-inspection"
-version = "0.1.0"
-dependencies = [
- "epub_provider",
- "getrandom 0.4.2",
- "image 0.25.10",
- "lopdf",
- "metadata-contract",
- "mobi",
- "pdf-range-reader",
- "pdf-reader-core",
- "publication-enrichment",
- "publication-model",
- "quick-xml 0.31.0",
- "regex",
- "roxmltree 0.20.0",
- "serde",
- "serde_json",
- "subject-projection",
- "tempfile",
- "zip",
-]
-
-[[package]]
-name = "publication-model"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "language-tags",
- "serde",
- "serde_json",
- "unicode-normalization",
- "uuid",
- "wire",
-]
-
-[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8266,12 +8349,14 @@ dependencies = [
  "async-channel",
  "audiobook-player",
  "bokheim-backend",
+ "book-model",
+ "content-address",
  "futures-util",
  "gpui",
  "gpui-component",
  "gpui_kobo",
+ "html-book",
  "html-engine",
- "html-publication",
  "html-view-core",
  "html-view-gpui",
  "library-model",
@@ -9907,8 +9992,8 @@ dependencies = [
 name = "subject-projection"
 version = "0.1.0"
 dependencies = [
+ "book-model",
  "csv",
- "publication-model",
  "rusqlite",
  "tempfile",
  "uuid",

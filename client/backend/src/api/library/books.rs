@@ -2,7 +2,7 @@ use super::LibraryClient;
 use crate::runtime::*;
 
 impl LibraryClient {
-    pub async fn book_format(&self, content_hash: crate::ContentHash) -> Result<Option<library_model::BookFormat>, String> {
+    pub async fn book_format(&self, content_hash: crate::ContentHash) -> Result<Option<book_model::BookFormat>, String> {
         self.request(library_requests::BookFormat { content_hash }).await
     }
 
@@ -28,7 +28,7 @@ impl LibraryClient {
     pub async fn move_book_to_trash(&self, content_hash: crate::ContentHash) -> Result<(), String> {
         self.request(library_requests::MoveBookToTrash { content_hash }).await
     }
-    /// Opens the publication using the target's reader and source adapter.
+    /// Opens the book using the target's reader and source adapter.
     pub async fn resolve_book(&self, content_hash: crate::ContentHash) -> Result<crate::ResolvedBook, String> {
         self.app.transport.resolve_book(self, content_hash).await
     }

@@ -1,1 +1,0 @@
-DELETE FROM sync_metadata WHERE key IN ('last_pull_state_seq','last_pull_reading_seq','inventory_repair_after')

@@ -17,9 +17,9 @@ pub fn execute(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
 fn execute_with_source(bytes: &[u8], source: JsValue) -> Result<Vec<u8>, JsValue> {
     let request = rmp_serde::from_slice(bytes).map_err(|error| JsValue::from_str(&error.to_string()))?;
     let response = match request {
-        bokheim_backend::host::cpu::CpuRequest::Publication { task } => {
-            let reader = bokheim_backend::host::web::publication_source::Reader::new(source).map_err(|e| JsValue::from_str(&e))?;
-            bokheim_backend::host::cpu::execute_publication(task, Box::new(reader))
+        bokheim_backend::host::cpu::CpuRequest::Book { task } => {
+            let reader = bokheim_backend::host::web::book_source::Reader::new(source).map_err(|e| JsValue::from_str(&e))?;
+            bokheim_backend::host::cpu::execute_book(task, Box::new(reader))
         }
         request => bokheim_backend::host::cpu::execute(request),
     }
@@ -45,14 +45,14 @@ pub fn start() -> Result<(), JsValue> {
             let CpuRequest { id, bytes, source } = request;
             let response = async {
                 if !source.is_undefined() {
-                    bokheim_backend::host::web::publication_source::connect(&source).await?;
+                    bokheim_backend::host::web::book_source::connect(&source).await?;
                 }
                 if matches!(rmp_serde::from_slice::<bokheim_backend::host::cpu::CpuRequest>(&bytes),
-                    Ok(bokheim_backend::host::cpu::CpuRequest::Publication {
-                        task: bokheim_backend::host::cpu::PublicationTask::Thumbnail { extension }
+                    Ok(bokheim_backend::host::cpu::CpuRequest::Book {
+                        task: bokheim_backend::host::cpu::BookTask::Thumbnail { extension }
                     }) if extension == "pdf") || matches!(rmp_serde::from_slice::<bokheim_backend::host::cpu::CpuRequest>(&bytes),
-                    Ok(bokheim_backend::host::cpu::CpuRequest::Publication {
-                        task: bokheim_backend::host::cpu::PublicationTask::Inspect { format: library_model::BookFormat::Pdf, .. }
+                    Ok(bokheim_backend::host::cpu::CpuRequest::Book {
+                        task: bokheim_backend::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. }
                     }))
                 {
                     initialize_pdfium().await?;
@@ -106,13 +106,13 @@ pub async fn import_worker_contract() -> Result<(), JsValue> {
 
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
-pub struct PublicationTestReader(bokheim_backend::host::web::publication_source::Reader);
+pub struct BookTestReader(bokheim_backend::host::web::book_source::Reader);
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
-impl PublicationTestReader {
+impl BookTestReader {
     #[wasm_bindgen(constructor)]
     pub fn new(source: JsValue) -> Result<Self, JsValue> {
-        bokheim_backend::host::web::publication_source::Reader::new(source).map(Self).map_err(|error| JsValue::from_str(&error))
+        bokheim_backend::host::web::book_source::Reader::new(source).map(Self).map_err(|error| JsValue::from_str(&error))
     }
     pub fn read(&mut self, offset: f64, length: u32) -> Result<Vec<u8>, JsValue> {
         use std::io::{Read, Seek, SeekFrom};

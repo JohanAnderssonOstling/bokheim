@@ -8,7 +8,7 @@ pub fn isbn_from_filename_like_title(title: &str) -> Option<String> {
     let mut candidate = String::new();
     let mut isbns = BTreeSet::new();
     let finish_candidate = |candidate: &mut String, isbns: &mut BTreeSet<String>| {
-        if let Some(isbn) = library_model::canonical_isbn(candidate) {
+        if let Some(isbn) = book_model::canonical_isbn(candidate) {
             isbns.insert(isbn);
         }
         candidate.clear();
@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn extracts_explicit_filename_author() {
-        assert_eq!(edition_identity_evidence("An Illustrated Guide (by-Kenneth-Ray-Stubbs)"), EditionIdentityEvidence { title: "An Illustrated Guide".to_owned(), author: Some("Kenneth Ray Stubbs".to_owned()), publication_year: None });
+        assert_eq!(edition_identity_evidence("An Illustrated Guide (by-Kenneth-Ray-Stubbs)"), EditionIdentityEvidence { title: "An Illustrated Guide".to_owned(), author: Some("Kenneth Ray Stubbs".to_owned()), book_year: None });
     }
 
     #[test]
@@ -45,7 +45,7 @@ mod tests {
     fn extracts_noisy_filename_title_author_and_year() {
         assert_eq!(
             edition_identity_evidence("(it-ebooks-2019) it-ebooks - Algorithms (Jeff Erickson)-iBooker it-ebooks (2019)(1)"),
-            EditionIdentityEvidence { title: "Algorithms".to_owned(), author: Some("Jeff Erickson".to_owned()), publication_year: Some(2019) }
+            EditionIdentityEvidence { title: "Algorithms".to_owned(), author: Some("Jeff Erickson".to_owned()), book_year: Some(2019) }
         );
     }
 
@@ -53,7 +53,7 @@ mod tests {
     fn extracts_inline_by_author_before_source_tag() {
         assert_eq!(
             edition_identity_evidence("A Concise History of France by Roger Price (z-lib.org)"),
-            EditionIdentityEvidence { title: "A Concise History of France".to_owned(), author: Some("Roger Price".to_owned()), publication_year: None }
+            EditionIdentityEvidence { title: "A Concise History of France".to_owned(), author: Some("Roger Price".to_owned()), book_year: None }
         );
     }
 

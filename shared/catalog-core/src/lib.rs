@@ -338,7 +338,7 @@ mod covers {
         }
 
         pub fn remember_subject_browse(&self, response: &CatalogSubjectBrowseResponse) {
-            self.remember_cover_urls(response.publications.iter().filter_map(|item| item.publication.image_url.as_deref().map(|image_url| (&item.source_id, image_url))));
+            self.remember_cover_urls(response.books.iter().filter_map(|item| item.book.image_url.as_deref().map(|image_url| (&item.source_id, image_url))));
         }
 
         fn remember_cover_urls<'a>(&self, references: impl IntoIterator<Item = (&'a CatalogSourceId, &'a str)>) {

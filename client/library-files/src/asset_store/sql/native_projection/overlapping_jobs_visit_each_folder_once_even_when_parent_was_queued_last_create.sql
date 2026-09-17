@@ -1,1 +1,0 @@
-CREATE TEMP TABLE visited_folder(id TEXT PRIMARY KEY); CREATE TEMP TRIGGER record_folder_visit BEFORE INSERT ON local_directory_projection BEGIN INSERT INTO visited_folder(id) VALUES(NEW.dir_id); END;

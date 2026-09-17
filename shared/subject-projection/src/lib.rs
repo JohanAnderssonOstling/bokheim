@@ -11,7 +11,7 @@ mod selector_format;
 mod pruning;
 mod taxonomy_sqlite;
 
-pub use publication_model::PublicationSubject;
+pub use book_model::BookSubject;
 pub use lcc_recovery::{LccMatchMethod, LccMatchEvidence, LccMatchAssignment, LccMatchReport};
 pub use pruning::redundant_lcc_exact_selectors;
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,7 +121,7 @@ impl ProjectedSubjectCode {
     }
 }
 
-pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectAssignment> {
+pub fn project_subjects(subjects: &[BookSubject]) -> Vec<ProjectedSubjectAssignment> {
     let mut projected = BTreeMap::<(String, String, i64), BTreeSet<usize>>::new();
     for assignment in match_bisac_subjects(subjects) {
         projected.entry((BISAC_SYSTEM_ID.to_owned(), assignment.node_path().to_owned(), BISAC_MATCHER_VERSION)).or_default().extend(assignment.evidence_positions());
@@ -151,7 +151,7 @@ pub fn project_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubject
     projected.into_iter().map(|((system_id, subject_path, matcher_version), evidence)| ProjectedSubjectAssignment { system_id, subject_path, matcher_version, evidence_positions: evidence.into_iter().collect(), lcc_evidence: Vec::new() }).collect()
 }
 
-pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectCode> {
+pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCode> {
     let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
     for assignment in match_bisac_subjects(subjects) {
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
@@ -191,7 +191,7 @@ pub fn project_subject_codes(subjects: &[PublicationSubject]) -> Vec<ProjectedSu
 
 /// Infer only complete classification values in otherwise uncontrolled embedded
 /// subjects. Keep the original declaration and its evidence position unchanged.
-fn subject_lcc_code(subject: &PublicationSubject) -> Option<String> {
+fn subject_lcc_code(subject: &BookSubject) -> Option<String> {
     if let Some(authority) = subject.authority() {
         return (external_subject_system(Some(authority))?.0 == LCC_SYSTEM_ID)
             .then(|| canonical_lcc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten();
@@ -214,7 +214,7 @@ fn subject_lcc_code(subject: &PublicationSubject) -> Option<String> {
     Some(canonical)
 }
 
-pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<ProjectedSubjectAssignment> {
+pub fn project_unified_subjects(subjects: &[BookSubject]) -> Vec<ProjectedSubjectAssignment> {
     let mut projected = BTreeMap::<String, BTreeSet<usize>>::new();
     let runtime = runtime::current();
     for classification in project_subject_codes(subjects) {
@@ -287,7 +287,7 @@ pub fn project_unified_subjects(subjects: &[PublicationSubject]) -> Vec<Projecte
         .collect()
 }
 
-fn normalized_source_labels(subject: &PublicationSubject) -> BTreeSet<String> {
+fn normalized_source_labels(subject: &BookSubject) -> BTreeSet<String> {
     let mut labels = BTreeSet::from([runtime::normalize_source_label(subject.name())]);
     let source = subject.source().trim().to_ascii_lowercase();
     let authority = subject.authority().map(str::trim).unwrap_or_default().to_ascii_lowercase();
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn unresolved_declared_lcc_does_not_fall_through_to_topic_labels() {
         for raw in ["IN PROCESS", "CPB Box no. 7", "WB 18.2", "WY 18.2", "LAW", "History", "Internet"] {
-            let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+            let subject = super::BookSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
             assert!(super::project_unified_subjects(&[subject]).is_empty(), "{raw}");
         }
     }
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn inferred_lcc_evidence_preserves_source_spelling_and_normalization() {
         let raw = ["qa76.73.r87", "LCC: QA76.73.R87"];
-        let subjects = raw.iter().map(|s| super::PublicationSubject::new(None, *s, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let subjects = raw.iter().map(|s| super::BookSubject::new(None, *s, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         let assignments = super::project_unified_subjects(&subjects);
         assert!(!assignments.is_empty());
         for assignment in assignments {
@@ -379,14 +379,14 @@ mod tests {
     #[test]
     fn declared_damaged_lcc_reaches_unified_projection_with_original_position() {
         for raw in ["QA76; UNKNOWN", "QA76.76 .063", "QA76."] {
-            let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+            let subject = super::BookSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
             let expected = super::unified_lcc_subject_paths(raw);
             assert!(!expected.is_empty(), "{raw}");
             let actual = super::project_unified_subjects(&[subject.clone()]);
             assert_eq!(actual.iter().map(|a| a.subject_path.clone()).collect::<std::collections::BTreeSet<_>>(), expected.into_iter().collect());
             assert!(actual.iter().all(|a| a.evidence_positions == [0]));
             assert_eq!(subject.code(), Some(raw));
-            let uncontrolled = super::PublicationSubject::new(None, raw, "dc:subject", None, None).unwrap();
+            let uncontrolled = super::BookSubject::new(None, raw, "dc:subject", None, None).unwrap();
             assert!(super::project_unified_subjects(&[uncontrolled]).is_empty(), "{raw}");
         }
     }
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn code_lists_preserve_all_paths_and_original_evidence() {
         let raw = "QA76; QC1";
-        let subject = super::PublicationSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
+        let subject = super::BookSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
         let codes = super::project_subject_codes(&[subject.clone()]);
         assert_eq!(codes.len(), 1);
         assert_eq!(codes[0].code(), raw);
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn embedded_lcc_values_project_without_changing_raw_metadata() {
         let values = ["QA76.73.R87", "LCC: HD69.C6 R38 1999", "QA75.5-76.95", "qa76.73.r87"];
-        let subjects = values.iter().map(|value| PublicationSubject::new(None, *value, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let subjects = values.iter().map(|value| BookSubject::new(None, *value, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == "lcc").collect::<Vec<_>>();
         assert_eq!(codes.len(), 3);
         let rust = codes.iter().find(|code| code.code() == "QA76.73.R87").unwrap();
@@ -429,11 +429,11 @@ mod tests {
     #[test]
     fn embedded_lcc_detection_rejects_identifiers_prose_and_other_authorities() {
         for value in ["9780131103627", "ISBN0131103628", "ISBN: 9780131103627", "9780131103627 The C Programming Language", "HIS036060", "COM051010", "QA", "IT", "History", "Rust programming QA76.73.R87", "QA76.73.R87: Rust programming", "CPB123", "MLCS123"] {
-            let subject = PublicationSubject::new(None, value, "dc:subject", None, None).unwrap();
+            let subject = BookSubject::new(None, value, "dc:subject", None, None).unwrap();
             assert!(subject_lcc_code(&subject).is_none(), "{value}");
         }
         for authority in ["LCSH", "BISAC", "custom"] {
-            let subject = PublicationSubject::new(None, "QA76.73.R87", "dc:subject", Some(authority.into()), None).unwrap();
+            let subject = BookSubject::new(None, "QA76.73.R87", "dc:subject", Some(authority.into()), None).unwrap();
             assert!(subject_lcc_code(&subject).is_none(), "{authority}");
         }
     }
@@ -452,8 +452,8 @@ mod tests {
     #[test]
     fn embedded_declared_lcc_terms_use_the_same_single_subject_matcher() {
         let subjects = vec![
-            PublicationSubject::new(None, "Business consultants", "dc:subject", Some("LCC".into()), Some("HD69.C6 R38 1999".into())).unwrap(),
-            PublicationSubject::new(None, "HD69.C6 R38 1999", "subject", None, None).unwrap(),
+            BookSubject::new(None, "Business consultants", "dc:subject", Some("LCC".into()), Some("HD69.C6 R38 1999".into())).unwrap(),
+            BookSubject::new(None, "HD69.C6 R38 1999", "subject", None, None).unwrap(),
         ];
         let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == "lcc").collect::<Vec<_>>();
         assert_eq!(codes.len(), 1);
@@ -472,7 +472,7 @@ mod tests {
         for (heading, expected_code) in
             [("Fiction", "FIC000000"), ("History", "HIS000000"), ("Juvenile Fiction", "JUV000000"), ("Drama", "DRA000000"), ("Poetry", "POE000000"), ("Science", "SCI000000"), ("Fiction / Short Stories", "FIC029000")]
         {
-            let subject = PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap();
+            let subject = BookSubject::new(None, heading, "dc:subject", None, None).unwrap();
             let codes = project_subject_codes(std::slice::from_ref(&subject));
             assert!(codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == expected_code), "{heading} must resolve to {expected_code}");
 
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn source_system_uris_resolve_codes_and_unknown_systems_fall_back_to_bisac_paths() {
-        let bisac = PublicationSubject::new(None, "History / United States / 20th Century", "opds2:subject", Some("https://vendor.example/subjects".to_owned()), None).unwrap();
+        let bisac = BookSubject::new(None, "History / United States / 20th Century", "opds2:subject", Some("https://vendor.example/subjects".to_owned()), None).unwrap();
         let bisac_codes = project_subject_codes(&[bisac]);
         assert!(bisac_codes.iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS036060"));
     }
@@ -494,8 +494,8 @@ mod tests {
     fn ddc_is_fallback_when_bisac_already_resolves_the_catalog_subject() {
         runtime::install_authoritative_taxonomy_for_tests();
         let subjects = vec![
-            PublicationSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap(),
-            PublicationSubject::new(None, "515.33", "openlibrary", Some("ddc".to_owned()), Some("515.33".to_owned())).unwrap(),
+            BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".to_owned()), Some("HIS036060".to_owned())).unwrap(),
+            BookSubject::new(None, "515.33", "openlibrary", Some("ddc".to_owned()), Some("515.33".to_owned())).unwrap(),
         ];
 
         let codes = project_subject_codes(&subjects);
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn bisac_components_in_separate_dc_subjects_keep_combined_evidence_in_unified_projection() {
         runtime::install_authoritative_taxonomy_for_tests();
-        let subjects = ["Fiction", "Short Stories"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let subjects = ["Fiction", "Short Stories"].into_iter().map(|heading| BookSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         let bisac = match_bisac_subjects(&subjects);
         let short_stories = bisac.iter().find(|assignment| assignment.node_path() == "Fiction / Short Stories").expect("production subject components must infer the BISAC path");
         assert_eq!(short_stories.evidence_positions(), &[0, 1]);
@@ -523,30 +523,30 @@ mod tests {
     #[test]
     fn lcsh_subjects_require_a_complete_adjacent_bisac_hierarchy() {
         for heading in ["History -- Great Britain", "Great Britain -- History -- Victoria, 1837-1901 -- Fiction", "Clothing and dress -- United States -- History"] {
-            let subject = PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap();
+            let subject = BookSubject::new(None, heading, "dc:subject", None, None).unwrap();
             let codes = project_subject_codes(&[subject]);
             assert!(codes.iter().all(|code| code.code() != "HIS015000"), "incomplete or reordered LCSH heading {heading} produced Great Britain history: {codes:?}");
         }
 
-        let complete = PublicationSubject::new(None, "History -- Europe -- Great Britain", "marc", Some("lcsh".to_owned()), None).unwrap();
+        let complete = BookSubject::new(None, "History -- Europe -- Great Britain", "marc", Some("lcsh".to_owned()), None).unwrap();
         assert!(project_subject_codes(&[complete]).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS015000"));
 
-        let fiction = PublicationSubject::new(None, "Fiction -- Short Stories", "dc:subject", None, None).unwrap();
+        let fiction = BookSubject::new(None, "Fiction -- Short Stories", "dc:subject", None, None).unwrap();
         assert!(project_subject_codes(&[fiction]).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "FIC029000"));
     }
 
     #[test]
     fn bisac_hierarchy_inference_requires_every_component() {
-        let partial = ["History", "Great Britain"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let partial = ["History", "Great Britain"].into_iter().map(|heading| BookSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         assert!(project_subject_codes(&partial).iter().all(|code| code.code() != "HIS015000"), "a missing Europe component must not infer Great Britain history");
 
-        let complete = ["History", "Europe", "Great Britain"].into_iter().map(|heading| PublicationSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
+        let complete = ["History", "Europe", "Great Britain"].into_iter().map(|heading| BookSubject::new(None, heading, "dc:subject", None, None).unwrap()).collect::<Vec<_>>();
         assert!(project_subject_codes(&complete).iter().any(|code| code.system_id() == BISAC_SYSTEM_ID && code.code() == "HIS015000"), "the complete BISAC hierarchy should infer Great Britain history");
     }
 
     #[test]
     fn fine_lcc_identifiers_are_recorded_independently_of_local_mapping_detail() {
-        let subject = PublicationSubject::new(None, "Regional law detail", "marc", Some("lcc".to_owned()), Some("kjcx 12.4 .a2".to_owned())).unwrap();
+        let subject = BookSubject::new(None, "Regional law detail", "marc", Some("lcc".to_owned()), Some("kjcx 12.4 .a2".to_owned())).unwrap();
         let codes = project_subject_codes(&[subject]);
 
         assert_eq!(codes.len(), 1);
@@ -555,10 +555,10 @@ mod tests {
     }
 
     #[test]
-    fn declared_lcc_suppresses_ddc_for_the_same_publication() {
+    fn declared_lcc_suppresses_ddc_for_the_same_book() {
         let subjects = vec![
-            PublicationSubject::new(None, "Computer science", "marc", Some("ddc".to_owned()), Some("004".to_owned())).unwrap(),
-            PublicationSubject::new(None, "Computer science", "marc", Some("lcc".to_owned()), Some("QA76".to_owned())).unwrap(),
+            BookSubject::new(None, "Computer science", "marc", Some("ddc".to_owned()), Some("004".to_owned())).unwrap(),
+            BookSubject::new(None, "Computer science", "marc", Some("lcc".to_owned()), Some("QA76".to_owned())).unwrap(),
         ];
         let codes = project_subject_codes(&subjects);
         assert!(codes.iter().any(|code| code.system_id() == LCC_SYSTEM_ID && code.code() == "QA76"));
@@ -573,7 +573,7 @@ mod tests {
             ("512.73", "Algebra"),
             ("519.20", "Probability"),
         ].into_iter().map(|(code, name)|
-            PublicationSubject::new(None, name, "marc", Some("ddc".to_owned()), Some(code.to_owned())).unwrap()
+            BookSubject::new(None, name, "marc", Some("ddc".to_owned()), Some(code.to_owned())).unwrap()
         ).collect::<Vec<_>>();
         let codes = project_subject_codes(&subjects).into_iter().filter(|code| code.system_id() == DDC_SYSTEM_ID).collect::<Vec<_>>();
         assert_eq!(codes.iter().map(ProjectedSubjectCode::code).collect::<Vec<_>>(), ["512.73", "519.20"]);

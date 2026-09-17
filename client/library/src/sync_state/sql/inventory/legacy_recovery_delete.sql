@@ -1,1 +1,0 @@
-DELETE FROM sync_metadata WHERE key=?1

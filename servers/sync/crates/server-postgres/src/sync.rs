@@ -62,15 +62,15 @@ impl PostgresSyncRepository {
         let phase_started = std::time::Instant::now();
         // The optimized reading-position path must enforce the same upload
         // prerequisite as the normal batch path.
-        let reason = match crate::publication_admission::dependency(change) {
+        let reason = match crate::book_admission::dependency(change) {
             Err(reason) => Some(reason),
             Ok(Some(hash)) => {
-                let available = crate::publication_admission::available(&mut transaction, user_id, &request.library_id, &[hash.to_string()]).await.map_err(internal)?;
+                let available = crate::book_admission::available(&mut transaction, user_id, &request.library_id, &[hash.to_string()]).await.map_err(internal)?;
                 (!available.contains(hash.as_str())).then_some(sync_common::MutationRejectionReason::MissingDependency)
             }
             Ok(None) => None,
         };
-        tracing::debug!(target: "sync_performance", phase = "publication_admission", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
+        tracing::debug!(target: "sync_performance", phase = "book_admission", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
         if let Some(reason) = reason {
             sync_store::validate_owned_cursor(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;
             let page = sync_store::fetch_owned_changes(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;

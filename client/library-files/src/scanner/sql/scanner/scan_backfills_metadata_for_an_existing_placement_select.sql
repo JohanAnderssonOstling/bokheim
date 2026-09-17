@@ -1,1 +1,0 @@
-SELECT added_at FROM book WHERE content_hash=?1

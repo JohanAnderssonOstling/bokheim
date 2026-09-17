@@ -239,7 +239,7 @@ fn retire(physical: String) {
         }
     });
     if !deferred {
-        // Publication already succeeded; bootstrap retries failed cleanup.
+        // Book already succeeded; bootstrap retries failed cleanup.
         retire_staged(&physical);
     }
 }
@@ -370,7 +370,7 @@ pub fn remove_file(name: &str) -> Result<bool, String> {
 }
 
 pub fn file_exists(name: &str) -> Result<bool, String> {
-    // Publication flushes bytes before committing the index entry.
+    // Book flushes bytes before committing the index entry.
     Ok(physical_name(name)?.is_some())
 }
 
@@ -401,12 +401,11 @@ pub fn cleanup_staged_import(job: &str, files: u32) -> Result<(), String> {
 }
 
 #[cfg(feature = "storage-contract-tests")]
-pub async fn asset_lifecycle_contract(phase: &str, has_pending_outbox: impl Fn(&str) -> Result<bool, String>) -> Result<(), String> {
+pub async fn asset_lifecycle_contract(phase: &str) -> Result<(), String> {
     let name = "assets/lifecycle-contract/thumbnail/empty";
     let database = "database-presence-contract.sqlite3";
     assert!(database_exists("__asset_index_v1.sqlite3")?);
     assert!(!file_exists("__asset_index_v1.sqlite3")?);
-    assert!(!has_pending_outbox("absent-library.sqlite3")?);
     assert!(!database_exists("absent-library.sqlite3")?);
     if phase == "prepare" {
         reserve_database_capacity(1).await?;
@@ -448,6 +447,5 @@ pub async fn asset_lifecycle_contract(phase: &str, has_pending_outbox: impl Fn(&
         assert!(!file_exists(name)?);
         assert!(read_file(name).await?.is_none());
     }
-    assert!(has_pending_outbox(database)?);
     Ok(())
 }

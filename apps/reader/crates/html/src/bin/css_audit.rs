@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use html::resources::ResourceProvider;
 use html::style::property_name_is_supported;
-use html_publication::{PublicationFormat, PublicationSource};
+use html_book::{BookSourceFormat, BookSource};
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::rules::CssRule;
@@ -116,11 +116,11 @@ fn audit_epub(path: &Path, rel_path: &str) -> HashMap<String, PropertyInfo> {
     let Ok(file) = fs::File::open(path) else {
         return unsupported;
     };
-    let Ok(publication) = PublicationSource::from_reader(PublicationFormat::Epub, file) else {
+    let Ok(book) = BookSource::from_reader(BookSourceFormat::Epub, file) else {
         return unsupported;
     };
-    let provider = publication.provider();
-    let html_entries = publication.document_uris().to_vec();
+    let provider = book.provider();
+    let html_entries = book.document_uris().to_vec();
 
     let mut seen_css_uris = HashSet::new();
 

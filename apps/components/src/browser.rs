@@ -183,7 +183,7 @@ pub fn mobile_back_button(theme: BrowserTheme) -> Button {
         .debug_selector(|| "mobile-navigation-back".into())
 }
 
-/// Shared navigation heading for browsing, publication loading, and reading.
+/// Shared navigation heading for browsing, book loading, and reading.
 pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Button) -> Div {
     div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(crate::CONTENT_INSET))
         .child(back)

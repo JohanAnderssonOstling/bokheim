@@ -1,9 +1,9 @@
 use super::runtime::{normalize_source_label, UnifiedTaxonomyRuntime};
 use super::UnifiedConceptRoute;
-use publication_model::PublicationSubject;
+use book_model::BookSubject;
 use std::collections::BTreeSet;
 
-pub(super) fn matching_hierarchy_paths(runtime: &UnifiedTaxonomyRuntime, subject: &PublicationSubject) -> BTreeSet<String> {
+pub(super) fn matching_hierarchy_paths(runtime: &UnifiedTaxonomyRuntime, subject: &BookSubject) -> BTreeSet<String> {
     let source = subject.source().trim().to_ascii_lowercase();
     let authority = subject.authority().map(str::trim).unwrap_or_default().to_ascii_lowercase();
     if authority != "fast" && !source.ends_with("/#fast") {

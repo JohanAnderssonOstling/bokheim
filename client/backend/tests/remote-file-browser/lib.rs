@@ -3,7 +3,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
 };
 use wasm_bindgen::prelude::*;
-use publication_access::{remote_file, BoxedBookReader, ContentHash};
+use book_access::{remote_file, BoxedBookReader, ContentHash};
 thread_local! {
     static GENERATION: Cell<u64> = const { Cell::new(0) };
     static FILE: RefCell<Option<BoxedBookReader>> = RefCell::new(None);

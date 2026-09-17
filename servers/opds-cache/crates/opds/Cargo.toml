@@ -12,7 +12,7 @@ httpdate = "1"
 log = "0.4"
 litteraturbanken = { path = "../litteraturbanken" }
 outbound = { package = "outbound-http", path = "../../../../shared/outbound-http" }
-publication-model = { path = "../../../../shared/publication-model" }
+book-model = { path = "../../../../shared/book-model" }
 quick-xml = "0.41"
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }

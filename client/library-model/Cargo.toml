@@ -6,15 +6,13 @@ publish = false
 
 [features]
 default = ["random-ids"]
-random-ids = ["uuid/v4", "publication-model/random-ids"]
-authoritative-taxonomy = ["subject-projection/authoritative-taxonomy"]
+random-ids = ["uuid/v4", "book-model/random-ids"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 catalog-model = { path = "../../shared/catalog-model" }
 content-address = { path = "../../shared/content-address" }
-publication-model = { path = "../../shared/publication-model", default-features = false }
-subject-projection = { path = "../../shared/subject-projection" }
+book-model = { path = "../../shared/book-model", default-features = false }
 unicode-normalization.workspace = true
 uuid = { version = "1", features = ["v5", "serde"] }
 

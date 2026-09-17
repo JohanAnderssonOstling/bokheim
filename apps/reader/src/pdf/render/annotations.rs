@@ -2,7 +2,7 @@
 
 use gpui::prelude::*;
 use gpui::{Context, Focusable, Window};
-use library_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
+use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
 use pdf_reader_core::NormalizedRect;
 use ui_components as components;
 

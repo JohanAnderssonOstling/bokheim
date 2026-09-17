@@ -14,7 +14,7 @@ Public unauthenticated endpoints:
 - `POST /api/opds/sources/{source-id}/page`
 - `POST /api/opds/sources/{source-id}/search`
 - `POST /api/opds/subjects`
-- `POST /api/opds/subject-publications`
+- `POST /api/opds/subject-books`
 - `POST /api/opds/sources/{source-id}/acquire`
 - `GET /api/opds/sources/{source-id}/cover?image_url={url}`
 - `GET /api/web/catalogs`
@@ -43,7 +43,7 @@ transaction; failures retain the previous generation. Page and search HTTP
 requests read SQLite only and never wait on an upstream catalog.
 
 Provider pagination is consumed during ingestion. Each discovered catalogue
-page follows its same-origin continuation chain, deduplicates publications in
+page follows its same-origin continuation chain, deduplicates books in
 provider order, and stages one complete logical page with no public pagination
 links. Paginated logical pages are fully re-fetched on replacement crawls
 because an HTTP validator for the first provider page cannot validate the
@@ -54,9 +54,9 @@ catalogue rows, crawl state, queues, operational inventory, and serving
 indexes. An incompatible cache is replaced and repopulated by the crawler at
 startup; no client or shared crate initializes this database.
 `GET /api/web/stats` reports process uptime, registry revision, metadata-service
-configuration, active page/publication/importable EPUB counts, crawl state,
+configuration, active page/book/importable EPUB counts, crawl state,
 extraction queues, normalized failure categories, retry state, and at most
-three redacted host/publication examples per category. The same bounded payload
+three redacted host/book examples per category. The same bounded payload
 is available to the operations collector from the separate loopback-only
 listener on `127.0.0.1:8092` at `GET /internal/operations`. Raw errors and
 acquisition URLs never leave the protected catalogue cache.
@@ -65,8 +65,8 @@ Search matches normalized contiguous substrings in title, author, and table of
 contents, returning each as a distinct ordered section. It is always evaluated
 against the active server snapshot; upstream OPDS search templates are neither
 stored nor routed. Requests include the
-client's supported languages. The response protocol identifies publications by
-sequence so it sends payloads only for publications the client does not already
+client's supported languages. The response protocol identifies books by
+sequence so it sends payloads only for books the client does not already
 have at the current epoch. The authoritative page/search queries and native
 delta assembly live in this server's `store` module. Clients persist exact
 language-keyed layouts for offline display; no shared crate owns either SQLite
@@ -75,7 +75,7 @@ schema.
 Subject browsing treats every crawled provider page as part of one logical
 collection. The server is authoritative for subject search, source/language/
 format filters, sorting, facets, totals, and result ranges. Native clients first
-request the ordered IDs for the selected range, reuse immutable publication
+request the ordered IDs for the selected range, reuse immutable book
 cards already cached for the returned epoch, and fetch only missing cards.
 The browser JSON endpoint receives full cards directly; neither transport sends
 a browse-mode flag. Provider pagination links remain crawler state and are never
@@ -90,19 +90,19 @@ layouts automatically fall back to the bounded full-file path. Range capability
 is remembered per origin so an incompatible host is not probed for every book. Raw
 subject evidence is stored separately from deterministic
 canonical assignments, using the shared `subject-projection` rules as local
-libraries. When a supported publication has an ISBN but no embedded subjects,
+libraries. When a supported book has an ISBN but no embedded subjects,
 `BOKHEIM_METADATA_URL` enables batched LCC enrichment from the standalone
 Open Library snapshot service. Subject browsing reads that canonical projection
 without sending titles or other library contents to this public service.
 
-Publication extraction is drained by one persistent serial worker. It downloads
-one publication to a bounded temporary file, extracts its metadata and artwork,
+Book extraction is drained by one persistent serial worker. It downloads
+one book to a bounded temporary file, extracts its metadata and artwork,
 commits the result, and then moves to the next source. Temporary files are
 deleted after extraction. A restart
 changes interrupted jobs back to pending and resumes them from the active
 catalogue generations without resetting successful payloads or retrying failed
 downloads in a tight loop. Completed crawls can still schedule a bounded retry
-of failed jobs. Each pass visits every source before taking another publication
+of failed jobs. Each pass visits every source before taking another book
 from the same source. Retryable
 failures use 15-minute, one-hour, six-hour, and then daily backoff. Permanent
 format, access, missing-resource, and safety-limit failures remain terminal
@@ -117,7 +117,7 @@ reuses its existing image. Native clients verify
 and download acquisitions directly. Browser clients use the acquisition
 endpoint because third-party book hosts commonly reject cross-origin browser
 requests. The endpoint re-fetches the registered catalogue page, verifies the
-publication identity, exact URL, free acquisition kind, and format, downloads
+book identity, exact URL, free acquisition kind, and format, downloads
 into a bounded temporary file, and streams it without adding it to the cache.
 At most two interactive browser acquisitions run concurrently, independently
 of the single background extraction download.
@@ -128,12 +128,12 @@ an arbitrary URL, so the service is not an open HTTP proxy. A configured
 registry file is checked when the registry is requested; only a valid higher
 revision is activated.
 
-Catalogue crawling, cover downloads, publication extraction, and catalogue
+Catalogue crawling, cover downloads, book extraction, and catalogue
 metadata backfill are independent workers. Every server start places all four
 in the paused state;
 the authenticated administrator dashboard can then resume, pause, or wake each
 worker separately through the loopback operations API. Pauses take effect
-between sources, publications, or enrichment batches rather than interrupting
+between sources, books, or enrichment batches rather than interrupting
 an in-flight unit of work.
 
 Catalogue page traffic is throttled independently per upstream origin. Each

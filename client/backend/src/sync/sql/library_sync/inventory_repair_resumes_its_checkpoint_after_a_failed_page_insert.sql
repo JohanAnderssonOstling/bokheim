@@ -1,1 +1,0 @@
-INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,?3)

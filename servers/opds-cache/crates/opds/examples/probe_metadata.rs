@@ -169,28 +169,28 @@ fn inspect_json(root: &Value, stats: &mut MetadataStats) {
     if let Some(links) = root.get("links") {
         walk_json("feed.links", links, stats);
     }
-    inspect_json_publications(root.get("publications"), stats);
+    inspect_json_books(root.get("publications"), stats);
     if let Some(groups) = root.get("groups").and_then(Value::as_array) {
         for group in groups {
             if let Some(metadata) = group.get("metadata") {
                 walk_json("group.metadata", metadata, stats);
             }
-            inspect_json_publications(group.get("publications"), stats);
+            inspect_json_books(group.get("publications"), stats);
         }
     }
 }
 
-fn inspect_json_publications(publications: Option<&Value>, stats: &mut MetadataStats) {
-    let Some(publications) = publications.and_then(Value::as_array) else { return };
-    for publication in publications {
-        if let Some(metadata) = publication.get("metadata") {
-            walk_json("publication.metadata", metadata, stats);
+fn inspect_json_books(books: Option<&Value>, stats: &mut MetadataStats) {
+    let Some(books) = books.and_then(Value::as_array) else { return };
+    for book in books {
+        if let Some(metadata) = book.get("metadata") {
+            walk_json("book.metadata", metadata, stats);
         }
-        if let Some(links) = publication.get("links") {
-            walk_json("publication.links", links, stats);
+        if let Some(links) = book.get("links") {
+            walk_json("book.links", links, stats);
         }
-        if let Some(images) = publication.get("images") {
-            walk_json("publication.images", images, stats);
+        if let Some(images) = book.get("images") {
+            walk_json("book.images", images, stats);
         }
     }
 }

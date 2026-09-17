@@ -14,12 +14,12 @@ class ClassifierTests(unittest.TestCase):
         link=claim({'id':'Q2'},'wikibase-item');ddc=claim('700','external-id','deprecated')
         book={'id':'Q1','claims':{'P8360':[claim('N5300')],'P921':[link]}}
         topic={'id':'Q2','claims':{'P1036':[ddc],'P8359':[claim('999')]}}
-        r=classifiers.for_publication(book,{'Q2':topic})
+        r=classifiers.for_book(book,{'Q2':topic})
         self.assertEqual(len(r['direct']),1);self.assertFalse(r['direct'][0]['inferred'])
         self.assertEqual(len(r['inferred']),1)
         e=r['inferred'][0];self.assertTrue(e['inferred']);self.assertEqual(e['source_entity'],'Q2')
         self.assertEqual(e['statement'],ddc);self.assertEqual(e['topic_link'],link)
-        self.assertEqual(classifiers.for_publication(book,{})['inferred'],[])
+        self.assertEqual(classifiers.for_book(book,{})['inferred'],[])
     def test_preferred_then_normal_then_deprecated_fallback(self):
         old=claim('100',rank='deprecated');normal=claim('200');preferred=claim('300',rank='preferred')
         self.assertEqual(classifiers.values([old,normal,preferred]),[preferred])

@@ -1,1 +1,1 @@
-SELECT bokheim_mutation('book_lifecycle',content_hash,0,COALESCE(title,content_hash),contributors_for_book(row_id),publication_metadata,COALESCE(added_at,0),format,NULL),0 FROM book WHERE content_hash=?1
+SELECT bokheim_mutation('book_lifecycle',content_hash,0,COALESCE(title,content_hash),contributors_for_book(row_id),book_metadata,COALESCE(added_at,0),format,NULL),0 FROM book WHERE content_hash=?1

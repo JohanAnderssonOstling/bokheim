@@ -155,7 +155,7 @@ impl WorkerRequest {
 fn source(message: &JsValue) -> Result<JsValue, String> {
     let source = field(message, "source");
     if !source.is_undefined() && !field(&source, "port").is_instance_of::<web_sys::MessagePort>() {
-        return Err("Missing publication source capability".into());
+        return Err("Missing book source capability".into());
     }
     Ok(source)
 }

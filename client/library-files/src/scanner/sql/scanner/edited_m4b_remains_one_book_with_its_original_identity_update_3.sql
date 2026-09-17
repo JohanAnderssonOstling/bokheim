@@ -1,1 +1,0 @@
-UPDATE audible_enrichment_jobs SET policy='old-policy'

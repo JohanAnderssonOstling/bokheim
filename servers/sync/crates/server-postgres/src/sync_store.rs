@@ -126,9 +126,9 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
     let now = server_now_ms();
     let (accepted, rejected): (Vec<_>, Vec<_>) = changes.iter().partition(|change| storage_rejection(change, now).is_none());
     let mut rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
-    let dependencies = accepted.iter().map(|change| crate::publication_admission::dependency(change)).collect::<Vec<_>>();
+    let dependencies = accepted.iter().map(|change| crate::book_admission::dependency(change)).collect::<Vec<_>>();
     let hashes = dependencies.iter().filter_map(|d| d.as_ref().ok().and_then(|h| h.as_ref()).map(ToString::to_string)).collect::<Vec<_>>();
-    let available = crate::publication_admission::available(tx, user_id, library_id, &hashes).await?;
+    let available = crate::book_admission::available(tx, user_id, library_id, &hashes).await?;
     let accepted = accepted.into_iter().zip(dependencies).filter_map(|(change, dependency)| {
         let reason = match dependency {
             Err(reason) => Some(reason),
