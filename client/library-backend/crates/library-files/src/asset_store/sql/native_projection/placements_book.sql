@@ -1,0 +1,1 @@
+SELECT b.content_hash,bd.dir_id,bd.file_name,bd.local_hash FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id JOIN dir_paths dp ON dp.id=bd.dir_id WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL AND b.content_hash=?1

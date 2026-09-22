@@ -1,0 +1,1 @@
+UPDATE book_dir SET local_hash=?3 WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)

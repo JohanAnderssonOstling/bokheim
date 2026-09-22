@@ -1,0 +1,1 @@
+SELECT relative_path FROM local_file_projection WHERE content_hash=?1 AND dir_id=?2

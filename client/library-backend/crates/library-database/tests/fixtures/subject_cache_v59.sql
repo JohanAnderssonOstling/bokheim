@@ -1,0 +1,23 @@
+-- Recreate the previous derived schema around real, unchanged library records.
+DROP VIEW temp.subject_route_paths;
+DROP TABLE library_subject;
+DROP TABLE subject_browse_member;
+DROP TABLE IF EXISTS subject_book_ownership;
+CREATE TABLE library_subject(path TEXT PRIMARY KEY,parent_path TEXT NOT NULL,concept_id INTEGER NOT NULL,label TEXT NOT NULL) WITHOUT ROWID;
+CREATE INDEX library_subject_parent ON library_subject(parent_path);
+CREATE INDEX library_subject_concept ON library_subject(concept_id);
+CREATE TABLE subject_browse_member(path TEXT NOT NULL,book_row_id INTEGER NOT NULL,direct INTEGER NOT NULL,PRIMARY KEY(path,book_row_id)) WITHOUT ROWID;
+CREATE INDEX subject_browse_member_book ON subject_browse_member(book_row_id,path);
+CREATE TABLE subject_book_ownership(subject_path TEXT NOT NULL,book_row_id INTEGER NOT NULL REFERENCES book(row_id) ON DELETE CASCADE,assignment_count INTEGER NOT NULL CHECK(assignment_count>0),PRIMARY KEY(subject_path,book_row_id));
+CREATE INDEX idx_subject_book_ownership_book ON subject_book_ownership(book_row_id,subject_path);
+CREATE TABLE subject_browse_child(location TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(location,path)) WITHOUT ROWID;
+CREATE TABLE subject_browse_book(location TEXT NOT NULL,book_row_id INTEGER NOT NULL REFERENCES book(row_id) ON DELETE CASCADE,PRIMARY KEY(location,book_row_id)) WITHOUT ROWID;
+CREATE INDEX subject_browse_book_book ON subject_browse_book(book_row_id);
+CREATE TABLE subject_browse_count(path TEXT PRIMARY KEY,book_count INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE subject_browse_raw_child(location TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(location,path)) WITHOUT ROWID;
+CREATE TABLE subject_browse_raw_book(location TEXT NOT NULL,book_row_id INTEGER NOT NULL,PRIMARY KEY(location,book_row_id)) WITHOUT ROWID;
+ALTER TABLE subject_browse_state DROP COLUMN taxonomy_revision;
+INSERT INTO library_subject VALUES('old route','Subject',-1,'old route');
+INSERT INTO subject_browse_member SELECT 'old route',row_id,1 FROM book;
+UPDATE subject_browse_state SET built_revision=tree_revision;
+PRAGMA user_version=59;

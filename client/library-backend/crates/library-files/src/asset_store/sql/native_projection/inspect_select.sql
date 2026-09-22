@@ -1,0 +1,1 @@
+SELECT relative_path FROM local_directory_projection WHERE dir_id=?1

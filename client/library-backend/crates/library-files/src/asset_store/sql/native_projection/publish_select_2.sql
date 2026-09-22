@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM dir WHERE parent_id=(SELECT parent_id FROM dir WHERE id=?1) AND id!=?1 AND name=?2 AND deleted_at IS NULL)

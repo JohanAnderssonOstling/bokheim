@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>One library. More than one thing at a time.</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101719; --panel:#182225; --line:#344549; --text:#edf2ed; --muted:#a7b8b9; --mint:#a8e8bd; --amber:#f4ca89; --blue:#a9c9ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,sans-serif; }
+    main { max-width:1180px; margin:auto; padding:56px 28px 64px; }
+    .eyebrow { font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--mint); font-weight:700; }
+    h1 { font-size:clamp(36px,5.4vw,66px); line-height:1.08; letter-spacing:-.045em; max-width:900px; margin:18px 0 22px; }
+    h2 { font-size:26px; line-height:1.25; letter-spacing:-.025em; margin:0 0 12px; }
+    h3 { font-size:18px; margin:0 0 8px; }
+    p { margin:0 0 14px; }
+    .intro { max-width:780px; font-size:20px; color:var(--muted); }
+    .intro strong { color:var(--text); }
+    section { margin-top:48px; }
+    .muted, small { color:var(--muted); }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:26px; }
+    .label { display:inline-block; font:700 11px/1.4 system-ui,sans-serif; letter-spacing:.1em; text-transform:uppercase; border:1px solid currentColor; border-radius:6px; padding:4px 7px; margin-bottom:16px; }
+    .current .label { color:var(--amber); } .proposed .label { color:var(--mint); }
+    .controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:24px 0 16px; }
+    button { color:var(--text); background:var(--panel); border:1px solid var(--line); padding:10px 17px; border-radius:30px; font:inherit; cursor:pointer; }
+    button:hover { border-color:var(--mint); } button:focus-visible { outline:3px solid var(--blue); outline-offset:3px; }
+    button:disabled { opacity:.4; cursor:default; }
+    #next { background:var(--mint); color:var(--bg); border-color:var(--mint); font-weight:700; }
+    #counter { margin-left:auto; font-variant-numeric:tabular-nums; color:var(--muted); }
+    #caption { min-height:60px; color:var(--blue); }
+    .lane { margin-top:20px; padding-top:15px; border-top:1px solid var(--line); }
+    .lane-title { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }
+    .status { min-height:76px; padding:12px 15px; border-left:3px solid var(--line); background:#10171970; border-radius:0 8px 8px 0; }
+    .status.wait { border-color:var(--amber); color:var(--amber); }
+    .status.active { border-color:var(--blue); color:var(--blue); }
+    .status.done { border-color:var(--mint); color:var(--mint); }
+    .note { margin-top:18px; font-size:14px; color:var(--muted); }
+    .boundary { margin-top:24px; padding:26px; border:1px dashed var(--mint); border-radius:20px; }
+    .boundary-title { color:var(--mint); margin-bottom:20px; font-size:13px; letter-spacing:.05em; }
+    .flow { display:grid; grid-template-columns:1fr 40px 1fr 40px 1fr; align-items:center; gap:8px; }
+    .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:19px; min-height:160px; }
+    .box small { display:block; font-size:14px; }
+    .arrow { text-align:center; color:var(--mint); font-size:26px; }
+    .commit { border-color:var(--blue); }
+    .rails { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:18px; }
+    .rail { border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:14px; }
+    .rail strong { display:block; color:var(--text); font-size:16px; }
+    .rules { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:22px; }
+    .rule { border-top:2px solid var(--line); padding-top:18px; }
+    .rule .number { color:var(--mint); font-size:12px; margin-bottom:8px; }
+    .rule p { color:var(--muted); font-size:15px; }
+    .conclusion { background:#23332b; border-color:#4c7258; }
+    .conclusion p:last-child { margin-bottom:0; }
+    footer { border-top:1px solid var(--line); margin-top:44px; padding-top:22px; font-size:13px; color:var(--muted); }
+    code { color:var(--blue); font-size:.9em; }
+    @media(max-width:760px) { main { padding:32px 18px; } .grid,.rules,.rails { grid-template-columns:1fr; } .flow { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); } .box { min-height:0; } .panel,.boundary { padding:20px; } #counter { margin-left:0; } }
+    @media print { :root { color-scheme:light; --bg:white; --panel:#f4f6f5; --line:#9da9a9; --text:#182225; --muted:#475454; --mint:#236343; --amber:#87520e; --blue:#23568b; } .controls { display:none; } .status,.conclusion { background:transparent; } main { padding:16px; } .panel,.boundary,.rule { break-inside:avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Backend architecture / a design proposal</div>
+    <h1>One library.<br>More than one thing at a time.</h1>
+    <p class="intro">Keep a single owner for the library. Stop making that owner <strong>wait for a whole download</strong> before handling the next request.</p>
+  </header>
+
+  <section aria-labelledby="comparison-title">
+    <h2 id="comparison-title">What happens during a slow download?</h2>
+    <p class="muted">Step through the same sequence in both designs. This is an illustrative schedule, not a performance measurement.</p>
+    <div class="controls">
+      <button id="back" type="button">← Back</button>
+      <button id="next" type="button">Next step →</button>
+      <button id="reset" type="button">Restart</button>
+      <span id="counter"></span>
+    </div>
+    <p id="caption" role="status" aria-live="polite" aria-atomic="true"></p>
+    <noscript><p>The proposed loop can answer browsing requests and publish progress while a download waits for the network. The current loop awaits the download before doing either.</p></noscript>
+    <div class="grid">
+      <article class="panel current">
+        <span class="label">Current / whole-operation wait</span>
+        <h3>The command loop stays inside the download</h3>
+        <div class="lane"><div class="lane-title">Command loop</div><div id="old-loop" class="status">Receives DownloadBook, then awaits its completion.</div></div>
+        <div class="lane"><div class="lane-title">Network operation</div><div id="old-network" class="status">HTTP may be pending without blocking the OS thread.</div></div>
+        <div class="lane"><div class="lane-title">Browsing, events &amp; scan progress</div><div id="old-work" class="status wait">Wait for the command handler to return.</div></div>
+        <p class="note">The thread can run independently scheduled tasks. But this loop cannot process another command, publish events, or poll its scan/import futures while the handler is awaiting.</p>
+      </article>
+      <article class="panel proposed">
+        <span class="label">Proposed / owned concurrent work</span>
+        <h3>The command loop starts work and returns</h3>
+        <div class="lane"><div class="lane-title">Command loop</div><div id="new-loop" class="status">Accepts the download and retains its operation and reply.</div></div>
+        <div class="lane"><div class="lane-title">Network operation</div><div id="new-network" class="status">Runs concurrently under library ownership.</div></div>
+        <div class="lane"><div class="lane-title">Browsing, events &amp; scan progress</div><div id="new-work" class="status done">Continue while HTTP is pending.</div></div>
+        <p class="note">Concurrent does not necessarily mean another thread. Owned futures beside the loop or owned local tasks can both provide this behavior.</p>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="ownership-title">
+    <h2 id="ownership-title">Keep ownership. Separate execution.</h2>
+    <p class="muted">The actor becomes a small coordinator—not a new framework, and not a mandatory gateway for every database write.</p>
+    <div class="boundary">
+      <div class="boundary-title">ONE OPEN LIBRARY · ONE LIFETIME SCOPE</div>
+      <div class="flow">
+        <div class="box"><h3>Accept &amp; coordinate</h3><small>Validate requests.<br>Apply short ordered changes.<br>Own operations and subscriptions.<br>Keep processing commands.</small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box"><h3>Perform slow work</h3><small>Download, read, inspect, import.<br>Allow independent work to overlap.<br>Limit concurrency.<br>Coordinate conflicting resources.</small></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="box commit"><h3>Validate &amp; finish</h3><small>For writes: check results still apply.<br>Commit a short transaction.<br>Publish changes and resolve replies.<br>Read-only work may just reply.</small></div>
+      </div>
+      <div class="rails">
+        <div class="rail"><strong>Coordination is not global serialization.</strong>Preserve ordering where it matters—for example, logical folder changes and reading-position updates. Audit interleaving at every asynchronous boundary.</div>
+        <div class="rail"><strong>Commit where the workflow owns it.</strong>Transfer workers already snapshot and commit using their own connections. They do not need to send every write back through the actor.</div>
+      </div>
+    </div>
+    <p class="note">This is a responsibility diagram, not three required threads or three required message types. Only changes to coordinator-owned state need a completion routed back to it.</p>
+  </section>
+
+  <section aria-labelledby="contracts-title">
+    <h2 id="contracts-title">Three contracts make concurrency safe</h2>
+    <div class="rules">
+      <article class="rule"><div class="number">01 / ORDERING</div><h3>Parallel where safe</h3><p>Browsing can overlap a download. Importing into a folder that is being moved or deleted needs explicit rules and validation. Do not simply spawn every command.</p></article>
+      <article class="rule"><div class="number">02 / CANCELLATION</div><h3>A caller is not the work</h3><p>Closing a reader can cancel its read. Dropping a download waiter need not cancel accepted durable work. Browser shared downloads must retain their existing coordinator-owned lifetime.</p></article>
+      <article class="rule"><div class="number">03 / SHUTDOWN</div><h3>No abandoned replies</h3><p>Stop accepting work, close subscriptions, and resolve pending replies. Cancel or finish owned work at safe boundaries. Blocking I/O already running cannot simply be aborted.</p></article>
+    </div>
+  </section>
+
+  <section class="panel conclusion" aria-labelledby="decision-title">
+    <h2 id="decision-title">The architectural decision is smaller than it sounds.</h2>
+    <p><strong>Keep:</strong> the library handle, library lifetime, native thread confinement, browser coordination, durable queues, and guarded commits.</p>
+    <p><strong>Change:</strong> command handling must not await long I/O before returning to the loop. Give pending operations consistent ownership, reply cleanup, and concurrency limits.</p>
+    <p><strong>Still to decide:</strong> per-operation ordering and cancellation contracts. Choose owned local tasks versus a collection such as <code>FuturesUnordered</code> after that audit—not as a substitute for it.</p>
+  </section>
+  <footer>
+    <strong>Important limit:</strong> async scheduling does not make synchronous work non-blocking. Slow SQL, database lock waits, filesystem calls, and CPU work can still stall the library executor. Native offloading and browser worker execution remain necessary where appropriate.<br>
+    Design explanation only · No backend behavior is changed by this page · No external scripts, fonts, or network requests.
+  </footer>
+</main>
+<script>
+  const steps = [
+    { caption:'1. A download request arrives. Both designs accept the same operation.',
+      old:[['active','Starts DownloadBook and enters its async handler.'],['active','Begins the download.'],['','No other request has arrived yet.']],
+      next:[['done','Starts an owned operation, then returns to the loop.'],['active','Begins the same download.'],['done','Ready to receive commands and process events.']] },
+    { caption:'2. The server is slow. The network future is pending.',
+      old:[['wait','Awaiting download completion. The command loop cannot advance.'],['wait','Waiting for HTTP. The OS thread is not occupied by this wait.'],['wait','Scan/import futures owned by this loop are not being polled.']],
+      next:[['done','Still processing commands, events, and operation completions.'],['wait','Waiting for the same HTTP response.'],['done','Scan/import work can advance when ready.']] },
+    { caption:'3. The user opens a folder. Its browsing request arrives while HTTP is still pending.',
+      old:[['wait','Still inside the download handler.'],['wait','HTTP is still pending.'],['wait','Folder query is queued. It has not started.']],
+      next:[['active','Handles the folder query while the download remains pending.'],['wait','HTTP is still pending.'],['done','Folder results return without waiting for the download.']] },
+    { caption:'4. Download progress arrives. It can be published immediately only when the loop is responsive.',
+      old:[['wait','Still awaiting the complete download.'],['active','Bytes arrive; the transfer emits a progress event.'],['wait','Progress event and folder query wait in their queues.']],
+      next:[['active','Publishes the progress event and continues processing.'],['active','The same transfer emits the same progress event.'],['done','Browsing remains available; subscribers receive progress.']] },
+    { caption:'5. The download finishes. Preserve its existing validated commit and completion semantics.',
+      old:[['done','Returns the download reply and finally resumes the loop.'],['done','Download workflow commits its result.'],['active','Queued browsing and events can now be processed.']],
+      next:[['done','The operation resolves its reply without monopolizing the loop.'],['done','Download workflow commits its result.'],['done','Other work has continued throughout the wait.']] }
+  ];
+  let index = 0;
+  const ids = ['loop','network','work'];
+  function render() {
+    const step = steps[index];
+    document.getElementById('caption').textContent = step.caption;
+    document.getElementById('counter').textContent = `${index + 1} / ${steps.length}`;
+    document.getElementById('back').disabled = index === 0;
+    document.getElementById('next').disabled = index === steps.length - 1;
+    for (const [prefix, values] of [['old',step.old],['new',step.next]]) {
+      values.forEach(([state,text], i) => {
+        const element = document.getElementById(`${prefix}-${ids[i]}`);
+        element.className = `status ${state}`;
+        element.textContent = text;
+      });
+    }
+  }
+  document.getElementById('back').addEventListener('click', () => { index = Math.max(0,index - 1); render(); });
+  document.getElementById('next').addEventListener('click', () => { index = Math.min(steps.length - 1,index + 1); render(); });
+  document.getElementById('reset').addEventListener('click', () => { index = 0; render(); });
+  render();
+</script>
+</body>
+</html>

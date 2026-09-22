@@ -1,0 +1,1 @@
+SELECT id,content_hash FROM local_book_work ORDER BY id
