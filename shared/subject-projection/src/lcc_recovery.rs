@@ -32,11 +32,7 @@ pub(super) fn report(original: &str, strict: impl Fn(&str) -> Vec<i64>, known_su
     let exact = strict(original);
     if !exact.is_empty() {
         let canonical = crate::canonical_lcc_notation(original);
-        let method = if canonical.as_deref() == Some(original.trim()) && canonical.as_deref().is_some_and(|s| crate::lcc::lcc_item_base(s).is_none() && crate::lcc::lcc_code_list(s).is_none()) {
-            LccMatchMethod::Exact
-        } else {
-            LccMatchMethod::Normalized
-        };
+        let method = if canonical.as_deref() == Some(original.trim()) && canonical.as_deref().is_some_and(|s| crate::lcc::lcc_item_base(s).is_none()) { LccMatchMethod::Exact } else { LccMatchMethod::Normalized };
         result.assignments = exact.into_iter().map(|concept_id| LccMatchAssignment { concept_id, evidence: vec![LccMatchEvidence { method, code: original.to_owned() }] }).collect();
         return result;
     }

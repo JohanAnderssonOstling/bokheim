@@ -54,7 +54,7 @@ mod tests {
 
 /// Extract complete, checksum-valid ISBNs from metadata text, retaining their
 /// original ISBN-10/13 form. Never take a substring of an alphanumeric token.
-pub(crate) fn isbns_in_text(text: &str) -> Vec<String> {
+pub fn from_text(text: &str) -> Vec<String> {
     let chars = text.chars().collect::<Vec<_>>();
     let separator = |c: char| c.is_whitespace() || matches!(c, '-' | '‐' | '‑' | '–');
     let mut found = std::collections::BTreeSet::new();
@@ -97,6 +97,16 @@ pub(crate) fn isbns_in_text(text: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// Accept a complete ISBN candidate from extracted book content.
+///
+/// Content readers may normalize layout whitespace and Unicode dash variants
+/// before calling this function. It deliberately rejects placeholder values
+/// and ISBN-13 values outside the ISBN prefixes.
+pub fn from_content_candidate(value: &str) -> Option<String> {
+    let raw: String = value.chars().filter(|c| !c.is_whitespace()).map(|c| if matches!(c, '\u{00ad}' | '–' | '‐' | '‑') { '-' } else { c }).collect();
+    canonical_isbn(&raw).filter(|isbn| (isbn.len() == 10 || isbn.starts_with("978") || isbn.starts_with("979")) && isbn != "0000000000" && isbn != "0000000000000")
+}
+
 #[cfg(test)]
 mod embedded_isbn_tests {
     use super::*;
@@ -111,15 +121,23 @@ mod embedded_isbn_tests {
             "ISBN9780131103627",
             "9780131103627, 9780131103627",
         ] {
-            assert_eq!(isbns_in_text(text), vec!["9780131103627"], "{text}");
+            assert_eq!(from_text(text), vec!["9780131103627"], "{text}");
         }
-        assert_eq!(isbns_in_text("ISBN-10: 0-8044-2957-X"), vec!["080442957X"]);
-        assert_eq!(isbns_in_text("9780131103627 / 9780306406157"), vec!["9780131103627", "9780306406157"]);
+        assert_eq!(from_text("ISBN-10: 0-8044-2957-X"), vec!["080442957X"]);
+        assert_eq!(from_text("9780131103627 / 9780306406157"), vec!["9780131103627", "9780306406157"]);
     }
     #[test]
     fn embedded_isbns_reject_invalid_checksums_and_numeric_substrings() {
         for text in ["9780131103628", "0000000000000", "1239780131103627", "9780131103627123", "id9780131103627foo", "123-9780131103627", "QA76.73.R87", "History"] {
-            assert!(isbns_in_text(text).is_empty(), "{text}");
+            assert!(from_text(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn content_candidates_apply_content_acceptance_rules() {
+        assert_eq!(from_content_candidate("978‑0‑13‑110362‑7"), Some("9780131103627".into()));
+        for value in ["0000000000", "0000000000000", "9770131103627", "9780131103628"] {
+            assert_eq!(from_content_candidate(value), None, "{value}");
         }
     }
     #[test]

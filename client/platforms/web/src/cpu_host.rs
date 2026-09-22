@@ -10,7 +10,7 @@ use wasm_bindgen::JsValue;
 pub struct WebHost;
 impl CpuHost for WebHost {
     fn capabilities(&self) -> InspectionCapabilities {
-        InspectionCapabilities { ocr: false, mobi_pages: false }
+        InspectionCapabilities { mobi_pages: false }
     }
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {

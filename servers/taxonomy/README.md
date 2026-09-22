@@ -92,3 +92,11 @@ then at most once every six hours. The bodyless conditional request normally
 returns `304 Not Modified`. A changed ETag discards the rehydratable sparse
 overlay and negative-resolution ledger, restores the bundled seed, and lets
 normal code hydration refill only the concepts that device uses.
+
+## Curation
+
+Selector maintenance lives in [`curation/`](curation): the propose/preview/apply
+scripts, coverage audits, viewer generators, and the `taxonomy-curation` bins
+(moved from `shared/subject-projection`, which now holds only the matcher
+library). See [`curation/SELECTOR-MAINTENANCE.md`](curation/SELECTOR-MAINTENANCE.md)
+for the workflow.

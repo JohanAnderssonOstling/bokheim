@@ -21,7 +21,7 @@ pub use pruning::redundant_lcc_exact_selectors;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use bisac::{bisac_code_for_path, bisac_subject_system, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment, SubjectNode, SubjectSystem};
-pub use lcc::{canonical_lcc_notation, lcc_enumeration_branch_hits, lcc_subject_path, lcc_subject_paths};
+pub use lcc::{canonical_lcc_notation, lcc_subject_path, lcc_subject_paths};
 pub use runtime::{
     install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, unified_concept_definitions, unified_concept_id, unified_has_exact_source_code,
     unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_lcc_subject_paths, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_revision_id, unified_taxonomy_routes,
@@ -65,9 +65,9 @@ pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_MATCHER_VERSION: i64 = 3;
 pub use runtime_index::{LCC_SYSTEM_ID, ROOT_SUBJECT_PATH, UNIFIED_VERSION};
 pub const LCC_VERSION: &str = "2024-outline-r2";
-pub const LCC_MATCHER_VERSION: i64 = 81;
+pub const LCC_MATCHER_VERSION: i64 = 82;
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
-pub const UNIFIED_MATCHER_VERSION: i64 = 133;
+pub const UNIFIED_MATCHER_VERSION: i64 = 134;
 const GENERIC_HISTORY_CONCEPT_ID: i64 = 3319;
 
 /// The original source declaration and the LCC evidence for one unified subject.
@@ -427,24 +427,6 @@ mod tests {
         assert_eq!(subject.name(), raw);
         let uncontrolled = BookSubject::new(None, raw, "dc:subject", None, None).unwrap();
         assert!(project_unified_subjects(&[uncontrolled]).is_empty());
-    }
-
-    #[test]
-    fn code_lists_preserve_all_paths_and_original_evidence() {
-        let raw = "QA76; QC1";
-        let subject = super::BookSubject::new(None, raw, "marc", Some("lcc".into()), Some(raw.into())).unwrap();
-        let codes = super::project_subject_codes(&[subject.clone()]);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].code(), raw);
-        assert_eq!(codes[0].evidence_positions(), &[0]);
-        let outline = super::project_subjects(&[subject.clone()]);
-        assert_eq!(outline.len(), 2);
-        assert!(outline.iter().all(|p| p.evidence_positions() == [0]));
-        let actual = super::project_unified_subjects(&[subject]);
-        let expected = ["QA76", "QC1"].into_iter().flat_map(super::unified_lcc_subject_paths).collect::<std::collections::BTreeSet<_>>();
-        assert!(expected.len() > 1);
-        assert_eq!(actual.iter().map(|p| p.subject_path().to_owned()).collect::<std::collections::BTreeSet<_>>(), expected);
-        assert!(actual.iter().all(|p| p.evidence_positions() == [0]));
     }
 
     #[test]

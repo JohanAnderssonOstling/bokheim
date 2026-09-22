@@ -17,9 +17,9 @@ pub mod web {
 
 /// CPU worker requests and execution.
 pub mod cpu {
-    pub use crate::worker_cpu::{execute, execute_book, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
+    pub use cpu_host::{execute, execute_book, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
     #[cfg(not(target_arch = "wasm32"))]
-    pub use library_backend::worker_cpu::{configure_pdf_cover_process, run_pdf_cover_process};
+    pub use thumbnail::{configure_pdf_cover_process, run_pdf_cover_process};
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "web-runtime-tests"))]

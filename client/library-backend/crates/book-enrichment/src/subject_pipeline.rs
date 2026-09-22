@@ -1,6 +1,7 @@
 //! Resumable subject-enrichment order. Hosts execute steps and merge returned
 //! evidence before requesting the next step. A failed request does not advance.
-use crate::{metadata_isbn, related_isbn};
+use crate::related_isbn;
+use book_model::from_metadata_value;
 use book_model::{BookMetadata, Scheme};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -15,14 +16,11 @@ pub enum SubjectPhase {
     PageIsbns,
     TitleAuthor,
     FinalIsbns,
-    Ocr,
-    OcrCodes,
-    OcrIsbns,
     Exhausted,
 }
 
 impl SubjectPhase {
-    pub const ALL: [Self; 11] = [Self::MetadataCodes, Self::MetadataIsbns, Self::Pages, Self::PageCodes, Self::PageIsbns, Self::TitleAuthor, Self::FinalIsbns, Self::Ocr, Self::OcrCodes, Self::OcrIsbns, Self::Exhausted];
+    pub const ALL: [Self; 8] = [Self::MetadataCodes, Self::MetadataIsbns, Self::Pages, Self::PageCodes, Self::PageIsbns, Self::TitleAuthor, Self::FinalIsbns, Self::Exhausted];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,10 +33,7 @@ pub struct SubjectCode {
 pub enum SubjectStep {
     ResolveCodes(Vec<SubjectCode>),
     LookupIsbns(Vec<String>),
-    /// Read page text without OCR.
     InspectPages,
-    /// Native-only fallback after title/author and its ISBN lookup lack LCC.
-    InspectOcr,
     SearchTitleAuthor,
     Complete,
     /// All stages finished without resolved LCC. Keep any BISAC evidence.
@@ -89,7 +84,7 @@ impl SubjectPipeline {
         }
         loop {
             let step = match self.stage {
-                SubjectPhase::MetadataCodes | SubjectPhase::PageCodes | SubjectPhase::OcrCodes => {
+                SubjectPhase::MetadataCodes | SubjectPhase::PageCodes => {
                     let codes = metadata
                         .subjects
                         .iter()
@@ -107,11 +102,11 @@ impl SubjectPipeline {
                     self.pending_codes = codes.clone();
                     SubjectStep::ResolveCodes(codes.into_iter().map(|(authority, code)| SubjectCode { authority, code }).collect())
                 }
-                SubjectPhase::MetadataIsbns | SubjectPhase::PageIsbns | SubjectPhase::FinalIsbns | SubjectPhase::OcrIsbns => {
+                SubjectPhase::MetadataIsbns | SubjectPhase::PageIsbns | SubjectPhase::FinalIsbns => {
                     // Preserve page-reference priority, but do not lose an
                     // unqueried metadata ISBN if a page reference has no result.
                     let mut isbns = related_isbn::lookup_candidates(&metadata.identifiers);
-                    isbns.extend(metadata.identifiers.iter().filter(|i| i.scheme() == &Scheme::Isbn).filter_map(|i| i.canonical_value().as_deref().and_then(metadata_isbn)));
+                    isbns.extend(metadata.identifiers.iter().filter(|i| i.scheme() == &Scheme::Isbn).filter_map(|i| i.canonical_value().as_deref().and_then(from_metadata_value)));
                     let mut keys = BTreeSet::new();
                     isbns.retain(|isbn| {
                         let Some(key) = isbn_key(isbn) else { return false };
@@ -129,7 +124,6 @@ impl SubjectPipeline {
                     SubjectStep::InspectPages
                 }
                 SubjectPhase::TitleAuthor => SubjectStep::SearchTitleAuthor,
-                SubjectPhase::Ocr => SubjectStep::InspectOcr,
                 SubjectPhase::Exhausted => return SubjectStep::Exhausted,
             };
             self.pending = true;
@@ -162,16 +156,13 @@ impl SubjectPipeline {
             SubjectPhase::PageCodes => SubjectPhase::PageIsbns,
             SubjectPhase::PageIsbns => SubjectPhase::TitleAuthor,
             SubjectPhase::TitleAuthor => SubjectPhase::FinalIsbns,
-            SubjectPhase::FinalIsbns => SubjectPhase::Ocr,
-            SubjectPhase::Ocr => SubjectPhase::OcrCodes,
-            SubjectPhase::OcrCodes => SubjectPhase::OcrIsbns,
-            SubjectPhase::OcrIsbns | SubjectPhase::Exhausted => SubjectPhase::Exhausted,
+            SubjectPhase::FinalIsbns | SubjectPhase::Exhausted => SubjectPhase::Exhausted,
         };
     }
 }
 
 pub fn isbn_key(value: &str) -> Option<String> {
-    let isbn = metadata_isbn(value)?;
+    let isbn = from_metadata_value(value)?;
     if isbn.len() == 13 {
         return Some(isbn);
     }
@@ -191,21 +182,6 @@ mod tests {
     fn code(m: &mut BookMetadata, authority: &str, value: &str) {
         m.subjects.push(BookSubject::new(None, value, "test", Some(authority.into()), Some(value.into())).unwrap());
     }
-    #[test]
-    fn ocr_is_after_title_search_and_only_without_resolved_lcc() {
-        let mut metadata = BookMetadata::default();
-        let mut pipeline = SubjectPipeline { stage: SubjectPhase::TitleAuthor, pages_inspected: true, ..Default::default() };
-        assert_eq!(pipeline.next_step(&metadata), SubjectStep::SearchTitleAuthor);
-        pipeline.finish_step();
-        let mut unresolved = pipeline.clone();
-        assert_eq!(unresolved.next_step(&metadata), SubjectStep::InspectOcr);
-        code(&mut metadata, "lcc", "Q125");
-        assert_eq!(pipeline.next_step(&metadata), SubjectStep::Complete);
-        metadata.subjects.clear();
-        code(&mut metadata, "bisac", "SCI000000");
-        assert_eq!(pipeline.next_step(&metadata), SubjectStep::InspectOcr);
-    }
-
     #[test]
     fn fallback_waits_for_its_library_phase_and_resumes_after_serialization() {
         let mut metadata = BookMetadata::default();
@@ -256,8 +232,6 @@ mod tests {
         assert_eq!(p.next_step(&m), SubjectStep::LookupIsbns(vec!["9780191507052".into()]));
         p.finish_step();
         assert_eq!(p.next_step(&m), SubjectStep::SearchTitleAuthor);
-        p.finish_step();
-        assert_eq!(p.next_step(&m), SubjectStep::InspectOcr);
         p.finish_step();
         assert_eq!(p.next_step(&m), SubjectStep::Exhausted);
         assert_eq!(m.subjects.len(), 2); // Partial subject evidence is retained.

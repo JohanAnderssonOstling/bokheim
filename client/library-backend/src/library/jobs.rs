@@ -40,28 +40,28 @@ impl LibrarySession {
     }
 
     pub(crate) async fn run_thumbnail_jobs(&self, cover_inspected: impl Fn() + crate::executor::BackendSend) -> Result<(), BackendError> {
-        self.run_thumbnail_batch(cover_inspected, &crate::worker_cpu::ThumbnailExtractor::default()).await
+        self.run_thumbnail_batch(cover_inspected, &asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone())).await
     }
 
-    pub(crate) async fn run_thumbnail_batch(&self, cover_inspected: impl Fn() + crate::executor::BackendSend, extractor: &crate::worker_cpu::ThumbnailExtractor) -> Result<(), BackendError> {
+    pub(crate) async fn run_thumbnail_batch(&self, cover_inspected: impl Fn() + crate::executor::BackendSend, extractor: &asset_transfer::thumbnail_jobs::ThumbnailExtractor) -> Result<(), BackendError> {
         asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, extractor).run_batch(&mut ThumbnailEvents { library: self, cover_inspected }).await.map_err(BackendError::operation)
     }
 
     /// One activity spans the fixed preparation batch, including progress
     /// notifications. Failed members remain retryable without stopping peers.
     pub(crate) async fn run_thumbnail_members(&self, hashes: Vec<ContentHash>) -> Result<(), BackendError> {
-        let extractor = crate::worker_cpu::ThumbnailExtractor::default();
+        let extractor = asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone());
         asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, &extractor).run_members(hashes, &mut ThumbnailEvents { library: self, cover_inspected: || {} }).await.map_err(BackendError::operation)
     }
 
     pub(super) async fn recover_thumbnail(&self, hash: ContentHash) -> Result<bool, BackendError> {
-        asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, &crate::worker_cpu::ThumbnailExtractor::default())
+        asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, &asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone()))
             .recover(hash, &mut ThumbnailEvents { library: self, cover_inspected: || {} })
             .await
             .map_err(BackendError::operation)
     }
 
-    pub(crate) async fn store_thumbnail(&self, hash: ContentHash, versions: &crate::worker_cpu::ThumbnailBytes) -> Result<(), BackendError> {
+    pub(crate) async fn store_thumbnail(&self, hash: ContentHash, versions: &cpu_host::ThumbnailBytes) -> Result<(), BackendError> {
         asset_transfer::thumbnail_jobs::store_thumbnail(&self.assets, hash, &versions.browse, &versions.high_density).await.map_err(BackendError::operation)?;
         self.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash });
         Ok(())

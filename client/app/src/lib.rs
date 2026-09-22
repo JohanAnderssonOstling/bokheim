@@ -24,7 +24,7 @@ pub use app::{AccountStatus, AccountStorageUsage, AppDataLocation, LibraryEntry,
 pub use app::{APP_NAME, APP_NAME_LOWER};
 /// Compatibility exports for clients that still import library-owned modules
 /// through the application crate. New code should depend on `library-backend`.
-pub(crate) use library_backend::{asset_store, library, sync, worker_cpu};
+pub(crate) use library_backend::{asset_store, library, sync};
 pub use library_backend::{
     BlobKey, BlobKind, BookDownloadStatus, BookPlacement, BookReader, BookSource, BoxedBookReader, ContentHash, DirId, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, DownloadProgress,
     DownloadProgressError, DownloadState, ImportFailure, ImportFailureKind, ImportProgress, ImportSource, ImportState, LibraryBrowseData, LibraryCommand, LibraryHandle, LibraryId, LibrarySession, LibrarySyncState, LibrarySyncStatus,

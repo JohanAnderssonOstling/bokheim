@@ -9,7 +9,7 @@ use std::time::Duration;
 
 mod identity;
 
-pub use identity::{edition_identity_evidence, isbn_from_filename_like_title, EditionIdentityEvidence};
+pub use identity::{edition_identity_evidence, EditionIdentityEvidence};
 
 pub use audiobook_library::ChapterOrigin;
 
@@ -194,7 +194,7 @@ fn recording_evidence(tag: &mp4ameta::Tag, authors: &[String]) -> metadata_contr
         values
     }
     let asins = values(tag, &["ASIN", "asin", "AUDIBLE_ASIN"]).into_iter().map(|value| value.to_ascii_uppercase()).filter(|value| value.len() == 10 && value.bytes().all(|b| b.is_ascii_alphanumeric())).collect();
-    let isbns = values(tag, &["ISBN", "isbn", "ISBN13", "ISBN-13", "ISBN10"]).into_iter().filter_map(|value| book_model::canonical_isbn(&value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let isbns = values(tag, &["ISBN", "isbn", "ISBN13", "ISBN-13", "ISBN10"]).into_iter().filter_map(|value| book_model::from_metadata_value(&value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     // Explicit NARRATOR atoms may name more than one person; only when none
     // exist does the composer fallback apply, and it never relabels an author.
     let mut narrators = values(tag, &["NARRATOR", "narrator"]);
@@ -376,6 +376,16 @@ mod recording_evidence_tests {
         assert!(evidence.asins.is_empty());
         assert!(evidence.isbns.is_empty());
         assert!(evidence.publishers.is_empty());
+    }
+
+    #[test]
+    fn recording_evidence_uses_metadata_value_rules_for_isbn_atoms() {
+        let mut tag = mp4ameta::Tag::default();
+        set(&mut tag, "ISBN13", "ISBN: 978‑0‑13‑110362‑7");
+        set(&mut tag, "ISBN", "0000000000");
+        set(&mut tag, "ISBN10", "9770131103627");
+        let evidence = recording_evidence(&tag, &[]);
+        assert_eq!(evidence.isbns, ["9780131103627"]);
     }
 }
 

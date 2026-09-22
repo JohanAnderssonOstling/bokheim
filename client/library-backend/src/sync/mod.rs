@@ -6,7 +6,6 @@ mod library_sync;
 pub(crate) mod recovery;
 mod scheduler;
 mod state_sync;
-pub(crate) mod transfer;
 #[cfg(target_arch = "wasm32")]
 mod web_coordinator;
 

@@ -20,7 +20,7 @@ impl LibraryScanner {
     pub(crate) fn discover(&self, snapshot: &library_database::ScanSnapshot) -> library_database::FilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {
-            crate::scanner::filesystem_scan::discover(&self.root, snapshot)
+            filesystem_scanner::filesystem_scan::discover(&self.root, snapshot)
         }
         #[cfg(not(all(feature = "scanner", not(target_arch = "wasm32"))))]
         {
@@ -29,14 +29,14 @@ impl LibraryScanner {
         }
     }
 
-    pub(crate) async fn inspect(&self, scan: &library_database::FilesystemScan, snapshot: &library_database::ScanSnapshot) -> library_database::InspectedFilesystemScan {
+    pub(crate) async fn inspect(&self, scan: &library_database::FilesystemScan, snapshot: &library_database::ScanSnapshot, host: &std::sync::Arc<dyn cpu_host::CpuHost>) -> library_database::InspectedFilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {
-            crate::scanner::filesystem_scan::inspect(&self.root, scan, snapshot).await
+            filesystem_scanner::filesystem_scan::inspect(&self.root, scan, snapshot, host).await
         }
         #[cfg(not(all(feature = "scanner", not(target_arch = "wasm32"))))]
         {
-            let _ = (scan, snapshot);
+            let _ = (scan, snapshot, host);
             library_database::InspectedFilesystemScan { readable: false, ..library_database::InspectedFilesystemScan::default() }
         }
     }
@@ -45,7 +45,7 @@ impl LibraryScanner {
 pub fn estimate_folders(locators: Vec<String>, cancelled: &std::sync::atomic::AtomicBool) -> Result<(u64, u64, u64), crate::BackendError> {
     #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
     {
-        crate::scanner::estimate_folders_cancellable(locators.into_iter().map(std::path::PathBuf::from).collect(), || cancelled.load(std::sync::atomic::Ordering::Acquire))
+        filesystem_scanner::estimate_folders_cancellable(locators.into_iter().map(std::path::PathBuf::from).collect(), || cancelled.load(std::sync::atomic::Ordering::Acquire))
             .ok_or_else(|| crate::BackendError::message("Folder estimate cancelled"))
     }
     #[cfg(not(all(feature = "scanner", not(target_arch = "wasm32"))))]

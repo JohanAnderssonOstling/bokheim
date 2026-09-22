@@ -32,7 +32,8 @@ members = [
     "apps/web-backend-worker",
     "apps/kobo-device",
     "servers/metadata",
-    "servers/taxonomy"
+    "servers/taxonomy",
+    "servers/taxonomy/curation"
 ]
 exclude = ["servers/sync"]
 

@@ -1,1 +1,0 @@
-UPDATE book_dir SET deleted_at=1, is_downloaded=0

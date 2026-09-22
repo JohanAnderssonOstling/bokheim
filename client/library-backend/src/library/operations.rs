@@ -152,13 +152,13 @@ impl LibrarySession {
         };
         report(ImportFileStage::ReadingMetadata);
         let started = web_time::Instant::now();
-        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format.canonical_extension(), crate::inspection_version(import.format)).map_err(BackendError::operation)?;
+        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format.canonical_extension(), book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
         let inspection = if reuse {
             None
         } else {
             let reader = staged.open_reader().map_err(BackendError::operation)?;
             Some(
-                crate::worker_cpu::submit_book(crate::worker_cpu::Inspect { source_name: import.file_name.clone(), format: import.format }, reader)
+                cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format }, cpu_host::as_cpu_reader(reader))
                     .await
                     .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
             )
@@ -232,7 +232,19 @@ impl LibrarySession {
     ) -> Result<(), BackendError> {
         let ValidatedImport { parent_id, file_name, format } = import;
         self.db
-            .commit_import(library_database::ImportCommit { parent_id, file_name, format, content_hash, checksum, size_bytes, inspection_version: crate::inspection_version(format), inspection, published, request_thumbnail, restore_paths })
+            .commit_import(library_database::ImportCommit {
+                parent_id,
+                file_name,
+                format,
+                content_hash,
+                checksum,
+                size_bytes,
+                inspection_version: book_inspection::inspection_version(format),
+                inspection,
+                published,
+                request_thumbnail,
+                restore_paths,
+            })
             .map_err(BackendError::operation)?;
         self.notify_contents_changed();
         self.notify_storage_changed();

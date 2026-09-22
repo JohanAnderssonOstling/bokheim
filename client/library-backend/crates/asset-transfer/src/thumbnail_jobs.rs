@@ -14,6 +14,28 @@ pub trait ThumbnailProcessor: Sync {
     fn generate(&self, extension: String, reader: BoxedBookReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailVersions>, BackendError>>;
 }
 
+/// Host-backed thumbnail extraction. The extractor carries an explicit host, so
+/// thumbnail jobs stay platform-neutral without a process-wide default.
+#[derive(Clone)]
+pub struct ThumbnailExtractor {
+    host: std::sync::Arc<dyn cpu_host::CpuHost>,
+}
+impl ThumbnailExtractor {
+    pub fn new(host: std::sync::Arc<dyn cpu_host::CpuHost>) -> Self {
+        Self { host }
+    }
+}
+impl ThumbnailProcessor for ThumbnailExtractor {
+    fn decode(&self, bytes: Vec<u8>) -> BoxedBackendFuture<'_, Result<ThumbnailVersions, BackendError>> {
+        let host = self.host.clone();
+        Box::pin(async move { cpu_host::cover(&*host, bytes).await.map(|v| ThumbnailVersions { browse: v.browse, high_density: v.high_density }) })
+    }
+    fn generate(&self, extension: String, reader: BoxedBookReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailVersions>, BackendError>> {
+        let host = self.host.clone();
+        Box::pin(async move { host.generate_thumbnail(extension, cpu_host::as_cpu_reader(reader)).await.map(|v| v.map(|v| ThumbnailVersions { browse: v.browse, high_density: v.high_density })) })
+    }
+}
+
 /// A batch keeps its activity guard alive across pages, including cancellation.
 ///
 /// Runs entirely on a library's own dedicated thread (see

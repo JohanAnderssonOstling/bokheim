@@ -182,11 +182,8 @@ impl BookMetadata {
             if !subject.source().rsplit(':').next().is_some_and(|source| source.eq_ignore_ascii_case("subject")) || subject.authority().is_some_and(|authority| !authority.eq_ignore_ascii_case("isbn")) {
                 continue;
             }
-            for isbn in crate::canonical::isbns_in_text(subject.name()) {
-                if self.identifiers.iter().any(|identifier| identifier.scheme() == &crate::Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) {
-                    continue;
-                }
-                self.identifiers.push(Identifier::new(isbn, crate::Scheme::Isbn, crate::Scope::Book)?);
+            for isbn in crate::from_text(subject.name()) {
+                crate::push_isbn(&mut self.identifiers, isbn, crate::Scope::Book)?;
             }
         }
         Ok(())

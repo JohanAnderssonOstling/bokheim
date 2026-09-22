@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 book-access = { path = "../book-access" }
 client-runtime = { path = "../../../client-runtime" }
+cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
 library-files = { path = "../library-files" }
 library-database = { path = "../library-database" }
@@ -27,7 +28,12 @@ uuid = { version = "1", features = ["v4"] }
 web-time = "1"
 
 [dev-dependencies]
+account-client = { path = "../../../account-client" }
+async-channel = "2"
 blake3 = "1"
+book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
+client-platform-native = { path = "../../../platforms/native" }
+image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 book-metadata = { path = "../book-metadata" }
 book-model = { path = "../../../../shared/book-model" }
 test-support = { path = "../../../test-support" }

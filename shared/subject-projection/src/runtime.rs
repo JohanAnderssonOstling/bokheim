@@ -1,4 +1,4 @@
-use super::lcc::{canonical_lcc_notation, compare_lcc_key, lcc_match_keys, lcc_span, parse_lcc_call};
+use super::lcc::{canonical_lcc_notation, compare_lcc_key, lcc_match_keys, parse_lcc_call};
 use super::runtime_index::{build_runtime, LccSelector};
 pub(super) use super::runtime_index::{compare_cutter_endpoint, compare_upper_cutters, cutter_components, normalize_source_label, UnifiedTaxonomyRuntime};
 pub use super::runtime_index::{lcc_subject_sort_orders, UnifiedConceptDefinition, UnifiedConceptRoute};
@@ -211,11 +211,6 @@ pub(super) fn matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &st
 }
 
 fn strict_matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> BTreeSet<i64> {
-    if system_id == LCC_SYSTEM_ID {
-        if let Some(ids) = explicit_lcc_list_matches(runtime, code) {
-            return ids;
-        }
-    }
     let candidates = matching_candidates(runtime, system_id, code);
     if candidates.len() > 1 {
         BTreeSet::new()
@@ -224,28 +219,7 @@ fn strict_matching_concepts(runtime: &UnifiedTaxonomyRuntime, system_id: &str, c
     }
 }
 
-// Subject ancestry takes precedence over selector form. Among unrelated
-// subjects, prefer exact codes, then narrower ranges, then prefixes.
-// Equally specific unrelated subjects remain unresolved and diagnostic.
-fn explicit_lcc_list_matches(runtime: &UnifiedTaxonomyRuntime, code: &str) -> Option<BTreeSet<i64>> {
-    let parts = super::lcc::lcc_code_list(code)?;
-    let mut result = BTreeSet::new();
-    for part in parts {
-        let ids = matching_candidates(runtime, LCC_SYSTEM_ID, &part);
-        if ids.len() != 1 {
-            return Some(BTreeSet::new());
-        }
-        result.extend(ids);
-    }
-    Some(result)
-}
-
 fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: &str) -> BTreeSet<i64> {
-    if system_id == LCC_SYSTEM_ID {
-        if let Some(ids) = explicit_lcc_list_matches(runtime, code) {
-            return ids;
-        }
-    }
     let Some(index) = runtime.selectors.get(system_id) else { return BTreeSet::new() };
     let canonical = if system_id == LCC_SYSTEM_ID {
         let Some(code) = canonical_lcc_notation(code) else { return BTreeSet::new() };
@@ -256,22 +230,12 @@ fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: 
     } else {
         code.trim().to_ascii_uppercase()
     };
-    let unwrapped = if system_id == LCC_SYSTEM_ID { super::lcc::repeated_lcc_base(&canonical).unwrap_or(&canonical) } else { &canonical };
-    let separated = (system_id == LCC_SYSTEM_ID)
-        .then(|| {
-            super::lcc::doubled_cutter_period_base(unwrapped)
-                .or_else(|| super::lcc::period_year_call_base(unwrapped))
-                .or_else(|| super::lcc::apostrophe_call_base(unwrapped))
-                .or_else(|| super::lcc::local_cutter_x_base(unwrapped))
-                .or_else(|| super::lcc::reference_collection_base(unwrapped).map(str::to_owned))
-        })
-        .flatten();
-    let slash_family = (system_id == LCC_SYSTEM_ID).then(|| super::lcc::terminal_slash_base(unwrapped)).flatten();
+    let separated = (system_id == LCC_SYSTEM_ID).then(|| super::lcc::apostrophe_call_base(&canonical)).flatten();
     let match_code = if system_id == LCC_SYSTEM_ID {
         // Display separators and item suffixes can occur in the same call.
         // Strip validated item enumeration after separator normalization too,
         // so a volume range cannot be mistaken for a classification range.
-        let base = separated.as_deref().unwrap_or(unwrapped);
+        let base = separated.as_deref().unwrap_or(&canonical);
         super::lcc::lcc_item_base(base).unwrap_or(base)
     } else {
         &canonical
@@ -285,47 +249,9 @@ fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: 
             matches.extend(ids.iter().map(|id| (*id, (2, specificity, false, 0.0, None))));
         }
     }
-    // An explicit printed-label assignment remains authoritative. Otherwise
-    // match the whole incoming interval, never only its start or an overlap.
-    if system_id == LCC_SYSTEM_ID && (matches.is_empty() || slash_family.is_some()) {
-        if let Some((start, end)) = lcc_span(match_code)
-            .or_else(|| {
-                let base = slash_family?;
-                Some((super::lcc::lcc_endpoint(base, false)?, super::lcc::lcc_endpoint(base, true)?))
-            })
-            .filter(|(start, end)| matches.is_empty() || (index.lcc_subclasses.contains(&start.letters) && index.lcc_subclasses.contains(&end.letters)))
-        {
-            // Broad class coverage must not turn invented subclass prefixes
-            // into valid matches. Explicit reviewed range labels above still win.
-            if !index.lcc_subclasses.contains(&start.letters) || !index.lcc_subclasses.contains(&end.letters) {
-                return BTreeSet::new();
-            }
-            if slash_family.is_none() && start.code == end.code && start.number == end.number {
-                return matching_candidates(runtime, system_id, &start.code);
-            }
-            let start_cutters = cutter_components(&start.remainder);
-            let end_cutters = cutter_components(&end.remainder);
-            index.lcc_intervals.containing(&index.lcc_ranges, (&start.letters, start.number), (&end.letters, end.number), |range| {
-                if compare_lcc_key(&range.start_letters, range.start_number, &start.letters, start.number).is_le()
-                    && compare_lcc_key(&end.letters, end.number, &range.end_letters, range.end_number).is_le()
-                    && (range.start_letters != start.letters || range.start_number != start.number || compare_cutter_endpoint(&start_cutters, &range.start_cutters).is_ge())
-                    && (range.end_letters != end.letters || range.end_number != end.number || range.end_cutters.is_empty() || compare_upper_cutters(&end_cutters, &range.end_cutters).is_le())
-                {
-                    let single = range.start_letters == range.end_letters;
-                    matches.push((range.concept_id, (1, range.start_cutters.len().max(range.end_cutters.len()), single, if single { range.end_number - range.start_number } else { f64::INFINITY }, Some(range))));
-                }
-            });
-            for (prefix, id) in &index.prefixes {
-                if prefix.bytes().all(|byte| byte.is_ascii_alphabetic()) && start.letters.starts_with(prefix) && end.letters.starts_with(prefix) && index.lcc_subclasses.contains(&start.letters) && index.lcc_subclasses.contains(&end.letters)
-                {
-                    matches.push((*id, (0, prefix.len(), false, 0.0, None)));
-                }
-            }
-        }
-    }
 
     let call = (system_id == LCC_SYSTEM_ID).then(|| parse_lcc_call(match_code)).flatten();
-    let allow_range_matching = system_id != LCC_SYSTEM_ID || (slash_family.is_none() && !match_code.contains('-') && call.as_ref().is_some_and(|call| index.lcc_subclasses.contains(&call.letters)));
+    let allow_range_matching = system_id != LCC_SYSTEM_ID || (!match_code.contains('-') && call.as_ref().is_some_and(|call| index.lcc_subclasses.contains(&call.letters)));
     if allow_range_matching {
         if let Some(call) = &call {
             let cutters = cutter_components(call.remainder);
@@ -479,7 +405,6 @@ mod tests {
         assert_eq!(taxonomy.lcc_match_candidates("DA670.C83 S35x"), vec![2]);
         assert_eq!(taxonomy.lcc_match_candidates("DA670.C85 .A1"), vec![1]);
         assert_eq!(taxonomy.lcc_match_candidates("DS54.95.L373 A58 2011"), vec![4]);
-        assert_eq!(taxonomy.lcc_match_candidates("DA670.C831-DA670.C838"), vec![2]);
     }
 
     #[test]
@@ -513,9 +438,7 @@ mod tests {
         assert_eq!(taxonomy.matching_concept_ids("lcc", "HD69.C65 R38"), vec![19]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "HD69.C654"), vec![3]);
         assert!(taxonomy.matching_concept_ids("lcc", "HD69.1.C6").is_empty());
-        // Documented Cutter-final x retains the complete topic Cutter;
-        // arbitrary suffix letters remain unsupported.
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "HD69.C6X"), vec![24]);
+        assert!(taxonomy.matching_concept_ids("lcc", "HD69.C6X").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "HD69.C6Z").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "HD69-70").is_empty());
     }
@@ -523,9 +446,6 @@ mod tests {
     #[test]
     fn fully_written_printed_ranges_match_only_their_exact_label() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(16, "Literature", &[], &["PN1-PN6790"]), concept(11, "Film", &[16], &["PN1997"])]).unwrap();
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "PN1-PN6790"), vec![16]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "PN1-6790"), vec![16]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "pn 1 - pn 6790"), vec![16]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PN1997"), vec![11]);
         assert!(taxonomy.matching_concept_ids("lcc", "PN100").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "PN1-PN6790.A3").is_empty());
@@ -534,17 +454,12 @@ mod tests {
     #[test]
     fn unfinished_item_captions_do_not_change_cutter_specificity() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "History", &[], &["DS400..DS500"]), concept(2, "Specific work", &[1], &["DS436.N47"]), concept(3, "Different Cutter", &[1], &["DS436.N48"])]).unwrap();
-        for code in ["DS436 .N47 1987 PT.", "DS436 .N47 1987 VOL", "DS436 .N47 1987 V.1:NO."] {
-            assert_eq!(taxonomy.matching_concept_ids("lcc", code), vec![2], "{code}");
-        }
         assert_eq!(taxonomy.matching_concept_ids("lcc", "DS436 BAD TEXT PT."), vec![1]);
     }
 
     #[test]
     fn equivalent_range_labels_do_not_choose_between_conflicting_subjects() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(17, "Mathematics", &[], &["QA1-939"]), concept(19, "Other", &[], &["QA1-QA939"])]).unwrap();
-        assert!(taxonomy.matching_concept_ids("lcc", "QA1-939").is_empty());
-        assert!(taxonomy.matching_concept_ids("lcc", "QA1-QA939").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "QA500").is_empty());
     }
 
@@ -557,24 +472,12 @@ mod tests {
             concept(4, "Exact topic", &[3], &["QA76.65"]),
         ])
         .unwrap();
-        for code in ["QA75.5-76.95", "qa 75.5 - qa 76.95"] {
-            assert_eq!(taxonomy.lcc_match_candidates(code), vec![2], "{code}");
-        }
-        assert_eq!(taxonomy.lcc_match_candidates("QA75-77"), vec![1]);
-        assert_eq!(taxonomy.lcc_match_candidates("QA76.6-76.66"), vec![3]);
         assert_eq!(taxonomy.lcc_match_candidates("QA76.65 .R3 2024"), vec![4]);
-        assert_eq!(taxonomy.lcc_match_candidates("QA76.65-76.65"), vec![4]);
+        assert!(taxonomy.lcc_match_candidates("QA75.5-76.95").is_empty());
+        assert!(taxonomy.lcc_match_candidates("QA76.6-76.66").is_empty());
+        assert!(taxonomy.lcc_match_candidates("QA76.65-76.65").is_empty());
         assert!(taxonomy.lcc_match_candidates("QA900-950").is_empty());
         assert!(taxonomy.lcc_match_candidates("QA950-900").is_empty());
-    }
-
-    #[test]
-    fn incoming_ranges_preserve_explicit_labels_and_report_ties() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "First", &[], &["QA1..QA10"]), concept(2, "Second", &[], &["QA1..QA10"]), concept(3, "Reviewed span", &[], &["QA2-QA9"])]).unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("QA2-9"), vec![3]);
-        assert_eq!(taxonomy.lcc_match_candidates("QA3-8"), vec![1, 2]);
-        let explicit_conflict = UnifiedTaxonomy::from_concepts(vec![concept(1, "First label", &[], &["QA2-9"]), concept(2, "Second label", &[], &["QA2-QA9"]), concept(3, "Containing range", &[], &["QA1..QA10"])]).unwrap();
-        assert_eq!(explicit_conflict.lcc_match_candidates("QA2-9"), vec![1, 2]);
     }
 
     #[test]
@@ -584,8 +487,8 @@ mod tests {
         assert!(taxonomy.lcc_match_candidates("QA3-9").is_empty());
         assert!(taxonomy.lcc_match_candidates("QB1-9").is_empty());
         assert!(taxonomy.lcc_match_candidates("QB2-10").is_empty());
-        assert_eq!(taxonomy.lcc_match_candidates("QB2-9"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("QC2-9"), vec![3]);
+        assert!(taxonomy.lcc_match_candidates("QB2-9").is_empty());
+        assert!(taxonomy.lcc_match_candidates("QC2-9").is_empty());
         assert!(taxonomy.lcc_match_candidates("QX2-9").is_empty());
     }
 
@@ -616,10 +519,10 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.73.R87 .A1 2025"), vec![24]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.9.X99"), vec![9]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA350 .A1"), vec![2]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA500 .A1"), vec![17]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA1-939"), vec![17]);
+        // Abbreviated dash ranges are below the coverage threshold: rejected, not expanded.
+        assert!(taxonomy.matching_concept_ids("lcc", "QA1-939").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "QA940").is_empty());
     }
 
@@ -698,29 +601,11 @@ mod tests {
     }
 
     #[test]
-    fn ranges_with_item_metadata_require_full_containment() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(1, "Language", &[], &["P100..P200"]),
-            concept(2, "Partial range", &[1], &["P121..P130"]),
-            concept(3, "Cross subclass", &[], &["QA75..QB76"]),
-            concept(4, "Start only", &[3], &["QA75..QA76"]),
-        ])
-        .unwrap();
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "P121-143.3 .S66 2021"), vec![1]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA75-QB76 .S66 2021"), vec![3]);
-        assert!(taxonomy.matching_concept_ids("lcc", "P121-201 .S66 2021").is_empty());
-        assert!(taxonomy.matching_concept_ids("lcc", "P143.3-121 .S66 2021").is_empty());
-    }
-
-    #[test]
-    fn printed_comparative_law_heading_preserves_its_complete_range() {
+    fn printed_paren_range_spellings_are_rejected() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Comparative law", &[], &["K520..K5582"]), concept(2, "Treaties", &[1], &["K524..K525"])]).unwrap();
-        for raw in ["K(520) 5582", "K(520)-5582", "K(520) – 5582"] {
-            let report = taxonomy.lcc_match_report(raw);
-            assert_eq!(report.assignments.iter().map(|a| a.concept_id).collect::<Vec<_>>(), [1]);
-            assert_eq!(report.assignments[0].evidence[0].method, crate::LccMatchMethod::Normalized);
-            assert_eq!(report.assignments[0].evidence[0].code, raw);
-        }
+        // Parenthesized range spellings are below the coverage threshold: rejected, not expanded.
+        assert!(taxonomy.matching_concept_ids("lcc", "K(520) 5582").is_empty());
+        assert!(taxonomy.matching_concept_ids("lcc", "K(520)-5582").is_empty());
         assert!(taxonomy.matching_concept_ids("lcc", "K(521) 5582").is_empty());
     }
 
@@ -728,41 +613,20 @@ mod tests {
     fn clipped_tail_recovery_does_not_merge_away_complete_subjects() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Epistemology", &[], &["BD143..BD237"]), concept(2, "Psychology", &[], &["BF1..BF990"]), concept(3, "Logic", &[], &["BC1..BC999"])]).unwrap();
         let report = taxonomy.lcc_match_report("BD143-237BF201Q342BC");
-        assert_eq!(report.assignments.iter().map(|a| a.concept_id).collect::<Vec<_>>(), [1, 2], "{report:?}");
-        assert_eq!(report.unresolved_fragments, ["BC"]);
-    }
-
-    #[test]
-    fn joined_terminal_subclasses_keep_complete_preceding_codes() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Computing", &[], &["QA75..QA76.99"]), concept(2, "Artificial intelligence", &[], &["Q334..Q342"])]).unwrap();
-        let raw = "QA76.9.D35Q334-342QA";
-        let report = taxonomy.lcc_match_report(raw);
-        assert_eq!(report.assignments.iter().map(|a| a.concept_id).collect::<Vec<_>>(), [1, 2], "{report:?}");
-        assert_eq!(report.unresolved_fragments, ["QA"]);
-        assert!(report.assignments.iter().flat_map(|a| &a.evidence).all(|e| e.code != "QA"));
+        assert_eq!(report.assignments.iter().map(|a| a.concept_id).collect::<Vec<_>>(), [2], "{report:?}");
+        assert_eq!(report.unresolved_fragments, ["BD143-237", "BC"]);
     }
 
     #[test]
     fn partial_lists_recover_complete_unicode_and_marc_members() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Computing", &[], &["QA75..QA76.99"])]).unwrap();
-        for raw in ["QA75–QA76; UNKNOWN", "QA76; 未分類"] {
+        for raw in ["QA76; 未分類"] {
             let report = taxonomy.lcc_match_report(raw);
             assert_eq!(report.assignments.iter().map(|a| a.concept_id).collect::<Vec<_>>(), [1], "{report:?}");
             assert!(!report.unresolved_fragments.is_empty());
             assert!(report.assignments[0].evidence.iter().all(|e| raw.contains(&e.code)));
         }
         assert!(taxonomy.lcc_match_report("未分類 QA76").assignments.is_empty());
-    }
-
-    #[test]
-    fn complete_joined_decimal_calls_keep_both_subjects() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Computing", &[], &["QA75..QA76.99"]), concept(2, "Microprogramming", &[1], &["QA76.76.M52"]), concept(3, "Software engineering", &[1], &["QA76.758"])]).unwrap();
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.76.M52QA76.758"), vec![2, 3]);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.76.M52QA76."), vec![2]);
-        let report = taxonomy.lcc_match_report("QA76.76.M52QA76.");
-        assert_eq!(report.unresolved_fragments, ["QA76."]);
-        assert_eq!(report.assignments[0].evidence[0].method, crate::LccMatchMethod::RecoveredComponent);
-        assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.76.M52QA76.758UNKNOWN"), vec![2]);
     }
 
     fn concept(id: i64, label: &str, parents: &[i64], lcc: &[&str]) -> UnifiedConceptDefinition {
@@ -780,16 +644,6 @@ mod tests {
             assert_eq!(taxonomy.lcc_match_candidates(code), vec![1], "{code}");
         }
         assert_eq!(taxonomy.lcc_match_candidates("DD801.W7 .B2 2005"), vec![3]);
-        assert_eq!(taxonomy.lcc_match_candidates("DD801.S4 VOL. III"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("DD801.S469 VOL. III"), vec![1]);
-    }
-
-    #[test]
-    fn explicit_mlc_subclasses_use_existing_heading_without_inventing_numbers() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Literature", &[], &["PQ", "(P)"]), concept(2, "Author", &[1], &["PQ8550.426.A74"])]).unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("MLCF 2013/40001 (PQ)"), vec![1]);
-        assert_eq!(taxonomy.lcc_match_candidates("PQ8550.426.A74"), vec![2]);
-        assert!(taxonomy.lcc_match_candidates("MLCF 2013/40001 (ZZ)").is_empty());
     }
 
     #[test]
@@ -812,7 +666,7 @@ mod tests {
     fn series_numbering_does_not_change_cutter_subjects() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Mathematics", &[], &["QA3..QA3"]), concept(2, "Selected series", &[1], &["QA3.A5..QA3.A6"])]).unwrap();
         assert_eq!(taxonomy.lcc_match_candidates("QA3 .A572 SER. 2, VOL. 130"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("QA3 .A7 NEW SER.:V.1"), vec![1]);
+        assert!(taxonomy.lcc_match_candidates("QA3 .A7 NEW SER.:V.1").is_empty());
         assert!(taxonomy.lcc_match_candidates("QA3 .A572 SER. 2 UNKNOWN").is_empty());
     }
 
@@ -824,91 +678,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_lists_assign_all_subjects_without_accepting_ambiguous_components() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(1, "Computing", &[], &["QA76..QA77"]),
-            concept(2, "Physics", &[], &["QC1..QC10"]),
-            concept(3, "Conflicting physics", &[], &["QC5..QC5"]),
-            concept(4, "Other conflicting physics", &[], &["QC5..QC5"]),
-        ])
-        .unwrap();
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76; QC1"), vec![1, 2]);
-        assert_eq!(taxonomy.lcc_match_candidates("QA76; QC1"), vec![1, 2]);
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76; QA77"), vec![1]);
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "[QA76; QC1]"), vec![1, 2]);
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76; QC5"), vec![1]);
-        assert_eq!(taxonomy.lcc_match_report("QA76; QC5").unresolved_fragments, ["QC5"]);
-        assert_eq!(taxonomy.lcc_match_report("QA76; QC1").assignments.len(), 2);
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76; QB1"), vec![1]);
-        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76; QC1 truncated"), vec![1, 2]);
-    }
-
-    #[test]
-    fn abbreviated_author_criticism_range_keeps_author_and_both_bounds() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(1, "Literature", &[], &["PK2631..PK2659"]),
-            concept(2, "Author", &[1], &["PK2659.P348..PK2659.P348"]),
-            concept(3, "Criticism", &[2], &["PK2659.P348.Z5..PK2659.P348.Z999"]),
-            concept(4, "Partial criticism", &[3], &["PK2659.P348.Z5..PK2659.P348.Z8"]),
-        ])
-        .unwrap();
-        for code in ["PK2659.P348Z5-Z999", "PK2659.P348.Z5-.Z999"] {
-            assert_eq!(taxonomy.lcc_match_candidates(code), vec![3], "{code}");
-            let report = taxonomy.lcc_match_report(code);
-            assert_eq!(report.assignments[0].evidence[0].code, code);
-        }
-        assert_eq!(taxonomy.lcc_match_candidates("PK2659.U32Z5-Z999"), vec![1]);
-        assert!(taxonomy.lcc_match_candidates("PK2659.P348Z5-Z9999").is_empty());
-    }
-
-    #[test]
-    fn repeated_ranges_keep_full_containment_and_original_exact_evidence() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Management", &[], &["HD28..HD70"]), concept(2, "Partial range", &[1], &["HD28..HD50"]), concept(3, "Exact original", &[1], &["HD28-70HD28-70HD28-70"])]).unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("HD28-70HD28-70"), vec![1]);
-        assert_eq!(taxonomy.lcc_match_candidates("HD28-70HD28-HD70"), vec![1]);
-        assert_eq!(taxonomy.lcc_match_candidates("HD28-HD70HD28-70"), vec![1]);
-        assert!(taxonomy.lcc_match_candidates("HD28-70HD28-HD70HD28").is_empty());
-        assert_eq!(taxonomy.lcc_match_candidates("HD28-70HD28-70HD28-70"), vec![3]);
-        assert!(taxonomy.lcc_match_candidates("HD28-70HD28-7").is_empty());
-    }
-
-    #[test]
-    fn terminal_slashes_require_whole_filing_family_containment() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(1, "Class", &[], &["DA690", "DA690..DA690"]),
-            concept(2, "S family", &[1], &["DA690.S..DA690.S"]),
-            concept(3, "Partial family", &[2], &["DA690.S..DA690.S5"]),
-            concept(4, "S4 family", &[2], &["DA690.S4..DA690.S4"]),
-            concept(5, "Partial second Cutter", &[4], &["DA690.S4.A..DA690.S4.M"]),
-        ])
-        .unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("DA690.S/"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("DA690.S4/"), vec![4]);
-        assert_eq!(taxonomy.lcc_match_candidates("DA690/"), vec![1]);
-        assert!(taxonomy.lcc_match_candidates("ZZ690.S/").is_empty());
-    }
-
-    #[test]
     fn no_cutter_work_marks_do_not_invent_author_cutters() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Modern authors", &[], &["PS3500..PS3599"]), concept(2, "Specific author", &[1], &["PS3566.I372"])]).unwrap();
         assert_eq!(taxonomy.lcc_match_candidates("PS3566 PIC"), vec![1]);
         assert_eq!(taxonomy.lcc_match_candidates("PS3566.I372"), vec![2]);
-    }
-
-    #[test]
-    fn doubled_period_keeps_cutter_range_boundaries() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Germany", &[], &["DD801..DD801"]), concept(2, "Saxony", &[1], &["DD801.S31..DD801.S46"])]).unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("DD801..S4 2003"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("DD801. .S469 2003"), vec![1]);
-        assert!(taxonomy.lcc_match_candidates("DD801...S4 2003").is_empty());
-    }
-
-    #[test]
-    fn period_year_retains_topic_bounds_and_exact_year_selectors() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Germany", &[], &["DD801..DD801"]), concept(2, "Saxony", &[1], &["DD801.S31..DD801.S46"]), concept(3, "Selected edition", &[2], &["DD801.S4 2003"])]).unwrap();
-        assert_eq!(taxonomy.lcc_match_candidates("DD801.S4.2003"), vec![3]);
-        assert_eq!(taxonomy.lcc_match_candidates("DD801.S4.2004"), vec![2]);
-        assert_eq!(taxonomy.lcc_match_candidates("DD801.S469.2003"), vec![1]);
     }
 
     #[test]
@@ -1066,47 +839,6 @@ mod tests {
             assert!(paths.iter().all(|path| !path.contains("Libraries & Collections / Library & Information Science")), "redundant library route remains for {call_number}: {paths:?}");
         }
     }
-    #[test]
-    fn cross_subclass_and_cutter_spans_require_complete_coverage() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(1, "History", &[], &["D1..DX301"]),
-            concept(2, "European history", &[1], &["DA1..DR999"]),
-            concept(3, "Medicine", &[], &["R..RZ"]),
-            concept(4, "Probability", &[], &["QA273.A1..QA274.9"]),
-            concept(5, "Cutter interval", &[], &["QB1.A1..QB1.C5"]),
-            concept(6, "Deep Cutter interval", &[], &["QC1.A1..QC1.C5.B9"]),
-        ])
-        .unwrap();
-        for (code, expected) in [("D1-DX301", 1), ("DA10-DR20", 2), ("DB10", 2), ("R-RZ", 3), ("R-R", 3), ("RA10-RC20", 3), ("RC20", 3), ("QA273.A1-274.9", 4), ("QB1.A2-.C4", 5)] {
-            assert_eq!(taxonomy.matching_concept_ids("lcc", code), vec![expected], "{code}");
-        }
-        for code in ["D1-DX302", "D-DX", "QA273-274.9", "QB1.A2-1", "QB1.A2-.D1", "QC1.A1-1.C5", "QB1.A2-1.C", "R-Q"] {
-            assert!(taxonomy.matching_concept_ids("lcc", code).is_empty(), "{code}");
-        }
-    }
-
-    #[test]
-    fn abbreviated_decimal_ranges_match_like_full_endpoints() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Operations", &[], &["T57.6..T57.97"]), concept(2, "Physical properties", &[], &["TA418.5..TA418.84"])]).unwrap();
-        for (short, full, id) in [("T57.6-.97", "T57.6-T57.97", 1), ("TA418.5–.84", "TA418.5-TA418.84", 2)] {
-            assert_eq!(taxonomy.matching_concept_ids("lcc", short), vec![id]);
-            assert_eq!(taxonomy.matching_concept_ids("lcc", short), taxonomy.matching_concept_ids("lcc", full));
-        }
-        for code in ["T57.6-.98", "T57.6-.5", "TA418.5-.85"] {
-            assert!(taxonomy.matching_concept_ids("lcc", code).is_empty(), "{code}");
-        }
-    }
-
-    #[test]
-    fn alphabetic_cutter_spans_require_full_interval_coverage() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Phenomenology", &[], &["B829.5.A..B829.5.Z"]), concept(2, "Partial interval", &[], &["QA76.B..QA76.D"])]).unwrap();
-        for (code, id) in [("B829.5.A-Z", 1), ("B829.5.A3-Z", 1), ("B829.5.A-B829.5.Z", 1), ("QA76.B-D", 2)] {
-            assert_eq!(taxonomy.matching_concept_ids("lcc", code), vec![id], "{code}");
-        }
-        for code in ["QA76.A-Z", "QA76.B-E", "B829.5.A-Z1"] {
-            assert!(taxonomy.matching_concept_ids("lcc", code).is_empty(), "{code}");
-        }
-    }
 
     #[test]
     fn pz_work_marks_match_author_exceptions_and_numeric_ranges() {
@@ -1114,17 +846,6 @@ mod tests {
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PZ7.R79835 Ham 1999"), vec![2]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PZ7.T47 Wh"), vec![1]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PZ7.R79835 BOX NO. 4"), vec![2]);
-    }
-
-    #[test]
-    fn separated_calls_with_volume_ranges_reach_numeric_and_cutter_selectors() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Philosophy", &[], &["B3000..B3999"]), concept(2, "Bounded author", &[1], &["B3279.H1..B3279.H9"])]).unwrap();
-        for (code, id) in [("B'3279'H9'BD. 18-19", 2), ("B'3300'A1'VOL. 1-3", 1), ("B3279.H9 BD. 18-19", 2)] {
-            assert_eq!(taxonomy.matching_concept_ids("lcc", code), vec![id], "{code}");
-        }
-        for code in ["B'3279'H9'BD. 18-UNKNOWN", "B'3279'H9'BD. 18-", "B'3279'H9'BD. 18-19 UNKNOWN"] {
-            assert!(taxonomy.matching_concept_ids("lcc", code).is_empty(), "{code}");
-        }
     }
 
     #[test]

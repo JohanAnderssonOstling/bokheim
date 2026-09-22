@@ -1,6 +1,7 @@
 use super::error::SyncResult;
 use super::library_sync::LibrarySync;
-use super::transfer::{TransferJob, TransferOrigin, TransferWorker};
+use asset_transfer::transfer::TransferWorker;
+use asset_transfer::{TransferJob, TransferOrigin};
 use library_database::TransferOutcome;
 use library_files::asset_store::AssetStore;
 use sync_common::ContentHash;

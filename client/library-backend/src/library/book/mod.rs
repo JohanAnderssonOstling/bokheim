@@ -4,6 +4,9 @@ use crate::BackendError;
 use crate::{ContentHash, DownloadState, LibrarySession};
 use book_model::BookFormat;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod browser;
+
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "native.rs"]
 mod host;

@@ -1,30 +1,5 @@
 //! Shared bibliographic lookup preparation and checksum-valid filename ISBNs.
 pub use metadata_contract::identity_evidence::{edition_identity_evidence, EditionIdentityEvidence};
-use std::collections::BTreeSet;
-
-/// Returns one unambiguous, checksum-valid ISBN embedded in a filename-like
-/// title. Multiple distinct ISBNs deliberately return `None`.
-pub fn isbn_from_filename_like_title(title: &str) -> Option<String> {
-    let mut candidate = String::new();
-    let mut isbns = BTreeSet::new();
-    let finish_candidate = |candidate: &mut String, isbns: &mut BTreeSet<String>| {
-        if let Some(isbn) = book_model::canonical_isbn(candidate) {
-            isbns.insert(isbn);
-        }
-        candidate.clear();
-    };
-    for character in title.chars() {
-        if character.is_ascii_digit() || matches!(character, 'x' | 'X' | '-') {
-            candidate.push(character);
-        } else if !candidate.is_empty() {
-            finish_candidate(&mut candidate, &mut isbns);
-        }
-    }
-    if !candidate.is_empty() {
-        finish_candidate(&mut candidate, &mut isbns);
-    }
-    (isbns.len() == 1).then(|| isbns.into_iter().next()).flatten()
-}
 
 #[cfg(test)]
 mod tests {
@@ -52,14 +27,6 @@ mod tests {
     #[test]
     fn extracts_inline_by_author_before_source_tag() {
         assert_eq!(edition_identity_evidence("A Concise History of France by Roger Price (z-lib.org)"), EditionIdentityEvidence { title: "A Concise History of France".to_owned(), author: Some("Roger Price".to_owned()), book_year: None });
-    }
-
-    #[test]
-    fn filename_isbn_requires_one_checksum_valid_value() {
-        assert_eq!(isbn_from_filename_like_title("9780198571001.pdf").as_deref(), Some("9780198571001"));
-        assert_eq!(isbn_from_filename_like_title("book-978-0-19-857100-1 scan.pdf").as_deref(), Some("9780198571001"));
-        assert_eq!(isbn_from_filename_like_title("9780198571002.pdf"), None);
-        assert_eq!(isbn_from_filename_like_title("9780198571001 and 9781501168697.pdf"), None);
     }
 
     #[test]

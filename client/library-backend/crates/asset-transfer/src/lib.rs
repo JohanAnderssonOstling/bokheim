@@ -16,5 +16,6 @@ pub mod deadline;
 pub mod planning;
 pub mod thumbnail_jobs;
 pub mod thumbnails;
+pub mod transfer;
 
 pub mod runner;

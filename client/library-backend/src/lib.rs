@@ -15,16 +15,11 @@ pub mod client;
 pub use client::LibraryClient;
 pub use book_model::{AgentId, AnnotationAnchor, AnnotationStyle, AuthorId, BookFormat, EpubCfi, ReadProgress, ReaderAnnotation};
 pub use library::{AudiobookBook, DocumentBook, ResolvedBook};
-#[cfg(target_arch = "wasm32")]
-pub mod browser_import;
 pub mod library;
 pub mod integration;
-#[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
-pub(crate) mod scanner;
 pub mod sync;
 #[cfg(test)]
 mod test_database;
-pub mod worker_cpu;
 
 pub use account_client::ServerUrl;
 pub use import_pipeline::{ImportFailure, ImportFailureKind, ImportProgress, ImportState};
@@ -36,7 +31,7 @@ pub use library_database::{BookPlacement, RelativeBookPath, RelativeBookPathErro
 pub use library_model::{LibraryBrowseQuery, LibraryHomeView, LibraryUpdate};
 pub use library_replica::{BlobKey, BlobKind, FolderDestinationPolicy, LibraryOperation, LibraryOperationKind, LibraryOperationState, ScanProgress, TransferJobKind};
 pub use client_runtime::BackendError;
-pub use sync::transfer::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
+pub use asset_transfer::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
 pub use sync_common::{ContentHash, DirId, LibraryId, ROOT_DIR_ID};
 /// The database belongs to a concrete library session, not the filesystem adapter.
 pub(crate) const APP_HIDDEN_DIR: &str = ".bokheim";
@@ -49,13 +44,21 @@ pub(crate) use library_runtime::interest as notification_interest;
 pub use book::{BookSource, ResolvedBookData};
 pub use library::{LibraryCommand, LibraryHandle, LibrarySession};
 
-/// Inspection cache version for a format. Matches the extractor contract:
-/// EPUB and PDF evidence versions with the shared extractor, others are 1.
-/// Shared by explicit import and the filesystem scanner, which both cache
-/// results keyed on this value.
-pub(crate) fn inspection_version(format: book_model::BookFormat) -> i64 {
-    match format {
-        book_model::BookFormat::Epub | book_model::BookFormat::Pdf => i64::from(book_inspection::evidence::INSPECTION_VERSION),
-        _ => 1,
+/// Process-wide CPU host default: the current platform's host. Sessions hold
+/// explicit handles; launchers override the default with
+/// [`cpu_host::set_cpu_host`] before opening libraries.
+pub(crate) fn default_cpu_host() -> std::sync::Arc<dyn cpu_host::CpuHost> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::sync::Arc::new(client_platform_web::cpu_host::WebHost::default())
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::sync::Arc::new(client_platform_native::cpu_host::NativeHost::default())
+    }
+}
+
+/// The installed host, installing the platform default first when none is set.
+pub(crate) fn cpu_host() -> std::sync::Arc<dyn cpu_host::CpuHost> {
+    cpu_host::cpu_host_or_init(default_cpu_host)
 }

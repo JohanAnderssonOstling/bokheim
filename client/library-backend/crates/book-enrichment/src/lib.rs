@@ -1,36 +1,31 @@
 //! Portable enrichment policy shared by client and authority ingestion.
-//! Storage, scheduling, file decoding, OCR and network transport belong to callers.
+//! Storage, scheduling, file decoding, and network transport belong to callers.
 pub mod evidence;
 pub mod filename_identity;
+pub mod filename_isbn;
 pub mod related_isbn;
 mod subject_pipeline;
 pub mod title_identity;
-pub mod title_isbn;
-use book_model::{BookMetadata, Scheme};
+use book_model::{from_metadata_value, BookMetadata, Scheme};
 pub use subject_pipeline::{isbn_key, SubjectCode, SubjectPhase, SubjectPipeline, SubjectStep};
-
-pub use book_model::metadata_isbn;
 use serde::{Deserialize, Serialize};
 
 /// Library-wide enrichment waves. Hosts may execute a wave using their own
 /// storage and workers, but must not start a later wave while an earlier wave
-/// still has candidates. This keeps expensive work (especially OCR) from
-/// starving cheap enrichment for the rest of the library.
+/// still has candidates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnrichmentWave {
     CheapMetadata,
     TitleAuthor,
-    Ocr,
 }
 
 impl EnrichmentWave {
-    pub const ALL: [Self; 3] = [Self::CheapMetadata, Self::TitleAuthor, Self::Ocr];
+    pub const ALL: [Self; 2] = [Self::CheapMetadata, Self::TitleAuthor];
 
     pub const fn next(self) -> Option<Self> {
         match self {
             Self::CheapMetadata => Some(Self::TitleAuthor),
-            Self::TitleAuthor => Some(Self::Ocr),
-            Self::Ocr => None,
+            Self::TitleAuthor => None,
         }
     }
 }
@@ -47,7 +42,7 @@ impl LookupPlan {
     pub fn from_metadata(metadata: &BookMetadata) -> Self {
         let printed = related_isbn::lookup_candidates(&metadata.identifiers);
         let embedded =
-            metadata.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).filter_map(|id| id.canonical_value().as_deref().and_then(metadata_isbn)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+            metadata.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).filter_map(|id| id.canonical_value().as_deref().and_then(from_metadata_value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
         let isbns = if printed.is_empty() { embedded } else { printed };
         let subject_complete = has_resolved_lcc(metadata);
         Self { needs_page_inspection: !subject_complete && isbns.is_empty(), subject_isbns: if subject_complete { Vec::new() } else { isbns.clone() }, author_isbns: isbns, subject_complete }
@@ -84,9 +79,9 @@ mod tests {
     #[test]
     fn whole_values_and_explicit_wrappers() {
         for value in ["978-1-934356-55-5", "978 1 934356 55 5", "urn:isbn:9781934356555", "URN|ISBN|9781934356555"] {
-            assert_eq!(metadata_isbn(value).as_deref(), Some("9781934356555"));
+            assert_eq!(from_metadata_value(value).as_deref(), Some("9781934356555"));
         }
-        assert_eq!(metadata_isbn("urn:uuid:isbn 0-330-26272-6").as_deref(), Some("0330262726"));
+        assert_eq!(from_metadata_value("urn:uuid:isbn 0-330-26272-6").as_deref(), Some("0330262726"));
     }
     #[test]
     fn survey_false_positives_are_rejected() {
@@ -103,7 +98,7 @@ mod tests {
             "https://example.org/9781934356555",
             "urn:9781934356555",
         ] {
-            assert_eq!(metadata_isbn(value), None, "{value}");
+            assert_eq!(from_metadata_value(value), None, "{value}");
         }
     }
 }

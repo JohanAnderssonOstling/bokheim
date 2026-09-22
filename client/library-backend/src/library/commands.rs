@@ -320,14 +320,16 @@ pub(super) fn prepare_library_request(library: Rc<LibrarySession>, command: Libr
         #[cfg(target_arch = "wasm32")]
         LibraryCommand::OpenRemoteAudio { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(crate::library::browser_audiobook::open_remote_audio(&library, content_hash).await?)) })),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::ReadBookRange { capability, offset, length } => PreparedRequest::Ready(Reply::new(serde_bytes::ByteBuf::from(crate::library::browser_book::read_range(*library.id(), &capability, offset, length)?))),
+        LibraryCommand::ReadBookRange { capability, offset, length } => PreparedRequest::Ready(Reply::new(serde_bytes::ByteBuf::from(crate::library::book::browser::read_local_range(*library.id(), &capability, offset, length)?))),
         #[cfg(target_arch = "wasm32")]
         LibraryCommand::ImportStagedBook { parent_id, file_name, physical, length, hash } => {
             PreparedRequest::Pending(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import_staged_book(parent_id, file_name, physical, length, hash).await?)) }))
         }
         #[cfg(target_arch = "wasm32")]
         LibraryCommand::CleanupStagedImport { job, files } => {
-            client_platform_web::web_storage::cleanup_staged_import(*library.id(), &job, files)?;
+            uuid::Uuid::parse_str(&job).map_err(crate::BackendError::operation)?;
+            let prefix = format!("__libraries/{}/imports/{job}/", library.id());
+            client_platform_web::web_storage::cleanup_staged_import(&prefix, files)?;
             PreparedRequest::Ready(Reply::new(()))
         }
     })

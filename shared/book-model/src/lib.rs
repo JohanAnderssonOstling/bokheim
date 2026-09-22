@@ -16,7 +16,7 @@ mod toc_target;
 pub use annotations::{annotation_progress, AnnotationAnchor, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, StoredAnnotationDetail};
 pub use author_name::{AuthorName, AuthorNameError, AuthorNameMatchKey};
 pub use book_format::BookFormat;
-pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid};
+pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid, from_content_candidate, from_text};
 pub use content_address::ContentHash;
 pub use credits::{agent_id_from_migration_seed, AgentId, AuthorId, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
 pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
@@ -830,7 +830,7 @@ mod tests {
 
 /// Accept a complete ISBN value, optionally wrapped in an explicit ISBN label.
 /// Never carve numbers out of identifiers, URLs, filenames or dates.
-pub fn metadata_isbn(value: &str) -> Option<String> {
+pub fn from_metadata_value(value: &str) -> Option<String> {
     fn whole(value: &str) -> Option<String> {
         let compact: String = value.chars().filter(|c| !c.is_whitespace() && !matches!(c, '-' | '\u{00ad}' | '\u{2010}'..='\u{2015}')).collect();
         if !(compact.len() == 10 || (compact.len() == 13 && (compact.starts_with("978") || compact.starts_with("979")))) || compact.chars().all(|c| c == '0') {
@@ -863,6 +863,38 @@ pub fn metadata_isbn(value: &str) -> Option<String> {
         return None;
     }
     whole(rest.trim_start_matches(|c: char| c == ':' || c == '|' || c.is_whitespace()))
+}
+
+/// Add a canonical ISBN only when no ISBN with the same canonical value exists.
+/// The caller retains ownership of the source-specific scope.
+pub fn push_isbn(identifiers: &mut Vec<Identifier>, isbn: impl AsRef<str>, scope: Scope) -> Result<(), IdentifierError> {
+    let isbn = canonical_isbn(isbn.as_ref()).unwrap_or_else(|| isbn.as_ref().to_owned());
+    if identifiers.iter().any(|identifier| identifier.scheme() == &Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) {
+        return Ok(());
+    }
+    identifiers.push(Identifier::new(isbn, Scheme::Isbn, scope)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod isbn_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_values_require_one_complete_value() {
+        assert_eq!(from_metadata_value("ISBN: 978‑0‑13‑110362‑7"), Some("9780131103627".into()));
+        assert_eq!(from_metadata_value("0000000000000"), None);
+        assert_eq!(from_metadata_value("9770131103627"), None);
+    }
+
+    #[test]
+    fn push_isbn_deduplicates_across_scopes() {
+        let mut identifiers = Vec::new();
+        push_isbn(&mut identifiers, "9780131103627", Scope::Book).unwrap();
+        push_isbn(&mut identifiers, "978-0-13-110362-7", Scope::Edition).unwrap();
+        assert_eq!(identifiers.len(), 1);
+        assert_eq!(identifiers[0].scope(), Scope::Book);
+    }
 }
 
 mod author_identity;

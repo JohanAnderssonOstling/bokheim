@@ -3,8 +3,8 @@
 //! Hosts own execution, transport, and resource lifetimes: native hosts run
 //! work on the blocking executor, browser hosts forward it to the CPU worker.
 //! Everything in this crate is portable. `client-platform-native` and
-//! `client-platform-web` provide the hosts; `library-backend` selects the
-//! process-wide default and keeps thin caller conveniences.
+//! `client-platform-web` provide the hosts; callers hold explicit host
+//! handles, and launchers may override the process-wide default.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,24 +13,38 @@ pub use client_runtime::BackendError;
 use std::sync::Arc;
 
 /// Byte reader handed to CPU work. A single trait keeps the object type legal;
-/// callers holding book-access readers wrap them in a local forwarder.
+/// holders of book-access readers convert them with [`as_cpu_reader`].
 pub trait CpuReader: std::io::Read + std::io::Seek + Send + Sync + 'static {}
 impl<T: std::io::Read + std::io::Seek + Send + Sync + 'static> CpuReader for T {}
 pub type BoxedCpuReader = Box<dyn CpuReader>;
 
+struct HostReader<R>(R);
+impl<R: std::io::Read> std::io::Read for HostReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+impl<R: std::io::Seek> std::io::Seek for HostReader<R> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+/// Adapt an owned book reader (for example a book-access reader) for CPU work.
+/// The opened reader owns its bytes; callers must not hold placement leases
+/// across the conversion.
+pub fn as_cpu_reader<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(reader: R) -> BoxedCpuReader {
+    Box::new(HostReader(reader))
+}
+
 #[derive(Clone, Copy)]
 pub struct InspectionCapabilities {
-    pub ocr: bool,
     pub mobi_pages: bool,
 }
 impl InspectionCapabilities {
-    pub fn supports(self, format: book_model::BookFormat, ocr: bool) -> bool {
+    pub fn supports(self, format: book_model::BookFormat) -> bool {
         use book_model::BookFormat;
-        if ocr {
-            self.ocr && matches!(format, BookFormat::Epub | BookFormat::Pdf)
-        } else {
-            matches!(format, BookFormat::Epub | BookFormat::Pdf) || (self.mobi_pages && format == BookFormat::Mobi)
-        }
+        matches!(format, BookFormat::Epub | BookFormat::Pdf) || (self.mobi_pages && format == BookFormat::Mobi)
     }
 }
 
@@ -40,7 +54,6 @@ pub enum BookTask {
     Inspect { source_name: String, format: book_model::BookFormat },
     SubjectPages { source_name: String, format: book_model::BookFormat },
     Thumbnail { extension: String },
-    SubjectOcr { source_name: String, format: book_model::BookFormat },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -139,16 +152,6 @@ pub fn execute_book_with_mobi<R: std::io::Read + std::io::Seek + Send + Sync + '
             .map_err(BackendError::operation)?;
             Ok(CpuResponse::SubjectEvidence(book.book))
         }
-        BookTask::SubjectOcr { source_name, format } => {
-            let path = std::path::Path::new(&source_name);
-            let book = match format {
-                book_model::BookFormat::Epub => book_inspection::inspect_epub_ocr_reader(path, reader),
-                book_model::BookFormat::Pdf => book_inspection::inspect_pdf_ocr_reader(path, reader).map(|b| b.metadata),
-                _ => return Err("OCR is only supported for EPUB and PDF".into()),
-            }
-            .map_err(BackendError::operation)?;
-            Ok(CpuResponse::SubjectEvidence(book.book))
-        }
         BookTask::Thumbnail { extension } => thumbnail::generate_thumbnail_versions_from_reader(&extension, reader).map(|versions| CpuResponse::Thumbnail(versions.map(ThumbnailBytes::from))).map_err(BackendError::operation),
     }
 }
@@ -204,7 +207,6 @@ macro_rules! book_operations {
 }
 book_operations! {
     SubjectPages { source_name: String, format: book_model::BookFormat } => book_model::BookMetadata, CpuResponse::SubjectEvidence(evidence) => evidence;
-    SubjectOcr { source_name: String, format: book_model::BookFormat } => book_model::BookMetadata, CpuResponse::SubjectEvidence(evidence) => evidence;
     Inspect { source_name: String, format: book_model::BookFormat } => book_metadata::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }

@@ -1347,7 +1347,7 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
         }
         // A checksum-valid whole value outranks the producer's scheme,
         // including EPUB 3 identifier-type refinements.
-        if let Some(isbn) = book_model::metadata_isbn(&identifier.value) {
+        if let Some(isbn) = book_model::from_metadata_value(&identifier.value) {
             identifier.value = isbn;
             identifier.scheme = IdentifierScheme::ISBN;
         } else if matches!(identifier.scheme, IdentifierScheme::ISBN) {
@@ -1393,8 +1393,8 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
 
 fn add_metadata_isbns(metadata: &mut EpubMetadata, values: impl IntoIterator<Item = String>) {
     for value in values {
-        let Some(isbn) = book_model::metadata_isbn(&value) else { continue };
-        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && book_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) {
+        let Some(isbn) = book_model::from_metadata_value(&value) else { continue };
+        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && book_model::from_metadata_value(&id.value).as_ref() == Some(&isbn)) {
             continue;
         }
         metadata.identifiers.push(EpubIdentifier { value: isbn, scheme: IdentifierScheme::ISBN, identifier_types: Vec::new() });

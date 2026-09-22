@@ -1,7 +1,7 @@
 use super::error::SyncError;
 use super::error::SyncResult;
-use super::transfer::{TransferOrigin, TransferQueue};
 use account_client::ServerUrl;
+use asset_transfer::{TransferOrigin, TransferQueue};
 use library_database::Database;
 use library_files::asset_store::AssetStore;
 use library_replica::TransferJobKind;
@@ -48,9 +48,9 @@ pub struct LibrarySyncConfig {
     pub(crate) credentials: library_runtime::account::SharedSyncCredentials,
     pub(crate) account: Option<library_runtime::account::LibraryAccount>,
     pub(crate) notification_interest: NotificationInterest,
+    pub(crate) cpu: std::sync::Arc<dyn cpu_host::CpuHost>,
 }
 
-#[derive(Debug)]
 pub struct LibrarySync {
     pub(super) asset_storage_enabled: Arc<AtomicBool>,
     pub(super) assets: AssetStore,
@@ -64,6 +64,7 @@ pub struct LibrarySync {
     pub(super) account: Option<library_runtime::account::LibraryAccount>,
     pub(super) notification_interest: NotificationInterest,
     pub(super) transfer_queue: Arc<TransferQueue>,
+    pub(super) cpu: std::sync::Arc<dyn cpu_host::CpuHost>,
     sync_gate: tokio::sync::Mutex<()>,
     asset_gate: tokio::sync::Mutex<()>,
     pub(crate) registration_gate: tokio::sync::Mutex<()>,
@@ -136,6 +137,7 @@ impl LibrarySync {
             account: config.account,
             notification_interest: config.notification_interest,
             transfer_queue,
+            cpu: config.cpu,
             sync_gate: tokio::sync::Mutex::new(()),
             asset_gate: tokio::sync::Mutex::new(()),
             registration_gate: tokio::sync::Mutex::new(()),
@@ -344,8 +346,8 @@ impl LibrarySync {
 
     /// Session hands the worker its library file: after this call every
     /// transfer runs on snapshots and commits, never on the session handle.
-    pub(crate) fn transfer_worker(&self) -> super::transfer::TransferWorker {
-        super::transfer::TransferWorker {
+    pub(crate) fn transfer_worker(&self) -> asset_transfer::transfer::TransferWorker {
+        asset_transfer::transfer::TransferWorker {
             asset_storage_enabled: self.asset_storage_enabled.clone(),
             assets: self.assets.clone(),
             http_client: self.http_client.clone(),
@@ -357,6 +359,7 @@ impl LibrarySync {
             notification_interest: self.notification_interest.clone(),
             availability_changed: self.availability_changed.clone(),
             db_path: self.db_path.clone(),
+            cpu: self.cpu.clone(),
             #[cfg(target_arch = "wasm32")]
             progress_key: None,
         }

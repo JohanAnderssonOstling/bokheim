@@ -57,7 +57,8 @@ fn abduction_and_kidnapping_do_not_absorb_intervening_offenses() {
         matches(code, 52571);
     }
     matches("HV6594", 52573); // Stalking.
-    matches("HV6571-HV6604", 52568); // Whole interval needs the broader crimes subject.
+                              // Printed dash intervals are below the coverage threshold: rejected, not expanded.
+    assert!(taxonomy().matching_concept_ids("lcc", "HV6571-HV6604").is_empty());
 }
 
 #[test]
@@ -90,7 +91,6 @@ fn substantive_law_is_not_misclassified_as_specialized_procedure() {
         ("K1571", 13314),
         ("K1577.5", 13314),
         ("KJC2655", 13314),
-        ("K3661-K3674", 5299),
         ("KJC4413", 5317), // General public law is outside court procedure.
         ("KJC4420", 5643),
         ("KJC4431", 5643),

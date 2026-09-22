@@ -1,4 +1,4 @@
-use super::transfer::TransferError;
+use asset_transfer::TransferError;
 use library_database::DatabaseError;
 
 pub(crate) type SyncResult<T> = Result<T, SyncError>;

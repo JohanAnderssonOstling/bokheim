@@ -29,7 +29,8 @@ impl LibrarySession {
         // asset workers borrow it through the owner; their futures stay
         // local to their tasks, so no sharing primitive is needed.
         let database = Arc::new(Database::open(&spec.config.database_locator)?);
-        let assets = open_assets(&spec.config.root, &spec.config.database_locator)?;
+        let cpu = crate::cpu_host();
+        let assets = open_assets(&spec.config.root, &spec.config.database_locator, &cpu)?;
         let transfer_history_path = history_path(&spec.config.root, &spec.config.database_locator);
         // `Database::open` already configured the connection (pragmas, sync
         // functions) internally.
@@ -41,7 +42,7 @@ impl LibrarySession {
         let sync = Arc::new(LibrarySync::new(LibrarySyncConfig {
             database_path: spec.config.database_locator.clone().into(),
             account: Some(spec.account.clone()),
-            transfer_queue: Arc::new(crate::sync::transfer::queue_with_history(&database, transfer_history_path)),
+            transfer_queue: Arc::new(library_runtime::transfer_history::queue_with_history(&database, transfer_history_path)),
             assets: assets.clone(),
             replica_id,
             server_url: spec.account.current().map_err(BackendError::operation)?.map(|session| session.server_url().clone()).unwrap_or(default_sync_server_url),
@@ -49,10 +50,11 @@ impl LibrarySession {
             event_tx: Some(event_tx.clone()),
             credentials: spec.account.credentials(),
             notification_interest: spec.notification_interest,
+            cpu: cpu.clone(),
         }));
         sync.set_asset_storage_enabled(spec.config.asset_storage_enabled);
         let metadata = metadata_client::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?;
-        let library = Self::from_parts(spec.config.id, database, assets, metadata, event_tx, event_rx, scanner).with_sync(sync).with_remote_changes(spec.remote_changes);
+        let library = Self::from_parts(spec.config.id, database, assets, metadata, event_tx, event_rx, scanner, cpu).with_sync(sync).with_remote_changes(spec.remote_changes);
         // The initial scan (if needed) is triggered by the caller after the
         // actor spawns: the scanner now does async inspection work, and this
         // constructor runs synchronously on the library's blocking-open path,
@@ -62,13 +64,13 @@ impl LibrarySession {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn open_assets(root: &str, database_locator: &str) -> Result<AssetStore, BackendError> {
+fn open_assets(root: &str, database_locator: &str, _cpu: &std::sync::Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, BackendError> {
     Ok(crate::asset_store::open(root).map_err(BackendError::operation)?.with_database_path(database_locator.into()))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn open_assets(root: &str, _database_locator: &str) -> Result<AssetStore, BackendError> {
-    Ok(crate::asset_store::open(root).map_err(BackendError::operation)?)
+fn open_assets(root: &str, _database_locator: &str, cpu: &std::sync::Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, BackendError> {
+    Ok(crate::asset_store::open(root, cpu.clone()).map_err(BackendError::operation)?)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

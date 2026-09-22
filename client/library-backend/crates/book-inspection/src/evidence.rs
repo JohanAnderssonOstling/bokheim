@@ -1,6 +1,6 @@
 //! Network-free bibliographic evidence rules shared by device and authority ingestion.
 //! A checksum is necessary, but never sufficient, to identify the current book.
-use book_model::{canonical_isbn, BookRecord, BookSubject, Identifier, Scheme, Scope};
+use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -17,8 +17,7 @@ fn isbn_pattern() -> &'static Regex {
 }
 
 fn complete_isbn(value: &str) -> Option<String> {
-    let raw: String = value.chars().filter(|c| !c.is_whitespace()).map(|c| if matches!(c, '–' | '‐' | '‑') { '-' } else { c }).collect();
-    canonical_isbn(&raw).filter(|isbn| (isbn.len() == 10 || isbn.starts_with("978") || isbn.starts_with("979")) && isbn != "0000000000")
+    book_model::from_content_candidate(value)
 }
 
 fn number_run_isbns(value: &str) -> Vec<String> {
@@ -157,7 +156,7 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
     out
 }
 
-/// OCR and text use the same candidate extraction rules.
+/// Extract identifier evidence from image-derived text.
 pub fn inspect_isbn_image(book: &BookRecord, location: &str, text: &str) -> SectionEvidence {
     inspect_section(book, location, text)
 }
@@ -168,13 +167,10 @@ pub fn usable_lcc(code: &str) -> bool {
     subject_projection::unified_lcc_has_numeric_coverage(code) && !subject_projection::unified_lcc_match_report(code).assignments.is_empty()
 }
 
-fn promotable_lcc(section: &SectionEvidence, code: &str) -> bool {
-    // In the colour-page smoke test OCR turned `.S76` into `.576`, yielding
-    // a different, plausible class number. Keep uncertain OCR codes as evidence
-    // and let the checksum-validated ISBN resolve the subject instead.
+fn promotable_lcc(_section: &SectionEvidence, code: &str) -> bool {
     static CUTTER: OnceLock<Regex> = OnceLock::new();
     let has_cutter = CUTTER.get_or_init(|| Regex::new(r"\.[A-Z][0-9]").unwrap());
-    usable_lcc(code) && (!section.location.contains(":ocr:") || has_cutter.is_match(code))
+    usable_lcc(code) && has_cutter.is_match(code)
 }
 
 /// Promote only locally established evidence. Every accepted ISBN becomes a
@@ -222,7 +218,7 @@ pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], forma
     let mut related_isbns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for section in evidence.iter().filter(|e| e.accepted).take(32) {
         for candidate in &section.isbns {
-            if let Some(isbn) = canonical_isbn(&candidate.isbn) {
+            if let Some(isbn) = book_model::from_content_candidate(&candidate.isbn) {
                 related_isbns.insert(isbn);
             }
         }
@@ -473,7 +469,7 @@ mod tests {
     #[test]
     fn isbn_candidates_do_not_require_a_page_kind() {
         let b = book("damaged title");
-        let strip = inspect_isbn_image(&b, "epub:ocr:copyright.png", "ISBN 0-19-285458-5");
+        let strip = inspect_isbn_image(&b, "epub:image:copyright.png", "ISBN 0-19-285458-5");
         assert_eq!(strip.isbns[0].isbn, "0192854585");
         let cover = inspect_isbn_image(&b, "pdf:page:127:back-cover", "A remarkable book.\nISBN 0-9613921-1-8");
         assert_eq!(cover.isbns[0].isbn, "0961392118");
@@ -489,9 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn ocr_decimal_in_place_of_cutter_does_not_override_subjects() {
+    fn image_text_decimal_in_place_of_cutter_does_not_override_subjects() {
         let mut b = book("Color Design Workbook");
-        let e = inspect_section(&b, "pdf:ocr:page:4", "Copyright 2006\nISBN 1-59253-192-X\nNC1000.576 2006");
+        let e = inspect_section(&b, "pdf:image:page:4", "Copyright 2006\nISBN 1-59253-192-X\nNC1000.576 2006");
         assert_eq!(e.lcc, ["NC1000.576 2006"]);
         apply_evidence(&mut b, &[e], "pdf");
         assert!(b.book.subjects.is_empty());

@@ -66,45 +66,13 @@ pub(super) fn inspect(provider: &EpubProvider, book: &BookRecord) -> Vec<Section
     sections
 }
 
-/// Select bibliographic images before the bounded front/back fallback. TOC
-/// copyright targets remain eligible even when they are deep in the spine.
-pub(super) fn ocr_images(provider: &EpubProvider) -> Vec<String> {
-    let uris = provider.document_uris().unwrap_or_default();
-    let mut links = BTreeMap::new();
-    if let Ok(Some(toc)) = provider.toc() {
-        toc_links(&toc, &mut links);
-    }
-    let mut selected = links.iter().filter(|(_, anchors)| anchors.values().any(|v| *v)).map(|(uri, _)| uri.clone()).take(32).collect::<Vec<_>>();
-    for (index, uri) in uris.iter().enumerate() {
-        if (index < evidence::EDGE_SECTIONS || index + evidence::EDGE_SECTIONS >= uris.len()) && !selected.contains(uri) && selected.len() < 32 {
-            selected.push(uri.clone());
-        }
-    }
-    let mut images = Vec::new();
-    for uri in selected {
-        let anchors = links.get(&uri).cloned().unwrap_or_default();
-        if let Ok(found) = provider.with_document_reader(&uri, SCAN_BYTES, |reader| ranked_images(reader, &uri, &anchors)) {
-            images.extend(found);
-        }
-    }
-    images.sort_by_key(|(_, priority)| !*priority);
-    let mut result = Vec::new();
-    for (path, _) in images {
-        if !result.contains(&path) {
-            result.push(path);
-        }
-        if result.len() == 32 {
-            break;
-        }
-    }
-    result
-}
-
+#[allow(dead_code)]
 fn is_cover_image(path: &str) -> bool {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase().contains("cover")
 }
 
+#[allow(dead_code)]
 fn ranked_images(reader: &mut dyn Read, uri: &str, anchors: &BTreeMap<String, bool>) -> io::Result<Vec<(String, bool)>> {
     let mut xml = Reader::from_reader(BufReader::new(reader));
     xml.expand_empty_elements(true);
@@ -315,32 +283,6 @@ mod tests {
     fn inspect(html: &str, anchors: &[(&str, bool)]) -> Vec<SectionEvidence> {
         let book = BookRecord { title: "wrong metadata".into(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() };
         scan(&mut html.as_bytes(), &book, "book.xhtml", &anchors.iter().map(|(k, v)| (k.to_string(), *v)).collect()).unwrap()
-    }
-    #[test]
-    fn toc_copyright_outside_edges_precedes_front_matter_images() {
-        let provider = EpubProvider::try_from_reader(std::io::Cursor::new(include_bytes!("../tests/fixtures/ocr-image-priority.epub").to_vec())).unwrap();
-        assert_eq!(ocr_images(&provider), ["isbn.png", "front.png"]);
-    }
-
-    #[test]
-    fn ocr_prefers_copyright_fragments_and_never_selects_cover_files() {
-        let html = "<html><body><img src='cover.jpg'/><a id='intro'/><img src='portrait.png'/><a id='rights'/><img src='BACK-COVER.JPG'/><img src='isbn.png'/><a id='chapter'/><img src='diagram.png'/></body></html>";
-        let anchors = [("intro".into(), false), ("rights".into(), true), ("chapter".into(), false)].into_iter().collect();
-        let found = ranked_images(&mut html.as_bytes(), "OPS/index.html", &anchors).unwrap();
-        assert_eq!(found, vec![("OPS/portrait.png".into(), false), ("OPS/isbn.png".into(), true), ("OPS/diagram.png".into(), false)]);
-        for name in ["cover.jpg", "images/Cover_1.PNG", "images/back-cover.jpeg", "images/coverimage.svg"] {
-            assert!(is_cover_image(name));
-        }
-        assert!(!is_cover_image("cover-directory/isbn.png"));
-    }
-
-    #[test]
-    fn copyright_text_and_semantics_prioritize_images_without_a_toc() {
-        for marker in ["<p>Copyright 2007</p>", "<section epub:type='copyright-page'>"] {
-            let html = format!("<html><body>{marker}<img src='isbn.png'/><h2>Contents</h2><img src='map.png'/></body></html>");
-            let found = ranked_images(&mut html.as_bytes(), "book.xhtml", &BTreeMap::new()).unwrap();
-            assert_eq!(found, vec![("isbn.png".into(), true), ("map.png".into(), false)]);
-        }
     }
     #[test]
     fn generic_index_filename_does_not_discard_copyright_isbns() {

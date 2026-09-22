@@ -1,1 +1,0 @@
-SELECT SUM(is_downloaded) FROM book_dir

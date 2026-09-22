@@ -390,11 +390,13 @@ dependencies = [
  "client-platform-runtime",
  "client-platform-web",
  "client-runtime",
+ "cpu-host",
  "env_logger",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.4.2",
+ "import-pipeline",
  "js-sys",
  "library-backend",
  "library-registry",
@@ -405,6 +407,7 @@ dependencies = [
  "sync-common",
  "tempfile",
  "test-support",
+ "thumbnail",
  "tokio",
  "uuid",
  "wasm-bindgen",
@@ -545,15 +548,21 @@ dependencies = [
 name = "asset-transfer"
 version = "0.1.0"
 dependencies = [
+ "account-client",
+ "async-channel",
  "axum",
  "blake3",
  "book-access",
+ "book-identity",
  "book-metadata",
  "book-model",
+ "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
  "client-runtime",
+ "cpu-host",
  "futures-util",
+ "image 0.24.9",
  "library-database",
  "library-files",
  "library-model",
@@ -3014,6 +3023,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "filesystem-scanner"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "book-identity",
+ "book-inspection",
+ "book-model",
+ "client-platform-runtime",
+ "client-runtime",
+ "cpu-host",
+ "futures-util",
+ "library-database",
+ "library-files",
+ "log",
+ "lopdf",
+ "sync-common",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5435,6 +5465,7 @@ dependencies = [
  "client-runtime",
  "cpu-host",
  "crossbeam-channel",
+ "filesystem-scanner",
  "futures-channel",
  "futures-util",
  "getrandom 0.3.4",
@@ -10248,6 +10279,15 @@ name = "taxonomy-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "taxonomy-curation"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "rusqlite",
+ "subject-projection",
 ]
 
 [[package]]

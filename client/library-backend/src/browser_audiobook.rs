@@ -1,17 +1,16 @@
 //! Local media retains a storage lease; remote media uses expiring direct URLs.
 use crate::library::PlaybackLocation;
 pub use crate::library::{PlaybackMetadata, PlaybackSource};
-use crate::worker_cpu::{BookOperation, CpuRequest, Inspect};
 use crate::{ContentHash, LibrarySession};
+use cpu_host::{BookOperation, CpuRequest, Inspect};
 use wasm_bindgen::prelude::*;
 
 use client_platform_web::transport::range::Server as RangeServer;
-use client_platform_web::transport::resources::{AsyncCallback, BlobUrl};
+use client_platform_web::transport::resources::{AsyncCallback, LocalMediaLease};
 
 /// Dropped by the worker when its owning tab cancels the subscription or disconnects.
 pub struct PlaybackLease {
-    _url: Option<BlobUrl>,
-    _file: Option<client_platform_web::web_storage::FileReader>,
+    _local: Option<LocalMediaLease>,
 }
 pub struct BrowserAudiobook {
     pub metadata: PlaybackMetadata,
@@ -79,12 +78,17 @@ pub(crate) async fn prepare_with_file(library: &LibrarySession, hash: ContentHas
     // Browser playback currently runs without artwork. In particular, opening
     // a remote book must not wait on optional thumbnail extraction or storage.
     let cover = Vec::new();
-    let url = if let Some(file) = &file { Some(BlobUrl::new(&file.upload_file().await?).map_err(|e| format!("Could not open audiobook file: {e:?}"))?) } else { None };
+    let (url, local_lease) = if let Some(file) = file {
+        let (url, lease) = client_platform_web::transport::resources::local_media_lease(file).await.map_err(crate::BackendError::operation)?;
+        (Some(url), Some(lease))
+    } else {
+        (None, None)
+    };
     let location = match &url {
-        Some(url) => PlaybackLocation::LocalUrl(url.url().to_owned()),
+        Some(url) => PlaybackLocation::LocalUrl(url.clone()),
         None => PlaybackLocation::Direct(library.direct_audio_source(hash).await?),
     };
-    let lease = PlaybackLease { _url: url, _file: file };
+    let lease = PlaybackLease { _local: local_lease };
     Ok((PlaybackSource { metadata: PlaybackMetadata { title, author, narrator, duration_ms, chapters, cover }, location }, lease))
 }
 
@@ -117,7 +121,7 @@ async fn submit_book<C: BookOperation>(operation: C, reader: crate::BoxedBookRea
     C::decode(rmp_serde::from_slice(&response).map_err(crate::BackendError::operation)?)
 }
 
-async fn submit_source<C: crate::worker_cpu::Operation>(operation: C, source: JsValue) -> Result<C::Reply, crate::BackendError> {
+async fn submit_source<C: cpu_host::Operation>(operation: C, source: JsValue) -> Result<C::Reply, crate::BackendError> {
     let bytes = rmp_serde::to_vec_named(&operation.request()).map_err(crate::BackendError::operation)?;
     let response = client_platform_web::transport::cpu_client::request_with_source(bytes, source).map_err(crate::BackendError::operation)?.await.map_err(crate::BackendError::operation)?;
     C::decode(rmp_serde::from_slice(&response).map_err(crate::BackendError::operation)?)

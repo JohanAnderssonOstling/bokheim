@@ -16,6 +16,8 @@ kobo = ["client-platform-kobo/device"]
 
 [dependencies]
 client-runtime = { path = "../client-runtime" }
+cpu-host = { path = "../library-backend/crates/cpu-host" }
+thumbnail = { path = "../library-backend/crates/thumbnail" }
 client-platform-desktop = { path = "crates/platform-desktop" }
 client-platform-runtime = { path = "../platforms/runtime" }
 account-contract = { path = "../../shared/account-contract" }

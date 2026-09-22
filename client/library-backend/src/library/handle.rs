@@ -40,6 +40,7 @@ pub struct LibrarySession {
     /// library path merely to calculate a settings total.
     // Its Drop implementation stops and joins the scanner threads.
     pub(super) _scanner: Arc<LibraryScanner>,
+    pub(super) cpu: std::sync::Arc<dyn cpu_host::CpuHost>,
     filesystem_scanning: std::cell::Cell<bool>,
     pub(super) file_work_error: std::cell::RefCell<Option<String>>,
 }
@@ -50,9 +51,9 @@ type ScanResult = Result<Option<library_database::ScanApplyResult>, crate::Backe
 #[cfg(not(target_arch = "wasm32"))]
 async fn publish_scan_batches(session: std::rc::Rc<LibrarySession>, mut snapshot: library_database::ScanSnapshot, mut discovery: library_database::FilesystemScan) -> ScanResult {
     let mut readable = discovery.readable;
-    for files in discovery.files.chunks(crate::scanner::filesystem_scan::PUBLISH_BATCH_SIZE) {
+    for files in discovery.files.chunks(filesystem_scanner::filesystem_scan::PUBLISH_BATCH_SIZE) {
         let chunk = library_database::FilesystemScan { files: files.to_vec(), readable: discovery.readable, ..Default::default() };
-        let inspected = session._scanner.inspect(&chunk, &snapshot).await;
+        let inspected = session._scanner.inspect(&chunk, &snapshot, &session.cpu).await;
         readable &= inspected.readable;
         if !inspected.books.is_empty() || !inspected.failures.is_empty() {
             let result = session.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, false).map_err(crate::BackendError::operation)?;
@@ -95,7 +96,7 @@ struct LibraryActor {
     /// The actor retains them for the lifetime of the page subscription; only
     /// a Send cancellation guard leaves the actor.
     #[cfg(target_arch = "wasm32")]
-    books: std::collections::HashMap<u64, super::browser_book::BookLease>,
+    books: std::collections::HashMap<u64, super::book::browser::BookLease>,
     #[cfg(target_arch = "wasm32")]
     next_book: u64,
 }
@@ -840,7 +841,10 @@ impl LibrarySession {
         }
     }
 
-    pub(crate) fn from_parts(id: LibraryId, db: std::sync::Arc<Database>, assets: AssetStore, metadata: metadata_client::MetadataClient, event_tx: LibraryEventSender, event_rx: LibraryEventReceiver, scanner: LibraryScanner) -> Self {
+    pub(crate) fn from_parts(
+        id: LibraryId, db: std::sync::Arc<Database>, assets: AssetStore, metadata: metadata_client::MetadataClient, event_tx: LibraryEventSender, event_rx: LibraryEventReceiver, scanner: LibraryScanner,
+        cpu: std::sync::Arc<dyn cpu_host::CpuHost>,
+    ) -> Self {
         let (sync_wake, sync_requests) = library_runtime::scheduler::SyncScheduler::new();
         let (asset_wake, asset_requests) = library_runtime::scheduler::SyncScheduler::new();
         Self {
@@ -860,6 +864,7 @@ impl LibrarySession {
             asset_requests: Some(asset_requests),
             remote_changes: None,
             _scanner: Arc::new(scanner),
+            cpu,
             filesystem_scanning: std::cell::Cell::new(false),
             file_work_error: Default::default(),
         }
@@ -1192,7 +1197,7 @@ impl LibrarySession {
         };
         self.emit(LibraryEvent::ScanStarted);
         let discovery = self._scanner.discover(&snapshot);
-        let inspected = self._scanner.inspect(&discovery, &snapshot).await;
+        let inspected = self._scanner.inspect(&discovery, &snapshot, &self.cpu).await;
         match self.db.apply_filesystem_scan(&snapshot, &discovery, &inspected) {
             Ok(library_database::ScanApplyResult::Applied) => self.emit(LibraryEvent::ContentsChanged),
             Ok(library_database::ScanApplyResult::Stale) => log::debug!("filesystem scan became stale before apply"),
@@ -1285,6 +1290,7 @@ mod background_scan_tests {
             events,
             receiver,
             LibraryScanner::from_root(root.to_str().unwrap()).unwrap(),
+            crate::default_cpu_host(),
         );
         LibraryActor::new(session)
     }
@@ -1403,7 +1409,7 @@ mod background_scan_tests {
         let assets = actor.session.asset_wake.clone();
         actor.handle_command(LibraryActorCommand::Ui { command: LibraryCommand::BookCount, reply }, &sync, &assets);
         let count: usize = result.recv().await.unwrap().unwrap().take().unwrap();
-        assert_eq!(count, crate::scanner::filesystem_scan::PUBLISH_BATCH_SIZE);
+        assert_eq!(count, filesystem_scanner::filesystem_scan::PUBLISH_BATCH_SIZE);
         assert!(actor.session.scanner_running());
         let result = actor.scan_job.task.as_mut().unwrap().await;
         actor.finish_scan(result);

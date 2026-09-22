@@ -24,7 +24,7 @@ impl LibrarySession {
         let mut unresolved = Vec::with_capacity(candidates.len());
         let mut filename_outcomes: Vec<library_database::EditionIdentityOutcome> = Vec::new();
         for candidate in candidates {
-            if let Some(isbn) = book_metadata::isbn_from_filename_like_title(&candidate.title) {
+            if let Some(isbn) = book_enrichment::filename_isbn::from_filename_single(&candidate.title) {
                 filename_outcomes.push(library_database::EditionIdentityOutcome {
                     content_hash: candidate.content_hash,
                     provider: OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER.to_owned(),

@@ -28,9 +28,6 @@ mod book;
 #[cfg(target_arch = "wasm32")]
 #[path = "../browser_audiobook.rs"]
 pub mod browser_audiobook;
-#[cfg(target_arch = "wasm32")]
-#[path = "../browser_book.rs"]
-pub mod browser_book;
 #[cfg(not(target_arch = "wasm32"))]
 mod directory_import;
 mod enrichment;

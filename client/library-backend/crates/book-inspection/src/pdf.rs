@@ -1,5 +1,5 @@
 use crate::{author_from_field, author_names, fallback_metadata, MetadataResult};
-use book_model::{canonical_doi, canonical_isbn, canonical_uuid, BookDate, BookMetadata, BookRecord, BookSubject, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
+use book_model::{canonical_doi, canonical_uuid, BookDate, BookMetadata, BookRecord, BookSubject, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
 use lopdf::{Dictionary, Document};
 use roxmltree::{Document as XmlDocument, Node};
 use std::collections::HashSet;
@@ -41,14 +41,10 @@ pub fn inspect_pdf_reader<R: Read + Seek + 'static>(source_name: &Path, mut read
 }
 
 pub fn inspect_pdf_pages_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_pages_mode(source_name, reader, false)
+    inspect_pdf_pages_mode(source_name, reader)
 }
 
-pub fn inspect_pdf_ocr_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_pages_mode(source_name, reader, true)
-}
-
-fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut reader: R, ocr: bool) -> MetadataResult<InspectedPdf> {
+fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
     let mut inspected = super::pdf_ranges::load_edges(&mut reader, EARLY_TEXT_PAGES).and_then(|document| inspect_pdf_document(source_name, document));
     let original_ids = inspected.as_mut().map(|i| std::mem::take(&mut i.metadata.book.identifiers)).unwrap_or_default();
     {
@@ -68,40 +64,7 @@ fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut read
                 }
             })
             .collect::<Vec<_>>();
-        if !ocr {
-            crate::evidence::apply_evidence(&mut inspected.metadata, &evidence, "pdf");
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if ocr {
-            if let Some(mut session) = crate::native_ocr::Session::start(&inspected.metadata) {
-                if session.available() {
-                    let mut selected = Vec::new();
-                    for page in [2, 3, 4, 5, 6, count, count.saturating_sub(1), 1, 7, 8, count.saturating_sub(2), count.saturating_sub(3)] {
-                        if page > 0 && page <= count && !selected.contains(&page) {
-                            selected.push(page);
-                        }
-                    }
-                    let mut source = reader.clone();
-                    source.seek(std::io::SeekFrom::Start(0))?;
-                    let rendered = pdf_reader_core::inspect_page_images(source, &selected, |page, image| {
-                        if !session.can_continue() {
-                            return false;
-                        }
-                        let pixels = crate::native_ocr::ppm(image.pixel_width(), image.pixel_height(), image.rgba().chunks_exact(4).flat_map(|p| p[..3].iter().copied()));
-                        if let Some(text) = session.recognize(&pixels, false) {
-                            let suffix = if page >= count.saturating_sub(1) { ":back-cover" } else { "" };
-                            let location = format!("pdf:ocr:page:{page}{suffix}");
-                            let evidence = crate::native_ocr::inspect_image_text(&inspected.metadata, &location, &text);
-                            crate::evidence::apply_evidence(&mut inspected.metadata, &[evidence], "pdf");
-                        }
-                        session.can_continue() && crate::native_ocr::needs_isbn(&inspected.metadata)
-                    });
-                    if rendered.is_err() {
-                        session.render_failed();
-                    }
-                }
-            }
-        }
+        crate::evidence::apply_evidence(&mut inspected.metadata, &evidence, "pdf");
         inspected.metadata.book.identifiers.extend(original_ids);
         Ok(inspected)
     }
@@ -164,7 +127,7 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
     }
 
     for original in title_values.iter().map(|value| value.text.as_str()).chain(info_title.as_deref()) {
-        book_enrichment::title_isbn::record(original, &mut book)?;
+        book_enrichment::filename_isbn::record(original, &mut book)?;
     }
 
     // Check complete dictionary/XMP property values regardless of their names.
@@ -186,10 +149,8 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         }
     }
     for value in values {
-        if let Some(isbn) = book_model::metadata_isbn(&value) {
-            if let Ok(id) = Identifier::new(isbn, Scheme::Isbn, Scope::Book) {
-                book.identifiers.push(id);
-            }
+        if let Some(isbn) = book_model::from_metadata_value(&value) {
+            book_model::push_isbn(&mut book.identifiers, isbn, Scope::Book)?;
         }
     }
 
@@ -292,8 +253,8 @@ fn xmp_identifiers(document: &XmlDocument<'_>) -> Vec<Identifier> {
 fn book_identifier(value: XmpValue) -> Option<Identifier> {
     let declared = value.scheme.as_deref().unwrap_or_default().to_ascii_lowercase();
     let trimmed = strip_identifier_label(&value.text);
-    let (value, scheme) = if declared.contains("isbn") || canonical_isbn(trimmed).is_some() {
-        (canonical_isbn(trimmed)?, Scheme::Isbn)
+    let (value, scheme) = if declared.contains("isbn") || book_model::from_metadata_value(trimmed).is_some() {
+        (book_model::from_metadata_value(trimmed)?, Scheme::Isbn)
     } else if declared.contains("doi") || canonical_doi(trimmed).is_some() {
         (canonical_doi(trimmed)?, Scheme::Doi)
     } else if declared.contains("uuid") || canonical_uuid(trimmed).is_some() {
@@ -404,7 +365,7 @@ mod tests {
             document.trailer.set("Info", info);
             let inspected = inspect_pdf_document(Path::new("Algorithms_ A Guide (Jeff Erickson) (2019).pdf"), document).unwrap();
             assert_eq!(inspected.metadata.title, "Algorithms");
-            let expected = book_enrichment::title_isbn::extract(title);
+            let expected = book_enrichment::filename_isbn::from_filename(title);
             assert_eq!(inspected.metadata.book.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).map(|id| id.value().to_owned()).collect::<Vec<_>>(), expected);
             assert_eq!(inspected.metadata.subtitle(), Some("A Guide"));
             assert_eq!(inspected.metadata.contributors[0].name(), "Jeff Erickson");
@@ -487,7 +448,7 @@ mod tests {
     }
 }
 
-/// Read dictionary and XMP values without page text or OCR.
+/// Read dictionary and XMP values without page text.
 pub fn inspect_pdf_metadata(path: &Path) -> MetadataResult<InspectedPdf> {
     inspect_pdf_document(path, super::pdf_ranges::metadata(std::fs::File::open(path)?)?)
 }

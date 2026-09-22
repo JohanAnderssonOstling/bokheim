@@ -1,7 +1,7 @@
 //! Portable EPUB and PDF metadata inspection.
 
 use book_model::{
-    canonical_isbn, marc_relator_code_from_metadata_role, BookDate, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
+    marc_relator_code_from_metadata_role, BookDate, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
 };
 use epub_provider::EpubProvider;
 use std::io::{Read, Seek};
@@ -16,13 +16,22 @@ mod mobi;
 #[cfg(feature = "mobi")]
 pub use mobi::{inspect_mobi_metadata_reader, inspect_mobi_pages_reader};
 mod epub_evidence;
-#[cfg(not(target_arch = "wasm32"))]
-mod native_ocr;
 pub use book_enrichment::related_isbn;
 pub use book_enrichment::title_identity::normalize_with_filename;
 mod pdf;
 mod pdf_ranges;
-pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_ocr_reader, inspect_pdf_pages_reader, inspect_pdf_reader, InspectedPdf};
+pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader, InspectedPdf};
+
+/// Inspection cache version for a format. Matches the extractor contract:
+/// EPUB and PDF evidence versions with the shared extractor, others are 1.
+/// Shared by explicit import and the filesystem scanner, which both cache
+/// results keyed on this value.
+pub fn inspection_version(format: BookFormat) -> i64 {
+    match format {
+        BookFormat::Epub | BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION),
+        _ => 1,
+    }
+}
 
 /// Reads PDF identity dictionaries without loading page or image streams.
 pub fn pdf_identity_document(reader: impl Read + Seek) -> MetadataResult<lopdf::Document> {
@@ -60,7 +69,7 @@ pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
 
-/// Cheap EPUB metadata only: no page evidence extraction or OCR.
+/// Cheap EPUB metadata only: no page evidence extraction.
 pub fn inspect_epub_metadata(path: &Path) -> MetadataResult<BookRecord> {
     epub_metadata_from_provider(path, &open_epub(path)?)
 }
@@ -268,7 +277,7 @@ fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Metadata
             // scheme, or attach an incorrect proprietary scheme. The value is
             // stronger evidence than that missing/mislabelled declaration.
             let mut value = identifier.value;
-            if let Some(isbn) = metadata_isbn(&value) {
+            if let Some(isbn) = from_metadata_value(&value) {
                 value = isbn;
                 if scheme != Scheme::Isbn {
                     scheme = Scheme::Isbn;
@@ -286,7 +295,7 @@ fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Metadata
         metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).map(contributor).collect::<Result<Vec<_>, _>>()?;
     let long_description = long_description(&metadata.properties);
     if let Some(isbn) = isbn_from_opf_path(provider.package_document_path()) {
-        push_epub_isbn(&mut identifiers, isbn)?;
+        book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
     }
     let title = if metadata.title.trim().is_empty() { fallback_metadata(path).title } else { metadata.title };
     let subtitle = metadata.alternate_titles.iter().find(|title| title.title_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("subtitle"))).map(|title| title.value.clone());
@@ -306,22 +315,14 @@ fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Metadata
     Ok(book)
 }
 
-use book_enrichment::metadata_isbn;
+use book_model::from_metadata_value;
 
 fn isbn_from_opf_path(path: &str) -> Option<String> {
     let file_name = path.rsplit('/').next()?;
     let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
     let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
     let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
-    canonical_isbn(stem)
-}
-
-fn push_epub_isbn(identifiers: &mut Vec<Identifier>, isbn: String) -> Result<(), BookMetadataError> {
-    if identifiers.iter().any(|identifier| identifier.scheme() == &Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) {
-        return Ok(());
-    }
-    identifiers.push(Identifier::new(isbn, Scheme::Isbn, Scope::Book)?);
-    Ok(())
+    book_enrichment::filename_isbn::from_filename_single(stem)
 }
 
 #[cfg(test)]
@@ -331,8 +332,7 @@ mod tests {
     #[test]
     fn page_inspection_without_images_yields_no_identifiers() {
         // The fixture has 32 text-only pages, identifier-free metadata, and
-        // no images, so neither page inspection nor the untriggered OCR
-        // stage has anything to promote.
+        // no images, so page inspection has nothing to promote.
         let bytes = include_bytes!("../tests/fixtures/ocr-image-priority.epub");
         let inspected = inspect_epub_pages_reader(Path::new("book.epub"), std::io::Cursor::new(bytes.to_vec())).unwrap();
         assert_eq!(inspected.title, "OCR priority fixture");
@@ -366,11 +366,11 @@ mod tests {
 
     #[test]
     fn malformed_identifier_wrapper_retains_only_complete_isbn_values() {
-        assert_eq!(metadata_isbn("urn:uuid:isbn 0-330-26272-6").as_deref(), Some("0330262726"));
-        assert_eq!(metadata_isbn("URN:UUID:ISBN: 0-330-26272-6").as_deref(), Some("0330262726"));
-        assert!(metadata_isbn("urn:uuid:12345678-1234-1234-1234-123456789abc").is_none());
-        assert!(metadata_isbn("https://example.org/0330262726").is_none());
-        assert!(metadata_isbn("urn:uuid:isbn 0-330-26272-7").is_none());
+        assert_eq!(from_metadata_value("urn:uuid:isbn 0-330-26272-6").as_deref(), Some("0330262726"));
+        assert_eq!(from_metadata_value("URN:UUID:ISBN: 0-330-26272-6").as_deref(), Some("0330262726"));
+        assert!(from_metadata_value("urn:uuid:12345678-1234-1234-1234-123456789abc").is_none());
+        assert!(from_metadata_value("https://example.org/0330262726").is_none());
+        assert!(from_metadata_value("urn:uuid:isbn 0-330-26272-7").is_none());
     }
 
     #[test]
@@ -401,7 +401,9 @@ mod tests {
     fn opf_filename_isbn_requires_a_valid_checksum() {
         assert_eq!(isbn_from_opf_path("OPS/9781501168697.opf").as_deref(), Some("9781501168697"));
         assert_eq!(isbn_from_opf_path("OPS/ISBN_978-1-5011-6869-7.OPF").as_deref(), Some("9781501168697"));
+        assert_eq!(isbn_from_opf_path("OPS/An excellent book 9781501168697.opf").as_deref(), Some("9781501168697"));
         assert_eq!(isbn_from_opf_path("OPS/9781501168698.opf"), None);
+        assert_eq!(isbn_from_opf_path("OPS/9781501168697 and 9780131103627.opf"), None);
         assert_eq!(isbn_from_opf_path("OPS/package.opf"), None);
     }
 }
@@ -419,23 +421,11 @@ fn inspect_epub_pages(provider: &EpubProvider, book: &mut BookRecord) {
 }
 
 /// Text-only fallback after metadata ISBN lookup produced no usable subject.
-/// File metadata is retained by the caller. OCR is a separate final stage.
 pub fn inspect_epub_pages_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<BookRecord> {
     let provider = EpubProvider::try_from_reader(reader)?;
     let mut book = epub_metadata_from_provider(source_name, &provider)?;
     book.book.identifiers.clear();
     inspect_epub_pages(&provider, &mut book);
-    Ok(book)
-}
-
-/// Explicit last-resort OCR. Earlier text/metadata ISBN misses must not suppress
-/// searching images for an additional ISBN. The caller merges evidence only.
-pub fn inspect_epub_ocr_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<BookRecord> {
-    let provider = EpubProvider::try_from_reader(reader)?;
-    let mut book = epub_metadata_from_provider(source_name, &provider)?;
-    book.book.identifiers.clear();
-    #[cfg(not(target_arch = "wasm32"))]
-    native_ocr::inspect_epub(&provider, &mut book);
     Ok(book)
 }
 

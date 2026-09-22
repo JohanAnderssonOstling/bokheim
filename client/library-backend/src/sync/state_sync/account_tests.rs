@@ -80,6 +80,7 @@ fn test_sync(root: &std::path::Path) -> TestSync {
         credentials: Arc::new(RwLock::new(None::<sync_transport::SyncCredentials>)),
         account: None,
         notification_interest: Default::default(),
+        cpu: crate::default_cpu_host(),
     });
     TestSync { sync, database }
 }

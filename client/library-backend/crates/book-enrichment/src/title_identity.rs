@@ -252,7 +252,7 @@ pub fn normalize_with_filename(metadata: &mut book_model::BookRecord, filename: 
     split_author_semicolons(&mut next)?;
     split_corroborated_comma_authors(&mut next, filename)?;
     let original_stem = std::path::Path::new(filename).file_stem().and_then(|stem| stem.to_str()).unwrap_or(filename);
-    super::title_isbn::record(&next.title, &mut next.book).map_err(|e| e.to_string())?;
+    super::filename_isbn::record(&next.title, &mut next.book).map_err(|e| e.to_string())?;
     super::filename_identifiers::record(original_stem, &mut next.book)?;
     if prefer_filename(&next, filename) {
         let stem = filename_title_stem(filename, &next.contributors);
@@ -284,14 +284,14 @@ pub fn normalize_with_filename(metadata: &mut book_model::BookRecord, filename: 
 pub fn normalize(metadata: &mut book_model::BookRecord) -> Result<(), String> {
     use book_model::{BookDate, Contributor, AUTHOR_MARC_RELATOR_CODE};
     split_author_semicolons(metadata)?;
-    super::title_isbn::record(&full_title(&metadata.title, metadata.subtitle()), &mut metadata.book).map_err(|e| e.to_string())?;
+    super::filename_isbn::record(&full_title(&metadata.title, metadata.subtitle()), &mut metadata.book).map_err(|e| e.to_string())?;
     if unusable_title(&full_title(&metadata.title, metadata.subtitle()), &metadata.contributors) {
         // Without a usable source filename, do not reinterpret technical junk
         // (for example the colon in a Windows path) as bibliographic fields.
         let original = full_title(&metadata.title, metadata.subtitle());
         if super::filename_identity::kindle_identifier_title(&original)
             || super::filename_identity::standard_title_placeholder(&original)
-            || !super::title_isbn::extract(&original).is_empty()
+            || !super::filename_isbn::from_filename(&original).is_empty()
             || original.trim().eq_ignore_ascii_case("true")
             || original.trim().to_ascii_lowercase().starts_with("oup_")
             || !super::filename_identity::unusable_title(&original)

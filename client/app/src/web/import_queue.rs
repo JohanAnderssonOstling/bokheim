@@ -3,7 +3,7 @@ use super::{field, object, Port};
 use js_sys::Array;
 #[cfg(feature = "web-runtime-tests")]
 use js_sys::{Object, Reflect};
-use library_backend::browser_import::queue::ImportJobs;
+use super::import_workflow::queue::ImportJobs;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::MessagePort;

@@ -5,9 +5,11 @@ use std::path::Path;
 
 fn split_lcc_range(selector: &str) -> Result<(&str, &str), String> {
     let (start, end) = selector.split_once("..").ok_or_else(|| format!("invalid LCC range {selector}"))?;
-    crate::lcc::lcc_endpoint(start, false).ok_or_else(|| format!("invalid LCC range start {start}"))?;
-    crate::lcc::lcc_endpoint(end, true).ok_or_else(|| format!("invalid LCC range end {end}"))?;
-    crate::lcc::lcc_span(&format!("{start}-{end}")).ok_or_else(|| format!("invalid LCC range {selector}"))?;
+    let start_ep = crate::lcc::lcc_endpoint(start, false).ok_or_else(|| format!("invalid LCC range start {start}"))?;
+    let end_ep = crate::lcc::lcc_endpoint(end, true).ok_or_else(|| format!("invalid LCC range end {end}"))?;
+    if crate::lcc::compare_lcc_key(&start_ep.letters, start_ep.number, &end_ep.letters, end_ep.number).is_gt() {
+        return Err(format!("invalid LCC range {selector}"));
+    }
     Ok((start, end))
 }
 
@@ -278,6 +280,7 @@ mod tests {
     }
 
     #[test]
+
     fn historical_boundary_corrections_work_for_read_only_and_writable_caches() {
         let mut db = Connection::open_in_memory().unwrap();
         let mut source = Connection::open_in_memory().unwrap();

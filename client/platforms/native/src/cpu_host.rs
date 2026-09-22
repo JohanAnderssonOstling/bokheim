@@ -14,7 +14,7 @@ impl Default for NativeHost {
 }
 impl CpuHost for NativeHost {
     fn capabilities(&self) -> InspectionCapabilities {
-        InspectionCapabilities { ocr: true, mobi_pages: true }
+        InspectionCapabilities { mobi_pages: true }
     }
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> executor::BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move { executor::run_blocking(move || cpu_host::execute_book_with_mobi(task, reader, cpu_host::local_mobi_pages)).await.map_err(BackendError::operation)? })

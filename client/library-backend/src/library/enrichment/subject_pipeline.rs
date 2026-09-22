@@ -94,7 +94,7 @@ impl LibrarySession {
                                 job.pipeline.finish_step();
                             }
                             SubjectStep::LookupIsbns(isbns) => {
-                                let exact_isbns = job.book.identifiers.iter().filter(|id| id.scheme() == &book_model::Scheme::Isbn).filter_map(|id| book_enrichment::metadata_isbn(id.value())).collect();
+                                let exact_isbns = job.book.identifiers.iter().filter(|id| id.scheme() == &book_model::Scheme::Isbn).filter_map(|id| book_model::from_metadata_value(id.value())).collect();
                                 let reference_isbns = book_enrichment::related_isbn::lookup_candidates(&job.book.identifiers).into_iter().collect();
                                 isbn_jobs.push(library_database::RichEnrichmentCandidate { content_hash: job.hash, isbns, exact_isbns, reference_isbns, classification_count: job.book.subjects.len() });
                                 stage_providers.insert(job.hash, OPEN_LIBRARY_RICH_PROVIDER);
@@ -107,26 +107,21 @@ impl LibrarySession {
                                 title_hashes.push(job.hash);
                                 stage_providers.insert(job.hash, OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER);
                             }
-                            step @ (SubjectStep::InspectPages | SubjectStep::InspectOcr) => {
-                                let ocr = matches!(step, SubjectStep::InspectOcr);
-                                let supported = crate::worker_cpu::inspection_capabilities().supports(job.format, ocr);
+                            SubjectStep::InspectPages => {
+                                let supported = self.cpu.capabilities().supports(job.format);
                                 if !supported {
                                     job.pipeline.finish_step();
                                     continue;
                                 }
-                                page_jobs.push((job.hash, job.title.clone(), job.format, ocr));
+                                page_jobs.push((job.hash, job.title.clone(), job.format));
                             }
                         }
                     }
-                    let mut pages = stream::iter(page_jobs.into_iter().map(|(hash, title, format, ocr)| async move {
+                    let mut pages = stream::iter(page_jobs.into_iter().map(|(hash, title, format)| async move {
                         let outcome = async {
                             let _lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
                             let Some(reader) = self.assets.prepare_reader(crate::BlobKind::Book, &hash).await.map_err(BackendError::operation)? else { return Ok(None) };
-                            let result = if ocr {
-                                crate::worker_cpu::submit_book(crate::worker_cpu::SubjectOcr { source_name: title, format }, reader).await
-                            } else {
-                                crate::worker_cpu::submit_book(crate::worker_cpu::SubjectPages { source_name: title, format }, reader).await
-                            };
+                            let result = cpu_host::submit_book(&*self.cpu, cpu_host::SubjectPages { source_name: title, format }, cpu_host::as_cpu_reader(reader)).await;
                             result.map(Some).map_err(BackendError::operation)
                         }
                         .await;

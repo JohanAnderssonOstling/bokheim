@@ -9,6 +9,8 @@ pub mod transport;
 pub mod cpu_host;
 #[cfg(target_arch = "wasm32")]
 pub mod web_storage;
+#[cfg(target_arch = "wasm32")]
+pub mod range_reader;
 
 #[cfg(target_arch = "wasm32")]
 pub mod signal;

@@ -75,7 +75,7 @@ pub fn unusable_title(value: &str) -> bool {
         || standard_title_placeholder(value)
         || lower.strip_prefix("oup_").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
         || numeric_identifier
-        || !super::title_isbn::extract(value).is_empty()
+        || !super::filename_isbn::from_filename(value).is_empty()
         || unusable_identity(stem)
         || value.len() > 4096
         || value.chars().any(|c| c == '\u{fffd}' || (c.is_control() && !c.is_whitespace()))

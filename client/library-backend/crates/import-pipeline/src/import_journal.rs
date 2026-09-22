@@ -2,7 +2,7 @@
 //! are committed; a worker may have stopped midway through the final write.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use sync_common::{ContentHash, DirId, LibraryId};
+use sync_common::{ContentHash, DirId};
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -83,11 +83,11 @@ impl Journal {
         self.directories.resolve(path).map(|(parent, name)| (parent, name.to_owned()))
     }
 
-    pub(crate) fn import_command(&self, library: LibraryId, job: &str, index: usize, path: &[String]) -> Result<crate::staged_import::StagedBook, String> {
+    pub(crate) fn import_command(&self, physical: String, index: usize, path: &[String]) -> Result<crate::staged_import::StagedBook, String> {
         let (parent_id, file_name) = self.destination(path)?;
         let length = *self.sizes.as_ref().and_then(|sizes| sizes.get(index)).ok_or("import file is absent from the manifest")?;
         let hash = self.copied_hash(index).ok_or("import file has not been copied")?.parse::<ContentHash>().map_err(|error| error.to_string())?;
-        let command = crate::staged_import::StagedBook { parent_id, file_name, physical: format!("__libraries/{library}/imports/{job}/{index}"), length, hash };
+        let command = crate::staged_import::StagedBook { parent_id, file_name, physical, length, hash };
         Ok(command)
     }
 

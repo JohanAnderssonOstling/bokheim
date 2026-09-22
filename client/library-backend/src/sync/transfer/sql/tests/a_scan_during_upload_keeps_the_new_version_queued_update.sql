@@ -1,1 +1,0 @@
-UPDATE book_dir SET local_hash='changed-during-upload'

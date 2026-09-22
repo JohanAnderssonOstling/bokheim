@@ -63,6 +63,7 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console", "Event", "EventTarget", "File", "DedicatedWorkerGlobalScope", "MessageChannel", "MessageEvent", "MessageEventInit", "MessagePort", "SharedWorker", "Worker", "WorkerOptions", "WorkerType"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+filesystem-scanner = { path = "crates/filesystem-scanner" }
 client-platform-native = { path = "../platforms/native", features = ["websocket"] }
 client-platform-kobo = { path = "../platforms/kobo" }
 book-identity = { path = "../../shared/book-identity", features = ["native-write"] }

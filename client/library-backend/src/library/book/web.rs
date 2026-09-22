@@ -1,7 +1,7 @@
 //! Browser book capabilities and media URLs with their owning leases.
 use super::*;
 use crate::book::{BookSource, ResolvedBookData};
-use crate::library::browser_book::BookLease;
+use super::browser::BookLease;
 pub(crate) type Opened = (ResolvedBookData, BookLease);
 
 pub(super) fn supports_streaming(format: BookFormat) -> bool {
@@ -16,7 +16,7 @@ pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &Bo
         Some(checksum) => pdf_metadata(library, hash, checksum).await?,
         None => None,
     };
-    let (source, lease) = crate::library::browser_book::register(*library.id(), file).map_err(BackendError::operation)?;
+    let (source, lease) = super::browser::register_local_reader(*library.id(), file).map_err(BackendError::operation)?;
     Ok(Some((ResolvedBookData { pdf_metadata, format: info.format, source }, lease)))
 }
 pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {

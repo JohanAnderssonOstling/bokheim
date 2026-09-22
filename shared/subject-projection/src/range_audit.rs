@@ -258,7 +258,7 @@ fn audit() {
     let mut interval_skipped = 0;
     for input in &ranges {
         let code = format!("{}-{}", input.low.code(false).unwrap(), input.high.code(false).unwrap());
-        if lcc_span(&code).is_none() || canonical_lcc_notation(&code).is_none() {
+        if canonical_lcc_notation(&code).is_none() {
             interval_skipped += 1;
             continue;
         }

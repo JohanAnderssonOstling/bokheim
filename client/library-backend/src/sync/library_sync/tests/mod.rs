@@ -9,9 +9,9 @@ use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id, fix
 
 const TEST_CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_AUTH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-use crate::sync::transfer::TransferJob;
 use crate::BlobKind;
 use asset_transfer::should_download_thumbnail;
+use asset_transfer::TransferJob;
 use library_database::CURSOR_RECOVERY_PENDING_KEY;
 use library_replica::coalesce_mutations_for_push;
 use library_replica::prepare_push;
@@ -192,7 +192,7 @@ struct TestManager {
 
 impl TestManager {
     /// Session hands the worker its library file, mirroring production.
-    fn transfer_worker(&self) -> crate::sync::transfer::TransferWorker {
+    fn transfer_worker(&self) -> asset_transfer::transfer::TransferWorker {
         self.sync.transfer_worker()
     }
 
@@ -204,7 +204,7 @@ impl TestManager {
         self.sync.request_downloads(content_hashes)
     }
 
-    fn prepare_requested_download(&self, hash: &ContentHash) -> crate::sync::error::SyncResult<Option<crate::sync::transfer::TransferJob>> {
+    fn prepare_requested_download(&self, hash: &ContentHash) -> crate::sync::error::SyncResult<Option<asset_transfer::TransferJob>> {
         self.sync.prepare_requested_download(hash)
     }
 
@@ -257,6 +257,7 @@ fn test_manager_with_replica(root: &Path, replica_id: &str) -> TestManager {
         credentials: Arc::new(std::sync::RwLock::new(None)),
         account: None,
         notification_interest: Default::default(),
+        cpu: crate::default_cpu_host(),
     });
     TestManager { sync, database }
 }

@@ -45,10 +45,8 @@ fn metadata(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookRecord> {
         }
         for value in values.into_iter().filter(|value| !value.trim().is_empty()) {
             let source = format!("mobi:exth:{}", key.position());
-            if let Some(isbn) = metadata_isbn(&value) {
-                if !book.book.identifiers.iter().any(|id| id.scheme() == &Scheme::Isbn && id.value() == isbn) {
-                    book.book.identifiers.push(Identifier::new(isbn, Scheme::Isbn, Scope::Book)?);
-                }
+            if let Some(isbn) = book_model::from_metadata_value(&value) {
+                book_model::push_isbn(&mut book.book.identifiers, isbn, Scope::Book)?;
             } else if *key == ExthRecord::Asin {
                 let asin = value.trim().to_ascii_uppercase();
                 if asin.len() == 10 && asin.starts_with('B') && asin.bytes().all(|b| b.is_ascii_alphanumeric()) {

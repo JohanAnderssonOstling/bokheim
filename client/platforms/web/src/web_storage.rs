@@ -36,10 +36,7 @@ fn js_error(error: JsValue) -> String {
 }
 /// Adopt immutable bytes without copying them through the database worker.
 /// The job owns uncommitted files, so an interrupted inspection preserves them.
-pub async fn adopt_staged(physical: String, length: u64, library: sync_common::LibraryId) -> Result<FileWriter, String> {
-    if !physical.starts_with(&format!("__libraries/{library}/imports/")) {
-        return Err("Staged book belongs to a different library".into());
-    }
+pub async fn adopt_staged(physical: String, length: u64) -> Result<FileWriter, String> {
     let source = prepare_physical(physical.clone()).await?;
     let actual = source.length;
     if actual != length {
@@ -420,9 +417,10 @@ pub async fn purge_library(library: sync_common::LibraryId) -> Result<(), String
 
 /// Once all outcomes are checkpointed, discard failed/unreferenced copies.
 /// Committed assets remain pinned by the durable index.
-pub fn cleanup_staged_import(library: sync_common::LibraryId, job: &str, files: u32) -> Result<(), String> {
-    uuid::Uuid::parse_str(job).map_err(|e| e.to_string())?;
-    let prefix = format!("__libraries/{library}/imports/{job}/");
+pub fn cleanup_staged_import(prefix: &str, files: u32) -> Result<(), String> {
+    if !prefix.starts_with("__libraries/") || !prefix.ends_with('/') {
+        return Err("invalid staged import prefix".into());
+    }
     let live = with_index(|index| super::asset_index::live_physical_files(index, &prefix))?;
     for index in 0..files {
         let physical = format!("{prefix}{index}");

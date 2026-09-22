@@ -42,7 +42,7 @@ impl LibrarySession {
                             continue;
                         }
                     }
-                    let versions = crate::worker_cpu::cover(bytes).await.map_err(BackendError::operation)?;
+                    let versions = cpu_host::cover(&*self.cpu, bytes).await.map_err(BackendError::operation)?;
                     return self.apply_enriched_cover(hash, &expected, &existing, Some(&versions)).await;
                 }
                 self.apply_enriched_cover(hash, &expected, &existing, None).await
@@ -89,7 +89,7 @@ impl LibrarySession {
             let result: Result<Option<bool>, BackendError> = async {
                 let bytes = self.metadata().audible_cover(&asin, &region).await.map_err(BackendError::operation)?;
                 let versions = match bytes {
-                    Some(bytes) => Some(crate::worker_cpu::cover(bytes).await.map_err(BackendError::operation)?),
+                    Some(bytes) => Some(cpu_host::cover(&*self.cpu, bytes).await.map_err(BackendError::operation)?),
                     None => None,
                 };
                 self.apply_enriched_cover_for_recording(hash, &expected, &existing, versions.as_ref(), Some(&identity)).await
@@ -124,14 +124,12 @@ impl LibrarySession {
     /// Network lookup and image processing happen before taking the lease.
     /// Recheck both logical state and stored bytes so a late lookup cannot
     /// overwrite a newer cover or publish for a book moved to trash.
-    async fn apply_enriched_cover(
-        &self, hash: ContentHash, expected: &(Option<(String, i64)>, Option<book_model::BookFormat>), existing: &Option<Vec<u8>>, versions: Option<&crate::worker_cpu::ThumbnailBytes>,
-    ) -> Result<Option<bool>, BackendError> {
+    async fn apply_enriched_cover(&self, hash: ContentHash, expected: &(Option<(String, i64)>, Option<book_model::BookFormat>), existing: &Option<Vec<u8>>, versions: Option<&cpu_host::ThumbnailBytes>) -> Result<Option<bool>, BackendError> {
         self.apply_enriched_cover_for_recording(hash, expected, existing, versions, None).await
     }
 
     async fn apply_enriched_cover_for_recording(
-        &self, hash: ContentHash, expected: &(Option<(String, i64)>, Option<book_model::BookFormat>), existing: &Option<Vec<u8>>, versions: Option<&crate::worker_cpu::ThumbnailBytes>, recording: Option<&(String, String)>,
+        &self, hash: ContentHash, expected: &(Option<(String, i64)>, Option<book_model::BookFormat>), existing: &Option<Vec<u8>>, versions: Option<&cpu_host::ThumbnailBytes>, recording: Option<&(String, String)>,
     ) -> Result<Option<bool>, BackendError> {
         let _lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
         let current = self.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)?;
@@ -178,6 +176,7 @@ mod tests {
             tx,
             rx,
             crate::library::discovery::LibraryScanner::from_root(root.to_str().unwrap()).unwrap(),
+            crate::default_cpu_host(),
         );
         (library, hash)
     }
@@ -217,7 +216,7 @@ mod tests {
         let (library, hash) = fixture(root.path(), "http://127.0.0.1:1");
         matched_recording(&library, hash);
         let expected = library.db.cover_enrichment_state(&hash).unwrap();
-        let versions = crate::worker_cpu::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
+        let versions = cpu_host::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
         let wrong = ("B000000002".into(), "us".into());
         assert_eq!(library.apply_enriched_cover_for_recording(hash, &expected, &None, Some(&versions), Some(&wrong)).await.unwrap(), None);
         assert!(library.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.unwrap().is_none());
@@ -265,7 +264,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (library, hash) = fixture(root.path(), "http://127.0.0.1:1");
         let expected = library.db.cover_enrichment_state(&hash).unwrap();
-        let versions = crate::worker_cpu::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
+        let versions = cpu_host::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
         assert_eq!(library.apply_enriched_cover(hash, &expected, &None, Some(&versions)).await.unwrap(), Some(true));
         assert_eq!(library.db.cover_enrichment_state(&hash).unwrap().0.unwrap().0, "ready");
         assert_eq!(library.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.unwrap(), Some(vec![2]));
@@ -276,7 +275,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (library, hash) = fixture(root.path(), "http://127.0.0.1:1");
         let expected = library.db.cover_enrichment_state(&hash).unwrap();
-        let versions = crate::worker_cpu::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
+        let versions = cpu_host::ThumbnailBytes { browse: vec![1], high_density: vec![2] };
         library.assets.write(crate::BlobKind::Thumbnail, &hash, b"newer cover").await.unwrap();
         assert!(library.apply_enriched_cover(hash, &expected, &None, Some(&versions)).await.unwrap().is_none());
         assert_eq!(library.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.unwrap(), Some(b"newer cover".to_vec()));
